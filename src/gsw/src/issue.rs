@@ -5,6 +5,7 @@
 //! only a shell can run it. This module asks the shell both questions.
 
 use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -225,8 +226,185 @@ pub(crate) fn resolve(value: Option<&str>, shell: &OsStr) -> Option<IssueCommand
     probe_with_deadline(shell, &command, PROBE_DEADLINE).then_some(command)
 }
 
+/// What a finished run of the issue command leaves under the frame.
+///
+/// `None` is a run that worked. The browser is the answer, and a monitor that
+/// also posted a line would spend a row of the frame saying what the user is
+/// already looking at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IssueOutcome {
+    message: Option<String>,
+}
+
+impl IssueOutcome {
+    /// The outcome of a run of `name` that wrote `lines` and ended the way
+    /// `status` reads.
+    ///
+    /// A failure says the last line that has text in it. That text comes from
+    /// another program: `ggs` refuses with exit status 2 on a branch that
+    /// names no issue, and that refusal is the whole reason the key did
+    /// nothing. A failure that wrote nothing has only the status left to
+    /// report, and a blank row under the frame would read as success.
+    fn new(_name: &str, _success: bool, _lines: &[String], _status: &str) -> Self {
+        Self { message: None }
+    }
+
+    /// The message to put under the frame, or `None` where the run says
+    /// nothing.
+    pub(crate) fn message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
+}
+
+/// The child that runs `command` in `workdir`.
+///
+/// The command is the whole script, unquoted. The probe already asked the
+/// shell about this exact name and the shell said yes, so the name is a
+/// command that this shell has — and quoting the word would stop the shell
+/// from expanding an alias, which is one of the two things `command -v`
+/// reports.
+fn run_command(shell: &OsStr, command: &IssueCommand, workdir: &Path) -> Command {
+    let mut child = Command::new(shell);
+    let _ = (command, workdir);
+    child
+}
+
+/// Run `command` in `workdir` and report what to say about it.
+///
+/// Blocking: the caller runs it on a thread of its own.
+pub(crate) fn run(shell: &OsStr, command: &IssueCommand, workdir: &Path) -> IssueOutcome {
+    let _ = (shell, command, workdir);
+    IssueOutcome { message: None }
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::*;
+
+    /// The lines of `text`, the way the runner splits what a child wrote.
+    fn lines(text: &str) -> Vec<String> {
+        text.lines().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn a_run_that_worked_says_nothing() {
+        // The browser is the answer.
+        let outcome = IssueOutcome::new("ggs", true, &lines("opened\n"), "exit status: 0");
+        assert_eq!(outcome.message(), None);
+    }
+
+    #[test]
+    fn a_run_that_failed_says_the_last_line_the_child_wrote() {
+        // `ggs` refuses on a branch that names no issue, and that refusal is
+        // the whole reason the key did nothing.
+        let outcome = IssueOutcome::new(
+            "ggs",
+            false,
+            &lines("looking\nbranch main names no issue\n"),
+            "exit status: 2",
+        );
+        assert_eq!(outcome.message(), Some("branch main names no issue"));
+    }
+
+    #[test]
+    fn a_run_that_failed_ignores_the_empty_lines_after_its_last_word() {
+        let outcome = IssueOutcome::new("ggs", false, &lines("no issue\n\n   \n"), "exit: 2");
+        assert_eq!(outcome.message(), Some("no issue"));
+    }
+
+    #[test]
+    fn a_run_that_failed_in_silence_names_the_exit_status() {
+        // A blank row under the frame reads as success.
+        let outcome = IssueOutcome::new("ggs", false, &[], "exit status: 2");
+        assert_eq!(outcome.message(), Some("ggs failed (exit status: 2)"));
+    }
+}
+
 #[cfg(all(test, unix))]
-mod probe_tests {
+mod run_tests {
+    use super::stub_shell::StubShell;
+    use super::*;
+
+    /// `path` with every symbolic link in it resolved.
+    ///
+    /// macOS reaches a temporary directory through a symbolic link, so the
+    /// path the shell prints is not the path this test asked for. Both sides
+    /// are resolved before they are compared.
+    fn resolved(path: &Path) -> PathBuf {
+        std::fs::canonicalize(path).expect("resolve the path")
+    }
+
+    /// The default command, which is what every test here runs.
+    fn default_command() -> IssueCommand {
+        IssueCommand::new(None).expect("the default names a command")
+    }
+
+    #[test]
+    fn a_run_that_worked_leaves_no_message() {
+        let stub = StubShell::answering(0);
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let outcome = run(stub.as_shell(), &default_command(), workdir.path());
+        assert_eq!(outcome.message(), None, "the browser is the answer");
+        let runs = stub.runs();
+        assert!(
+            runs.contains("-ic"),
+            "the run must be interactive, or the shell has no functions: {runs:?}",
+        );
+    }
+
+    #[test]
+    fn the_run_names_the_command_with_no_quoting_around_it() {
+        // Quoting the word stops a shell from expanding an alias, and an alias
+        // is one of the two things the probe reports.
+        let stub = StubShell::answering(0);
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let command = IssueCommand::new(Some("myfunc")).expect("a name");
+        let _ = run(stub.as_shell(), &command, workdir.path());
+        let runs = stub.runs();
+        assert!(
+            runs.lines().any(|line| line == "myfunc"),
+            "the script must be the bare name: {runs:?}",
+        );
+    }
+
+    #[test]
+    fn a_run_that_failed_puts_what_the_child_said_under_the_frame() {
+        let stub = StubShell::new("echo 'branch main names no issue' >&2\nexit 2");
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let outcome = run(stub.as_shell(), &default_command(), workdir.path());
+        assert_eq!(
+            outcome.message(),
+            Some("branch main names no issue"),
+            "a refusal must reach the screen",
+        );
+    }
+
+    #[test]
+    fn the_run_happens_in_the_work_tree() {
+        // The command asks `gh` about the issue, and `gh` reads the origin
+        // remote of the directory it runs in.
+        let stub = StubShell::answering(0);
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let _ = run(stub.as_shell(), &default_command(), workdir.path());
+        assert_eq!(resolved(&stub.cwd()), resolved(workdir.path()));
+    }
+
+    #[test]
+    fn the_run_child_carries_no_git_location() {
+        let child = run_command(OsStr::new("/bin/sh"), &default_command(), Path::new("/"));
+        for name in GIT_LOCATION_VARS {
+            assert!(
+                child
+                    .get_envs()
+                    .any(|(key, value)| key == OsStr::new(name) && value.is_none()),
+                "the run child must carry no {name}",
+            );
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod stub_shell {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
@@ -238,18 +416,18 @@ mod probe_tests {
     /// soon as the shell exits. A shorter one would measure how fast this
     /// machine starts a process rather than what the probe does with the
     /// answer — the first start of a freshly written script took 600 ms here.
-    const ANSWER_DEADLINE: Duration = PROBE_DEADLINE;
+    pub(super) const ANSWER_DEADLINE: Duration = PROBE_DEADLINE;
 
     /// The deadline for the stub that hangs.
     ///
     /// This is the one test that waits for a deadline, so the number is small.
     /// [`StubShell::new`] pays the slow first start before the test begins, so
     /// a second of it is a second the stub is already running in.
-    const HANG_DEADLINE: Duration = Duration::from_secs(1);
+    pub(super) const HANG_DEADLINE: Duration = Duration::from_secs(1);
 
     /// Longer than [`HANG_DEADLINE`] and far shorter than the `sleep` the
     /// hanging stub holds. A probe that waits for the shell crosses it.
-    const GAVE_UP_WITHIN: Duration = Duration::from_secs(15);
+    pub(super) const GAVE_UP_WITHIN: Duration = Duration::from_secs(15);
 
     /// The variable that tells a stub to do nothing and exit.
     ///
@@ -265,7 +443,7 @@ mod probe_tests {
     /// then does what the test asked of it. The suite never reads the rc file
     /// of whoever runs it: an interactive shell of this machine would answer
     /// about this machine, and the answer would change from host to host.
-    struct StubShell {
+    pub(super) struct StubShell {
         /// Owns the files. Dropping it removes them, so it is held for as long
         /// as the test reads them.
         _dir: TempDir,
@@ -277,6 +455,8 @@ mod probe_tests {
         environment: PathBuf,
         /// The process id the last run holds, written by a stub that hangs.
         pid: PathBuf,
+        /// The directory of each run.
+        cwd: PathBuf,
     }
 
     /// Where a stub's tail names the file it records its process id in.
@@ -288,17 +468,24 @@ mod probe_tests {
         ///
         /// One directory holds the script and every file it writes, so the one
         /// [`TempDir`] this holds owns all of them.
-        fn new(tail: &str) -> Self {
+        pub(super) fn new(tail: &str) -> Self {
             let dir = tempfile::tempdir().expect("tempdir");
             let path = dir.path().join("stub-shell");
             let runs = dir.path().join("runs");
             let environment = dir.path().join("environment");
             let pid = dir.path().join("pid");
+            let cwd = dir.path().join("cwd");
             let tail = tail.replace(PID_FILE, &shell_escape(&pid.display().to_string()));
             let script = format!(
-                "#!/bin/sh\n                 [ -n \"${{{WARMUP_VAR}:-}}\" ] && exit 0\n                 printf '%s\\n' \"$@\" >> {}\n                 env >> {}\n                 {tail}\n",
+                "#!/bin/sh\n\
+                 [ -n \"${{{WARMUP_VAR}:-}}\" ] && exit 0\n\
+                 printf '%s\\n' \"$@\" >> {}\n\
+                 env >> {}\n\
+                 pwd >> {}\n\
+                 {tail}\n",
                 shell_escape(&runs.display().to_string()),
                 shell_escape(&environment.display().to_string()),
+                shell_escape(&cwd.display().to_string()),
             );
             std::fs::write(&path, script).expect("write the stub");
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
@@ -309,6 +496,7 @@ mod probe_tests {
                 runs,
                 environment,
                 pid,
+                cwd,
             };
             stub.warm();
             stub
@@ -316,7 +504,7 @@ mod probe_tests {
 
         /// Start the script once, so the test that follows does not pay for
         /// the first start of it.
-        fn warm(&self) {
+        pub(super) fn warm(&self) {
             let status = Command::new(&self.path)
                 .env(WARMUP_VAR, "1")
                 .stdin(Stdio::null())
@@ -333,7 +521,7 @@ mod probe_tests {
         }
 
         /// A stub that answers `status` and exits.
-        fn answering(status: u8) -> Self {
+        pub(super) fn answering(status: u8) -> Self {
             Self::new(&format!("exit {status}"))
         }
 
@@ -341,7 +529,7 @@ mod probe_tests {
         ///
         /// `$$` is the shell's own process id, and `exec` keeps it — so the
         /// recorded id is the id of the process that hangs.
-        fn hanging() -> Self {
+        pub(super) fn hanging() -> Self {
             Self::new(&format!("echo $$ > {PID_FILE}\nexec sleep 30"))
         }
 
@@ -350,7 +538,7 @@ mod probe_tests {
         /// The stub writes the file, and the probe kills the stub. Which of
         /// the two happens first is the machine's business, so a test that
         /// reads the file waits for it rather than assuming it is there.
-        fn wait_for_pid(&self) -> i32 {
+        pub(super) fn wait_for_pid(&self) -> i32 {
             let give_up_at = Instant::now() + GAVE_UP_WITHIN;
             while !self.pid.exists() {
                 assert!(
@@ -363,23 +551,29 @@ mod probe_tests {
         }
 
         /// The stub, as the path to give the probe.
-        fn as_shell(&self) -> &OsStr {
+        pub(super) fn as_shell(&self) -> &OsStr {
             self.path.as_os_str()
         }
 
         /// Every argument of every run, one for each line, or the empty string
         /// where the stub never ran.
-        fn runs(&self) -> String {
+        pub(super) fn runs(&self) -> String {
             std::fs::read_to_string(&self.runs).unwrap_or_default()
         }
 
         /// The environment of every run.
-        fn environment(&self) -> String {
+        pub(super) fn environment(&self) -> String {
             std::fs::read_to_string(&self.environment).unwrap_or_default()
         }
 
+        /// The directory of the last run, as the shell reported it.
+        pub(super) fn cwd(&self) -> PathBuf {
+            let recorded = std::fs::read_to_string(&self.cwd).expect("the stub must record a cwd");
+            PathBuf::from(recorded.trim_end())
+        }
+
         /// The process id the hanging stub holds.
-        fn recorded_pid(&self) -> i32 {
+        pub(super) fn recorded_pid(&self) -> i32 {
             std::fs::read_to_string(&self.pid)
                 .expect("the stub must record its process id")
                 .trim()
@@ -387,6 +581,13 @@ mod probe_tests {
                 .expect("the recorded process id must be a number")
         }
     }
+
+}
+
+#[cfg(all(test, unix))]
+mod probe_tests {
+    use super::stub_shell::{StubShell, ANSWER_DEADLINE, GAVE_UP_WITHIN, HANG_DEADLINE};
+    use super::*;
 
     /// Whether a process of `pid` still exists.
     fn alive(pid: i32) -> bool {
