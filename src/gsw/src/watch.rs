@@ -660,6 +660,11 @@ enum Event {
     /// screen and does nothing otherwise, which is what keeps a push error up
     /// until the user has actually looked at the screen.
     Dismiss,
+    /// The user asked for the issue of the branch (`G`).
+    ///
+    /// Only [`classify_input`] makes one, and it makes one only where the
+    /// command exists — so the loop never receives a request it cannot serve.
+    IssueRequested,
 }
 
 /// What keys mean right now.
@@ -676,6 +681,21 @@ pub(crate) enum InputMode {
     Confirm,
     /// A push is running. `p` is inert here, so two pushes cannot overlap.
     Pushing,
+}
+
+/// Whether the `G` key has a command behind it.
+///
+/// A separate value from [`InputMode`], because it is not a mode: it changes
+/// what one key does and it changes no other key. It is a parameter of
+/// [`classify_input`] rather than a flag that function reads, so the absent
+/// case is testable with no shell.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum IssueKey {
+    /// The command exists. `G` asks for the issue.
+    Bound,
+    /// The command does not exist, or the probe has not answered yet. `G`
+    /// does nothing, the way an unbound key does.
+    Unbound,
 }
 
 /// The git work one watch-mode refresh performs: re-open the repository so
@@ -1107,7 +1127,7 @@ where
         Event::Resize => pending.resize = true,
         Event::ForceRefresh => pending.force = true,
         Event::Key(key) => {
-            if let Some(action) = classify_input(key, ui.mode()) {
+            if let Some(action) = classify_input(key, ui.mode(), IssueKey::Unbound) {
                 return absorb(action, pending, ui, snapshot, dims, clock, start_push);
             }
         }
@@ -1122,6 +1142,7 @@ where
         Event::PushOutput(line) => ui.output_line(line),
         Event::PushCancelled => ui.cancel(),
         Event::Dismiss => ui.dismiss(),
+        Event::IssueRequested => {}
         Event::PushFinished(outcome) => {
             let succeeded = outcome.success;
             ui.finished(outcome, clock());
@@ -1556,7 +1577,8 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 ///   an impatient second press cannot start an overlapping push.
 /// - Every other press is [`Event::Dismiss`], which clears a status message and
 ///   otherwise does nothing.
-fn classify_input(key: KeyEvent, mode: InputMode) -> Option<Event> {
+fn classify_input(key: KeyEvent, mode: InputMode, issue: IssueKey) -> Option<Event> {
+    let _ = issue;
     let KeyEvent {
         code,
         modifiers,
@@ -2493,14 +2515,30 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    /// Both values of the new key's availability. Every old key means the
+    /// same thing under each of them: the new key must move no old one.
+    const BOTH_AVAILABILITIES: [IssueKey; 2] = [IssueKey::Bound, IssueKey::Unbound];
+
+    /// Every mode a key can arrive in.
+    const EVERY_MODE: [InputMode; 3] = [
+        InputMode::Normal,
+        InputMode::Confirm,
+        InputMode::Pushing,
+    ];
+
     #[test]
     fn classify_input_maps_the_r_key_to_force_refresh() {
         // Pressing `r` is the manual-refresh escape hatch: the input classifier
         // must turn an `r` key PRESS into Event::ForceRefresh.
-        assert!(matches!(
-            classify_input(press(KeyCode::Char('r')), InputMode::Normal),
-            Some(Event::ForceRefresh),
-        ));
+        for issue in BOTH_AVAILABILITIES {
+            assert!(
+                matches!(
+                    classify_input(press(KeyCode::Char('r')), InputMode::Normal, issue),
+                    Some(Event::ForceRefresh),
+                ),
+                "`r` must refresh with {issue:?}",
+            );
+        }
     }
 
     #[test]
@@ -2514,28 +2552,30 @@ mod tests {
             kind: KeyEventKind::Release,
             ..press(KeyCode::Char('r'))
         };
-        assert!(
-            classify_input(r_release, InputMode::Normal).is_none(),
-            "a key release must be ignored — only a press acts",
-        );
+        for issue in BOTH_AVAILABILITIES {
+            assert!(
+                classify_input(r_release, InputMode::Normal, issue).is_none(),
+                "a key release must be ignored — only a press acts",
+            );
 
-        // `q` and Ctrl-C both request a quit.
-        assert!(matches!(
-            classify_input(press(KeyCode::Char('q')), InputMode::Normal),
-            Some(Event::Quit),
-        ));
-        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert!(matches!(
-            classify_input(ctrl_c, InputMode::Normal),
-            Some(Event::Quit),
-        ));
+            // `q` and Ctrl-C both request a quit.
+            assert!(matches!(
+                classify_input(press(KeyCode::Char('q')), InputMode::Normal, issue),
+                Some(Event::Quit),
+            ));
+            let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+            assert!(matches!(
+                classify_input(ctrl_c, InputMode::Normal, issue),
+                Some(Event::Quit),
+            ));
 
-        // An unrelated key press acts on nothing, but is not silence: it clears
-        // a status message that may be on screen.
-        assert!(matches!(
-            classify_input(press(KeyCode::Char('x')), InputMode::Normal),
-            Some(Event::Dismiss),
-        ));
+            // An unrelated key press acts on nothing, but is not silence: it
+            // clears a status message that may be on screen.
+            assert!(matches!(
+                classify_input(press(KeyCode::Char('x')), InputMode::Normal, issue),
+                Some(Event::Dismiss),
+            ));
+        }
     }
 
     #[test]
@@ -2556,29 +2596,107 @@ mod tests {
 
     #[test]
     fn p_asks_to_push_only_when_nothing_else_is_happening() {
-        // The new key. It opens the confirmation from the normal mode, and is
+        // The push key. It opens the confirmation from the normal mode, and is
         // inert while a push is already running — an impatient second press
         // must not start an overlapping push.
+        for issue in BOTH_AVAILABILITIES {
+            assert!(matches!(
+                classify_input(press(KeyCode::Char('p')), InputMode::Normal, issue),
+                Some(Event::PushRequested),
+            ));
+            assert!(matches!(
+                classify_input(press(KeyCode::Char('p')), InputMode::Pushing, issue),
+                Some(Event::Dismiss),
+            ));
+        }
+    }
+
+    #[test]
+    fn g_asks_for_the_issue_while_the_monitor_and_a_push_run() {
+        // The issue key. A browser opens beside the monitor, which conflicts
+        // with nothing a push does — so it acts in both of those modes.
+        for mode in [InputMode::Normal, InputMode::Pushing] {
+            assert!(
+                matches!(
+                    classify_input(press(KeyCode::Char('G')), mode, IssueKey::Bound),
+                    Some(Event::IssueRequested),
+                ),
+                "`G` must ask for the issue in {mode:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn g_does_nothing_while_the_confirmation_is_up() {
+        // That mode owns the answer to a question. No new key may trap the
+        // user in it.
         assert!(matches!(
-            classify_input(press(KeyCode::Char('p')), InputMode::Normal),
-            Some(Event::PushRequested),
-        ));
-        assert!(matches!(
-            classify_input(press(KeyCode::Char('p')), InputMode::Pushing),
+            classify_input(press(KeyCode::Char('G')), InputMode::Confirm, IssueKey::Bound),
             Some(Event::Dismiss),
         ));
     }
 
     #[test]
-    fn the_confirmation_accepts_y_and_enter() {
-        for code in [KeyCode::Char('y'), KeyCode::Char('Y'), KeyCode::Enter] {
+    fn g_does_nothing_where_the_command_does_not_exist() {
+        // Silence belongs to this case only, and it is the silence of an
+        // unbound key rather than a code path of its own.
+        for mode in EVERY_MODE {
             assert!(
                 matches!(
-                    classify_input(press(code), InputMode::Confirm),
-                    Some(Event::PushConfirmed),
+                    classify_input(press(KeyCode::Char('G')), mode, IssueKey::Unbound),
+                    Some(Event::Dismiss),
                 ),
-                "{code:?} must confirm the push",
+                "`G` must do nothing in {mode:?} with no command behind it",
             );
+        }
+    }
+
+    #[test]
+    fn lowercase_g_stays_unbound() {
+        // The user asked for `G`. A shifted key and an unshifted one are two
+        // keys, and only one of them was asked for.
+        for mode in EVERY_MODE {
+            for issue in BOTH_AVAILABILITIES {
+                assert!(
+                    matches!(
+                        classify_input(press(KeyCode::Char('g')), mode, issue),
+                        Some(Event::Dismiss),
+                    ),
+                    "`g` must stay unbound in {mode:?} with {issue:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_release_of_the_issue_key_is_ignored() {
+        // Only a press acts, and the new key is no exception.
+        let g_release = KeyEvent {
+            kind: KeyEventKind::Release,
+            ..press(KeyCode::Char('G'))
+        };
+        for mode in EVERY_MODE {
+            for issue in BOTH_AVAILABILITIES {
+                assert!(
+                    classify_input(g_release, mode, issue).is_none(),
+                    "a release of `G` must be ignored in {mode:?} with {issue:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_confirmation_accepts_y_and_enter() {
+        for code in [KeyCode::Char('y'), KeyCode::Char('Y'), KeyCode::Enter] {
+            for issue in BOTH_AVAILABILITIES {
+                assert!(
+                    matches!(
+                        classify_input(press(code), InputMode::Confirm, issue),
+                        Some(Event::PushConfirmed),
+                    ),
+                    "{code:?} must confirm the push with {issue:?}",
+                );
+            }
         }
     }
 
@@ -2593,13 +2711,15 @@ mod tests {
             KeyCode::Char('q'),
             KeyCode::Esc,
         ] {
-            assert!(
-                matches!(
-                    classify_input(press(code), InputMode::Confirm),
-                    Some(Event::PushCancelled),
-                ),
-                "{code:?} must cancel the push",
-            );
+            for issue in BOTH_AVAILABILITIES {
+                assert!(
+                    matches!(
+                        classify_input(press(code), InputMode::Confirm, issue),
+                        Some(Event::PushCancelled),
+                    ),
+                    "{code:?} must cancel the push with {issue:?}",
+                );
+            }
         }
     }
 
@@ -2608,13 +2728,15 @@ mod tests {
         // With a question on screen, `r` must not refresh and `p` must not
         // re-ask. Anything that is not an answer does nothing.
         for code in [KeyCode::Char('r'), KeyCode::Char('p'), KeyCode::Char('x')] {
-            assert!(
-                matches!(
-                    classify_input(press(code), InputMode::Confirm),
-                    Some(Event::Dismiss),
-                ),
-                "{code:?} must not act while the confirmation is up",
-            );
+            for issue in BOTH_AVAILABILITIES {
+                assert!(
+                    matches!(
+                        classify_input(press(code), InputMode::Confirm, issue),
+                        Some(Event::Dismiss),
+                    ),
+                    "{code:?} must not act while the confirmation is up",
+                );
+            }
         }
     }
 
@@ -2623,11 +2745,13 @@ mod tests {
         // A monitor that cannot be quit while it waits on the network is one
         // that has to be killed from another pane.
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        for mode in [InputMode::Normal, InputMode::Confirm, InputMode::Pushing] {
-            assert!(
-                matches!(classify_input(ctrl_c, mode), Some(Event::Quit)),
-                "Ctrl-C must quit from {mode:?}",
-            );
+        for mode in EVERY_MODE {
+            for issue in BOTH_AVAILABILITIES {
+                assert!(
+                    matches!(classify_input(ctrl_c, mode, issue), Some(Event::Quit)),
+                    "Ctrl-C must quit from {mode:?}",
+                );
+            }
         }
     }
 
@@ -2635,14 +2759,16 @@ mod tests {
     fn q_and_r_still_work_while_a_push_runs() {
         // The push runs off this thread, so the monitor stays live underneath
         // it: quitting and refreshing keep working.
-        assert!(matches!(
-            classify_input(press(KeyCode::Char('q')), InputMode::Pushing),
-            Some(Event::Quit),
-        ));
-        assert!(matches!(
-            classify_input(press(KeyCode::Char('r')), InputMode::Pushing),
-            Some(Event::ForceRefresh),
-        ));
+        for issue in BOTH_AVAILABILITIES {
+            assert!(matches!(
+                classify_input(press(KeyCode::Char('q')), InputMode::Pushing, issue),
+                Some(Event::Quit),
+            ));
+            assert!(matches!(
+                classify_input(press(KeyCode::Char('r')), InputMode::Pushing, issue),
+                Some(Event::ForceRefresh),
+            ));
+        }
     }
 
     #[test]
