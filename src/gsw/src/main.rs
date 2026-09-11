@@ -18,6 +18,8 @@ use termwindow::should_force_colors;
 mod age;
 mod bar;
 mod git;
+/// Opening the issue that the branch names, through a command the user supplies.
+mod issue;
 /// Cutting a child process's byte chunks into lines that are safe to paint.
 mod lines;
 mod push;
