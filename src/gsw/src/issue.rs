@@ -901,6 +901,20 @@ mod stub_shell {
             Self::new(&format!("echo $$ > {PID_FILE}\nexec sleep 30"))
         }
 
+        /// A stub that starts a child of its own and then waits for it.
+        ///
+        /// This is the shape a real rc file hangs in. A shell hangs inside
+        /// some command it started, not inside a builtin, so the process that
+        /// holds the session open is a grandchild of `gsw` and not the child
+        /// `gsw` started. `$!` is that grandchild, so the recorded id is the
+        /// id of the process that hangs. [`StubShell::hanging`] records `$$`
+        /// after an `exec`, which makes the shell itself the process that
+        /// hangs — the narrow case, and the one a signal to the direct child
+        /// already covers.
+        pub(super) fn hanging_in_a_child() -> Self {
+            Self::new(&format!("sleep 30 &\necho $! > {PID_FILE}\nwait"))
+        }
+
         /// A stub that writes `said` and then never exits.
         ///
         /// A command that says why it stopped, and then hangs, is the shape
@@ -981,6 +995,24 @@ mod stub_shell {
         unsafe { libc::kill(pid, 0) == 0 }
     }
 
+    /// Wait for the process of `pid` to go, and report whether it went.
+    ///
+    /// A signal arrives when the system delivers it, and not when the call
+    /// that sent it returns. So a process that is already dead answers for a
+    /// moment longer, and a test that looks once reports a process that is on
+    /// its way out as a process that stays. This waits, the way
+    /// [`StubShell::wait_for_pid`] waits for a file.
+    pub(super) fn wait_until_gone(pid: i32) -> bool {
+        let give_up_at = Instant::now() + GAVE_UP_WITHIN;
+        while alive(pid) {
+            if Instant::now() >= give_up_at {
+                return false;
+            }
+            std::thread::sleep(PROBE_POLL);
+        }
+        true
+    }
+
     /// End the process of `pid` now.
     ///
     /// A test that proves `gsw` leaves a process running owns that process
@@ -995,7 +1027,9 @@ mod stub_shell {
 
 #[cfg(all(test, unix))]
 mod probe_tests {
-    use super::stub_shell::{alive, StubShell, ANSWER_DEADLINE, GAVE_UP_WITHIN, HANG_DEADLINE};
+    use super::stub_shell::{
+        alive, kill_now, wait_until_gone, StubShell, ANSWER_DEADLINE, GAVE_UP_WITHIN, HANG_DEADLINE,
+    };
     use super::*;
 
     /// The command the default name resolves to.
@@ -1041,6 +1075,32 @@ mod probe_tests {
         assert!(
             !alive(pid),
             "the probe must leave no child behind, and {pid} is still running",
+        );
+    }
+
+    #[test]
+    fn a_shell_that_hangs_in_a_child_leaves_no_grandchild() {
+        // The shape a real rc file hangs in. A shell waits inside some command
+        // it started, so the process that holds the session open is a
+        // grandchild of gsw. A signal to the direct child alone kills the
+        // shell and leaves that grandchild running, which is the process this
+        // deadline exists to prevent.
+        let stub = StubShell::hanging_in_a_child();
+        assert!(
+            !probe_with_deadline(stub.as_shell(), &default_command(), HANG_DEADLINE),
+            "a shell that hangs must report the command absent",
+        );
+        let pid = stub.wait_for_pid();
+        let gone = wait_until_gone(pid);
+        // The cleanup comes before the assertion. A failed assertion ends the
+        // test where it stands, and the process this test started is the one
+        // thing that must not outlive it.
+        if !gone {
+            kill_now(pid);
+        }
+        assert!(
+            gone,
+            "the probe must leave no process behind, and the grandchild {pid} is still running",
         );
     }
 
