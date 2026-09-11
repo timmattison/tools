@@ -719,7 +719,7 @@ impl Capabilities {
         // routine is what names the protocol. The caller states all three
         // budgets, because it builds the request before this call picks one of
         // them. <https://github.com/timmattison/tools/issues/480>
-        let budget = request.payload.of_routine(DisplayRoutine::Kitty);
+        let budget = request.payload.of_routine(routine);
 
         match routine {
             DisplayRoutine::Sixel => write_sixel(out, image, request, budget, answered),
