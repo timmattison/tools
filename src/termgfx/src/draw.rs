@@ -2436,21 +2436,50 @@ mod tests {
     /// rung of the ladder reaches the budget and the fit spends no pixels.
     const REFUSED_SOURCE_BUDGET_SHARE: usize = 2;
 
-    /// The characters that mosh holds for one transmission.
+    /// The characters that mosh carries in one Kitty transmission.
     ///
-    /// `MAXIMUM_STORED_CHARACTERS` of `crates/mosh-terminal/src/imagestore.rs`,
-    /// which `ImageStore::hold` tests against `control.len() + payload.len()`.
-    /// A transmission above it earns `ENOSPC` and draws nothing. The file
-    /// stands in `timmattison/mosh-rs` at commit `5676142`
-    /// (<https://github.com/timmattison/mosh-rs>).
-    const MOSH_STORE_CHARACTERS: usize = 1024 * 1024;
+    /// `MAXIMUM_TRANSMISSION_CHARACTERS` of
+    /// `crates/mosh-terminal/src/imagestore.rs`, which `ImageStore::hold`
+    /// measures against `control.len() + payload.len()` over every chunk of
+    /// the transmission. A transmission above it earns `ENOSPC`, and the user
+    /// reads an empty screen.
+    ///
+    /// The file stands in `timmattison/mosh-rs`
+    /// (<https://github.com/timmattison/mosh-rs/issues/94>).
+    const MOSH_KITTY_CAP: usize = 1600 * 1024;
+
+    /// The characters that mosh carries in one Sixel device-control string.
+    ///
+    /// `MAXIMUM_SIXEL_STRING_CHARACTERS` of
+    /// `crates/mosh-terminal/src/dispatcher.rs`, which counts the body of the
+    /// string. mosh cuts a string above it at the cap and keeps the rest, and
+    /// nothing tells the program of the session that the cut happened.
+    const MOSH_SIXEL_CAP: usize = 1024 * 1024;
+
+    /// The bytes that mosh carries in one iTerm2 operating system command.
+    ///
+    /// `MAXIMUM_INLINE_IMAGE_BYTES` of
+    /// `crates/mosh-terminal/src/dispatcher.rs`, which counts the
+    /// `1337;File=` part and the base64 payload together. mosh cuts a command
+    /// above it at the cap, in the same silence as a Sixel string.
+    const MOSH_ITERM2_CAP: usize = 1024 * 1024;
+
+    /// Every cap that a mosh session states today.
+    ///
+    /// The three numbers do not count one unit. Each one counts the stretch of
+    /// the escape sequence that carries one whole picture in its own protocol,
+    /// and one unit is one byte on the wire in every case. So the room that
+    /// [`PayloadBudget::under_command_cap`] leaves has to be real room under
+    /// each of the three, and not under the one that a reader remembers.
+    const MOSH_CAPS: [usize; 3] = [MOSH_KITTY_CAP, MOSH_SIXEL_CAP, MOSH_ITERM2_CAP];
 
     /// The side of the picture that the mosh budget test fits.
     ///
-    /// Raw pixels cost four characters each, so this picture costs 1440000 and
-    /// stands well above [`PayloadBudget::MOSH`]. A picture under the budget
-    /// would leave the fit unrun and the test measuring nothing.
-    const OVER_BUDGET_SIDE: u32 = 600;
+    /// Raw pixels cost four characters each, so this picture costs 1960000
+    /// characters and stands above every cap of [`MOSH_CAPS`], the largest one
+    /// included. A picture under a cap would leave the fit unrun and the test
+    /// measuring nothing.
+    const OVER_BUDGET_SIDE: u32 = 700;
 
     /// The characters of payload that the budget tests allow.
     ///
@@ -4067,67 +4096,108 @@ mod tests {
         );
     }
 
-    /// A picture fitted for mosh fits the store that mosh keeps, keys and all.
+    /// A picture fitted for mosh fits every cap that mosh states, keys and all.
     ///
-    /// [`PayloadBudget::MOSH`] bounds the payload alone, and mosh counts the
-    /// control block with it. So the room that the budget leaves has to be real
-    /// room, measured against the keys of a real command, and not a number that
-    /// looks generous.
+    /// A budget bounds the payload alone, and every cap of mosh counts the
+    /// command with it. So the room that
+    /// [`PayloadBudget::under_command_cap`] leaves has to be real room,
+    /// measured against the keys of a real command, and not a number that
+    /// looks generous. mosh states three caps and they are three different
+    /// numbers, so the room has to be real under each one of them.
     ///
-    /// Two assertions carry that, and they catch two different mistakes.
-    /// The budget against the store catches a budget with no room in it for
-    /// the keys, and it reads the budget rather than the fit, because
-    /// [`FIT_SAFETY`] leaves five percent of its own and would hide a thin
-    /// allowance. The fitted payload against the store catches a budget raised
-    /// above the store itself.
+    /// Three assertions carry that, and they catch three different mistakes.
     ///
-    /// Both mutations were measured on 2026-09-07. A `MOSH` of one
-    /// mebicharacter fails the first, and a `MOSH` of two fails the second.
-    /// Every other test here states a budget of its own and passes with either
-    /// mistake in place.
+    /// * **The budget against the cap.** It catches a budget with no room in
+    ///   it for the keys, and it reads the budget rather than the fit, because
+    ///   [`FIT_SAFETY`] leaves five percent of its own and would hide a thin
+    ///   allowance.
+    /// * **The fitted payload against the cap.** It catches a fit that gives
+    ///   back a payload above the budget it was given, whatever the arithmetic
+    ///   of the budget says.
+    /// * **The fallback against the smallest cap.** [`PayloadBudget::MOSH`]
+    ///   answers where a session states no cap at all, so it has to stand
+    ///   under every cap that such a session can hold.
+    ///
+    /// The three mutations below were measured on 2026-09-11, one at a time.
+    ///
+    /// * An `under_command_cap` that gives `Self(characters)` takes no room
+    ///   off the cap. The budget and the keys then come to 1638452 against a
+    ///   cap of 1638400, and the first assertion fails.
+    ///   [`a_cap_that_counts_the_command_leaves_room_for_the_command`] fails
+    ///   with it as well: that test holds the arithmetic, and this one holds
+    ///   the arithmetic against the keys of a real command.
+    /// * A [`FIT_SAFETY`] of 1.05 aims each attempt above the budget in place
+    ///   of under it. The fit then gives back 1716152 characters against the
+    ///   same cap, and the second assertion fails. Four other tests of the fit
+    ///   fail with it as well.
+    /// * A `MOSH` of `Self(1024 * 1024)`, which is one mebicharacter with no
+    ///   room off it, comes to 1048628 against the smallest cap of 1048576.
+    ///   The third assertion fails, and no other test of this module fails
+    ///   with it.
     #[test]
-    fn a_picture_fitted_for_mosh_fits_the_store_that_mosh_keeps() {
+    fn a_picture_fitted_for_mosh_fits_every_cap_that_mosh_states() {
         let picture = photograph_of(OVER_BUDGET_SIDE, OVER_BUDGET_SIDE);
         let whole = KittyPayload::RawRgb
             .encode(&picture)
             .expect("raw pixels reach base64 with no encoder that can refuse them");
 
-        let (_fitted, _shape, payload) = fit_to_payload_budget(
-            Cow::Borrowed(&picture),
-            PayloadBudget::MOSH,
-            KittyPayload::RawRgb,
-        )
-        .expect("raw pixels reach base64 with no encoder that can refuse them");
-
+        let largest = MOSH_CAPS
+            .into_iter()
+            .max()
+            .expect("the table names three caps");
         assert!(
-            whole.len() > MOSH_STORE_CHARACTERS,
-            "the fixture must stand above the store, or the fit never runs and this test measures nothing"
-        );
-        assert!(
-            payload.len() < whole.len(),
-            "the fit must really take pixels off a picture that stands above the budget"
+            whole.len() > largest,
+            "the fixture must stand above every cap, or the fit never runs and this test measures nothing"
         );
 
-        let keys = kitty_keys_of(
+        for cap in MOSH_CAPS {
+            let budget = PayloadBudget::under_command_cap(cap);
+            let keys = kitty_keys_of(
+                &picture,
+                Picture::Frame {
+                    id: TEST_PLACEMENT_ID,
+                },
+                budget,
+            );
+
+            // The budget itself has to leave room for the keys, whatever the
+            // fit does with it. A payload that spends the whole budget is the
+            // payload that a picture just above it produces.
+            let allowed = budget.characters() + keys.len();
+            assert!(
+                allowed <= cap,
+                "mosh counts the keys and the payload together, and the budget plus the keys of a real command come to {allowed}, which is above the cap of {cap}"
+            );
+
+            let (_fitted, _shape, payload) =
+                fit_to_payload_budget(Cow::Borrowed(&picture), budget, KittyPayload::RawRgb)
+                    .expect("raw pixels reach base64 with no encoder that can refuse them");
+
+            let held = payload.len() + keys.len();
+            assert!(
+                held <= cap,
+                "mosh counts the keys and the payload together, and the two come to {held}, which is above the cap of {cap}"
+            );
+        }
+
+        // The fallback answers for a session that states no cap, and such a
+        // session can hold any cap that mosh has ever stated. So it has to
+        // stand under the smallest of them.
+        let smallest = MOSH_CAPS
+            .into_iter()
+            .min()
+            .expect("the table names three caps");
+        let fallback = kitty_keys_of(
             &picture,
             Picture::Frame {
                 id: TEST_PLACEMENT_ID,
             },
             PayloadBudget::MOSH,
         );
-        // The budget itself has to leave room for the keys, whatever the fit
-        // does with it. A payload that spends the whole budget is the payload
-        // that a picture just above it produces.
-        let allowed = PayloadBudget::MOSH.characters() + keys.len();
+        let spent = PayloadBudget::MOSH.characters() + fallback.len();
         assert!(
-            allowed <= MOSH_STORE_CHARACTERS,
-            "mosh holds the keys and the payload together, and the budget plus the keys of a real command come to {allowed}, which is above {MOSH_STORE_CHARACTERS}"
-        );
-
-        let held = payload.len() + keys.len();
-        assert!(
-            held <= MOSH_STORE_CHARACTERS,
-            "mosh holds the keys and the payload together, and the two come to {held}, which is above {MOSH_STORE_CHARACTERS}"
+            spent <= smallest,
+            "the fallback and the keys of a real command come to {spent}, which is above the smallest cap of {smallest}"
         );
     }
 
