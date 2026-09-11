@@ -418,6 +418,46 @@ mod run_tests {
     }
 
     #[test]
+    fn a_tail_on_standard_output_does_not_join_the_first_line_of_standard_error() {
+        // A command that stops mid-line on one pipe and gives its reason on
+        // the other is the shape a refusal arrives in. One splitter across
+        // both pipes keeps the unterminated bytes of standard output, and the
+        // first line of standard error then completes them — the text under
+        // the frame reads `partialreason`, which is a word no program wrote.
+        // Each pipe gets a splitter of its own, so each tail keeps its own row.
+        let stub = StubShell::new("printf 'partial'\nprintf 'reason\\n' >&2\nexit 2");
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let outcome = run(stub.as_shell(), &default_command(), workdir.path());
+        assert_eq!(
+            outcome.message(),
+            Some("reason"),
+            "the tail of standard output must not join the first line of standard error",
+        );
+    }
+
+    #[test]
+    fn a_character_cut_in_half_on_standard_output_stays_out_of_the_message() {
+        // `日` is three bytes and this stub writes the first two of them. One
+        // splitter across both pipes decodes that broken tail together with
+        // the first line of standard error, which puts a replacement character
+        // in front of the reason. Two splitters keep the broken tail on a row
+        // of its own, where it costs the reason nothing.
+        let stub = StubShell::new("printf '\\346\\227'\nprintf 'reason\\n' >&2\nexit 2");
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let outcome = run(stub.as_shell(), &default_command(), workdir.path());
+        let message = outcome.message();
+        assert_eq!(
+            message,
+            Some("reason"),
+            "a character cut in half on standard output must not reach the message",
+        );
+        assert!(
+            !message.is_some_and(|text| text.contains('\u{fffd}')),
+            "the message must carry no replacement character: {message:?}",
+        );
+    }
+
+    #[test]
     fn the_run_happens_in_the_work_tree() {
         // The command asks `gh` about the issue, and `gh` reads the origin
         // remote of the directory it runs in.
