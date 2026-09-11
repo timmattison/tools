@@ -14,8 +14,8 @@ use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 use termgfx::{
-    terminal_cells, Budget, Capabilities, Cursor, MoshImages, PayloadBudget, Picture,
-    ProtocolBudgets, Request, TerminalType,
+    terminal_cells, Budget, Capabilities, Cursor, MoshImages, Picture, ProtocolBudgets, Request,
+    TerminalType,
 };
 use termion::event::Key;
 use termion::input::TermRead;
@@ -2021,9 +2021,11 @@ enum RemoteTransport {
     /// answer outranks this one, so such a session draws.
     ///
     /// A Mosh that draws still keeps every image for the length of the
-    /// session, and it refuses one transmission above a mebicharacter. That is
-    /// what [`payload_budget_for`] answers, and it is why a transport that
-    /// cannot draw at all still names a budget.
+    /// session, and it caps what it keeps. The cap is not one number: Mosh
+    /// keeps one cap for each protocol it carries, and it states the three in
+    /// `MOSH_IMAGE_BUDGETS`. A Mosh that states none leaves the careful number
+    /// that `termgfx` holds. That is what [`payload_budget_for`] answers, and
+    /// it is why a transport that cannot draw at all still names a budget.
     Mosh,
     /// Running under Eternal Terminal (ET_VERSION env var or etterminal in process tree).
     /// ET passes escape sequences through but its virtual terminal doesn't
@@ -2036,27 +2038,41 @@ enum RemoteTransport {
 /// one time for each of the three inline-image protocols.
 ///
 /// A transport that keeps every image it carries caps what it keeps, and a
-/// picture above that cap draws nothing at all. The tool cannot read the cap
-/// off the session, because no protocol asks the question, so it names the one
-/// transport whose cap is known.
+/// picture above that cap draws nothing at all. **mosh states those caps in
+/// the environment of the session, and this reads them from there.** A query
+/// cannot ask the question, because a multiplexer owns the pseudo terminal of
+/// the pane and answers every query itself, and the environment is the one
+/// channel that crosses a multiplexer. `termgfx::MoshImages` reads the
+/// variable and `termgfx::MoshImages::budgets` states what it read.
+///
+/// A copy of a number that another project holds goes stale, and the copy that
+/// stood here did: it named one cap for all three protocols, where mosh keeps
+/// one cap for each of the three. A protocol that the session does not name
+/// keeps `termgfx::PayloadBudget::MOSH`, the careful number that `termgfx`
+/// holds, because every mosh built before
+/// <https://github.com/timmattison/mosh-rs/issues/94> states no cap at all and
+/// that number is what keeps a picture drawing there. See
+/// <https://github.com/timmattison/tools/issues/480>.
 ///
 /// The answer names all three protocols, because `termgfx` reads the terminal
-/// and picks the protocol after this call. mosh states a cap for each of the
-/// three, and a later step of
-/// <https://github.com/timmattison/tools/issues/480> reads those three caps off
-/// the session. This step states the one cap that mosh once kept for all three,
-/// so a picture travels under the same number it travelled under before.
+/// and picks the protocol after this call.
+///
+/// The session answers for a mosh alone. The variable outlives the session
+/// that wrote it, because a tmux server or a Zellij server that a mosh session
+/// started hands the whole environment of that session to every pane it opens
+/// after the mosh session ends. So the caps that a local terminal reads state
+/// what some transport once carried, and they state nothing about this run.
 ///
 /// # Arguments
 /// * `transport` - The remote transport that this session runs over.
 /// * `session` - What the environment of a mosh session states about the
-///   images it carries.
+///   images it carries. It is read for a mosh and for no other transport.
 ///
 /// # Returns
 /// The budget of each of the three protocols under that transport.
 fn payload_budget_for(transport: RemoteTransport, session: MoshImages) -> ProtocolBudgets {
     match transport {
-        RemoteTransport::Mosh => ProtocolBudgets::uniform(PayloadBudget::MOSH),
+        RemoteTransport::Mosh => session.budgets(),
         // A local terminal keeps the resolution it was given, and Eternal
         // Terminal carries the bytes through. A budget on either one would
         // cost a picture resolution and buy nothing.
@@ -2175,7 +2191,7 @@ fn classify_transport(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use termgfx::AnsweredProtocol;
+    use termgfx::{AnsweredProtocol, PayloadBudget};
 
     /// A mosh reads the caps off the session, and no other transport names a
     /// cap.
