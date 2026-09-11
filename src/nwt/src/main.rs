@@ -1111,16 +1111,16 @@ fn setup_shell_integration() -> Result<(), shellsetup::ShellSetupError> {
 /// expects it to work. The worst case is redundant copies; the alternative would be
 /// missing critical development configuration.
 fn get_tracked_files(repo_root: &Path) -> HashSet<PathBuf> {
-    let output = Command::new("git")
-        .args(["ls-files"])
-        .current_dir(repo_root)
-        // Scrub any inherited git-location vars (set when this process is a
-        // child of a git hook) so the query targets `repo_root`, not whatever
-        // GIT_DIR/GIT_INDEX_FILE the parent exported. A no-op in normal use.
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .output();
+    // Shed the whole inherited `GIT_` family, through
+    // [`gitscratch::shed_inherited_git_environment`], so the query targets
+    // `repo_root` rather than whatever repository a parent git hook exported.
+    // The rule is the prefix and never a list of names: this call site listed
+    // three, and `GIT_OBJECT_DIRECTORY` and `GIT_CONFIG_PARAMETERS` walked
+    // straight through them.
+    let mut command = Command::new("git");
+    shed_inherited_git_environment(&mut command);
+
+    let output = command.args(["ls-files"]).current_dir(repo_root).output();
 
     match output {
         Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
@@ -2184,16 +2184,17 @@ fn bootstrap_hooks(worktree: &Path, quiet: bool) -> bool {
         Stdio::inherit()
     };
 
-    let status = Command::new(program)
+    // Shed the whole inherited `GIT_` family so the install's lifecycle scripts
+    // — a `prepare` that runs `git config core.hooksPath`, say — operate on
+    // `worktree` rather than on whatever repository a parent git hook exported.
+    // The child is a package manager rather than git, and that changes nothing:
+    // it runs git, and git obeys the environment first.
+    let mut command = Command::new(program);
+    shed_inherited_git_environment(&mut command);
+
+    let status = command
         .args(args)
         .current_dir(worktree)
-        // Scrub any inherited git-location vars so the install's lifecycle
-        // scripts (e.g. a `prepare` that runs `git config core.hooksPath`)
-        // operate on `worktree`, not on whatever GIT_DIR/GIT_INDEX_FILE a parent
-        // git hook exported. A no-op in normal use (no such vars are set).
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(stderr)
@@ -2243,6 +2244,16 @@ fn bootstrap_hooks(worktree: &Path, quiet: bool) -> bool {
 /// are returned unchanged by `--type=path`, so those keep resolving against the
 /// worktree as before.
 ///
+/// One part of that precedence is deliberately not honored: the inherited
+/// `GIT_` family leaves before the query runs, `GIT_CONFIG_GLOBAL` and
+/// `GIT_CONFIG_SYSTEM` among it. Removing those two costs nothing, because a
+/// removal is not the same as a redirect to `/dev/null`: with them gone git
+/// reads the host's `~/.gitconfig` and `/etc/gitconfig` exactly as it does in a
+/// shell that holds nothing. What it does cost is the answer for a user who
+/// exported one of them on purpose, and that is the price of not inheriting
+/// `GIT_CONFIG_PARAMETERS`, which git hands every hook and which would
+/// otherwise answer this question with configuration the user never wrote.
+///
 /// Returns:
 /// - `None` when `core.hooksPath` is unset (git's built-in `.git/hooks` default
 ///   always exists "enough" — an empty hooks dir is not our concern), when the
@@ -2258,15 +2269,17 @@ fn missing_hooks_path(worktree: &Path) -> Option<String> {
     // `--type=path` makes git expand `~/` and `~user/` the same way it does at
     // hook-run time. stdin is nulled so git can never block; stderr is nulled to
     // avoid noise.
-    let output = Command::new("git")
+    // Shed the whole inherited `GIT_` family so the query targets `worktree`
+    // rather than whatever repository a parent git hook exported. That includes
+    // `GIT_CONFIG_PARAMETERS`, which git hands every hook and which carries the
+    // outer command's `-c` options: left in place it answers this question with
+    // a value the user never configured.
+    let mut command = Command::new("git");
+    shed_inherited_git_environment(&mut command);
+
+    let output = command
         .args(["config", "--type=path", "core.hooksPath"])
         .current_dir(worktree)
-        // Scrub any inherited git-location vars (set when this process is a
-        // child of a git hook) so the query targets `worktree`, not whatever
-        // GIT_DIR/GIT_INDEX_FILE the parent exported. A no-op in normal use.
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()

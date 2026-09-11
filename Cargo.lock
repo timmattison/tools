@@ -4715,6 +4715,7 @@ dependencies = [
  "anyhow",
  "buildinfo",
  "clap",
+ "gitscratch",
  "glob",
  "tempfile",
  "toml",

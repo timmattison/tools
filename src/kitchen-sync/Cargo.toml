@@ -9,6 +9,11 @@ anyhow.workspace = true
 buildinfo.workspace = true
 clap.workspace = true
 glob.workspace = true
+# For `shed_inherited_git_environment`: this tool clones a repository, and an
+# inherited GIT_DIR or GIT_INDEX_FILE would aim the clone's checkout at another
+# repository's index. Which variables to shed is knowledge that lives in
+# gitscratch rather than being copied here to drift.
+gitscratch.workspace = true
 tempfile.workspace = true
 toml.workspace = true
 
