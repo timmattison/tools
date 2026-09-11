@@ -5,7 +5,7 @@
 //! only a shell can run it. This module asks the shell both questions.
 
 use std::ffi::{OsStr, OsString};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::child::detach_from_terminal;
@@ -169,8 +169,13 @@ fn shell_child(shell: &OsStr, script: String) -> Command {
 /// what makes this the right question: the thing being looked for is usually
 /// neither a file nor a builtin.
 fn probe_command(shell: &OsStr, command: &IssueCommand) -> Command {
-    let mut child = Command::new(shell);
-    let _ = command;
+    let mut child = shell_child(shell, format!("command -v {}", shell_escape(command.name())));
+    // Nothing the probe says belongs on the screen. An rc file that prints a
+    // banner would otherwise paint over the frame.
+    child
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     child
 }
 
@@ -179,8 +184,32 @@ fn probe_command(shell: &OsStr, command: &IssueCommand) -> Command {
 /// Exit status 0 means the command exists. Every other status, a shell that
 /// cannot be started, and a shell that never answers all mean it does not.
 fn probe_with_deadline(shell: &OsStr, command: &IssueCommand, deadline: Duration) -> bool {
-    let _ = (shell, command, deadline);
-    true
+    let Ok(mut child) = probe_command(shell, command).spawn() else {
+        // No such shell, or it is not executable. A shell that cannot be
+        // started has no functions to find.
+        return false;
+    };
+
+    let give_up_at = Instant::now() + deadline;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {
+                if Instant::now() >= give_up_at {
+                    // The child is killed and then reaped, in that order. A
+                    // kill alone leaves a zombie for the life of the session,
+                    // which is the process this deadline exists to prevent.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                std::thread::sleep(PROBE_POLL);
+            }
+            // The child cannot be asked about. Treating that as absent is the
+            // same answer every other failure gets.
+            Err(_) => return false,
+        }
+    }
 }
 
 /// The command `G` runs, where the environment names one and the shell has it.
@@ -203,11 +232,32 @@ mod probe_tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
-    /// Long enough for a shell to start and answer on a loaded machine, and
-    /// short enough that the test of the deadline does not slow the suite.
-    /// The production deadline is [`PROBE_DEADLINE`], and this test is about
-    /// the rule rather than about the number.
-    const TEST_DEADLINE: Duration = Duration::from_millis(750);
+    /// The deadline for a stub that answers.
+    ///
+    /// It is the production deadline, and it costs nothing: a probe returns as
+    /// soon as the shell exits. A shorter one would measure how fast this
+    /// machine starts a process rather than what the probe does with the
+    /// answer — the first start of a freshly written script took 600 ms here.
+    const ANSWER_DEADLINE: Duration = PROBE_DEADLINE;
+
+    /// The deadline for the stub that hangs.
+    ///
+    /// This is the one test that waits for a deadline, so the number is small.
+    /// [`StubShell::new`] pays the slow first start before the test begins, so
+    /// a second of it is a second the stub is already running in.
+    const HANG_DEADLINE: Duration = Duration::from_secs(1);
+
+    /// Longer than [`HANG_DEADLINE`] and far shorter than the `sleep` the
+    /// hanging stub holds. A probe that waits for the shell crosses it.
+    const GAVE_UP_WITHIN: Duration = Duration::from_secs(15);
+
+    /// The variable that tells a stub to do nothing and exit.
+    ///
+    /// [`StubShell::new`] runs the script once with it set. The first start of
+    /// a script this process just wrote is the slow one, and paying it here is
+    /// what keeps the deadline of a test a measure of the probe rather than of
+    /// the machine.
+    const WARMUP_VAR: &str = "GSW_STUB_WARMUP";
 
     /// A script that stands in for the user's shell.
     ///
@@ -246,20 +296,40 @@ mod probe_tests {
             let pid = dir.path().join("pid");
             let tail = tail.replace(PID_FILE, &shell_escape(&pid.display().to_string()));
             let script = format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> {}\nenv >> {}\n{tail}\n",
+                "#!/bin/sh\n                 [ -n \"${{{WARMUP_VAR}:-}}\" ] && exit 0\n                 printf '%s\\n' \"$@\" >> {}\n                 env >> {}\n                 {tail}\n",
                 shell_escape(&runs.display().to_string()),
                 shell_escape(&environment.display().to_string()),
             );
             std::fs::write(&path, script).expect("write the stub");
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
                 .expect("make the stub executable");
-            Self {
+            let stub = Self {
                 _dir: dir,
                 path,
                 runs,
                 environment,
                 pid,
-            }
+            };
+            stub.warm();
+            stub
+        }
+
+        /// Start the script once, so the test that follows does not pay for
+        /// the first start of it.
+        fn warm(&self) {
+            let status = Command::new(&self.path)
+                .env(WARMUP_VAR, "1")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("start the stub");
+            assert!(status.success(), "the stub must start and exit");
+            assert_eq!(
+                self.runs(),
+                "",
+                "a warm-up must leave no record behind, or every other test here reads it",
+            );
         }
 
         /// A stub that answers `status` and exits.
@@ -273,6 +343,23 @@ mod probe_tests {
         /// recorded id is the id of the process that hangs.
         fn hanging() -> Self {
             Self::new(&format!("echo $$ > {PID_FILE}\nexec sleep 30"))
+        }
+
+        /// Wait for the hanging stub to record its process id.
+        ///
+        /// The stub writes the file, and the probe kills the stub. Which of
+        /// the two happens first is the machine's business, so a test that
+        /// reads the file waits for it rather than assuming it is there.
+        fn wait_for_pid(&self) -> i32 {
+            let give_up_at = Instant::now() + GAVE_UP_WITHIN;
+            while !self.pid.exists() {
+                assert!(
+                    Instant::now() < give_up_at,
+                    "the hanging stub never recorded its process id",
+                );
+                std::thread::sleep(PROBE_POLL);
+            }
+            self.recorded_pid()
         }
 
         /// The stub, as the path to give the probe.
@@ -318,7 +405,7 @@ mod probe_tests {
     fn a_shell_that_answers_zero_has_the_command() {
         let stub = StubShell::answering(0);
         assert!(
-            probe_with_deadline(stub.as_shell(), &default_command(), TEST_DEADLINE),
+            probe_with_deadline(stub.as_shell(), &default_command(), ANSWER_DEADLINE),
             "exit status 0 means the command exists",
         );
         assert!(
@@ -331,7 +418,7 @@ mod probe_tests {
     fn a_shell_that_answers_one_does_not_have_the_command() {
         let stub = StubShell::answering(1);
         assert!(
-            !probe_with_deadline(stub.as_shell(), &default_command(), TEST_DEADLINE),
+            !probe_with_deadline(stub.as_shell(), &default_command(), ANSWER_DEADLINE),
             "every status but 0 means the command does not exist",
         );
     }
@@ -341,14 +428,14 @@ mod probe_tests {
         let stub = StubShell::hanging();
         let started = Instant::now();
         assert!(
-            !probe_with_deadline(stub.as_shell(), &default_command(), TEST_DEADLINE),
+            !probe_with_deadline(stub.as_shell(), &default_command(), HANG_DEADLINE),
             "a shell that hangs must report the command absent",
         );
         assert!(
-            started.elapsed() < TEST_DEADLINE * 4,
+            started.elapsed() < GAVE_UP_WITHIN,
             "the probe must give up at its deadline rather than wait for the shell",
         );
-        let pid = stub.recorded_pid();
+        let pid = stub.wait_for_pid();
         assert!(
             !alive(pid),
             "the probe must leave no child behind, and {pid} is still running",
@@ -374,7 +461,7 @@ mod probe_tests {
     fn the_probe_asks_about_the_command_the_variable_names() {
         let stub = StubShell::answering(0);
         let command = IssueCommand::new(Some("myfunc")).expect("a name");
-        assert!(probe_with_deadline(stub.as_shell(), &command, TEST_DEADLINE));
+        assert!(probe_with_deadline(stub.as_shell(), &command, ANSWER_DEADLINE));
         let runs = stub.runs();
         assert!(
             runs.contains("-ic"),
@@ -409,7 +496,7 @@ mod probe_tests {
         assert!(probe_with_deadline(
             stub.as_shell(),
             &default_command(),
-            TEST_DEADLINE
+            ANSWER_DEADLINE
         ));
         let environment = stub.environment();
         for name in GIT_LOCATION_VARS {
