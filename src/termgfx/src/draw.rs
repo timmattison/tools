@@ -89,7 +89,8 @@ const KITTY_QUIET: &str = "q=2";
 /// [`Picture::Still`] wants that one. A terminal that refuses the picture draws
 /// nothing, and the tool that asked for no answer then reports success in front
 /// of an empty screen. The image store of a mosh session holds a fixed number of
-/// bytes and refuses a picture above it, so the case is a common one.
+/// bytes for one transmission and refuses a picture above it, so the case is a
+/// common one.
 ///
 /// **The caller of this crate reads the answer that this key asks for.** A
 /// caller that asks a terminal for a failure report and then reads nothing
@@ -293,17 +294,25 @@ pub struct Budget {
     pub rows: Option<u32>,
 }
 
-/// The characters of payload that one image can spend.
+/// The characters of payload that one image can spend in one protocol.
 ///
 /// A terminal that carries an image over a network caps what one image can
-/// spend, and a transmission above that cap draws nothing at all. mosh is the
-/// cap that matters in practice, and it bounds each of the three protocols
-/// that this module writes. [`PayloadBudget::MOSH`] names those three caps and
-/// says where each one stands.
+/// spend. A transmission above that cap draws nothing at all, or it reaches
+/// the screen with the end cut off. mosh is the cap that matters in practice,
+/// and it states one cap for each of the three protocols that this module
+/// writes. The three caps are three different numbers.
 ///
-/// The budget bounds the payload that the protocol carries, and the keys in
-/// front of that payload are a few tens of characters. [`PayloadBudget::MOSH`]
-/// leaves room for them.
+/// **One budget belongs to one protocol.** [`ProtocolBudgets`] holds the three
+/// together, and [`Capabilities::draw`] hands each writer the budget of the
+/// protocol that writer sends. One number for all three bounds two protocols
+/// out of three by the cap of a protocol they do not use, which is the defect
+/// of <https://github.com/timmattison/tools/issues/480>.
+///
+/// The budget bounds the payload that the protocol carries, and the command in
+/// front of that payload is a few tens of characters. Every cap counts that
+/// command as well, so [`PayloadBudget::under_command_cap`] takes the room for
+/// the command off a cap of a transport and leaves the payload that a picture
+/// can really spend.
 ///
 /// A picture above the budget is drawn at a smaller cost rather than not at
 /// all, and [`fit_to_payload_budget`] states what it spends to get there.
@@ -320,36 +329,44 @@ pub struct Budget {
 pub struct PayloadBudget(usize);
 
 impl PayloadBudget {
-    /// The room that [`PayloadBudget::MOSH`] leaves for the keys of the
-    /// command.
+    /// The room that a budget leaves for the command in front of the payload.
     ///
-    /// mosh counts the keys and the payload of one command together, so the
-    /// keys come out of the same mebicharacter that the payload spends. A
-    /// Kitty control block runs to about eighty characters, and the arguments
-    /// of the other two protocols are shorter. This room stands far above all
-    /// three, because a picture that loses four kibicharacters of resolution
-    /// loses nothing a reader can see.
+    /// Every cap that a transport states counts the command of the protocol
+    /// together with the payload, so the command comes out of the same number
+    /// that the payload spends. The command takes three shapes, one for each
+    /// protocol that this module writes. A Kitty control block runs to about
+    /// eighty characters. An iTerm2 operating system command carries the
+    /// `1337;File=` part and the arguments that follow it. A Sixel
+    /// device-control string carries the introducer and the size of the
+    /// picture. This room stands far above all three, because a picture that
+    /// loses four kibicharacters of resolution loses nothing a reader can see.
+    ///
+    /// [`PayloadBudget::under_command_cap`] is where the room comes off a cap.
     const CONTROL_BLOCK_ROOM: usize = 4096;
 
-    /// The budget of a mosh session.
+    /// The careful budget of a session that states no cap at all.
     ///
-    /// mosh caps one image at one mebicharacter, and the cap is the same
-    /// number for each of the three protocols that this module writes. The
-    /// three numbers stand in `timmattison/mosh-rs` at commit `5676142`
-    /// (<https://github.com/timmattison/mosh-rs>):
+    /// **This is a fallback and it is not the cap of any protocol.** A mosh
+    /// that draws images states the cap of each protocol it carries in
+    /// `MOSH_IMAGE_BUDGETS`, and [`crate::MoshImages::budgets`] reads the three
+    /// numbers there. Upstream mosh writes no such variable, and neither does
+    /// a mosh built before that variable landed, so a session that states
+    /// nothing lands here.
     ///
-    /// * Kitty: `MAXIMUM_STORED_CHARACTERS` of
-    ///   `crates/mosh-terminal/src/imagestore.rs`. `ImageStore::hold` refuses a
-    ///   transmission above it with [`crate::Refusal`] `ENOSPC`, and it counts
-    ///   `control.len() + payload.len()`. The store holds every image it
-    ///   accepted under that same number for the length of the session, and it
-    ///   evicts the oldest images to make room for a new one.
-    /// * iTerm2: `MAXIMUM_INLINE_IMAGE_CHARACTERS` of
-    ///   `crates/mosh-terminal/src/dispatcher.rs`. The protocol carries a whole
-    ///   image in one operating system command, and mosh drops every character
-    ///   of that command above the cap.
-    /// * Sixel: `MAXIMUM_SIXEL_STRING_CHARACTERS` of the same file, which
-    ///   bounds one device-control string in the same way.
+    /// The number is one mebicharacter less the room for the command. It
+    /// stands at or under every cap that mosh has ever stated, so a picture
+    /// fitted for it reaches a terminal on any of those sessions.
+    ///
+    /// **A copy of a real cap goes stale in silence, and this one already
+    /// did.** This constant carried the cap of the Kitty protocol until mosh
+    /// raised that cap, and nothing here said so. A copy that stands under the
+    /// real cap only draws a smaller picture than the transport allows. A copy
+    /// that stands above a cap the transport lowered draws nothing at all in
+    /// the Kitty protocol, and it draws a picture with the end cut off in the
+    /// two others. So a caller reads the cap of the protocol it writes, and it
+    /// reaches this number only where the session states none. See
+    /// <https://github.com/timmattison/tools/issues/480> and
+    /// <https://github.com/timmattison/mosh-rs/issues/94>.
     pub const MOSH: Self = Self(1024 * 1024 - Self::CONTROL_BLOCK_ROOM);
 
     /// The budget of a terminal that states no cap of its own.
@@ -414,10 +431,9 @@ impl PayloadBudget {
 
 /// The payload budget of each of the three inline-image protocols.
 ///
-/// mosh once capped every protocol it carries at the same number, and
-/// [`PayloadBudget::MOSH`] is that one number. mosh states three caps now, one
-/// for each protocol, so one budget answers for the wrong protocol on two runs
-/// out of three. A budget above the cap of the protocol sends a picture that
+/// mosh once capped every protocol it carries at the same number. mosh states
+/// three caps now, one for each protocol, so one budget answers for the wrong
+/// protocol on two runs out of three. A budget above the cap of the protocol sends a picture that
 /// the terminal drops, and the user sees an empty screen. A budget below it
 /// takes resolution off a picture that the terminal would have drawn whole.
 /// See <https://github.com/timmattison/tools/issues/480>.
@@ -1033,10 +1049,10 @@ trait Payload: Copy {
 /// and the two cost very different numbers of characters. Base64 turns three
 /// bytes into four characters, and three bytes is one pixel, so raw pixels cost
 /// four characters for every pixel: 580800 characters for a photograph of 330
-/// pixels by 440. A mosh session holds 1048576 characters of image, so one such
-/// picture takes over half of that store. A photograph of twice the pixels
-/// costs more than the whole store, and it never arrives. A PNG of the same
-/// photograph costs a fraction of it.
+/// pixels by 440. mosh carries 1638400 characters in one Kitty transmission,
+/// so one such picture takes over a third of that cap. A photograph of three
+/// times the pixels stands above the whole cap, and it never arrives. A PNG of
+/// the same photograph costs a fraction of it.
 ///
 /// The variant owns the `f=` key, the keys that state the pixel size, and the
 /// encoder, all three together. One place therefore decides the header and the
@@ -1227,10 +1243,10 @@ impl JpegQuality {
     /// The quality that the ladder stops at.
     ///
     /// The report of this defect measures a photograph of 3074 pixels by 1856
-    /// at this quality: 785138 bytes, which is 1046852 base64 characters.
-    /// [`PayloadBudget::MOSH`] holds 1044480 of them, so the floor of the
-    /// ladder still misses the budget by 2372 characters, which is 0.2 percent
-    /// of it. [`fit_to_payload_budget`] spends that last distance on pixels,
+    /// at this quality: 785138 bytes, which is 1046852 base64 characters. The
+    /// cap that mosh states for the iTerm2 protocol leaves 1044480 characters
+    /// of payload, so the floor of the ladder still misses that budget by 2372
+    /// characters, which is 0.2 percent of it. [`fit_to_payload_budget`] spends that last distance on pixels,
     /// and [`FIT_SAFETY`] aims 5 percent under the budget as well, so
     /// [`shrink_towards`] takes 2.6 percent off each side of that photograph,
     /// for 2993 pixels by 1807. Under this quality the blocks of the encoder
@@ -1291,12 +1307,13 @@ impl JpegQuality {
 ///   A photograph compresses poorly in a lossless format, and a JPEG of it
 ///   carries about twelve times the pixels of a PNG for the same characters.
 ///   That is what keeps a photograph at the resolution of the screen inside the
-///   budget of a mosh session.
+///   budget that a mosh session states for this protocol.
 ///
 /// A raw PNM was the one shape that the writer made before this, and a
 /// photograph of 3074 pixels by 1856 costs 22821376 base64 characters in it.
-/// A mosh session holds 1048576, so the fit shrank that picture to about 655
-/// pixels by 395 and the terminal stretched it over the whole rectangle. The
+/// mosh carries 1048576 bytes in one iTerm2 command, so the fit shrank that
+/// picture to about 655 pixels by 395 and the terminal stretched it over the
+/// whole rectangle. The
 /// shape is now the rung that a frame starts at, where the time of the encoder
 /// is the cost that the reader feels, and a still picture starts at a PNG.
 ///
@@ -1601,8 +1618,9 @@ fn shape_that_costs_least<P: Payload>(
     // A rung that states its count states it off the pixel count alone, so the
     // budget refuses such a rung before an encoder builds the payload that the
     // budget then throws away. A frame of 1920 pixels by 1080 costs 8294424
-    // characters as a raw PNM, and a mosh session holds 1044480 of them, so
-    // this step saves that payload one time for every frame of the video.
+    // characters as a raw PNM, and no cap that a mosh session states holds a
+    // fifth of them, so this step saves that payload one time for every frame
+    // of the video.
     //
     // The step stops at the last rung of the ladder on purpose. The caller has
     // to come back with a payload: `fit_to_payload_budget` spends the pixels of
@@ -1705,9 +1723,9 @@ fn shrink_towards(
 ///
 /// [`Picture::Still`] is one still picture, and it travels as a PNG.
 /// Raw pixels cost four base64 characters for every pixel, so a photograph of
-/// 330 pixels by 440 costs 580800 characters that way. That is over half of the
-/// 1048576 characters that a mosh session holds, and a photograph of twice the
-/// pixels never arrives at all. A still picture goes out one time, so the
+/// 330 pixels by 440 costs 580800 characters that way. That is over a third of
+/// the 1638400 characters that mosh carries in one Kitty transmission, and a
+/// photograph of three times the pixels never arrives at all. A still picture goes out one time, so the
 /// characters are the whole of what it pays, and a PNG of it costs a fraction
 /// of the raw pixels.
 ///
@@ -1779,8 +1797,9 @@ fn write_kitty<W: Write>(
 
     // The downscale above bounds the picture by the screen. This bounds it by
     // the characters that the transport carries, which is a second bound and
-    // not the same one: mosh caps one transmission at one mebicharacter, and a
-    // window of more than about 51 columns by 23 makes a frame above that cap.
+    // not the same one: mosh caps one Kitty transmission at 1638400
+    // characters, and a window of more than about 64 columns by 29 makes a
+    // frame above that cap.
     // `c=` and `r=` below still state the cell span that the screen gave, so
     // the picture keeps its size there and loses resolution alone.
     let (image, shape, base64_data) = fit_to_payload_budget(image, budget, shape)?;
@@ -3135,10 +3154,10 @@ mod tests {
 
     #[test]
     fn a_still_picture_travels_as_a_png() {
-        // Raw pixels cost four base64 characters for every pixel, and a mosh
-        // session holds 1048576 characters of image, so one photograph takes
-        // over half of that store and a photograph of twice the pixels never
-        // arrives. `f=100` names a PNG instead, and a Kitty terminal then reads
+        // Raw pixels cost four base64 characters for every pixel, and mosh
+        // carries 1638400 characters in one Kitty transmission, so one
+        // photograph takes over a third of that cap and a photograph of three
+        // times the pixels never arrives. `f=100` names a PNG instead, and a Kitty terminal then reads
         // the width and the height out of the PNG itself. The header must carry
         // no `s=` key and no `v=` key beside it.
         let control_data = kitty_still_control_data();
@@ -3182,9 +3201,9 @@ mod tests {
     /// A frame above the budget comes back inside it.
     ///
     /// A frame keeps the raw pixels, so its payload is exactly four characters
-    /// for every pixel. mosh caps one transmission at one mebicharacter, which
-    /// is 262144 pixels, or a window of about 51 columns by 23. Every larger
-    /// window drew no frame at all.
+    /// for every pixel. mosh caps one Kitty transmission at 1638400
+    /// characters, which is 409600 pixels, or a window of about 64 columns by
+    /// 29. Every larger window drew no frame at all.
     #[test]
     fn a_frame_above_the_payload_budget_comes_back_inside_it() {
         let spent = kitty_payload_of(
@@ -3265,7 +3284,8 @@ mod tests {
     /// The iTerm2 protocol carries a whole file, and a raw PNM file spends
     /// three bytes on every pixel and compresses none of them. A photograph of
     /// 3074 pixels by 1856 costs 17116032 bytes that way, which is 22821376
-    /// base64 characters, and a mosh session holds 1048576 of them. The same
+    /// base64 characters, and mosh carries 1048576 bytes in one iTerm2
+    /// command. The same
     /// photograph as a PNG costs a fraction of it and loses no pixel at all.
     ///
     /// The rule holds for a still picture. One frame of many starts at the raw
@@ -3882,9 +3902,9 @@ mod tests {
     /// refuses.
     ///
     /// A raw shape states what it costs off the pixel count alone. A frame of
-    /// 1920 pixels by 1080 costs 8294424 characters as a raw PNM, and a mosh
-    /// session holds 1044480 of them, so the budget refuses that rung for every
-    /// frame of the video. A walk that reads the statement steps past the rung.
+    /// 1920 pixels by 1080 costs 8294424 characters as a raw PNM, and no cap
+    /// that a mosh session states holds a fifth of them, so the budget refuses
+    /// that rung for every frame of the video. A walk that reads the statement steps past the rung.
     /// A walk that reads the payload builds those 8294424 characters one time
     /// for each frame and throws every one of them away.
     ///
@@ -4425,9 +4445,9 @@ mod tests {
 
     /// The cap of a transport that counts the command as well.
     ///
-    /// The number is the cap that mosh states for one Kitty transmission, and
-    /// the test reads it as a cap of the transport and not as a budget of the
-    /// payload.
+    /// The number is the cap that mosh states for one Sixel device-control
+    /// string and for one iTerm2 command, and the test reads it as a cap of
+    /// the transport and not as a budget of the payload.
     const COMMAND_AND_PAYLOAD_CAP: usize = 1024 * 1024;
 
     /// A cap that counts the command leaves room for the command.
