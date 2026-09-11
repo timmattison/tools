@@ -50,8 +50,8 @@ impl Pid {
     ///
     /// The function is `const`, so a test states a pid as a constant.
     #[must_use]
-    pub const fn new(_pid: u32) -> Self {
-        Self(0)
+    pub const fn new(pid: u32) -> Self {
+        Self(pid)
     }
 
     /// The process id of this process.
@@ -68,7 +68,10 @@ impl Pid {
 /// that path, which is the component that an exact match reads.
 #[must_use]
 pub fn comm_basename(comm: &str) -> &str {
-    comm
+    Path::new(comm)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or(comm)
 }
 
 /// A list of Zellij clients that holds at least one client.
@@ -86,13 +89,16 @@ impl ClientPids {
     /// A list that holds `pids`, or `None` when there is no client to hold.
     #[must_use]
     pub fn new(pids: Vec<Pid>) -> Option<Self> {
+        if pids.is_empty() {
+            return None;
+        }
         Some(Self(pids))
     }
 
     /// The clients, in the order that `ps` reported them. Never empty.
     #[must_use]
     pub fn as_slice(&self) -> &[Pid] {
-        &[]
+        &self.0
     }
 }
 
@@ -131,8 +137,19 @@ impl ZellijScan {
     ///
     /// `ps_args_output` is the output of `ps -eo pid=,args=`.
     #[must_use]
-    pub fn for_session(_ps_args_output: &str, _session: Option<&str>) -> Self {
-        Self::Off
+    pub fn for_session(ps_args_output: &str, session: Option<&str>) -> Self {
+        let Some(session) = session else {
+            return Self::Off;
+        };
+        match ClientPids::new(zellij_client_pids(ps_args_output, session)) {
+            Some(clients) => Self::Clients(clients),
+            // The session named no client, so the careful answer is the one
+            // that treats every Zellij client on the machine as a candidate.
+            // It reports a transport of another session, and that mistake
+            // hides a feature. The opposite mistake uses a feature that the
+            // transport carries badly.
+            None => Self::EveryClient,
+        }
     }
 }
 
@@ -154,8 +171,33 @@ impl ZellijScan {
 /// (`zellij --server /path/.../NAME`) does not match, because the session name
 /// is only a part of its socket path.
 #[must_use]
-pub fn zellij_client_pids(_ps_args_output: &str, _session: &str) -> Vec<Pid> {
-    Vec::new()
+pub fn zellij_client_pids(ps_args_output: &str, session: &str) -> Vec<Pid> {
+    if session.is_empty() {
+        return Vec::new();
+    }
+
+    let mut clients = Vec::new();
+
+    for line in ps_args_output.lines() {
+        let mut parts = line.split_whitespace();
+        let pid = match parts.next().and_then(|s| s.parse::<u32>().ok()) {
+            Some(p) => Pid(p),
+            None => continue,
+        };
+        let Some(program) = parts.next() else {
+            continue;
+        };
+        if comm_basename(program) != ZELLIJ_PROGRAM_NAME {
+            continue;
+        }
+        // The remaining tokens are the arguments of the client. The session
+        // name must be one complete argument.
+        if parts.any(|arg| arg == session) {
+            clients.push(pid);
+        }
+    }
+
+    clients
 }
 
 /// The Zellij session of this process, from `ZELLIJ` and `ZELLIJ_SESSION_NAME`.
@@ -212,11 +254,37 @@ impl ProcessTree {
     ///
     /// A line that carries no pid or no ppid is skipped.
     #[must_use]
-    pub fn parse(_ps_comm_output: &str) -> Self {
-        Self {
-            parent_of: HashMap::new(),
-            comm_of: HashMap::new(),
+    pub fn parse(ps_comm_output: &str) -> Self {
+        let mut parent_of: HashMap<Pid, Pid> = HashMap::new();
+        let mut comm_of: HashMap<Pid, String> = HashMap::new();
+
+        for line in ps_comm_output.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let mut parts = line.split_whitespace();
+            let pid = match parts.next().and_then(|s| s.parse::<u32>().ok()) {
+                Some(p) => Pid(p),
+                None => continue,
+            };
+            let ppid = match parts.next().and_then(|s| s.parse::<u32>().ok()) {
+                Some(p) => Pid(p),
+                None => continue,
+            };
+            // Rejoin the remaining tokens, so that a path that holds a space
+            // survives, for example "/Users/user/my apps/mosh-server". On
+            // macOS, `ps -eo comm=` gives the full path of the executable. The
+            // `p_comm` field of the kernel holds 16 characters only, but `ps`
+            // reads the full path through libproc, so a cut name is not
+            // expected. A zombie process and a thread of the kernel show a cut
+            // name, and "mosh-server" is 11 characters, which fits.
+            let comm: String = parts.collect::<Vec<&str>>().join(" ");
+            parent_of.insert(pid, ppid);
+            comm_of.insert(pid, comm);
         }
+
+        Self { parent_of, comm_of }
     }
 
     /// The tree of this machine.
@@ -240,7 +308,59 @@ impl ProcessTree {
     ///    client itself does not count as a match, because the client is the
     ///    stand-in and not the process in question.
     #[must_use]
-    pub fn has_ancestor(&self, _pid: Pid, _scan: &ZellijScan, _target_name: &str) -> bool {
+    pub fn has_ancestor(&self, pid: Pid, scan: &ZellijScan, target_name: &str) -> bool {
+        // Case 1: the walk goes up from the given process. The process itself
+        // counts as a match.
+        let mut ancestor = pid;
+        for _ in 0..MAX_ANCESTOR_DEPTH {
+            if let Some(comm) = self.comm_of.get(&ancestor) {
+                if comm_basename(comm) == target_name {
+                    return true;
+                }
+            }
+            match self.parent_of.get(&ancestor) {
+                Some(&ppid) if ppid != Pid(0) && ppid != ancestor => ancestor = ppid,
+                _ => break,
+            }
+        }
+
+        // Case 2: Zellij started its server as a daemon, which broke the chain
+        // of parents. The walk goes up from each client that stands in for the
+        // given process.
+        let every_client: Vec<Pid>;
+        let clients: &[Pid] = match scan {
+            ZellijScan::Off => return false,
+            ZellijScan::Clients(clients) => clients.as_slice(),
+            // Every process whose basename is exactly "zellij", which is the
+            // program of the client and not "zellij-server" or another name.
+            ZellijScan::EveryClient => {
+                every_client = self
+                    .comm_of
+                    .iter()
+                    .filter(|(_, comm)| comm_basename(comm) == ZELLIJ_PROGRAM_NAME)
+                    .map(|(&pid, _)| pid)
+                    .collect();
+                &every_client
+            }
+        };
+
+        for &client in clients {
+            let mut ancestor = client;
+            for _ in 0..MAX_ANCESTOR_DEPTH {
+                match self.parent_of.get(&ancestor) {
+                    Some(&ppid) if ppid != Pid(0) && ppid != ancestor => {
+                        if let Some(pcomm) = self.comm_of.get(&ppid) {
+                            if comm_basename(pcomm) == target_name {
+                                return true;
+                            }
+                        }
+                        ancestor = ppid;
+                    }
+                    _ => break,
+                }
+            }
+        }
+
         false
     }
 }
