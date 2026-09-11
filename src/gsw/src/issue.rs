@@ -944,9 +944,9 @@ mod run_tests {
         // Watch mode holds the alternate screen in raw mode, and this child is
         // an interactive shell. An interactive shell opens `/dev/tty` for job
         // control and for every prompt it paints, so a child that keeps the
-        // controlling terminal reads the keys the event thread of `gsw` is
-        // waiting for and paints over the frame. Nothing in the tree of this
-        // child may be able to open the terminal.
+        // controlling terminal reads the keys the event thread of `gsw` waits
+        // for and paints over the frame. No process in the tree of this child
+        // can be able to open the terminal.
         //
         // The run is the half with the longer reach: the probe asks a shell one
         // question, and this starts the command of the user in that shell.
@@ -1334,8 +1334,9 @@ mod stub_shell {
 
     /// What a stub writes when `/dev/tty` was unopenable.
     ///
-    /// This is the only outcome that keeps an interactive shell from painting
-    /// a prompt over the frame of `gsw` and taking the keys `gsw` reads.
+    /// This is the only outcome that stops an interactive shell. Given a
+    /// terminal, such a shell paints a prompt over the frame of `gsw` and takes
+    /// the keys `gsw` reads.
     pub(super) const TTY_REFUSED: &str = "refused";
 
     /// Whether the **test process** can open the controlling terminal.
@@ -1537,8 +1538,8 @@ mod stub_shell {
         /// What the stub found when it reached for the controlling terminal.
         ///
         /// The read fails where the file is absent, and an absent file means
-        /// the stub never ran. A test that took that for an answer would pass
-        /// while it proved nothing at all, so the message names that case.
+        /// the stub never ran. A test that took that for an answer passes and
+        /// proves nothing at all, so the message names that case.
         pub(super) fn terminal_record(&self) -> String {
             std::fs::read_to_string(&self.tty)
                 .expect("the stub never ran, so the terminal probe proved nothing")
@@ -1681,7 +1682,7 @@ mod probe_tests {
         // the alternate screen in raw mode. An interactive shell that keeps the
         // controlling terminal opens `/dev/tty` for job control, and anything
         // the rc file starts can ask the same terminal for a password. Both
-        // take the keys the event thread of `gsw` is waiting for.
+        // take the keys the event thread of `gsw` waits for.
         if !test_process_can_open_the_terminal() {
             eprintln!(
                 "skipped: this test process has no controlling terminal, so /dev/tty is \
