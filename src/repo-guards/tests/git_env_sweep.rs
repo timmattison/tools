@@ -360,6 +360,7 @@ fn a_workspace_with_no_rust_refuses() {
         "Cargo.toml",
         "[package]\nname = \"one\"\nedition = \"2021\"\n",
     );
+    fs::create_dir_all(dir.path().join("src/one/src")).expect("an empty library tree");
 
     let error = git_env_sweep::audit(dir.path()).expect_err("an empty read set is a refusal");
 
@@ -370,21 +371,108 @@ fn a_workspace_with_no_rust_refuses() {
 }
 
 #[test]
-fn a_directory_of_build_artifacts_is_not_read() {
+fn a_member_with_no_src_directory_refuses() {
+    let dir = TempDir::new().expect("a temp dir");
+    write(
+        dir.path(),
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"src/*\"]\n",
+    );
+    write(
+        &dir.path().join("src/one"),
+        "Cargo.toml",
+        "[package]\nname = \"one\"\nedition = \"2021\"\n",
+    );
+    write(
+        &dir.path().join("src/one"),
+        "tests/cli.rs",
+        "fn main() {}\n",
+    );
+
+    let error = git_env_sweep::audit(dir.path()).expect_err("an unmodelled layout is a refusal");
+
+    assert!(
+        matches!(error, GitEnvSweepError::NoLibraryTree { .. }),
+        "expected a layout refusal, got {error}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// What cargo compiles, which is not every `.rs` file on disk.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_helper_module_under_tests_is_read() {
     let ws = workspace("pub fn run() {}\n");
-    let generated = ws.path().join("src/one/target");
-    write(&generated, "CACHEDIR.TAG", "Signature: 8a477f597d28d172\n");
-    write(&generated, "left-by-a-build.rs", "fn x( {\n");
+    write(
+        &ws.path().join("src/one/tests/common"),
+        "mod.rs",
+        "pub fn run(command: &mut std::process::Command) {\n    \
+         command.env_remove(\"GIT_DIR\");\n}\n",
+    );
+
+    let report = git_env_sweep::audit(ws.path()).expect("the audit reaches a verdict");
+
+    assert_eq!(
+        named(&report),
+        ["GIT_DIR".to_owned()],
+        "a directory holding a mod.rs is a module of a test target, and cargo compiles it: \
+         {report}"
+    );
+}
+
+#[test]
+fn a_data_directory_under_tests_is_not_read() {
+    // `src/cdva/tests/fixtures/rust` is this shape: Rust that a tool reads as
+    // input, two files of which are invalid on purpose. Reading it as source
+    // would refuse the whole workspace over a file that cannot spawn anything.
+    let ws = workspace("pub fn run() {}\n");
+    write(
+        &ws.path().join("src/one/tests/fixtures"),
+        "invalid.rs",
+        "pub fn run( {\n",
+    );
+    write(
+        &ws.path().join("src/one/tests/fixtures"),
+        "named.rs",
+        "pub fn run(command: &mut std::process::Command) {\n    \
+         command.env_remove(\"GIT_DIR\");\n}\n",
+    );
 
     let report = git_env_sweep::audit(ws.path()).expect("the audit reaches a verdict");
 
     assert!(
+        report.is_compliant(),
+        "a directory holding neither mod.rs nor main.rs is data, and a removal written into a \
+         parser fixture is a fixture rather than a defect: {report}"
+    );
+    assert!(
         report
             .files()
             .iter()
-            .all(|file| !file.starts_with("src/one/target")),
-        "a directory carrying CACHEDIR.TAG holds artifacts, not source: {:?}",
+            .all(|file| !file.starts_with("src/one/tests/fixtures")),
+        "nothing under the data directory is read: {:?}",
         report.files()
+    );
+}
+
+#[test]
+fn a_build_script_is_read() {
+    let ws = workspace("pub fn run() {}\n");
+    write(
+        &ws.path().join("src/one"),
+        "build.rs",
+        "fn main() {\n    let mut command = std::process::Command::new(\"git\");\n    \
+         command.env_remove(\"GIT_DIR\");\n}\n",
+    );
+
+    let report = git_env_sweep::audit(ws.path()).expect("the audit reaches a verdict");
+
+    assert_eq!(
+        named(&report),
+        ["GIT_DIR".to_owned()],
+        "a build script runs on the build machine, where a leaked GIT_DIR is just as wrong: \
+         {report}"
     );
 }
 

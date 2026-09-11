@@ -85,11 +85,25 @@
 //!
 //! `~/.claude/REGEX-VS-AST.md` names it: a perfect matcher pointed at four of
 //! seven directories reports clean for the same reason and with the same
-//! silence. So the scanned set is derived from the workspace manifest, through
+//! silence. So the read set is derived from the workspace manifest, through
 //! [`workspace_lints::members`], exactly as the sibling guards derive theirs,
 //! and an empty set is an error rather than a clean verdict. A companion test
 //! measures that set against the target roots `cargo metadata` reports, so a
-//! directory this walk never reaches shows up as a set difference.
+//! directory the walk never reaches shows up as a set difference.
+//!
+//! Within a member, the read set is the Rust cargo compiles, which is not every
+//! `.rs` file on disk. Everything under `src` is read, and so is a build
+//! script. Under `tests`, `benches` and `examples`, the files at the top are
+//! read and a subdirectory is read only when it holds a `mod.rs` or a
+//! `main.rs` — cargo's own convention for a directory that is a module or a
+//! target, rather than one that holds data.
+//!
+//! That distinction is load-bearing rather than tidy. `src/cdva/tests/fixtures`
+//! holds Rust that `cdva` reads as *input*, two files of which are invalid on
+//! purpose, so a walk that read every `.rs` file would refuse the whole
+//! workspace over a file that cannot spawn anything. Reading them as source
+//! would also be wrong in the other direction: a named removal written into a
+//! parser fixture is a fixture, not a defect.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -116,12 +130,28 @@ const ENV_REMOVE: &str = "env_remove";
 /// Rust source extension.
 const RS: &str = "rs";
 
-/// The marker a build tool drops in a directory of generated artifacts.
+/// The member directory cargo compiles the library and the binaries from.
 ///
-/// Cargo writes one into its target directory. A directory holding it is not
-/// source, and walking into it would judge whatever a build happened to leave
-/// there.
-const CACHEDIR_TAG: &str = "CACHEDIR.TAG";
+/// Read whole. A module under it can sit anywhere, because the 2018 edition
+/// spells a module directory without a `mod.rs`, so nothing narrower than the
+/// whole tree reaches every file.
+const LIBRARY_TREE: &str = "src";
+
+/// The member directories whose top-level Rust files are each a target root.
+///
+/// A subdirectory of one of these is read only when it looks like a module or a
+/// target; see [`MODULE_ROOTS`].
+const TARGET_TREES: [&str; 3] = ["tests", "benches", "examples"];
+
+/// The conventional build script, at the member root.
+const BUILD_RS: &str = "build.rs";
+
+/// What a subdirectory of a target tree holds when it is Rust rather than data.
+///
+/// `mod.rs` makes it a module of a sibling target, and `main.rs` makes it a
+/// target of its own. A directory holding neither is data the tests read, and
+/// cargo never compiles it.
+const MODULE_ROOTS: [&str; 2] = ["mod.rs", "main.rs"];
 
 /// One deliberate removal of a `GIT_` variable by name.
 ///
@@ -181,6 +211,26 @@ pub enum GitEnvSweepError {
         dir: PathBuf,
         /// The underlying failure.
         source: walkdir::Error,
+    },
+
+    /// A target tree could not be listed.
+    #[error("cannot list {} while collecting source files: {source}", dir.display())]
+    ReadTargetTree {
+        /// The directory that could not be listed.
+        dir: PathBuf,
+        /// The underlying I/O failure.
+        source: io::Error,
+    },
+
+    /// A workspace member holds no `src` directory.
+    #[error(
+        "workspace member {} holds no `{LIBRARY_TREE}` directory; this guard models cargo's \
+         default layout, so it would read the wrong tree and report clean for the wrong reason",
+        dir.display()
+    )]
+    NoLibraryTree {
+        /// The member directory.
+        dir: PathBuf,
     },
 
     /// A source file could not be read from disk.
@@ -399,53 +449,110 @@ pub fn audit(repo_root: &Path) -> Result<Report, GitEnvSweepError> {
     })
 }
 
-/// Every Rust source file under the workspace members of `repo_root`, relative
-/// to `repo_root` and sorted.
+/// Every Rust source file cargo compiles for the workspace members of
+/// `repo_root`, relative to `repo_root` and sorted.
 ///
-/// Lifted out of [`audit`] so a test can measure the scanned set against
+/// Lifted out of [`audit`] so a test can measure the read set against
 /// `cargo metadata` without re-deriving it, which is the only way to tell a
 /// guard that found nothing from a guard that looked nowhere.
 ///
 /// # Errors
 ///
 /// Returns [`GitEnvSweepError`] when the members cannot be enumerated, a member
-/// directory cannot be walked, or the walk finds no Rust source.
+/// holds no `src` directory, a directory cannot be walked or listed, or the
+/// walk finds no Rust source.
 pub fn source_files(repo_root: &Path) -> Result<Vec<PathBuf>, GitEnvSweepError> {
     let members = workspace_lints::members(repo_root)?;
 
     let mut files = Vec::new();
     for dir in &members {
-        for entry in WalkDir::new(dir).into_iter().filter_entry(is_source_tree) {
-            let entry = entry.map_err(|source| GitEnvSweepError::Walk {
-                dir: dir.clone(),
-                source,
-            })?;
-            let path = entry.path();
-            if entry.file_type().is_file() && path.extension().is_some_and(|ext| ext == RS) {
-                files.push(path.strip_prefix(repo_root).unwrap_or(path).to_path_buf());
-            }
+        let library = dir.join(LIBRARY_TREE);
+        if !library.is_dir() {
+            return Err(GitEnvSweepError::NoLibraryTree { dir: dir.clone() });
+        }
+        read_tree(&library, &mut files)?;
+
+        let build = dir.join(BUILD_RS);
+        if build.is_file() {
+            files.push(build);
+        }
+
+        for tree in TARGET_TREES {
+            read_target_tree(&dir.join(tree), &mut files)?;
         }
     }
 
-    files.sort();
-    files.dedup();
-    if files.is_empty() {
+    let mut relative: Vec<PathBuf> = files
+        .into_iter()
+        .map(|path| {
+            path.strip_prefix(repo_root)
+                .unwrap_or(path.as_path())
+                .to_path_buf()
+        })
+        .collect();
+    relative.sort();
+    relative.dedup();
+
+    if relative.is_empty() {
         return Err(GitEnvSweepError::NoSourceFiles {
             members: members.len(),
         });
     }
 
-    Ok(files)
+    Ok(relative)
 }
 
-/// False for a directory of generated artifacts, which is not source.
+/// Append every `.rs` file under `dir`, to any depth.
+fn read_tree(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), GitEnvSweepError> {
+    for entry in WalkDir::new(dir) {
+        let entry = entry.map_err(|source| GitEnvSweepError::Walk {
+            dir: dir.to_path_buf(),
+            source,
+        })?;
+        if entry.file_type().is_file() && is_rust(entry.path()) {
+            files.push(entry.into_path());
+        }
+    }
+    Ok(())
+}
+
+/// Append the Rust of one target tree: the files at the top, and the whole of
+/// each subdirectory that holds a [`MODULE_ROOTS`] entry.
 ///
-/// Cargo marks its target directory with a [`CACHEDIR_TAG`], and so does every
-/// other tool that adopted the convention. Asking for the marker rather than
-/// for the name `target` means a source directory that happens to be called
-/// `target` is still read.
-fn is_source_tree(entry: &walkdir::DirEntry) -> bool {
-    !entry.file_type().is_dir() || !entry.path().join(CACHEDIR_TAG).is_file()
+/// A missing tree is not an error. A crate with no tests has no `tests`
+/// directory, and every crate lacks two of the three.
+fn read_target_tree(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), GitEnvSweepError> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+
+    let entries = fs::read_dir(dir).map_err(|source| GitEnvSweepError::ReadTargetTree {
+        dir: dir.to_path_buf(),
+        source,
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|source| GitEnvSweepError::ReadTargetTree {
+            dir: dir.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+
+        if path.is_dir() {
+            if MODULE_ROOTS.iter().any(|root| path.join(root).is_file()) {
+                read_tree(&path, files)?;
+            }
+        } else if is_rust(&path) {
+            files.push(path);
+        }
+    }
+
+    Ok(())
+}
+
+/// True for a Rust source file.
+fn is_rust(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| extension == RS)
 }
 
 /// The `GIT_` variables `path` removes by name, sorted and deduplicated.
