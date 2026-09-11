@@ -312,7 +312,6 @@ fn shell_child(shell: &OsStr, script: String) -> Command {
     let mut command = Command::new(shell);
     command.arg("-ic").arg(script);
     gitscratch::shed_inherited_git_environment(&mut command);
-    detach_from_terminal(&mut command);
     command
 }
 
@@ -764,7 +763,8 @@ mod outcome_tests {
 #[cfg(all(test, unix))]
 mod run_tests {
     use super::stub_shell::{
-        alive, kill_now, StubShell, ANSWER_DEADLINE, GAVE_UP_WITHIN, HANG_DEADLINE,
+        alive, kill_now, test_process_can_open_the_terminal, StubShell, ANSWER_DEADLINE,
+        GAVE_UP_WITHIN, HANG_DEADLINE, TTY_REFUSED,
     };
     use super::*;
     use std::path::PathBuf;
@@ -935,6 +935,41 @@ mod run_tests {
         assert!(
             !message.is_some_and(|text| text.contains('\u{fffd}')),
             "the message must carry no replacement character: {message:?}",
+        );
+    }
+
+    #[test]
+    fn the_run_child_cannot_open_the_controlling_terminal() {
+        // Watch mode holds the alternate screen in raw mode, and this child is
+        // an interactive shell. An interactive shell opens `/dev/tty` for job
+        // control and for every prompt it paints, so a child that keeps the
+        // controlling terminal reads the keys the event thread of `gsw` is
+        // waiting for and paints over the frame. Nothing in the tree of this
+        // child may be able to open the terminal.
+        //
+        // The run is the half with the longer reach: the probe asks a shell one
+        // question, and this starts the command of the user in that shell.
+        if !test_process_can_open_the_terminal() {
+            eprintln!(
+                "skipped: this test process has no controlling terminal, so /dev/tty is \
+                 unopenable for every child regardless - the assertion would hold vacuously",
+            );
+            return;
+        }
+
+        let stub = StubShell::probing_the_terminal();
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let outcome = run(stub.as_shell(), &default_command(), workdir.path());
+        assert_eq!(
+            outcome.message(),
+            None,
+            "the stub exits 0, so the run must report nothing",
+        );
+        assert_eq!(
+            stub.terminal_record(),
+            TTY_REFUSED,
+            "the run child keeps the controlling terminal, so the command of the user can paint \
+             over the frame of gsw and take the keys gsw is reading",
         );
     }
 
@@ -1274,14 +1309,55 @@ mod stub_shell {
         pid: PathBuf,
         /// The directory of each run.
         cwd: PathBuf,
+        /// What the last run found when it reached for the controlling
+        /// terminal, written by a stub that looks for one.
+        tty: PathBuf,
     }
 
     /// Where a stub's tail names the file it records its process id in.
     const PID_FILE: &str = "<PID_FILE>";
 
+    /// Where a stub's tail names the file it records the terminal in.
+    ///
+    /// A second placeholder of the same shape as [`PID_FILE`], because the
+    /// answer travels the same way. A stub cannot report through its standard
+    /// streams: the probe sends all three to [`Stdio::null`], and a run sends
+    /// two of them to temporary files the runner owns. A file of its own is
+    /// how a stub says what it found.
+    const TTY_FILE: &str = "<TTY_FILE>";
+
+    /// What a stub writes when it **could** open the controlling terminal.
+    ///
+    /// This is the failure the tests of it exist to catch.
+    pub(super) const TTY_OPENED: &str = "opened";
+
+    /// What a stub writes when `/dev/tty` was unopenable.
+    ///
+    /// This is the only outcome that keeps an interactive shell from painting
+    /// a prompt over the frame of `gsw` and taking the keys `gsw` reads.
+    pub(super) const TTY_REFUSED: &str = "refused";
+
+    /// Whether the **test process** can open the controlling terminal.
+    ///
+    /// An assertion about a child is worth making only where there is a
+    /// terminal for that child to be denied. A `cargo test` started from a
+    /// script, from a runner, or from the pre-commit hook of this repository
+    /// has no controlling terminal at all. `/dev/tty` is then unopenable for
+    /// every process in the tree, detached or not, and the assertion holds for
+    /// a reason that has nothing to do with the code. A test that reads this
+    /// skips with a printed reason rather than bank such a vacancy as a green.
+    pub(super) fn test_process_can_open_the_terminal() -> bool {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .is_ok()
+    }
+
     impl StubShell {
-        /// A stub whose last line is `tail`, with [`PID_FILE`] in it replaced
-        /// by the quoted path of the file the stub records its id in.
+        /// A stub whose last line is `tail`, with [`PID_FILE`] and
+        /// [`TTY_FILE`] in it replaced by the quoted paths of the files the
+        /// stub records its id and its terminal in.
         ///
         /// One directory holds the script and every file it writes, so the one
         /// [`TempDir`] this holds owns all of them.
@@ -1292,7 +1368,10 @@ mod stub_shell {
             let environment = dir.path().join("environment");
             let pid = dir.path().join("pid");
             let cwd = dir.path().join("cwd");
-            let tail = tail.replace(PID_FILE, &shell_quote(&pid.display().to_string()));
+            let tty = dir.path().join("tty");
+            let tail = tail
+                .replace(PID_FILE, &shell_quote(&pid.display().to_string()))
+                .replace(TTY_FILE, &shell_quote(&tty.display().to_string()));
             let script = format!(
                 "#!/bin/sh\n\
                  [ -n \"${{{WARMUP_VAR}:-}}\" ] && exit 0\n\
@@ -1314,6 +1393,7 @@ mod stub_shell {
                 environment,
                 pid,
                 cwd,
+                tty,
             };
             stub.warm();
             stub
@@ -1340,6 +1420,33 @@ mod stub_shell {
         /// A stub that answers `status` and exits.
         pub(super) fn answering(status: u8) -> Self {
             Self::new(&format!("exit {status}"))
+        }
+
+        /// A stub that reaches for the controlling terminal, records what it
+        /// found, and exits 0.
+        ///
+        /// This is the shape of the fake `ssh` of
+        /// `the_push_child_cannot_open_the_controlling_terminal`, and it asks
+        /// the same question of the two children of this module.
+        ///
+        /// **The subshell is deliberate.** A redirection that fails ends the
+        /// shell that carries it, so a bare `exec 3<>/dev/tty` in the stub
+        /// itself takes the stub down and the `else` branch is unreachable.
+        /// The subshell takes that failure instead, and the stub reads its
+        /// status.
+        ///
+        /// The status is 0, so the probe reports the command present and the
+        /// run reports nothing. Each test asserts that as well as the record,
+        /// because both say the production path really reached the stub.
+        pub(super) fn probing_the_terminal() -> Self {
+            Self::new(&format!(
+                "if ( exec 3<>/dev/tty ) 2>/dev/null; then\n\
+                 \tprintf '{TTY_OPENED}' > {TTY_FILE}\n\
+                 else\n\
+                 \tprintf '{TTY_REFUSED}' > {TTY_FILE}\n\
+                 fi\n\
+                 exit 0",
+            ))
         }
 
         /// A stub that records its process id and then never exits.
@@ -1426,6 +1533,18 @@ mod stub_shell {
             PathBuf::from(recorded.trim_end())
         }
 
+        /// What the stub found when it reached for the controlling terminal.
+        ///
+        /// The read fails where the file is absent, and an absent file means
+        /// the stub never ran. A test that took that for an answer would pass
+        /// while it proved nothing at all, so the message names that case.
+        pub(super) fn terminal_record(&self) -> String {
+            std::fs::read_to_string(&self.tty)
+                .expect("the stub never ran, so the terminal probe proved nothing")
+                .trim()
+                .to_string()
+        }
+
         /// The process id the hanging stub holds.
         pub(super) fn recorded_pid(&self) -> i32 {
             std::fs::read_to_string(&self.pid)
@@ -1477,7 +1596,8 @@ mod stub_shell {
 #[cfg(all(test, unix))]
 mod probe_tests {
     use super::stub_shell::{
-        alive, kill_now, wait_until_gone, StubShell, ANSWER_DEADLINE, GAVE_UP_WITHIN, HANG_DEADLINE,
+        alive, kill_now, test_process_can_open_the_terminal, wait_until_gone, StubShell,
+        ANSWER_DEADLINE, GAVE_UP_WITHIN, HANG_DEADLINE, TTY_REFUSED,
     };
     use super::*;
 
@@ -1550,6 +1670,35 @@ mod probe_tests {
         assert!(
             gone,
             "the probe must leave no process behind, and the grandchild {pid} is still running",
+        );
+    }
+
+    #[test]
+    fn the_probe_child_cannot_open_the_controlling_terminal() {
+        // The probe runs `$SHELL -ic`, which reads the rc file of the user.
+        // That file is somebody else's code, and it runs while watch mode holds
+        // the alternate screen in raw mode. An interactive shell that keeps the
+        // controlling terminal opens `/dev/tty` for job control, and anything
+        // the rc file starts can ask the same terminal for a password. Both
+        // take the keys the event thread of `gsw` is waiting for.
+        if !test_process_can_open_the_terminal() {
+            eprintln!(
+                "skipped: this test process has no controlling terminal, so /dev/tty is \
+                 unopenable for every child regardless - the assertion would hold vacuously",
+            );
+            return;
+        }
+
+        let stub = StubShell::probing_the_terminal();
+        assert!(
+            probe_with_deadline(stub.as_shell(), &default_command(), ANSWER_DEADLINE),
+            "the stub exits 0, so the probe must report the command present",
+        );
+        assert_eq!(
+            stub.terminal_record(),
+            TTY_REFUSED,
+            "the probe child keeps the controlling terminal, so the rc file of the user can paint \
+             over the frame of gsw and take the keys gsw is reading",
         );
     }
 
