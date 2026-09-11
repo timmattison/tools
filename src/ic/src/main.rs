@@ -14,8 +14,8 @@ use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 use termgfx::{
-    terminal_cells, Budget, Capabilities, Cursor, PayloadBudget, Picture, ProtocolBudgets, Request,
-    TerminalType,
+    terminal_cells, Budget, Capabilities, Cursor, MoshImages, PayloadBudget, Picture,
+    ProtocolBudgets, Request, TerminalType,
 };
 use termion::event::Key;
 use termion::input::TermRead;
@@ -1948,7 +1948,10 @@ fn display_image(
             rows: scaled_height,
         },
         source,
-        payload: payload_budget_for(transport),
+        // The caps of a mosh travel in the environment of the session, and
+        // `Capabilities::detect_by_asking` already read them, so this call
+        // costs no second read either.
+        payload: payload_budget_for(transport, terminal_caps.session()),
         picture,
         // A frame of a video always holds the cursor, because the caller puts
         // the cursor where it wants it before every frame. A still picture
@@ -2046,10 +2049,12 @@ enum RemoteTransport {
 ///
 /// # Arguments
 /// * `transport` - The remote transport that this session runs over.
+/// * `session` - What the environment of a mosh session states about the
+///   images it carries.
 ///
 /// # Returns
 /// The budget of each of the three protocols under that transport.
-fn payload_budget_for(transport: RemoteTransport) -> ProtocolBudgets {
+fn payload_budget_for(transport: RemoteTransport, session: MoshImages) -> ProtocolBudgets {
     match transport {
         RemoteTransport::Mosh => ProtocolBudgets::uniform(PayloadBudget::MOSH),
         // A local terminal keeps the resolution it was given, and Eternal
@@ -2170,42 +2175,86 @@ fn classify_transport(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use termgfx::{AnsweredProtocol, MoshImages};
+    use termgfx::AnsweredProtocol;
 
-    /// A mosh session states the budget that mosh keeps, and no other
-    /// transport states one.
+    /// A mosh reads the caps off the session, and no other transport names a
+    /// cap.
     ///
     /// mosh holds every image for the length of the session, because a client
-    /// that reconnects holds none, and it refuses one transmission above a
-    /// mebicharacter with `ENOSPC`. A picture above that cap draws nothing at
-    /// all, and the user reads an empty screen and an error.
+    /// that reconnects holds none, and it caps what it holds. The cap is not
+    /// one number. mosh states one cap for each protocol it carries, and it
+    /// states the three in `MOSH_IMAGE_BUDGETS`, because the environment is
+    /// the one channel that crosses a multiplexer. A picture above the cap of
+    /// the protocol that carries it draws nothing at all, and the user reads
+    /// an empty screen and an error.
+    ///
+    /// This crate held a copy of those caps, and the copy went stale. That is
+    /// the defect that <https://github.com/timmattison/tools/issues/480>
+    /// reports, so this test states the session it covers and asserts against
+    /// the caps of that session. A number typed out in an assertion is the
+    /// same copy again, and it goes stale in the same way.
+    ///
+    /// A mosh that states no cap keeps the careful number that this crate
+    /// holds. Every mosh built before
+    /// <https://github.com/timmattison/mosh-rs/issues/94> states none, and the
+    /// careful number is what keeps a picture drawing there.
     ///
     /// Nothing else here names a cap. A local terminal keeps the resolution it
-    /// was given, and Eternal Terminal carries the bytes through, so a budget
-    /// on either one would cost a picture resolution for no reason.
-    ///
-    /// The answer names all three protocols, and every one of them reads the
-    /// same number here. mosh states a cap for each protocol, and a later step
-    /// of <https://github.com/timmattison/tools/issues/480> reads the three
-    /// apart. This test holds what a user sees today, so it states that the
-    /// three still agree.
+    /// was given, and Eternal Terminal carries the bytes through. Both answer
+    /// the same whatever the session states, because the variable outlives the
+    /// session that wrote it: a tmux server that a mosh session started hands
+    /// that environment to every pane it opens after the mosh session ends,
+    /// and such a pane is no mosh.
     #[test]
-    fn a_mosh_session_states_the_budget_that_mosh_keeps() {
+    fn a_mosh_reads_the_caps_off_the_session_and_no_other_transport_names_a_cap() {
+        /// The cap that the session of this test states for the Kitty
+        /// graphics protocol.
+        const KITTY_CAP: usize = 1_638_400;
+
+        /// The cap that the session of this test states for the Sixel
+        /// protocol.
+        const SIXEL_CAP: usize = 1_048_576;
+
+        /// The cap that the session of this test states for the iTerm2
+        /// protocol. The three caps differ, so an answer that reads the wrong
+        /// protocol fails here.
+        const ITERM2_CAP: usize = 524_288;
+
+        let stated = MoshImages::from_env(
+            Some("kitty,sixel,iterm2"),
+            None,
+            Some(&format!(
+                "kitty={KITTY_CAP},sixel={SIXEL_CAP},iterm2={ITERM2_CAP}"
+            )),
+        );
         assert_eq!(
-            payload_budget_for(RemoteTransport::Mosh),
+            payload_budget_for(RemoteTransport::Mosh, stated),
+            ProtocolBudgets::uniform(PayloadBudget::MOSH)
+                .with_kitty(PayloadBudget::under_command_cap(KITTY_CAP))
+                .with_sixel(PayloadBudget::under_command_cap(SIXEL_CAP))
+                .with_iterm2(PayloadBudget::under_command_cap(ITERM2_CAP)),
+            "a picture under mosh takes the cap that the session states for the protocol that carries it, less the room of the command"
+        );
+
+        let silent = MoshImages::from_env(Some("kitty,sixel,iterm2"), None, None);
+        assert_eq!(
+            payload_budget_for(RemoteTransport::Mosh, silent),
             ProtocolBudgets::uniform(PayloadBudget::MOSH),
-            "a picture under mosh must fit the store that mosh keeps, whichever protocol carries it"
+            "a mosh that states no cap keeps the careful number, so a mosh built before the caps travelled draws what it drew before"
         );
-        assert_eq!(
-            payload_budget_for(RemoteTransport::None),
-            ProtocolBudgets::UNLIMITED,
-            "a local terminal states no cap, so a picture keeps every pixel"
-        );
-        assert_eq!(
-            payload_budget_for(RemoteTransport::EternalTerminal),
-            ProtocolBudgets::UNLIMITED,
-            "Eternal Terminal carries the bytes through and states no cap of its own"
-        );
+
+        for local in [RemoteTransport::None, RemoteTransport::EternalTerminal] {
+            assert_eq!(
+                payload_budget_for(local, silent),
+                ProtocolBudgets::UNLIMITED,
+                "a local terminal keeps the resolution it was given, and Eternal Terminal carries the bytes through, so neither one names a cap"
+            );
+            assert_eq!(
+                payload_budget_for(local, stated),
+                ProtocolBudgets::UNLIMITED,
+                "and neither one names a cap where the session states caps, because the variable outlives the session that wrote it"
+            );
+        }
     }
 
     // =========================================================================
