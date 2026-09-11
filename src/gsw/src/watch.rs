@@ -747,9 +747,16 @@ impl IssueRun {
 
     /// The command to run now, or `None` where there is nothing to run or a
     /// run is already in flight.
+    ///
+    /// Setting the flag as it hands the command over is what makes a second
+    /// `G` start nothing: the key still classifies, and this still answers.
     fn start(&mut self) -> Option<crate::issue::IssueCommand> {
-        let _ = &self.command;
-        None
+        if self.running {
+            return None;
+        }
+        let command = self.command.clone()?;
+        self.running = true;
+        Some(command)
     }
 
     /// A run has ended, so `G` means something again.
@@ -1257,7 +1264,15 @@ where
             }
         }
         Event::IssueCommandFound(command) => issue.found(command),
-        Event::IssueFinished(_outcome) => issue.finished(),
+        Event::IssueFinished(outcome) => {
+            issue.finished();
+            // A run that worked says nothing: the browser is the answer. A run
+            // that failed says why, in the words of another program, so it
+            // waits for a key the way git's error text does.
+            if let Some(message) = outcome.message() {
+                ui.post_error(message.to_string());
+            }
+        }
         Event::PushFinished(outcome) => {
             let succeeded = outcome.success;
             ui.finished(outcome, clock());
