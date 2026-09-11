@@ -10,6 +10,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::child::detach_from_terminal;
+use crate::lines::LineSplitter;
 
 /// The variable that names the command `G` runs.
 pub(crate) const ISSUE_COMMAND_ENV: &str = "GSW_ISSUE_COMMAND";
@@ -245,8 +246,18 @@ impl IssueOutcome {
     /// names no issue, and that refusal is the whole reason the key did
     /// nothing. A failure that wrote nothing has only the status left to
     /// report, and a blank row under the frame would read as success.
-    fn new(_name: &str, _success: bool, _lines: &[String], _status: &str) -> Self {
-        Self { message: None }
+    fn new(name: &str, success: bool, lines: &[String], status: &str) -> Self {
+        if success {
+            return Self { message: None };
+        }
+        let last = lines
+            .iter()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .map(|line| line.trim_end().to_string());
+        Self {
+            message: Some(last.unwrap_or_else(|| format!("{name} failed ({status})"))),
+        }
     }
 
     /// The message to put under the frame, or `None` where the run says
@@ -264,8 +275,15 @@ impl IssueOutcome {
 /// from expanding an alias, which is one of the two things `command -v`
 /// reports.
 fn run_command(shell: &OsStr, command: &IssueCommand, workdir: &Path) -> Command {
-    let mut child = Command::new(shell);
-    let _ = (command, workdir);
+    let mut child = shell_child(shell, command.name().to_string());
+    // The command asks `gh` about the issue, and `gh` reads the origin remote
+    // of the directory it runs in. Both pipes are captured, because a line the
+    // child writes to the terminal would paint over the frame.
+    child
+        .current_dir(workdir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     child
 }
 
@@ -273,8 +291,34 @@ fn run_command(shell: &OsStr, command: &IssueCommand, workdir: &Path) -> Command
 ///
 /// Blocking: the caller runs it on a thread of its own.
 pub(crate) fn run(shell: &OsStr, command: &IssueCommand, workdir: &Path) -> IssueOutcome {
-    let _ = (shell, command, workdir);
-    IssueOutcome { message: None }
+    let name = command.name();
+    let output = match run_command(shell, command, workdir).output() {
+        Ok(output) => output,
+        // The shell is gone, or it cannot be started. Rare, and worth saying
+        // plainly: every other failure here is the child's own words.
+        Err(error) => {
+            return IssueOutcome {
+                message: Some(format!("cannot run {name}: {error}")),
+            }
+        }
+    };
+
+    // Standard output first, then standard error, which is the order a
+    // refusal reads in: a command says what it did on one pipe and why it
+    // stopped on the other. Both go through [`LineSplitter`], the one place a
+    // child's bytes become text gsw can paint — a tab is up to eight columns
+    // and an escape sequence repaints the frame in another program's colors.
+    let mut splitter = LineSplitter::new();
+    let mut lines = splitter.feed(&output.stdout);
+    lines.extend(splitter.feed(&output.stderr));
+    lines.extend(splitter.finish());
+
+    IssueOutcome::new(
+        name,
+        output.status.success(),
+        &lines,
+        &output.status.to_string(),
+    )
 }
 
 #[cfg(test)]
