@@ -487,7 +487,7 @@ fn write_images(
             // nine by one. A cell of 20 pixels by 40 makes that 7200 pixels,
             // or 28800 characters of raw payload, so it stands far under the
             // smallest cap that a transport states.
-            payload: termgfx::PayloadBudget::UNLIMITED,
+            payload: termgfx::ProtocolBudgets::UNLIMITED,
             picture: termgfx::Picture::Frame {
                 id: u32::try_from(index).unwrap_or(u32::MAX).saturating_add(1),
             },
