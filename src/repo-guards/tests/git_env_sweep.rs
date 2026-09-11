@@ -166,8 +166,9 @@ fn a_named_removal_built_by_a_macro_is_reported() {
 
     assert_eq!(
         named(&report),
-        ["GIT_".to_owned()],
-        "a name assembled from a GIT_ literal is still a name: {report}"
+        ["GIT_{name}".to_owned()],
+        "a name assembled from a GIT_ literal is still a name, and the literal is what the \
+         report quotes back: {report}"
     );
 }
 

@@ -98,7 +98,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use proc_macro2::TokenStream;
+use proc_macro2::{Delimiter, TokenStream, TokenTree};
 use thiserror::Error;
 use walkdir::WalkDir;
 
@@ -475,6 +475,52 @@ fn named_removals(path: &Path) -> Result<Vec<String>, GitEnvSweepError> {
 
 /// Walk `tokens`, recording every `GIT_` variable removed by name.
 ///
-/// Not yet written. The audit therefore reports every file clean, which is the
-/// verdict the tests of this module must refuse.
-fn collect_named_removals(_tokens: TokenStream, _found: &mut BTreeSet<String>) {}
+/// Recursion follows every group, so a call nested in a block, a closure, or
+/// the body of a macro invocation is reached the same way a top-level one is.
+fn collect_named_removals(tokens: TokenStream, found: &mut BTreeSet<String>) {
+    let trees: Vec<TokenTree> = tokens.into_iter().collect();
+
+    for (index, tree) in trees.iter().enumerate() {
+        if let TokenTree::Ident(ident) = tree {
+            if ident == ENV_REMOVE {
+                // An identifier followed immediately by a parenthesized group
+                // is a call. `env_remove!(...)` puts a `!` between the two, so
+                // a macro of that name is not read as one.
+                if let Some(TokenTree::Group(group)) = trees.get(index + 1) {
+                    if group.delimiter() == Delimiter::Parenthesis {
+                        collect_git_literals(group.stream(), found);
+                    }
+                }
+            }
+        }
+
+        if let TokenTree::Group(group) = tree {
+            collect_named_removals(group.stream(), found);
+        }
+    }
+}
+
+/// Record every `GIT_`-prefixed string literal in `tokens`, to any depth.
+///
+/// The whole argument is searched rather than only its first token, so a
+/// literal behind a reference, a `const` spelled inline, or a macro that builds
+/// the name is found. That over-matches a call that merely mentions such a
+/// literal while removing something else, and that is the safe direction: an
+/// over-matching guard fails loudly and gets repaired, while one that under-
+/// matches reports clean and stays that way.
+fn collect_git_literals(tokens: TokenStream, found: &mut BTreeSet<String>) {
+    for tree in tokens {
+        match tree {
+            TokenTree::Literal(literal) => {
+                if let syn::Lit::Str(text) = syn::Lit::new(literal) {
+                    let value = text.value();
+                    if value.starts_with(GIT_ENVIRONMENT_PREFIX) {
+                        found.insert(value);
+                    }
+                }
+            }
+            TokenTree::Group(group) => collect_git_literals(group.stream(), found),
+            TokenTree::Ident(_) | TokenTree::Punct(_) => {}
+        }
+    }
+}
