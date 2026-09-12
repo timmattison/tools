@@ -106,9 +106,10 @@ impl Session {
 
     /// Read the machine.
     ///
-    /// A machine whose `ps` does not run has no table to walk. It reports a
-    /// local shell, from the environment alone. That answer is the behavior
-    /// gsw has today, so a machine that cannot answer loses no key.
+    /// A machine whose `ps` does not run has no table to walk. The
+    /// environment answers alone there, so a mosh session on such a machine
+    /// reports a local shell. That answer is the behavior gsw has today, so a
+    /// machine that cannot answer loses no key.
     pub(crate) fn read() -> Self {
         let ssh = SshEnvironment::read();
         let pid = Pid::current();

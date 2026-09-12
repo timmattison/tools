@@ -615,9 +615,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       whether the shell is remote: it is remote when `SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY`
       is in the environment, or when a `mosh-server` stands above the process — mosh carries none
       of those variables into the shell it starts, so the process tree is the only place that
-      says so. The message fades off the screen after a minute, and any other key takes it away
-      sooner. The offer of the second press goes with the message, so a `G` a minute later asks
-      again. The limit is a multiplexer that starts its server as a daemon: that
+      says so. The message fades off the screen after a minute. Any other key takes the offer of
+      the second press away, so a `G` a minute later asks again, and so does a `G` after any
+      other key. The limit is a multiplexer that starts its server as a daemon: that
       server reparents to PID 1, and the walk up the process tree stops there. gsw answers that
       for Zellij through the Zellij client, which keeps the chain. A session viewed through tmux
       reports whatever stands above the tmux server.

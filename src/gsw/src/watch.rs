@@ -1350,11 +1350,18 @@ where
         Event::PushOutput(line) => ui.output_line(line),
         Event::PushCancelled => ui.cancel(),
         Event::Dismiss => ui.dismiss(),
-        Event::IssueRequested => match issue.press(clock()) {
-            IssuePress::Run(command) => (hooks.start_issue)(command),
-            IssuePress::Ask(message) => ui.post_notice(message, clock()),
-            IssuePress::Nothing => {}
-        },
+        Event::IssueRequested => {
+            // One read of the clock, for both halves of one press. The arming
+            // and the message it stands for must end at the same moment, and
+            // two reads put the arming microseconds before the message. A test
+            // clock that steps on every read makes the same gap a whole step.
+            let now = clock();
+            match issue.press(now) {
+                IssuePress::Run(command) => (hooks.start_issue)(command),
+                IssuePress::Ask(message) => ui.post_notice(message, now),
+                IssuePress::Nothing => {}
+            }
+        }
         Event::IssueCommandFound(command) => issue.found(command),
         Event::IssueFinished(outcome) => {
             issue.finished();
