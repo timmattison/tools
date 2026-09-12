@@ -4948,6 +4948,34 @@ mod push_loop_tests {
     }
 
     #[test]
+    fn a_g_pressed_while_a_push_owns_the_row_arms_nothing() {
+        // The message that asks for the second press *is* the offer, so the
+        // offer cannot stand while that message is still in the queue. A push
+        // owns the row for minutes, and a notice posted then waits for it. A
+        // press that armed the key there would let the next `G` open a browser
+        // on the machine nobody sits at, with nobody ever asked a second time
+        // for it — which is the exact harm this feature exists to stop.
+        let (screen, seen) = run_loop_remote(vec![
+            probe_answered(),
+            Event::PushRequested,
+            Event::PushConfirmed,
+            press_g(),
+            press_g(),
+            Event::Quit,
+        ]);
+        assert!(
+            seen.issue_runs.is_empty(),
+            "a press made while a push owns the row must arm nothing, got {:?}",
+            seen.issue_runs,
+        );
+        let painted = strip_ansi(&screen);
+        assert!(
+            !painted.contains(SECOND_PRESS_NOTICE),
+            "the notice must wait for the row the push owns, got {painted:?}",
+        );
+    }
+
+    #[test]
     fn a_key_between_two_g_presses_on_a_remote_shell_starts_nothing() {
         // The message is the armed state, and every other key takes it off the
         // screen. A `G` after that key is a first press again.
