@@ -56,6 +56,20 @@ use crate::probe::{ask_for_a_refusal, Refusal, QUERY_BUDGET};
 /// around the same pixels.
 const KITTY_CHUNK_SIZE: usize = 4096;
 
+/// The characters that one Kitty command puts around one chunk of the payload.
+///
+/// A command after the first one carries `ESC _ G m = 1 ;` in front of its
+/// chunk and `ESC \` behind it. The first part is seven characters and the
+/// second is two, which makes nine. The last command of a transmission carries
+/// `m=0` in place of `m=1`, and that is the same nine characters.
+///
+/// [`kitty_budget_under_chunk_framing`] counts nine for every chunk, the first
+/// one included. The first command carries the header in place of these nine
+/// characters, and [`PayloadBudget::CONTROL_BLOCK_ROOM`] covers that header, so
+/// the nine characters counted there are an overcount. Nine characters carry
+/// two pixels of the picture, and one rule for every chunk is worth two pixels.
+const KITTY_CHUNK_FRAMING: usize = 9;
+
 /// The Kitty graphics command that takes every image off the screen.
 ///
 /// `a=d` is the delete action and `d=A` names every placement of every image.
@@ -312,7 +326,10 @@ pub struct Budget {
 /// front of that payload is a few tens of characters. Every cap counts that
 /// command as well, so [`PayloadBudget::under_command_cap`] takes the room for
 /// the command off a cap of a transport and leaves the payload that a picture
-/// can really spend.
+/// can really spend. The Kitty protocol sends a large payload in one command
+/// for each chunk of it, and that cost grows with the payload, so
+/// [`kitty_budget_under_chunk_framing`] takes the framing of those commands
+/// off the budget inside [`write_kitty`].
 ///
 /// A picture above the budget is drawn at a smaller cost rather than not at
 /// all, and [`fit_to_payload_budget`] states what it spends to get there.
@@ -338,8 +355,18 @@ impl PayloadBudget {
     /// eighty characters. An iTerm2 operating system command carries the
     /// `1337;File=` part and the arguments that follow it. A Sixel
     /// device-control string carries the introducer and the size of the
-    /// picture. This room stands far above all three, because a picture that
-    /// loses four kibicharacters of resolution loses nothing a reader can see.
+    /// picture. This room stands far above one command of any of the three,
+    /// because a picture that loses four kibicharacters of resolution loses
+    /// nothing a reader can see.
+    ///
+    /// **One command is what this room covers, and a Kitty transmission is
+    /// more than one command.** [`write_kitty`] sends a payload above
+    /// [`KITTY_CHUNK_SIZE`] in one command for each chunk, so the characters
+    /// that the Kitty protocol adds to the payload grow with the payload, and
+    /// one fixed number cannot cover a cost that grows. The room here covers
+    /// the first command of that transmission, which carries the header and
+    /// the keys. [`kitty_budget_under_chunk_framing`] takes the framing of the
+    /// commands after it off the budget, inside the writer that writes them.
     ///
     /// [`PayloadBudget::under_command_cap`] is where the room comes off a cap.
     const CONTROL_BLOCK_ROOM: usize = 4096;
@@ -390,9 +417,16 @@ impl PayloadBudget {
     /// command and the introducer of a Sixel device-control string all come
     /// out of the same number that the payload spends.
     /// [`PayloadBudget::CONTROL_BLOCK_ROOM`] is the room that this module
-    /// keeps for them, and it stands above all three. This function takes that
-    /// room off the cap, so a caller turns a cap of the transport into a
-    /// budget of the payload and learns nothing about the room.
+    /// keeps for them, and it stands above one command of each of the three.
+    /// This function takes that room off the cap, so a caller turns a cap of
+    /// the transport into a budget of the payload and learns nothing about the
+    /// room.
+    ///
+    /// A Kitty transmission of a large payload carries one command for each
+    /// chunk, and the framing of the commands after the first grows with the
+    /// payload. [`kitty_budget_under_chunk_framing`] takes that off the budget
+    /// inside [`write_kitty`], so this function states one rule for the three
+    /// protocols and the writer that chunks states its own cost.
     ///
     /// A cap at or below the room gives a budget of zero, and that answer is
     /// correct. Such a transport carries no picture that this crate can draw,
@@ -1692,6 +1726,57 @@ fn shrink_towards(
     Some(image.resize(width, height, FilterType::Lanczos3))
 }
 
+/// The budget that leaves room for the control block of every chunk.
+///
+/// [`write_kitty`] is the one writer of this module that sends more than one
+/// command for one picture. A payload above [`KITTY_CHUNK_SIZE`] goes out in
+/// one command for each chunk, every one of those commands carries a control
+/// block of its own, and every cap counts those control blocks together with
+/// the payload. So the room for them comes off the budget before the fit
+/// spends it.
+///
+/// **[`PayloadBudget::CONTROL_BLOCK_ROOM`] covers the first command alone.**
+/// That room is one fixed number, and the cost of the chunks grows with the
+/// payload, so one fixed number cannot cover it. A frame of 1023 pixels by
+/// 1023 costs 4186116 characters of payload, and the commands around it cost
+/// 9246 characters, which is more than twice that room.
+///
+/// The room comes off here, beside [`KITTY_CHUNK_SIZE`] and the framing that
+/// the writer writes. No caller states it. There is one path to the terminal,
+/// so no caller can take a different one and get the arithmetic wrong.
+///
+/// A payload of [`KITTY_CHUNK_SIZE`] characters or fewer goes out in one
+/// command, and [`PayloadBudget::CONTROL_BLOCK_ROOM`] covers that command
+/// already, so a budget at or under that size comes back unchanged. A larger
+/// budget gives the largest payload `P` that holds
+/// `P + KITTY_CHUNK_FRAMING * chunks` inside it, where `chunks` is `P` divided
+/// by [`KITTY_CHUNK_SIZE`] and rounded up. A whole chunk costs its own
+/// characters and its framing together, so the whole chunks divide out, and
+/// what is left holds one more chunk that pays its framing first.
+///
+/// # Arguments
+/// * `budget` - The characters that the cap of the transport left, which is
+///   that cap less [`PayloadBudget::CONTROL_BLOCK_ROOM`].
+///
+/// # Returns
+/// The characters of payload that leave room for the framing of every chunk.
+/// [`PayloadBudget::UNLIMITED`] comes back a little under itself, which is
+/// still a number that no picture reaches, and the arithmetic neither
+/// overflows nor panics there.
+const fn kitty_budget_under_chunk_framing(budget: PayloadBudget) -> PayloadBudget {
+    let characters = budget.characters();
+
+    if characters <= KITTY_CHUNK_SIZE {
+        return budget;
+    }
+
+    let chunk_and_framing = KITTY_CHUNK_SIZE + KITTY_CHUNK_FRAMING;
+    let whole_chunks = characters / chunk_and_framing;
+    let rest = characters - whole_chunks * chunk_and_framing;
+
+    PayloadBudget::of(whole_chunks * KITTY_CHUNK_SIZE + rest.saturating_sub(KITTY_CHUNK_FRAMING))
+}
+
 /// Write an image with the Kitty graphics protocol.
 ///
 /// The command is `ESC _ G <key>=<value>,... ; <base64 data> ESC \`. A large
@@ -1735,6 +1820,16 @@ fn shrink_towards(
 /// rate, which is the thing the reader sees, so the frame starts at the shape
 /// that costs the least time and pays more characters for it. [`write_iterm2`]
 /// states this same trade.
+///
+/// # The framing of the chunks comes off the budget here
+///
+/// This writer is the one writer of this module that sends more than one
+/// command for one picture, so it is the one writer whose command cost grows
+/// with the payload. It therefore takes its own framing off the budget it was
+/// handed, with [`kitty_budget_under_chunk_framing`], before the fit spends
+/// that budget. The caller states the cap of the transport alone, and
+/// [`PayloadBudget::CONTROL_BLOCK_ROOM`] covers the first command of this
+/// transmission.
 ///
 /// Ghostty and WezTerm read this same protocol.
 ///
@@ -1802,7 +1897,13 @@ fn write_kitty<W: Write>(
     // frame above that cap.
     // `c=` and `r=` below still state the cell span that the screen gave, so
     // the picture keeps its size there and loses resolution alone.
-    let (image, shape, base64_data) = fit_to_payload_budget(image, budget, shape)?;
+    //
+    // The budget loses the framing of every chunk before the fit spends it.
+    // This writer sends a large payload in one command for each chunk, every
+    // cap counts those commands together with the payload, and the room that
+    // the caller took off the cap covers the first command alone.
+    let (image, shape, base64_data) =
+        fit_to_payload_budget(image, kitty_budget_under_chunk_framing(budget), shape)?;
 
     let (_, term_rows) = cells_of(window);
     let contract = cursor_contract(request, term_rows, || {
@@ -2493,9 +2594,20 @@ mod tests {
         MOSH_CAPS[0],
         MOSH_CAPS[1],
         MOSH_CAPS[2],
-        2 * 1024 * 1024,
-        4 * 1024 * 1024,
+        CAP_ABOVE_MOSH,
+        CAP_THAT_THE_ROOM_RUNS_OUT_AT,
     ];
+
+    /// A Kitty cap of two mebicharacters, which stands above every cap that
+    /// mosh states today and under the cap that the room runs out at.
+    const CAP_ABOVE_MOSH: usize = 2 * 1024 * 1024;
+
+    /// The cap that first carries a whole Kitty transmission above itself.
+    ///
+    /// The report of this defect measured a frame of 1023 pixels by 1023 here.
+    /// The payload stood inside the budget, and the whole transmission stood
+    /// 1058 characters above the cap.
+    const CAP_THAT_THE_ROOM_RUNS_OUT_AT: usize = 4 * 1024 * 1024;
 
     /// The side of the picture that the mosh budget test fits.
     ///
@@ -2549,6 +2661,21 @@ mod tests {
             .filter_map(|block| block.split_once(';'))
             .map(|(_keys, rest)| rest.split("\x1b\\").next().unwrap_or_default().len())
             .sum()
+    }
+
+    /// The characters that a Kitty payload costs with the framing of every
+    /// chunk on top of it.
+    ///
+    /// [`write_kitty`] sends a payload above [`KITTY_CHUNK_SIZE`] in one
+    /// command for each chunk, and every cap counts those commands together
+    /// with the payload. So a budget that really holds a payload holds this
+    /// number, and a budget of the payload alone is a budget that the picture
+    /// stands just above.
+    ///
+    /// # Arguments
+    /// * `payload` - The characters of payload.
+    fn kitty_characters_with_framing(payload: usize) -> usize {
+        payload + KITTY_CHUNK_FRAMING * payload.div_ceil(KITTY_CHUNK_SIZE)
     }
 
     /// Draw `image` on a Kitty terminal inside `budget` and give back the
@@ -4229,7 +4356,7 @@ mod tests {
     ///
     /// The three mutations below were measured on 2026-09-11, one at a time.
     ///
-    /// * A `kitty_budget_under_chunk_framing` that gives its argument back
+    /// * A [`kitty_budget_under_chunk_framing`] that gives its argument back
     ///   unchanged takes no framing off the budget. That is the defect this
     ///   test was rewritten for: the picture that fills the budget of the
     ///   4194304 cap then writes 4195362 characters, which stands 1058 above
@@ -4402,6 +4529,14 @@ mod tests {
     ///
     /// The fit must not cost a picture that already fits one pixel of
     /// resolution, and `UNLIMITED` must reach the encoder unchanged.
+    ///
+    /// **A budget really holds a Kitty picture when it holds the payload and
+    /// the framing of every chunk together**, because every cap counts the
+    /// commands of the transmission with the payload.
+    /// [`kitty_characters_with_framing`] states that number. A budget of the
+    /// payload alone is a budget that the picture stands just above, and
+    /// [`kitty_budget_under_chunk_framing`] takes the framing off it, so the
+    /// fit spends pixels there and it is right to spend them.
     #[test]
     fn a_picture_under_the_payload_budget_keeps_every_pixel() {
         let fixture = photograph_fixture();
@@ -4417,12 +4552,12 @@ mod tests {
             Picture::Frame {
                 id: TEST_PLACEMENT_ID,
             },
-            PayloadBudget::of(generous),
+            PayloadBudget::of(kitty_characters_with_framing(generous)),
         );
 
         assert_eq!(
             ample, generous,
-            "a budget that the picture already fits must take no pixel off it"
+            "a budget that holds the picture and its framing must take no pixel off the picture"
         );
     }
 
@@ -4655,6 +4790,128 @@ mod tests {
             PayloadBudget::under_command_cap(0).characters(),
             0,
             "a cap below the room has to saturate at zero and never wrap around"
+        );
+    }
+
+    /// The Kitty budget takes the framing of every chunk off itself.
+    ///
+    /// [`write_kitty`] sends a payload above [`KITTY_CHUNK_SIZE`] in one
+    /// command for each chunk, and every cap counts those commands together
+    /// with the payload. So the budget that reaches the fit has to hold the
+    /// payload and the framing of its chunks together, and
+    /// [`kitty_budget_under_chunk_framing`] is the arithmetic that does it.
+    /// [`a_picture_fitted_for_mosh_fits_every_cap_that_mosh_states`] holds the
+    /// same rule against a real command, and this test holds the arithmetic
+    /// alone.
+    ///
+    /// Three assertions carry it, and each one catches a different mistake.
+    ///
+    /// * **A small budget comes back unchanged.** A payload of one chunk or
+    ///   fewer characters goes out in one command, and
+    ///   [`PayloadBudget::CONTROL_BLOCK_ROOM`] covers that command already.
+    /// * **Two large budgets come back at the numbers that the report of this
+    ///   defect measured**, which are the budgets of a 1638400 cap and of a
+    ///   4194304 cap.
+    /// * **The answer is the largest payload that fits.** The payload and the
+    ///   framing of its chunks stand inside the budget, and one character more
+    ///   of payload stands above it.
+    ///
+    /// The three mutations below were measured on 2026-09-11, one at a time.
+    ///
+    /// * A function with no branch for a small budget takes the framing off
+    ///   every budget. A budget of 1 then comes back at 0, and the first
+    ///   assertion fails.
+    /// * A [`kitty_budget_under_chunk_framing`] that gives its argument back
+    ///   unchanged takes no framing off any budget. That is the defect this
+    ///   test was written for: the budget of the 1638400 cap then comes back at
+    ///   1634304 in place of 1630713, and the second assertion fails.
+    /// * A branch that gives a budget of two chunks back unchanged covers a
+    ///   transmission of two commands with the room for one. A budget of 4097
+    ///   then comes back at 4097, which costs 4115 characters with its framing,
+    ///   and the third assertion fails.
+    ///
+    /// The second of the three fails
+    /// [`a_picture_fitted_for_mosh_fits_every_cap_that_mosh_states`] as well,
+    /// at the 4194304 cap. The other two move a budget of a few thousand
+    /// characters, and every cap that the other test states is far above that,
+    /// so this test is the one that catches them.
+    #[test]
+    fn a_kitty_budget_takes_the_framing_of_every_chunk_off_itself() {
+        // A payload of one chunk or fewer characters goes out in one command,
+        // and the room for the command covers that one already.
+        for characters in [0, 1, KITTY_CHUNK_SIZE - 1, KITTY_CHUNK_SIZE] {
+            assert_eq!(
+                kitty_budget_under_chunk_framing(PayloadBudget::of(characters)).characters(),
+                characters,
+                "a budget of one chunk or fewer characters goes out in one command, so it comes back unchanged"
+            );
+        }
+
+        // The two budgets that the report of this defect measured.
+        for (cap, expected) in [
+            (MOSH_KITTY_CAP, 1_630_713_usize),
+            (CAP_THAT_THE_ROOM_RUNS_OUT_AT, 4_181_019),
+        ] {
+            let budget = PayloadBudget::under_command_cap(cap);
+            let under_framing = kitty_budget_under_chunk_framing(budget).characters();
+            assert_eq!(
+                under_framing, expected,
+                "the budget of a cap of {cap} has to leave room for the framing of every chunk"
+            );
+        }
+
+        // The answer is the largest payload that the budget holds with the
+        // framing of its chunks on top of it.
+        for characters in [
+            KITTY_CHUNK_SIZE + 1,
+            KITTY_CHUNK_SIZE * 2,
+            PayloadBudget::MOSH.characters(),
+            PayloadBudget::under_command_cap(MOSH_KITTY_CAP).characters(),
+            PayloadBudget::under_command_cap(CAP_THAT_THE_ROOM_RUNS_OUT_AT).characters(),
+        ] {
+            let payload =
+                kitty_budget_under_chunk_framing(PayloadBudget::of(characters)).characters();
+            let held = kitty_characters_with_framing(payload);
+            let one_more = kitty_characters_with_framing(payload + 1);
+
+            assert!(
+                held <= characters,
+                "a payload of {payload} costs {held} characters with its framing, which is above the budget of {characters}"
+            );
+            assert!(
+                one_more > characters,
+                "a payload of one character more costs {one_more} characters with its framing, so {payload} is not the largest payload that the budget of {characters} holds"
+            );
+        }
+    }
+
+    /// The budget of a terminal that states no cap stays astronomical.
+    ///
+    /// [`PayloadBudget::UNLIMITED`] is `usize::MAX`, which is the top of the
+    /// range that [`kitty_budget_under_chunk_framing`] works in. An arithmetic
+    /// that multiplies before it divides overflows there, and an overflow
+    /// gives a small number that sends a picture the terminal drops.
+    ///
+    /// Two assertions carry it. The answer holds its own framing, which is the
+    /// same rule that every other budget obeys, and it stays above half of the
+    /// range, because a budget that no picture reaches has to stay one.
+    ///
+    /// The mutation below was measured on 2026-09-11. An answer written as
+    /// `characters * KITTY_CHUNK_SIZE / (KITTY_CHUNK_SIZE + KITTY_CHUNK_FRAMING)`
+    /// states the same ratio in one expression, and the multiplication
+    /// overflows a `usize` here. The test then panics with `attempt to
+    /// multiply with overflow` before it reads one assertion.
+    #[test]
+    fn a_kitty_budget_of_a_terminal_with_no_cap_stays_astronomical() {
+        let unlimited = kitty_budget_under_chunk_framing(PayloadBudget::UNLIMITED).characters();
+
+        assert!(
+            kitty_characters_with_framing(unlimited) <= PayloadBudget::UNLIMITED.characters(),
+            "the budget of a terminal that states no cap has to hold its own framing, and it came back as {unlimited}"
+        );
+        assert!(
+            unlimited > usize::MAX / 2,
+            "the budget of a terminal that states no cap stays a number that no picture reaches, and it came back as {unlimited}"
         );
     }
 
