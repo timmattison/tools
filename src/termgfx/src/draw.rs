@@ -2473,13 +2473,37 @@ mod tests {
     /// each of the three, and not under the one that a reader remembers.
     const MOSH_CAPS: [usize; 3] = [MOSH_KITTY_CAP, MOSH_SIXEL_CAP, MOSH_ITERM2_CAP];
 
+    /// Every cap that the whole-transmission test measures a Kitty stream
+    /// against.
+    ///
+    /// The first three come straight off [`MOSH_CAPS`], and they are the caps
+    /// that a mosh states today. The two above them are caps that a mosh
+    /// states tomorrow. This crate reads the caps out of `MOSH_IMAGE_BUDGETS`,
+    /// so the number arrives from the session and no constant here chose it,
+    /// and mosh raised the Kitty cap one time already, from one mebicharacter
+    /// to 1600 kibicharacters.
+    ///
+    /// **A larger cap is where the room runs out first.** The Kitty writer
+    /// sends a payload above [`KITTY_CHUNK_SIZE`] in more than one command,
+    /// and every command carries a control block of its own, so the characters
+    /// that the protocol adds to the payload grow with the payload.
+    /// [`PayloadBudget::CONTROL_BLOCK_ROOM`] is one fixed number, and one fixed
+    /// number cannot cover a cost that grows.
+    const KITTY_TRANSMISSION_CAPS: [usize; 5] = [
+        MOSH_CAPS[0],
+        MOSH_CAPS[1],
+        MOSH_CAPS[2],
+        2 * 1024 * 1024,
+        4 * 1024 * 1024,
+    ];
+
     /// The side of the picture that the mosh budget test fits.
     ///
-    /// Raw pixels cost four characters each, so this picture costs 1960000
-    /// characters and stands above every cap of [`MOSH_CAPS`], the largest one
-    /// included. A picture under a cap would leave the fit unrun and the test
-    /// measuring nothing.
-    const OVER_BUDGET_SIDE: u32 = 700;
+    /// Raw pixels cost four characters each, so this picture costs 4665600
+    /// characters and stands above every cap of [`KITTY_TRANSMISSION_CAPS`],
+    /// the largest one included, which is 4194304. A picture under a cap would
+    /// leave the fit unrun and the test measuring nothing there.
+    const OVER_BUDGET_SIDE: u32 = 1080;
 
     /// The characters of payload that the budget tests allow.
     ///
@@ -2551,6 +2575,81 @@ mod tests {
             .expect("a write to a vector never fails");
 
         kitty_payload_characters(&String::from_utf8(out).expect("a Kitty command is ASCII"))
+    }
+
+    /// Draw `image` on a Kitty terminal inside `budget` and give back the
+    /// characters of the whole stream that the writer wrote.
+    ///
+    /// **This counts what a cap counts.** mosh measures one transmission as
+    /// `control.len() + payload.len()` over every chunk of it, so a test of a
+    /// cap reads the whole stream and not the payload inside it. The count
+    /// holds every byte that left the writer, which is the control block of
+    /// each chunk as well as the payload, so it stands at or above what mosh
+    /// counts. The measurement is careful and it is never generous.
+    ///
+    /// The request states no bound in cells, so the picture draws at its own
+    /// pixel size and the fit is the one thing that bounds it. A bound in
+    /// cells would take the size of the picture off the window of whoever runs
+    /// the suite, and the count would move with that window.
+    ///
+    /// The cursor is [`Cursor::Held`], which writes nothing around the
+    /// command, so the count holds the command alone.
+    ///
+    /// # Arguments
+    /// * `image` - The picture to draw.
+    /// * `picture` - Whether the picture travels as one still or as one frame.
+    /// * `budget` - The characters of payload that the picture can spend.
+    fn kitty_stream_characters_of(
+        image: &DynamicImage,
+        picture: Picture,
+        budget: PayloadBudget,
+    ) -> usize {
+        let request = Request {
+            budget: Budget {
+                columns: None,
+                rows: None,
+            },
+            payload: ProtocolBudgets::uniform(budget),
+            picture,
+            cursor: Cursor::Held,
+            ..test_request()
+        };
+
+        let mut out = Vec::new();
+        Capabilities::new(TerminalType::Kitty, true, true)
+            .draw(&mut out, image, &request)
+            .expect("a write to a vector never fails");
+
+        out.len()
+    }
+
+    /// The side of the square picture whose raw pixels cost the most
+    /// characters that `budget` holds.
+    ///
+    /// Raw pixels cost four characters for one pixel, so this picture fills
+    /// the budget and the fit leaves it alone. That picture is the worst case
+    /// of the chunk framing: every character that the writer puts around the
+    /// payload stands on top of a payload that already reached the budget.
+    ///
+    /// # Arguments
+    /// * `budget` - The characters of payload that the picture can spend.
+    fn saturating_side_of(budget: PayloadBudget) -> u32 {
+        /// The base64 characters that one raw pixel costs.
+        const CHARACTERS_FOR_ONE_PIXEL: usize = 4;
+
+        let pixels = budget.characters() / CHARACTERS_FOR_ONE_PIXEL;
+        u32::try_from(pixels.isqrt()).expect("the side of a test picture stands inside a u32")
+    }
+
+    /// The square picture whose raw pixels cost the most characters that
+    /// `budget` holds.
+    ///
+    /// # Arguments
+    /// * `budget` - The characters of payload that the picture can spend.
+    fn saturating_picture_of(budget: PayloadBudget) -> DynamicImage {
+        let side = saturating_side_of(budget);
+
+        photograph_of(side, side)
     }
 
     /// Draw `image` on a Kitty terminal inside `budget` and give back the keys
@@ -4096,108 +4195,113 @@ mod tests {
         );
     }
 
-    /// A picture fitted for mosh fits every cap that mosh states, keys and all.
+    /// A picture fitted for mosh fits every cap that mosh states, framing and
+    /// all.
     ///
     /// A budget bounds the payload alone, and every cap of mosh counts the
-    /// command with it. So the room that
-    /// [`PayloadBudget::under_command_cap`] leaves has to be real room,
-    /// measured against the keys of a real command, and not a number that
-    /// looks generous. mosh states three caps and they are three different
-    /// numbers, so the room has to be real under each one of them.
+    /// characters of the command with it. The Kitty protocol is the one of the
+    /// three that sends more than one command: a payload above
+    /// [`KITTY_CHUNK_SIZE`] goes out in one command for each chunk, and each
+    /// of those commands carries a control block of its own. So the characters
+    /// that the protocol adds to the payload grow with the payload, and a test
+    /// of a cap has to measure the whole stream that the writer wrote.
+    ///
+    /// [`kitty_stream_characters_of`] is that measurement, and the invariant
+    /// it holds is one sentence: **a whole Kitty transmission stands at or
+    /// under the cap that the transport states, for any cap the transport can
+    /// state.** The caps arrive from `MOSH_IMAGE_BUDGETS` now, so the three
+    /// caps of mosh today are not the only caps this code meets, and
+    /// [`KITTY_TRANSMISSION_CAPS`] names two above them.
     ///
     /// Three assertions carry that, and they catch three different mistakes.
     ///
-    /// * **The budget against the cap.** It catches a budget with no room in
-    ///   it for the keys, and it reads the budget rather than the fit, because
-    ///   [`FIT_SAFETY`] leaves five percent of its own and would hide a thin
-    ///   allowance.
-    /// * **The fitted payload against the cap.** It catches a fit that gives
-    ///   back a payload above the budget it was given, whatever the arithmetic
-    ///   of the budget says.
+    /// * **The picture that fills the budget.** A picture whose payload
+    ///   reaches the budget with nothing to spare is the worst case of the
+    ///   framing: the fit leaves such a picture alone, so every character of
+    ///   framing lands on top of a full budget.
+    ///   [`saturating_picture_of`] builds that picture for each cap.
+    /// * **The picture above the cap.** It makes the fit spend pixels, so the
+    ///   test reads the writer on the path that resizes as well as on the path
+    ///   that sends the picture as it stands.
     /// * **The fallback against the smallest cap.** [`PayloadBudget::MOSH`]
-    ///   answers where a session states no cap at all, so it has to stand
-    ///   under every cap that such a session can hold.
+    ///   answers where a session states no cap at all, so a picture that fills
+    ///   it has to stand under every cap that such a session can hold.
     ///
     /// The three mutations below were measured on 2026-09-11, one at a time.
     ///
+    /// * A `kitty_budget_under_chunk_framing` that gives its argument back
+    ///   unchanged takes no framing off the budget. That is the defect this
+    ///   test was rewritten for: the picture that fills the budget of the
+    ///   4194304 cap then writes 4195362 characters, which stands 1058 above
+    ///   that cap, and the first assertion fails. No other test of this module
+    ///   fails with it.
     /// * An `under_command_cap` that gives `Self(characters)` takes no room
-    ///   off the cap. The budget and the keys then come to 1638452 against a
-    ///   cap of 1638400, and the first assertion fails.
+    ///   off the cap at all. The picture that fills the budget of the 1638400
+    ///   cap then writes 1642037 characters, and the first assertion fails.
     ///   [`a_cap_that_counts_the_command_leaves_room_for_the_command`] fails
     ///   with it as well: that test holds the arithmetic, and this one holds
-    ///   the arithmetic against the keys of a real command.
+    ///   the arithmetic against a real command.
     /// * A [`FIT_SAFETY`] of 1.05 aims each attempt above the budget in place
-    ///   of under it. The fit then gives back 1716152 characters against the
-    ///   same cap, and the second assertion fails. Four other tests of the fit
-    ///   fail with it as well.
-    /// * A `MOSH` of `Self(1024 * 1024)`, which is one mebicharacter with no
-    ///   room off it, comes to 1048628 against the smallest cap of 1048576.
-    ///   The third assertion fails, and no other test of this module fails
-    ///   with it.
+    ///   of under it. The picture above the cap then writes 1719908
+    ///   characters against the 1638400 cap, and the second assertion fails.
+    ///   Four other tests of the fit fail with it as well.
     #[test]
     fn a_picture_fitted_for_mosh_fits_every_cap_that_mosh_states() {
-        let picture = photograph_of(OVER_BUDGET_SIDE, OVER_BUDGET_SIDE);
+        let over_budget = photograph_of(OVER_BUDGET_SIDE, OVER_BUDGET_SIDE);
         let whole = KittyPayload::RawRgb
-            .encode(&picture)
+            .encode(&over_budget)
             .expect("raw pixels reach base64 with no encoder that can refuse them");
 
-        let largest = MOSH_CAPS
+        let largest = KITTY_TRANSMISSION_CAPS
             .into_iter()
             .max()
-            .expect("the table names three caps");
+            .expect("the table names five caps");
         assert!(
             whole.len() > largest,
             "the fixture must stand above every cap, or the fit never runs and this test measures nothing"
         );
 
-        for cap in MOSH_CAPS {
+        let frame = Picture::Frame {
+            id: TEST_PLACEMENT_ID,
+        };
+
+        for cap in KITTY_TRANSMISSION_CAPS {
             let budget = PayloadBudget::under_command_cap(cap);
-            let keys = kitty_keys_of(
-                &picture,
-                Picture::Frame {
-                    id: TEST_PLACEMENT_ID,
-                },
-                budget,
+
+            // The picture that fills the budget is the worst case of the
+            // framing. The fit leaves it alone, so every character that the
+            // writer puts around the payload stands on top of a budget that
+            // the payload already reached.
+            let filled = kitty_stream_characters_of(&saturating_picture_of(budget), frame, budget);
+            assert!(
+                filled <= cap,
+                "mosh counts the control block of every chunk together with the payload, and a picture that fills the budget writes {filled} characters, which is above the cap of {cap}"
             );
 
-            // The budget itself has to leave room for the keys, whatever the
-            // fit does with it. A payload that spends the whole budget is the
-            // payload that a picture just above it produces.
-            let allowed = budget.characters() + keys.len();
+            // A picture above the cap makes the fit spend pixels, so the test
+            // reads the writer on that path as well.
+            let fitted = kitty_stream_characters_of(&over_budget, frame, budget);
             assert!(
-                allowed <= cap,
-                "mosh counts the keys and the payload together, and the budget plus the keys of a real command come to {allowed}, which is above the cap of {cap}"
-            );
-
-            let (_fitted, _shape, payload) =
-                fit_to_payload_budget(Cow::Borrowed(&picture), budget, KittyPayload::RawRgb)
-                    .expect("raw pixels reach base64 with no encoder that can refuse them");
-
-            let held = payload.len() + keys.len();
-            assert!(
-                held <= cap,
-                "mosh counts the keys and the payload together, and the two come to {held}, which is above the cap of {cap}"
+                fitted <= cap,
+                "mosh counts the control block of every chunk together with the payload, and a fitted picture writes {fitted} characters, which is above the cap of {cap}"
             );
         }
 
         // The fallback answers for a session that states no cap, and such a
         // session can hold any cap that mosh has ever stated. So it has to
         // stand under the smallest of them.
-        let smallest = MOSH_CAPS
+        let smallest = KITTY_TRANSMISSION_CAPS
             .into_iter()
             .min()
-            .expect("the table names three caps");
-        let fallback = kitty_keys_of(
-            &picture,
-            Picture::Frame {
-                id: TEST_PLACEMENT_ID,
-            },
+            .expect("the table names five caps");
+        let spent = kitty_stream_characters_of(
+            &saturating_picture_of(PayloadBudget::MOSH),
+            frame,
             PayloadBudget::MOSH,
         );
-        let spent = PayloadBudget::MOSH.characters() + fallback.len();
         assert!(
             spent <= smallest,
-            "the fallback and the keys of a real command come to {spent}, which is above the smallest cap of {smallest}"
+            "a picture that fills the fallback writes {spent} characters, which is above the smallest cap of {smallest}"
         );
     }
 
