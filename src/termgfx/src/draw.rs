@@ -467,9 +467,9 @@ impl PayloadBudget {
 ///
 /// mosh once capped every protocol it carries at the same number. mosh states
 /// three caps now, one for each protocol, so one budget answers for the wrong
-/// protocol on two runs out of three. A budget above the cap of the protocol sends a picture that
-/// the terminal drops, and the user sees an empty screen. A budget below it
-/// takes resolution off a picture that the terminal would have drawn whole.
+/// protocol on two runs out of three. [`PayloadBudget`] states what a budget
+/// above the cap of the protocol costs. A budget below that cap takes
+/// resolution off a picture that the terminal would have drawn whole.
 /// See <https://github.com/timmattison/tools/issues/480>.
 ///
 /// A caller states each protocol by name, with [`ProtocolBudgets::with_kitty`],
