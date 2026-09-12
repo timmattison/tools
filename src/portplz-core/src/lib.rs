@@ -557,14 +557,18 @@ mod tests {
     #[test]
     fn test_derive_on_git_init_repo_is_gitrepo_and_stable() {
         fn run_git(dir: &std::path::Path, args: &[&str]) {
-            let status = std::process::Command::new("git")
+            // Shed the whole inherited `GIT_` family, then pin the two config
+            // files. The sweep comes first so the pins win, and it is a prefix
+            // rather than the three names this fixture used to list: a list
+            // strips nothing new the day git adds a variable.
+            let mut command = std::process::Command::new("git");
+            gitscratch::shed_inherited_git_environment(&mut command);
+
+            let status = command
                 .args(args)
                 .current_dir(dir)
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
                 .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .env_remove("GIT_DIR")
-                .env_remove("GIT_WORK_TREE")
-                .env_remove("GIT_INDEX_FILE")
                 .status()
                 .expect("invoke git");
             assert!(status.success(), "git {args:?} failed");

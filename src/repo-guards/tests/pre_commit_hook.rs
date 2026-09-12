@@ -21,6 +21,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use gitscratch::shed_inherited_git_environment;
+
 /// A deliberately misformatted Rust source file. `cargo fmt --check` rejects it
 /// because of the run-together braces, doubled spaces, and stray whitespace.
 const MISFORMATTED_MAIN_RS: &str = "fn main()    {println!(\"hi\" ) ;}\n";
@@ -90,15 +92,17 @@ fn git_init_and_stage(dir: &Path, paths: &[&str]) {
 
 /// Run `git -C <dir> <args>` and assert it succeeded.
 fn run_git(dir: &Path, args: &[&str]) {
-    let output = Command::new("git")
+    // Shed the whole inherited `GIT_` family so the fixture repo is the one git
+    // operates on, even when this runs from inside the repo's own hook. The
+    // rule is the prefix and never a list of names: `GIT_DIR` overrides `-C`,
+    // and so does a variable nobody here thought to name.
+    let mut command = Command::new("git");
+    shed_inherited_git_environment(&mut command);
+
+    let output = command
         .arg("-C")
         .arg(dir)
         .args(args)
-        // Scrub inherited git env so the fixture repo is the one git operates
-        // on, even when invoked from inside this repo's own git hooks/tests.
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
     assert!(
@@ -125,16 +129,16 @@ struct HookRun {
     output: String,
 }
 
-/// Run the real hook once with `dir` as CWD, scrubbing inherited git env vars so
-/// the hook operates on the fixture repo rather than this test's repo. Gives
-/// back the exit status and the printed output of that one run.
+/// Run the real hook once with `dir` as CWD, shedding the inherited `GIT_`
+/// family so the hook operates on the fixture repo rather than this test's
+/// repo. Gives back the exit status and the printed output of that one run.
 fn run_hook(dir: &Path) -> HookRun {
-    let completed = Command::new("bash")
+    let mut command = Command::new("bash");
+    shed_inherited_git_environment(&mut command);
+
+    let completed = command
         .arg(hook_path())
         .current_dir(dir)
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
         .output()
         .expect("failed to spawn pre-commit hook");
     HookRun {

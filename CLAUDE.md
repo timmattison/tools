@@ -273,6 +273,167 @@ full path, `shellquote::shell_quote(...)`, where the call site sits behind a
 - `swt` - the path of a `.swt-check` override, and the command lines it prints
   for a person to paste
 
+## Spawning Git
+
+Every command this workspace spawns that is git, or that runs git, **must**
+shed the inherited git environment through `gitscratch`. **Never write a list
+of variable names.**
+
+There are two entrances, and which one a spawn takes is decided by whether it
+has a user whose intent to honor:
+
+- **A test fixture** takes `gitscratch::shed_inherited_git_environment` (or the
+  `NoInheritedGitEnvironment` trait, for a builder chain). It sheds the whole
+  `GIT_` prefix and keeps nothing. A fixture builds a throwaway repository, so
+  there is no user setting for it to honor.
+- **A production spawn** takes
+  `gitscratch::shed_inherited_git_environment_keeping_user_intent`. It sheds
+  the same prefix and keeps the six names of
+  `gitscratch::USER_INTENT_GIT_ENVIRONMENT` — `GIT_CONFIG_GLOBAL`,
+  `GIT_CONFIG_SYSTEM`, `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_ASKPASS` and
+  `GIT_TERMINAL_PROMPT`. A person states each of those on purpose, and a tool
+  that runs for that person honors them.
+
+### Why
+
+Git obeys the environment before it obeys the directory a command was pointed
+at, and it exports its own variables into every hook it runs. So a tool or a
+test that runs from inside a pre-commit hook aims its git children at the
+repository being committed to, whatever `current_dir` says. That has stamped
+real commits with a fixture's identity and written a fixture's file onto a live
+branch.
+
+The repair kept arriving as a list of the three or four names somebody had
+thought of. **A list is the defect, not the style.** It strips nothing new the
+day git adds a variable, and from then on it returns the same clean-looking
+answer as a list that works. Two variables walked through the three-name list
+this workspace kept copying:
+
+- `GIT_OBJECT_DIRECTORY` sends every object a child writes into another
+  repository's store.
+- `GIT_CONFIG_PARAMETERS`, which git hands every hook, injects arbitrary
+  configuration (`user.email`, `core.bare`, `core.hooksPath`) into the child.
+
+Neither names a location, so no amount of adding location names would have
+caught either. The rule is the `GIT_` prefix, and the shared sweep enumerates
+the environment rather than knowing any name at all.
+
+### Why a keep-list is not a list of names again
+
+The production entrance keeps six names, and that is a different shape from the
+strip-list above rather than a return to it. **The split is not by git's
+families, which the prefix genuinely cannot tell apart. It is by whose intent a
+variable carries.** Git exports `GIT_DIR`, `GIT_INDEX_FILE` and
+`GIT_CONFIG_PARAMETERS` into every hook, so those carry the launching hook's
+intent and leave. A person exports `GIT_SSH_COMMAND` and `GIT_TERMINAL_PROMPT`,
+so those carry the user's intent and stay. `gitscratch` states the two sets as
+`USER_INTENT_GIT_ENVIRONMENT` and `HOOK_EXPORTED_GIT_ENVIRONMENT`, and a test
+holds them disjoint — `GIT_EDITOR` is out of the keep-list for exactly that
+reason, although a person does set it on purpose.
+
+**A keep-list is safe in the way a strip-list is not, because its staleness runs
+in the safe direction.** A stale strip-list inherits a variable git added after
+it was written, and reports the same clean-looking answer as a list that works.
+A stale keep-list sheds such a variable. The cost is one setting a user states
+again, not one repository a tool writes into by mistake.
+
+Dropping the six is not free. `GIT_SSH_COMMAND`, `GIT_SSH` and `GIT_ASKPASS`
+are how a user authenticates, so dropping them turns a working install into an
+authentication failure for anyone who holds a non-default key.
+`GIT_TERMINAL_PROMPT=0` is what makes such a failure fast; without it git
+prompts on `/dev/tty`, and a tool whose stdout a shell wrapper captures shows
+the user a stalled command instead.
+
+### Usage
+
+Take the crate with `gitscratch.workspace = true` (a dev-dependency when only
+the tests spawn git), then sweep before the command is built. A production
+spawn:
+
+```rust
+use gitscratch::shed_inherited_git_environment_keeping_user_intent;
+
+let mut command = Command::new("git");
+shed_inherited_git_environment_keeping_user_intent(&mut command);
+
+let output = command.args(["ls-files"]).current_dir(repo_root).output();
+```
+
+A test fixture, which keeps nothing:
+
+```rust
+use gitscratch::shed_inherited_git_environment;
+
+let mut command = Command::new("git");
+shed_inherited_git_environment(&mut command);
+```
+
+A value the call site wants pinned is set **after** the sweep, and so wins.
+That is how `cwt` keeps its fixture identity and how several fixtures keep
+`GIT_CONFIG_GLOBAL` pointed at `/dev/null`.
+
+Removing `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` costs a fixture nothing: a
+removal is not a redirect to `/dev/null`, so git falls back to the host's
+`~/.gitconfig` and `/etc/gitconfig` exactly as it does in a shell that holds
+nothing. What it costs is the answer for a user who exported one on purpose,
+which is why the production entrance keeps both — `nwt`'s `missing_hooks_path`
+reads the effective `core.hooksPath`, and the global and system steps of that
+precedence are two of the four steps it exists to predict.
+
+A third entrance, `gitscratch::shed_git_environment_from`, takes the key source
+and the rule as parameters. Tests use it, so no test has to set a real `GIT_*`
+variable: cargo runs the tests of one binary on parallel threads, and such a
+test would redirect the git children of every sibling thread.
+
+### The Trap: A Lint Cannot Say This
+
+`clippy.toml` supports `disallowed-methods`, which matches a method path and
+ignores its arguments. The predicate here is entirely about the argument, so
+clippy can only ban `env_remove` outright, which fires on every legitimate
+removal of a variable that is not git's. The guard therefore reads the source.
+
+It reads **tokens** rather than the syntax tree, because `syn` leaves the body
+of a macro invocation unparsed and a tree walk cannot see a removal written
+inside one. Tokens keep the property the tree gives: a `//` comment never
+becomes a token, a doc comment becomes one string literal, and the text of a
+string is one token rather than the words it spells — so prose that names the
+call stays data. Each file is parsed first, so a file the guard cannot read as
+Rust is a refusal rather than a clean verdict.
+
+The read set is the Rust cargo compiles, not every `.rs` file on disk.
+`src/cdva/tests/fixtures/rust` holds Rust that `cdva` reads as *input*, two
+files of which are invalid on purpose. A named removal written into a parser
+fixture is a fixture, not a defect.
+
+### The Exemptions
+
+`repo_guards::git_env_sweep::EXEMPTIONS` holds two entries, both in
+`src/gitscratch/src/git.rs`: the restated removal of `GIT_AUTHOR_DATE` and
+`GIT_COMMITTER_DATE` after the blanket sweep, so that second guard holds on its
+own. Entries are keyed on **(file, variable)**, so a new named removal in an
+exempt file is still a violation, and an entry that matches nothing is reported
+too — an allowlist nobody prunes is how a guard quietly stops covering what it
+was written for.
+
+### What the Guard Does Not Prove
+
+It proves no call site passes a `GIT_`-prefixed name to `env_remove` as a
+literal. A list of those names held in a constant and applied in a loop hands
+the call a binding, so the guard reports it clean — the module doc of
+`git_env_sweep` records why widening the matcher to see that shape was measured
+and refused. It does **not** prove a given spawn sheds anything at all either: a
+spawn that scrubs nothing is not written in a shape any rule can name. Proving
+either is a dataflow question, and this workspace does not have a dataflow
+engine.
+
+### Guards Enforcing This
+
+- `repo_guards::git_env_sweep` (`src/repo-guards/src/git_env_sweep.rs`) — no
+  file cargo compiles removes a `GIT_`-prefixed variable by name. Its companion
+  test asks `cargo metadata` whether the read set holds every target root cargo
+  builds, so a directory the walk never reaches shows up as a set difference
+  instead of a clean report
+
 ## Version Information
 
 All tools in this repository **must** display version information including git hash and dirty status when `--version` or `-V` is used.

@@ -12,31 +12,33 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use gitscratch::shed_inherited_git_environment;
 use tempfile::TempDir;
 
-/// Scrub the git-location env vars that git exports when it invokes a hook.
+/// Shed the inherited git environment, then pin what these fixtures need.
 ///
-/// In a worktree, git exports absolute `GIT_DIR`/`GIT_WORK_TREE`/
-/// `GIT_INDEX_FILE`/`GIT_PREFIX` to the pre-commit hook. Those leak into child
-/// `git` and `cwt` processes and pin them to the real repository regardless of
-/// `current_dir(tempdir)`, so fixture commits would land in the real repository.
+/// In a worktree, git exports an absolute `GIT_DIR`, `GIT_WORK_TREE`,
+/// `GIT_INDEX_FILE` and `GIT_PREFIX` to the pre-commit hook. Those leak into
+/// child `git` and `cwt` processes and pin them to the real repository whatever
+/// `current_dir(tempdir)` says, so fixture commits would land in the real
+/// repository. [`gitscratch::shed_inherited_git_environment`] removes the whole
+/// `GIT_` family rather than the four names this fixture used to list, because
+/// a list strips nothing new the day git adds a variable.
 ///
-/// `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` point at `/dev/null` so the
-/// developer's own git config (aliases, `init.defaultBranch`, hooks) cannot
-/// change what these tests observe. The identity vars are set explicitly for the
-/// same reason: the pre-commit hook exports its own, and a fixture commit must
+/// The pins come after the sweep and so win. `GIT_CONFIG_GLOBAL` and
+/// `GIT_CONFIG_SYSTEM` point at `/dev/null` so the developer's own git config
+/// (aliases, `init.defaultBranch`, hooks) cannot change what these tests
+/// observe. The identity is stated for the same reason: a fixture commit must
 /// behave the same under a commit as it does under a bare `cargo test`.
 pub fn scrub_git_env(cmd: &mut Command) -> &mut Command {
+    shed_inherited_git_environment(cmd);
+
     cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .env("GIT_AUTHOR_NAME", "cwt test")
         .env("GIT_AUTHOR_EMAIL", "cwt@example.com")
         .env("GIT_COMMITTER_NAME", "cwt test")
         .env("GIT_COMMITTER_EMAIL", "cwt@example.com")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_PREFIX")
 }
 
 /// Run `git <args>` in `dir` and assert it succeeded.

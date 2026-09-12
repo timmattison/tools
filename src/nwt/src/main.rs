@@ -8,7 +8,7 @@ use std::thread;
 
 use buildinfo::version_string;
 use clap::Parser;
-use gitscratch::shed_inherited_git_environment;
+use gitscratch::shed_inherited_git_environment_keeping_user_intent;
 use names::Generator;
 use repowalker::find_repo_context;
 use serde::Deserialize;
@@ -955,13 +955,25 @@ enum WorktreeResult {
 /// which `--checkout` solves, or a directory that exists, which
 /// `--random-directory` solves. Only git can say which.
 ///
-/// The whole inherited `GIT_*` family is shed first, through
-/// [`gitscratch::shed_inherited_git_environment`]. An inherited `GIT_DIR` aims
-/// the question at another repository, whose branches say nothing about this
-/// one. The rule is the prefix, never a list of names.
+/// This is a production spawn, so it takes
+/// [`gitscratch::shed_inherited_git_environment_keeping_user_intent`]. That
+/// sheds the whole inherited `GIT_` prefix and keeps the six names of
+/// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`]. An inherited `GIT_DIR` aims the
+/// question at another repository, whose branches say nothing about this one.
+/// The rule is the prefix plus a keep-list, and never a strip-list of names: a
+/// strip-list inherits the variable git invents next year, and a keep-list
+/// sheds it.
+///
+/// None of the six kept names moves this question to another repository. Two of
+/// them name a configuration file, and four name how git authenticates to a
+/// remote, which `show-ref` never reaches.
+///
+/// [`try_create_worktree`] takes the same entrance, so the add and the question
+/// that classifies its failure read one environment. Two answers from one
+/// environment do not disagree.
 fn branch_exists(repo_root: &Path, branch: &str) -> bool {
     let mut command = Command::new("git");
-    shed_inherited_git_environment(&mut command);
+    shed_inherited_git_environment_keeping_user_intent(&mut command);
 
     command
         .args(["show-ref", "--verify", "--quiet"])
@@ -981,6 +993,33 @@ fn branch_exists(repo_root: &Path, branch: &str) -> bool {
 /// This function displays git's progress output (e.g., "Updating files: X%") in real-time
 /// while also capturing stderr for error classification. This is done by spawning a thread
 /// that reads stderr and both echoes it to the terminal and captures it for later analysis.
+///
+/// # The inherited git environment
+///
+/// This is the one git child of `nwt` that writes. `git worktree add` makes a
+/// branch ref, a reflog and a whole `worktrees/<name>` directory in the
+/// repository it reaches. Git obeys the environment before it obeys the
+/// directory a command was pointed at, so an inherited `GIT_DIR` sends all of
+/// that into another repository — the repository being committed to, for a
+/// `nwt` that a git hook started.
+///
+/// So the command takes the production entrance,
+/// [`gitscratch::shed_inherited_git_environment_keeping_user_intent`], before
+/// the arguments are set. It sheds the whole inherited `GIT_` prefix and keeps
+/// the six names of [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`]. The four
+/// authentication names of that list earn their keep here: the add checks a
+/// tree out, and a smudge filter or a `post-checkout` hook that fetches —
+/// git-lfs installs one — then reaches the network as the user's own shell
+/// reaches it.
+///
+/// **What the shed gives up.** `git worktree add` runs the repository's
+/// `post-checkout` hook, and that hook now reads an environment without the
+/// `GIT_` variables this process inherited. A hook that reads one of them reads
+/// nothing in its place. The loss is bounded: git sets its own variables for
+/// the hook it runs, so what leaves is only what `nwt` inherited, and never
+/// what git states for the hook itself. The gain is the worktree landing in the
+/// repository the user pointed `nwt` at, and that is worth more than a hook's
+/// view of a variable an outer command exported.
 fn try_create_worktree(
     repo_root: &std::path::Path,
     worktree_path: &str,
@@ -988,6 +1027,8 @@ fn try_create_worktree(
     checkout_ref: Option<&str>,
 ) -> WorktreeResult {
     let mut cmd = Command::new("git");
+    shed_inherited_git_environment_keeping_user_intent(&mut cmd);
+
     if let Some(ref_name) = checkout_ref {
         cmd.args(["worktree", "add", worktree_path, ref_name]);
     } else {
@@ -1111,16 +1152,22 @@ fn setup_shell_integration() -> Result<(), shellsetup::ShellSetupError> {
 /// expects it to work. The worst case is redundant copies; the alternative would be
 /// missing critical development configuration.
 fn get_tracked_files(repo_root: &Path) -> HashSet<PathBuf> {
-    let output = Command::new("git")
-        .args(["ls-files"])
-        .current_dir(repo_root)
-        // Scrub any inherited git-location vars (set when this process is a
-        // child of a git hook) so the query targets `repo_root`, not whatever
-        // GIT_DIR/GIT_INDEX_FILE the parent exported. A no-op in normal use.
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .output();
+    // Shed the inherited `GIT_` family, through
+    // [`gitscratch::shed_inherited_git_environment_keeping_user_intent`], so the
+    // query targets `repo_root` rather than whatever repository a parent git
+    // hook exported. The rule is the prefix and never a list of names: this call
+    // site listed three, and `GIT_OBJECT_DIRECTORY` and `GIT_CONFIG_PARAMETERS`
+    // walked straight through them.
+    //
+    // The six names of `gitscratch::USER_INTENT_GIT_ENVIRONMENT` stay, because a
+    // person states them on purpose and `nwt` runs for that person. None of them
+    // moves this query to another repository: two name configuration files, and
+    // four name how git authenticates to a remote, which `ls-files` never
+    // reaches.
+    let mut command = Command::new("git");
+    shed_inherited_git_environment_keeping_user_intent(&mut command);
+
+    let output = command.args(["ls-files"]).current_dir(repo_root).output();
 
     match output {
         Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
@@ -1499,14 +1546,29 @@ const GIT_CONFIG_KEY_NOT_FOUND: i32 = 1;
 /// no configuration error, and the run stops soon after at the `git worktree
 /// add` that says so plainly.
 ///
-/// The command sheds the whole inherited `GIT_*` family through
-/// [`gitscratch::shed_inherited_git_environment`]. An inherited `GIT_DIR` aims
-/// git at another repository, and the answer would then be that repository's
-/// setting. The rule is the `GIT_` prefix and never a list of names: see that
-/// function for which variable walked through the last list.
+/// This is a production spawn, so it takes
+/// [`gitscratch::shed_inherited_git_environment_keeping_user_intent`]. That
+/// sheds the whole inherited `GIT_` prefix and keeps the six names of
+/// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`]. An inherited `GIT_DIR` aims git
+/// at another repository, and the answer is then that repository's setting.
+/// `GIT_CONFIG_PARAMETERS` leaves with the rest, because git hands it to every
+/// hook: it carries the launching hook's `-c` options, and it answers this
+/// question with a value the user never wrote.
+///
+/// A `GIT_CONFIG_GLOBAL` the user stated stays, and it is part of the
+/// precedence this read exists to honor. The read covers every scope, and
+/// `GIT_CONFIG_GLOBAL` names the file git reads in place of `~/.gitconfig`.
+/// Shed it, and a user who states [`WORKTREES_DIR_KEY`] in the file they chose
+/// gets a worktree in a directory they never named. `GIT_CONFIG_SYSTEM` stays
+/// for the same reason, in place of the system file.
+///
+/// The rule is the prefix plus a keep-list, and never a strip-list of names. A
+/// strip-list inherits the variable git invents next year and still reports a
+/// clean-looking answer; a keep-list sheds it. See
+/// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`] for what each kept name buys.
 fn stated_worktrees_dir(repo_root: &Path) -> StatedWorktreesDir {
     let mut command = Command::new("git");
-    shed_inherited_git_environment(&mut command);
+    shed_inherited_git_environment_keeping_user_intent(&mut command);
 
     let output = command
         .args(["config", "--type=path", "--get", WORKTREES_DIR_KEY])
@@ -2184,16 +2246,28 @@ fn bootstrap_hooks(worktree: &Path, quiet: bool) -> bool {
         Stdio::inherit()
     };
 
-    let status = Command::new(program)
+    // Shed the inherited `GIT_` family so the install's lifecycle scripts — a
+    // `prepare` that runs `git config core.hooksPath`, say — operate on
+    // `worktree` rather than on whatever repository a parent git hook exported.
+    // The child is a package manager rather than git, and that changes nothing:
+    // it runs git, and git obeys the environment first.
+    //
+    // The authentication family survives, because this install reaches the
+    // network. `GIT_SSH`, `GIT_SSH_COMMAND` and `GIT_ASKPASS` are how the user
+    // authenticates, so an install that fetches a private git dependency still
+    // authenticates the way the user's own shell does; a user who holds a
+    // non-default key gets an authentication failure without them.
+    // `GIT_TERMINAL_PROMPT` is what keeps a failure fast: set to `0` it makes a
+    // missing credential fail at once, and without it git prompts on
+    // `/dev/tty`. The shell wrapper captures this command's stdout to `cd` with,
+    // so the user reads such a prompt as a command that stalls with nothing on
+    // the screen.
+    let mut command = Command::new(program);
+    shed_inherited_git_environment_keeping_user_intent(&mut command);
+
+    let status = command
         .args(args)
         .current_dir(worktree)
-        // Scrub any inherited git-location vars so the install's lifecycle
-        // scripts (e.g. a `prepare` that runs `git config core.hooksPath`)
-        // operate on `worktree`, not on whatever GIT_DIR/GIT_INDEX_FILE a parent
-        // git hook exported. A no-op in normal use (no such vars are set).
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(stderr)
@@ -2243,6 +2317,17 @@ fn bootstrap_hooks(worktree: &Path, quiet: bool) -> bool {
 /// are returned unchanged by `--type=path`, so those keep resolving against the
 /// worktree as before.
 ///
+/// That precedence is honored in full, and it takes an allowlist to honor it.
+/// The inherited `GIT_` family leaves before the query runs, but
+/// `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` stay — they are two of the six
+/// names in `gitscratch::USER_INTENT_GIT_ENVIRONMENT`. A user who exports one
+/// of them means it, and the global and system steps of the precedence are two
+/// of the four steps this function exists to predict. `GIT_CONFIG_PARAMETERS`
+/// still leaves, because git hands it to every hook: it carries the launching
+/// hook's `-c` options, and left in place it answers this question with
+/// configuration the user never wrote. The two are told apart by whose intent
+/// each one carries, not by which of git's families each belongs to.
+///
 /// Returns:
 /// - `None` when `core.hooksPath` is unset (git's built-in `.git/hooks` default
 ///   always exists "enough" — an empty hooks dir is not our concern), when the
@@ -2258,15 +2343,19 @@ fn missing_hooks_path(worktree: &Path) -> Option<String> {
     // `--type=path` makes git expand `~/` and `~user/` the same way it does at
     // hook-run time. stdin is nulled so git can never block; stderr is nulled to
     // avoid noise.
-    let output = Command::new("git")
+    // Shed the inherited `GIT_` family so the query targets `worktree` rather
+    // than whatever repository a parent git hook exported. That includes
+    // `GIT_CONFIG_PARAMETERS`, which git hands every hook and which carries the
+    // outer command's `-c` options: left in place it answers this question with
+    // a value the user never configured. `GIT_CONFIG_GLOBAL` and
+    // `GIT_CONFIG_SYSTEM` stay, because a user states those on purpose and this
+    // query predicts what git reads at commit time — see the function doc.
+    let mut command = Command::new("git");
+    shed_inherited_git_environment_keeping_user_intent(&mut command);
+
+    let output = command
         .args(["config", "--type=path", "core.hooksPath"])
         .current_dir(worktree)
-        // Scrub any inherited git-location vars (set when this process is a
-        // child of a git hook) so the query targets `worktree`, not whatever
-        // GIT_DIR/GIT_INDEX_FILE the parent exported. A no-op in normal use.
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
@@ -2350,177 +2439,35 @@ fn warn_if_hooks_missing(worktree: &Path) {
 mod tests {
     use super::*;
 
-    use std::ffi::OsStr;
-
-    /// The prefix that identifies a variable as git's, and therefore as one
-    /// [`scrub_git_env`] removes.
-    const GIT_ENV_PREFIX: &str = "GIT_";
-
-    /// Removes every `GIT_*` variable in `vars` from `cmd`'s child environment,
-    /// returning `cmd` so it chains inside a builder expression.
-    ///
-    /// **The rule is the `GIT_` prefix, and never a list of names.** A list goes
-    /// stale the day git adds a variable, and from then on it strips nothing new
-    /// while reporting the same clean-looking answer as a scrub that works. This
-    /// fixture was a three-name list of `GIT_DIR`, `GIT_WORK_TREE` and
-    /// `GIT_INDEX_FILE` until the test below caught what walked through it:
-    /// `GIT_OBJECT_DIRECTORY`, which redirects the fixture's blob, tree and
-    /// commit writes into a foreign repository's object store, and
-    /// `GIT_CONFIG_PARAMETERS`, which injects arbitrary config (`user.email`,
-    /// `core.bare`, `core.hooksPath`) into the fixture's git. Neither is a
-    /// location variable, so no amount of adding location names would have
-    /// caught them. Sweeping the whole prefix picks up whatever git invents next
-    /// without anyone editing this file.
-    ///
-    /// The key source is a parameter rather than [`std::env::vars_os`] so this
-    /// can be tested without ever mutating the process environment. That is
-    /// load-bearing, not decoration: this file's test binary holds well over a
-    /// hundred tests and cargo runs them on parallel threads, so a test that set
-    /// a real `GIT_*` variable to prove the scrub works would redirect every
-    /// sibling thread's `git` child while it did so. A synthetic key list keeps
-    /// the test parallel-safe.
-    ///
-    /// Keys are compared through `OsStr::to_string_lossy`: lossy conversion
-    /// replaces invalid bytes with U+FFFD and so can never manufacture a `GIT_`
-    /// prefix out of bytes that did not spell one.
-    fn scrub_git_env_from<I, K>(cmd: &mut Command, vars: I) -> &mut Command
-    where
-        I: IntoIterator<Item = K>,
-        K: AsRef<OsStr>,
-    {
-        for key in vars {
-            if key.as_ref().to_string_lossy().starts_with(GIT_ENV_PREFIX) {
-                cmd.env_remove(key.as_ref());
-            }
-        }
-        cmd
-    }
-
-    /// Removes every inherited `GIT_*` variable from `cmd`'s child environment,
-    /// returning `cmd` so it chains inside a builder expression.
-    ///
-    /// This is [`scrub_git_env_from`] fed the real process environment, which is
-    /// the only key source a spawned child actually inherits, and it is why a
-    /// fixture here can only act on the directory it was handed. Without it,
-    /// `current_dir(dir)` is not enough: when the suite runs from inside a git
-    /// hook, git exports its own variables into the hook's environment,
-    /// `cargo test` inherits them, and `GIT_DIR` overrides cwd-based discovery —
-    /// so a fixture's `git config`/`commit` lands in the *real* repo. A config
-    /// write is sticky, and one leak outlives the run that caused it.
-    ///
-    /// `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` are swept along with the rest,
-    /// and that costs nothing: removing them is not the same as pinning them to
-    /// `/dev/null`. With the variables gone, git falls back to the host's
-    /// `~/.gitconfig` and `/etc/gitconfig` exactly as it does in a normal shell,
-    /// so settings the fixtures rely on — `init.defaultBranch` among them —
-    /// still apply.
-    fn scrub_git_env(cmd: &mut Command) -> &mut Command {
-        scrub_git_env_from(cmd, std::env::vars_os().map(|(key, _)| key))
-    }
-
-    /// Every variable the scrub must remove, paired with what leaving it in
-    /// place does to a fixture that only meant to touch its own temp dir.
-    ///
-    /// The consequence travels with the name so a regression explains itself in
-    /// the failure message instead of naming a variable and leaving the reader
-    /// to guess why it mattered.
-    const GIT_ENV_LEAKS: &[(&str, &str)] = &[
-        (
-            "GIT_DIR",
-            "points git at a foreign repository, and it beats both `current_dir` and `git -C`",
-        ),
-        (
-            "GIT_WORK_TREE",
-            "aims the fixture's checkout and its `git add` at a foreign working tree",
-        ),
-        (
-            "GIT_INDEX_FILE",
-            "stages the fixture's files into a foreign repository's index, and git exports it to every pre-commit hook",
-        ),
-        (
-            "GIT_OBJECT_DIRECTORY",
-            "writes the fixture's blobs, trees and commits into a foreign repository's object store",
-        ),
-        (
-            "GIT_CONFIG_PARAMETERS",
-            "injects arbitrary config (user.email, core.bare, core.hooksPath) into the fixture's git",
-        ),
-        (
-            "GIT_AUTHOR_NAME",
-            "authors the fixture's commits under whatever identity the launching environment carried",
-        ),
-    ];
-
-    /// A variable the scrub must leave alone, paired with what removing it would
-    /// cost.
-    const NON_GIT_ENV_KEEP: (&str, &str) = (
-        "PATH",
-        "is how the child finds `git` at all, so removing it would break every fixture",
-    );
-
-    /// The scrub is defined by the `GIT_` prefix, never by a list of names.
-    ///
-    /// A named list reports the same clean-looking answer as a working scrub
-    /// while missing whatever git added since the list was written, and the two
-    /// variables that walked through the three-name version are not location
-    /// variables at all — so no amount of adding location names would have
-    /// caught them.
-    ///
-    /// The keys are synthetic and the process environment is never touched, so
-    /// this test is safe to run beside the rest of the binary's tests on
-    /// parallel threads.
-    #[test]
-    fn scrub_removes_every_git_prefixed_key_and_nothing_else() {
-        let mut cmd = Command::new("git");
-        let keys: Vec<&str> = GIT_ENV_LEAKS
-            .iter()
-            .map(|(key, _)| *key)
-            .chain(std::iter::once(NON_GIT_ENV_KEEP.0))
-            .collect();
-        scrub_git_env_from(&mut cmd, &keys);
-
-        let removed: Vec<String> = cmd
-            .get_envs()
-            .filter(|(_, value)| value.is_none())
-            .map(|(key, _)| key.to_string_lossy().into_owned())
-            .collect();
-
-        for (key, consequence) in GIT_ENV_LEAKS {
-            assert!(
-                removed.iter().any(|scrubbed| scrubbed == key),
-                "{key} must be scrubbed from the fixture's git children: left in place it {consequence}. \
-                 The rule is the `GIT_` prefix, never a list of names."
-            );
-        }
-
-        let (kept, cost) = NON_GIT_ENV_KEEP;
-        assert!(
-            !removed.iter().any(|scrubbed| scrubbed == kept),
-            "{kept} must survive the scrub: it {cost}"
-        );
-    }
-
     /// Helper to run a git command in a directory, returning whether it
     /// succeeded. Shared across child test modules (`env_copy_tests`,
     /// `bootstrap_hooks_tests`) which both need a real git repo for their
     /// integration tests. Stdout/stderr are nulled so concurrent test runs
     /// don't interleave noise.
     ///
-    /// The whole inherited `GIT_*` family is removed via [`scrub_git_env`], so
-    /// `dir` is the repo git operates on even when the suite runs from inside
-    /// the pre-commit hook's own `cargo test` — see that function for how the
-    /// leak happens, and [`scrub_git_env_from`] for why the rule is the prefix
-    /// rather than a list of names.
+    /// The whole inherited `GIT_*` family leaves through
+    /// [`gitscratch::shed_inherited_git_environment`], so `dir` is the
+    /// repository git operates on even when the suite runs from inside the
+    /// pre-commit hook's own `cargo test`. Without that sweep,
+    /// `current_dir(dir)` is not enough: git exports its own variables into the
+    /// environment of a hook, `cargo test` inherits them, and `GIT_DIR` outranks
+    /// discovery from the working directory — so a fixture's `git config` or
+    /// `git commit` lands in the real repository. A config write is sticky, and
+    /// one leak outlives the run that caused it.
+    ///
+    /// This is the entrance a fixture takes, and it keeps nothing, because a
+    /// fixture has no user whose intent to honor. Which variables to shed is
+    /// knowledge that lives in `gitscratch` rather than being copied here to
+    /// drift, and the rule there is the `GIT_` prefix and never a list of names.
     fn run_git(dir: &Path, args: &[&str]) -> bool {
         let mut cmd = Command::new("git");
         cmd.args(args)
             .current_dir(dir)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        scrub_git_env(&mut cmd)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        gitscratch::shed_inherited_git_environment(&mut cmd);
+
+        cmd.status().map(|s| s.success()).unwrap_or(false)
     }
 
     #[test]

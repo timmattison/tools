@@ -4715,6 +4715,7 @@ dependencies = [
  "anyhow",
  "buildinfo",
  "clap",
+ "gitscratch",
  "glob",
  "tempfile",
  "toml",
@@ -6130,6 +6131,7 @@ dependencies = [
 name = "portplz-core"
 version = "0.1.0"
 dependencies = [
+ "gitscratch",
  "gix",
  "libc",
  "sha2 0.10.9",
@@ -6804,6 +6806,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 name = "repo-guards"
 version = "0.1.0"
 dependencies = [
+ "gitscratch",
  "glob",
  "proc-macro2",
  "pulldown-cmark",
@@ -6812,6 +6815,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "toml",
+ "walkdir",
 ]
 
 [[package]]

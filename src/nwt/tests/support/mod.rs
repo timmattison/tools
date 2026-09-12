@@ -128,6 +128,16 @@ pub fn nanos() -> u128 {
 /// is cleaned up with it. gpg signing is disabled so a globally-configured
 /// signer can't break the commit, and the commit is made exactly once (no retry
 /// loop, per the repo's git discipline).
+///
+/// `maintenance.auto` is set to `false`, and that is load-bearing rather than
+/// tidiness. `git commit` ends by starting `git maintenance run --auto`, which
+/// detaches and takes `.git/objects/maintenance.lock` while it decides it has
+/// nothing to do. The lock is there when `commit` returns on 38 runs out of 40,
+/// and it is gone a few milliseconds later. So a test that reads the whole tree
+/// of this repository sees a path that appears or vanishes on its own, and
+/// `tests/production-git-env-isolation.rs` reads exactly that to say the decoy
+/// came back byte-identical. Left on, a detached git of the fixture's own
+/// making answers that question one run in five.
 pub fn init_repo() -> (TempDir, PathBuf) {
     let temp = TempDir::new().expect("Failed to create temp dir");
     let repo = temp.path().join("repo");
@@ -141,6 +151,10 @@ pub fn init_repo() -> (TempDir, PathBuf) {
     assert!(
         run_git(&repo, &["config", "user.name", "Test User"]),
         "git config user.name failed"
+    );
+    assert!(
+        run_git(&repo, &["config", "maintenance.auto", "false"]),
+        "git config maintenance.auto failed"
     );
 
     std::fs::write(repo.join("README.md"), "baseline\n").expect("Failed to write baseline file");
