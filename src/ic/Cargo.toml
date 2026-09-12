@@ -20,6 +20,7 @@ termgfx.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]
+image.workspace = true
 libc.workspace = true
 
 [lints]
