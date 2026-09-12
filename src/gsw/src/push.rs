@@ -1048,10 +1048,6 @@ impl PushUi {
     /// only for a message that goes straight onto the row. A message that
     /// waits for a push takes the instant of the frame that posts it
     /// instead — see [`HeldLife`].
-    #[allow(
-        dead_code,
-        reason = "the G key posts through this in the next slice of issue #478, and that slice removes this attribute"
-    )]
     pub(crate) fn post_notice(&mut self, line: String, now: Instant) {
         self.post(line, Life::Fading { posted_at: now });
     }
@@ -1361,6 +1357,12 @@ const RUNNING_NOTICE: &str = "Pushing…";
 ///
 /// It is also the length of the fade, so the message reaches black exactly as
 /// it is removed and nothing ever blinks out at full brightness.
+///
+/// The `G` key's own state in [`crate::watch`] reads it as well. The message
+/// that asks for a second press of that key is the armed state of the key, so
+/// the arming and the message it stands for must end at the same moment — one
+/// number, read in both places, rather than two numbers that agree until
+/// somebody changes one of them.
 pub(crate) const STATUS_LIFETIME: Duration = Duration::from_secs(60);
 
 /// How often such a message has to be repainted for its age text and its fade

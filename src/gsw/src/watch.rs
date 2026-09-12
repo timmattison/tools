@@ -773,19 +773,68 @@ impl IssueRun {
     }
 
     /// What one press of `G` does now.
-    fn press(&mut self, _now: Instant) -> IssuePress {
+    ///
+    /// The questions come in the order of the rules, and each one settles the
+    /// press on its own.
+    ///
+    /// A run in flight answers nothing and changes nothing else, because one
+    /// run at a time is the rule and a message that asked for a second press
+    /// would ask for a press that runs nothing. No command answers nothing
+    /// too, which is the silence of an unbound key.
+    ///
+    /// A local shell runs the command, because the browser opens where the
+    /// person sits. So does a remote shell whose message still stands: that
+    /// message is what the user read, and this press is the answer to it.
+    ///
+    /// Everything else is a first press on a remote shell. It records the
+    /// instant and asks, and [`absorb`] puts the words it returns under the
+    /// frame.
+    fn press(&mut self, now: Instant) -> IssuePress {
         if self.running {
             return IssuePress::Nothing;
         }
         let Some(command) = self.command.clone() else {
             return IssuePress::Nothing;
         };
-        self.running = true;
-        IssuePress::Run(command)
+        if self.session == crate::remote::Session::Local || self.is_armed(now) {
+            // The arming goes as the run starts. An arming that outlived the
+            // run it was given for would let the next press open a browser on
+            // the wrong machine, with nobody asked a second time for it.
+            self.armed = None;
+            self.running = true;
+            return IssuePress::Run(command);
+        }
+        self.armed = Some(now);
+        IssuePress::Ask(format!(
+            "remote shell — press G again to run {}",
+            command.name()
+        ))
+    }
+
+    /// Whether the message that asks for a second press still stands.
+    ///
+    /// The message goes off the screen one [`crate::push::STATUS_LIFETIME`]
+    /// after it was posted, so the arming ends at that same moment. The screen
+    /// and the key then say one thing: a `G` a minute later asks again.
+    ///
+    /// Saturating for the reason the age of a status message in
+    /// [`crate::push`] is: `now` comes from the loop's injected clock, and a
+    /// clock a test drives backwards reports the zero age it plainly has
+    /// rather than underflowing.
+    fn is_armed(&self, now: Instant) -> bool {
+        self.armed.is_some_and(|posted_at| {
+            now.saturating_duration_since(posted_at) < crate::push::STATUS_LIFETIME
+        })
     }
 
     /// A key other than `G` takes the arming away.
-    fn disarm(&mut self) {}
+    ///
+    /// That key also takes the message off the screen, and the message is the
+    /// armed state. The two go together, so a `G` after such a key is a first
+    /// press again.
+    fn disarm(&mut self) {
+        self.armed = None;
+    }
 
     /// A run has ended, so `G` means something again.
     fn finished(&mut self) {
