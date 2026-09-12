@@ -2833,11 +2833,30 @@ mod tests {
         }
     }
 
-    /// Write `bytes` to a file of this process and give back a guard of it.
+    /// Build a path in the temporary directory that no other test uses.
     ///
     /// The name carries the process id and the nanoseconds of the clock, so two
-    /// runs of this suite at the same time write two files (see CLAUDE.md
+    /// runs of this suite at the same time name two files (see CLAUDE.md
     /// parallel-safety).
+    ///
+    /// # Arguments
+    /// * `stem` - The first part of the file name, which tells a reader of the
+    ///   temporary directory which test made the file.
+    /// * `extension` - The extension of the file name.
+    ///
+    /// # Returns
+    /// The path. The caller makes the file, and no test here makes a file at
+    /// this path more than one time.
+    fn unique_temporary_path(stem: &str, extension: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+
+        std::env::temp_dir().join(format!("{stem}-{}-{nanos}.{extension}", std::process::id()))
+    }
+
+    /// Write `bytes` to a file of this process and give back a guard of it.
     ///
     /// # Arguments
     /// * `bytes` - The bytes to write.
@@ -2847,17 +2866,57 @@ mod tests {
     /// A [`TemporaryFile`] that names the path and removes the file at the end
     /// of the test, whether the test passes or fails.
     fn temporary_file_of(bytes: &[u8], extension: &str) -> TemporaryFile {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or(0);
-        let path = std::env::temp_dir().join(format!(
-            "ic-source-{}-{nanos}.{extension}",
-            std::process::id()
-        ));
+        let path = unique_temporary_path("ic-source", extension);
         fs::write(&path, bytes).expect("a write to the temporary directory");
 
         TemporaryFile(path)
+    }
+
+    /// Two threads that build a path at one time build two different paths.
+    ///
+    /// The test binary runs its tests on many threads, and every thread carries
+    /// the process id of the binary. A name that only the clock makes unique
+    /// therefore collides when two threads read the clock in the same
+    /// nanosecond. Both threads then write and remove one file, and the test
+    /// that reads the file reads the bytes of the other test or no bytes at
+    /// all.
+    #[test]
+    fn temporary_paths_built_at_once_are_all_different() {
+        /// The number of threads that build paths at the same time.
+        const THREADS: usize = 8;
+        /// The number of paths that each thread builds.
+        const PATHS_PER_THREAD: usize = 2000;
+
+        let built: Vec<PathBuf> = thread::scope(|scope| {
+            let builders: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        (0..PATHS_PER_THREAD)
+                            .map(|_| unique_temporary_path("ic-collision-probe", "png"))
+                            .collect::<Vec<PathBuf>>()
+                    })
+                })
+                .collect();
+
+            builders
+                .into_iter()
+                .flat_map(|builder| {
+                    builder
+                        .join()
+                        .expect("a builder thread ends without a panic")
+                })
+                .collect()
+        });
+
+        let distinct: HashSet<&PathBuf> = built.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            THREADS * PATHS_PER_THREAD,
+            "every path must differ from every other path, but {} of {} threads x {} paths are the same",
+            built.len() - distinct.len(),
+            THREADS,
+            PATHS_PER_THREAD
+        );
     }
 
     /// A terminal that carries a whole image file.
@@ -3047,17 +3106,13 @@ mod tests {
     // Tests for ensure_file_exists
     // =========================================================================
 
-    /// Build a path that is guaranteed not to exist, keyed on pid + nanos so
-    /// concurrent test runs never collide on it (see CLAUDE.md parallel-safety).
+    /// Build a path that no file holds.
+    ///
+    /// # Returns
+    /// A path in the temporary directory. No test makes a file at this path,
+    /// and [`unique_temporary_path`] keeps the name away from every other test.
     fn nonexistent_path() -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        std::env::temp_dir().join(format!(
-            "ic-does-not-exist-{}-{nanos}.mp4",
-            std::process::id()
-        ))
+        unique_temporary_path("ic-does-not-exist", "mp4")
     }
 
     #[test]
