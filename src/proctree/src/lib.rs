@@ -382,10 +382,15 @@ impl ProcessTree {
 
 /// Everything that the walk needs, read from the machine in one call.
 ///
-/// This is the one-call door for a tool whose whole question is "does a process
-/// of this name stand above me". A tool that holds its own policy over the two
-/// snapshots reads them as text instead, through [`ps_snapshot`] and
-/// [`ps_arguments`].
+/// The call reads the process table and the Zellij session, and, inside Zellij
+/// only, the process arguments. It hands back the two results that a walk
+/// needs: the parsed table, and the scan that names the clients which stand in
+/// for this process. The policy over those two belongs to the tool, because
+/// each tool does something different with the answer. That is why the type
+/// gives the table and the scan, and never a yes or a no.
+///
+/// A tool whose policy takes the two snapshots as text reads them through
+/// [`ps_snapshot`] and [`ps_arguments`] instead.
 #[derive(Debug, Clone)]
 pub struct Ancestry {
     tree: ProcessTree,
@@ -415,12 +420,6 @@ impl Ancestry {
         };
         let scan = ZellijScan::for_session(&arguments, session.as_deref());
         Some(Self { tree, scan })
-    }
-
-    /// Whether a process whose basename is `name` stands above this process.
-    #[must_use]
-    pub fn has_ancestor(&self, name: &str) -> bool {
-        self.tree.has_ancestor(Pid::current(), &self.scan, name)
     }
 
     /// The parsed process table.
