@@ -13,6 +13,7 @@
 //! because an environment variable outranks every config source, so the
 //! identity pinned here only holds once they are gone.
 
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
@@ -100,11 +101,11 @@ pub trait NoInheritedGitEnvironment {
 
 impl NoInheritedGitEnvironment for Command {
     fn without_inherited_git_environment(&mut self) -> &mut Self {
-        for (key, _) in std::env::vars_os() {
-            if key.to_string_lossy().starts_with(GIT_ENVIRONMENT_PREFIX) {
-                self.env_remove(&key);
-            }
-        }
+        shed_git_environment_from(
+            self,
+            std::env::vars_os().map(|(key, _)| key),
+            InheritedGitEnvironment::ShedEverything,
+        );
 
         self
     }
@@ -141,6 +142,171 @@ impl NoInheritedGitEnvironment for Command {
 /// ```
 pub fn shed_inherited_git_environment(command: &mut Command) {
     command.without_inherited_git_environment();
+}
+
+/// Which rule a sweep applies to a `GIT_`-prefixed variable it finds.
+///
+/// The two rules exist because the two kinds of caller differ in one way that
+/// decides the answer: a fixture has no user whose intent to honor, and a
+/// production tool has one. A call site names the rule it wants, so a reader of
+/// that call site sees the decision instead of a bare boolean.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InheritedGitEnvironment {
+    /// Remove every `GIT_`-prefixed key the source holds.
+    ///
+    /// The rule for a fixture. A fixture builds a throwaway repository and must
+    /// reach nothing else, so it keeps nothing that a launching hook or a
+    /// developer's shell left in the environment.
+    ShedEverything,
+    /// Remove every `GIT_`-prefixed key except a name in
+    /// [`USER_INTENT_GIT_ENVIRONMENT`].
+    ///
+    /// The rule for a production tool. Such a tool acts for the person who
+    /// started it, so the six names that person sets on purpose stay, and the
+    /// rest of the prefix leaves.
+    KeepUserIntent,
+}
+
+/// The `GIT_` variables a person sets on purpose, which
+/// [`InheritedGitEnvironment::KeepUserIntent`] keeps.
+///
+/// **A keep-list is safe in the way a strip-list is not.** A strip-list goes
+/// stale the day git adds a variable, and from then on it inherits the new
+/// variable and reports the same clean-looking answer as a list that works. A
+/// keep-list goes stale in the other direction: a variable git invents next
+/// year is shed by default, and the cost of that staleness is one setting a
+/// user has to state again rather than one repository a tool writes into by
+/// mistake.
+///
+/// Each name below states what the keep buys and what a drop costs.
+pub const USER_INTENT_GIT_ENVIRONMENT: &[&str] = &[
+    // The file git reads in place of `~/.gitconfig`. Kept, a tool that predicts
+    // what git does at commit time reads the configuration the user chose.
+    // Dropped, the tool predicts against a file the user replaced, and the
+    // worktree to repo-local to global to system precedence breaks at its third
+    // step.
+    "GIT_CONFIG_GLOBAL",
+    // The file git reads in place of `/etc/gitconfig`. The same gain and the
+    // same cost, at the fourth step of that precedence.
+    "GIT_CONFIG_SYSTEM",
+    // The program git runs in place of `ssh`. Kept, a fetch or a clone over
+    // `git@` reaches the host the way the user's own shell reaches it. Dropped,
+    // git runs plain `ssh` with the default key, and a user who holds a
+    // non-default key gets an authentication failure.
+    "GIT_SSH",
+    // The same program, with the arguments git is to pass it. A user states one
+    // of these two, and a tool that drops either one breaks the same fetch.
+    "GIT_SSH_COMMAND",
+    // The program git runs to ask for a password. Kept, a private dependency
+    // over HTTPS gets its credential from the helper the user chose. Dropped,
+    // git falls back to the terminal.
+    "GIT_ASKPASS",
+    // Whether git asks a person for a credential on the terminal. A user sets
+    // it to `0` so that a missing credential fails at once. Dropped, git
+    // prompts on `/dev/tty`, and a tool whose stdout a shell wrapper captures
+    // shows the user a command that stalls with nothing on the screen.
+    "GIT_TERMINAL_PROMPT",
+];
+
+/// The `GIT_` variables git exports into the environment of a hook.
+///
+/// It exists to be asserted disjoint from [`USER_INTENT_GIT_ENVIRONMENT`], and
+/// the test that asserts it is `tests/user-intent-environment.rs`. A name git
+/// hands every hook cannot be read as the user's intent: the value in the
+/// environment came from git, not from the person, so a keep-list that held one
+/// of these names would let a hook aim a tool at the hook's own repository.
+///
+/// This is a sample of what git exports and never its definition. A list of
+/// names is the wrong shape for deciding what to shed, which is why the sweep
+/// matches the prefix instead. A list is the right shape for the one question
+/// asked here, because the question is about six names that are written down.
+pub const HOOK_EXPORTED_GIT_ENVIRONMENT: &[&str] = &[
+    "GIT_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_AUTHOR_DATE",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_EXEC_PATH",
+    "GIT_PREFIX",
+    "GIT_EDITOR",
+];
+
+/// Schedule the removal of every `GIT_`-prefixed key of `keys` that `rule` does
+/// not keep.
+///
+/// **The key source is a parameter rather than [`std::env::vars_os`], and that
+/// is load-bearing.** Cargo runs the tests of one binary on parallel threads,
+/// so a test that set a real `GIT_*` variable to prove this rule would redirect
+/// the git children of every sibling thread while it did so. A synthetic key
+/// list keeps such a test parallel-safe. The two entrances that read the real
+/// environment, [`shed_inherited_git_environment`] and
+/// [`shed_inherited_git_environment_keeping_user_intent`], both delegate here,
+/// so the rule has one implementation and the test measures the one a spawn
+/// uses.
+///
+/// Keys are compared through [`std::ffi::OsStr::to_string_lossy`]: lossy
+/// conversion replaces an invalid byte with U+FFFD, so it can never manufacture
+/// a `GIT_` prefix out of bytes that did not spell one.
+///
+/// A value the call site wants pinned is set *after* this call, and so wins.
+///
+/// ```no_run
+/// use gitscratch::InheritedGitEnvironment;
+///
+/// let mut command = std::process::Command::new("git");
+/// gitscratch::shed_git_environment_from(
+///     &mut command,
+///     ["GIT_DIR", "GIT_SSH_COMMAND", "PATH"],
+///     InheritedGitEnvironment::KeepUserIntent,
+/// );
+/// ```
+pub fn shed_git_environment_from<I, K>(
+    command: &mut Command,
+    keys: I,
+    _rule: InheritedGitEnvironment,
+) where
+    I: IntoIterator<Item = K>,
+    K: AsRef<OsStr>,
+{
+    for key in keys {
+        if key
+            .as_ref()
+            .to_string_lossy()
+            .starts_with(GIT_ENVIRONMENT_PREFIX)
+        {
+            command.env_remove(key.as_ref());
+        }
+    }
+}
+
+/// Detach `command` from the inherited git environment, and keep the six names
+/// the user stated on purpose.
+///
+/// **The entrance a production spawn takes.** It sheds the whole `GIT_` prefix,
+/// [`USER_INTENT_GIT_ENVIRONMENT`] excepted, so a tool still aims at the
+/// repository it was pointed at while it authenticates the way the user's own
+/// shell authenticates. [`shed_inherited_git_environment`] is the entrance a
+/// fixture takes, and it keeps nothing.
+///
+/// The split is not a split by git's families, which the prefix genuinely
+/// cannot tell apart. It is a split by whose intent a variable carries. A hook
+/// exports `GIT_DIR`, `GIT_INDEX_FILE` and `GIT_CONFIG_PARAMETERS`, so those
+/// carry the launching hook's intent and leave. A person exports
+/// `GIT_SSH_COMMAND` and `GIT_TERMINAL_PROMPT`, so those carry the user's
+/// intent and stay. `tests/user-intent-environment.rs` pins the two lists
+/// disjoint.
+///
+/// ```no_run
+/// let mut command = std::process::Command::new("git");
+/// gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
+/// ```
+pub fn shed_inherited_git_environment_keeping_user_intent(command: &mut Command) {
+    shed_git_environment_from(
+        command,
+        std::env::vars_os().map(|(key, _)| key),
+        InheritedGitEnvironment::KeepUserIntent,
+    );
 }
 
 /// The outcome of one git invocation.

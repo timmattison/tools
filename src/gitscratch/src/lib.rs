@@ -120,9 +120,22 @@ pub mod scratch;
 pub mod testing;
 
 /// The environment guards, which every consumer that spawns git of its own
-/// needs. Both of them only *remove* variables, so neither one can point a
-/// command at a repository or give it a command to run.
-pub use git::{shed_inherited_git_environment, NoInheritedGitEnvironment};
+/// needs. Every one of them only *removes* variables, so none of them can point
+/// a command at a repository or give it a command to run.
+///
+/// There are two rules rather than one, and [`InheritedGitEnvironment`] names
+/// which is which. A fixture sheds the whole `GIT_` prefix through
+/// [`shed_inherited_git_environment`] or [`NoInheritedGitEnvironment`]. A
+/// production spawn sheds the same prefix through
+/// [`shed_inherited_git_environment_keeping_user_intent`] and keeps the six
+/// names of [`USER_INTENT_GIT_ENVIRONMENT`], which a person states on purpose.
+/// [`shed_git_environment_from`] is the one implementation of both, with the
+/// key source as a parameter so a test never touches the process environment.
+pub use git::{
+    shed_git_environment_from, shed_inherited_git_environment,
+    shed_inherited_git_environment_keeping_user_intent, InheritedGitEnvironment,
+    NoInheritedGitEnvironment, HOOK_EXPORTED_GIT_ENVIRONMENT, USER_INTENT_GIT_ENVIRONMENT,
+};
 
 /// The runner itself, and only for the test scaffolding.
 ///
