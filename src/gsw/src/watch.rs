@@ -3210,6 +3210,12 @@ mod tests {
     /// reads the clock several times per iteration, so a stepping clock is what
     /// lets a test cross a scheduled deadline without sleeping — deterministic
     /// and parallel-safe, unlike a real timer.
+    ///
+    /// It also counts the reads, which a frozen clock cannot. Two reads of a
+    /// frozen clock give the same instant as one read, so a frozen clock hides
+    /// a read the code makes and does not need. A clock that moves on every
+    /// read turns that extra read into a whole step, which a test can hold an
+    /// interval against.
     pub(super) fn stepping_clock(base: Instant, step: Duration) -> impl Fn() -> Instant {
         let reads = std::cell::Cell::new(0_u32);
         move || {
@@ -4986,6 +4992,47 @@ mod push_loop_tests {
             seen.issue_runs,
             vec![found_command()],
             "the second press must run the command",
+        );
+    }
+
+    /// Two thirds of the window the message that asks for a second press
+    /// stands in.
+    ///
+    /// The size is what makes the read count visible. One step is inside
+    /// [`crate::push::STATUS_LIFETIME`] and two steps are past it, so two
+    /// presses one clock read apart find the arming, and two presses two clock
+    /// reads apart find nothing. A function rather than a constant, because
+    /// the arithmetic on a [`Duration`] does not run in a constant.
+    fn press_step() -> Duration {
+        crate::push::STATUS_LIFETIME * 2 / 3
+    }
+
+    #[test]
+    fn each_g_press_reads_the_clock_once_so_the_second_press_still_stands() {
+        // The rule: one press of `G` reads the clock once. The loop's own
+        // reads then never eat the window the second press stands in.
+        //
+        // An extra read inside one press costs a whole step of that window. A
+        // frozen clock cannot show that cost, because two reads of a frozen
+        // clock give the same instant as one read. This clock steps on every
+        // read instead. `absorb` reads the clock for a key only in the
+        // `Event::IssueRequested` arm, so the two presses land on consecutive
+        // reads and sit one step apart, which is inside the window. A second
+        // read for the notice puts the presses two steps apart, which is past
+        // the window, and the second press then only asks again.
+        //
+        // This pins commit 54a9cb2b, which took that second read out.
+        let (_screen, seen) = run_loop_in_session(
+            vec![probe_answered(), press_g(), press_g(), Event::Quit],
+            TEST_DIMS,
+            |_frame_dims| "FRAME".to_string(),
+            stepping_clock(Instant::now(), press_step()),
+            crate::remote::Session::Remote,
+        );
+        assert_eq!(
+            seen.issue_runs,
+            vec![found_command()],
+            "each press must read the clock once, so the second press runs the command",
         );
     }
 
