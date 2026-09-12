@@ -417,10 +417,14 @@ was written for.
 
 ### What the Guard Does Not Prove
 
-It proves no call site is written as a named list. It does **not** prove a
-given spawn sheds anything at all: a spawn that scrubs nothing is not written
-in a shape any rule can name. Proving that is a dataflow question, and this
-workspace does not have a dataflow engine.
+It proves no call site passes a `GIT_`-prefixed name to `env_remove` as a
+literal. A list of those names held in a constant and applied in a loop hands
+the call a binding, so the guard reports it clean — the module doc of
+`git_env_sweep` records why widening the matcher to see that shape was measured
+and refused. It does **not** prove a given spawn sheds anything at all either: a
+spawn that scrubs nothing is not written in a shape any rule can name. Proving
+either is a dataflow question, and this workspace does not have a dataflow
+engine.
 
 ### Guards Enforcing This
 

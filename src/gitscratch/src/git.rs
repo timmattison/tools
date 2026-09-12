@@ -146,10 +146,14 @@ impl NoInheritedGitEnvironment for Command {
 /// `disallowed-methods` matches a method path and ignores its arguments.
 ///
 /// What the guard proves is narrow, and worth stating. It proves no call site
-/// is written as a named list. It does not prove a given spawn sheds anything
-/// at all, because a spawn that scrubs nothing is not written in a shape any
-/// rule can name. So immunity still holds where this is called, and the guard
-/// stops the one way it used to be quietly replaced.
+/// passes a `GIT_`-prefixed name to `env_remove` as a literal. A list of those
+/// names held in a constant and applied in a loop hands the call a binding, so
+/// the guard reports it clean; its module doc states why widening the matcher
+/// to see that shape was measured and refused. It does not prove a given spawn
+/// sheds anything at all either, because a spawn that scrubs nothing is not
+/// written in a shape any rule can name. So immunity still holds where this is
+/// called, and the guard stops the spelling it used to be quietly replaced
+/// with.
 ///
 /// ```no_run
 /// let mut command = std::process::Command::new("git");

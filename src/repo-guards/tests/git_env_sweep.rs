@@ -6,11 +6,16 @@
 //!
 //! The fixtures are organised by *syntactic form*, not by the one spelling that
 //! prompted the guard. A named removal can arrive as a bare literal, behind a
-//! reference, inside a macro body, or through a constant, and each of those is
-//! a separate way for a matcher to go quiet. The negative half matters as much:
-//! a comment, a doc comment, and a string that merely *spells* the call are all
-//! prose, and a guard that reads prose as code gets deleted by whoever it
-//! blocks first.
+//! reference, inside a macro body, inside a macro definition, or out of a macro
+//! that builds the name, and each of those is a separate way for a matcher to
+//! go quiet. The negative half matters as much: a comment, a doc comment, and a
+//! string that merely *spells* the call are all prose, and a guard that reads
+//! prose as code gets deleted by whoever it blocks first.
+//!
+//! One form is a defect this matcher does not see: a list of names held in a
+//! `const` and applied in a loop, which hands the call a binding rather than a
+//! literal. That gap is pinned below, with the rest of the fixtures, and the
+//! module doc of `repo_guards::git_env_sweep` states why the guard keeps it.
 //!
 //! Parallel safety: this workspace's tests share `./target` with the pre-commit
 //! hook's own `cargo test`, so two copies of any test here can run at the same
@@ -265,6 +270,51 @@ fn setting_a_git_variable_is_not_a_removal() {
     assert!(
         report.is_compliant(),
         "pinning a variable is a decision, and only removing one by name is the defect: {report}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The known gap. This shape is the defect, and the matcher does not see it.
+// ---------------------------------------------------------------------------
+
+/// Pins that a list of names held in a `const` and applied in a loop passes the
+/// audit. **That is a gap, not correct behavior.**
+///
+/// The three names below are the list this workspace kept copying, and the loop
+/// is what a person writes who tidies three repeated `env_remove` lines into
+/// one. Each pass of the loop hands `env_remove` a binding, so the argument
+/// holds no literal and the matcher records nothing.
+///
+/// To close the gap, the guard has to resolve `LEAKED` to its value, which is
+/// dataflow. The cheap substitute — report an array holding two or more `GIT_`
+/// literals — was measured against this workspace and refused: it reports 14
+/// correct files and no defect at all. The module doc of
+/// `repo_guards::git_env_sweep` carries that measurement.
+///
+/// So this test states the limit rather than approves the shape, and it is what
+/// makes the limit an expectation. A later widening of the matcher fails here,
+/// which makes the widening a decision somebody takes instead of a silent
+/// change.
+#[test]
+fn the_guard_does_not_see_a_named_list_held_in_a_constant() {
+    let report = verdict(
+        "pub fn run(command: &mut std::process::Command) {\n    \
+         const LEAKED: [&str; 3] = [\"GIT_DIR\", \"GIT_WORK_TREE\", \"GIT_INDEX_FILE\"];\n    \
+         for name in LEAKED {\n        command.env_remove(name);\n    }\n}\n",
+    );
+
+    assert!(
+        report.is_compliant(),
+        "the matcher reads the argument of the call, and this one holds a binding: {report}"
+    );
+    assert!(
+        report
+            .files()
+            .iter()
+            .any(|file| file == Path::new("src/one/src/lib.rs")),
+        "the audit read the fixture and still found nothing, so this pins the matcher rather \
+         than a walk that missed the file: {:?}",
+        report.files()
     );
 }
 

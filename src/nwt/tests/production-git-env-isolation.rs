@@ -8,12 +8,13 @@
 //! The gap this closes is narrow and worth stating. A spawn that sheds nothing
 //! is not written in a shape a rule can name, so `repo_guards::git_env_sweep`
 //! cannot report one and says so in its own documentation. It proves no call
-//! site is written as a hand-written list of variable names. It does not prove
-//! a given spawn sheds anything at all. The only thing that proves *that* is a
-//! run of the binary in a hostile environment, with the damage measured on the
-//! file system afterwards. Removing the sweep from a production spawn left
-//! every test of `nwt` and of `repo-guards` green, which is how this file came
-//! to exist.
+//! site passes a `GIT_`-prefixed name to `env_remove` as a literal, and a list
+//! of those names held in a constant and applied in a loop walks through even
+//! that. It does not prove a given spawn sheds anything at all. The only thing
+//! that proves *that* is a run of the binary in a hostile environment, with the
+//! damage measured on the file system afterwards. Removing the sweep from a
+//! production spawn left every test of `nwt` and of `repo-guards` green, which
+//! is how this file came to exist.
 //!
 //! The two tests are the two halves of one rule, which
 //! `gitscratch::shed_inherited_git_environment_keeping_user_intent` states:

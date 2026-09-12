@@ -12,12 +12,14 @@
 //! The gap this closes is narrow and worth stating. A spawn that sheds nothing
 //! is not written in a shape a rule can name, so `repo_guards::git_env_sweep`
 //! cannot report one and says so in its own documentation. It proves no call
-//! site is written as a hand-written list of variable names. It does not prove
-//! a given spawn sheds anything at all. The only thing that proves *that* is a
-//! run of the binary in a hostile environment, with the damage measured on the
-//! file system afterwards. The unit tests of `kitchen-sync` call `shallow_clone`
-//! directly and read the files it produced, so they say nothing about where the
-//! objects and the index of that clone were written. This file does.
+//! site passes a `GIT_`-prefixed name to `env_remove` as a literal, and a list
+//! of those names held in a constant and applied in a loop walks through even
+//! that. It does not prove a given spawn sheds anything at all. The only thing
+//! that proves *that* is a run of the binary in a hostile environment, with the
+//! damage measured on the file system afterwards. The unit tests of
+//! `kitchen-sync` call `shallow_clone` directly and read the files it produced,
+//! so they say nothing about where the objects and the index of that clone were
+//! written. This file does.
 //!
 //! Every variable below is set on the **child command**, and nothing here
 //! touches the environment of this process. Cargo runs the tests of one binary

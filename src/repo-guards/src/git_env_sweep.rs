@@ -27,6 +27,46 @@
 //! so it never trips its own rule. Neither does a removal of a variable that is
 //! not git's.
 //!
+//! # The limit: a name that reaches the call in a binding
+//!
+//! The matcher reads the argument of the call, so it finds a name only where
+//! the call site writes one there. A list of names held in a `const` and
+//! applied in a loop hands `env_remove` a binding, and this audit reports that
+//! file clean:
+//!
+//! ```ignore
+//! const LEAKED: [&str; 3] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"];
+//! for name in LEAKED {
+//!     command.env_remove(name);
+//! }
+//! ```
+//!
+//! That is the named list in its other spelling, and it is what a person writes
+//! who tidies three repeated `env_remove` lines into one loop. The test
+//! `the_guard_does_not_see_a_named_list_held_in_a_constant` pins the gap, so a
+//! later widening of the matcher is a decision somebody makes rather than a
+//! silent change.
+//!
+//! **The obvious widening was measured, and refused.** The cheap rule is to
+//! report an array that holds two or more `GIT_` literals. Measured against
+//! this workspace, the audit read 392 files; 25 of them hold two or more `GIT_`
+//! string literals, and 14 write those names into an array. All 14 are correct
+//! code: the keep-list `gitscratch::USER_INTENT_GIT_ENVIRONMENT`, the identity
+//! names a fixture pins on every command it builds, the probe lists that the
+//! hostile-environment tests aim at a decoy repository, the [`EXEMPTIONS`]
+//! table below, and the fixtures of this guard's own tests. So the widened rule
+//! finds no defect, reports 14 offenders, and needs an allowlist entry for each
+//! one. Issue #482 states what that is: "a rule that ships with a 24-file
+//! allowlist is a census rather than a guard".
+//!
+//! To report the loop and stay quiet about the 14, the guard has to resolve a
+//! constant to its value. That is dataflow, and #482 rules it out as well: "It
+//! stops being a good trade the day it grows toward a dataflow engine."
+//!
+//! The limit therefore stands, stated rather than repaired. What this guard
+//! decides is one thing: no call site passes a `GIT_`-prefixed name to
+//! `env_remove` as a literal.
+//!
 //! # Why a list is the defect rather than a style
 //!
 //! `~/.claude/HERMETIC-TESTS.md` states it as a rule: strip by prefix, never by
@@ -626,11 +666,15 @@ fn collect_named_removals(tokens: TokenStream, found: &mut BTreeSet<String>) {
 /// Record every `GIT_`-prefixed string literal in `tokens`, to any depth.
 ///
 /// The whole argument is searched rather than only its first token, so a
-/// literal behind a reference, a `const` spelled inline, or a macro that builds
+/// literal behind a reference, a literal inside a block, or a macro that builds
 /// the name is found. That over-matches a call that merely mentions such a
 /// literal while removing something else, and that is the safe direction: an
 /// over-matching guard fails loudly and gets repaired, while one that under-
 /// matches reports clean and stays that way.
+///
+/// The argument is also the whole of what is read. A name the call site reaches
+/// through a `const` or a variable writes no literal here, and the module doc
+/// states why that limit stands.
 fn collect_git_literals(tokens: TokenStream, found: &mut BTreeSet<String>) {
     for tree in tokens {
         match tree {
