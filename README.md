@@ -493,6 +493,14 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     `build`, `.turbo`, `.cache`) and `*.test.ts(x)` files are ignored. The screen is cleared and
     pass/fail status is printed in color before each run.
   - To install: `cargo install --git https://github.com/timmattison/tools ng`
+- nle (non-linear editor)
+  - A desktop editor for the terminal recordings that `beta` writes. It loads a `.json` or
+    `.json.gz` recording, lays the frames out on a timeline beside a preview pane, and writes the
+    result back, with or without gzip compression. Export runs the `beta` CLI, so a recording
+    leaves as an HTML player or as a video — keep `beta` on your PATH for that.
+  - To run it from a checkout: `./src/nle/run-nle.sh`. It picks the dev server port with `portplz`,
+    so two worktrees never collide, then starts `cargo tauri dev`.
+  - To build the desktop application: `cargo tauri build` from `src/nle`.
 - gsw (git status watch)
   - Compact pretty output of branch state: a self-refreshing live watch on a TTY, and a single
     render when its output is piped or `--one-shot` is given — so it needs no `viddy`/`watch`

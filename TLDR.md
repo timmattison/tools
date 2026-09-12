@@ -40,6 +40,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `krt` | Knights of the Round Trip — records the network path to a destination, hop by hop, into an append-only JSONL file, and draws the live table of that path under a terminal. `krt replay` folds one run of a recorded file into one table of the path. `krt hunt` looks for the longest path it can find: it draws random addresses, traces a pool of them at once, and prints the shortest, longest, fastest, and slowest path it found, and `--mine` probes a few addresses near each destination that sets a record, to find whether a neighbor gives a longer path. |
 | `localnext` | Serves a statically exported Next.js app from its `out` directory, on a port derived from the project and the git branch. |
 | `ng` | Navel-Gaze — watches JS/TS files and re-runs `pnpm lint` (or `--typecheck`) on change. |
+| `nle` | Non-Linear Editor — a desktop editor for `beta` terminal recordings, with a timeline, a preview pane, and HTML or video export. |
 | `nodenuke` | Removes `node_modules` directories and lock files throughout a repo. |
 | `nodeup` | Updates npm/pnpm/yarn packages across all `package.json` directories. |
 | `nwt` | New Worktree — creates a git worktree with a random Docker-style name. |

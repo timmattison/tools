@@ -10,3 +10,5 @@ node_modules
 .wrangler/
 # swt's green-check escape hatch: per-developer, never committed.
 .swt-check
+src/nle/frontend/dist/
+src/nle/gen/
