@@ -289,9 +289,12 @@ A smaller image can fit where this one did not: try --width, --height or --scale
 
 The exit code is 1, so a script reads the failure as well.
 
-**The last line belongs to `ENOSPC` alone.** A full image store is the one
-refusal that the size of the picture caused, so a smaller picture is the one
-repair for it. A terminal that answers another code, such as `EINVAL` for bytes
+**The last line belongs to `ENOSPC` alone.** A terminal that answers that code
+refused the picture for room, which is the one refusal that the size of the
+picture caused, so a smaller picture is the one repair for it. The message
+beside the code names the room that ran out. A mosh answers it where one
+transmission stands above the cap that `MOSH_IMAGE_BUDGETS` states for that
+protocol. A terminal that answers another code, such as `EINVAL` for bytes
 it decodes as no picture, refused the picture for a reason that a resize does
 not touch. `ic` reports the code and the message of the terminal there, and it
 advises nothing:
