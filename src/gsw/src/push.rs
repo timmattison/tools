@@ -1361,7 +1361,7 @@ const RUNNING_NOTICE: &str = "Pushing…";
 ///
 /// It is also the length of the fade, so the message reaches black exactly as
 /// it is removed and nothing ever blinks out at full brightness.
-const STATUS_LIFETIME: Duration = Duration::from_secs(60);
+pub(crate) const STATUS_LIFETIME: Duration = Duration::from_secs(60);
 
 /// How often such a message has to be repainted for its age text and its fade
 /// to move.
