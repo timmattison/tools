@@ -64,15 +64,24 @@ const HOOKS_PATH_KEY: &str = "core.hooksPath";
 /// `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` — hand the caller a way to set any
 /// key at all.
 ///
-/// Removing `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` costs nothing, because
+/// Removing `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` costs nothing here, because
 /// removing a variable is not the same as pinning it to `/dev/null`: with them
 /// gone git falls back to the host's `~/.gitconfig` and `/etc/gitconfig` exactly
-/// as it does in a normal shell.
+/// as it does in a normal shell. It costs a *production* tool the answer for a
+/// user who exported one on purpose, which is why production takes the other
+/// entrance - see below.
 ///
-/// One trait rather than one per family, because the prefix cannot tell the
-/// families apart, and any split back into halves is a list again. A call site
-/// that asked for the location half alone would be asking for the shape this
-/// crate stopped trusting.
+/// **One trait, and the one split beside it is not a split by family.** The
+/// prefix cannot tell git's families apart, so a call site that asked for the
+/// location half alone would be asking for the shape this crate stopped
+/// trusting. The split that is safe is a split by *whose intent* a variable
+/// carries. [`shed_inherited_git_environment_keeping_user_intent`] keeps the
+/// six names of [`USER_INTENT_GIT_ENVIRONMENT`], which a person states on
+/// purpose, and sheds the rest of the prefix. A keep-list is safe in the way a
+/// strip-list is not, because its staleness runs in the safe direction: a
+/// variable git invents next year is shed by default rather than inherited by
+/// default. This trait keeps the blanket rule, because a fixture has no user
+/// whose intent to honor.
 ///
 /// Public, and an extension trait rather than a private helper, because the
 /// commands that need it are not all git: a consumer's test suite spawning its
@@ -122,6 +131,12 @@ impl NoInheritedGitEnvironment for Command {
 /// a throwaway repository - is broken the same way by the same environment, and
 /// the rule for what to shed is worth keeping in one reusable place rather than
 /// copied into each of them to drift.
+///
+/// **The entrance a fixture takes.** It keeps nothing, because a fixture has no
+/// user whose intent to honor. A production spawn takes
+/// [`shed_inherited_git_environment_keeping_user_intent`] instead, which sheds
+/// the same prefix and keeps the six names of
+/// [`USER_INTENT_GIT_ENVIRONMENT`].
 ///
 /// It was an offer rather than a guarantee for as long as nothing obliged a git
 /// spawn in this repository to call it. `repo_guards::git_env_sweep` now does
@@ -264,17 +279,22 @@ pub const HOOK_EXPORTED_GIT_ENVIRONMENT: &[&str] = &[
 pub fn shed_git_environment_from<I, K>(
     command: &mut Command,
     keys: I,
-    _rule: InheritedGitEnvironment,
+    rule: InheritedGitEnvironment,
 ) where
     I: IntoIterator<Item = K>,
     K: AsRef<OsStr>,
 {
     for key in keys {
-        if key
-            .as_ref()
-            .to_string_lossy()
-            .starts_with(GIT_ENVIRONMENT_PREFIX)
-        {
+        let name = key.as_ref().to_string_lossy();
+
+        if !name.starts_with(GIT_ENVIRONMENT_PREFIX) {
+            continue;
+        }
+
+        let kept = matches!(rule, InheritedGitEnvironment::KeepUserIntent)
+            && USER_INTENT_GIT_ENVIRONMENT.contains(&&*name);
+
+        if !kept {
             command.env_remove(key.as_ref());
         }
     }

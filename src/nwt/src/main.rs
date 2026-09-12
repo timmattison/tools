@@ -8,7 +8,9 @@ use std::thread;
 
 use buildinfo::version_string;
 use clap::Parser;
-use gitscratch::shed_inherited_git_environment;
+use gitscratch::{
+    shed_inherited_git_environment, shed_inherited_git_environment_keeping_user_intent,
+};
 use names::Generator;
 use repowalker::find_repo_context;
 use serde::Deserialize;
@@ -1111,14 +1113,20 @@ fn setup_shell_integration() -> Result<(), shellsetup::ShellSetupError> {
 /// expects it to work. The worst case is redundant copies; the alternative would be
 /// missing critical development configuration.
 fn get_tracked_files(repo_root: &Path) -> HashSet<PathBuf> {
-    // Shed the whole inherited `GIT_` family, through
-    // [`gitscratch::shed_inherited_git_environment`], so the query targets
-    // `repo_root` rather than whatever repository a parent git hook exported.
-    // The rule is the prefix and never a list of names: this call site listed
-    // three, and `GIT_OBJECT_DIRECTORY` and `GIT_CONFIG_PARAMETERS` walked
-    // straight through them.
+    // Shed the inherited `GIT_` family, through
+    // [`gitscratch::shed_inherited_git_environment_keeping_user_intent`], so the
+    // query targets `repo_root` rather than whatever repository a parent git
+    // hook exported. The rule is the prefix and never a list of names: this call
+    // site listed three, and `GIT_OBJECT_DIRECTORY` and `GIT_CONFIG_PARAMETERS`
+    // walked straight through them.
+    //
+    // The six names of `gitscratch::USER_INTENT_GIT_ENVIRONMENT` stay, because a
+    // person states them on purpose and `nwt` runs for that person. None of them
+    // moves this query to another repository: two name configuration files, and
+    // four name how git authenticates to a remote, which `ls-files` never
+    // reaches.
     let mut command = Command::new("git");
-    shed_inherited_git_environment(&mut command);
+    shed_inherited_git_environment_keeping_user_intent(&mut command);
 
     let output = command.args(["ls-files"]).current_dir(repo_root).output();
 
@@ -2184,13 +2192,24 @@ fn bootstrap_hooks(worktree: &Path, quiet: bool) -> bool {
         Stdio::inherit()
     };
 
-    // Shed the whole inherited `GIT_` family so the install's lifecycle scripts
-    // — a `prepare` that runs `git config core.hooksPath`, say — operate on
+    // Shed the inherited `GIT_` family so the install's lifecycle scripts — a
+    // `prepare` that runs `git config core.hooksPath`, say — operate on
     // `worktree` rather than on whatever repository a parent git hook exported.
     // The child is a package manager rather than git, and that changes nothing:
     // it runs git, and git obeys the environment first.
+    //
+    // The authentication family survives, because this install reaches the
+    // network. `GIT_SSH`, `GIT_SSH_COMMAND` and `GIT_ASKPASS` are how the user
+    // authenticates, so an install that fetches a private git dependency still
+    // authenticates the way the user's own shell does; a user who holds a
+    // non-default key gets an authentication failure without them.
+    // `GIT_TERMINAL_PROMPT` is what keeps a failure fast: set to `0` it makes a
+    // missing credential fail at once, and without it git prompts on
+    // `/dev/tty`. The shell wrapper captures this command's stdout to `cd` with,
+    // so the user reads such a prompt as a command that stalls with nothing on
+    // the screen.
     let mut command = Command::new(program);
-    shed_inherited_git_environment(&mut command);
+    shed_inherited_git_environment_keeping_user_intent(&mut command);
 
     let status = command
         .args(args)
@@ -2244,15 +2263,16 @@ fn bootstrap_hooks(worktree: &Path, quiet: bool) -> bool {
 /// are returned unchanged by `--type=path`, so those keep resolving against the
 /// worktree as before.
 ///
-/// One part of that precedence is deliberately not honored: the inherited
-/// `GIT_` family leaves before the query runs, `GIT_CONFIG_GLOBAL` and
-/// `GIT_CONFIG_SYSTEM` among it. Removing those two costs nothing, because a
-/// removal is not the same as a redirect to `/dev/null`: with them gone git
-/// reads the host's `~/.gitconfig` and `/etc/gitconfig` exactly as it does in a
-/// shell that holds nothing. What it does cost is the answer for a user who
-/// exported one of them on purpose, and that is the price of not inheriting
-/// `GIT_CONFIG_PARAMETERS`, which git hands every hook and which would
-/// otherwise answer this question with configuration the user never wrote.
+/// That precedence is honored in full, and it takes an allowlist to honor it.
+/// The inherited `GIT_` family leaves before the query runs, but
+/// `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` stay — they are two of the six
+/// names in `gitscratch::USER_INTENT_GIT_ENVIRONMENT`. A user who exports one
+/// of them means it, and the global and system steps of the precedence are two
+/// of the four steps this function exists to predict. `GIT_CONFIG_PARAMETERS`
+/// still leaves, because git hands it to every hook: it carries the launching
+/// hook's `-c` options, and left in place it answers this question with
+/// configuration the user never wrote. The two are told apart by whose intent
+/// each one carries, not by which of git's families each belongs to.
 ///
 /// Returns:
 /// - `None` when `core.hooksPath` is unset (git's built-in `.git/hooks` default
@@ -2269,13 +2289,15 @@ fn missing_hooks_path(worktree: &Path) -> Option<String> {
     // `--type=path` makes git expand `~/` and `~user/` the same way it does at
     // hook-run time. stdin is nulled so git can never block; stderr is nulled to
     // avoid noise.
-    // Shed the whole inherited `GIT_` family so the query targets `worktree`
-    // rather than whatever repository a parent git hook exported. That includes
+    // Shed the inherited `GIT_` family so the query targets `worktree` rather
+    // than whatever repository a parent git hook exported. That includes
     // `GIT_CONFIG_PARAMETERS`, which git hands every hook and which carries the
     // outer command's `-c` options: left in place it answers this question with
-    // a value the user never configured.
+    // a value the user never configured. `GIT_CONFIG_GLOBAL` and
+    // `GIT_CONFIG_SYSTEM` stay, because a user states those on purpose and this
+    // query predicts what git reads at commit time — see the function doc.
     let mut command = Command::new("git");
-    shed_inherited_git_environment(&mut command);
+    shed_inherited_git_environment_keeping_user_intent(&mut command);
 
     let output = command
         .args(["config", "--type=path", "core.hooksPath"])

@@ -39,6 +39,21 @@
 //! `core.hooksPath` — into the child. Neither names a location, so no amount of
 //! adding location names would have caught either.
 //!
+//! # A keep-list is a different shape, and this guard does not report it
+//!
+//! `gitscratch::shed_inherited_git_environment_keeping_user_intent` sweeps the
+//! same prefix and keeps six names a person states on purpose, which
+//! `gitscratch::USER_INTENT_GIT_ENVIRONMENT` holds. That is not the shape
+//! reported here: those names sit in a `const` array and never reach
+//! `env_remove`.
+//!
+//! The difference is more than where the names are written. The staleness of a
+//! keep-list runs in the safe direction. A stale strip-list *inherits* the
+//! variable git added after it was written, and reports the same clean-looking
+//! answer as a list that works. A stale keep-list *sheds* it, so the cost is one
+//! setting a user states again rather than one repository a tool writes into by
+//! mistake.
+//!
 //! # Why a lint cannot say this
 //!
 //! `clippy.toml` supports `disallowed-methods`, which matches a method path and
