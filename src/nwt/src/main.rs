@@ -8,9 +8,7 @@ use std::thread;
 
 use buildinfo::version_string;
 use clap::Parser;
-use gitscratch::{
-    shed_inherited_git_environment, shed_inherited_git_environment_keeping_user_intent,
-};
+use gitscratch::shed_inherited_git_environment_keeping_user_intent;
 use names::Generator;
 use repowalker::find_repo_context;
 use serde::Deserialize;
@@ -957,13 +955,25 @@ enum WorktreeResult {
 /// which `--checkout` solves, or a directory that exists, which
 /// `--random-directory` solves. Only git can say which.
 ///
-/// The whole inherited `GIT_*` family is shed first, through
-/// [`gitscratch::shed_inherited_git_environment`]. An inherited `GIT_DIR` aims
-/// the question at another repository, whose branches say nothing about this
-/// one. The rule is the prefix, never a list of names.
+/// This is a production spawn, so it takes
+/// [`gitscratch::shed_inherited_git_environment_keeping_user_intent`]. That
+/// sheds the whole inherited `GIT_` prefix and keeps the six names of
+/// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`]. An inherited `GIT_DIR` aims the
+/// question at another repository, whose branches say nothing about this one.
+/// The rule is the prefix plus a keep-list, and never a strip-list of names: a
+/// strip-list inherits the variable git invents next year, and a keep-list
+/// sheds it.
+///
+/// None of the six kept names moves this question to another repository. Two of
+/// them name a configuration file, and four name how git authenticates to a
+/// remote, which `show-ref` never reaches.
+///
+/// [`try_create_worktree`] takes the same entrance, so the add and the question
+/// that classifies its failure read one environment. Two answers from one
+/// environment do not disagree.
 fn branch_exists(repo_root: &Path, branch: &str) -> bool {
     let mut command = Command::new("git");
-    shed_inherited_git_environment(&mut command);
+    shed_inherited_git_environment_keeping_user_intent(&mut command);
 
     command
         .args(["show-ref", "--verify", "--quiet"])
@@ -983,6 +993,33 @@ fn branch_exists(repo_root: &Path, branch: &str) -> bool {
 /// This function displays git's progress output (e.g., "Updating files: X%") in real-time
 /// while also capturing stderr for error classification. This is done by spawning a thread
 /// that reads stderr and both echoes it to the terminal and captures it for later analysis.
+///
+/// # The inherited git environment
+///
+/// This is the one git child of `nwt` that writes. `git worktree add` makes a
+/// branch ref, a reflog and a whole `worktrees/<name>` directory in the
+/// repository it reaches. Git obeys the environment before it obeys the
+/// directory a command was pointed at, so an inherited `GIT_DIR` sends all of
+/// that into another repository — the repository being committed to, for a
+/// `nwt` that a git hook started.
+///
+/// So the command takes the production entrance,
+/// [`gitscratch::shed_inherited_git_environment_keeping_user_intent`], before
+/// the arguments are set. It sheds the whole inherited `GIT_` prefix and keeps
+/// the six names of [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`]. The four
+/// authentication names of that list earn their keep here: the add checks a
+/// tree out, and a smudge filter or a `post-checkout` hook that fetches —
+/// git-lfs installs one — then reaches the network as the user's own shell
+/// reaches it.
+///
+/// **What the shed gives up.** `git worktree add` runs the repository's
+/// `post-checkout` hook, and that hook now reads an environment without the
+/// `GIT_` variables this process inherited. A hook that reads one of them reads
+/// nothing in its place. The loss is bounded: git sets its own variables for
+/// the hook it runs, so what leaves is only what `nwt` inherited, and never
+/// what git states for the hook itself. The gain is the worktree landing in the
+/// repository the user pointed `nwt` at, and that is worth more than a hook's
+/// view of a variable an outer command exported.
 fn try_create_worktree(
     repo_root: &std::path::Path,
     worktree_path: &str,
@@ -990,6 +1027,8 @@ fn try_create_worktree(
     checkout_ref: Option<&str>,
 ) -> WorktreeResult {
     let mut cmd = Command::new("git");
+    shed_inherited_git_environment_keeping_user_intent(&mut cmd);
+
     if let Some(ref_name) = checkout_ref {
         cmd.args(["worktree", "add", worktree_path, ref_name]);
     } else {
@@ -1507,14 +1546,29 @@ const GIT_CONFIG_KEY_NOT_FOUND: i32 = 1;
 /// no configuration error, and the run stops soon after at the `git worktree
 /// add` that says so plainly.
 ///
-/// The command sheds the whole inherited `GIT_*` family through
-/// [`gitscratch::shed_inherited_git_environment`]. An inherited `GIT_DIR` aims
-/// git at another repository, and the answer would then be that repository's
-/// setting. The rule is the `GIT_` prefix and never a list of names: see that
-/// function for which variable walked through the last list.
+/// This is a production spawn, so it takes
+/// [`gitscratch::shed_inherited_git_environment_keeping_user_intent`]. That
+/// sheds the whole inherited `GIT_` prefix and keeps the six names of
+/// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`]. An inherited `GIT_DIR` aims git
+/// at another repository, and the answer is then that repository's setting.
+/// `GIT_CONFIG_PARAMETERS` leaves with the rest, because git hands it to every
+/// hook: it carries the launching hook's `-c` options, and it answers this
+/// question with a value the user never wrote.
+///
+/// A `GIT_CONFIG_GLOBAL` the user stated stays, and it is part of the
+/// precedence this read exists to honor. The read covers every scope, and
+/// `GIT_CONFIG_GLOBAL` names the file git reads in place of `~/.gitconfig`.
+/// Shed it, and a user who states [`WORKTREES_DIR_KEY`] in the file they chose
+/// gets a worktree in a directory they never named. `GIT_CONFIG_SYSTEM` stays
+/// for the same reason, in place of the system file.
+///
+/// The rule is the prefix plus a keep-list, and never a strip-list of names. A
+/// strip-list inherits the variable git invents next year and still reports a
+/// clean-looking answer; a keep-list sheds it. See
+/// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`] for what each kept name buys.
 fn stated_worktrees_dir(repo_root: &Path) -> StatedWorktreesDir {
     let mut command = Command::new("git");
-    shed_inherited_git_environment(&mut command);
+    shed_inherited_git_environment_keeping_user_intent(&mut command);
 
     let output = command
         .args(["config", "--type=path", "--get", WORKTREES_DIR_KEY])
