@@ -74,33 +74,48 @@ pub fn comm_basename(comm: &str) -> &str {
         .unwrap_or(comm)
 }
 
-/// A list of Zellij clients that holds at least one client.
+/// Holds [`ClientPids`] so that its field stays private to this module. A
+/// private tuple field is still reachable from every other line of the file
+/// that declares it, and this crate is one file. So the field alone enforces
+/// nothing, and the wall of this module is what makes [`ClientPids::new`] the
+/// only door.
 ///
-/// [`ClientPids::new`] is the only way to build one, so the empty case gets an
-/// answer once instead of at every call site. The emptiness matters because a
-/// tool asks whether *every* client of the session is a client of one
-/// transport. `all` over an empty list answers yes, so a session with no named
-/// client reports that transport for no reason. That session belongs to
-/// [`ZellijScan::EveryClient`] instead.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClientPids(Vec<Pid>);
+/// The invariant behind that door is that the list is never empty. A caller
+/// asks whether *every* client of the session is a client of one transport,
+/// and `all` over an empty list answers yes.
+mod client_pids {
+    use super::Pid;
 
-impl ClientPids {
-    /// A list that holds `pids`, or `None` when there is no client to hold.
-    #[must_use]
-    pub fn new(pids: Vec<Pid>) -> Option<Self> {
-        if pids.is_empty() {
-            return None;
+    /// A list of Zellij clients that holds at least one client.
+    ///
+    /// [`ClientPids::new`] is the only way to build one, so the empty case gets
+    /// an answer once instead of at every call site. The emptiness matters
+    /// because a tool asks whether *every* client of the session is a client of
+    /// one transport. `all` over an empty list answers yes, so a session with
+    /// no named client reports that transport for no reason. That session
+    /// belongs to [`super::ZellijScan::EveryClient`] instead.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ClientPids(Vec<Pid>);
+
+    impl ClientPids {
+        /// A list that holds `pids`, or `None` when there is no client to hold.
+        #[must_use]
+        pub fn new(pids: Vec<Pid>) -> Option<Self> {
+            if pids.is_empty() {
+                return None;
+            }
+            Some(Self(pids))
         }
-        Some(Self(pids))
-    }
 
-    /// The clients, in the order that `ps` reported them. Never empty.
-    #[must_use]
-    pub fn as_slice(&self) -> &[Pid] {
-        &self.0
+        /// The clients, in the order that `ps` reported them. Never empty.
+        #[must_use]
+        pub fn as_slice(&self) -> &[Pid] {
+            &self.0
+        }
     }
 }
+
+pub use client_pids::ClientPids;
 
 /// Which Zellij clients stand in for the current process during the search.
 ///
