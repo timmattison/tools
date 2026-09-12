@@ -1661,6 +1661,39 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     `WN_NO_CLAUDE=1 wn`, `WN_PLAN_TIMEOUT=900 wn`, `WN_PLAN_EFFORT=high wn`,
     `WN_PLAN_MODEL=opus wn`
   - To install: `cargo install --git https://github.com/timmattison/tools wn`
+- workit
+  - Builds a Cargo workspace manifest out of a directory tree. It walks the tree, finds every
+    `Cargo.toml` that declares a package and no workspace of its own, and writes those directories
+    into the `[workspace]` members list — rewriting the members of a manifest that is already there
+    and leaving the rest of it alone, and naming on stderr every member the walk did not find
+    before that rewrite drops it. The manifest lands beside the tree that was scanned, so
+    `workit --path ~/code/other` writes `~/code/other/Cargo.toml` and never touches the directory
+    the run was started from; `--output` names a file of its own instead. A member is written
+    relative to the directory that holds the manifest, because that is the directory cargo resolves
+    a member against, so `--output` decides what the members read — and a package that directory
+    does not hold is named in full and takes no `--prefix`. Two packages that share a name are
+    refused rather than written, with the paths that hold each one, because a workspace cannot
+    carry the same package name twice — the report is ordered by package name and by path, so two
+    runs over one tree read the same. A directory named `target` or `node_modules` stays out of
+    the walk, and so does a package inside a git worktree that lies *below* the search path, which
+    is a second checkout of packages the repository already holds — where the search path itself
+    sits is never matched, so a run from inside a worktree still finds every package under it, and
+    a run that found packages and then filtered every one of them out says so and names
+    `--include-worktrees`. A package under a nested repository of its own is not a second checkout
+    and stays in. An exclusion names a whole directory below the search path, so
+    `targets` and `node_modules_backup` stay in, and the search path itself is never matched
+    against the list — `workit --path ~/code/target/myproj` searches that tree like any other. An
+    entry it cannot read — a directory whose mode keeps it out, a `Cargo.toml` nobody can parse — is
+    named on stderr and skipped rather than ending the walk, and the number skipped is stated once at
+    the end; the packages it did find are still the answer. A scan that skipped something and found
+    nothing never read the tree it was pointed at, so that one fails instead of reporting an empty
+    tree.
+  - Usage: `workit`, `workit --path ~/code/tools` (writes `~/code/tools/Cargo.toml`),
+    `workit --output workspace/Cargo.toml` (writes there, and roots every member at `workspace/`),
+    `workit --dry-run` (prints the manifest it would write and touches nothing),
+    `workit --exclude vendor`, `workit --prefix src/`, `workit --include-worktrees`,
+    `workit --no-default-excludes`.
+  - To install: `cargo install --git https://github.com/timmattison/tools workit`
 
 ## dirhash
 
