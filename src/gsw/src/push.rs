@@ -587,8 +587,9 @@ pub(crate) struct PushOutcome {
 /// state below describes: a question, a push in flight, and the outcome of
 /// one. It is **not** the push's alone. The `G` key runs a command of the
 /// user's own, and a command that refuses says why — so
-/// [`PushUi::post_error`] is the door another feature posts through, and
-/// [`PushUi::post_error`] is what keeps the two from painting over each other.
+/// [`PushUi::post_error`] and [`PushUi::post_notice`] are the two doors
+/// another feature posts through, and they are what keeps the two features
+/// from painting over each other.
 ///
 /// Watch mode holds one of these and asks it two questions — what mode are we
 /// in, and what does the pane show. It never learns whether a prompt or an
@@ -611,11 +612,12 @@ pub(crate) struct PushUi {
     /// again the moment it ends, so a second `G` refuses with the first
     /// refusal still waiting. One slot made the second message overwrite the
     /// first, which is the silence the rule above forbids. Each message here
-    /// reaches the user in turn, and each waits for a key of its own.
+    /// reaches the user in turn, and each gets the row to itself for a life of
+    /// its own — a key for an error, the clock for a notice.
     ///
     /// The queue holds [`MAX_HELD_MESSAGES`] messages. A full one drops the
     /// newest and keeps the oldest — see that constant for why that end.
-    held: VecDeque<String>,
+    held: VecDeque<HeldMessage>,
     /// Whether the terminal takes 24-bit color, as [`crate::RenderConfig`]
     /// resolved it from the CLI flags and `COLORTERM`. Carried here because the
     /// status message fades, and a fade
@@ -711,6 +713,78 @@ impl Life {
             Self::Fading { posted_at } => Some(now.saturating_duration_since(*posted_at)),
         }
     }
+
+    /// What is left of this life for a message that must wait for the row.
+    ///
+    /// The instant goes on purpose, and [`HeldLife`] says why: it is the
+    /// instant the message was posted, and a message that waits reaches the
+    /// row later than that.
+    fn kind(&self) -> HeldLife {
+        match self {
+            Self::UntilDismissed => HeldLife::UntilDismissed,
+            Self::Fading { .. } => HeldLife::Fading,
+        }
+    }
+}
+
+/// A message that is waiting for the row, and how long it stays once it has it.
+///
+/// The two travel together because the frame that frees the row knows nothing
+/// about which door the message came through. A queue of lines beside a queue
+/// of lives, or beside a flag, is two things that can get one step out of
+/// order — and the message would then take the wrong life.
+struct HeldMessage {
+    /// The line to put on the row.
+    line: String,
+    /// What takes it off the row again.
+    life: HeldLife,
+}
+
+/// How long a held message stays once the row frees up.
+///
+/// [`Life::Fading`] carries the instant a message was posted, and a held
+/// message is posted when the row frees up rather than when it arrived. So the
+/// queue holds the kind alone, and [`PushUi::post_held`] reads the clock that
+/// puts it on the row. A message that waited three minutes for a push then
+/// gets its whole life in front of the user, and not the end of one.
+enum HeldLife {
+    /// Becomes [`Life::Fading`], posted at the instant it reaches the row.
+    Fading,
+    /// Becomes [`Life::UntilDismissed`], which has no instant to carry.
+    UntilDismissed,
+}
+
+impl HeldLife {
+    /// The life a message of this kind takes when it reaches the row at `now`.
+    fn at(&self, now: Instant) -> Life {
+        match self {
+            Self::Fading => Life::Fading { posted_at: now },
+            Self::UntilDismissed => Life::UntilDismissed,
+        }
+    }
+}
+
+/// Where a posted message landed: on the row, or in the queue behind it.
+///
+/// The two doors into the row answer this because the row is not always free,
+/// and a caller can have work that only the first answer justifies. The `G`
+/// key is that caller: the message it posts asks for a second press, and the
+/// offer of that press stands exactly as long as the message on the row does.
+/// A message that waits for a push is a message nobody has read, so a key
+/// armed by it would take a press the user never gave a reason for.
+///
+/// An enum rather than a `bool`, because the two answers are two places and
+/// not the presence and absence of one thing. `Posted::Held` at
+/// [`MAX_HELD_MESSAGES`] is the message that was dropped as well as the one
+/// that waits — neither took the row, which is the whole question here, and a
+/// third answer would make every caller decide something it has no use for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Posted {
+    /// The message is under the frame now.
+    OnRow,
+    /// A question or a push in flight owns the row, so the message waits in
+    /// [`PushUi::held`] — or, on a full queue, went nowhere at all.
+    Held,
 }
 
 impl PushUi {
@@ -892,19 +966,24 @@ impl PushUi {
     /// to act on: the row is freed by a key, by a clock, and by a push that
     /// ended, and a render follows each of them.
     ///
-    /// **One message per frame, and no more.** The message it posts waits for
-    /// a key, so the next frame finds the row busy and leaves the rest of the
-    /// queue alone. A queue of two thus reaches the user as two messages in
-    /// order, and each one gets the key the first one gets. To post them all
-    /// at once would put the second message where the user reads the first.
-    fn post_held(&mut self) {
+    /// **One message per frame, and no more.** The message it posts owns the
+    /// row until a key or the clock takes it away, so the next frame finds the
+    /// row busy and leaves the rest of the queue alone. A queue of two thus
+    /// reaches the user as two messages in order, and each one gets the whole
+    /// life the first one gets. To post them all at once would put the second
+    /// message where the user reads the first.
+    ///
+    /// `now` is the instant the message reaches the row, which is the instant
+    /// a fading one starts its life from — see [`HeldLife`]. The one caller is
+    /// [`PushUi::overlay`], which is already holding it.
+    fn post_held(&mut self, now: Instant) {
         if !matches!(self.state, State::Idle) {
             return;
         }
-        if let Some(line) = self.held.pop_front() {
+        if let Some(message) = self.held.pop_front() {
             self.state = State::Status {
-                lines: vec![line],
-                life: Life::UntilDismissed,
+                lines: vec![message.line],
+                life: message.life.at(now),
             };
         }
     }
@@ -969,17 +1048,78 @@ impl PushUi {
     /// the ones already in it. That constant says why the oldest is the one
     /// worth the row.
     pub(crate) fn post_error(&mut self, line: String) {
+        // The answer goes unread here on purpose. git's words wait for a key
+        // wherever they land, so a caller of this door has nothing to decide
+        // from where the message went — see [`Posted`] for the caller that has.
+        let _ = self.post(line, Life::UntilDismissed);
+    }
+
+    /// Put gsw's own words under the frame, to be taken off again by the clock.
+    ///
+    /// The second door into the row, beside [`PushUi::post_error`]. The two
+    /// agree about who owns the row: a question and a push in flight are never
+    /// painted over, so a message that arrives while one of them is up joins
+    /// the back of [`PushUi::held`] and waits for the frame that finds the row
+    /// free. A full queue drops the message that arrives, here exactly as
+    /// there — see [`MAX_HELD_MESSAGES`].
+    ///
+    /// They differ in one thing, and [`Life`] already says why.
+    /// [`PushUi::post_error`] carries another program's words, which are a
+    /// remedy: the user has to read them and act on them, so only a key takes
+    /// them away. This carries gsw's own words about a key the user pressed,
+    /// which are a report: it goes stale the way a push that worked goes
+    /// stale, so the clock takes it away.
+    ///
+    /// `now` is the watch loop's injected clock, and it starts the countdown
+    /// only for a message that goes straight onto the row. A message that
+    /// waits for a push takes the instant of the frame that posts it
+    /// instead — see [`HeldLife`].
+    ///
+    /// So the answer says which of those two happened, and the caller needs
+    /// it. `now` starts a countdown the caller may run a clock of its own
+    /// against — the `G` key runs exactly that — and that clock is a lie for a
+    /// message that has not reached the row. [`Posted`] says what each answer
+    /// obliges the caller to do.
+    pub(crate) fn post_notice(&mut self, line: String, now: Instant) -> Posted {
+        self.post(line, Life::Fading { posted_at: now })
+    }
+
+    /// Put `line` on the row with `life`, or hold it until the row is free.
+    ///
+    /// The body both doors share, so the rule about who owns the row is
+    /// written once. A question and a push in flight are never painted over,
+    /// and a message that arrives while one of them is up joins the back of
+    /// [`PushUi::held`] — at [`MAX_HELD_MESSAGES`] the message that arrives is
+    /// the one that goes.
+    ///
+    /// A held message keeps the kind of its life and loses the instant. The
+    /// instant in `life` is the instant the message arrived, and a held
+    /// message reaches the row on a later frame, so [`PushUi::post_held`]
+    /// reads the clock again there. [`HeldLife`] says why that is the right
+    /// end to measure from.
+    ///
+    /// The answer reports which of the two arms below ran, so a caller whose
+    /// own state stands on the message can see whether anybody has read it
+    /// yet — see [`Posted`]. A full queue answers [`Posted::Held`] with the
+    /// message dropped, because the question is whether it took the row and it
+    /// did not.
+    fn post(&mut self, line: String, life: Life) -> Posted {
         match self.state {
             State::Asking { .. } | State::Running { .. } => {
                 if self.held.len() < MAX_HELD_MESSAGES {
-                    self.held.push_back(line);
+                    self.held.push_back(HeldMessage {
+                        line,
+                        life: life.kind(),
+                    });
                 }
+                Posted::Held
             }
             State::Idle | State::Status { .. } => {
                 self.state = State::Status {
                     lines: vec![line],
-                    life: Life::UntilDismissed,
+                    life,
                 };
+                Posted::OnRow
             }
         }
     }
@@ -1051,7 +1191,7 @@ impl PushUi {
     /// frame drawn.
     pub(crate) fn overlay(&mut self, dims: Dimensions, now: Instant) -> Overlay {
         self.expire(now);
-        self.post_held();
+        self.post_held(now);
         let width = dims.width;
         let lines: Vec<String> = match &self.state {
             State::Idle => Vec::new(),
@@ -1257,7 +1397,13 @@ const RUNNING_NOTICE: &str = "Pushing…";
 ///
 /// It is also the length of the fade, so the message reaches black exactly as
 /// it is removed and nothing ever blinks out at full brightness.
-const STATUS_LIFETIME: Duration = Duration::from_secs(60);
+///
+/// The `G` key's own state in [`crate::watch`] reads it as well. The message
+/// that asks for a second press of that key is the armed state of the key, so
+/// the arming and the message it stands for must end at the same moment — one
+/// number, read in both places, rather than two numbers that agree until
+/// somebody changes one of them.
+pub(crate) const STATUS_LIFETIME: Duration = Duration::from_secs(60);
 
 /// How often such a message has to be repainted for its age text and its fade
 /// to move.
@@ -1984,6 +2130,169 @@ mod ui_tests {
             !seen.iter().any(|text| text.contains(&newest)),
             "the newest message is the one a full queue drops, got {seen:?}",
         );
+    }
+
+    /// What a notice says. The wording belongs to the key that posts one, and
+    /// the tests below are about how long it stays.
+    const NOTICE: &str = "remote shell — press G again";
+
+    #[test]
+    fn a_notice_takes_itself_off_the_screen() {
+        // gsw's own words about a key the user pressed. They are a report, and
+        // a report that stays until somebody types at the monitor is a row
+        // spent for the rest of the session.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        ui.post_notice(NOTICE.to_string(), now);
+
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert!(
+            text.contains(NOTICE),
+            "the notice must reach the screen, got {text:?}",
+        );
+        assert!(
+            text.contains("(0s ago)"),
+            "a message the clock removes says how old it is, got {text:?}",
+        );
+        assert_eq!(
+            ui.next_tick(),
+            Some(STATUS_CADENCE),
+            "a message that ages must wake the loop to age",
+        );
+
+        let text = painted(&mut ui, tall_pane(80), now + STATUS_LIFETIME);
+        assert_eq!(text, "", "the clock must take the notice away");
+    }
+
+    #[test]
+    fn a_message_from_another_feature_still_waits_for_a_key_a_lifetime_later() {
+        // The other door is unchanged by the one above it. Another program's
+        // words are a remedy, and a remedy that leaves on its own while the
+        // user reads another pane is worse than a row spent.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        ui.post_error("branch main names no issue".to_string());
+
+        let later = now + STATUS_LIFETIME;
+        let text = painted(&mut ui, tall_pane(80), later);
+        assert!(
+            text.contains("branch main names no issue"),
+            "an error must outlive the lifetime a notice has, got {text:?}",
+        );
+        assert!(
+            !text.contains("ago"),
+            "a message that never expires has no countdown to report, got {text:?}",
+        );
+
+        ui.dismiss();
+        let text = painted(&mut ui, tall_pane(80), later);
+        assert_eq!(text, "", "a key is still what clears it");
+    }
+
+    #[test]
+    fn a_notice_that_arrives_during_a_push_waits_for_the_row() {
+        // `G` acts while a push runs, and the push owns the row: its notice
+        // goes with the outcome it is about to report.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.post_notice(NOTICE.to_string(), now);
+
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert!(
+            text.contains(RUNNING_NOTICE),
+            "the push must keep the rows it is using, got {text:?}",
+        );
+        assert!(
+            !text.contains(NOTICE),
+            "the held notice must wait its turn, got {text:?}",
+        );
+        assert_eq!(ui.mode(), InputMode::Pushing, "the push is still running");
+    }
+
+    #[test]
+    fn a_notice_that_waited_for_the_row_gets_its_whole_life_on_it() {
+        // A push with a pre-push hook takes minutes, and a notice posted at
+        // the start of one reaches the screen at the end. Its life starts
+        // where the user can read it: a notice that carried the instant it
+        // arrived would appear already expired and go on the next frame.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.post_notice(NOTICE.to_string(), now);
+
+        // The push runs for longer than a notice lives, and its own message
+        // then takes the row for a lifetime of its own.
+        let push_ended = now + STATUS_LIFETIME * 2;
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: String::new(),
+            },
+            push_ended,
+        );
+        let text = painted(&mut ui, tall_pane(80), push_ended);
+        assert!(
+            !text.contains(NOTICE),
+            "the push's own outcome comes first, got {text:?}",
+        );
+
+        // The push's message ages off, and the notice takes the row it leaves.
+        let arrived = push_ended + STATUS_LIFETIME;
+        let text = painted(&mut ui, tall_pane(80), arrived);
+        assert!(
+            text.contains(NOTICE),
+            "the held notice must reach the screen, got {text:?}",
+        );
+        assert!(
+            text.contains("(0s ago)"),
+            "the life of a held notice starts on the row, got {text:?}",
+        );
+
+        let text = painted(&mut ui, tall_pane(80), arrived + STATUS_CADENCE);
+        assert!(
+            text.contains(NOTICE),
+            "the notice must still be there a moment later, got {text:?}",
+        );
+
+        let text = painted(&mut ui, tall_pane(80), arrived + STATUS_LIFETIME);
+        assert_eq!(
+            text, "",
+            "the clock must take the notice away a lifetime after it arrived",
+        );
+    }
+
+    #[test]
+    fn an_error_that_waited_for_the_row_still_waits_for_a_key() {
+        // The queue carries which life a message takes, and it must carry the
+        // other one unchanged. An error that waited for a push is still a
+        // remedy when it reaches the row.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.post_error("branch main names no issue".to_string());
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: String::new(),
+            },
+            now,
+        );
+
+        // The push's own message ages off, and the held error takes the row.
+        let arrived = now + STATUS_LIFETIME;
+        let text = painted(&mut ui, tall_pane(80), arrived);
+        assert!(
+            text.contains("branch main names no issue"),
+            "the held error must reach the screen, got {text:?}",
+        );
+
+        let text = painted(&mut ui, tall_pane(80), arrived + STATUS_LIFETIME * 3);
+        assert!(
+            text.contains("branch main names no issue"),
+            "a held error must not expire once it is on the row, got {text:?}",
+        );
+
+        ui.dismiss();
+        let text = painted(&mut ui, tall_pane(80), arrived);
+        assert_eq!(text, "", "a key is what clears it");
     }
 
     #[test]

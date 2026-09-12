@@ -3782,6 +3782,7 @@ dependencies = [
  "ignore",
  "libc",
  "notify",
+ "proctree",
  "shellquote",
  "tempfile",
  "termsize",
@@ -4179,6 +4180,7 @@ dependencies = [
  "image",
  "libc",
  "notify",
+ "proctree",
  "termgfx",
  "termion",
  "unicode-width",
@@ -6264,6 +6266,10 @@ dependencies = [
  "chrono",
  "hex",
 ]
+
+[[package]]
+name = "proctree"
+version = "0.1.0"
 
 [[package]]
 name = "prodash"

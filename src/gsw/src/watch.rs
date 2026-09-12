@@ -707,12 +707,28 @@ pub(crate) enum IssueKey {
     Unbound,
 }
 
+/// What one press of `G` does.
+///
+/// One value rather than an `Option` beside a flag, because the loop does one
+/// thing for each answer. A press that runs and a press that asks are then two
+/// arms of one match, and no second question decides between them.
+#[derive(Debug, PartialEq, Eq)]
+enum IssuePress {
+    /// Run this command.
+    Run(crate::issue::IssueCommand),
+    /// Put this under the frame, and wait for a second press.
+    Ask(String),
+    /// Nothing at all.
+    Nothing,
+}
+
 /// The `G` key's own state, for the life of one watch-mode run.
 ///
-/// Two facts, and they are one value because one key reads both: the command
-/// the probe found, and whether a run of it is in flight. The second is a flag
-/// here rather than a fourth [`InputMode`], because it changes what one key
-/// does and changes no other key.
+/// Four facts, and they are one value because one key reads all of them: the
+/// command the probe found, whether a run of it is in flight, where the person
+/// who reads this screen sits, and whether a message that asks for a second
+/// press stands. None of them is an [`InputMode`], because each changes what
+/// this one key does and changes no other key.
 struct IssueRun {
     /// The command the probe found. `None` until the probe answers, and
     /// forever where it found none or where the feature is off.
@@ -720,14 +736,34 @@ struct IssueRun {
     /// Whether a run is in flight. One run at a time: a browser opening twice
     /// is two tabs nobody asked for.
     running: bool,
+    /// Where the person who reads this screen sits. Decided once, at start.
+    session: crate::remote::Session,
+    /// When the message that asks for a second press took the row, or `None`
+    /// when no such message stands.
+    ///
+    /// The message on screen is the armed state, so this holds an instant and
+    /// not a flag: the message goes away by itself after
+    /// [`crate::push::STATUS_LIFETIME`], and the arming goes with it.
+    ///
+    /// **The instant is the one the message took the row at, and not the one
+    /// the key was pressed at.** The row is not always free — a question and a
+    /// push in flight own it, and [`crate::push::PushUi::post_notice`] holds a
+    /// message that arrives then. A held message is a message nobody has read,
+    /// so an arming that started at the press would offer a second press
+    /// against a warning still sitting in the queue. [`IssueRun::arm`] is
+    /// therefore called by [`absorb`] and only for the answer that says the
+    /// words reached the screen.
+    armed: Option<Instant>,
 }
 
 impl IssueRun {
-    /// Nothing found yet, and nothing running.
-    fn new() -> Self {
+    /// Nothing found yet, nothing running, and nothing asked.
+    fn new(session: crate::remote::Session) -> Self {
         Self {
             command: None,
             running: false,
+            session,
+            armed: None,
         }
     }
 
@@ -745,18 +781,83 @@ impl IssueRun {
         self.command = Some(command);
     }
 
-    /// The command to run now, or `None` where there is nothing to run or a
-    /// run is already in flight.
+    /// What one press of `G` does now.
     ///
-    /// Setting the flag as it hands the command over is what makes a second
-    /// `G` start nothing: the key still classifies, and this still answers.
-    fn start(&mut self) -> Option<crate::issue::IssueCommand> {
+    /// The questions come in the order of the rules, and each one settles the
+    /// press on its own.
+    ///
+    /// A run in flight answers nothing and changes nothing else, because one
+    /// run at a time is the rule and a message that asked for a second press
+    /// would ask for a press that runs nothing. No command answers nothing
+    /// too, which is the silence of an unbound key.
+    ///
+    /// A local shell runs the command, because the browser opens where the
+    /// person sits. So does a remote shell whose message still stands: that
+    /// message is what the user read, and this press is the answer to it.
+    ///
+    /// Everything else is a first press on a remote shell. It asks, and
+    /// [`absorb`] puts the words it returns under the frame.
+    ///
+    /// **The asking and the arming are two halves, and this half only asks.**
+    /// The message is the armed state, and whether the message reaches the
+    /// screen is the row's answer rather than this one's — see
+    /// [`IssueRun::armed`]. So [`absorb`] posts the words, reads that answer,
+    /// and calls [`IssueRun::arm`] for the answer that says the row took them.
+    fn press(&mut self, now: Instant) -> IssuePress {
         if self.running {
-            return None;
+            return IssuePress::Nothing;
         }
-        let command = self.command.clone()?;
-        self.running = true;
-        Some(command)
+        let Some(command) = self.command.clone() else {
+            return IssuePress::Nothing;
+        };
+        if self.session == crate::remote::Session::Local || self.is_armed(now) {
+            // The arming goes as the run starts. An arming that outlived the
+            // run it was given for would let the next press open a browser on
+            // the wrong machine, with nobody asked a second time for it.
+            self.armed = None;
+            self.running = true;
+            return IssuePress::Run(command);
+        }
+        IssuePress::Ask(format!(
+            "remote shell — press G again to run {}",
+            command.name()
+        ))
+    }
+
+    /// The message that asks for a second press reached the row at `now`.
+    ///
+    /// The one door into the armed state, and [`absorb`] is its one caller:
+    /// the row answers whether the words are on the screen, and only that
+    /// answer arms the key. [`IssueRun::armed`] says why the instant is this
+    /// one and not the instant of the press.
+    fn arm(&mut self, now: Instant) {
+        self.armed = Some(now);
+    }
+
+    /// Whether the message that asks for a second press still stands.
+    ///
+    /// The message goes off the screen one [`crate::push::STATUS_LIFETIME`]
+    /// after it took the row, and [`IssueRun::armed`] holds that same instant,
+    /// so the arming ends at that same moment. The screen and the key then say
+    /// one thing: a `G` a minute later asks again.
+    ///
+    /// Saturating for the reason the age of a status message in
+    /// [`crate::push`] is: `now` comes from the loop's injected clock, and a
+    /// clock a test drives backwards reports the zero age it plainly has
+    /// rather than underflowing.
+    fn is_armed(&self, now: Instant) -> bool {
+        self.armed.is_some_and(|posted_at| {
+            now.saturating_duration_since(posted_at) < crate::push::STATUS_LIFETIME
+        })
+    }
+
+    /// A key other than `G` takes the arming away.
+    ///
+    /// That key also takes the message off the screen, and the message is the
+    /// armed state. The two go together, so a `G` after such a key is a first
+    /// press again.
+    fn disarm(&mut self) {
+        self.armed = None;
     }
 
     /// A run has ended, so `G` means something again.
@@ -898,6 +999,11 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     let issue_tx = tx.clone();
     spawn_issue_probe(shell.clone(), tx.clone());
 
+    // Where the person who reads this screen sits, read once and beside the
+    // shell above. A session does not change under a running process, and the
+    // read costs one `ps`.
+    let session = crate::remote::Session::read();
+
     // The one ignore matcher both threads share: the watcher callback reads it
     // per event, and every `walk` below rebuilds it from disk so a `.gitignore`
     // edited in another pane takes effect without a restart.
@@ -917,6 +1023,7 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             freshest: initial_freshest,
             schedule,
             ui: PushUi::new(cfg.truecolor),
+            session,
         },
         LoopHooks {
             collect: || walk(&mut handle, &ignore, cfg),
@@ -1141,6 +1248,9 @@ struct LoopStart {
     /// loop is the only place that knows what is displayed — see
     /// [`Event::Key`] for why the reader thread must not.
     ui: PushUi,
+    /// Where the person who reads this screen sits, so the `G` key knows
+    /// whether a browser opened here reaches anybody.
+    session: crate::remote::Session,
 }
 
 /// The side-effecting hooks the watch loop drives, bundled so the loop stays one
@@ -1244,6 +1354,12 @@ where
         Event::ForceRefresh => pending.force = true,
         Event::Key(key) => {
             if let Some(action) = classify_input(key, ui.mode(), issue.key()) {
+                // Every key but `G` takes the arming away. The message that
+                // asks for the second press is the armed state, and this key
+                // is not that press.
+                if !matches!(action, Event::IssueRequested) {
+                    issue.disarm();
+                }
                 return absorb(action, pending, ui, issue, snapshot, dims, hooks);
             }
         }
@@ -1259,8 +1375,26 @@ where
         Event::PushCancelled => ui.cancel(),
         Event::Dismiss => ui.dismiss(),
         Event::IssueRequested => {
-            if let Some(command) = issue.start() {
-                (hooks.start_issue)(command);
+            // One read of the clock, for both halves of one press. The arming
+            // and the message it stands for must end at the same moment, and
+            // two reads put the arming microseconds before the message. A test
+            // clock that steps on every read makes the same gap a whole step.
+            // The arm below takes this same instant, which is why it is right:
+            // it runs only where the message went straight onto the row, so
+            // `now` is the instant the message got there.
+            let now = clock();
+            match issue.press(now) {
+                IssuePress::Run(command) => (hooks.start_issue)(command),
+                // The row arms the key, and not the press. A question or a
+                // push in flight owns the row, and a notice that arrives then
+                // waits in the queue — nobody has read it, so a second press
+                // against it would run the command with no warning ever seen.
+                IssuePress::Ask(message) => {
+                    if ui.post_notice(message, now) == crate::push::Posted::OnRow {
+                        issue.arm(now);
+                    }
+                }
+                IssuePress::Nothing => {}
             }
         }
         Event::IssueCommandFound(command) => issue.found(command),
@@ -1367,10 +1501,11 @@ where
         mut freshest,
         mut schedule,
         mut ui,
+        session,
     } = start;
     // The probe answers on the loop's own channel, so the key is unbound until
     // it does and the loop never waits for it.
-    let mut issue = IssueRun::new();
+    let mut issue = IssueRun::new(session);
     loop {
         // Wait for the first event, or — when the decay timer is enabled — wake
         // after `interval` of quiet for a tick.
@@ -3075,6 +3210,12 @@ mod tests {
     /// reads the clock several times per iteration, so a stepping clock is what
     /// lets a test cross a scheduled deadline without sleeping — deterministic
     /// and parallel-safe, unlike a real timer.
+    ///
+    /// It also counts the reads, which a frozen clock cannot. Two reads of a
+    /// frozen clock give the same instant as one read, so a frozen clock hides
+    /// a read the code makes and does not need. A clock that moves on every
+    /// read turns that extra read into a whole step, which a test can hold an
+    /// interval against.
     pub(super) fn stepping_clock(base: Instant, step: Duration) -> impl Fn() -> Instant {
         let reads = std::cell::Cell::new(0_u32);
         move || {
@@ -3106,6 +3247,7 @@ mod tests {
                 freshest: Some(Duration::ZERO),
                 schedule: WalkSchedule::new(Some(interval), base, Duration::ZERO),
                 ui: PushUi::new(false),
+                session: crate::remote::Session::Local,
             },
             LoopHooks {
                 collect: || {
@@ -3160,6 +3302,7 @@ mod tests {
                     Duration::ZERO,
                 ),
                 ui: PushUi::new(false),
+                session: crate::remote::Session::Local,
             },
             LoopHooks {
                 collect: || Ok(empty_snapshot()),
@@ -3207,6 +3350,7 @@ mod tests {
                 freshest: Some(Duration::ZERO),
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
+                session: crate::remote::Session::Local,
             },
             LoopHooks {
                 collect: || {
@@ -3260,6 +3404,7 @@ mod tests {
                 freshest: None,
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
+                session: crate::remote::Session::Local,
             },
             LoopHooks {
                 collect: || {
@@ -3306,6 +3451,7 @@ mod tests {
                 freshest: None,
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
+                session: crate::remote::Session::Local,
             },
             LoopHooks {
                 collect: || {
@@ -3353,6 +3499,7 @@ mod tests {
                 freshest: None,
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
+                session: crate::remote::Session::Local,
             },
             LoopHooks {
                 collect: || {
@@ -3396,6 +3543,7 @@ mod tests {
                 freshest: Some(Duration::ZERO),
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
+                session: crate::remote::Session::Local,
             },
             LoopHooks {
                 collect: || Ok(empty_snapshot()),
@@ -3446,6 +3594,7 @@ mod tests {
                 freshest: Some(Duration::from_secs(30)),
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
+                session: crate::remote::Session::Local,
             },
             LoopHooks {
                 collect: || Ok(empty_snapshot()),
@@ -3493,6 +3642,7 @@ mod tests {
                 freshest: Some(Duration::ZERO),
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
+                session: crate::remote::Session::Local,
             },
             LoopHooks {
                 collect: || {
@@ -3549,6 +3699,7 @@ mod tests {
                 freshest: None,
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
+                session: crate::remote::Session::Local,
             },
             LoopHooks {
                 collect: || {
@@ -3605,6 +3756,7 @@ mod tests {
                 freshest: Some(Duration::ZERO),
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
+                session: crate::remote::Session::Local,
             },
             LoopHooks {
                 collect: || Ok(empty_snapshot()),
@@ -3684,6 +3836,7 @@ mod tests {
                 freshest: None, // decay timer off: isolate the throttle from tick behavior
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
+                session: crate::remote::Session::Local,
             },
             LoopHooks {
                 collect: || {
@@ -3762,6 +3915,7 @@ mod tests {
                 freshest: Some(Duration::ZERO),
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
+                session: crate::remote::Session::Local,
             },
             LoopHooks {
                 collect: || {
@@ -3837,6 +3991,7 @@ mod tests {
                 freshest: Some(Duration::ZERO),
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
+                session: crate::remote::Session::Local,
             },
             LoopHooks {
                 collect: || {
@@ -3913,6 +4068,7 @@ mod tests {
                 freshest: None, // decay timer off: isolate the throttle from tick behavior
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
+                session: crate::remote::Session::Local,
             },
             LoopHooks {
                 collect: || {
@@ -3989,6 +4145,7 @@ mod tests {
                 freshest: None, // decay timer off: isolate the throttle from tick behavior
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
+                session: crate::remote::Session::Local,
             },
             LoopHooks {
                 collect: || {
@@ -4054,6 +4211,7 @@ mod tests {
                 freshest: None, // decay timer off: isolate the forced walk from tick behavior
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
+                session: crate::remote::Session::Local,
             },
             LoopHooks {
                 collect: || {
@@ -4122,6 +4280,7 @@ mod tests {
                 freshest: None, // decay timer off: isolate the failed walk from tick behavior
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
+                session: crate::remote::Session::Local,
             },
             LoopHooks {
                 collect: || {
@@ -4207,6 +4366,7 @@ mod tests {
                 freshest: None, // decay timer off: isolate the throttle from tick behavior
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
+                session: crate::remote::Session::Local,
             },
             LoopHooks {
                 collect: || {
@@ -4302,6 +4462,7 @@ mod tests {
                 freshest: None, // decay timer off: isolate recovery from tick behavior
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
+                session: crate::remote::Session::Local,
             },
             LoopHooks {
                 collect: || {
@@ -4526,6 +4687,22 @@ mod push_loop_tests {
         run_loop_with(events, TEST_DIMS, |_frame_dims| "FRAME".to_string())
     }
 
+    /// [`run_loop`] on a remote shell.
+    ///
+    /// A helper of its own rather than a parameter of [`run_loop`], because
+    /// every other key means the same thing in both sessions and only the `G`
+    /// key reads this.
+    fn run_loop_remote(events: Vec<Event>) -> (String, Seen) {
+        let base = Instant::now();
+        run_loop_in_session(
+            events,
+            TEST_DIMS,
+            |_frame_dims| "FRAME".to_string(),
+            move || base,
+            crate::remote::Session::Remote,
+        )
+    }
+
     /// Run the loop in a pane of the given size, with a frame that really fills
     /// the rows it was given.
     ///
@@ -4569,6 +4746,27 @@ mod push_loop_tests {
         render_frame: fn(Dimensions) -> String,
         clock: Clock,
     ) -> (String, Seen) {
+        run_loop_in_session(
+            events,
+            dims,
+            render_frame,
+            clock,
+            crate::remote::Session::Local,
+        )
+    }
+
+    /// [`run_loop_clocked`] with the session supplied by the caller.
+    ///
+    /// One more knob, added the way every knob above it was added: the tests
+    /// that do not name a session read exactly as they did, and they all get
+    /// the local one, which is the session every one of them assumed.
+    fn run_loop_in_session<Clock: Fn() -> Instant>(
+        events: Vec<Event>,
+        dims: Dimensions,
+        render_frame: fn(Dimensions) -> String,
+        clock: Clock,
+        session: crate::remote::Session,
+    ) -> (String, Seen) {
         let (tx, rx) = mpsc::channel();
         for event in events {
             tx.send(event).expect("queue event");
@@ -4586,6 +4784,7 @@ mod push_loop_tests {
                 freshest: None,
                 schedule: no_timed_refresh_for_push(),
                 ui: PushUi::new(false),
+                session,
             },
             LoopHooks {
                 collect: || {
@@ -4645,6 +4844,247 @@ mod push_loop_tests {
     /// One press of `G`.
     fn press_g() -> Event {
         Event::Key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE))
+    }
+
+    /// An [`IssueRun`] in `session`, whose probe has answered.
+    fn issue_run_in(session: crate::remote::Session) -> IssueRun {
+        let mut issue = IssueRun::new(session);
+        issue.found(found_command());
+        issue
+    }
+
+    /// Both places the person who reads the screen can sit.
+    const BOTH_SESSIONS: [crate::remote::Session; 2] = [
+        crate::remote::Session::Local,
+        crate::remote::Session::Remote,
+    ];
+
+    /// The message the first press on a remote shell puts under the frame.
+    ///
+    /// Written out here rather than taken from the code it pins, so a change
+    /// to the words of the message is a change these tests report. The command
+    /// is the whole command line, because that is what the second press runs.
+    const SECOND_PRESS_NOTICE: &str = "remote shell — press G again to run ggs";
+
+    #[test]
+    fn a_press_on_a_local_shell_runs_the_command_at_once() {
+        // The browser opens where the person sits, so there is nothing to ask.
+        let mut issue = issue_run_in(crate::remote::Session::Local);
+        assert_eq!(
+            issue.press(Instant::now()),
+            IssuePress::Run(found_command()),
+            "a local shell must run the command on the first press",
+        );
+    }
+
+    #[test]
+    fn a_first_press_on_a_remote_shell_asks_for_a_second_one() {
+        // The browser opens on the machine that runs gsw, where nobody sits.
+        let mut issue = issue_run_in(crate::remote::Session::Remote);
+        assert_eq!(
+            issue.press(Instant::now()),
+            IssuePress::Ask(SECOND_PRESS_NOTICE.to_string()),
+            "the message must name the command the second press runs",
+        );
+    }
+
+    #[test]
+    fn a_second_press_on_a_remote_shell_runs_the_command() {
+        // The caller arms, because only the row knows whether the words it
+        // returned reached the screen. `absorb` makes this pair of calls.
+        let now = Instant::now();
+        let mut issue = issue_run_in(crate::remote::Session::Remote);
+        issue.press(now);
+        issue.arm(now);
+        assert_eq!(
+            issue.press(now + Duration::from_secs(1)),
+            IssuePress::Run(found_command()),
+            "the second press must run the command the message named",
+        );
+    }
+
+    #[test]
+    fn a_second_press_one_lifetime_later_asks_again() {
+        // The message on screen is the armed state. It leaves the screen after
+        // one `STATUS_LIFETIME`, and the arming leaves with it, so the two end
+        // at the same moment. The caller arms, as it does in `absorb`, and it
+        // arms at the instant the message took the row.
+        let now = Instant::now();
+        let mut issue = issue_run_in(crate::remote::Session::Remote);
+        issue.press(now);
+        issue.arm(now);
+        assert_eq!(
+            issue.press(now + crate::push::STATUS_LIFETIME),
+            IssuePress::Ask(SECOND_PRESS_NOTICE.to_string()),
+            "a press one lifetime after the first must ask again",
+        );
+    }
+
+    #[test]
+    fn a_key_between_two_presses_takes_the_arming_away() {
+        // That key also takes the message off the screen, and the message is
+        // the armed state. The caller arms first, as it does in `absorb`,
+        // because there is no arming to take away otherwise.
+        let now = Instant::now();
+        let mut issue = issue_run_in(crate::remote::Session::Remote);
+        issue.press(now);
+        issue.arm(now);
+        issue.disarm();
+        assert_eq!(
+            issue.press(now),
+            IssuePress::Ask(SECOND_PRESS_NOTICE.to_string()),
+            "a key other than `G` must leave the next press asking",
+        );
+    }
+
+    #[test]
+    fn a_press_while_a_run_is_in_flight_does_nothing() {
+        // One run at a time, in both sessions: a browser opening twice is two
+        // tabs nobody asked for. A press here must not arm anything either,
+        // because the message would ask for a press that runs nothing.
+        for session in BOTH_SESSIONS {
+            let mut issue = issue_run_in(session);
+            issue.running = true;
+            assert_eq!(
+                issue.press(Instant::now()),
+                IssuePress::Nothing,
+                "a run in flight must answer nothing in {session:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_press_with_no_command_does_nothing() {
+        // The probe has not answered yet, or it found no command. That is the
+        // one silent case the key has, and it is silent in both sessions.
+        for session in BOTH_SESSIONS {
+            let mut issue = IssueRun::new(session);
+            assert_eq!(
+                issue.press(Instant::now()),
+                IssuePress::Nothing,
+                "no command must answer nothing in {session:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_first_g_on_a_remote_shell_starts_no_run_and_asks_again() {
+        // The browser would open on the machine that runs gsw, where nobody
+        // sits. So the first press spends a row rather than a tab.
+        let (screen, seen) = run_loop_remote(vec![probe_answered(), press_g(), Event::Quit]);
+        assert!(
+            seen.issue_runs.is_empty(),
+            "a first press on a remote shell must start no run, got {:?}",
+            seen.issue_runs,
+        );
+        let painted = strip_ansi(&screen);
+        assert!(
+            painted.contains(SECOND_PRESS_NOTICE),
+            "the message must reach the screen, got {painted:?}",
+        );
+    }
+
+    #[test]
+    fn a_second_g_on_a_remote_shell_starts_the_run() {
+        let (_screen, seen) =
+            run_loop_remote(vec![probe_answered(), press_g(), press_g(), Event::Quit]);
+        assert_eq!(
+            seen.issue_runs,
+            vec![found_command()],
+            "the second press must run the command",
+        );
+    }
+
+    /// Two thirds of the window the message that asks for a second press
+    /// stands in.
+    ///
+    /// The size is what makes the read count visible. One step is inside
+    /// [`crate::push::STATUS_LIFETIME`] and two steps are past it, so two
+    /// presses one clock read apart find the arming, and two presses two clock
+    /// reads apart find nothing. A function rather than a constant, because
+    /// the arithmetic on a [`Duration`] does not run in a constant.
+    fn press_step() -> Duration {
+        crate::push::STATUS_LIFETIME * 2 / 3
+    }
+
+    #[test]
+    fn each_g_press_reads_the_clock_once_so_the_second_press_still_stands() {
+        // The rule: one press of `G` reads the clock once. The loop's own
+        // reads then never eat the window the second press stands in.
+        //
+        // An extra read inside one press costs a whole step of that window. A
+        // frozen clock cannot show that cost, because two reads of a frozen
+        // clock give the same instant as one read. This clock steps on every
+        // read instead. `absorb` reads the clock for a key only in the
+        // `Event::IssueRequested` arm, so the two presses land on consecutive
+        // reads and sit one step apart, which is inside the window. A second
+        // read for the notice puts the presses two steps apart, which is past
+        // the window, and the second press then only asks again.
+        //
+        // This pins commit 54a9cb2b, which took that second read out.
+        let (_screen, seen) = run_loop_in_session(
+            vec![probe_answered(), press_g(), press_g(), Event::Quit],
+            TEST_DIMS,
+            |_frame_dims| "FRAME".to_string(),
+            stepping_clock(Instant::now(), press_step()),
+            crate::remote::Session::Remote,
+        );
+        assert_eq!(
+            seen.issue_runs,
+            vec![found_command()],
+            "each press must read the clock once, so the second press runs the command",
+        );
+    }
+
+    #[test]
+    fn a_g_pressed_while_a_push_owns_the_row_arms_nothing() {
+        // The message that asks for the second press *is* the offer, so the
+        // offer cannot stand while that message is still in the queue. A push
+        // owns the row for minutes, and a notice posted then waits for it. A
+        // press that armed the key there would let the next `G` open a browser
+        // on the machine nobody sits at, with nobody ever asked a second time
+        // for it — which is the exact harm this feature exists to stop.
+        let (screen, seen) = run_loop_remote(vec![
+            probe_answered(),
+            Event::PushRequested,
+            Event::PushConfirmed,
+            press_g(),
+            press_g(),
+            Event::Quit,
+        ]);
+        assert!(
+            seen.issue_runs.is_empty(),
+            "a press made while a push owns the row must arm nothing, got {:?}",
+            seen.issue_runs,
+        );
+        let painted = strip_ansi(&screen);
+        assert!(
+            !painted.contains(SECOND_PRESS_NOTICE),
+            "the notice must wait for the row the push owns, got {painted:?}",
+        );
+    }
+
+    #[test]
+    fn a_key_between_two_g_presses_on_a_remote_shell_starts_nothing() {
+        // The message is the armed state, and every other key takes it off the
+        // screen. A `G` after that key is a first press again.
+        let (screen, seen) = run_loop_remote(vec![
+            probe_answered(),
+            press_g(),
+            key(KeyCode::Char('x')),
+            press_g(),
+            Event::Quit,
+        ]);
+        assert!(
+            seen.issue_runs.is_empty(),
+            "a key between the presses must leave the second one asking, got {:?}",
+            seen.issue_runs,
+        );
+        let painted = strip_ansi(&screen);
+        assert!(
+            painted.contains(SECOND_PRESS_NOTICE),
+            "the second press must ask again, got {painted:?}",
+        );
     }
 
     #[test]
@@ -4783,6 +5223,7 @@ mod push_loop_tests {
                 freshest: None, // decay timer off: the message is the only thing that ages
                 schedule: no_timed_refresh_for_push(),
                 ui: pushed_ui(base),
+                session: crate::remote::Session::Local,
             },
             LoopHooks {
                 collect: || Ok(pushable_snapshot()),
@@ -5199,6 +5640,7 @@ mod push_loop_tests {
                     freshest: None,
                     schedule: no_timed_refresh_for_push(),
                     ui: PushUi::new(false),
+                    session: crate::remote::Session::Local,
                 },
                 LoopHooks {
                     collect: || Ok(pushable_snapshot()),

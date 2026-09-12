@@ -608,6 +608,21 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       unbound key does. That is the one silent case the key has: every other outcome speaks.
       Because the question is asked once, a function you add to your rc file after gsw started
       needs a restart.
+    - **On a remote shell, `G` asks once more.** The browser opens on the machine that runs gsw, and
+      on a remote shell nobody sits at that machine — so the first `G` runs nothing and puts
+      `remote shell — press G again to run ggs` under the frame, where the command named is whatever
+      `GSW_ISSUE_COMMAND` holds. The second `G` runs it, for as long as that message is on the
+      screen. gsw decides once, at start, whether the shell is remote: it is remote when
+      `SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY` is in the environment, or when a `mosh-server`
+      stands above the process — mosh carries none of those variables into the shell it starts, so
+      the process tree is the only place that says so. The message fades off the screen after a
+      minute. Any other key takes the offer of the second press away, so a `G` a minute later asks
+      again, and so does a `G` after any other key. The offer stands exactly as long as the message
+      does, so a `G` pressed while a push owns the row offers nothing: that message waits for the
+      row the way any other does, and the offer starts when it gets there. The limit is a
+      multiplexer that starts its server as a daemon: that server reparents to PID 1, and the walk
+      up the process tree stops there. gsw answers that for Zellij through the Zellij client, which
+      keeps the chain. A session viewed through tmux reports whatever stands above the tmux server.
     - A run that works costs the frame no row: the browser is the answer. A run that fails puts
       the last line the command wrote under the frame, where it waits for a key the way git's
       error text does — `ggs` refuses on a branch that names no issue, and that refusal is the

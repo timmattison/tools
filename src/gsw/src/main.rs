@@ -25,6 +25,8 @@ mod issue;
 /// Cutting a child process's byte chunks into lines that are safe to paint.
 mod lines;
 mod push;
+/// Deciding whether the person who reads this screen sits at this machine.
+mod remote;
 mod render;
 mod repo;
 mod snapshot;

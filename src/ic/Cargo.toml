@@ -14,6 +14,7 @@ buildinfo.workspace = true
 clap.workspace = true
 image.workspace = true
 notify.workspace = true
+proctree.workspace = true
 termion.workspace = true
 termgfx.workspace = true
 unicode-width.workspace = true

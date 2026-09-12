@@ -1,0 +1,9 @@
+[package]
+name = "proctree"
+version = "0.1.0"
+edition.workspace = true
+description = "The walk of the process ancestry that every tool in this workspace shares"
+license = "MIT"
+
+[lints]
+workspace = true
