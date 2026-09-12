@@ -540,13 +540,44 @@ fn repo_root() -> PathBuf {
         .unwrap_or_else(|e| panic!("cannot canonicalize {}: {e}", root.display()))
 }
 
+/// The audit of this repository is clean, over a read set no smaller than the
+/// set of target roots `cargo metadata` names.
+///
+/// The floor is ground truth rather than a remembered number. Cargo names every
+/// target root it builds, and each of those roots is a file this guard must
+/// read, so the read set can never be the smaller of the two. A hand-typed
+/// floor measures nothing the workspace can move: it only loosens as the
+/// workspace grows, so a walk that later lost half the members still clears it.
+///
+/// This is not the assertion
+/// `the_read_set_holds_every_target_root_cargo_builds` makes, and both earn
+/// their place:
+///
+/// - That test compares the two sets by difference, so it names each root the
+///   guard never reads. This test carries a size and no names. The two failure
+///   messages therefore answer different questions: which file is invisible,
+///   and how large the gap is.
+/// - That test reads `source_files` on its own. This test reads the report,
+///   which is where every caller takes a verdict from. Today `audit` reports
+///   every file `source_files` returns, so the counts are equal and that test
+///   covers this one by arithmetic. The two surfaces part company the day
+///   `audit` drops a file between the walk and the verdict — an unreadable file
+///   skipped rather than refused, for one. That test stays green there, and
+///   this one fails.
 #[test]
 fn this_workspace_removes_no_git_variable_by_name() {
-    let report = git_env_sweep::audit(&repo_root()).expect("the audit reaches a verdict");
+    let root = repo_root();
+    let roots = cargo_target_roots(&root).len();
+
+    let report = git_env_sweep::audit(&root).expect("the audit reaches a verdict");
+    let examined = report.files_examined();
 
     assert!(
-        report.files_examined() > 300,
-        "this workspace holds hundreds of Rust source files, so a smaller count means the walk          reached the wrong tree and would report clean for the wrong reason: {report}"
+        examined >= roots,
+        "cargo names {roots} target roots, and every one of them is a file this guard must \
+         read, so a read set of {examined} files means the walk reached the wrong tree or lost \
+         members, and a clean report over a read set that short is clean for the wrong reason: \
+         {report}"
     );
     assert!(report.is_compliant(), "{report}");
     assert!(
