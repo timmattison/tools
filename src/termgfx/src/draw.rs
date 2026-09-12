@@ -56,6 +56,20 @@ use crate::probe::{ask_for_a_refusal, Refusal, QUERY_BUDGET};
 /// around the same pixels.
 const KITTY_CHUNK_SIZE: usize = 4096;
 
+/// The characters that one Kitty command puts around one chunk of the payload.
+///
+/// A command after the first one carries `ESC _ G m = 1 ;` in front of its
+/// chunk and `ESC \` behind it. The first part is seven characters and the
+/// second is two, which makes nine. The last command of a transmission carries
+/// `m=0` in place of `m=1`, and that is the same nine characters.
+///
+/// [`kitty_budget_under_chunk_framing`] counts nine for every chunk, the first
+/// one included. The first command carries the header in place of these nine
+/// characters, and [`PayloadBudget::CONTROL_BLOCK_ROOM`] covers that header, so
+/// the nine characters counted there are an overcount. Nine characters carry
+/// two pixels of the picture, and one rule for every chunk is worth two pixels.
+const KITTY_CHUNK_FRAMING: usize = 9;
+
 /// The Kitty graphics command that takes every image off the screen.
 ///
 /// `a=d` is the delete action and `d=A` names every placement of every image.
@@ -89,7 +103,8 @@ const KITTY_QUIET: &str = "q=2";
 /// [`Picture::Still`] wants that one. A terminal that refuses the picture draws
 /// nothing, and the tool that asked for no answer then reports success in front
 /// of an empty screen. The image store of a mosh session holds a fixed number of
-/// bytes and refuses a picture above it, so the case is a common one.
+/// bytes for one transmission and refuses a picture above it, so the case is a
+/// common one.
 ///
 /// **The caller of this crate reads the answer that this key asks for.** A
 /// caller that asks a terminal for a failure report and then reads nothing
@@ -293,17 +308,28 @@ pub struct Budget {
     pub rows: Option<u32>,
 }
 
-/// The characters of payload that one image can spend.
+/// The characters of payload that one image can spend in one protocol.
 ///
 /// A terminal that carries an image over a network caps what one image can
-/// spend, and a transmission above that cap draws nothing at all. mosh is the
-/// cap that matters in practice, and it bounds each of the three protocols
-/// that this module writes. [`PayloadBudget::MOSH`] names those three caps and
-/// says where each one stands.
+/// spend. A transmission above that cap draws nothing at all, or it reaches
+/// the screen with the end cut off. mosh is the cap that matters in practice,
+/// and it states one cap for each of the three protocols that this module
+/// writes. The three caps are three different numbers.
 ///
-/// The budget bounds the payload that the protocol carries, and the keys in
-/// front of that payload are a few tens of characters. [`PayloadBudget::MOSH`]
-/// leaves room for them.
+/// **One budget belongs to one protocol.** [`ProtocolBudgets`] holds the three
+/// together, and [`Capabilities::draw`] hands each writer the budget of the
+/// protocol that writer sends. One number for all three bounds two protocols
+/// out of three by the cap of a protocol they do not use, which is the defect
+/// of <https://github.com/timmattison/tools/issues/480>.
+///
+/// The budget bounds the payload that the protocol carries, and the command in
+/// front of that payload is a few tens of characters. Every cap counts that
+/// command as well, so [`PayloadBudget::under_command_cap`] takes the room for
+/// the command off a cap of a transport and leaves the payload that a picture
+/// can really spend. The Kitty protocol sends a large payload in one command
+/// for each chunk of it, and that cost grows with the payload, so
+/// [`kitty_budget_under_chunk_framing`] takes the framing of those commands
+/// off the budget inside [`write_kitty`].
 ///
 /// A picture above the budget is drawn at a smaller cost rather than not at
 /// all, and [`fit_to_payload_budget`] states what it spends to get there.
@@ -320,36 +346,54 @@ pub struct Budget {
 pub struct PayloadBudget(usize);
 
 impl PayloadBudget {
-    /// The room that [`PayloadBudget::MOSH`] leaves for the keys of the
-    /// command.
+    /// The room that a budget leaves for the command in front of the payload.
     ///
-    /// mosh counts the keys and the payload of one command together, so the
-    /// keys come out of the same mebicharacter that the payload spends. A
-    /// Kitty control block runs to about eighty characters, and the arguments
-    /// of the other two protocols are shorter. This room stands far above all
-    /// three, because a picture that loses four kibicharacters of resolution
-    /// loses nothing a reader can see.
+    /// Every cap that a transport states counts the command of the protocol
+    /// together with the payload, so the command comes out of the same number
+    /// that the payload spends. The command takes three shapes, one for each
+    /// protocol that this module writes. A Kitty control block runs to about
+    /// eighty characters. An iTerm2 operating system command carries the
+    /// `1337;File=` part and the arguments that follow it. A Sixel
+    /// device-control string carries the introducer and the size of the
+    /// picture. This room stands far above one command of any of the three,
+    /// because a picture that loses four kibicharacters of resolution loses
+    /// nothing a reader can see.
+    ///
+    /// **One command is what this room covers, and a Kitty transmission is
+    /// more than one command.** [`write_kitty`] sends a payload above
+    /// [`KITTY_CHUNK_SIZE`] in one command for each chunk, so the characters
+    /// that the Kitty protocol adds to the payload grow with the payload, and
+    /// one fixed number cannot cover a cost that grows. The room here covers
+    /// the first command of that transmission, which carries the header and
+    /// the keys. [`kitty_budget_under_chunk_framing`] takes the framing of the
+    /// commands after it off the budget, inside the writer that writes them.
+    ///
+    /// [`PayloadBudget::under_command_cap`] is where the room comes off a cap.
     const CONTROL_BLOCK_ROOM: usize = 4096;
 
-    /// The budget of a mosh session.
+    /// The careful budget of a session that states no cap at all.
     ///
-    /// mosh caps one image at one mebicharacter, and the cap is the same
-    /// number for each of the three protocols that this module writes. The
-    /// three numbers stand in `timmattison/mosh-rs` at commit `5676142`
-    /// (<https://github.com/timmattison/mosh-rs>):
+    /// **This is a fallback and it is not the cap of any protocol.** A mosh
+    /// that draws images states the cap of each protocol it carries in
+    /// `MOSH_IMAGE_BUDGETS`, and [`crate::MoshImages::budgets`] reads the three
+    /// numbers there. Upstream mosh writes no such variable, and neither does
+    /// a mosh built before that variable landed, so a session that states
+    /// nothing lands here.
     ///
-    /// * Kitty: `MAXIMUM_STORED_CHARACTERS` of
-    ///   `crates/mosh-terminal/src/imagestore.rs`. `ImageStore::hold` refuses a
-    ///   transmission above it with [`crate::Refusal`] `ENOSPC`, and it counts
-    ///   `control.len() + payload.len()`. The store holds every image it
-    ///   accepted under that same number for the length of the session, and it
-    ///   evicts the oldest images to make room for a new one.
-    /// * iTerm2: `MAXIMUM_INLINE_IMAGE_CHARACTERS` of
-    ///   `crates/mosh-terminal/src/dispatcher.rs`. The protocol carries a whole
-    ///   image in one operating system command, and mosh drops every character
-    ///   of that command above the cap.
-    /// * Sixel: `MAXIMUM_SIXEL_STRING_CHARACTERS` of the same file, which
-    ///   bounds one device-control string in the same way.
+    /// The number is one mebicharacter less the room for the command. It
+    /// stands at or under every cap that mosh has ever stated, so a picture
+    /// fitted for it reaches a terminal on any of those sessions.
+    ///
+    /// **A copy of a real cap goes stale in silence, and this one already
+    /// did.** This constant carried the cap of the Kitty protocol until mosh
+    /// raised that cap, and nothing here said so. A copy that stands under the
+    /// real cap only draws a smaller picture than the transport allows. A copy
+    /// that stands above a cap the transport lowered draws nothing at all in
+    /// the Kitty protocol, and it draws a picture with the end cut off in the
+    /// two others. So a caller reads the cap of the protocol it writes, and it
+    /// reaches this number only where the session states none. See
+    /// <https://github.com/timmattison/tools/issues/480> and
+    /// <https://github.com/timmattison/mosh-rs/issues/94>.
     pub const MOSH: Self = Self(1024 * 1024 - Self::CONTROL_BLOCK_ROOM);
 
     /// The budget of a terminal that states no cap of its own.
@@ -362,6 +406,45 @@ impl PayloadBudget {
     #[must_use]
     pub const fn of(characters: usize) -> Self {
         Self(characters)
+    }
+
+    /// The payload that a picture can spend under a cap that counts the
+    /// command as well.
+    ///
+    /// A transport states a cap for each protocol, and each of those caps
+    /// counts the command of the protocol together with the payload. The keys
+    /// of a Kitty control block, the arguments of an iTerm2 operating system
+    /// command and the introducer of a Sixel device-control string all come
+    /// out of the same number that the payload spends.
+    /// [`PayloadBudget::CONTROL_BLOCK_ROOM`] is the room that this module
+    /// keeps for them, and it stands above one command of each of the three.
+    /// This function takes that room off the cap, so a caller turns a cap of
+    /// the transport into a budget of the payload and learns nothing about the
+    /// room.
+    ///
+    /// A Kitty transmission of a large payload carries one command for each
+    /// chunk, and the framing of the commands after the first grows with the
+    /// payload. [`kitty_budget_under_chunk_framing`] takes that off the budget
+    /// inside [`write_kitty`], so this function states one rule for the three
+    /// protocols and the writer that chunks states its own cost.
+    ///
+    /// A cap at or below the room gives a budget of zero, and that answer is
+    /// correct. Such a transport carries no picture that this crate can draw,
+    /// and a budget of zero holds no payload.
+    ///
+    /// mosh is the transport that states such caps, and it now states one for
+    /// each protocol. See
+    /// <https://github.com/timmattison/tools/issues/480>.
+    ///
+    /// # Arguments
+    /// * `characters` - The cap, in characters, which counts the command and
+    ///   the payload together.
+    ///
+    /// # Returns
+    /// The characters of payload that one image can spend under that cap.
+    #[must_use]
+    pub const fn under_command_cap(characters: usize) -> Self {
+        Self(characters.saturating_sub(Self::CONTROL_BLOCK_ROOM))
     }
 
     /// Whether a payload of `characters` fits inside this budget.
@@ -377,6 +460,135 @@ impl PayloadBudget {
     #[must_use]
     const fn characters(self) -> usize {
         self.0
+    }
+}
+
+/// The payload budget of each of the three inline-image protocols.
+///
+/// mosh once capped every protocol it carries at the same number. mosh states
+/// three caps now, one for each protocol, so one budget answers for the wrong
+/// protocol on two runs out of three. [`PayloadBudget`] states what a budget
+/// above the cap of the protocol costs. A budget below that cap takes
+/// resolution off a picture that the terminal would have drawn whole.
+/// See <https://github.com/timmattison/tools/issues/480>.
+///
+/// A caller states each protocol by name, with [`ProtocolBudgets::with_kitty`],
+/// [`ProtocolBudgets::with_sixel`] and [`ProtocolBudgets::with_iterm2`]. One
+/// constructor that took the three budgets as three arguments of one type
+/// would let a caller put two of them in the wrong order with nothing to say
+/// so, and that mistake shows itself as a picture that draws at the wrong size
+/// on one terminal out of three.
+///
+/// The builder also fits the caller that reads the caps of a transport. Such a
+/// caller starts at one careful budget with [`ProtocolBudgets::uniform`], and
+/// it then overrides each protocol whose cap the transport really states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProtocolBudgets {
+    /// The budget of the Kitty graphics protocol.
+    kitty: PayloadBudget,
+    /// The budget of the Sixel protocol.
+    sixel: PayloadBudget,
+    /// The budget of the iTerm2 protocol.
+    iterm2: PayloadBudget,
+}
+
+impl ProtocolBudgets {
+    /// The budgets of a terminal that states no cap of its own.
+    pub const UNLIMITED: Self = Self::uniform(PayloadBudget::UNLIMITED);
+
+    /// The same budget for each of the three protocols.
+    ///
+    /// A caller that reads the caps of a transport starts here, at the most
+    /// careful budget it knows, and it then overrides each protocol whose cap
+    /// the transport really states. A protocol that the transport says nothing
+    /// about keeps the careful budget, which draws a picture the terminal
+    /// holds.
+    ///
+    /// # Arguments
+    /// * `budget` - The budget that each of the three protocols takes.
+    ///
+    /// # Returns
+    /// The budgets, with all three protocols at `budget`.
+    #[must_use]
+    pub const fn uniform(budget: PayloadBudget) -> Self {
+        Self {
+            kitty: budget,
+            sixel: budget,
+            iterm2: budget,
+        }
+    }
+
+    /// These budgets, with the Kitty graphics protocol at `budget`.
+    ///
+    /// # Arguments
+    /// * `budget` - The budget of the Kitty graphics protocol.
+    ///
+    /// # Returns
+    /// The same budgets, with that one protocol changed.
+    #[must_use]
+    pub const fn with_kitty(self, budget: PayloadBudget) -> Self {
+        Self {
+            kitty: budget,
+            sixel: self.sixel,
+            iterm2: self.iterm2,
+        }
+    }
+
+    /// These budgets, with the Sixel protocol at `budget`.
+    ///
+    /// # Arguments
+    /// * `budget` - The budget of the Sixel protocol.
+    ///
+    /// # Returns
+    /// The same budgets, with that one protocol changed.
+    #[must_use]
+    pub const fn with_sixel(self, budget: PayloadBudget) -> Self {
+        Self {
+            kitty: self.kitty,
+            sixel: budget,
+            iterm2: self.iterm2,
+        }
+    }
+
+    /// These budgets, with the iTerm2 protocol at `budget`.
+    ///
+    /// # Arguments
+    /// * `budget` - The budget of the iTerm2 protocol.
+    ///
+    /// # Returns
+    /// The same budgets, with that one protocol changed.
+    #[must_use]
+    pub const fn with_iterm2(self, budget: PayloadBudget) -> Self {
+        Self {
+            kitty: self.kitty,
+            sixel: self.sixel,
+            iterm2: budget,
+        }
+    }
+
+    /// The budget of the protocol that `routine` writes.
+    ///
+    /// The draw names the routine, and the routine names the protocol, so this
+    /// is the one step between the budgets that a caller states and the budget
+    /// that one picture spends.
+    ///
+    /// [`DisplayRoutine`] stays inside this crate, which is why this answer
+    /// does as well. A caller outside the crate names a protocol with
+    /// [`ProtocolBudgets::with_kitty`], [`ProtocolBudgets::with_sixel`] or
+    /// [`ProtocolBudgets::with_iterm2`], and it reads no routine at all.
+    ///
+    /// # Arguments
+    /// * `routine` - The routine that this terminal draws with.
+    ///
+    /// # Returns
+    /// The payload budget of the protocol that the routine writes.
+    #[must_use]
+    pub(crate) const fn of_routine(self, routine: DisplayRoutine) -> PayloadBudget {
+        match routine {
+            DisplayRoutine::Kitty => self.kitty,
+            DisplayRoutine::Sixel => self.sixel,
+            DisplayRoutine::Iterm2 => self.iterm2,
+        }
     }
 }
 
@@ -474,8 +686,21 @@ pub struct Request<'a> {
     /// carries an encoding of its own, so neither one can take a file as it
     /// stands.
     pub source: Option<&'a [u8]>,
-    /// How many characters of payload the image can spend.
-    pub payload: PayloadBudget,
+    /// How many characters of payload the image can spend, stated one time
+    /// for each of the three inline-image protocols.
+    ///
+    /// The caller cannot state one number here, because it does not know which
+    /// protocol the picture travels in. [`Capabilities::draw`] reads the
+    /// terminal and picks the protocol, and that happens after the caller
+    /// builds this request. So the caller states the budget of all three
+    /// protocols, and the draw reads the one that belongs to the protocol it
+    /// writes.
+    ///
+    /// A transport that caps the three protocols at the same number states
+    /// that number one time, with [`ProtocolBudgets::uniform`]. mosh caps them
+    /// at three different numbers, which is why this holds three.
+    /// See <https://github.com/timmattison/tools/issues/480>.
+    pub payload: ProtocolBudgets,
     /// Whether the run draws one picture or one frame of many.
     pub picture: Picture,
     /// Where the cursor stands when the image is written.
@@ -538,10 +763,18 @@ impl Capabilities {
         // the one read of the terminal happened before this call and no writer
         // reads the terminal a second time.
         let answered = self.answered_cell();
-        match self.display_routine() {
-            DisplayRoutine::Sixel => write_sixel(out, image, request, answered),
-            DisplayRoutine::Kitty => write_kitty(out, image, request, answered),
-            DisplayRoutine::Iterm2 => write_iterm2(out, image, request, answered),
+        let routine = self.display_routine();
+
+        // Each of the three protocols carries a cap of its own, and the
+        // routine is what names the protocol. The caller states all three
+        // budgets, because it builds the request before this call picks one of
+        // them. <https://github.com/timmattison/tools/issues/480>
+        let budget = request.payload.of_routine(routine);
+
+        match routine {
+            DisplayRoutine::Sixel => write_sixel(out, image, request, budget, answered),
+            DisplayRoutine::Kitty => write_kitty(out, image, request, budget, answered),
+            DisplayRoutine::Iterm2 => write_iterm2(out, image, request, budget, answered),
         }?;
 
         out.flush()?;
@@ -850,10 +1083,10 @@ trait Payload: Copy {
 /// and the two cost very different numbers of characters. Base64 turns three
 /// bytes into four characters, and three bytes is one pixel, so raw pixels cost
 /// four characters for every pixel: 580800 characters for a photograph of 330
-/// pixels by 440. A mosh session holds 1048576 characters of image, so one such
-/// picture takes over half of that store. A photograph of twice the pixels
-/// costs more than the whole store, and it never arrives. A PNG of the same
-/// photograph costs a fraction of it.
+/// pixels by 440. mosh carries 1638400 characters in one Kitty transmission,
+/// so one such picture takes over a third of that cap. A photograph of three
+/// times the pixels stands above the whole cap, and it never arrives. A PNG of
+/// the same photograph costs a fraction of it.
 ///
 /// The variant owns the `f=` key, the keys that state the pixel size, and the
 /// encoder, all three together. One place therefore decides the header and the
@@ -1044,14 +1277,15 @@ impl JpegQuality {
     /// The quality that the ladder stops at.
     ///
     /// The report of this defect measures a photograph of 3074 pixels by 1856
-    /// at this quality: 785138 bytes, which is 1046852 base64 characters.
-    /// [`PayloadBudget::MOSH`] holds 1044480 of them, so the floor of the
-    /// ladder still misses the budget by 2372 characters, which is 0.2 percent
-    /// of it. [`fit_to_payload_budget`] spends that last distance on pixels,
-    /// and [`FIT_SAFETY`] aims 5 percent under the budget as well, so
-    /// [`shrink_towards`] takes 2.6 percent off each side of that photograph,
-    /// for 2993 pixels by 1807. Under this quality the blocks of the encoder
-    /// start to show, and the pixel count is then the better thing to spend.
+    /// at this quality: 785138 bytes, which is 1046852 base64 characters. The
+    /// cap that mosh states for the iTerm2 protocol leaves 1044480 characters
+    /// of payload, so the floor of the ladder still misses that budget by 2372
+    /// characters, which is 0.2 percent of it. [`fit_to_payload_budget`] spends
+    /// that last distance on pixels, and [`FIT_SAFETY`] aims 5 percent under
+    /// the budget as well, so [`shrink_towards`] takes 2.6 percent off each
+    /// side of that photograph, for 2993 pixels by 1807. Under this quality the
+    /// blocks of the encoder start to show, and the pixel count is then the
+    /// better thing to spend.
     const LOWEST: Self = Self(35);
 
     /// How far one step of the ladder falls.
@@ -1108,12 +1342,13 @@ impl JpegQuality {
 ///   A photograph compresses poorly in a lossless format, and a JPEG of it
 ///   carries about twelve times the pixels of a PNG for the same characters.
 ///   That is what keeps a photograph at the resolution of the screen inside the
-///   budget of a mosh session.
+///   budget that a mosh session states for this protocol.
 ///
 /// A raw PNM was the one shape that the writer made before this, and a
 /// photograph of 3074 pixels by 1856 costs 22821376 base64 characters in it.
-/// A mosh session holds 1048576, so the fit shrank that picture to about 655
-/// pixels by 395 and the terminal stretched it over the whole rectangle. The
+/// mosh carries 1048576 bytes in one iTerm2 command, so the fit shrank that
+/// picture to about 655 pixels by 395 and the terminal stretched it over the
+/// whole rectangle. The
 /// shape is now the rung that a frame starts at, where the time of the encoder
 /// is the cost that the reader feels, and a still picture starts at a PNG.
 ///
@@ -1418,8 +1653,9 @@ fn shape_that_costs_least<P: Payload>(
     // A rung that states its count states it off the pixel count alone, so the
     // budget refuses such a rung before an encoder builds the payload that the
     // budget then throws away. A frame of 1920 pixels by 1080 costs 8294424
-    // characters as a raw PNM, and a mosh session holds 1044480 of them, so
-    // this step saves that payload one time for every frame of the video.
+    // characters as a raw PNM, and no cap that a mosh session states holds a
+    // fifth of them, so this step saves that payload one time for every frame
+    // of the video.
     //
     // The step stops at the last rung of the ladder on purpose. The caller has
     // to come back with a payload: `fit_to_payload_budget` spends the pixels of
@@ -1491,6 +1727,57 @@ fn shrink_towards(
     Some(image.resize(width, height, FilterType::Lanczos3))
 }
 
+/// The budget that leaves room for the control block of every chunk.
+///
+/// [`write_kitty`] is the one writer of this module that sends more than one
+/// command for one picture. A payload above [`KITTY_CHUNK_SIZE`] goes out in
+/// one command for each chunk, every one of those commands carries a control
+/// block of its own, and every cap counts those control blocks together with
+/// the payload. So the room for them comes off the budget before the fit
+/// spends it.
+///
+/// **[`PayloadBudget::CONTROL_BLOCK_ROOM`] covers the first command alone.**
+/// That room is one fixed number, and the cost of the chunks grows with the
+/// payload, so one fixed number cannot cover it. A frame of 1023 pixels by
+/// 1023 costs 4186116 characters of payload, and the commands around it cost
+/// 9246 characters, which is more than twice that room.
+///
+/// The room comes off here, beside [`KITTY_CHUNK_SIZE`] and the framing that
+/// the writer writes. No caller states it. There is one path to the terminal,
+/// so no caller can take a different one and get the arithmetic wrong.
+///
+/// A payload of [`KITTY_CHUNK_SIZE`] characters or fewer goes out in one
+/// command, and [`PayloadBudget::CONTROL_BLOCK_ROOM`] covers that command
+/// already, so a budget at or under that size comes back unchanged. A larger
+/// budget gives the largest payload `P` that holds
+/// `P + KITTY_CHUNK_FRAMING * chunks` inside it, where `chunks` is `P` divided
+/// by [`KITTY_CHUNK_SIZE`] and rounded up. A whole chunk costs its own
+/// characters and its framing together, so the whole chunks divide out, and
+/// what is left holds one more chunk that pays its framing first.
+///
+/// # Arguments
+/// * `budget` - The characters that the cap of the transport left, which is
+///   that cap less [`PayloadBudget::CONTROL_BLOCK_ROOM`].
+///
+/// # Returns
+/// The characters of payload that leave room for the framing of every chunk.
+/// [`PayloadBudget::UNLIMITED`] comes back a little under itself, which is
+/// still a number that no picture reaches, and the arithmetic neither
+/// overflows nor panics there.
+const fn kitty_budget_under_chunk_framing(budget: PayloadBudget) -> PayloadBudget {
+    let characters = budget.characters();
+
+    if characters <= KITTY_CHUNK_SIZE {
+        return budget;
+    }
+
+    let chunk_and_framing = KITTY_CHUNK_SIZE + KITTY_CHUNK_FRAMING;
+    let whole_chunks = characters / chunk_and_framing;
+    let rest = characters - whole_chunks * chunk_and_framing;
+
+    PayloadBudget::of(whole_chunks * KITTY_CHUNK_SIZE + rest.saturating_sub(KITTY_CHUNK_FRAMING))
+}
+
 /// Write an image with the Kitty graphics protocol.
 ///
 /// The command is `ESC _ G <key>=<value>,... ; <base64 data> ESC \`. A large
@@ -1520,13 +1807,13 @@ fn shrink_towards(
 /// An image leaves here in one of the two shapes of [`KittyPayload`], and
 /// `request.picture` names which one.
 ///
-/// [`Picture::Still`] is one still picture, and it travels as a PNG.
-/// Raw pixels cost four base64 characters for every pixel, so a photograph of
-/// 330 pixels by 440 costs 580800 characters that way. That is over half of the
-/// 1048576 characters that a mosh session holds, and a photograph of twice the
-/// pixels never arrives at all. A still picture goes out one time, so the
-/// characters are the whole of what it pays, and a PNG of it costs a fraction
-/// of the raw pixels.
+/// [`Picture::Still`] is one still picture, and it travels as a PNG. Raw pixels
+/// cost four base64 characters for every pixel, so a photograph of 330 pixels
+/// by 440 costs 580800 characters that way. That is over a third of the 1638400
+/// characters that mosh carries in one Kitty transmission, and a photograph of
+/// three times the pixels never arrives at all. A still picture goes out one
+/// time, so the characters are the whole of what it pays, and a PNG of it costs
+/// a fraction of the raw pixels.
 ///
 /// [`Picture::Frame`] is one frame of many, and it keeps the raw pixels. The
 /// caller draws the next frame directly after this one, so a PNG encoder here
@@ -1535,12 +1822,27 @@ fn shrink_towards(
 /// that costs the least time and pays more characters for it. [`write_iterm2`]
 /// states this same trade.
 ///
+/// # The framing of the chunks comes off the budget here
+///
+/// This writer is the one writer of this module that sends more than one
+/// command for one picture, so it is the one writer whose command cost grows
+/// with the payload. It therefore takes its own framing off the budget it was
+/// handed, with [`kitty_budget_under_chunk_framing`], before the fit spends
+/// that budget. The caller states the cap of the transport alone, and
+/// [`PayloadBudget::CONTROL_BLOCK_ROOM`] covers the first command of this
+/// transmission.
+///
 /// Ghostty and WezTerm read this same protocol.
 ///
 /// # Arguments
 /// * `out` - The stream that takes the bytes.
 /// * `image` - The image to draw.
 /// * `request` - The budget, the cursor and the aspect ratio.
+/// * `budget` - The characters of payload that this picture can spend. It is
+///   the budget of this protocol alone, which [`Capabilities::draw`] reads out
+///   of [`Request::payload`] once it has picked the protocol.
+/// * `answered` - The cell size that the terminal reported, when it reported
+///   one.
 ///
 /// # Errors
 /// Gives the error of the first write to `out` that fails.
@@ -1548,6 +1850,7 @@ fn write_kitty<W: Write>(
     out: &mut W,
     image: &DynamicImage,
     request: &Request<'_>,
+    budget: PayloadBudget,
     answered: Option<CellPixels>,
 ) -> Result<(), DrawError> {
     // The window arrives one time, and every size of this image comes off it.
@@ -1590,11 +1893,18 @@ fn write_kitty<W: Write>(
 
     // The downscale above bounds the picture by the screen. This bounds it by
     // the characters that the transport carries, which is a second bound and
-    // not the same one: mosh caps one transmission at one mebicharacter, and a
-    // window of more than about 51 columns by 23 makes a frame above that cap.
+    // not the same one: mosh caps one Kitty transmission at 1638400
+    // characters, and a window of more than about 64 columns by 29 makes a
+    // frame above that cap.
     // `c=` and `r=` below still state the cell span that the screen gave, so
     // the picture keeps its size there and loses resolution alone.
-    let (image, shape, base64_data) = fit_to_payload_budget(image, request.payload, shape)?;
+    //
+    // The budget loses the framing of every chunk before the fit spends it.
+    // This writer sends a large payload in one command for each chunk, every
+    // cap counts those commands together with the payload, and the room that
+    // the caller took off the cap covers the first command alone.
+    let (image, shape, base64_data) =
+        fit_to_payload_budget(image, kitty_budget_under_chunk_framing(budget), shape)?;
 
     let (_, term_rows) = cells_of(window);
     let contract = cursor_contract(request, term_rows, || {
@@ -1677,6 +1987,11 @@ fn write_kitty<W: Write>(
 /// * `out` - The stream that takes the bytes.
 /// * `image` - The image to draw.
 /// * `request` - The budget, the cursor and the aspect ratio.
+/// * `budget` - The characters of payload that this picture can spend. It is
+///   the budget of this protocol alone, which [`Capabilities::draw`] reads out
+///   of [`Request::payload`] once it has picked the protocol.
+/// * `answered` - The cell size that the terminal reported, when it reported
+///   one.
 ///
 /// # Errors
 /// Gives [`DrawError::Encode`] when the encoder refuses the image, and the
@@ -1685,6 +2000,7 @@ fn write_sixel<W: Write>(
     out: &mut W,
     image: &DynamicImage,
     request: &Request<'_>,
+    budget: PayloadBudget,
     answered: Option<CellPixels>,
 ) -> Result<(), DrawError> {
     // The window arrives one time, and both bounds of this image come off it.
@@ -1720,7 +2036,7 @@ fn write_sixel<W: Write>(
     // picture that spends fewer pixels is smaller on the screen as well. That
     // is the whole of what the protocol allows, and a smaller picture beats the
     // empty screen that a refused transmission leaves.
-    let (resized, _shape, payload) = fit_to_payload_budget(resized, request.payload, SixelPayload)?;
+    let (resized, _shape, payload) = fit_to_payload_budget(resized, budget, SixelPayload)?;
 
     let (_, term_rows) = cells_of(window);
     let contract = cursor_contract(request, term_rows, || {
@@ -1747,8 +2063,9 @@ fn write_sixel<W: Write>(
 /// through the encoder.
 ///
 /// # Arguments
-/// * `request` - The request that the caller made, which states the file and
-///   the characters that the picture can spend.
+/// * `request` - The request that the caller made, which states the file.
+/// * `budget` - The characters of payload that the picture can spend, which is
+///   the budget of the iTerm2 protocol.
 /// * `resized` - True when the display bounds took pixels off the picture.
 ///
 /// # Returns
@@ -1761,7 +2078,11 @@ fn write_sixel<W: Write>(
 /// iTerm2 protocol alone. [`Capabilities::travels_as_it_stands`] is the
 /// entrance that reads the protocol as well, and a caller asks that one before
 /// it holds a file at all.
-fn source_payload_of(request: &Request<'_>, resized: bool) -> Option<String> {
+fn source_payload_of(
+    request: &Request<'_>,
+    budget: PayloadBudget,
+    resized: bool,
+) -> Option<String> {
     if resized {
         return None;
     }
@@ -1775,7 +2096,7 @@ fn source_payload_of(request: &Request<'_>, resized: bool) -> Option<String> {
     // The length of base64 comes off the length of the input alone, so the
     // arithmetic stands in for the encode. The budget refuses the file before
     // the allocation of four thirds of that file happens.
-    if !request.payload.holds(base64_characters_of(source.len())) {
+    if !budget.holds(base64_characters_of(source.len())) {
         return None;
     }
 
@@ -1924,6 +2245,11 @@ fn file_travels_as_it_stands(source: &[u8]) -> bool {
 /// * `out` - The stream that takes the bytes.
 /// * `image` - The image to draw.
 /// * `request` - The budget, the cursor and the aspect ratio.
+/// * `budget` - The characters of payload that this picture can spend. It is
+///   the budget of this protocol alone, which [`Capabilities::draw`] reads out
+///   of [`Request::payload`] once it has picked the protocol.
+/// * `answered` - The cell size that the terminal reported, when it reported
+///   one.
 ///
 /// # Errors
 /// Gives the error of the first write to `out` that fails.
@@ -1931,6 +2257,7 @@ fn write_iterm2<W: Write>(
     out: &mut W,
     image: &DynamicImage,
     request: &Request<'_>,
+    budget: PayloadBudget,
     answered: Option<CellPixels>,
 ) -> Result<(), DrawError> {
     // The window arrives one time, and every size of this image comes off it.
@@ -1983,10 +2310,10 @@ fn write_iterm2<W: Write>(
     // cell span either way, so a picture that does spend pixels keeps the size
     // it takes on the screen. The terminal reads the format out of the file, so
     // no argument of the command names the shape that the picture travelled in.
-    let (image, base64_data) = match source_payload_of(request, resized) {
+    let (image, base64_data) = match source_payload_of(request, budget, resized) {
         Some(payload) => (image, payload),
         None => {
-            let (fitted, _shape, payload) = fit_to_payload_budget(image, request.payload, shape)?;
+            let (fitted, _shape, payload) = fit_to_payload_budget(image, budget, shape)?;
 
             (fitted, payload)
         }
@@ -2040,7 +2367,7 @@ mod tests {
                 rows: Some(5),
             },
             source: None,
-            payload: PayloadBudget::UNLIMITED,
+            payload: ProtocolBudgets::UNLIMITED,
             picture: Picture::Still,
             cursor: Cursor::BelowImage,
             preserve_aspect: true,
@@ -2211,21 +2538,85 @@ mod tests {
     /// rung of the ladder reaches the budget and the fit spends no pixels.
     const REFUSED_SOURCE_BUDGET_SHARE: usize = 2;
 
-    /// The characters that mosh holds for one transmission.
+    /// The characters that mosh carries in one Kitty transmission.
     ///
-    /// `MAXIMUM_STORED_CHARACTERS` of `crates/mosh-terminal/src/imagestore.rs`,
-    /// which `ImageStore::hold` tests against `control.len() + payload.len()`.
-    /// A transmission above it earns `ENOSPC` and draws nothing. The file
-    /// stands in `timmattison/mosh-rs` at commit `5676142`
-    /// (<https://github.com/timmattison/mosh-rs>).
-    const MOSH_STORE_CHARACTERS: usize = 1024 * 1024;
+    /// `MAXIMUM_TRANSMISSION_CHARACTERS` of
+    /// `crates/mosh-terminal/src/imagestore.rs`, which `ImageStore::hold`
+    /// measures against `control.len() + payload.len()` over every chunk of
+    /// the transmission. A transmission above it earns `ENOSPC`, and the user
+    /// reads an empty screen.
+    ///
+    /// The file stands in `timmattison/mosh-rs`
+    /// (<https://github.com/timmattison/mosh-rs/issues/94>).
+    const MOSH_KITTY_CAP: usize = 1600 * 1024;
+
+    /// The characters that mosh carries in one Sixel device-control string.
+    ///
+    /// `MAXIMUM_SIXEL_STRING_CHARACTERS` of
+    /// `crates/mosh-terminal/src/dispatcher.rs`, which counts the body of the
+    /// string. mosh cuts a string above it at the cap and keeps the rest, and
+    /// nothing tells the program of the session that the cut happened.
+    const MOSH_SIXEL_CAP: usize = 1024 * 1024;
+
+    /// The bytes that mosh carries in one iTerm2 operating system command.
+    ///
+    /// `MAXIMUM_INLINE_IMAGE_BYTES` of
+    /// `crates/mosh-terminal/src/dispatcher.rs`, which counts the
+    /// `1337;File=` part and the base64 payload together. mosh cuts a command
+    /// above it at the cap, in the same silence as a Sixel string.
+    const MOSH_ITERM2_CAP: usize = 1024 * 1024;
+
+    /// Every cap that a mosh session states today.
+    ///
+    /// The three numbers do not count one unit. Each one counts the stretch of
+    /// the escape sequence that carries one whole picture in its own protocol,
+    /// and one unit is one byte on the wire in every case. So the room that
+    /// [`PayloadBudget::under_command_cap`] leaves has to be real room under
+    /// each of the three, and not under the one that a reader remembers.
+    const MOSH_CAPS: [usize; 3] = [MOSH_KITTY_CAP, MOSH_SIXEL_CAP, MOSH_ITERM2_CAP];
+
+    /// Every cap that the whole-transmission test measures a Kitty stream
+    /// against.
+    ///
+    /// The first three come straight off [`MOSH_CAPS`], and they are the caps
+    /// that a mosh states today. The two above them are caps that a mosh
+    /// states tomorrow. This crate reads the caps out of `MOSH_IMAGE_BUDGETS`,
+    /// so the number arrives from the session and no constant here chose it,
+    /// and mosh raised the Kitty cap one time already, from one mebicharacter
+    /// to 1600 kibicharacters.
+    ///
+    /// **A larger cap is where the room runs out first.** The Kitty writer
+    /// sends a payload above [`KITTY_CHUNK_SIZE`] in more than one command,
+    /// and every command carries a control block of its own, so the characters
+    /// that the protocol adds to the payload grow with the payload.
+    /// [`PayloadBudget::CONTROL_BLOCK_ROOM`] is one fixed number, and one fixed
+    /// number cannot cover a cost that grows.
+    const KITTY_TRANSMISSION_CAPS: [usize; 5] = [
+        MOSH_CAPS[0],
+        MOSH_CAPS[1],
+        MOSH_CAPS[2],
+        CAP_ABOVE_MOSH,
+        CAP_THAT_THE_ROOM_RUNS_OUT_AT,
+    ];
+
+    /// A Kitty cap of two mebicharacters, which stands above every cap that
+    /// mosh states today and under the cap that the room runs out at.
+    const CAP_ABOVE_MOSH: usize = 2 * 1024 * 1024;
+
+    /// The cap that first carries a whole Kitty transmission above itself.
+    ///
+    /// The report of this defect measured a frame of 1023 pixels by 1023 here.
+    /// The payload stood inside the budget, and the whole transmission stood
+    /// 1058 characters above the cap.
+    const CAP_THAT_THE_ROOM_RUNS_OUT_AT: usize = 4 * 1024 * 1024;
 
     /// The side of the picture that the mosh budget test fits.
     ///
-    /// Raw pixels cost four characters each, so this picture costs 1440000 and
-    /// stands well above [`PayloadBudget::MOSH`]. A picture under the budget
-    /// would leave the fit unrun and the test measuring nothing.
-    const OVER_BUDGET_SIDE: u32 = 600;
+    /// Raw pixels cost four characters each, so this picture costs 4665600
+    /// characters and stands above every cap of [`KITTY_TRANSMISSION_CAPS`],
+    /// the largest one included, which is 4194304. A picture under a cap would
+    /// leave the fit unrun and the test measuring nothing there.
+    const OVER_BUDGET_SIDE: u32 = 1080;
 
     /// The characters of payload that the budget tests allow.
     ///
@@ -2273,6 +2664,21 @@ mod tests {
             .sum()
     }
 
+    /// The characters that a Kitty payload costs with the framing of every
+    /// chunk on top of it.
+    ///
+    /// [`write_kitty`] sends a payload above [`KITTY_CHUNK_SIZE`] in one
+    /// command for each chunk, and every cap counts those commands together
+    /// with the payload. So a budget that really holds a payload holds this
+    /// number, and a budget of the payload alone is a budget that the picture
+    /// stands just above.
+    ///
+    /// # Arguments
+    /// * `payload` - The characters of payload.
+    fn kitty_characters_with_framing(payload: usize) -> usize {
+        payload + KITTY_CHUNK_FRAMING * payload.div_ceil(KITTY_CHUNK_SIZE)
+    }
+
     /// Draw `image` on a Kitty terminal inside `budget` and give back the
     /// characters of payload that reached the stream.
     ///
@@ -2285,7 +2691,7 @@ mod tests {
     /// * `budget` - The characters of payload that the picture can spend.
     fn kitty_payload_of(image: &DynamicImage, picture: Picture, budget: PayloadBudget) -> usize {
         let request = Request {
-            payload: budget,
+            payload: ProtocolBudgets::uniform(budget),
             picture,
             cursor: Cursor::Held,
             ..test_request()
@@ -2299,6 +2705,81 @@ mod tests {
         kitty_payload_characters(&String::from_utf8(out).expect("a Kitty command is ASCII"))
     }
 
+    /// Draw `image` on a Kitty terminal inside `budget` and give back the
+    /// characters of the whole stream that the writer wrote.
+    ///
+    /// **This counts what a cap counts.** mosh measures one transmission as
+    /// `control.len() + payload.len()` over every chunk of it, so a test of a
+    /// cap reads the whole stream and not the payload inside it. The count
+    /// holds every byte that left the writer, which is the control block of
+    /// each chunk as well as the payload, so it stands at or above what mosh
+    /// counts. The measurement is careful and it is never generous.
+    ///
+    /// The request states no bound in cells, so the picture draws at its own
+    /// pixel size and the fit is the one thing that bounds it. A bound in
+    /// cells would take the size of the picture off the window of whoever runs
+    /// the suite, and the count would move with that window.
+    ///
+    /// The cursor is [`Cursor::Held`], which writes nothing around the
+    /// command, so the count holds the command alone.
+    ///
+    /// # Arguments
+    /// * `image` - The picture to draw.
+    /// * `picture` - Whether the picture travels as one still or as one frame.
+    /// * `budget` - The characters of payload that the picture can spend.
+    fn kitty_stream_characters_of(
+        image: &DynamicImage,
+        picture: Picture,
+        budget: PayloadBudget,
+    ) -> usize {
+        let request = Request {
+            budget: Budget {
+                columns: None,
+                rows: None,
+            },
+            payload: ProtocolBudgets::uniform(budget),
+            picture,
+            cursor: Cursor::Held,
+            ..test_request()
+        };
+
+        let mut out = Vec::new();
+        Capabilities::new(TerminalType::Kitty, true, true)
+            .draw(&mut out, image, &request)
+            .expect("a write to a vector never fails");
+
+        out.len()
+    }
+
+    /// The side of the square picture whose raw pixels cost the most
+    /// characters that `budget` holds.
+    ///
+    /// Raw pixels cost four characters for one pixel, so this picture fills
+    /// the budget and the fit leaves it alone. That picture is the worst case
+    /// of the chunk framing: every character that the writer puts around the
+    /// payload stands on top of a payload that already reached the budget.
+    ///
+    /// # Arguments
+    /// * `budget` - The characters of payload that the picture can spend.
+    fn saturating_side_of(budget: PayloadBudget) -> u32 {
+        /// The base64 characters that one raw pixel costs.
+        const CHARACTERS_FOR_ONE_PIXEL: usize = 4;
+
+        let pixels = budget.characters() / CHARACTERS_FOR_ONE_PIXEL;
+        u32::try_from(pixels.isqrt()).expect("the side of a test picture stands inside a u32")
+    }
+
+    /// The square picture whose raw pixels cost the most characters that
+    /// `budget` holds.
+    ///
+    /// # Arguments
+    /// * `budget` - The characters of payload that the picture can spend.
+    fn saturating_picture_of(budget: PayloadBudget) -> DynamicImage {
+        let side = saturating_side_of(budget);
+
+        photograph_of(side, side)
+    }
+
     /// Draw `image` on a Kitty terminal inside `budget` and give back the keys
     /// of the opening command, which is the part between `ESC _ G` and the
     /// first semicolon.
@@ -2309,7 +2790,7 @@ mod tests {
     /// * `budget` - The characters of payload that the picture can spend.
     fn kitty_keys_of(image: &DynamicImage, picture: Picture, budget: PayloadBudget) -> String {
         let request = Request {
-            payload: budget,
+            payload: ProtocolBudgets::uniform(budget),
             picture,
             cursor: Cursor::Held,
             ..test_request()
@@ -2342,7 +2823,7 @@ mod tests {
     /// * `budget` - The characters of payload that the picture can spend.
     fn sixel_payload_of(image: &DynamicImage, budget: PayloadBudget) -> usize {
         let request = Request {
-            payload: budget,
+            payload: ProtocolBudgets::uniform(budget),
             cursor: Cursor::Held,
             ..test_request()
         };
@@ -2373,7 +2854,7 @@ mod tests {
         budget: PayloadBudget,
     ) -> String {
         let request = Request {
-            payload: budget,
+            payload: ProtocolBudgets::uniform(budget),
             source,
             cursor: Cursor::Held,
             ..test_request()
@@ -2741,7 +3222,7 @@ mod tests {
                 rows: None,
             },
             source,
-            payload: budget,
+            payload: ProtocolBudgets::uniform(budget),
             picture: Picture::Still,
             cursor: Cursor::Held,
             preserve_aspect: true,
@@ -2929,12 +3410,12 @@ mod tests {
 
     #[test]
     fn a_still_picture_travels_as_a_png() {
-        // Raw pixels cost four base64 characters for every pixel, and a mosh
-        // session holds 1048576 characters of image, so one photograph takes
-        // over half of that store and a photograph of twice the pixels never
-        // arrives. `f=100` names a PNG instead, and a Kitty terminal then reads
-        // the width and the height out of the PNG itself. The header must carry
-        // no `s=` key and no `v=` key beside it.
+        // Raw pixels cost four base64 characters for every pixel, and mosh
+        // carries 1638400 characters in one Kitty transmission, so one
+        // photograph takes over a third of that cap and a photograph of three
+        // times the pixels never arrives. `f=100` names a PNG instead, and a
+        // Kitty terminal then reads the width and the height out of the PNG
+        // itself. The header must carry no `s=` key and no `v=` key beside it.
         let control_data = kitty_still_control_data();
 
         assert!(
@@ -2976,9 +3457,9 @@ mod tests {
     /// A frame above the budget comes back inside it.
     ///
     /// A frame keeps the raw pixels, so its payload is exactly four characters
-    /// for every pixel. mosh caps one transmission at one mebicharacter, which
-    /// is 262144 pixels, or a window of about 51 columns by 23. Every larger
-    /// window drew no frame at all.
+    /// for every pixel. mosh caps one Kitty transmission at 1638400
+    /// characters, which is 409600 pixels, or a window of about 64 columns by
+    /// 29. Every larger window drew no frame at all.
     #[test]
     fn a_frame_above_the_payload_budget_comes_back_inside_it() {
         let spent = kitty_payload_of(
@@ -3059,7 +3540,8 @@ mod tests {
     /// The iTerm2 protocol carries a whole file, and a raw PNM file spends
     /// three bytes on every pixel and compresses none of them. A photograph of
     /// 3074 pixels by 1856 costs 17116032 bytes that way, which is 22821376
-    /// base64 characters, and a mosh session holds 1048576 of them. The same
+    /// base64 characters, and mosh carries 1048576 bytes in one iTerm2
+    /// command. The same
     /// photograph as a PNG costs a fraction of it and loses no pixel at all.
     ///
     /// The rule holds for a still picture. One frame of many starts at the raw
@@ -3676,11 +4158,11 @@ mod tests {
     /// refuses.
     ///
     /// A raw shape states what it costs off the pixel count alone. A frame of
-    /// 1920 pixels by 1080 costs 8294424 characters as a raw PNM, and a mosh
-    /// session holds 1044480 of them, so the budget refuses that rung for every
-    /// frame of the video. A walk that reads the statement steps past the rung.
-    /// A walk that reads the payload builds those 8294424 characters one time
-    /// for each frame and throws every one of them away.
+    /// 1920 pixels by 1080 costs 8294424 characters as a raw PNM, and no cap
+    /// that a mosh session states holds a fifth of them, so the budget refuses
+    /// that rung for every frame of the video. A walk that reads the statement
+    /// steps past the rung. A walk that reads the payload builds those 8294424
+    /// characters one time for each frame and throws every one of them away.
     ///
     /// The ladder here counts the encoder runs of its top rung, so the test
     /// measures the encoder run itself and not the payload it made.
@@ -3841,67 +4323,113 @@ mod tests {
         );
     }
 
-    /// A picture fitted for mosh fits the store that mosh keeps, keys and all.
+    /// A picture fitted for mosh fits every cap that mosh states, framing and
+    /// all.
     ///
-    /// [`PayloadBudget::MOSH`] bounds the payload alone, and mosh counts the
-    /// control block with it. So the room that the budget leaves has to be real
-    /// room, measured against the keys of a real command, and not a number that
-    /// looks generous.
+    /// A budget bounds the payload alone, and every cap of mosh counts the
+    /// characters of the command with it. The Kitty protocol is the one of the
+    /// three that sends more than one command: a payload above
+    /// [`KITTY_CHUNK_SIZE`] goes out in one command for each chunk, and each
+    /// of those commands carries a control block of its own. So the characters
+    /// that the protocol adds to the payload grow with the payload, and a test
+    /// of a cap has to measure the whole stream that the writer wrote.
     ///
-    /// Two assertions carry that, and they catch two different mistakes.
-    /// The budget against the store catches a budget with no room in it for
-    /// the keys, and it reads the budget rather than the fit, because
-    /// [`FIT_SAFETY`] leaves five percent of its own and would hide a thin
-    /// allowance. The fitted payload against the store catches a budget raised
-    /// above the store itself.
+    /// [`kitty_stream_characters_of`] is that measurement, and the invariant
+    /// it holds is one sentence: **a whole Kitty transmission stands at or
+    /// under the cap that the transport states, for any cap the transport can
+    /// state.** The caps arrive from `MOSH_IMAGE_BUDGETS` now, so the three
+    /// caps of mosh today are not the only caps this code meets, and
+    /// [`KITTY_TRANSMISSION_CAPS`] names two above them.
     ///
-    /// Both mutations were measured on 2026-09-07. A `MOSH` of one
-    /// mebicharacter fails the first, and a `MOSH` of two fails the second.
-    /// Every other test here states a budget of its own and passes with either
-    /// mistake in place.
+    /// Three assertions carry that, and they catch three different mistakes.
+    ///
+    /// * **The picture that fills the budget.** A picture whose payload
+    ///   reaches the budget with nothing to spare is the worst case of the
+    ///   framing: the fit leaves such a picture alone, so every character of
+    ///   framing lands on top of a full budget.
+    ///   [`saturating_picture_of`] builds that picture for each cap.
+    /// * **The picture above the cap.** It makes the fit spend pixels, so the
+    ///   test reads the writer on the path that resizes as well as on the path
+    ///   that sends the picture as it stands.
+    /// * **The fallback against the smallest cap.** [`PayloadBudget::MOSH`]
+    ///   answers where a session states no cap at all, so a picture that fills
+    ///   it has to stand under every cap that such a session can hold.
+    ///
+    /// The three mutations below were measured on 2026-09-11, one at a time.
+    ///
+    /// * A [`kitty_budget_under_chunk_framing`] that gives its argument back
+    ///   unchanged takes no framing off the budget. That is the defect this
+    ///   test was rewritten for: the picture that fills the budget of the
+    ///   4194304 cap then writes 4195362 characters, which stands 1058 above
+    ///   that cap, and the first assertion fails. No other test of this module
+    ///   fails with it.
+    /// * An `under_command_cap` that gives `Self(characters)` takes no room
+    ///   off the cap at all. The picture that fills the budget of the 1638400
+    ///   cap then writes 1642037 characters, and the first assertion fails.
+    ///   [`a_cap_that_counts_the_command_leaves_room_for_the_command`] fails
+    ///   with it as well: that test holds the arithmetic, and this one holds
+    ///   the arithmetic against a real command.
+    /// * A [`FIT_SAFETY`] of 1.05 aims each attempt above the budget in place
+    ///   of under it. The picture above the cap then writes 1719908
+    ///   characters against the 1638400 cap, and the second assertion fails.
+    ///   Four other tests of the fit fail with it as well.
     #[test]
-    fn a_picture_fitted_for_mosh_fits_the_store_that_mosh_keeps() {
-        let picture = photograph_of(OVER_BUDGET_SIDE, OVER_BUDGET_SIDE);
+    fn a_picture_fitted_for_mosh_fits_every_cap_that_mosh_states() {
+        let over_budget = photograph_of(OVER_BUDGET_SIDE, OVER_BUDGET_SIDE);
         let whole = KittyPayload::RawRgb
-            .encode(&picture)
+            .encode(&over_budget)
             .expect("raw pixels reach base64 with no encoder that can refuse them");
 
-        let (_fitted, _shape, payload) = fit_to_payload_budget(
-            Cow::Borrowed(&picture),
+        let largest = KITTY_TRANSMISSION_CAPS
+            .into_iter()
+            .max()
+            .expect("the table names five caps");
+        assert!(
+            whole.len() > largest,
+            "the fixture must stand above every cap, or the fit never runs and this test measures nothing"
+        );
+
+        let frame = Picture::Frame {
+            id: TEST_PLACEMENT_ID,
+        };
+
+        for cap in KITTY_TRANSMISSION_CAPS {
+            let budget = PayloadBudget::under_command_cap(cap);
+
+            // The picture that fills the budget is the worst case of the
+            // framing. The fit leaves it alone, so every character that the
+            // writer puts around the payload stands on top of a budget that
+            // the payload already reached.
+            let filled = kitty_stream_characters_of(&saturating_picture_of(budget), frame, budget);
+            assert!(
+                filled <= cap,
+                "mosh counts the control block of every chunk together with the payload, and a picture that fills the budget writes {filled} characters, which is above the cap of {cap}"
+            );
+
+            // A picture above the cap makes the fit spend pixels, so the test
+            // reads the writer on that path as well.
+            let fitted = kitty_stream_characters_of(&over_budget, frame, budget);
+            assert!(
+                fitted <= cap,
+                "mosh counts the control block of every chunk together with the payload, and a fitted picture writes {fitted} characters, which is above the cap of {cap}"
+            );
+        }
+
+        // The fallback answers for a session that states no cap, and such a
+        // session can hold any cap that mosh has ever stated. So it has to
+        // stand under the smallest of them.
+        let smallest = KITTY_TRANSMISSION_CAPS
+            .into_iter()
+            .min()
+            .expect("the table names five caps");
+        let spent = kitty_stream_characters_of(
+            &saturating_picture_of(PayloadBudget::MOSH),
+            frame,
             PayloadBudget::MOSH,
-            KittyPayload::RawRgb,
-        )
-        .expect("raw pixels reach base64 with no encoder that can refuse them");
-
-        assert!(
-            whole.len() > MOSH_STORE_CHARACTERS,
-            "the fixture must stand above the store, or the fit never runs and this test measures nothing"
         );
         assert!(
-            payload.len() < whole.len(),
-            "the fit must really take pixels off a picture that stands above the budget"
-        );
-
-        let keys = kitty_keys_of(
-            &picture,
-            Picture::Frame {
-                id: TEST_PLACEMENT_ID,
-            },
-            PayloadBudget::MOSH,
-        );
-        // The budget itself has to leave room for the keys, whatever the fit
-        // does with it. A payload that spends the whole budget is the payload
-        // that a picture just above it produces.
-        let allowed = PayloadBudget::MOSH.characters() + keys.len();
-        assert!(
-            allowed <= MOSH_STORE_CHARACTERS,
-            "mosh holds the keys and the payload together, and the budget plus the keys of a real command come to {allowed}, which is above {MOSH_STORE_CHARACTERS}"
-        );
-
-        let held = payload.len() + keys.len();
-        assert!(
-            held <= MOSH_STORE_CHARACTERS,
-            "mosh holds the keys and the payload together, and the two come to {held}, which is above {MOSH_STORE_CHARACTERS}"
+            spent <= smallest,
+            "a picture that fills the fallback writes {spent} characters, which is above the smallest cap of {smallest}"
         );
     }
 
@@ -4002,6 +4530,14 @@ mod tests {
     ///
     /// The fit must not cost a picture that already fits one pixel of
     /// resolution, and `UNLIMITED` must reach the encoder unchanged.
+    ///
+    /// **A budget really holds a Kitty picture when it holds the payload and
+    /// the framing of every chunk together**, because every cap counts the
+    /// commands of the transmission with the payload.
+    /// [`kitty_characters_with_framing`] states that number. A budget of the
+    /// payload alone is a budget that the picture stands just above, and
+    /// [`kitty_budget_under_chunk_framing`] takes the framing off it, so the
+    /// fit spends pixels there and it is right to spend them.
     #[test]
     fn a_picture_under_the_payload_budget_keeps_every_pixel() {
         let fixture = photograph_fixture();
@@ -4017,12 +4553,12 @@ mod tests {
             Picture::Frame {
                 id: TEST_PLACEMENT_ID,
             },
-            PayloadBudget::of(generous),
+            PayloadBudget::of(kitty_characters_with_framing(generous)),
         );
 
         assert_eq!(
             ample, generous,
-            "a budget that the picture already fits must take no pixel off it"
+            "a budget that holds the picture and its framing must take no pixel off the picture"
         );
     }
 
@@ -4215,5 +4751,390 @@ mod tests {
             "the refusal must leave the stream untouched, but it holds {} bytes",
             out.len()
         );
+    }
+
+    /// The cap of a transport that counts the command as well.
+    ///
+    /// The number is the cap that mosh states for one Sixel device-control
+    /// string and for one iTerm2 command, and the test reads it as a cap of
+    /// the transport and not as a budget of the payload.
+    const COMMAND_AND_PAYLOAD_CAP: usize = 1024 * 1024;
+
+    /// A cap that counts the command leaves room for the command.
+    ///
+    /// mosh counts the command of the protocol together with the payload, so a
+    /// budget that took such a cap as it stands would let a picture spend
+    /// every character of it. The keys of the command then carry the
+    /// transmission above the cap, and mosh draws nothing at all. So the
+    /// budget has to stand below the cap by the room that this module keeps
+    /// for the command.
+    ///
+    /// The two small caps hold the other half of the rule. A cap at or below
+    /// the room carries no picture that this crate can draw, so the budget of
+    /// such a transport is zero. An answer that wrapped around would give a
+    /// picture the whole address space to spend.
+    #[test]
+    fn a_cap_that_counts_the_command_leaves_room_for_the_command() {
+        assert_eq!(
+            PayloadBudget::under_command_cap(COMMAND_AND_PAYLOAD_CAP).characters(),
+            COMMAND_AND_PAYLOAD_CAP - PayloadBudget::CONTROL_BLOCK_ROOM,
+            "the room for the command has to come off the cap of the transport"
+        );
+
+        assert_eq!(
+            PayloadBudget::under_command_cap(PayloadBudget::CONTROL_BLOCK_ROOM).characters(),
+            0,
+            "a cap that the command alone fills leaves no payload"
+        );
+
+        assert_eq!(
+            PayloadBudget::under_command_cap(0).characters(),
+            0,
+            "a cap below the room has to saturate at zero and never wrap around"
+        );
+    }
+
+    /// The Kitty budget takes the framing of every chunk off itself.
+    ///
+    /// [`write_kitty`] sends a payload above [`KITTY_CHUNK_SIZE`] in one
+    /// command for each chunk, and every cap counts those commands together
+    /// with the payload. So the budget that reaches the fit has to hold the
+    /// payload and the framing of its chunks together, and
+    /// [`kitty_budget_under_chunk_framing`] is the arithmetic that does it.
+    /// [`a_picture_fitted_for_mosh_fits_every_cap_that_mosh_states`] holds the
+    /// same rule against a real command, and this test holds the arithmetic
+    /// alone.
+    ///
+    /// Three assertions carry it, and each one catches a different mistake.
+    ///
+    /// * **A small budget comes back unchanged.** A payload of one chunk or
+    ///   fewer characters goes out in one command, and
+    ///   [`PayloadBudget::CONTROL_BLOCK_ROOM`] covers that command already.
+    /// * **Two large budgets come back at the numbers that the report of this
+    ///   defect measured**, which are the budgets of a 1638400 cap and of a
+    ///   4194304 cap.
+    /// * **The answer is the largest payload that fits.** The payload and the
+    ///   framing of its chunks stand inside the budget, and one character more
+    ///   of payload stands above it.
+    ///
+    /// The three mutations below were measured on 2026-09-11, one at a time.
+    ///
+    /// * A function with no branch for a small budget takes the framing off
+    ///   every budget. A budget of 1 then comes back at 0, and the first
+    ///   assertion fails.
+    /// * A [`kitty_budget_under_chunk_framing`] that gives its argument back
+    ///   unchanged takes no framing off any budget. That is the defect this
+    ///   test was written for: the budget of the 1638400 cap then comes back at
+    ///   1634304 in place of 1630713, and the second assertion fails.
+    /// * A branch that gives a budget of two chunks back unchanged covers a
+    ///   transmission of two commands with the room for one. A budget of 4097
+    ///   then comes back at 4097, which costs 4115 characters with its framing,
+    ///   and the third assertion fails.
+    ///
+    /// The second of the three fails
+    /// [`a_picture_fitted_for_mosh_fits_every_cap_that_mosh_states`] as well,
+    /// at the 4194304 cap. The other two move a budget of a few thousand
+    /// characters, and every cap that the other test states is far above that,
+    /// so this test is the one that catches them.
+    #[test]
+    fn a_kitty_budget_takes_the_framing_of_every_chunk_off_itself() {
+        // A payload of one chunk or fewer characters goes out in one command,
+        // and the room for the command covers that one already.
+        for characters in [0, 1, KITTY_CHUNK_SIZE - 1, KITTY_CHUNK_SIZE] {
+            assert_eq!(
+                kitty_budget_under_chunk_framing(PayloadBudget::of(characters)).characters(),
+                characters,
+                "a budget of one chunk or fewer characters goes out in one command, so it comes back unchanged"
+            );
+        }
+
+        // The two budgets that the report of this defect measured.
+        for (cap, expected) in [
+            (MOSH_KITTY_CAP, 1_630_713_usize),
+            (CAP_THAT_THE_ROOM_RUNS_OUT_AT, 4_181_019),
+        ] {
+            let budget = PayloadBudget::under_command_cap(cap);
+            let under_framing = kitty_budget_under_chunk_framing(budget).characters();
+            assert_eq!(
+                under_framing, expected,
+                "the budget of a cap of {cap} has to leave room for the framing of every chunk"
+            );
+        }
+
+        // The answer is the largest payload that the budget holds with the
+        // framing of its chunks on top of it.
+        for characters in [
+            KITTY_CHUNK_SIZE + 1,
+            KITTY_CHUNK_SIZE * 2,
+            PayloadBudget::MOSH.characters(),
+            PayloadBudget::under_command_cap(MOSH_KITTY_CAP).characters(),
+            PayloadBudget::under_command_cap(CAP_THAT_THE_ROOM_RUNS_OUT_AT).characters(),
+        ] {
+            let payload =
+                kitty_budget_under_chunk_framing(PayloadBudget::of(characters)).characters();
+            let held = kitty_characters_with_framing(payload);
+            let one_more = kitty_characters_with_framing(payload + 1);
+
+            assert!(
+                held <= characters,
+                "a payload of {payload} costs {held} characters with its framing, which is above the budget of {characters}"
+            );
+            assert!(
+                one_more > characters,
+                "a payload of one character more costs {one_more} characters with its framing, so {payload} is not the largest payload that the budget of {characters} holds"
+            );
+        }
+    }
+
+    /// The budget of a terminal that states no cap stays astronomical.
+    ///
+    /// [`PayloadBudget::UNLIMITED`] is `usize::MAX`, which is the top of the
+    /// range that [`kitty_budget_under_chunk_framing`] works in. An arithmetic
+    /// that multiplies before it divides overflows there, and an overflow
+    /// gives a small number that sends a picture the terminal drops.
+    ///
+    /// Two assertions carry it. The answer holds its own framing, which is the
+    /// same rule that every other budget obeys, and it stays above half of the
+    /// range, because a budget that no picture reaches has to stay one.
+    ///
+    /// The mutation below was measured on 2026-09-11. An answer written as
+    /// `characters * KITTY_CHUNK_SIZE / (KITTY_CHUNK_SIZE + KITTY_CHUNK_FRAMING)`
+    /// states the same ratio in one expression, and the multiplication
+    /// overflows a `usize` here. The test then panics with `attempt to
+    /// multiply with overflow` before it reads one assertion.
+    #[test]
+    fn a_kitty_budget_of_a_terminal_with_no_cap_stays_astronomical() {
+        let unlimited = kitty_budget_under_chunk_framing(PayloadBudget::UNLIMITED).characters();
+
+        assert!(
+            kitty_characters_with_framing(unlimited) <= PayloadBudget::UNLIMITED.characters(),
+            "the budget of a terminal that states no cap has to hold its own framing, and it came back as {unlimited}"
+        );
+        assert!(
+            unlimited > usize::MAX / 2,
+            "the budget of a terminal that states no cap stays a number that no picture reaches, and it came back as {unlimited}"
+        );
+    }
+
+    /// The budget that the test states for the Kitty graphics protocol.
+    const KITTY_TEST_CAP: usize = 1024 * 1024;
+
+    /// The budget that the test states for the Sixel protocol.
+    const SIXEL_TEST_CAP: usize = 512 * 1024;
+
+    /// The budget that the test states for the iTerm2 protocol.
+    const ITERM2_TEST_CAP: usize = 256 * 1024;
+
+    /// The one careful budget that the test starts the builder at.
+    const UNIFORM_TEST_CAP: usize = 64 * 1024;
+
+    /// Each protocol reads the budget that the caller stated for it.
+    ///
+    /// mosh states a cap for each of the three protocols, and the three caps
+    /// differ. A holder that gave one number for all three would send a Sixel
+    /// picture under the cap of Kitty, and the terminal drops a picture above
+    /// the cap of its own protocol, so the user sees nothing at all. That one
+    /// number is the defect of
+    /// <https://github.com/timmattison/tools/issues/480>.
+    ///
+    /// The three budgets differ from each other on purpose. Three equal
+    /// numbers pass with two of the fields crossed over, and that crossing is
+    /// the mistake the builder exists to stop.
+    #[test]
+    fn each_protocol_reads_the_budget_that_the_caller_stated_for_it() {
+        let same = ProtocolBudgets::uniform(PayloadBudget::of(UNIFORM_TEST_CAP));
+        for routine in [
+            DisplayRoutine::Kitty,
+            DisplayRoutine::Sixel,
+            DisplayRoutine::Iterm2,
+        ] {
+            assert_eq!(
+                same.of_routine(routine).characters(),
+                UNIFORM_TEST_CAP,
+                "one budget for every protocol is what {routine:?} has to read here"
+            );
+        }
+
+        let each = same
+            .with_kitty(PayloadBudget::of(KITTY_TEST_CAP))
+            .with_sixel(PayloadBudget::of(SIXEL_TEST_CAP))
+            .with_iterm2(PayloadBudget::of(ITERM2_TEST_CAP));
+
+        assert_eq!(
+            each.of_routine(DisplayRoutine::Kitty).characters(),
+            KITTY_TEST_CAP,
+            "the Kitty graphics protocol has to read the budget stated for Kitty"
+        );
+        assert_eq!(
+            each.of_routine(DisplayRoutine::Sixel).characters(),
+            SIXEL_TEST_CAP,
+            "the Sixel protocol has to read the budget stated for Sixel"
+        );
+        assert_eq!(
+            each.of_routine(DisplayRoutine::Iterm2).characters(),
+            ITERM2_TEST_CAP,
+            "the iTerm2 protocol has to read the budget stated for iTerm2"
+        );
+
+        for routine in [
+            DisplayRoutine::Kitty,
+            DisplayRoutine::Sixel,
+            DisplayRoutine::Iterm2,
+        ] {
+            assert_eq!(
+                ProtocolBudgets::UNLIMITED.of_routine(routine),
+                PayloadBudget::UNLIMITED,
+                "a terminal that states no cap bounds no protocol, {routine:?} with the rest"
+            );
+        }
+    }
+
+    /// The share of an unbounded payload that the crossed-budget test states
+    /// for the two protocols it does not draw.
+    ///
+    /// The test needs a budget that the fit of every one of the three
+    /// protocols really reaches, because a budget that a writer cannot reach
+    /// leaves a payload above it and reads as the answer of a writer that
+    /// never saw the budget at all. A count of characters is not such a
+    /// number. Each writer bounds the picture by the window before the fit
+    /// runs, so the payload that the fit starts from moves with the cell size
+    /// that the terminal of the runner reports, and one count stands above
+    /// that payload on a small cell and far under it on a large one.
+    ///
+    /// A share of the payload that the protocol itself made holds on both
+    /// sides. It stands under that payload at every cell size, so the fit
+    /// always runs, and it stays near enough for the fit to reach it. A
+    /// measurement on 2026-09-11 swept the cells from 6 pixels through 48 and
+    /// drew the fixture on all three protocols. Every fit landed below this
+    /// share, with the iTerm2 protocol furthest below it, because that one
+    /// steps onto a JPEG rung.
+    const OTHER_PROTOCOL_BUDGET_SHARE: usize = 90;
+
+    /// A terminal that draws with `routine`.
+    ///
+    /// [`Capabilities::draw`] takes a terminal and picks the routine itself,
+    /// so a test that wants to drive one named routine names a terminal of it.
+    ///
+    /// # Arguments
+    /// * `routine` - The routine that the test draws with.
+    ///
+    /// # Returns
+    /// A terminal type that [`Capabilities`] answers for with that routine.
+    fn terminal_of_routine(routine: DisplayRoutine) -> TerminalType {
+        match routine {
+            DisplayRoutine::Kitty => TerminalType::Kitty,
+            DisplayRoutine::Sixel => TerminalType::Zellij,
+            DisplayRoutine::Iterm2 => TerminalType::ITerm2,
+        }
+    }
+
+    /// Draw `image` on a terminal of `routine` inside `budgets` and give back
+    /// the characters of payload that reached the stream.
+    ///
+    /// Each of the three protocols wraps its payload in a command of its own,
+    /// so the measurement reads the routine as well as the bytes. The three
+    /// answers match [`kitty_payload_characters`], [`sixel_payload_of`] and
+    /// [`iterm2_payload_of`], which measure one protocol each.
+    ///
+    /// The cursor is [`Cursor::Held`], which writes nothing around the
+    /// command, so the count does not move with the window of whoever runs the
+    /// suite.
+    ///
+    /// # Arguments
+    /// * `image` - The picture to draw.
+    /// * `routine` - The routine, and with it the protocol, that draws it.
+    /// * `budgets` - The characters of payload that each protocol can spend.
+    ///
+    /// # Returns
+    /// The characters of payload of the command, with the keys and the
+    /// arguments left out of the number.
+    fn payload_of_routine(
+        image: &DynamicImage,
+        routine: DisplayRoutine,
+        budgets: ProtocolBudgets,
+    ) -> usize {
+        let request = Request {
+            payload: budgets,
+            cursor: Cursor::Held,
+            ..test_request()
+        };
+
+        let capabilities = Capabilities::new(terminal_of_routine(routine), true, true);
+        assert_eq!(
+            capabilities.display_routine(),
+            routine,
+            "this test measures {routine:?}, so the terminal it draws on has to draw with it"
+        );
+
+        let mut out = Vec::new();
+        capabilities
+            .draw(&mut out, image, &request)
+            .expect("a write to a vector never fails");
+        let command =
+            String::from_utf8(out).expect("a command of these three protocols holds ASCII alone");
+
+        match routine {
+            DisplayRoutine::Kitty => kitty_payload_characters(&command),
+            // The Sixel writer writes the device control string of the encoder
+            // and nothing else, so the bytes of the stream are the payload.
+            DisplayRoutine::Sixel => command.len(),
+            DisplayRoutine::Iterm2 => command
+                .rsplit_once(':')
+                .expect("an iTerm2 command holds a colon between the arguments and the payload")
+                .1
+                .trim_end_matches('\x07')
+                .len(),
+        }
+    }
+
+    /// A writer reads the budget of the protocol it writes, and no other one.
+    ///
+    /// mosh states a cap for each of the three protocols, and the three caps
+    /// differ. The request carries all three, because the caller builds it
+    /// before [`Capabilities::draw`] picks the protocol. So the draw has to
+    /// hand each writer the budget of the protocol that writer sends, and a
+    /// draw that hands out one number for all three bounds two protocols out
+    /// of three by the cap of a protocol they do not use. That is the defect
+    /// of <https://github.com/timmattison/tools/issues/480>.
+    ///
+    /// The test draws each protocol in turn with a budget that bounds it at
+    /// nothing, and with a budget under its own payload on the other two. A
+    /// writer that read one of those other budgets would take characters off
+    /// the picture, and the payload then falls to that budget. A writer that
+    /// reads its own takes nothing off, and the payload stands above it.
+    ///
+    /// Every routine is measured, so a draw that hands the wrong budget to any
+    /// one of the three fails here. Two arms of the match with their budgets
+    /// crossed over fail as well, because the routine of each arm is the one
+    /// budget that stands unbounded for that draw.
+    #[test]
+    fn a_writer_reads_the_budget_of_the_protocol_it_writes() {
+        let fixture = photograph_fixture();
+
+        for routine in [
+            DisplayRoutine::Kitty,
+            DisplayRoutine::Sixel,
+            DisplayRoutine::Iterm2,
+        ] {
+            let whole = payload_of_routine(&fixture, routine, ProtocolBudgets::UNLIMITED);
+            let others = whole * OTHER_PROTOCOL_BUDGET_SHARE / 100;
+            let tight = ProtocolBudgets::uniform(PayloadBudget::of(others));
+            let budgets = match routine {
+                DisplayRoutine::Kitty => tight.with_kitty(PayloadBudget::UNLIMITED),
+                DisplayRoutine::Sixel => tight.with_sixel(PayloadBudget::UNLIMITED),
+                DisplayRoutine::Iterm2 => tight.with_iterm2(PayloadBudget::UNLIMITED),
+            };
+
+            assert!(
+                others < whole,
+                "the budget of the other two protocols has to stand under the payload of {routine:?}, or a writer that read it would take nothing off the picture and this test would measure nothing"
+            );
+
+            let spent = payload_of_routine(&fixture, routine, budgets);
+            assert!(
+                spent > others,
+                "nothing bounds {routine:?} here, so its picture has to spend the {whole} characters it spends unbounded, but it spent {spent}, which the {others} characters of the other two protocols hold"
+            );
+        }
     }
 }

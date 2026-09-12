@@ -86,7 +86,7 @@ mod probe;
 mod session;
 
 pub use detect::{AnsweredProtocol, Capabilities, ImageProtocol, TerminalType};
-pub use draw::{Budget, Cursor, DrawError, PayloadBudget, Picture, Request};
+pub use draw::{Budget, Cursor, DrawError, PayloadBudget, Picture, ProtocolBudgets, Request};
 pub use geometry::{cell_pixels, terminal_cells};
 pub use probe::Refusal;
 pub use session::{MoshImages, ProtocolSet};

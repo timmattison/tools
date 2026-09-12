@@ -196,15 +196,35 @@ mosh that draws images states what it carries there:
 |----------|-------|---------|
 | `MOSH_IMAGES` | e.g. `kitty,sixel,iterm2` | The protocols that the **transport** carries. Only a mosh that draws images writes it, so a mosh session that carries none is an upstream mosh and `ic` still refuses it. |
 | `MOSH_CLIENT_IMAGES` | e.g. `kitty,sixel` | The protocols that the **terminal of the user** draws. The wrapper writes it where that terminal answered the query, and an upstream server started by that wrapper carries this one and no `MOSH_IMAGES`. |
+| `MOSH_IMAGE_BUDGETS` | e.g. `kitty=1638400,sixel=1048576,iterm2=1048576` | The largest picture that the **transport** carries, for each protocol it carries. The names are the names of `MOSH_IMAGES` and they stand in the same order. Each cap counts the command of the protocol together with the payload, so `ic` takes room for the command off it. A protocol that the value does not name keeps a careful number that `ic` holds, so a mosh that states no cap draws as it drew before. |
 
-`ic` reads the process tree as well as these two variables, and the two answer
-different questions: the variable states what the transport carries, and the
-process tree states that the transport of this session is a mosh. The variable
-outlives the session that wrote it, because it crosses a multiplexer. A user
-exports it by hand, and a tmux server or a Zellij server that a mosh session
-started hands the whole environment of that session to every pane it opens after
-the mosh session ends. So a variable that names no mosh of this session states
-nothing, and `ic` answers for the terminal that this session really has.
+**The three numbers do not count one unit.** Each one counts the stretch of the
+escape sequence that carries one whole picture in its own protocol, and one unit
+is one byte on the wire in every case. The `kitty` number counts the characters
+of the control block and of the payload of one transmission, added together,
+over every chunk of that transmission. The `sixel` number counts the characters
+of the body of one device-control string. The `iterm2` number counts the bytes
+of the body of one operating system command, the `1337;File=` part and the
+base64 payload together. A reader that takes the three for one unit answers for
+the wrong protocol on two runs out of three, which is the defect that this
+variable closes.
+
+**Above the cap the three protocols fail two different ways.** mosh refuses a
+whole `kitty` transmission with `ENOSPC`, and the user reads an empty screen.
+mosh cuts a `sixel` picture or an `iterm2` picture at the cap and keeps the
+rest, and nothing tells `ic` that the cut happened. So `ic` measures a picture
+against the cap of the protocol it writes, before it writes one byte, and it
+draws a smaller picture in place of a picture that never arrives whole.
+
+`ic` reads the process tree as well as these three variables, and the two
+sources answer different questions: a variable states what the transport
+carries, and the process tree states that the transport of this session is a
+mosh. A variable outlives the session that wrote it, because it crosses a
+multiplexer. A user exports it by hand, and a tmux server or a Zellij server
+that a mosh session started hands the whole environment of that session to every
+pane it opens after the mosh session ends. So a variable that names no mosh of
+this session states nothing, and `ic` answers for the terminal that this session
+really has.
 
 A picture travels through the transport and then draws on the terminal of the
 user, so `ic` draws it with a protocol that both of them read and that this
@@ -238,15 +258,17 @@ A picture in a protocol that one of the two does not read lands on the screen as
 For image display, use a terminal that draws one of the protocols this Mosh carries.
 ```
 
-Both variables state what the transport carries and what the terminal of the
-user draws. Neither one states what a multiplexer in front of the picture
-draws, because the shell that starts that multiplexer hands the whole
-environment to it. So a mosh session that carries images lifts the refusal that
-names mosh and lifts no other one: a tmux that answers no query still takes the
-refusal that names tmux, inside such a mosh as everywhere else.
+The two lists state what the transport carries and what the terminal of the
+user draws. None of the three variables states what a multiplexer in front of
+the picture draws, because the shell that starts that multiplexer hands the
+whole environment to it. So a mosh session that carries images lifts the refusal
+that names mosh and lifts no other one: a tmux that answers no query still takes
+the refusal that names tmux, inside such a mosh as everywhere else.
 
 See [timmattison/mosh-rs#78](https://github.com/timmattison/mosh-rs/issues/78)
-for the two variables and where they come from.
+for the two lists and where they come from, and
+[timmattison/mosh-rs#94](https://github.com/timmattison/mosh-rs/issues/94) for
+the caps and why the three numbers do not count one unit.
 
 ### A terminal that refuses a picture
 
@@ -267,9 +289,12 @@ A smaller image can fit where this one did not: try --width, --height or --scale
 
 The exit code is 1, so a script reads the failure as well.
 
-**The last line belongs to `ENOSPC` alone.** A full image store is the one
-refusal that the size of the picture caused, so a smaller picture is the one
-repair for it. A terminal that answers another code, such as `EINVAL` for bytes
+**The last line belongs to `ENOSPC` alone.** A terminal that answers that code
+refused the picture for room, which is the one refusal that the size of the
+picture caused, so a smaller picture is the one repair for it. The message
+beside the code names the room that ran out. A mosh answers it where one
+transmission stands above the cap that `MOSH_IMAGE_BUDGETS` states for that
+protocol. A terminal that answers another code, such as `EINVAL` for bytes
 it decodes as no picture, refused the picture for a reason that a resize does
 not touch. `ic` reports the code and the message of the terminal there, and it
 advises nothing:

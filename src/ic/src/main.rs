@@ -14,7 +14,8 @@ use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 use termgfx::{
-    terminal_cells, Budget, Capabilities, Cursor, PayloadBudget, Picture, Request, TerminalType,
+    terminal_cells, Budget, Capabilities, Cursor, MoshImages, Picture, ProtocolBudgets, Request,
+    TerminalType,
 };
 use termion::event::Key;
 use termion::input::TermRead;
@@ -1947,7 +1948,10 @@ fn display_image(
             rows: scaled_height,
         },
         source,
-        payload: payload_budget_for(transport),
+        // The caps of a mosh travel in the environment of the session, and
+        // `Capabilities::detect_by_asking` already read them, so this call
+        // costs no second read either.
+        payload: payload_budget_for(transport, terminal_caps.session()),
         picture,
         // A frame of a video always holds the cursor, because the caller puts
         // the cursor where it wants it before every frame. A still picture
@@ -2017,9 +2021,11 @@ enum RemoteTransport {
     /// answer outranks this one, so such a session draws.
     ///
     /// A Mosh that draws still keeps every image for the length of the
-    /// session, and it refuses one transmission above a mebicharacter. That is
-    /// what [`payload_budget_for`] answers, and it is why a transport that
-    /// cannot draw at all still names a budget.
+    /// session, and it caps what it keeps. The cap is not one number: Mosh
+    /// keeps one cap for each protocol it carries, and it states the three in
+    /// `MOSH_IMAGE_BUDGETS`. A Mosh that states none leaves the careful number
+    /// that `termgfx` holds. That is what [`payload_budget_for`] answers, and
+    /// it is why a transport that cannot draw at all still names a budget.
     Mosh,
     /// Running under Eternal Terminal (ET_VERSION env var or etterminal in process tree).
     /// ET passes escape sequences through but its virtual terminal doesn't
@@ -2028,25 +2034,49 @@ enum RemoteTransport {
     EternalTerminal,
 }
 
-/// The characters of payload that a picture can spend on `transport`.
+/// The characters of payload that a picture can spend on `transport`, stated
+/// one time for each of the three inline-image protocols.
 ///
 /// A transport that keeps every image it carries caps what it keeps, and a
-/// picture above that cap draws nothing at all. The tool cannot read the cap
-/// off the session, because no protocol asks the question, so it names the one
-/// transport whose cap is known.
+/// picture above that cap draws nothing at all. **mosh states those caps in
+/// the environment of the session, and this reads them from there.** A query
+/// cannot ask the question, because a multiplexer owns the pseudo terminal of
+/// the pane and answers every query itself, and the environment is the one
+/// channel that crosses a multiplexer. `termgfx::MoshImages` reads the
+/// variable and `termgfx::MoshImages::budgets` states what it read.
+///
+/// A copy of a number that another project holds goes stale, and the copy that
+/// stood here did: it named one cap for all three protocols, where mosh keeps
+/// one cap for each of the three. A protocol that the session does not name
+/// keeps `termgfx::PayloadBudget::MOSH`, the careful number that `termgfx`
+/// holds, because every mosh built before
+/// <https://github.com/timmattison/mosh-rs/issues/94> states no cap at all and
+/// that number is what keeps a picture drawing there. See
+/// <https://github.com/timmattison/tools/issues/480>.
+///
+/// The answer names all three protocols, because `termgfx` reads the terminal
+/// and picks the protocol after this call.
+///
+/// The session answers for a mosh alone. The variable outlives the session
+/// that wrote it, because a tmux server or a Zellij server that a mosh session
+/// started hands the whole environment of that session to every pane it opens
+/// after the mosh session ends. So the caps that a local terminal reads state
+/// what some transport once carried, and they state nothing about this run.
 ///
 /// # Arguments
 /// * `transport` - The remote transport that this session runs over.
+/// * `session` - What the environment of a mosh session states about the
+///   images it carries. It is read for a mosh and for no other transport.
 ///
 /// # Returns
-/// The budget that the transport allows.
-fn payload_budget_for(transport: RemoteTransport) -> PayloadBudget {
+/// The budget of each of the three protocols under that transport.
+fn payload_budget_for(transport: RemoteTransport, session: MoshImages) -> ProtocolBudgets {
     match transport {
-        RemoteTransport::Mosh => PayloadBudget::MOSH,
+        RemoteTransport::Mosh => session.budgets(),
         // A local terminal keeps the resolution it was given, and Eternal
         // Terminal carries the bytes through. A budget on either one would
         // cost a picture resolution and buy nothing.
-        RemoteTransport::None | RemoteTransport::EternalTerminal => PayloadBudget::UNLIMITED,
+        RemoteTransport::None | RemoteTransport::EternalTerminal => ProtocolBudgets::UNLIMITED,
     }
 }
 
@@ -2161,36 +2191,86 @@ fn classify_transport(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use termgfx::{AnsweredProtocol, MoshImages};
+    use termgfx::{AnsweredProtocol, PayloadBudget};
 
-    /// A mosh session states the budget that mosh keeps, and no other
-    /// transport states one.
+    /// A mosh reads the caps off the session, and no other transport names a
+    /// cap.
     ///
     /// mosh holds every image for the length of the session, because a client
-    /// that reconnects holds none, and it refuses one transmission above a
-    /// mebicharacter with `ENOSPC`. A picture above that cap draws nothing at
-    /// all, and the user reads an empty screen and an error.
+    /// that reconnects holds none, and it caps what it holds. The cap is not
+    /// one number. mosh states one cap for each protocol it carries, and it
+    /// states the three in `MOSH_IMAGE_BUDGETS`, because the environment is
+    /// the one channel that crosses a multiplexer. A picture above the cap of
+    /// the protocol that carries it draws nothing at all, and the user reads
+    /// an empty screen and an error.
+    ///
+    /// This crate held a copy of those caps, and the copy went stale. That is
+    /// the defect that <https://github.com/timmattison/tools/issues/480>
+    /// reports, so this test states the session it covers and asserts against
+    /// the caps of that session. A number typed out in an assertion is the
+    /// same copy again, and it goes stale in the same way.
+    ///
+    /// A mosh that states no cap keeps the careful number that this crate
+    /// holds. Every mosh built before
+    /// <https://github.com/timmattison/mosh-rs/issues/94> states none, and the
+    /// careful number is what keeps a picture drawing there.
     ///
     /// Nothing else here names a cap. A local terminal keeps the resolution it
-    /// was given, and Eternal Terminal carries the bytes through, so a budget
-    /// on either one would cost a picture resolution for no reason.
+    /// was given, and Eternal Terminal carries the bytes through. Both answer
+    /// the same whatever the session states, because the variable outlives the
+    /// session that wrote it: a tmux server that a mosh session started hands
+    /// that environment to every pane it opens after the mosh session ends,
+    /// and such a pane is no mosh.
     #[test]
-    fn a_mosh_session_states_the_budget_that_mosh_keeps() {
-        assert_eq!(
-            payload_budget_for(RemoteTransport::Mosh),
-            PayloadBudget::MOSH,
-            "a picture under mosh must fit the store that mosh keeps"
+    fn a_mosh_reads_the_caps_off_the_session_and_no_other_transport_names_a_cap() {
+        /// The cap that the session of this test states for the Kitty
+        /// graphics protocol.
+        const KITTY_CAP: usize = 1_638_400;
+
+        /// The cap that the session of this test states for the Sixel
+        /// protocol.
+        const SIXEL_CAP: usize = 1_048_576;
+
+        /// The cap that the session of this test states for the iTerm2
+        /// protocol. The three caps differ, so an answer that reads the wrong
+        /// protocol fails here.
+        const ITERM2_CAP: usize = 524_288;
+
+        let stated = MoshImages::from_env(
+            Some("kitty,sixel,iterm2"),
+            None,
+            Some(&format!(
+                "kitty={KITTY_CAP},sixel={SIXEL_CAP},iterm2={ITERM2_CAP}"
+            )),
         );
         assert_eq!(
-            payload_budget_for(RemoteTransport::None),
-            PayloadBudget::UNLIMITED,
-            "a local terminal states no cap, so a picture keeps every pixel"
+            payload_budget_for(RemoteTransport::Mosh, stated),
+            ProtocolBudgets::uniform(PayloadBudget::MOSH)
+                .with_kitty(PayloadBudget::under_command_cap(KITTY_CAP))
+                .with_sixel(PayloadBudget::under_command_cap(SIXEL_CAP))
+                .with_iterm2(PayloadBudget::under_command_cap(ITERM2_CAP)),
+            "a picture under mosh takes the cap that the session states for the protocol that carries it, less the room of the command"
         );
+
+        let silent = MoshImages::from_env(Some("kitty,sixel,iterm2"), None, None);
         assert_eq!(
-            payload_budget_for(RemoteTransport::EternalTerminal),
-            PayloadBudget::UNLIMITED,
-            "Eternal Terminal carries the bytes through and states no cap of its own"
+            payload_budget_for(RemoteTransport::Mosh, silent),
+            ProtocolBudgets::uniform(PayloadBudget::MOSH),
+            "a mosh that states no cap keeps the careful number, so a mosh built before the caps travelled draws what it drew before"
         );
+
+        for local in [RemoteTransport::None, RemoteTransport::EternalTerminal] {
+            assert_eq!(
+                payload_budget_for(local, silent),
+                ProtocolBudgets::UNLIMITED,
+                "a local terminal keeps the resolution it was given, and Eternal Terminal carries the bytes through, so neither one names a cap"
+            );
+            assert_eq!(
+                payload_budget_for(local, stated),
+                ProtocolBudgets::UNLIMITED,
+                "and neither one names a cap where the session states caps, because the variable outlives the session that wrote it"
+            );
+        }
     }
 
     // =========================================================================
@@ -2258,7 +2338,7 @@ mod tests {
     /// `mosh-server new` starts by hand: the server states what it carries and
     /// no wrapper stated what the terminal of the user draws.
     fn a_mosh_that_carries_images() -> MoshImages {
-        MoshImages::from_env(Some("kitty,sixel,iterm2"), None)
+        MoshImages::from_env(Some("kitty,sixel,iterm2"), None, None)
     }
 
     /// A mosh that carries images draws a picture for a terminal that named
@@ -2294,7 +2374,7 @@ mod tests {
     #[test]
     fn the_gate_reads_the_session_that_the_capabilities_carry() {
         let named = Capabilities::new(TerminalType::Ghostty, true, true)
-            .in_session(MoshImages::from_env(Some("kitty"), None));
+            .in_session(MoshImages::from_env(Some("kitty"), None, None));
         assert!(
             validate_terminal_for_graphics(&named, &RemoteTransport::Mosh, false, "Image").is_ok(),
             "this mosh carries the kitty protocol, and Ghostty draws it"
@@ -2314,7 +2394,7 @@ mod tests {
     #[test]
     fn a_mosh_that_carries_images_still_takes_the_refusal_that_names_tmux() {
         let named = Capabilities::new(TerminalType::Ghostty, true, true)
-            .in_session(MoshImages::from_env(Some("kitty"), None));
+            .in_session(MoshImages::from_env(Some("kitty"), None, None));
         let error = validate_terminal_for_graphics(&named, &RemoteTransport::Mosh, true, "Image")
             .expect_err("a tmux that answered no query must be refused");
         assert!(
@@ -2358,6 +2438,7 @@ mod tests {
             .in_session(MoshImages::from_env(
                 Some("kitty,sixel,iterm2"),
                 Some("kitty"),
+                None,
             ));
         let error = validate_terminal_for_graphics(&pane, &RemoteTransport::Mosh, false, "Image")
             .expect_err("a session that delivers no protocol this terminal draws must be refused");
@@ -2390,7 +2471,7 @@ mod tests {
     #[test]
     fn a_session_that_names_no_terminal_of_the_user_names_two_sets() {
         let kitty = Capabilities::new(TerminalType::Kitty, true, true)
-            .in_session(MoshImages::from_env(Some("sixel"), None));
+            .in_session(MoshImages::from_env(Some("sixel"), None, None));
         let error = validate_terminal_for_graphics(&kitty, &RemoteTransport::Mosh, false, "Image")
             .expect_err("a session that delivers no protocol this terminal draws must be refused");
         let message = error.to_string();
@@ -2424,6 +2505,7 @@ mod tests {
             .in_session(MoshImages::from_env(
                 Some("kitty,sixel,iterm2"),
                 Some("kitty,sixel"),
+                None,
             ));
         assert!(
             validate_terminal_for_graphics(&pane, &RemoteTransport::Mosh, false, "Image").is_ok(),
@@ -2448,7 +2530,7 @@ mod tests {
     #[test]
     fn a_session_narrows_the_routine_of_a_terminal_of_no_name() {
         let unnamed = Capabilities::new(TerminalType::Unknown, true, true)
-            .in_session(MoshImages::from_env(Some("sixel"), None));
+            .in_session(MoshImages::from_env(Some("sixel"), None, None));
         assert!(
             validate_terminal_for_graphics(&unnamed, &RemoteTransport::Mosh, false, "Image")
                 .is_ok(),
@@ -2473,7 +2555,7 @@ mod tests {
     #[test]
     fn a_stale_mosh_variable_outside_a_mosh_draws_a_picture() {
         let named = Capabilities::new(TerminalType::Ghostty, true, true)
-            .in_session(MoshImages::from_env(Some("sixel"), None));
+            .in_session(MoshImages::from_env(Some("sixel"), None, None));
         assert!(
             validate_terminal_for_graphics(&named, &RemoteTransport::None, false, "Image").is_ok(),
             "a variable that names no transport of this session says nothing about it"

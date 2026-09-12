@@ -1351,7 +1351,11 @@ mod tests {
         );
         assert_eq!(
             Capabilities::new(TerminalType::Unknown, true, true)
-                .in_session(crate::session::MoshImages::from_env(Some("sixel"), None))
+                .in_session(crate::session::MoshImages::from_env(
+                    Some("sixel"),
+                    None,
+                    None
+                ))
                 .display_routine(),
             DisplayRoutine::Sixel,
             "and a session that delivers sixel alone states more than the guess does"
@@ -1360,6 +1364,7 @@ mod tests {
             Capabilities::new(TerminalType::Unknown, true, true)
                 .in_session(crate::session::MoshImages::from_env(
                     Some("kitty,sixel,iterm2"),
+                    None,
                     None
                 ))
                 .display_routine(),
@@ -1378,7 +1383,7 @@ mod tests {
     /// does not read.
     #[test]
     fn a_terminal_that_stated_its_protocol_keeps_it_whatever_the_session_delivers() {
-        let session = crate::session::MoshImages::from_env(Some("sixel"), None);
+        let session = crate::session::MoshImages::from_env(Some("sixel"), None, None);
         assert_eq!(
             Capabilities::new(TerminalType::Ghostty, true, true)
                 .in_session(session)
