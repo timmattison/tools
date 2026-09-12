@@ -9,9 +9,10 @@
 //!
 //! `gitscratch::shed_inherited_git_environment` holds the rule that replaces
 //! the list. It is named rather than linked because this crate takes gitscratch
-//! as a dev-dependency, so rustdoc cannot resolve the path from here. It enumerates the process environment and removes every key with
-//! the `GIT_` prefix, so a variable git invents next year leaves without anyone
-//! editing a file. Its own documentation states the gap this module closes:
+//! as a dev-dependency, so rustdoc cannot resolve the path from here. It
+//! enumerates the process environment and removes every key with the `GIT_`
+//! prefix, so a variable git invents next year leaves without anyone editing a
+//! file. Its own documentation states the gap this module closes:
 //!
 //! > That is an offer, not a guarantee. Nothing - no lint, no type, no guard -
 //! > obliges a git spawn in this repository to call this, so immunity holds
@@ -90,9 +91,9 @@
 //! The difference is more than where the names are written. The staleness of a
 //! keep-list runs in the safe direction. A stale strip-list *inherits* the
 //! variable git added after it was written, and reports the same clean-looking
-//! answer as a list that works. A stale keep-list *sheds* it, so the cost is one
-//! setting a user states again rather than one repository a tool writes into by
-//! mistake.
+//! answer as a list that works. A stale keep-list *sheds* it, so the cost is
+//! one setting a user states again rather than one repository a tool writes
+//! into by mistake.
 //!
 //! # Why a lint cannot say this
 //!
@@ -124,7 +125,8 @@
 //! parenthesized group. An identifier followed by `!` is a macro invocation and
 //! is not matched. The group is then searched, to any depth, for a string
 //! literal starting with `GIT_`, so every spelling of the same call reduces to
-//! the same answer: a bare literal, a reference to one, or one built by a macro.
+//! the same answer: a bare literal, a reference to one, or one built by a
+//! macro.
 //!
 //! # The exemptions
 //!
