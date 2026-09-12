@@ -2160,6 +2160,7 @@ fn classify_transport(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use termgfx::{AnsweredProtocol, MoshImages};
 
     /// A mosh session states the budget that mosh keeps, and no other
@@ -2833,11 +2834,26 @@ mod tests {
         }
     }
 
+    /// The count of the paths that this process built.
+    ///
+    /// Each call of [`unique_temporary_path`] adds one to this count and puts
+    /// the answer in the name it builds.
+    static NEXT_TEMPORARY_PATH: AtomicU64 = AtomicU64::new(0);
+
     /// Build a path in the temporary directory that no other test uses.
     ///
-    /// The name carries the process id and the nanoseconds of the clock, so two
-    /// runs of this suite at the same time name two files (see CLAUDE.md
-    /// parallel-safety).
+    /// Two hazards make one name into two names, and the name answers each one
+    /// with a different part of itself (see CLAUDE.md parallel-safety):
+    ///
+    /// * Two test *processes* run at the same time, from the pre-commit hook
+    ///   and from a hand-typed run of the suite. The process id and the
+    ///   nanoseconds of the clock keep those two apart. The counter cannot,
+    ///   because each process starts its count at zero.
+    /// * Two test *threads* of one process run at the same time, because the
+    ///   test binary runs its tests on many threads. Those threads carry one
+    ///   process id, and two of them read the clock in the same nanosecond, so
+    ///   the process id and the nanoseconds keep no thread apart. The counter
+    ///   does, because one add gives one answer to one caller.
     ///
     /// # Arguments
     /// * `stem` - The first part of the file name, which tells a reader of the
@@ -2852,8 +2868,12 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_nanos())
             .unwrap_or(0);
+        let count = NEXT_TEMPORARY_PATH.fetch_add(1, Ordering::Relaxed);
 
-        std::env::temp_dir().join(format!("{stem}-{}-{nanos}.{extension}", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "{stem}-{}-{nanos}-{count}.{extension}",
+            std::process::id()
+        ))
     }
 
     /// Write `bytes` to a file of this process and give back a guard of it.
