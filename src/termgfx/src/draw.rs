@@ -1280,11 +1280,12 @@ impl JpegQuality {
     /// at this quality: 785138 bytes, which is 1046852 base64 characters. The
     /// cap that mosh states for the iTerm2 protocol leaves 1044480 characters
     /// of payload, so the floor of the ladder still misses that budget by 2372
-    /// characters, which is 0.2 percent of it. [`fit_to_payload_budget`] spends that last distance on pixels,
-    /// and [`FIT_SAFETY`] aims 5 percent under the budget as well, so
-    /// [`shrink_towards`] takes 2.6 percent off each side of that photograph,
-    /// for 2993 pixels by 1807. Under this quality the blocks of the encoder
-    /// start to show, and the pixel count is then the better thing to spend.
+    /// characters, which is 0.2 percent of it. [`fit_to_payload_budget`] spends
+    /// that last distance on pixels, and [`FIT_SAFETY`] aims 5 percent under
+    /// the budget as well, so [`shrink_towards`] takes 2.6 percent off each
+    /// side of that photograph, for 2993 pixels by 1807. Under this quality the
+    /// blocks of the encoder start to show, and the pixel count is then the
+    /// better thing to spend.
     const LOWEST: Self = Self(35);
 
     /// How far one step of the ladder falls.
@@ -1806,13 +1807,13 @@ const fn kitty_budget_under_chunk_framing(budget: PayloadBudget) -> PayloadBudge
 /// An image leaves here in one of the two shapes of [`KittyPayload`], and
 /// `request.picture` names which one.
 ///
-/// [`Picture::Still`] is one still picture, and it travels as a PNG.
-/// Raw pixels cost four base64 characters for every pixel, so a photograph of
-/// 330 pixels by 440 costs 580800 characters that way. That is over a third of
-/// the 1638400 characters that mosh carries in one Kitty transmission, and a
-/// photograph of three times the pixels never arrives at all. A still picture goes out one time, so the
-/// characters are the whole of what it pays, and a PNG of it costs a fraction
-/// of the raw pixels.
+/// [`Picture::Still`] is one still picture, and it travels as a PNG. Raw pixels
+/// cost four base64 characters for every pixel, so a photograph of 330 pixels
+/// by 440 costs 580800 characters that way. That is over a third of the 1638400
+/// characters that mosh carries in one Kitty transmission, and a photograph of
+/// three times the pixels never arrives at all. A still picture goes out one
+/// time, so the characters are the whole of what it pays, and a PNG of it costs
+/// a fraction of the raw pixels.
 ///
 /// [`Picture::Frame`] is one frame of many, and it keeps the raw pixels. The
 /// caller draws the next frame directly after this one, so a PNG encoder here
@@ -3412,9 +3413,9 @@ mod tests {
         // Raw pixels cost four base64 characters for every pixel, and mosh
         // carries 1638400 characters in one Kitty transmission, so one
         // photograph takes over a third of that cap and a photograph of three
-        // times the pixels never arrives. `f=100` names a PNG instead, and a Kitty terminal then reads
-        // the width and the height out of the PNG itself. The header must carry
-        // no `s=` key and no `v=` key beside it.
+        // times the pixels never arrives. `f=100` names a PNG instead, and a
+        // Kitty terminal then reads the width and the height out of the PNG
+        // itself. The header must carry no `s=` key and no `v=` key beside it.
         let control_data = kitty_still_control_data();
 
         assert!(
@@ -4159,9 +4160,9 @@ mod tests {
     /// A raw shape states what it costs off the pixel count alone. A frame of
     /// 1920 pixels by 1080 costs 8294424 characters as a raw PNM, and no cap
     /// that a mosh session states holds a fifth of them, so the budget refuses
-    /// that rung for every frame of the video. A walk that reads the statement steps past the rung.
-    /// A walk that reads the payload builds those 8294424 characters one time
-    /// for each frame and throws every one of them away.
+    /// that rung for every frame of the video. A walk that reads the statement
+    /// steps past the rung. A walk that reads the payload builds those 8294424
+    /// characters one time for each frame and throws every one of them away.
     ///
     /// The ladder here counts the encoder runs of its top rung, so the test
     /// measures the encoder run itself and not the payload it made.
