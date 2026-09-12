@@ -1,0 +1,18 @@
+# Build outputs
+/target/
+
+# Environment files. The glob covers every real variant (.env, .env.local,
+# .env.bak, ...) because any of them can hold a live API key; the negation
+# keeps the committed template visible. Add further templates here, not by
+# widening the exception.
+.env*
+!.env.example
+
+# IDE files
+.vscode/
+.idea/
+
+# Temporary files
+*.swp
+*.swo
+*~

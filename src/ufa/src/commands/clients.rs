@@ -1,0 +1,270 @@
+use anyhow::Result;
+use clap::Subcommand;
+use tabled::Tabled;
+use uuid::Uuid;
+
+use crate::{
+    client::UnifiClient,
+    models::{Client, ClientAction, Page},
+    output::{print_output, print_vec_table, OutputFormat},
+    site_helper::get_site_id_or_prompt,
+};
+
+/// Shown in place of a value the client kind does not have at all, such as
+/// the MAC address of a VPN client.
+const NOT_APPLICABLE: &str = "N/A";
+
+#[derive(Subcommand, Debug)]
+pub enum ClientsCommand {
+    /// List connected clients on a site
+    List {
+        /// Maximum number of clients to return
+        #[clap(long, default_value = "25")]
+        limit: u32,
+
+        /// Offset for pagination
+        #[clap(long, default_value = "0")]
+        offset: u64,
+
+        /// Filter expression
+        #[clap(long)]
+        filter: Option<String>,
+    },
+
+    /// Get client details
+    Get {
+        /// Client ID
+        client_id: Uuid,
+    },
+
+    /// Authorize guest access for a client
+    AuthorizeGuest {
+        /// Client ID
+        client_id: Uuid,
+
+        /// Time limit in minutes
+        #[clap(long)]
+        time_limit_minutes: Option<u64>,
+
+        /// Data usage limit in megabytes
+        #[clap(long)]
+        data_usage_limit_mbytes: Option<u64>,
+
+        /// Download rate limit in kilobits per second
+        #[clap(long)]
+        rx_rate_limit_kbps: Option<u64>,
+
+        /// Upload rate limit in kilobits per second
+        #[clap(long)]
+        tx_rate_limit_kbps: Option<u64>,
+    },
+
+    /// Unauthorize guest access for a client
+    UnauthorizeGuest {
+        /// Client ID
+        client_id: Uuid,
+    },
+}
+
+#[derive(Tabled, serde::Serialize)]
+struct ClientRow {
+    #[tabled(rename = "ID")]
+    id: String,
+    #[tabled(rename = "Name")]
+    name: String,
+    #[tabled(rename = "Type")]
+    client_type: String,
+    #[tabled(rename = "IP Address")]
+    ip_address: String,
+    #[tabled(rename = "MAC Address")]
+    mac_address: String,
+    #[tabled(rename = "Connected At")]
+    connected_at: String,
+}
+
+/// Render an address a client may not have at all.
+///
+/// # Arguments
+///
+/// * `address` - The address the controller reported, if it reported one.
+///
+/// # Returns
+///
+/// The address as the controller spelled it, or an empty cell.
+fn address_or_blank<A: std::fmt::Display>(address: Option<&A>) -> String {
+    address.map(ToString::to_string).unwrap_or_default()
+}
+
+fn client_to_row(client: &Client) -> ClientRow {
+    match client {
+        Client::Wired(c) => ClientRow {
+            id: c.id.to_string(),
+            name: c.name.clone(),
+            client_type: "WIRED".to_string(),
+            ip_address: address_or_blank(c.ip_address.as_ref()),
+            mac_address: c.mac_address.to_string(),
+            connected_at: c.connected_at.clone().unwrap_or_default(),
+        },
+        Client::Wireless(c) => ClientRow {
+            id: c.id.to_string(),
+            name: c.name.clone(),
+            client_type: "WIRELESS".to_string(),
+            ip_address: address_or_blank(c.ip_address.as_ref()),
+            mac_address: c.mac_address.to_string(),
+            connected_at: c.connected_at.clone().unwrap_or_default(),
+        },
+        Client::Vpn(c) => ClientRow {
+            id: c.id.to_string(),
+            name: c.name.clone(),
+            client_type: "VPN".to_string(),
+            ip_address: address_or_blank(c.ip_address.as_ref()),
+            mac_address: NOT_APPLICABLE.to_string(),
+            connected_at: c.connected_at.clone().unwrap_or_default(),
+        },
+        Client::Teleport(c) => ClientRow {
+            id: c.id.to_string(),
+            name: c.name.clone(),
+            client_type: "TELEPORT".to_string(),
+            ip_address: address_or_blank(c.ip_address.as_ref()),
+            mac_address: NOT_APPLICABLE.to_string(),
+            connected_at: c.connected_at.clone().unwrap_or_default(),
+        },
+        // A client kind this build does not know still belongs in the
+        // listing, described with whatever the controller did say about it.
+        Client::Unknown(c) => ClientRow {
+            id: c.id.map(|id| id.to_string()).unwrap_or_default(),
+            name: c.name.clone().unwrap_or_default(),
+            client_type: c.client_type.clone(),
+            ip_address: address_or_blank(c.ip_address.as_ref()),
+            mac_address: c
+                .mac_address
+                .as_ref()
+                .map_or_else(|| NOT_APPLICABLE.to_string(), ToString::to_string),
+            connected_at: c.connected_at.clone().unwrap_or_default(),
+        },
+    }
+}
+
+pub async fn handle_clients_command(
+    command: ClientsCommand,
+    site_id: Option<Uuid>,
+    client: &UnifiClient,
+    output_format: OutputFormat,
+) -> Result<()> {
+    match command {
+        ClientsCommand::List {
+            limit,
+            offset,
+            filter,
+        } => list_clients(client, site_id, limit, offset, filter, output_format).await,
+        ClientsCommand::Get { client_id } => {
+            get_client(client, site_id, client_id, output_format).await
+        }
+        ClientsCommand::AuthorizeGuest {
+            client_id,
+            time_limit_minutes,
+            data_usage_limit_mbytes,
+            rx_rate_limit_kbps,
+            tx_rate_limit_kbps,
+        } => {
+            authorize_guest(
+                client,
+                site_id,
+                client_id,
+                time_limit_minutes,
+                data_usage_limit_mbytes,
+                rx_rate_limit_kbps,
+                tx_rate_limit_kbps,
+            )
+            .await
+        }
+        ClientsCommand::UnauthorizeGuest { client_id } => {
+            unauthorize_guest(client, site_id, client_id).await
+        }
+    }
+}
+
+async fn list_clients(
+    client: &UnifiClient,
+    site_id: Option<Uuid>,
+    limit: u32,
+    offset: u64,
+    filter: Option<String>,
+    output_format: OutputFormat,
+) -> Result<()> {
+    let limit_str = limit.to_string();
+    let offset_str = offset.to_string();
+    let mut params: Vec<(&str, &dyn std::fmt::Display)> =
+        vec![("limit", &limit_str), ("offset", &offset_str)];
+
+    if let Some(f) = &filter {
+        params.push(("filter", f));
+    }
+
+    let site_id = get_site_id_or_prompt(client, site_id).await?;
+    let path = format!("sites/{}/clients", site_id);
+    let page: Page<Client> = client.get_with_params(&path, &params).await?;
+
+    match output_format {
+        OutputFormat::Json => {
+            print_output(&page, output_format)?;
+        }
+        OutputFormat::Table => {
+            let rows: Vec<ClientRow> = page.data.iter().map(client_to_row).collect();
+            print_vec_table(&rows, output_format)?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn get_client(
+    client: &UnifiClient,
+    site_id: Option<Uuid>,
+    client_id: Uuid,
+    output_format: OutputFormat,
+) -> Result<()> {
+    let site_id = get_site_id_or_prompt(client, site_id).await?;
+    let path = format!("sites/{}/clients/{}", site_id, client_id);
+    let client_details: Client = client.get(&path).await?;
+
+    print_output(&client_details, output_format)?;
+    Ok(())
+}
+
+async fn authorize_guest(
+    client: &UnifiClient,
+    site_id: Option<Uuid>,
+    client_id: Uuid,
+    time_limit_minutes: Option<u64>,
+    data_usage_limit_mbytes: Option<u64>,
+    rx_rate_limit_kbps: Option<u64>,
+    tx_rate_limit_kbps: Option<u64>,
+) -> Result<()> {
+    let site_id = get_site_id_or_prompt(client, site_id).await?;
+    let path = format!("sites/{}/clients/{}/actions", site_id, client_id);
+    let action = ClientAction::AuthorizeGuestAccess {
+        time_limit_minutes,
+        data_usage_limit_mbytes,
+        rx_rate_limit_kbps,
+        tx_rate_limit_kbps,
+    };
+
+    let _: serde_json::Value = client.post(&path, &action).await?;
+    println!("Guest access authorized successfully");
+    Ok(())
+}
+
+async fn unauthorize_guest(
+    client: &UnifiClient,
+    site_id: Option<Uuid>,
+    client_id: Uuid,
+) -> Result<()> {
+    let site_id = get_site_id_or_prompt(client, site_id).await?;
+    let path = format!("sites/{}/clients/{}/actions", site_id, client_id);
+    let action = ClientAction::UnauthorizeGuestAccess;
+
+    let _: serde_json::Value = client.post(&path, &action).await?;
+    println!("Guest access unauthorized successfully");
+    Ok(())
+}

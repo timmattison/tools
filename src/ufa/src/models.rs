@@ -1,0 +1,1130 @@
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+/// Declare an enum whose values arrive from the UniFi API as bare strings.
+///
+/// The controller is a third-party product on its own release schedule: a
+/// firmware update can introduce a device state, a connector type or a Wi-Fi
+/// standard that this build has never heard of. A plain `#[derive(Deserialize)]`
+/// enum rejects such a value, and because it is one field of one item of a
+/// paged response, that rejection fails the *whole* listing.
+///
+/// Every enum declared through this macro instead keeps the unrecognized text
+/// in an `Unknown` variant, so:
+///
+/// * the rest of the response still reaches the user,
+/// * `--output json` hands the value back exactly as the controller sent it,
+/// * `Display` shows the controller's own spelling, for known and unknown
+///   values alike.
+///
+/// The wire spelling is written once per variant and drives serialization,
+/// deserialization and display together, so they cannot drift apart.
+///
+/// # Examples
+///
+/// ```ignore
+/// api_enum! {
+///     /// How the controller says a port is doing.
+///     pub enum PortState {
+///         Up => "UP",
+///         Down => "DOWN",
+///     }
+/// }
+/// ```
+macro_rules! api_enum {
+    (
+        $(#[$enum_meta:meta])*
+        $visibility:vis enum $name:ident {
+            $(
+                $(#[$variant_meta:meta])*
+                $variant:ident => $wire:literal
+            ),* $(,)?
+        }
+    ) => {
+        $(#[$enum_meta])*
+        #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+        $visibility enum $name {
+            $(
+                $(#[$variant_meta])*
+                #[serde(rename = $wire)]
+                $variant,
+            )*
+            /// A value this build does not know, kept verbatim so it can still
+            /// be shown and written back out.
+            #[serde(untagged)]
+            Unknown(String),
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    $( Self::$variant => formatter.write_str($wire), )*
+                    Self::Unknown(value) => formatter.write_str(value),
+                }
+            }
+        }
+    };
+}
+
+/// Declare a newtype over a string the UniFi API reports.
+///
+/// The value is kept exactly as the controller sent it and is never
+/// validated: it arrives *from* the controller, so rejecting a spelling we
+/// did not expect would turn a cosmetic surprise into a failed command. What
+/// the type buys is that two strings describing different things can no
+/// longer stand in for one another -- a MAC address handed to something
+/// expecting an IP address is a compile error rather than a wrong column.
+///
+/// The inner string is private and the type is `#[serde(transparent)]`, so
+/// the wire format is unchanged and the only ways to read the value back out
+/// are `Display` and serialization.
+macro_rules! api_string {
+    (
+        $(#[$meta:meta])*
+        $visibility:vis struct $name:ident;
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+        #[serde(transparent)]
+        $visibility struct $name(String);
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str(&self.0)
+            }
+        }
+
+        impl From<String> for $name {
+            fn from(value: String) -> Self {
+                Self(value)
+            }
+        }
+
+        impl From<&str> for $name {
+            fn from(value: &str) -> Self {
+                Self(value.to_string())
+            }
+        }
+    };
+}
+
+api_string! {
+    /// The hardware address of a device or client, as the controller
+    /// reported it.
+    pub struct MacAddress;
+}
+
+api_string! {
+    /// The network address of a device or client, as the controller reported
+    /// it. Both IPv4 and IPv6 arrive here.
+    pub struct IpAddress;
+}
+
+// Common pagination types
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Page<T> {
+    pub offset: u64,
+    pub limit: u32,
+    pub count: u32,
+    #[serde(rename = "totalCount")]
+    pub total_count: u64,
+    pub data: Vec<T>,
+}
+
+// Site models
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Site {
+    pub id: Uuid,
+    #[serde(rename = "internalReference")]
+    pub internal_reference: String,
+    pub name: String,
+}
+
+// Device models
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Device {
+    pub id: Uuid,
+    /// A device the controller has not named yet -- one part way through
+    /// adoption, say -- must still appear in the listing, so an absent name
+    /// is empty rather than fatal.
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(rename = "macAddress")]
+    pub mac_address: MacAddress,
+    #[serde(rename = "ipAddress")]
+    pub ip_address: IpAddress,
+    pub state: DeviceState,
+    pub features: Vec<DeviceFeature>,
+    pub interfaces: Vec<DeviceInterface>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DeviceDetails {
+    pub id: Uuid,
+    /// Absent for the same reason as [`Device::name`].
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub model: String,
+    pub supported: bool,
+    #[serde(rename = "macAddress")]
+    pub mac_address: MacAddress,
+    #[serde(rename = "ipAddress")]
+    pub ip_address: IpAddress,
+    pub state: DeviceState,
+    #[serde(rename = "firmwareVersion")]
+    pub firmware_version: String,
+    #[serde(rename = "firmwareUpdatable")]
+    pub firmware_updatable: bool,
+    #[serde(rename = "adoptedAt")]
+    pub adopted_at: Option<String>,
+    #[serde(rename = "provisionedAt")]
+    pub provisioned_at: Option<String>,
+    #[serde(rename = "configurationId")]
+    pub configuration_id: String,
+    pub uplink: Option<DeviceUplink>,
+    pub features: serde_json::Value,
+    pub interfaces: DeviceInterfaces,
+}
+
+api_enum! {
+    /// What the controller says a device is doing.
+    pub enum DeviceState {
+        Online => "ONLINE",
+        Offline => "OFFLINE",
+        PendingAdoption => "PENDING_ADOPTION",
+        Updating => "UPDATING",
+        GettingReady => "GETTING_READY",
+        Adopting => "ADOPTING",
+        Deleting => "DELETING",
+        ConnectionInterrupted => "CONNECTION_INTERRUPTED",
+        Isolated => "ISOLATED",
+    }
+}
+
+api_enum! {
+    /// A capability the controller reports a device as having.
+    pub enum DeviceFeature {
+        Switching => "switching",
+        AccessPoint => "accessPoint",
+        Gateway => "gateway",
+    }
+}
+
+api_enum! {
+    /// A kind of interface the controller reports a device as having.
+    pub enum DeviceInterface {
+        Ports => "ports",
+        Radios => "radios",
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DeviceUplink {
+    #[serde(rename = "deviceId")]
+    pub device_id: Uuid,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DeviceInterfaces {
+    pub ports: Option<Vec<Port>>,
+    pub radios: Option<Vec<WirelessRadio>>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Port {
+    pub idx: u32,
+    pub state: PortState,
+    pub connector: PortConnector,
+    #[serde(rename = "maxSpeedMbps")]
+    pub max_speed_mbps: u32,
+    #[serde(rename = "speedMbps")]
+    pub speed_mbps: Option<u32>,
+    pub poe: Option<PortPoE>,
+}
+
+api_enum! {
+    /// What the controller says a port is doing.
+    pub enum PortState {
+        Up => "UP",
+        Down => "DOWN",
+        /// The controller's own "UNKNOWN": it has no state to report. This is
+        /// a value we recognize, unlike the generated `Unknown` fallback.
+        Unspecified => "UNKNOWN",
+    }
+}
+
+api_enum! {
+    /// The physical connector of a port.
+    pub enum PortConnector {
+        Rj45 => "RJ45",
+        Sfp => "SFP",
+        Sfpplus => "SFPPLUS",
+        Sfp28 => "SFP28",
+        Qsfp28 => "QSFP28",
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct PortPoE {
+    pub standard: PoEStandard,
+    #[serde(rename = "type")]
+    pub poe_type: u8,
+    pub enabled: bool,
+    pub state: PoEState,
+}
+
+api_enum! {
+    /// The PoE standard a port supplies power under.
+    pub enum PoEStandard {
+        Af => "802.3af",
+        At => "802.3at",
+        Bt => "802.3bt",
+    }
+}
+
+api_enum! {
+    /// What the controller says the PoE supply of a port is doing.
+    pub enum PoEState {
+        Up => "UP",
+        Down => "DOWN",
+        Limited => "LIMITED",
+        /// The controller's own "UNKNOWN": it has no state to report. This is
+        /// a value we recognize, unlike the generated `Unknown` fallback.
+        Unspecified => "UNKNOWN",
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct WirelessRadio {
+    #[serde(rename = "wlanStandard")]
+    pub wlan_standard: WlanStandard,
+    #[serde(rename = "frequencyGHz")]
+    pub frequency_ghz: String,
+    #[serde(rename = "channelWidthMHz")]
+    pub channel_width_mhz: u32,
+    pub channel: Option<u32>,
+}
+
+api_enum! {
+    /// The Wi-Fi standard a radio is operating under.
+    pub enum WlanStandard {
+        A => "802.11a",
+        B => "802.11b",
+        G => "802.11g",
+        N => "802.11n",
+        Ac => "802.11ac",
+        Ax => "802.11ax",
+        Be => "802.11be",
+    }
+}
+
+// Device statistics
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DeviceStatistics {
+    #[serde(rename = "uptimeSec")]
+    pub uptime_sec: Option<u64>,
+    #[serde(rename = "lastHeartbeatAt")]
+    pub last_heartbeat_at: Option<String>,
+    #[serde(rename = "nextHeartbeatAt")]
+    pub next_heartbeat_at: Option<String>,
+    #[serde(rename = "loadAverage1Min")]
+    pub load_average_1min: Option<f64>,
+    #[serde(rename = "loadAverage5Min")]
+    pub load_average_5min: Option<f64>,
+    #[serde(rename = "loadAverage15Min")]
+    pub load_average_15min: Option<f64>,
+    #[serde(rename = "cpuUtilizationPct")]
+    pub cpu_utilization_pct: Option<f64>,
+    #[serde(rename = "memoryUtilizationPct")]
+    pub memory_utilization_pct: Option<f64>,
+    pub uplink: Option<UplinkStatistics>,
+    pub interfaces: DeviceInterfaceStatistics,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct UplinkStatistics {
+    #[serde(rename = "txRateBps")]
+    pub tx_rate_bps: Option<u64>,
+    #[serde(rename = "rxRateBps")]
+    pub rx_rate_bps: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DeviceInterfaceStatistics {
+    pub radios: Option<Vec<RadioStatistics>>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct RadioStatistics {
+    #[serde(rename = "frequencyGHz")]
+    pub frequency_ghz: f64,
+    #[serde(rename = "txRetriesPct")]
+    pub tx_retries_pct: Option<f64>,
+}
+
+// Client models
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "type")]
+pub enum Client {
+    #[serde(rename = "WIRED")]
+    Wired(WiredClient),
+    #[serde(rename = "WIRELESS")]
+    Wireless(WirelessClient),
+    #[serde(rename = "VPN")]
+    Vpn(VpnClient),
+    #[serde(rename = "TELEPORT")]
+    Teleport(TeleportClient),
+    /// A client of a kind this build does not know, or one whose fields do
+    /// not match the shape we expect. Keeping it costs the user nothing;
+    /// rejecting it would cost them the entire client listing.
+    #[serde(untagged)]
+    Unknown(UnknownClient),
+}
+
+/// A client whose `type` this build does not recognize.
+///
+/// Only the fields every client kind shares are named; everything else is
+/// carried through untouched so `--output json` still reports the client
+/// exactly as the controller described it.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct UnknownClient {
+    #[serde(rename = "type")]
+    pub client_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(
+        rename = "connectedAt",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub connected_at: Option<String>,
+    #[serde(rename = "ipAddress", default, skip_serializing_if = "Option::is_none")]
+    pub ip_address: Option<IpAddress>,
+    #[serde(
+        rename = "macAddress",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub mac_address: Option<MacAddress>,
+    /// Everything else the controller sent, kept verbatim.
+    #[serde(flatten)]
+    pub other_fields: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct WiredClient {
+    pub id: Uuid,
+    pub name: String,
+    #[serde(rename = "connectedAt")]
+    pub connected_at: Option<String>,
+    #[serde(rename = "ipAddress")]
+    pub ip_address: Option<IpAddress>,
+    #[serde(rename = "macAddress")]
+    pub mac_address: MacAddress,
+    #[serde(rename = "uplinkDeviceId")]
+    pub uplink_device_id: Uuid,
+    pub access: ClientAccess,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct WirelessClient {
+    pub id: Uuid,
+    pub name: String,
+    #[serde(rename = "connectedAt")]
+    pub connected_at: Option<String>,
+    #[serde(rename = "ipAddress")]
+    pub ip_address: Option<IpAddress>,
+    #[serde(rename = "macAddress")]
+    pub mac_address: MacAddress,
+    #[serde(rename = "uplinkDeviceId")]
+    pub uplink_device_id: Uuid,
+    pub access: ClientAccess,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct VpnClient {
+    pub id: Uuid,
+    pub name: String,
+    #[serde(rename = "connectedAt")]
+    pub connected_at: Option<String>,
+    #[serde(rename = "ipAddress")]
+    pub ip_address: Option<IpAddress>,
+    pub access: ClientAccess,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct TeleportClient {
+    pub id: Uuid,
+    pub name: String,
+    #[serde(rename = "connectedAt")]
+    pub connected_at: Option<String>,
+    #[serde(rename = "ipAddress")]
+    pub ip_address: Option<IpAddress>,
+    pub access: ClientAccess,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "type")]
+pub enum ClientAccess {
+    #[serde(rename = "DEFAULT")]
+    Default,
+    #[serde(rename = "GUEST")]
+    Guest { authorized: bool },
+    /// An access tier this build does not know, kept verbatim.
+    #[serde(untagged)]
+    Unknown(UnknownTaggedObject),
+}
+
+/// A `type`-tagged object whose type this build does not recognize.
+///
+/// The tag is named so it can be shown; the remaining fields are carried
+/// through untouched so nothing the controller said is lost.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct UnknownTaggedObject {
+    #[serde(rename = "type")]
+    pub object_type: String,
+    #[serde(flatten)]
+    pub other_fields: serde_json::Map<String, serde_json::Value>,
+}
+
+// Voucher models
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Voucher {
+    pub id: Uuid,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+    pub name: String,
+    pub code: String,
+    #[serde(rename = "authorizedGuestLimit")]
+    pub authorized_guest_limit: Option<u64>,
+    #[serde(rename = "authorizedGuestCount")]
+    pub authorized_guest_count: u64,
+    #[serde(rename = "activatedAt")]
+    pub activated_at: Option<String>,
+    #[serde(rename = "expiresAt")]
+    pub expires_at: Option<String>,
+    pub expired: bool,
+    #[serde(rename = "timeLimitMinutes")]
+    pub time_limit_minutes: u64,
+    #[serde(rename = "dataUsageLimitMBytes")]
+    pub data_usage_limit_mbytes: Option<u64>,
+    #[serde(rename = "rxRateLimitKbps")]
+    pub rx_rate_limit_kbps: Option<u64>,
+    #[serde(rename = "txRateLimitKbps")]
+    pub tx_rate_limit_kbps: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VoucherCreateRequest {
+    pub count: u32,
+    pub name: String,
+    #[serde(
+        rename = "authorizedGuestLimit",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub authorized_guest_limit: Option<u64>,
+    #[serde(rename = "timeLimitMinutes")]
+    pub time_limit_minutes: u64,
+    #[serde(
+        rename = "dataUsageLimitMBytes",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub data_usage_limit_mbytes: Option<u64>,
+    #[serde(rename = "rxRateLimitKbps", skip_serializing_if = "Option::is_none")]
+    pub rx_rate_limit_kbps: Option<u64>,
+    #[serde(rename = "txRateLimitKbps", skip_serializing_if = "Option::is_none")]
+    pub tx_rate_limit_kbps: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VoucherCreateResponse {
+    pub vouchers: Vec<Voucher>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VoucherDeletionResults {
+    #[serde(rename = "vouchersDeleted")]
+    pub vouchers_deleted: u64,
+}
+
+// Application info
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ApplicationInfo {
+    #[serde(rename = "applicationVersion")]
+    pub application_version: String,
+}
+
+// Action models
+#[derive(Debug, Serialize)]
+#[serde(tag = "action")]
+pub enum DeviceAction {
+    #[serde(rename = "RESTART")]
+    Restart,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "action")]
+pub enum PortAction {
+    #[serde(rename = "POWER_CYCLE")]
+    PowerCycle,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "action")]
+pub enum ClientAction {
+    #[serde(rename = "AUTHORIZE_GUEST_ACCESS")]
+    AuthorizeGuestAccess {
+        #[serde(rename = "timeLimitMinutes", skip_serializing_if = "Option::is_none")]
+        time_limit_minutes: Option<u64>,
+        #[serde(
+            rename = "dataUsageLimitMBytes",
+            skip_serializing_if = "Option::is_none"
+        )]
+        data_usage_limit_mbytes: Option<u64>,
+        #[serde(rename = "rxRateLimitKbps", skip_serializing_if = "Option::is_none")]
+        rx_rate_limit_kbps: Option<u64>,
+        #[serde(rename = "txRateLimitKbps", skip_serializing_if = "Option::is_none")]
+        tx_rate_limit_kbps: Option<u64>,
+    },
+    #[serde(rename = "UNAUTHORIZE_GUEST_ACCESS")]
+    UnauthorizeGuestAccess,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::de::DeserializeOwned;
+
+    /// A value no build of this tool knows about, standing in for whatever
+    /// Ubiquiti ships in the next firmware.
+    const FUTURE_VALUE: &str = "FUTURE_FIRMWARE_VALUE";
+
+    /// Where the production half of this file ends and the tests begin.
+    const TEST_MODULE_ATTRIBUTE: &str = "#[cfg(test)]";
+
+    /// One enum to exercise: its name, and a round trip through it.
+    type EnumCheck = (&'static str, fn(&str) -> String);
+
+    /// Deserialize `raw` as a bare JSON string into `T` and serialize it back.
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The value the controller sent, without JSON quoting.
+    ///
+    /// # Returns
+    ///
+    /// Whatever `T` serializes back to, without JSON quoting.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the value cannot be read into `T` or written back out.
+    fn round_trip<T: DeserializeOwned + Serialize>(raw: &str) -> String {
+        let json = serde_json::to_string(raw).expect("quoting a string must succeed");
+        let parsed: T = serde_json::from_str(&json).unwrap_or_else(|error| {
+            panic!(
+                "{} must accept the unrecognized value {raw}: {error}",
+                std::any::type_name::<T>()
+            )
+        });
+        let written = serde_json::to_string(&parsed).expect("writing the value back must succeed");
+        serde_json::from_str(&written).unwrap_or_else(|error| {
+            panic!(
+                "{} must serialize back to a string: {error}",
+                std::any::type_name::<T>()
+            )
+        })
+    }
+
+    /// A device listing holding one device whose state is `state`.
+    fn device_page_json(state: &str) -> String {
+        format!(
+            r#"{{
+                "offset": 0, "limit": 25, "count": 2, "totalCount": 2,
+                "data": [
+                    {{
+                        "id": "00000000-0000-0000-0000-000000000001",
+                        "name": "ap-lr", "model": "U6-LR",
+                        "macAddress": "00:11:22:33:44:55", "ipAddress": "192.168.1.2",
+                        "state": "{state}",
+                        "features": ["accessPoint"], "interfaces": ["radios"]
+                    }},
+                    {{
+                        "id": "00000000-0000-0000-0000-000000000002",
+                        "name": "switch-8", "model": "USW-8",
+                        "macAddress": "00:11:22:33:44:66", "ipAddress": "192.168.1.3",
+                        "state": "ONLINE",
+                        "features": ["switching"], "interfaces": ["ports"]
+                    }}
+                ]
+            }}"#
+        )
+    }
+
+    /// Every enum read from the controller must survive a value this build
+    /// does not know, and must hand that value back unchanged so `--output
+    /// json` stays faithful to what the controller actually said.
+    #[test]
+    fn unknown_values_round_trip_through_every_api_enum() {
+        let checks: &[EnumCheck] = &[
+            ("DeviceState", round_trip::<DeviceState>),
+            ("DeviceFeature", round_trip::<DeviceFeature>),
+            ("DeviceInterface", round_trip::<DeviceInterface>),
+            ("PortState", round_trip::<PortState>),
+            ("PortConnector", round_trip::<PortConnector>),
+            ("PoEStandard", round_trip::<PoEStandard>),
+            ("PoEState", round_trip::<PoEState>),
+            ("WlanStandard", round_trip::<WlanStandard>),
+        ];
+
+        for (name, check) in checks {
+            assert_eq!(
+                check(FUTURE_VALUE),
+                FUTURE_VALUE,
+                "{name} must hand an unrecognized value back unchanged"
+            );
+        }
+    }
+
+    /// Known values must keep their exact wire spelling, so opening the enums
+    /// up cannot quietly rewrite what `--output json` emits.
+    #[test]
+    fn known_values_keep_their_wire_spelling() {
+        let checks: &[EnumCheck] = &[
+            ("ONLINE", round_trip::<DeviceState>),
+            ("accessPoint", round_trip::<DeviceFeature>),
+            ("radios", round_trip::<DeviceInterface>),
+            ("UP", round_trip::<PortState>),
+            ("SFP28", round_trip::<PortConnector>),
+            ("802.3bt", round_trip::<PoEStandard>),
+            ("LIMITED", round_trip::<PoEState>),
+            ("802.11be", round_trip::<WlanStandard>),
+        ];
+
+        for (value, check) in checks {
+            assert_eq!(check(value), *value, "{value} must round trip unchanged");
+        }
+    }
+
+    /// One device in an unfamiliar state must not cost the user the whole
+    /// listing.
+    #[test]
+    fn a_device_in_an_unknown_state_does_not_kill_the_listing() {
+        let json = device_page_json(FUTURE_VALUE);
+
+        let page: Page<Device> = serde_json::from_str(&json)
+            .unwrap_or_else(|error| panic!("the listing must still parse: {error}"));
+
+        assert_eq!(page.data.len(), 2, "every device must survive the parse");
+        assert_eq!(
+            page.data[1].name, "switch-8",
+            "the known device must survive"
+        );
+        let written = serde_json::to_value(&page.data[0]).expect("writing the device back");
+        assert_eq!(
+            written["state"], FUTURE_VALUE,
+            "the unrecognized state must be reported as the controller sent it"
+        );
+    }
+
+    /// A device the controller reports without a name is a device the user
+    /// still needs to see -- and still must not cost them the whole listing.
+    #[test]
+    fn a_device_without_a_name_does_not_kill_the_listing() {
+        let json = r#"{
+            "offset": 0, "limit": 25, "count": 1, "totalCount": 1,
+            "data": [
+                {
+                    "id": "00000000-0000-0000-0000-000000000001",
+                    "macAddress": "00:11:22:33:44:55", "ipAddress": "192.168.1.2",
+                    "state": "PENDING_ADOPTION",
+                    "features": [], "interfaces": []
+                }
+            ]
+        }"#;
+
+        let page: Page<Device> = serde_json::from_str(json)
+            .unwrap_or_else(|error| panic!("a nameless device must still parse: {error}"));
+
+        assert_eq!(page.data.len(), 1, "the nameless device must survive");
+    }
+
+    /// A client type this build has never heard of must not cost the user the
+    /// whole client listing, and what is known about it must still come back.
+    #[test]
+    fn an_unknown_client_type_does_not_kill_the_listing() {
+        let json = r#"{
+            "offset": 0, "limit": 25, "count": 2, "totalCount": 2,
+            "data": [
+                {
+                    "type": "MESH",
+                    "id": "00000000-0000-0000-0000-000000000001",
+                    "name": "mesh-node",
+                    "ipAddress": "192.168.1.9",
+                    "macAddress": "00:11:22:33:44:99",
+                    "connectedAt": "2026-07-21T00:00:00Z"
+                },
+                {
+                    "type": "WIRED",
+                    "id": "00000000-0000-0000-0000-000000000002",
+                    "name": "nas",
+                    "ipAddress": "192.168.1.10",
+                    "macAddress": "00:11:22:33:44:10",
+                    "uplinkDeviceId": "00000000-0000-0000-0000-000000000003",
+                    "access": { "type": "DEFAULT" }
+                }
+            ]
+        }"#;
+
+        let page: Page<Client> = serde_json::from_str(json)
+            .unwrap_or_else(|error| panic!("the client listing must still parse: {error}"));
+
+        assert_eq!(page.data.len(), 2, "every client must survive the parse");
+        let written = serde_json::to_value(&page.data[0]).expect("writing the client back");
+        assert_eq!(
+            written["type"], "MESH",
+            "the unrecognized client type must be reported as the controller sent it"
+        );
+        assert_eq!(
+            written["name"], "mesh-node",
+            "what is known about an unfamiliar client must still be reported"
+        );
+    }
+
+    /// A new access tier must not cost the user the client it belongs to.
+    #[test]
+    fn an_unknown_client_access_type_does_not_kill_the_client() {
+        let json = r#"{
+            "type": "WIRED",
+            "id": "00000000-0000-0000-0000-000000000002",
+            "name": "nas",
+            "macAddress": "00:11:22:33:44:10",
+            "uplinkDeviceId": "00000000-0000-0000-0000-000000000003",
+            "access": { "type": "HOTSPOT", "authorized": true }
+        }"#;
+
+        let client: Client = serde_json::from_str(json)
+            .unwrap_or_else(|error| panic!("the client must still parse: {error}"));
+
+        let written = serde_json::to_value(&client).expect("writing the client back");
+        assert_eq!(
+            written["access"]["type"], "HOTSPOT",
+            "the unrecognized access type must be reported as the controller sent it"
+        );
+    }
+
+    /// The guardrail for this whole class of bug: an enum read from the
+    /// controller that has no unknown-value fallback breaks every command
+    /// that touches it the day Ubiquiti ships a new value, so adding one must
+    /// fail here rather than in the field.
+    ///
+    /// An enum is exempt only if it is never deserialized (request bodies we
+    /// author ourselves cannot surprise us).
+    #[test]
+    fn no_api_enum_is_closed_to_unknown_values() {
+        const SOURCE: &str = include_str!("models.rs");
+
+        // Only the production half of the file: the test module below holds
+        // sample declarations that are text, not types.
+        let production = SOURCE.split(TEST_MODULE_ATTRIBUTE).next().unwrap_or(SOURCE);
+
+        let closed: Vec<String> = enum_declarations(production)
+            .into_iter()
+            .filter(|declaration| declaration.needs_fallback() && !declaration.has_fallback())
+            .map(|declaration| declaration.name)
+            .collect();
+
+        assert!(
+            closed.is_empty(),
+            "these enums are read from the UniFi API but reject values this build \
+             does not know, which fails the whole response instead of the one odd \
+             item: {closed:?}. Declare them with api_enum! (bare string values) or \
+             give them an untagged fallback variant (tagged objects)."
+        );
+    }
+
+    /// One enum declaration found in the source of this file.
+    struct EnumDeclaration {
+        name: String,
+        /// Declared through `api_enum!`, which supplies the fallback itself.
+        from_api_enum_macro: bool,
+        /// Read from the controller, as opposed to only ever written.
+        deserialized: bool,
+        /// Carries a variant that swallows anything unrecognized.
+        fallback_variant: bool,
+    }
+
+    impl EnumDeclaration {
+        fn needs_fallback(&self) -> bool {
+            self.deserialized
+        }
+
+        fn has_fallback(&self) -> bool {
+            self.from_api_enum_macro || self.fallback_variant
+        }
+    }
+
+    /// Find every enum declared in `source`.
+    ///
+    /// This reads the source text rather than the compiled types because the
+    /// point is to catch an enum somebody *adds*, which no amount of testing
+    /// the existing types can do.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - The Rust source to scan.
+    ///
+    /// # Returns
+    ///
+    /// One entry per enum declaration, in source order.
+    fn enum_declarations(source: &str) -> Vec<EnumDeclaration> {
+        const MACRO_OPENER: &str = "api_enum! {";
+
+        let lines: Vec<&str> = source.lines().collect();
+        let mut declarations = Vec::new();
+
+        for (index, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            if !trimmed.ends_with('{') {
+                continue;
+            }
+            let Some(rest) = trimmed
+                .strip_prefix("pub enum ")
+                .or_else(|| trimmed.strip_prefix("enum "))
+            else {
+                continue;
+            };
+            let name = rest.trim_end_matches('{').trim().to_string();
+
+            let mut from_api_enum_macro = false;
+            let mut deserialized = false;
+            for earlier in lines[..index].iter().rev() {
+                let earlier = earlier.trim();
+                if earlier.starts_with("#[") || earlier.starts_with("///") {
+                    deserialized |= earlier.contains("derive") && earlier.contains("Deserialize");
+                    continue;
+                }
+                from_api_enum_macro = earlier.ends_with(MACRO_OPENER);
+                break;
+            }
+            if from_api_enum_macro {
+                deserialized = true;
+            }
+
+            let fallback_variant = lines[index + 1..]
+                .iter()
+                .take_while(|body| body.trim() != "}")
+                .any(|body| body.contains("serde(untagged)") || body.contains("serde(other)"));
+
+            declarations.push(EnumDeclaration {
+                name,
+                from_api_enum_macro,
+                deserialized,
+                fallback_variant,
+            });
+        }
+
+        declarations
+    }
+
+    /// The source scan above is only worth anything if it can actually fail,
+    /// so feed it an enum of exactly the shape it is meant to catch.
+    #[test]
+    fn the_closed_enum_guard_can_fail() {
+        let closed_enum_source = "\
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = \"SCREAMING_SNAKE_CASE\")]
+pub enum NewlyAddedState {
+    Online,
+    Offline,
+}
+";
+
+        let declarations = enum_declarations(closed_enum_source);
+
+        assert_eq!(declarations.len(), 1, "the scan must find the enum at all");
+        assert!(
+            declarations[0].needs_fallback() && !declarations[0].has_fallback(),
+            "a closed enum read from the API must be reported as closed"
+        );
+    }
+
+    /// A device carrying both kinds of address.
+    const DEVICE_JSON: &str = r#"{
+        "id": "00000000-0000-0000-0000-000000000001",
+        "name": "ap-lr", "model": "U6-LR",
+        "macAddress": "00:11:22:33:44:55", "ipAddress": "192.168.1.2",
+        "state": "ONLINE",
+        "features": [], "interfaces": []
+    }"#;
+
+    /// The same device, in the shape `devices get` returns.
+    const DEVICE_DETAILS_JSON: &str = r#"{
+        "id": "00000000-0000-0000-0000-000000000001",
+        "name": "ap-lr", "model": "U6-LR", "supported": true,
+        "macAddress": "00:11:22:33:44:55", "ipAddress": "192.168.1.2",
+        "state": "ONLINE",
+        "firmwareVersion": "7.0.0", "firmwareUpdatable": false,
+        "configurationId": "abc",
+        "features": {}, "interfaces": {}
+    }"#;
+
+    /// One client of each kind that carries an address.
+    const CLIENTS_JSON: &str = r#"[
+        {
+            "type": "WIRED",
+            "id": "00000000-0000-0000-0000-000000000002",
+            "name": "nas",
+            "ipAddress": "192.168.1.10", "macAddress": "00:11:22:33:44:10",
+            "uplinkDeviceId": "00000000-0000-0000-0000-000000000009",
+            "access": { "type": "DEFAULT" }
+        },
+        {
+            "type": "WIRELESS",
+            "id": "00000000-0000-0000-0000-000000000003",
+            "name": "phone",
+            "ipAddress": "192.168.1.11", "macAddress": "00:11:22:33:44:11",
+            "uplinkDeviceId": "00000000-0000-0000-0000-000000000009",
+            "access": { "type": "DEFAULT" }
+        },
+        {
+            "type": "VPN",
+            "id": "00000000-0000-0000-0000-000000000004",
+            "name": "laptop-vpn",
+            "ipAddress": "192.168.1.12",
+            "access": { "type": "DEFAULT" }
+        },
+        {
+            "type": "TELEPORT",
+            "id": "00000000-0000-0000-0000-000000000005",
+            "name": "laptop-teleport",
+            "ipAddress": "192.168.1.13",
+            "access": { "type": "DEFAULT" }
+        }
+    ]"#;
+
+    /// A MAC address and an IP address are different things, and the model
+    /// must say so: as long as both are plain `String`s, one can be passed
+    /// wherever the other is expected and nothing complains until a user sees
+    /// a MAC address in the IP column.
+    #[test]
+    fn mac_and_ip_addresses_are_not_interchangeable() {
+        let device: Device = serde_json::from_str(DEVICE_JSON).expect("the device must parse");
+        let details: DeviceDetails =
+            serde_json::from_str(DEVICE_DETAILS_JSON).expect("the device details must parse");
+        let clients: Vec<Client> =
+            serde_json::from_str(CLIENTS_JSON).expect("the clients must parse");
+        let mut wired = None;
+        let mut wireless = None;
+        let mut vpn = None;
+        let mut teleport = None;
+        for client in &clients {
+            match client {
+                Client::Wired(c) => wired = Some(c),
+                Client::Wireless(c) => wireless = Some(c),
+                Client::Vpn(c) => vpn = Some(c),
+                Client::Teleport(c) => teleport = Some(c),
+                Client::Unknown(c) => panic!("unexpected client kind {}", c.client_type),
+            }
+        }
+        let wired = wired.expect("the wired client must parse as one");
+        let wireless = wireless.expect("the wireless client must parse as one");
+        let vpn = vpn.expect("the VPN client must parse as one");
+        let teleport = teleport.expect("the teleport client must parse as one");
+
+        let checks: &[(&str, &str, &str)] = &[
+            (
+                "Device.mac_address",
+                std::any::type_name_of_val(&device.mac_address),
+                "MacAddress",
+            ),
+            (
+                "Device.ip_address",
+                std::any::type_name_of_val(&device.ip_address),
+                "IpAddress",
+            ),
+            (
+                "DeviceDetails.mac_address",
+                std::any::type_name_of_val(&details.mac_address),
+                "MacAddress",
+            ),
+            (
+                "DeviceDetails.ip_address",
+                std::any::type_name_of_val(&details.ip_address),
+                "IpAddress",
+            ),
+            (
+                "WiredClient.mac_address",
+                std::any::type_name_of_val(&wired.mac_address),
+                "MacAddress",
+            ),
+            (
+                "WiredClient.ip_address",
+                std::any::type_name_of_val(&wired.ip_address),
+                "IpAddress",
+            ),
+            (
+                "WirelessClient.mac_address",
+                std::any::type_name_of_val(&wireless.mac_address),
+                "MacAddress",
+            ),
+            (
+                "WirelessClient.ip_address",
+                std::any::type_name_of_val(&wireless.ip_address),
+                "IpAddress",
+            ),
+            (
+                "VpnClient.ip_address",
+                std::any::type_name_of_val(&vpn.ip_address),
+                "IpAddress",
+            ),
+            (
+                "TeleportClient.ip_address",
+                std::any::type_name_of_val(&teleport.ip_address),
+                "IpAddress",
+            ),
+        ];
+
+        for (field, actual, expected) in checks {
+            assert!(
+                actual.contains(expected),
+                "{field} must be carried as a {expected} of its own so it cannot be \
+                 passed where the other kind of address belongs, but it is a {actual}"
+            );
+        }
+    }
+
+    /// Distinguishing the two kinds of address is an internal matter: what
+    /// goes out over the wire, and out through `--output json`, must be the
+    /// same plain string the controller sent.
+    #[test]
+    fn addresses_round_trip_as_the_plain_strings_the_controller_sent() {
+        let device: Device = serde_json::from_str(DEVICE_JSON).expect("the device must parse");
+        let clients: Vec<Client> =
+            serde_json::from_str(CLIENTS_JSON).expect("the clients must parse");
+
+        let written = serde_json::to_value(&device).expect("writing the device back");
+        assert_eq!(
+            written["macAddress"], "00:11:22:33:44:55",
+            "the MAC address must be written back as a plain string"
+        );
+        assert_eq!(
+            written["ipAddress"], "192.168.1.2",
+            "the IP address must be written back as a plain string"
+        );
+
+        let written = serde_json::to_value(&clients).expect("writing the clients back");
+        assert_eq!(
+            written[0]["macAddress"], "00:11:22:33:44:10",
+            "a client MAC address must be written back as a plain string"
+        );
+        assert_eq!(
+            written[2]["ipAddress"], "192.168.1.12",
+            "a client IP address must be written back as a plain string"
+        );
+    }
+}
