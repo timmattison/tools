@@ -273,6 +273,108 @@ full path, `shellquote::shell_quote(...)`, where the call site sits behind a
 - `swt` - the path of a `.swt-check` override, and the command lines it prints
   for a person to paste
 
+## Spawning Git
+
+Every command this workspace spawns that is git, or that runs git, **must**
+shed the inherited git environment through
+`gitscratch::shed_inherited_git_environment` (or the
+`NoInheritedGitEnvironment` trait, for a builder chain). **Never write a list
+of variable names.**
+
+### Why
+
+Git obeys the environment before it obeys the directory a command was pointed
+at, and it exports its own variables into every hook it runs. So a tool or a
+test that runs from inside a pre-commit hook aims its git children at the
+repository being committed to, whatever `current_dir` says. That has stamped
+real commits with a fixture's identity and written a fixture's file onto a live
+branch.
+
+The repair kept arriving as a list of the three or four names somebody had
+thought of. **A list is the defect, not the style.** It strips nothing new the
+day git adds a variable, and from then on it returns the same clean-looking
+answer as a list that works. Two variables walked through the three-name list
+this workspace kept copying:
+
+- `GIT_OBJECT_DIRECTORY` sends every object a child writes into another
+  repository's store.
+- `GIT_CONFIG_PARAMETERS`, which git hands every hook, injects arbitrary
+  configuration (`user.email`, `core.bare`, `core.hooksPath`) into the child.
+
+Neither names a location, so no amount of adding location names would have
+caught either. The rule is the `GIT_` prefix, and the shared sweep enumerates
+the environment rather than knowing any name at all.
+
+### Usage
+
+Take the crate with `gitscratch.workspace = true` (a dev-dependency when only
+the tests spawn git), then sweep before the command is built:
+
+```rust
+use gitscratch::shed_inherited_git_environment;
+
+let mut command = Command::new("git");
+shed_inherited_git_environment(&mut command);
+
+let output = command.args(["ls-files"]).current_dir(repo_root).output();
+```
+
+A value the call site wants pinned is set **after** the sweep, and so wins.
+That is how `cwt` keeps its fixture identity and how several fixtures keep
+`GIT_CONFIG_GLOBAL` pointed at `/dev/null`.
+
+Removing `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` costs nothing on its own:
+a removal is not a redirect to `/dev/null`, so git falls back to the host's
+`~/.gitconfig` and `/etc/gitconfig` exactly as it does in a shell that holds
+nothing. What it does cost is the answer for a user who exported one on
+purpose — `nwt`'s `missing_hooks_path` says so in its own documentation, which
+is where such a cost belongs.
+
+### The Trap: A Lint Cannot Say This
+
+`clippy.toml` supports `disallowed-methods`, which matches a method path and
+ignores its arguments. The predicate here is entirely about the argument, so
+clippy can only ban `env_remove` outright, which fires on every legitimate
+removal of a variable that is not git's. The guard therefore reads the source.
+
+It reads **tokens** rather than the syntax tree, because `syn` leaves the body
+of a macro invocation unparsed and a tree walk cannot see a removal written
+inside one. Tokens keep the property the tree gives: a `//` comment never
+becomes a token, a doc comment becomes one string literal, and the text of a
+string is one token rather than the words it spells — so prose that names the
+call stays data. Each file is parsed first, so a file the guard cannot read as
+Rust is a refusal rather than a clean verdict.
+
+The read set is the Rust cargo compiles, not every `.rs` file on disk.
+`src/cdva/tests/fixtures/rust` holds Rust that `cdva` reads as *input*, two
+files of which are invalid on purpose. A named removal written into a parser
+fixture is a fixture, not a defect.
+
+### The Exemptions
+
+`repo_guards::git_env_sweep::EXEMPTIONS` holds two entries, both in
+`src/gitscratch/src/git.rs`: the restated removal of `GIT_AUTHOR_DATE` and
+`GIT_COMMITTER_DATE` after the blanket sweep, so that second guard holds on its
+own. Entries are keyed on **(file, variable)**, so a new named removal in an
+exempt file is still a violation, and an entry that matches nothing is reported
+too — an allowlist nobody prunes is how a guard quietly stops covering what it
+was written for.
+
+### What the Guard Does Not Prove
+
+It proves no call site is written as a named list. It does **not** prove a
+given spawn sheds anything at all: a spawn that scrubs nothing is not written
+in a shape any rule can name. Proving that is a dataflow question, and this
+workspace does not have a dataflow engine.
+
+### Guards Enforcing This
+
+- `repo_guards::git_env_sweep` (`src/repo-guards/src/git_env_sweep.rs`) — no
+  file cargo compiles removes a `GIT_`-prefixed variable by name. Its companion
+  test asks `cargo metadata` whether the read set holds every target root cargo
+  builds, so a directory the walk never reaches shows up as a set difference
+  instead of a clean report
+
 ## Version Information
 
 All tools in this repository **must** display version information including git hash and dirty status when `--version` or `-V` is used.

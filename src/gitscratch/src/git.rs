@@ -122,9 +122,18 @@ impl NoInheritedGitEnvironment for Command {
 /// the rule for what to shed is worth keeping in one reusable place rather than
 /// copied into each of them to drift.
 ///
-/// That is an offer, not a guarantee. Nothing - no lint, no type, no guard -
-/// obliges a git spawn in this repository to call this, so immunity holds where
-/// it is called and nowhere else.
+/// It was an offer rather than a guarantee for as long as nothing obliged a git
+/// spawn in this repository to call it. `repo_guards::git_env_sweep` now does
+/// the obliging from the other side: it reports every `env_remove` in the
+/// workspace whose argument names a `GIT_` variable, which is the shape a
+/// hand-written list arrives in. A clippy rule cannot say that, because
+/// `disallowed-methods` matches a method path and ignores its arguments.
+///
+/// What the guard proves is narrow, and worth stating. It proves no call site
+/// is written as a named list. It does not prove a given spawn sheds anything
+/// at all, because a spawn that scrubs nothing is not written in a shape any
+/// rule can name. So immunity still holds where this is called, and the guard
+/// stops the one way it used to be quietly replaced.
 ///
 /// ```no_run
 /// let mut command = std::process::Command::new("git");
@@ -264,6 +273,12 @@ impl Git {
             // each commit its own time, exactly as it does in a shell that
             // holds nothing. Pinned by
             // `every_identity_variable_is_settled_on_the_command_the_runner_builds`.
+            //
+            // These are the only two removals by name that this workspace
+            // allows, and `repo_guards::git_env_sweep::EXEMPTIONS` names them
+            // one variable at a time. A third removal written here is still a
+            // violation, and an exemption that stops matching is reported, so
+            // neither this comment nor that list can quietly outlive the other.
             .env_remove("GIT_AUTHOR_DATE")
             .env_remove("GIT_COMMITTER_DATE");
         command
