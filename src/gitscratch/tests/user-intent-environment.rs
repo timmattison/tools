@@ -1,5 +1,6 @@
 //! What [`gitscratch::shed_inherited_git_environment_keeping_user_intent`]
-//! takes off a production command, and what it deliberately leaves on.
+//! takes off a production command, what it deliberately leaves on, and what the
+//! fixture rule beside it takes off a command that keeps nothing.
 //!
 //! A fixture and a production tool differ in one way that decides the rule. A
 //! fixture builds a throwaway repository and has no user whose intent to honor,
@@ -41,9 +42,13 @@ use gitscratch::{
     USER_INTENT_GIT_ENVIRONMENT,
 };
 
-/// `GIT_` variables a production spawn must shed, each paired with what leaving
-/// it in place costs. The consequence is quoted back on failure, so a
+/// `GIT_` variables a spawn must shed under either rule, each paired with what
+/// leaving it in place costs. The consequence is quoted back on failure, so a
 /// regression explains itself rather than only naming a key.
+///
+/// Neither rule keeps one of these names. A production spawn sheds them because
+/// each carries the intent of the hook that launched it, and a fixture sheds
+/// them because a fixture keeps nothing at all.
 const MUST_SHED: &[(&str, &str)] = &[
     (
         "GIT_DIR",
@@ -206,6 +211,44 @@ fn sheds_a_git_variable_that_does_not_exist_yet() {
          that keeps it is a strip-list, and a strip-list reports clean for whatever git invents \
          next."
     );
+}
+
+/// The fixture rule sheds every name a leak arrives under, and touches nothing
+/// outside the prefix.
+///
+/// `nwt` held this assertion over a private copy of the sweep, and the
+/// assertion moved here when the copy went. It measures what no other test
+/// here measures: the test above reads the same six names under the keep rule,
+/// and `tests/inherited-environment.rs` probes the configuration family rather
+/// than the location family. Without this one, a fixture rule that kept
+/// `GIT_DIR` would report clean.
+#[test]
+fn the_fixture_rule_sheds_every_name_a_leak_arrives_under() {
+    let keys: Vec<&str> = MUST_SHED
+        .iter()
+        .map(|(key, _)| *key)
+        .chain(NOT_GIT.iter().map(|(key, _)| *key))
+        .collect();
+
+    let mut command = Command::new("git");
+    shed_git_environment_from(&mut command, &keys, InheritedGitEnvironment::ShedEverything);
+    let removed = scheduled_removals(&command);
+
+    for (key, consequence) in MUST_SHED {
+        assert!(
+            removed.iter().any(|removal| removal == key),
+            "`{key}` survived a fixture sweep: left in place it {consequence}. A fixture keeps \
+             nothing, and the rule is the `GIT_` prefix rather than a list of names."
+        );
+    }
+
+    for (key, cost) in NOT_GIT {
+        assert!(
+            !removed.iter().any(|removal| removal == key),
+            "`{key}` left a fixture sweep, and it does not carry the `GIT_` prefix: it {cost}. A \
+             sweep that over-matches takes the fixture's own environment with it."
+        );
+    }
 }
 
 /// The fixture rule keeps nothing, the keep-list included.
