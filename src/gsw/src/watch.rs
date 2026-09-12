@@ -738,12 +738,21 @@ struct IssueRun {
     running: bool,
     /// Where the person who reads this screen sits. Decided once, at start.
     session: crate::remote::Session,
-    /// When the message that asks for a second press was posted, or `None`
+    /// When the message that asks for a second press took the row, or `None`
     /// when no such message stands.
     ///
-    /// The message on screen is the armed state, so this holds the instant the
-    /// message was posted and not a flag: the message goes away by itself
-    /// after [`crate::push::STATUS_LIFETIME`], and the arming goes with it.
+    /// The message on screen is the armed state, so this holds an instant and
+    /// not a flag: the message goes away by itself after
+    /// [`crate::push::STATUS_LIFETIME`], and the arming goes with it.
+    ///
+    /// **The instant is the one the message took the row at, and not the one
+    /// the key was pressed at.** The row is not always free — a question and a
+    /// push in flight own it, and [`crate::push::PushUi::post_notice`] holds a
+    /// message that arrives then. A held message is a message nobody has read,
+    /// so an arming that started at the press would offer a second press
+    /// against a warning still sitting in the queue. [`IssueRun::arm`] is
+    /// therefore called by [`absorb`] and only for the answer that says the
+    /// words reached the screen.
     armed: Option<Instant>,
 }
 
@@ -786,9 +795,14 @@ impl IssueRun {
     /// person sits. So does a remote shell whose message still stands: that
     /// message is what the user read, and this press is the answer to it.
     ///
-    /// Everything else is a first press on a remote shell. It records the
-    /// instant and asks, and [`absorb`] puts the words it returns under the
-    /// frame.
+    /// Everything else is a first press on a remote shell. It asks, and
+    /// [`absorb`] puts the words it returns under the frame.
+    ///
+    /// **The asking and the arming are two halves, and this half only asks.**
+    /// The message is the armed state, and whether the message reaches the
+    /// screen is the row's answer rather than this one's — see
+    /// [`IssueRun::armed`]. So [`absorb`] posts the words, reads that answer,
+    /// and calls [`IssueRun::arm`] for the answer that says the row took them.
     fn press(&mut self, now: Instant) -> IssuePress {
         if self.running {
             return IssuePress::Nothing;
@@ -804,18 +818,28 @@ impl IssueRun {
             self.running = true;
             return IssuePress::Run(command);
         }
-        self.armed = Some(now);
         IssuePress::Ask(format!(
             "remote shell — press G again to run {}",
             command.name()
         ))
     }
 
+    /// The message that asks for a second press reached the row at `now`.
+    ///
+    /// The one door into the armed state, and [`absorb`] is its one caller:
+    /// the row answers whether the words are on the screen, and only that
+    /// answer arms the key. [`IssueRun::armed`] says why the instant is this
+    /// one and not the instant of the press.
+    fn arm(&mut self, now: Instant) {
+        self.armed = Some(now);
+    }
+
     /// Whether the message that asks for a second press still stands.
     ///
     /// The message goes off the screen one [`crate::push::STATUS_LIFETIME`]
-    /// after it was posted, so the arming ends at that same moment. The screen
-    /// and the key then say one thing: a `G` a minute later asks again.
+    /// after it took the row, and [`IssueRun::armed`] holds that same instant,
+    /// so the arming ends at that same moment. The screen and the key then say
+    /// one thing: a `G` a minute later asks again.
     ///
     /// Saturating for the reason the age of a status message in
     /// [`crate::push`] is: `now` comes from the loop's injected clock, and a
@@ -1355,10 +1379,21 @@ where
             // and the message it stands for must end at the same moment, and
             // two reads put the arming microseconds before the message. A test
             // clock that steps on every read makes the same gap a whole step.
+            // The arm below takes this same instant, which is why it is right:
+            // it runs only where the message went straight onto the row, so
+            // `now` is the instant the message got there.
             let now = clock();
             match issue.press(now) {
                 IssuePress::Run(command) => (hooks.start_issue)(command),
-                IssuePress::Ask(message) => ui.post_notice(message, now),
+                // The row arms the key, and not the press. A question or a
+                // push in flight owns the row, and a notice that arrives then
+                // waits in the queue — nobody has read it, so a second press
+                // against it would run the command with no warning ever seen.
+                IssuePress::Ask(message) => {
+                    if ui.post_notice(message, now) == crate::push::Posted::OnRow {
+                        issue.arm(now);
+                    }
+                }
                 IssuePress::Nothing => {}
             }
         }
@@ -4849,9 +4884,12 @@ mod push_loop_tests {
 
     #[test]
     fn a_second_press_on_a_remote_shell_runs_the_command() {
+        // The caller arms, because only the row knows whether the words it
+        // returned reached the screen. `absorb` makes this pair of calls.
         let now = Instant::now();
         let mut issue = issue_run_in(crate::remote::Session::Remote);
         issue.press(now);
+        issue.arm(now);
         assert_eq!(
             issue.press(now + Duration::from_secs(1)),
             IssuePress::Run(found_command()),
@@ -4863,10 +4901,12 @@ mod push_loop_tests {
     fn a_second_press_one_lifetime_later_asks_again() {
         // The message on screen is the armed state. It leaves the screen after
         // one `STATUS_LIFETIME`, and the arming leaves with it, so the two end
-        // at the same moment.
+        // at the same moment. The caller arms, as it does in `absorb`, and it
+        // arms at the instant the message took the row.
         let now = Instant::now();
         let mut issue = issue_run_in(crate::remote::Session::Remote);
         issue.press(now);
+        issue.arm(now);
         assert_eq!(
             issue.press(now + crate::push::STATUS_LIFETIME),
             IssuePress::Ask(SECOND_PRESS_NOTICE.to_string()),
@@ -4877,10 +4917,12 @@ mod push_loop_tests {
     #[test]
     fn a_key_between_two_presses_takes_the_arming_away() {
         // That key also takes the message off the screen, and the message is
-        // the armed state.
+        // the armed state. The caller arms first, as it does in `absorb`,
+        // because there is no arming to take away otherwise.
         let now = Instant::now();
         let mut issue = issue_run_in(crate::remote::Session::Remote);
         issue.press(now);
+        issue.arm(now);
         issue.disarm();
         assert_eq!(
             issue.press(now),

@@ -764,6 +764,29 @@ impl HeldLife {
     }
 }
 
+/// Where a posted message landed: on the row, or in the queue behind it.
+///
+/// The two doors into the row answer this because the row is not always free,
+/// and a caller can have work that only the first answer justifies. The `G`
+/// key is that caller: the message it posts asks for a second press, and the
+/// offer of that press stands exactly as long as the message on the row does.
+/// A message that waits for a push is a message nobody has read, so a key
+/// armed by it would take a press the user never gave a reason for.
+///
+/// An enum rather than a `bool`, because the two answers are two places and
+/// not the presence and absence of one thing. `Posted::Held` at
+/// [`MAX_HELD_MESSAGES`] is the message that was dropped as well as the one
+/// that waits — neither took the row, which is the whole question here, and a
+/// third answer would make every caller decide something it has no use for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Posted {
+    /// The message is under the frame now.
+    OnRow,
+    /// A question or a push in flight owns the row, so the message waits in
+    /// [`PushUi::held`] — or, on a full queue, went nowhere at all.
+    Held,
+}
+
 impl PushUi {
     /// A UI with nothing on screen, drawing on a terminal that takes 24-bit
     /// color when `truecolor` says so.
@@ -1025,7 +1048,10 @@ impl PushUi {
     /// the ones already in it. That constant says why the oldest is the one
     /// worth the row.
     pub(crate) fn post_error(&mut self, line: String) {
-        self.post(line, Life::UntilDismissed);
+        // The answer goes unread here on purpose. git's words wait for a key
+        // wherever they land, so a caller of this door has nothing to decide
+        // from where the message went — see [`Posted`] for the caller that has.
+        let _ = self.post(line, Life::UntilDismissed);
     }
 
     /// Put gsw's own words under the frame, to be taken off again by the clock.
@@ -1048,8 +1074,14 @@ impl PushUi {
     /// only for a message that goes straight onto the row. A message that
     /// waits for a push takes the instant of the frame that posts it
     /// instead — see [`HeldLife`].
-    pub(crate) fn post_notice(&mut self, line: String, now: Instant) {
-        self.post(line, Life::Fading { posted_at: now });
+    ///
+    /// So the answer says which of those two happened, and the caller needs
+    /// it. `now` starts a countdown the caller may run a clock of its own
+    /// against — the `G` key runs exactly that — and that clock is a lie for a
+    /// message that has not reached the row. [`Posted`] says what each answer
+    /// obliges the caller to do.
+    pub(crate) fn post_notice(&mut self, line: String, now: Instant) -> Posted {
+        self.post(line, Life::Fading { posted_at: now })
     }
 
     /// Put `line` on the row with `life`, or hold it until the row is free.
@@ -1065,7 +1097,13 @@ impl PushUi {
     /// message reaches the row on a later frame, so [`PushUi::post_held`]
     /// reads the clock again there. [`HeldLife`] says why that is the right
     /// end to measure from.
-    fn post(&mut self, line: String, life: Life) {
+    ///
+    /// The answer reports which of the two arms below ran, so a caller whose
+    /// own state stands on the message can see whether anybody has read it
+    /// yet — see [`Posted`]. A full queue answers [`Posted::Held`] with the
+    /// message dropped, because the question is whether it took the row and it
+    /// did not.
+    fn post(&mut self, line: String, life: Life) -> Posted {
         match self.state {
             State::Asking { .. } | State::Running { .. } => {
                 if self.held.len() < MAX_HELD_MESSAGES {
@@ -1074,12 +1112,14 @@ impl PushUi {
                         life: life.kind(),
                     });
                 }
+                Posted::Held
             }
             State::Idle | State::Status { .. } => {
                 self.state = State::Status {
                     lines: vec![line],
                     life,
                 };
+                Posted::OnRow
             }
         }
     }
