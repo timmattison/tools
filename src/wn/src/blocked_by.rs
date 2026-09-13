@@ -13,15 +13,447 @@
 //! A plan once put #170 before #168, and #170 said that #168 blocked it. `wn`
 //! answered the plan and sent the reader to #170. This module reads that claim
 //! out of the body of an issue, so the answer can hold the plan to it.
+//!
+//! # A heading and a list item are blocks, not text
+//!
+//! A pattern over the text reads `Blocked by #168` on one line, and the list
+//! marker between the heading and the number stops it. So the body is cut into
+//! blocks first: headings, paragraphs and list items, with code fences skipped.
+//! A block names a blocker in two ways:
+//!
+//! * It stands in the section of a `Blocked by` or `Depends on` heading, up to
+//!   the next heading of the same level or higher.
+//! * Its own text starts with one of those labels, as in `**Blocked by:** #12`.
+//!
+//! # Only the numbers at the start of a block count
+//!
+//! `#3, #4 and #5` and `#5 (test-taking UI)` are blockers. A block that starts
+//! with a word is prose about other work, so `It can run beside #169.` under the
+//! heading names no blocker. A paragraph that wraps is one block, so a line that
+//! happens to start with a number is still inside that prose.
+//!
+//! This reader acts on what it reads: a blocker it names can refuse a plan. So a
+//! phrase in the middle of a sentence is not read, because a line of a tracker
+//! such as `#12 — Click to open *blocked by #11*` says what blocks another issue.
+//!
+//! The gather script of the `plan-parallel-work` skill reads the same blocks,
+//! and its table of forms stands beside the table of this module.
 
 use crate::chain::IssueNumber;
 
+/// The labels that name work which comes before the issue. A heading carries
+/// one to open a section, and a block carries one at its start. They are ASCII,
+/// so a comparison that ignores ASCII case is the whole comparison.
+const LABELS: &[&str] = &["blocked by", "depends on"];
+
+/// The word a separator between two numbers can be: `#4 and #5`.
+const AND: &str = "and";
+
+/// The most spaces a heading, a fence, or a block quote is indented by. One more
+/// makes the line code.
+const MAX_INDENT: usize = 3;
+
+/// The fewest marks that open a code fence.
+const FENCE_MARKS: usize = 3;
+
+/// The deepest level of a heading.
+const MAX_HEADING_LEVEL: usize = 6;
+
+/// The most digits the number of an ordered list item has.
+const MAX_ITEM_DIGITS: usize = 9;
+
+/// One block of a body.
+enum Block {
+    /// A heading, its level, and its text with the marks taken off.
+    Heading { level: usize, text: String },
+    /// A paragraph or a list item, with the lines that continue it.
+    Text(String),
+}
+
+/// Whether a block that is still taking lines is a paragraph or a list item.
+///
+/// Only a paragraph can become a setext heading.
+#[derive(PartialEq, Eq)]
+enum Kind {
+    Paragraph,
+    Item,
+}
+
+/// A block that is still taking lines.
+struct Open {
+    kind: Kind,
+    lines: Vec<String>,
+}
+
 /// The numbers `body` names as work that comes before its issue, in the order
 /// the body writes them, each one once.
+///
+/// A number of another repository is read past and names nothing, and so is a
+/// number GitHub cannot give an issue: zero, or one too large for a `u64`.
 #[must_use]
 pub fn read(body: &str) -> Vec<IssueNumber> {
-    let _ = body;
-    Vec::new()
+    let mut numbers: Vec<IssueNumber> = Vec::new();
+    // The level of the heading whose section the walk stands in.
+    let mut section: Option<usize> = None;
+    for block in blocks_of(body) {
+        match block {
+            Block::Heading { level, text } => {
+                if section.is_some_and(|open| level <= open) {
+                    section = None;
+                }
+                if section.is_none() && after_label(undecorated(&text)).is_some() {
+                    section = Some(level);
+                }
+            }
+            Block::Text(text) => {
+                let (labelled, named) = head_of(&text);
+                if section.is_none() && !labelled {
+                    continue;
+                }
+                for number in named {
+                    if !numbers.contains(&number) {
+                        numbers.push(number);
+                    }
+                }
+            }
+        }
+    }
+    numbers
+}
+
+/// The headings, paragraphs and list items of `body`, in order.
+///
+/// A list item takes the lines that continue it, and a paragraph takes the lines
+/// that wrap it. A code fence and an indented code block give no block, and a
+/// block quote gives the blocks inside it.
+fn blocks_of(body: &str) -> Vec<Block> {
+    let mut blocks: Vec<Block> = Vec::new();
+    let mut open: Option<Open> = None;
+    let mut fence: Option<(char, usize)> = None;
+    for written in body.split('\n') {
+        let mut line = written.strip_suffix('\r').unwrap_or(written);
+        while let Some(inner) = quoted(line) {
+            line = inner;
+        }
+
+        if let Some((mark, length)) = fence {
+            if closes_fence(line, mark, length) {
+                fence = None;
+            }
+            continue;
+        }
+        if let Some(opened) = fence_of(line) {
+            close(&mut open, &mut blocks);
+            fence = Some(opened);
+            continue;
+        }
+        if line.trim().is_empty() {
+            close(&mut open, &mut blocks);
+            continue;
+        }
+        if let Some((level, text)) = atx_heading(line) {
+            close(&mut open, &mut blocks);
+            blocks.push(Block::Heading {
+                level,
+                text: text.to_string(),
+            });
+            continue;
+        }
+        if let Some(level) = setext_underline(line) {
+            match open.take() {
+                Some(Open {
+                    kind: Kind::Paragraph,
+                    lines,
+                }) => blocks.push(Block::Heading {
+                    level,
+                    text: lines.join(" "),
+                }),
+                other => {
+                    open = other;
+                    close(&mut open, &mut blocks);
+                }
+            }
+            continue;
+        }
+        if open.is_none() && is_indented_code(line) {
+            continue;
+        }
+        if let Some(text) = list_item(line) {
+            close(&mut open, &mut blocks);
+            open = Some(Open {
+                kind: Kind::Item,
+                lines: vec![text.trim().to_string()],
+            });
+            continue;
+        }
+        match &mut open {
+            Some(block) => block.lines.push(line.trim().to_string()),
+            None => {
+                open = Some(Open {
+                    kind: Kind::Paragraph,
+                    lines: vec![line.trim().to_string()],
+                });
+            }
+        }
+    }
+    close(&mut open, &mut blocks);
+    blocks
+}
+
+/// Put the block that is still taking lines, if there is one, at the end of
+/// `blocks`.
+fn close(open: &mut Option<Open>, blocks: &mut Vec<Block>) {
+    if let Some(block) = open.take() {
+        blocks.push(Block::Text(block.lines.join("\n")));
+    }
+}
+
+/// `line` with its indentation taken off, or `None` when it is indented by more
+/// than [`MAX_INDENT`] spaces.
+fn unindented(line: &str) -> Option<&str> {
+    let rest = line.trim_start_matches(' ');
+    (line.len() - rest.len() <= MAX_INDENT).then_some(rest)
+}
+
+/// The text inside one level of block quote, or `None` when `line` is not quoted.
+fn quoted(line: &str) -> Option<&str> {
+    let rest = unindented(line)?.strip_prefix('>')?;
+    Some(rest.strip_prefix(' ').unwrap_or(rest))
+}
+
+/// The mark and the length of the code fence `line` opens, or `None` when it
+/// opens none.
+fn fence_of(line: &str) -> Option<(char, usize)> {
+    let rest = unindented(line)?;
+    let mark = rest.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    let length = rest.chars().take_while(|c| *c == mark).count();
+    (length >= FENCE_MARKS).then_some((mark, length))
+}
+
+/// Whether `line` closes a fence of `length` marks of `mark`.
+fn closes_fence(line: &str, mark: char, length: usize) -> bool {
+    unindented(line).is_some_and(|rest| {
+        let after = rest.trim_start_matches(mark);
+        rest.chars().count() - after.chars().count() >= length && after.trim().is_empty()
+    })
+}
+
+/// The level and the text of the ATX heading `line` is, or `None` when it is
+/// no such heading.
+///
+/// `#168` is no heading, because a heading puts a space after its marks.
+fn atx_heading(line: &str) -> Option<(usize, &str)> {
+    let rest = unindented(line)?;
+    let after = rest.trim_start_matches('#');
+    let level = rest.len() - after.len();
+    if !(1..=MAX_HEADING_LEVEL).contains(&level) {
+        return None;
+    }
+    if !(after.is_empty() || after.starts_with([' ', '\t'])) {
+        return None;
+    }
+    let text = after.trim();
+    let unclosed = text.trim_end_matches('#');
+    if unclosed.is_empty() || unclosed.ends_with([' ', '\t']) {
+        return Some((level, unclosed.trim_end()));
+    }
+    Some((level, text))
+}
+
+/// The level of the setext heading `line` underlines, or `None` when it is no
+/// such underline.
+fn setext_underline(line: &str) -> Option<usize> {
+    let rest = unindented(line)?.trim_end_matches([' ', '\t']);
+    let mark = rest.chars().next().filter(|c| matches!(c, '=' | '-'))?;
+    rest.chars()
+        .all(|c| c == mark)
+        .then_some(if mark == '=' { 1 } else { 2 })
+}
+
+/// Whether `line` is indented far enough to be code.
+fn is_indented_code(line: &str) -> bool {
+    line.starts_with('\t') || unindented(line).is_none()
+}
+
+/// The text of the list item `line` opens, or `None` when it opens none.
+///
+/// The marker can stand at any depth, so a nested item opens a block of its
+/// own and does not continue the item above it.
+fn list_item(line: &str) -> Option<&str> {
+    let rest = line.trim_start_matches([' ', '\t']);
+    let after = if let Some(after) = rest.strip_prefix(['-', '*', '+']) {
+        after
+    } else {
+        let digits = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+        if !(1..=MAX_ITEM_DIGITS).contains(&(rest.len() - digits.len())) {
+            return None;
+        }
+        digits.strip_prefix(['.', ')'])?
+    };
+    if after.is_empty() {
+        return Some(after);
+    }
+    after.strip_prefix([' ', '\t'])
+}
+
+/// Whether `c` is a character of a word, as the boundary after a label and
+/// after a number reads it.
+fn is_word(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Whether `c` is something a writer puts around a label and a number: space,
+/// an emphasis mark, or a symbol such as `⛔` or `🚧`.
+///
+/// The symbols are named as ranges, and the gather script of the skill names the
+/// same ranges, so the two readers strip the same characters: U+2190 to U+2BFF
+/// (arrows, shapes, dingbats, the older emoji), U+1F000 to U+1FAFF (the newer
+/// emoji), the zero width joiner, and the emoji selector.
+fn is_decoration(c: char) -> bool {
+    c.is_whitespace()
+        || matches!(
+            c,
+            '*' | '_'
+                | '~'
+                | '\u{200D}'
+                | '\u{FE0F}'
+                | '\u{2190}'..='\u{2BFF}'
+                | '\u{1F000}'..='\u{1FAFF}'
+        )
+}
+
+/// `text` with the decoration in front of it taken off.
+fn undecorated(text: &str) -> &str {
+    text.trim_start_matches(is_decoration)
+}
+
+/// The text after the label `text` starts with, or `None` when it starts with
+/// none.
+fn after_label(text: &str) -> Option<&str> {
+    LABELS.iter().find_map(|label| {
+        let head = text.get(..label.len())?;
+        let rest = text.get(label.len()..)?;
+        (head.eq_ignore_ascii_case(label) && !rest.chars().next().is_some_and(is_word))
+            .then_some(rest)
+    })
+}
+
+/// Whether the text of a block starts with a label, and the numbers at its
+/// start.
+fn head_of(text: &str) -> (bool, Vec<IssueNumber>) {
+    let mut rest = undecorated(without_task_box(text));
+    let labelled = match after_label(rest) {
+        Some(after) => {
+            let after = undecorated(after);
+            rest = after.strip_prefix(':').unwrap_or(after);
+            true
+        }
+        None => false,
+    };
+
+    let mut numbers: Vec<IssueNumber> = Vec::new();
+    loop {
+        rest = undecorated(rest);
+        if let Some((number, after)) = local_reference(rest) {
+            numbers.extend(number);
+            rest = after;
+        } else if let Some(after) = other_reference(rest) {
+            rest = after;
+        } else {
+            break;
+        }
+        rest = rest.trim_start_matches([' ', '\t']);
+        if rest.starts_with('(') {
+            if let Some(after) = after_group(rest) {
+                rest = after;
+            }
+        }
+        rest = undecorated(rest);
+        if let Some(after) = separator(rest) {
+            rest = after;
+        } else if local_reference(rest).is_none() && other_reference(rest).is_none() {
+            break;
+        }
+    }
+    (labelled, numbers)
+}
+
+/// `text` with the box of a task list item taken off its front.
+fn without_task_box(text: &str) -> &str {
+    ["[ ]", "[x]", "[X]"]
+        .iter()
+        .find_map(|task_box| {
+            let after = text.strip_prefix(task_box)?;
+            let spaced = after.trim_start_matches([' ', '\t']);
+            (spaced.len() < after.len()).then_some(spaced)
+        })
+        .unwrap_or(text)
+}
+
+/// The number of this repository `text` starts with, and the text after it, or
+/// `None` when it starts with no such number.
+///
+/// The number is `None` when GitHub cannot give an issue that number. The text
+/// after it still comes back, so the caller reads past it.
+fn local_reference(text: &str) -> Option<(Option<IssueNumber>, &str)> {
+    let after_mark = text.strip_prefix('#')?;
+    let end = after_mark
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(after_mark.len());
+    if end == 0 {
+        return None;
+    }
+    let (digits, after) = after_mark.split_at(end);
+    if after.starts_with('#') || after.chars().next().is_some_and(is_word) {
+        return None;
+    }
+    Some((digits.parse().ok().and_then(IssueNumber::new), after))
+}
+
+/// The text after the number of another repository `text` starts with, as in
+/// `timmattison/muxiavelli#294`, or `None` when it starts with none.
+fn other_reference(text: &str) -> Option<&str> {
+    let is_name = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-');
+    let after_owner = text.trim_start_matches(is_name);
+    if after_owner.len() == text.len() {
+        return None;
+    }
+    let name = after_owner.strip_prefix('/')?;
+    let after_name = name.trim_start_matches(is_name);
+    if after_name.len() == name.len() {
+        return None;
+    }
+    local_reference(after_name).map(|(_, after)| after)
+}
+
+/// The text after the parenthesis that closes the one `text` opens with, or
+/// `None` when nothing closes it.
+fn after_group(text: &str) -> Option<&str> {
+    let mut depth: usize = 0;
+    for (at, c) in text.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return text.get(at + 1..);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The text after the separator `text` starts with, or `None` when it starts
+/// with none: a comma, an ampersand, a slash, or the word `and`.
+fn separator(text: &str) -> Option<&str> {
+    if let Some(after) = text.strip_prefix([',', '&', '/']) {
+        return Some(after);
+    }
+    let head = text.get(..AND.len())?;
+    let after = text.get(AND.len()..)?;
+    (head.eq_ignore_ascii_case(AND) && !after.chars().next().is_some_and(is_word)).then_some(after)
 }
 
 #[cfg(test)]
