@@ -352,6 +352,20 @@ fn notes(report: &Report, repo: &str) -> Vec<String> {
         );
     }
 
+    // A wait the plan never wrote needs its source, or the reader of the plan
+    // reads a row that disagrees with what they wrote and suspects the tool.
+    for left_out in report.left_out() {
+        notes.push(
+            format!(
+                "{} waits for {}: the issue says so, and the plan does not.",
+                left_out.step,
+                list(&left_out.blockers)
+            )
+            .yellow()
+            .to_string(),
+        );
+    }
+
     notes
 }
 

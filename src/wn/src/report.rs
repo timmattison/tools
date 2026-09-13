@@ -49,6 +49,7 @@
 use std::collections::HashMap;
 
 use crate::chain::IssueNumber;
+use crate::declared::LeftOut;
 use crate::graph::Graph;
 use crate::plan::Step;
 
@@ -227,6 +228,10 @@ pub struct Report {
     /// every position of a chain and of a stream, because a reader of one line
     /// of work reads the line above the row and needs no list.
     waits: Vec<Vec<IssueNumber>>,
+    /// The steps that wait for work the plan did not say they wait for, and
+    /// that work. Empty unless [`crate::declared::settle`] added a blocker, so
+    /// the note it earns names where a wait came from.
+    left_out: Vec<LeftOut>,
 }
 
 impl Report {
@@ -253,6 +258,7 @@ impl Report {
             ready: next.into_iter().collect(),
             out_of_order,
             waits,
+            left_out: Vec::new(),
         }
     }
 
@@ -328,7 +334,21 @@ impl Report {
             ready,
             out_of_order,
             waits,
+            left_out: Vec::new(),
         }
+    }
+
+    /// This report, with the blockers the plan left out and the issues named.
+    #[must_use]
+    pub fn with_left_out(self, left_out: Vec<LeftOut>) -> Self {
+        Self { left_out, ..self }
+    }
+
+    /// The steps that wait for work the plan did not say they wait for, in
+    /// the order they were found.
+    #[must_use]
+    pub fn left_out(&self) -> &[LeftOut] {
+        &self.left_out
     }
 
     /// The chain, in the order it was written.

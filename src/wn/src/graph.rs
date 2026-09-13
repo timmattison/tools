@@ -1500,6 +1500,42 @@ pub(crate) fn of_parts(
         .map(Graph::in_topological_order)
 }
 
+/// The graph a plan of streams draws, with its steps in the order of the plan
+/// and no cycle refused.
+///
+/// [`of_plan`] claims no graph for a plan whose streams stand apart, because
+/// the reader of streams answers it. [`crate::declared::settle`] still needs
+/// the edges of such a plan, to hold them to what the issues say comes first,
+/// so this builds them whatever the plan draws. It refuses nothing: the reader
+/// of streams answers a plan that names one number in two orders, and only an
+/// edge the issues add can turn that into a refusal.
+pub(crate) fn of_streams(plan: &Plan) -> Graph {
+    let ordered: Vec<Step> = plan
+        .streams()
+        .iter()
+        .flat_map(|stream| stream.steps())
+        .copied()
+        .collect();
+    let work = Work::of(&ordered);
+    let mut edges = chains_of(plan);
+    edges.extend(crossings_of(plan, &work));
+    Graph::of_edges(nodes_of(plan, &work), &edges)
+}
+
+/// The graph one chain draws: each number comes before the number after it.
+///
+/// A chain holds each number once, because [`crate::chain::parse_chain`] keeps
+/// the first place of a number and drops the rest, so it draws no cycle.
+pub(crate) fn of_chain(numbers: &[IssueNumber]) -> Graph {
+    let steps: Vec<Step> = numbers
+        .iter()
+        .map(|number| Step::new(*number, None))
+        .collect();
+    let edges: Vec<(IssueNumber, IssueNumber)> =
+        numbers.windows(2).map(|pair| (pair[0], pair[1])).collect();
+    Graph::of_edges(steps, &edges)
+}
+
 /// The step that does the work of every number a plan names.
 ///
 /// A step names its own number. A pair names one number more: the issue its
