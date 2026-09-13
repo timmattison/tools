@@ -569,6 +569,66 @@ mod tests {
         );
     }
 
+    /// Both readers of a name give the same answer to the same name.
+    ///
+    /// [`ProtocolSet::parse`] and [`parse_budgets`] each read a name of a
+    /// protocol out of the environment. A rule that stands in two places
+    /// drifts apart, and a name that only one of the two reads is the defect
+    /// this covers. So this drives both readers over the same names, and it
+    /// asks the same two questions of each one: every name that this crate
+    /// draws reads whatever its case, and a name that this crate does not
+    /// draw drops.
+    #[test]
+    fn both_readers_of_a_name_give_the_same_answer_to_the_same_name() {
+        /// The cap that one pair states, to show which protocol takes it.
+        const STATED_CAP: usize = 4096;
+
+        /// A name of a protocol that this crate does not draw.
+        const UNREAD_NAME: &str = "quicktime";
+
+        /// Each name in mixed case, with the routine that writes it.
+        const MIXED_CASE: [(&str, DisplayRoutine); 3] = [
+            ("KiTtY", DisplayRoutine::Kitty),
+            ("SiXeL", DisplayRoutine::Sixel),
+            ("ItErM2", DisplayRoutine::Iterm2),
+        ];
+
+        for (name, routine) in MIXED_CASE {
+            assert_eq!(
+                ProtocolSet::parse(name),
+                ProtocolSet::of_routine(routine),
+                "the set reads {name} as the protocol its routine writes"
+            );
+
+            let budgets = parse_budgets(&format!(" {name} = {STATED_CAP} "));
+            assert_eq!(
+                budgets.of_routine(routine),
+                PayloadBudget::under_command_cap(STATED_CAP),
+                "the budgets read {name} as that same one protocol"
+            );
+            for (other_name, other_routine) in MIXED_CASE {
+                if other_routine == routine {
+                    continue;
+                }
+                assert_eq!(
+                    budgets.of_routine(other_routine),
+                    PayloadBudget::MOSH,
+                    "a cap of {name} states no cap of {other_name}"
+                );
+            }
+        }
+
+        assert!(
+            ProtocolSet::parse(UNREAD_NAME).is_empty(),
+            "a name that this crate does not draw leaves the set empty"
+        );
+        assert_eq!(
+            parse_budgets(&format!("{UNREAD_NAME}={STATED_CAP}")),
+            ProtocolBudgets::uniform(PayloadBudget::MOSH),
+            "and it leaves all three budgets at the careful number"
+        );
+    }
+
     /// A message about a set names the protocols of it in one order.
     #[test]
     fn a_message_names_the_protocols_of_a_set_in_one_order() {
