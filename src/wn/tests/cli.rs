@@ -3250,3 +3250,194 @@ fn the_line_never_runs_past_the_window_it_is_painted_in() {
         );
     }
 }
+
+/// What GitHub says about the slices of the wave tank, with the body of each.
+///
+/// `#170` says under `Blocked by` that `#168` comes first, and its body names
+/// `#169` in prose as well, which blocks nothing. `#168` says `#167` comes
+/// first, and `#167` is done. Three marks close the raw string, because a body
+/// holds `"##`.
+///
+/// One answer serves every query of a run. The query names the numbers it
+/// wants, and the reader of the answer reads those numbers and no others, so a
+/// run that asks about `#167` alone reads `#167` out of this.
+const WAVE_ISSUES: &str = r###"{"data":{"repository":{
+"i170":{"__typename":"Issue","number":170,"title":"The cell slider","state":"OPEN","stateReason":null,
+        "body":"## Parent\n\n#166\n\n## Blocked by\n\n- #168\n\nIt can run beside #169."},
+"i168":{"__typename":"Issue","number":168,"title":"The slope","state":"OPEN","stateReason":null,
+        "body":"## Blocked by\n\n- #167\n"},
+"i167":{"__typename":"Issue","number":167,"title":"The flat tank","state":"CLOSED","stateReason":"COMPLETED",
+        "body":""}
+}}}"###;
+
+/// The plan of the wave tank as the run of the skill wrote it: `#170` first.
+const WAVE_PLAN_REVERSED: &str = "\
+| Stream | Order | Zone |
+|--------|-------|------|
+| S2 — wave tank | #170 → #168 | src/components/experiments/wave-* |
+";
+
+/// The same plan, written as the JSON document the run printed.
+const WAVE_DOCUMENT_REVERSED: &str = r#"{
+  "version": 1,
+  "streams": [
+    { "id": "S2", "name": "wave tank",
+      "order": [{ "issue": 170, "waitsFor": [] }, { "issue": 168, "waitsFor": [] }] }
+  ]
+}"#;
+
+/// The plan of the wave tank in the order its issues say.
+const WAVE_PLAN: &str = "\
+| Stream | Order | Zone |
+|--------|-------|------|
+| S2 — wave tank | #168 → #170 | src/components/experiments/wave-* |
+";
+
+/// The two slices as two streams that stand apart, which is the plan that
+/// leaves the blocker out rather than putting it after the slice it blocks.
+const WAVE_PLAN_APART: &str = "\
+| Stream | Order | Zone |
+|--------|-------|------|
+| S2 — slope | #168 | src/components/experiments/wave-* |
+| S3 — slider | #170 | src/components/viz/viz-shell.tsx |
+";
+
+/// The answer a plan earns once a blocker it left out joins it: the step
+/// waits, the blocker is the one issue to start, and a note says which of the
+/// two claims named the wait.
+const WAVE_LEFT_OUT_ANSWER: &str = concat!(
+    "→ #168  The slope\n",
+    "· #170  The cell slider  waits for #168\n",
+    "\n",
+    "#170 waits for #168: the issue says so, and the plan does not.\n",
+    "Start #168 next with 'si 168'\n",
+);
+
+/// The sentence a plan that puts `#170` before `#168` is refused with.
+const WAVE_REFUSAL: &str = "the plan puts #170 before #168, but #170 says it is blocked by #168. \
+                            Fix the order, or run wn --refresh to build a new plan";
+
+/// The count of GraphQL queries the fake `gh` was sent.
+fn queries_sent(gh: &FakeGh) -> usize {
+    if gh.asked_nothing() {
+        return 0;
+    }
+    gh.recorded_args()
+        .lines()
+        .filter(|line| *line == "graphql")
+        .count()
+}
+
+#[test]
+fn refuses_a_plan_that_puts_an_issue_before_its_own_blocker() {
+    // The plan that sent a reader to #170. The issue says #168 comes first, so
+    // an answer to this plan names work that cannot start, and the run names
+    // the pair instead.
+    let gh = FakeGh::new(WAVE_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", WAVE_PLAN_REVERSED);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "the run could not answer, stdout: {}",
+        stdout(&output)
+    );
+    assert!(
+        stderr(&output).contains(WAVE_REFUSAL),
+        "the refusal names the pair, in {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+}
+
+#[test]
+fn refuses_a_json_plan_that_puts_an_issue_before_its_own_blocker() {
+    // The same plan in the shape the run of the skill hands back, which is the
+    // shape it arrived in on the day it sent a reader to #170.
+    let gh = FakeGh::new(WAVE_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", WAVE_DOCUMENT_REVERSED);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "the run could not answer, stdout: {}",
+        stdout(&output)
+    );
+    assert!(
+        stderr(&output).contains(WAVE_REFUSAL),
+        "the refusal names the pair, in {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+}
+
+#[test]
+fn a_plan_in_the_order_its_issues_say_answers_as_it_always_did() {
+    // Every blocker the issues name stands before the issue, so the plan
+    // reader answers, and no row carries the column of a graph.
+    let gh = FakeGh::new(WAVE_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", WAVE_PLAN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let answer = stdout(&output);
+    assert!(
+        answer.contains(SUMMARY_HEADING),
+        "the plan reader answered, in {answer}"
+    );
+    assert!(
+        !answer.contains(WAITS_FOR),
+        "no row waits for anything, in {answer}"
+    );
+    assert!(
+        answer.contains("si 168"),
+        "the answer names #168, in {answer}"
+    );
+    assert!(
+        !answer.contains("si 170"),
+        "the answer never names #170, in {answer}"
+    );
+}
+
+#[test]
+fn a_blocker_the_plan_left_out_joins_the_answer() {
+    // Two streams that stand apart would name #168 and #170 both. #170 says
+    // #168 comes first, so the answer waits, names #168 alone, and says the
+    // wait came from the issue.
+    let gh = FakeGh::new(WAVE_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", WAVE_PLAN_APART);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), WAVE_LEFT_OUT_ANSWER);
+}
+
+#[test]
+fn an_open_blocker_outside_the_chain_joins_the_answer() {
+    // The chain names #170 alone. #170 says #168 comes first, and #168 stands
+    // nowhere in the chain, so the run asks about it. It is open, so it joins
+    // the answer. It says #167 comes first, so the run asks about that too, and
+    // #167 is done, so it changes nothing. Three rounds are three queries.
+    let gh = FakeGh::new(WAVE_ISSUES);
+    let output = run(&gh, &["--repo", REPO, "#170"], "80", false);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), WAVE_LEFT_OUT_ANSWER);
+    assert_eq!(queries_sent(&gh), 3, "asked {}", gh.recorded_args());
+}
+
+#[test]
+fn a_finished_blocker_outside_the_chain_changes_nothing() {
+    // #168 says #167 comes first, and #167 is done. The run asks about #167
+    // once and then answers the chain exactly as a chain is answered.
+    let gh = FakeGh::new(WAVE_ISSUES);
+    let output = run(&gh, &["--repo", REPO, "#168"], "80", false);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let answer = stdout(&output);
+    assert!(
+        !answer.contains(WAITS_FOR),
+        "no row waits for anything, in {answer}"
+    );
+    assert!(
+        answer.contains("Start #168 next with 'si 168'"),
+        "the chain names #168, in {answer}"
+    );
+    assert!(
+        !answer.contains("#167"),
+        "the answer names no #167, in {answer}"
+    );
+    assert_eq!(queries_sent(&gh), 2, "asked {}", gh.recorded_args());
+}
