@@ -41,6 +41,7 @@
 //! clipboard is the cache the next run reads through the clipboard input that
 //! already stands.
 
+mod blocked_by;
 mod build;
 mod chain;
 mod envelope;
