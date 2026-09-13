@@ -119,6 +119,13 @@ pub struct Entry {
     /// The issue this work closes, when the step names one. `None` for every
     /// step of a chain, because a chain writes one number for each step.
     pub closes: Option<Closes>,
+    /// The numbers the body of the issue names as work that comes before it,
+    /// with its own number left out. [`crate::blocked_by::read`] states which
+    /// forms count.
+    ///
+    /// Empty for a pull request, whose body `wn` does not ask for, and for a
+    /// number GitHub gave no answer for.
+    pub blocked_by: Vec<IssueNumber>,
 }
 
 impl Entry {
@@ -177,6 +184,7 @@ impl States {
             title: String::new(),
             status: Status::Missing,
             closes: None,
+            blocked_by: Vec::new(),
         })
     }
 }
@@ -449,6 +457,7 @@ mod tests {
             title: format!("title of {number}"),
             status,
             closes: None,
+            blocked_by: Vec::new(),
         }
     }
 

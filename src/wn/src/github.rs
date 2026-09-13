@@ -321,6 +321,7 @@ fn entry_of(repository: &Value, reasons: &Reasons<'_>, number: IssueNumber) -> R
             title: String::new(),
             status: Status::Missing,
             closes: None,
+            blocked_by: Vec::new(),
         });
     };
 
@@ -342,6 +343,7 @@ fn entry_of(repository: &Value, reasons: &Reasons<'_>, number: IssueNumber) -> R
             anyhow!("GitHub gave {number} the state {state}, which wn cannot read")
         })?,
         closes: None,
+        blocked_by: Vec::new(),
     })
 }
 
@@ -507,6 +509,37 @@ mod tests {
         assert!(
             query.contains("stateReason"),
             "the query asks why an issue closed, in {query}"
+        );
+    }
+
+    #[test]
+    fn the_query_asks_for_the_body_of_an_issue() {
+        // The body is where an issue says what blocks it, and the answer holds
+        // a plan to that. The one query carries it, so the check costs no
+        // second round trip.
+        let query = build_query(&chain(&[1]));
+        assert!(
+            query.contains("... on Issue { number title state stateReason body }"),
+            "the query asks for the body of an issue, in {query}"
+        );
+    }
+
+    #[test]
+    fn reads_what_the_body_of_an_issue_says_blocks_it() {
+        // `#170` names itself beside `#168`. An issue does not block itself,
+        // so its own number comes off. A body of null names nothing.
+        // Three marks close this raw string, because the body holds `"##`.
+        let body = r###"{"data":{"repository":{
+            "i170":{"__typename":"Issue","number":170,"title":"Slider","state":"OPEN","stateReason":null,
+                    "body":"## Blocked by\n\n- #168\n- #170\n\nIt can run beside #169."},
+            "i168":{"__typename":"Issue","number":168,"title":"Slope","state":"OPEN","stateReason":null,"body":null}
+        }}}"###;
+        let entries = parse_response(body, &chain(&[170, 168])).expect("that body is an answer");
+        assert_eq!(entries[0].blocked_by, chain(&[168]));
+        assert!(
+            entries[1].blocked_by.is_empty(),
+            "a body of null names no blocker, and it named {:?}",
+            entries[1].blocked_by
         );
     }
 

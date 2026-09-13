@@ -781,6 +781,7 @@ mod tests {
             title: title.to_string(),
             status,
             closes: None,
+            blocked_by: Vec::new(),
         }
     }
 
