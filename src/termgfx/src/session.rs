@@ -77,6 +77,44 @@ const ITERM2_NAME: &str = "iterm2";
 /// What a message calls a set that names no protocol at all.
 const EMPTY_SET_NAME: &str = "none";
 
+/// The name of each protocol that this crate draws, with the routine that
+/// writes it.
+///
+/// The module states this pairing one time, and every reader of a name takes
+/// its answer from here. [`routine_of_name`] reads a name out of the
+/// environment with it, and [`ProtocolSet::in_order`] reads the order of it.
+/// So a fourth protocol on the mosh channel is one new row here, and no new
+/// branch anywhere else.
+///
+/// The order is the order that a message names the protocols in, and it is
+/// the order of choice of [`ProtocolSet::preferred_routine`] as well. Kitty
+/// stands first, sixel stands next, and iterm2 stands last.
+const PROTOCOL_NAMES: [(&str, DisplayRoutine); 3] = [
+    (KITTY_NAME, DisplayRoutine::Kitty),
+    (SIXEL_NAME, DisplayRoutine::Sixel),
+    (ITERM2_NAME, DisplayRoutine::Iterm2),
+];
+
+/// The routine that writes the protocol of `name`.
+///
+/// [`ProtocolSet::parse`] and [`parse_budgets`] both read a name out of the
+/// environment, and both of them read it here, so the two readers never
+/// disagree about a name. A name is read whatever its case. The caller drops
+/// the space around a name before it asks.
+///
+/// # Arguments
+/// * `name` - One name out of one of the three variables.
+///
+/// # Returns
+/// The routine that writes that protocol, or `None` where this crate draws
+/// no such protocol.
+fn routine_of_name(name: &str) -> Option<DisplayRoutine> {
+    PROTOCOL_NAMES
+        .into_iter()
+        .find(|&(known, _)| name.eq_ignore_ascii_case(known))
+        .map(|(_, routine)| routine)
+}
+
 /// A set of the inline-image protocols that one party carries or draws.
 ///
 /// The three protocols stand as three flags rather than as a list, because the
@@ -99,22 +137,37 @@ impl ProtocolSet {
     /// transport that grows a fourth protocol does not turn this set into a
     /// promise that this crate cannot keep.
     ///
+    /// [`routine_of_name`] states which name this crate draws, and
+    /// [`parse_budgets`] reads that same answer, so the two readers of a name
+    /// never disagree.
+    ///
     /// # Arguments
     /// * `raw` - The value of the variable.
     #[must_use]
     pub fn parse(raw: &str) -> Self {
         let mut set = Self::default();
         for token in raw.split(',') {
-            let token = token.trim();
-            if token.eq_ignore_ascii_case(KITTY_NAME) {
-                set.kitty = true;
-            } else if token.eq_ignore_ascii_case(SIXEL_NAME) {
-                set.sixel = true;
-            } else if token.eq_ignore_ascii_case(ITERM2_NAME) {
-                set.iterm2 = true;
+            if let Some(routine) = routine_of_name(token.trim()) {
+                set.insert(routine);
             }
         }
         set
+    }
+
+    /// Put the protocol that `routine` writes into this set.
+    ///
+    /// The match is exhaustive, so a fourth routine stops the build here. A
+    /// routine that no arm names puts no flag in, and the set then drops that
+    /// protocol without a word.
+    ///
+    /// # Arguments
+    /// * `routine` - The routine that writes the protocol to put in.
+    fn insert(&mut self, routine: DisplayRoutine) {
+        match routine {
+            DisplayRoutine::Kitty => self.kitty = true,
+            DisplayRoutine::Sixel => self.sixel = true,
+            DisplayRoutine::Iterm2 => self.iterm2 = true,
+        }
     }
 
     /// Whether this set names no protocol at all.
@@ -181,15 +234,12 @@ impl ProtocolSet {
     ///
     /// [`ProtocolSet::names`] and [`ProtocolSet::preferred_routine`] both read
     /// this order, so a message and a choice never disagree about which
-    /// protocol stands first.
+    /// protocol stands first. The order is the order of [`PROTOCOL_NAMES`],
+    /// which is where this module states a name and a routine together.
     fn in_order(&self) -> impl Iterator<Item = (&'static str, DisplayRoutine)> + '_ {
-        [
-            (self.kitty, KITTY_NAME, DisplayRoutine::Kitty),
-            (self.sixel, SIXEL_NAME, DisplayRoutine::Sixel),
-            (self.iterm2, ITERM2_NAME, DisplayRoutine::Iterm2),
-        ]
-        .into_iter()
-        .filter_map(|(held, name, routine)| held.then_some((name, routine)))
+        PROTOCOL_NAMES
+            .into_iter()
+            .filter(|&(_, routine)| self.holds(routine))
     }
 }
 
@@ -199,7 +249,8 @@ impl ProtocolSet {
 /// stands between the name of a protocol and the cap of it. The names are the
 /// names of `MOSH_IMAGES`, and they stand in the same order, so a reader joins
 /// the two lists by name. A name is read whatever its case, and the space
-/// around a pair is dropped, as [`ProtocolSet::parse`] reads a name.
+/// around a pair is dropped. [`routine_of_name`] states that rule, and
+/// [`ProtocolSet::parse`] reads the same one.
 ///
 /// Each cap counts the command of the protocol together with the payload, so
 /// [`PayloadBudget::under_command_cap`] takes the room of the command off it.
@@ -242,15 +293,11 @@ fn parse_budgets(raw: &str) -> ProtocolBudgets {
         let Ok(cap) = cap.trim().parse::<usize>() else {
             continue;
         };
-        let name = name.trim();
+        let Some(routine) = routine_of_name(name.trim()) else {
+            continue;
+        };
         let budget = PayloadBudget::under_command_cap(cap);
-        if name.eq_ignore_ascii_case(KITTY_NAME) {
-            budgets = budgets.with_kitty(budget);
-        } else if name.eq_ignore_ascii_case(SIXEL_NAME) {
-            budgets = budgets.with_sixel(budget);
-        } else if name.eq_ignore_ascii_case(ITERM2_NAME) {
-            budgets = budgets.with_iterm2(budget);
-        }
+        budgets = budgets.with_routine(routine, budget);
     }
     budgets
 }

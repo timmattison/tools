@@ -593,6 +593,32 @@ impl ProtocolBudgets {
             DisplayRoutine::Iterm2 => self.iterm2,
         }
     }
+
+    /// These budgets, with the protocol that `routine` writes at `budget`.
+    ///
+    /// This is the writer that matches the reader
+    /// [`ProtocolBudgets::of_routine`]. A caller that reads the caps of a
+    /// transport names one protocol by its routine, and it writes the cap of
+    /// that one protocol here. The three writers by name stay for a caller
+    /// outside the crate, which reads no routine at all.
+    ///
+    /// The match is exhaustive, so a fourth routine stops the build here
+    /// rather than drop the cap that the transport stated for it.
+    ///
+    /// # Arguments
+    /// * `routine` - The routine that writes the protocol to change.
+    /// * `budget` - The budget of that one protocol.
+    ///
+    /// # Returns
+    /// The same budgets, with that one protocol changed.
+    #[must_use]
+    pub(crate) const fn with_routine(self, routine: DisplayRoutine, budget: PayloadBudget) -> Self {
+        match routine {
+            DisplayRoutine::Kitty => self.with_kitty(budget),
+            DisplayRoutine::Sixel => self.with_sixel(budget),
+            DisplayRoutine::Iterm2 => self.with_iterm2(budget),
+        }
+    }
 }
 
 /// Where the cursor stands when the image is written.
