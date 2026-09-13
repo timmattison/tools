@@ -44,6 +44,7 @@
 mod blocked_by;
 mod build;
 mod chain;
+mod declared;
 mod envelope;
 mod github;
 mod graph;
