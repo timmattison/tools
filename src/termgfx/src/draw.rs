@@ -63,11 +63,14 @@ const KITTY_CHUNK_SIZE: usize = 4096;
 /// second is two, which makes nine. The last command of a transmission carries
 /// `m=0` in place of `m=1`, and that is the same nine characters.
 ///
-/// [`kitty_budget_under_chunk_framing`] counts nine for every chunk, the first
-/// one included. The first command carries the header in place of these nine
-/// characters, and [`PayloadBudget::CONTROL_BLOCK_ROOM`] covers that header, so
-/// the nine characters counted there are an overcount. Nine characters carry
-/// two pixels of the picture, and one rule for every chunk is worth two pixels.
+/// [`kitty_budget_under_chunk_framing`] counts nine for every chunk, the
+/// first one included. The first command carries the header where a later
+/// command carries `ESC _ G`. Beyond that header the first command carries
+/// `, m = 1 ;` and the terminator, which is seven characters.
+/// [`PayloadBudget::CONTROL_BLOCK_ROOM`] covers the header, so the nine
+/// characters counted for the first chunk cover those seven. The overcount
+/// is two characters. Two base64 characters carry under one pixel of the
+/// picture, and one rule for every chunk is worth that.
 const KITTY_CHUNK_FRAMING: usize = 9;
 
 /// The Kitty graphics command that takes every image off the screen.
