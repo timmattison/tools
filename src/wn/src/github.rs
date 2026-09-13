@@ -44,6 +44,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::blocked_by;
 use crate::chain::IssueNumber;
 use crate::report::{Entry, Status};
 
@@ -192,7 +193,7 @@ pub fn build_query(numbers: &[IssueNumber]) -> String {
             format!(
                 "    {}: issueOrPullRequest(number: {}) {{\n      \
                  __typename\n      \
-                 ... on Issue {{ number title state stateReason }}\n      \
+                 ... on Issue {{ number title state stateReason body }}\n      \
                  ... on PullRequest {{ number title state }}\n    }}\n",
                 alias(*number),
                 number.get()
@@ -343,7 +344,17 @@ fn entry_of(repository: &Value, reasons: &Reasons<'_>, number: IssueNumber) -> R
             anyhow!("GitHub gave {number} the state {state}, which wn cannot read")
         })?,
         closes: None,
-        blocked_by: Vec::new(),
+        // Only an issue carries a body in the answer, because the query asks
+        // an issue for one and a pull request for none. An issue does not
+        // block itself, so a body that names its own number loses it here.
+        blocked_by: node
+            .get("body")
+            .and_then(Value::as_str)
+            .map(blocked_by::read)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|blocker| *blocker != number)
+            .collect(),
     })
 }
 
