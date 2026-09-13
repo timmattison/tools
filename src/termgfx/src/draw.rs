@@ -362,6 +362,21 @@ impl PayloadBudget {
     /// because a picture that loses four kibicharacters of resolution loses
     /// nothing a reader can see.
     ///
+    /// **Two tests measure that claim, one for each shape of writer.**
+    /// [`a_picture_fitted_for_mosh_fits_every_cap_that_mosh_states`] measures
+    /// a whole Kitty transmission against every cap it can meet.
+    /// [`a_whole_command_stands_under_the_cap_of_its_own_protocol`] measures
+    /// a whole Sixel string and a whole iTerm2 command against the cap of the
+    /// protocol that wrote it. A measurement on 2026-09-13 states the iTerm2
+    /// command in 62 characters.
+    ///
+    /// **A Sixel string needs no room here, because the encoder writes the
+    /// introducer inside the payload.** [`SixelPayload::encode`] gives the
+    /// whole device-control string, and the budget bounds that string, so the
+    /// room stands over a Sixel picture as pure slack. The two other
+    /// protocols write a command around a payload that the budget bounds on
+    /// its own, and the room covers that command.
+    ///
     /// **One command is what this room covers, and a Kitty transmission is
     /// more than one command.** [`write_kitty`] sends a payload above
     /// [`KITTY_CHUNK_SIZE`] in one command for each chunk, so the characters
@@ -2602,6 +2617,12 @@ mod tests {
     /// and one unit is one byte on the wire in every case. So the room that
     /// [`PayloadBudget::under_command_cap`] leaves has to be real room under
     /// each of the three, and not under the one that a reader remembers.
+    ///
+    /// Two tests measure a whole stream against a cap of its own protocol.
+    /// [`a_picture_fitted_for_mosh_fits_every_cap_that_mosh_states`] measures
+    /// the Kitty protocol, and
+    /// [`a_whole_command_stands_under_the_cap_of_its_own_protocol`] measures
+    /// the two others through [`ONE_COMMAND_CAPS`].
     const MOSH_CAPS: [usize; 3] = [MOSH_KITTY_CAP, MOSH_SIXEL_CAP, MOSH_ITERM2_CAP];
 
     /// Every cap that the whole-transmission test measures a Kitty stream
@@ -2638,6 +2659,26 @@ mod tests {
     /// The payload stood inside the budget, and the whole transmission stood
     /// 1058 characters above the cap.
     const CAP_THAT_THE_ROOM_RUNS_OUT_AT: usize = 4 * 1024 * 1024;
+
+    /// Every protocol that carries one whole picture in one command, with the
+    /// cap that mosh states for that protocol.
+    ///
+    /// The Kitty protocol stands outside this table. It sends one command for
+    /// each chunk of a large payload, so
+    /// [`a_picture_fitted_for_mosh_fits_every_cap_that_mosh_states`] measures
+    /// it against [`KITTY_TRANSMISSION_CAPS`] instead.
+    ///
+    /// **The two caps here used to reach the suite as Kitty numbers alone.**
+    /// The Kitty test draws every entry of [`KITTY_TRANSMISSION_CAPS`] on a
+    /// Kitty terminal, and [`MOSH_SIXEL_CAP`] and [`MOSH_ITERM2_CAP`] arrive
+    /// there as two of those entries. So no test measured a whole Sixel
+    /// string or a whole iTerm2 command against the cap of its own protocol.
+    /// [`a_whole_command_stands_under_the_cap_of_its_own_protocol`] is that
+    /// measurement.
+    const ONE_COMMAND_CAPS: [(DisplayRoutine, usize); 2] = [
+        (DisplayRoutine::Sixel, MOSH_SIXEL_CAP),
+        (DisplayRoutine::Iterm2, MOSH_ITERM2_CAP),
+    ];
 
     /// The side of the picture that the mosh budget test fits.
     ///
@@ -2774,6 +2815,69 @@ mod tests {
 
         let mut out = Vec::new();
         Capabilities::new(TerminalType::Kitty, true, true)
+            .draw(&mut out, image, &request)
+            .expect("a write to a vector never fails");
+
+        out.len()
+    }
+
+    /// Draw `image` on a terminal that draws with `routine`, inside
+    /// `budgets`, and give back the characters of the whole stream that the
+    /// writer wrote.
+    ///
+    /// **This counts what a cap counts.** A transport measures one picture as
+    /// the command of the protocol together with the payload, so a test of a
+    /// cap reads the whole stream and not the payload inside it.
+    /// [`kitty_stream_characters_of`] is the same measurement for the one
+    /// protocol that sends more than one command, and
+    /// [`payload_of_routine`] is the measurement of the payload alone.
+    ///
+    /// The routine that really ran is asserted here.
+    /// [`Capabilities::draw`] picks the routine off the terminal, so a
+    /// terminal that answers for another protocol measures another writer
+    /// under this name.
+    ///
+    /// The request states no bound in cells. A bound in cells takes the size
+    /// of the picture off the window of whoever runs the suite, and the count
+    /// then moves with that window. The Sixel writer bounds its picture by
+    /// that window whatever the request states, so a Sixel count moves with
+    /// it anyway, and a test reads such a count rather than states it.
+    ///
+    /// The cursor is [`Cursor::Held`], which writes nothing around the
+    /// command, so the count holds the command alone.
+    ///
+    /// # Arguments
+    /// * `image` - The picture to draw.
+    /// * `routine` - The routine, and with it the protocol, that draws it.
+    /// * `budgets` - The characters of payload that each protocol can spend.
+    ///
+    /// # Returns
+    /// The characters of the whole stream, which is the command of the
+    /// protocol and the payload inside it.
+    fn stream_characters_of(
+        image: &DynamicImage,
+        routine: DisplayRoutine,
+        budgets: ProtocolBudgets,
+    ) -> usize {
+        let request = Request {
+            budget: Budget {
+                columns: None,
+                rows: None,
+            },
+            payload: budgets,
+            cursor: Cursor::Held,
+            ..test_request()
+        };
+
+        let capabilities = Capabilities::new(terminal_of_routine(routine), true, true);
+        assert_eq!(
+            capabilities.display_routine(),
+            routine,
+            "this test measures {routine:?}, so the terminal it draws on has to draw with it"
+        );
+
+        let mut out = Vec::new();
+        capabilities
             .draw(&mut out, image, &request)
             .expect("a write to a vector never fails");
 
@@ -4460,6 +4564,119 @@ mod tests {
             spent <= smallest,
             "a picture that fills the fallback writes {spent} characters, which is above the smallest cap of {smallest}"
         );
+    }
+
+    /// A whole command of a protocol stands under the cap of that protocol.
+    ///
+    /// Every cap that a transport states counts the command of the protocol
+    /// together with the payload, and a budget bounds the payload alone.
+    /// [`PayloadBudget::under_command_cap`] takes
+    /// [`PayloadBudget::CONTROL_BLOCK_ROOM`] off a cap to leave room for the
+    /// command, and it applies one room to all three protocols.
+    /// [`a_picture_fitted_for_mosh_fits_every_cap_that_mosh_states`] measures
+    /// that room against a whole Kitty transmission. This test measures it
+    /// against the two other protocols, each one against the cap of
+    /// [`ONE_COMMAND_CAPS`] that mosh states for it.
+    ///
+    /// **A cut Sixel string and a cut iTerm2 command are the quiet
+    /// failures.** mosh cuts either one at the cap and keeps the rest, and
+    /// nothing tells the program of the session that the cut happened. So a
+    /// picture above one of these two caps draws a wrong picture in silence,
+    /// where a Kitty transmission above its cap earns `ENOSPC` and draws
+    /// nothing.
+    ///
+    /// Two caps measure each protocol, and they catch two different
+    /// mistakes.
+    ///
+    /// * **The cap that mosh states.** Both writers bound the picture by the
+    ///   window of the terminal before the fit runs, so the stream stands far
+    ///   under this cap. This arm measures the two constants that mosh
+    ///   states, and a writer that puts more framing around its payload fails
+    ///   here.
+    /// * **The cap one character under the stream.** That is the tightest cap
+    ///   that the picture misses. The room has to come off such a cap, or the
+    ///   budget holds the whole payload, the fit spends nothing, and the
+    ///   writer puts one character more than the cap on the wire.
+    ///
+    /// A measurement on 2026-09-13 states the numbers below. The Sixel
+    /// writer resizes to the window, and that run read no window, so the
+    /// Sixel picture came off the default size of 800 pixels by 600.
+    ///
+    /// * The Sixel writer draws the photograph fixture in 182991 characters,
+    ///   against a cap of 1048576. The encoder writes the introducer itself,
+    ///   so that count is the payload and the command together. A cap of
+    ///   182990 takes the picture to 172978 characters.
+    /// * The iTerm2 writer draws the same fixture in 296102 characters,
+    ///   against the same cap. That is a PNG payload of 296040 characters
+    ///   behind 62 characters of command. A cap of 296101 takes the picture
+    ///   onto a JPEG rung, at 23342 characters.
+    ///
+    /// The two mutations below were measured on 2026-09-13, one at a time.
+    ///
+    /// * A [`PayloadBudget::CONTROL_BLOCK_ROOM`] of 0 leaves no room for the
+    ///   command. The tight budget of iTerm2 then holds the whole PNG
+    ///   payload, so the fit leaves the picture alone and the writer puts
+    ///   296102 characters against the cap of 296101. The iTerm2 arm fails.
+    ///   **The Sixel arm passes with that mutation, and that is correct.**
+    ///   The encoder of that protocol writes the introducer inside the
+    ///   payload that the budget bounds, so the room covers no character of a
+    ///   Sixel string and a Sixel string needs none.
+    ///   [`a_kitty_budget_takes_the_framing_of_every_chunk_off_itself`] fails
+    ///   with that mutation as well, and no other test of this crate does.
+    /// * An `under_command_cap` that adds the room in place of taking it off
+    ///   gives a budget above the cap. The Sixel writer then puts 182991
+    ///   characters against the cap of 182990, and the Sixel arm fails first.
+    ///   The iTerm2 arm fails with it as well. Three other tests fail with
+    ///   it: [`a_cap_that_counts_the_command_leaves_room_for_the_command`],
+    ///   which holds the arithmetic on its own,
+    ///   [`a_kitty_budget_takes_the_framing_of_every_chunk_off_itself`], and
+    ///   [`a_picture_fitted_for_mosh_fits_every_cap_that_mosh_states`].
+    #[test]
+    fn a_whole_command_stands_under_the_cap_of_its_own_protocol() {
+        let fixture = photograph_fixture();
+
+        for (routine, cap) in ONE_COMMAND_CAPS {
+            let spent = stream_characters_of(
+                &fixture,
+                routine,
+                ProtocolBudgets::UNLIMITED
+                    .with_routine(routine, PayloadBudget::under_command_cap(cap)),
+            );
+            assert!(
+                spent <= cap,
+                "mosh counts the command of {routine:?} together with the payload, and the writer put {spent} characters on the wire, which is above the cap of {cap}"
+            );
+            assert!(
+                spent > 0,
+                "a writer of {routine:?} that puts nothing on the wire draws nothing, and this test then measures nothing"
+            );
+
+            // The tightest cap that the picture misses. A budget above such
+            // a cap holds the whole payload, the fit spends nothing, and the
+            // writer puts one character more than the cap on the wire.
+            let whole = stream_characters_of(&fixture, routine, ProtocolBudgets::UNLIMITED);
+            assert!(
+                whole > PayloadBudget::CONTROL_BLOCK_ROOM,
+                "the picture of {routine:?} spends {whole} characters, which the room of {} already covers, so a cap under it leaves a budget of nothing and this test measures nothing",
+                PayloadBudget::CONTROL_BLOCK_ROOM
+            );
+
+            let tight = whole - 1;
+            let fitted = stream_characters_of(
+                &fixture,
+                routine,
+                ProtocolBudgets::UNLIMITED
+                    .with_routine(routine, PayloadBudget::under_command_cap(tight)),
+            );
+            assert!(
+                fitted <= tight,
+                "a cap of {tight} stands one character under what the picture of {routine:?} spends, and the writer put {fitted} characters on the wire"
+            );
+            assert!(
+                fitted < whole,
+                "a cap under what the picture of {routine:?} spends has to make the fit spend something, but the writer put the same {fitted} characters on the wire"
+            );
+        }
     }
 
     /// The fit takes resolution off a picture and takes no room off it.
