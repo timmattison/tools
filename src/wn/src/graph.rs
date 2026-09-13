@@ -1083,6 +1083,24 @@ impl Graph {
             .map_or(NO_POSITIONS, Vec::as_slice)
     }
 
+    /// Every edge of the graph, as the number of the step before and the number
+    /// of the step after, in the order of the steps after.
+    ///
+    /// [`of_parts`] takes edges in this shape, so a caller that adds an edge to
+    /// a graph builds the new graph out of these and the edge it adds.
+    #[must_use]
+    pub(crate) fn edges(&self) -> Vec<(IssueNumber, IssueNumber)> {
+        self.before
+            .iter()
+            .zip(&self.steps)
+            .flat_map(|(before, later)| {
+                before
+                    .iter()
+                    .map(move |&earlier| (self.steps[earlier].number(), later.number()))
+            })
+            .collect()
+    }
+
     /// The positions of the steps that come after the step at each position.
     ///
     /// A [`Graph`] holds the steps before each step, because that is the

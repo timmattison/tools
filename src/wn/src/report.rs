@@ -187,6 +187,24 @@ impl States {
             blocked_by: Vec::new(),
         })
     }
+
+    /// Whether GitHub was asked about `number` and answered.
+    ///
+    /// [`entry`](Self::entry) gives a missing entry for a number nobody asked
+    /// about and for a number the repository does not have alike. This parts
+    /// the two, for a caller that must ask about a number before it reads one.
+    #[must_use]
+    pub fn knows(&self, number: IssueNumber) -> bool {
+        self.entries.contains_key(&number)
+    }
+
+    /// Hold what GitHub said about each number of `entries` as well.
+    ///
+    /// A number already held takes the later answer, as [`of`](Self::of) does.
+    pub fn extend(&mut self, entries: Vec<Entry>) {
+        self.entries
+            .extend(entries.into_iter().map(|entry| (entry.number, entry)));
+    }
 }
 
 /// The steps of the input, in order, and the answer they give.

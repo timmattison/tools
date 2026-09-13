@@ -19,9 +19,16 @@
 //! says nothing about its state. A finished one changes nothing. An open one
 //! joins the graph as a step, and the blockers it names are read in turn.
 
-use crate::chain::IssueNumber;
-use crate::graph::Graph;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+use crate::chain::{list, IssueNumber};
+use crate::graph::{of_parts, Graph, Work};
+use crate::plan::Step;
 use crate::report::{Entry, States};
+
+/// One edge of an order: the number of the step before, and the number of the
+/// step after.
+type Edge = (IssueNumber, IssueNumber);
 
 /// The steps of the answer that wait for work the plan did not say they wait
 /// for, and that work.
@@ -68,8 +75,142 @@ pub fn settle(
     states: States,
     fetch: &dyn Fn(&[IssueNumber]) -> anyhow::Result<Vec<Entry>>,
 ) -> anyhow::Result<Settled> {
-    let _ = (graph, fetch);
-    Ok(Settled::Agrees(states))
+    let mut states = states;
+    // A blocker that names the issue of a pair names the pair, because the pull
+    // request does the work. A number the plan names nowhere names itself.
+    let work = Work::of(graph.steps());
+    let plan_edges = graph.edges();
+    let mut steps: Vec<Step> = graph.steps().to_vec();
+    let mut added: Vec<Edge> = Vec::new();
+    let mut left_out: Vec<LeftOut> = Vec::new();
+
+    // The first round examines the steps of the plan, and each round after it
+    // examines the blockers the round before it added. A round adds a step only
+    // for a blocker no step holds, so the rounds end when the blockers the
+    // issues name run out, and every number of a repository is finite.
+    let mut examined = 0;
+    while examined < steps.len() {
+        let round: Vec<Step> = steps.get(examined..).unwrap_or_default().to_vec();
+        examined = steps.len();
+        let unknown = unknown_blockers(&round, &states, &work);
+        if !unknown.is_empty() {
+            states.extend(fetch(&unknown)?);
+        }
+        for step in round {
+            for (listed_by, named) in blockers_of(step, &states) {
+                let blocker = work.names(named);
+                if blocker == step.number() || states.entry(blocker).status.is_finished() {
+                    continue;
+                }
+                let order: Vec<Edge> = plan_edges.iter().chain(&added).copied().collect();
+                if path(&order, blocker, step.number()).is_some() {
+                    continue;
+                }
+                if path(&plan_edges, step.number(), blocker).is_some() {
+                    return Err(OrderError::Reversed {
+                        step: step.number(),
+                        blocker,
+                        listed_by,
+                        named,
+                    }
+                    .into());
+                }
+                if let Some(cycle) = path(&order, step.number(), blocker) {
+                    return Err(OrderError::Cycle(cycle).into());
+                }
+                added.push((blocker, step.number()));
+                if !steps.iter().any(|held| held.number() == blocker) {
+                    steps.push(work.step(blocker));
+                }
+                match left_out.iter_mut().find(|held| held.step == step.number()) {
+                    Some(held) => held.blockers.push(blocker),
+                    None => left_out.push(LeftOut {
+                        step: step.number(),
+                        blockers: vec![blocker],
+                    }),
+                }
+            }
+        }
+    }
+
+    if added.is_empty() {
+        return Ok(Settled::Agrees(states));
+    }
+    let mut edges = plan_edges;
+    edges.extend(added);
+    Ok(Settled::Adds {
+        graph: of_parts(steps, &edges)?,
+        states,
+        left_out,
+    })
+}
+
+/// Every blocker the issues of `step` name, with the number of the issue that
+/// names it, or nothing when `step` is not open.
+///
+/// A step names its own number, and a pair names the issue its pull request
+/// closes as well. The body is on the issue, so the blockers of the issue are
+/// the blockers of the step. A step nobody can start again waits for nothing.
+fn blockers_of(step: Step, states: &States) -> Vec<Edge> {
+    if !states.entry(step.number()).status.is_open() {
+        return Vec::new();
+    }
+    [Some(step.number()), step.closes()]
+        .into_iter()
+        .flatten()
+        .flat_map(|listed_by| {
+            states
+                .entry(listed_by)
+                .blocked_by
+                .into_iter()
+                .map(move |named| (listed_by, named))
+        })
+        .collect()
+}
+
+/// The blockers the steps of `round` name whose state nobody asked about yet,
+/// each one once, so one query answers for the whole round.
+fn unknown_blockers(round: &[Step], states: &States, work: &Work) -> Vec<IssueNumber> {
+    let mut unknown: Vec<IssueNumber> = Vec::new();
+    for &step in round {
+        for (_, named) in blockers_of(step, states) {
+            let blocker = work.names(named);
+            if !states.knows(blocker) && !unknown.contains(&blocker) {
+                unknown.push(blocker);
+            }
+        }
+    }
+    unknown
+}
+
+/// The numbers of one walk from `from` to `to` along `edges`, both ends
+/// included, or `None` when no walk reaches `to`.
+///
+/// The walk is breadth first, so the walk it names is a shortest one, and a
+/// refusal that names it names no more steps than it must.
+fn path(edges: &[Edge], from: IssueNumber, to: IssueNumber) -> Option<Vec<IssueNumber>> {
+    let mut came_from: BTreeMap<IssueNumber, IssueNumber> = BTreeMap::new();
+    let mut reached: BTreeSet<IssueNumber> = BTreeSet::from([from]);
+    let mut queue: VecDeque<IssueNumber> = VecDeque::from([from]);
+    while let Some(at) = queue.pop_front() {
+        if at == to {
+            let mut walk = vec![to];
+            let mut back = to;
+            while let Some(&earlier) = came_from.get(&back) {
+                walk.push(earlier);
+                back = earlier;
+            }
+            walk.reverse();
+            return Some(walk);
+        }
+        for &(before, after) in edges {
+            if before == at && reached.insert(after) {
+                came_from.insert(after, at);
+                queue.push_back(after);
+            }
+        }
+    }
+    None
 }
 
 /// Why a plan cannot be answered once its issues are read.
@@ -90,6 +231,15 @@ pub enum OrderError {
         listed_by: IssueNumber,
         named: IssueNumber,
     },
+    /// No edge of the plan goes against a blocker, and the blockers the issues
+    /// name still return to where they started. The numbers are the walk from
+    /// the step to its blocker, and the blocker comes before the step.
+    #[error(
+        "the order returns to {} once the blockers each issue names join the plan, \
+         so no step can start first",
+        list(.0)
+    )]
+    Cycle(Vec<IssueNumber>),
 }
 
 #[cfg(test)]
