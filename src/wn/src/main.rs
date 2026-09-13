@@ -33,6 +33,12 @@
 //! code fence around the document comes off before that character is read,
 //! because a run of a model at a high level of effort writes such a fence.
 //!
+//! Whatever the shape, the answer holds the order to what the issues say. The
+//! body of an issue names its blockers under `Blocked by`, and a plan that puts
+//! an issue before its own blocker is refused rather than answered. A plan once
+//! put #170 before #168 while #170 said #168 blocked it, and the reader it sent
+//! to #170 found that out by opening the issue.
+//!
 //! The reader who has no plan at all has a repository full of open issues
 //! instead. That plan is one `claude` run away, and `wn` already knows the
 //! repository, so `wn` builds it: the run is the fourth input, after the
@@ -164,6 +170,13 @@ one character, because a text whose first character that is not a space is `{` i
 and nothing else `wn` reads starts that way. A Markdown code fence around the document comes off \
 before that character is read, because a run of a model at a high level of effort writes one. A \
 document that does not parse is an error and never a walk on to the next reader.\n\n\
+Every shape is held to what its own issues say comes first. The query asks for the body of each \
+issue, and a list item under a `Blocked by` or `Depends on` heading, or a block that starts with \
+that label, names a blocker. A plan that puts an issue before its own blocker is refused with the \
+pair named, because an answer to it sends somebody to work that cannot start. A blocker the plan \
+leaves out joins the answer instead, and a note says the issue named that wait and the plan did \
+not. A blocker that stands nowhere in the plan costs one more query, and a finished one changes \
+nothing.\n\n\
 Quote the chain. A shell reads an unquoted `#` as the start of a comment.\n\n\
 The chain comes out of the first input that holds one: the argument, then standard input, then \
 the system clipboard, then a run of claude that builds a plan. So `wn` alone answers the chain \

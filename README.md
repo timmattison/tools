@@ -1361,6 +1361,23 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     stream while `Order` says the opposite, and one half of a contradiction is no answer. A
     blocker the repository does not have keeps its row and its note, and the run exits `1`,
     because a blocker that is a typo is a stream that waits forever.
+  - Every plan is held to what its own issues say comes first, because a person or a run of a
+    model writes the plan and either can get the order wrong. The one query asks for the body of
+    every issue, and a body names a blocker in the shape the `to-issues` skill writes: a list item
+    or a paragraph under a `Blocked by` or `Depends on` heading, or a block that starts with that
+    label, as in `**Blocked by:** #12`. Only the numbers at the start of a block count, so `It can
+    run beside #169.` under the heading blocks nothing. A phrase in the middle of a sentence counts
+    for nothing either, because a line of a tracker such as `#12 (blocked by #11)` says what blocks
+    another issue.
+  - A plan that puts an issue before its own blocker is refused, and the run exits `2`: `the plan
+    puts #170 before #168, but #170 says it is blocked by #168`. That is the plan that sent a
+    reader to #170. A blocker the plan leaves out joins the answer instead, and the answer then
+    reads the way a picture reads, with `waits for #168` on the row and the note `#170 waits for
+    #168: the issue says so, and the plan does not.` A blocker that stands nowhere in the plan
+    costs one more query for each round of such blockers. A finished one changes nothing, and an
+    open one joins the answer with the blockers it names in turn. Only an open issue names a
+    blocker and only an open blocker holds work back, so work that is already done never refuses
+    a plan. A chain goes through the same check, so `wn "#170"` names #168 first.
   - A plan drawn as a picture is a third shape of input, and it says the one thing that no chain
     and no table says: two streams that join.
 
