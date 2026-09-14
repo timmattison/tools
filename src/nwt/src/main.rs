@@ -1674,6 +1674,16 @@ struct EnvCopySummary {
     copied: usize,
     /// Destinations that already existed and were deliberately left alone.
     kept: usize,
+    /// Files under a `--sparse-exclude` directory, which the copy does not
+    /// take. A copy makes the excluded directory in the new worktree again.
+    skipped: usize,
+}
+
+/// The stderr line for an untracked `.env` that the copy does not take,
+/// because it is under the excluded directory `dir`.
+fn skipped_under_excluded_message(relative_path: &Path, dir: &SparseExcludeDir) -> String {
+    let _ = (relative_path, dir);
+    String::new()
 }
 
 /// Builds the user-facing line announcing a destination `.env` that was left alone.
@@ -1772,7 +1782,13 @@ fn copy_env_file(source: &Path, dest: &Path) -> io::Result<()> {
 ///
 /// Returns an [`EnvCopySummary`] recording how many files were copied and how many
 /// existing destinations were kept.
-fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) -> EnvCopySummary {
+fn copy_untracked_env_files(
+    main_repo: &Path,
+    worktree: &Path,
+    excluded: &[SparseExcludeDir],
+    quiet: bool,
+) -> EnvCopySummary {
+    let _ = excluded;
     // Get all tracked files in a single git call for performance
     let tracked_files = get_tracked_files(main_repo);
     let mut summary = EnvCopySummary::default();
@@ -2323,7 +2339,12 @@ fn main() {
 
                 // Copy untracked .env files from main worktree to new worktree
                 if config.copy_env {
-                    copy_untracked_env_files(&repo_root, &worktree_path, config.quiet);
+                    copy_untracked_env_files(
+                        &repo_root,
+                        &worktree_path,
+                        &sparse_excludes,
+                        config.quiet,
+                    );
                 }
 
                 // Rename Zellij tab if running inside Zellij, unless tab renaming
@@ -4626,7 +4647,7 @@ mod tests {
             create_file(source.path(), ".env", "SECRET=value");
 
             // Copy env files (no git, so all .env files are "untracked")
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             // Verify the file was copied
             assert!(
@@ -4643,7 +4664,7 @@ mod tests {
             // Create .env.local file
             create_file(source.path(), ".env.local", "LOCAL_SECRET=local");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 file_has_content(dest.path(), ".env.local", "LOCAL_SECRET=local"),
@@ -4659,7 +4680,7 @@ mod tests {
             // Create .env.development file
             create_file(source.path(), ".env.development", "DEV=true");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 file_has_content(dest.path(), ".env.development", "DEV=true"),
@@ -4675,7 +4696,7 @@ mod tests {
             // Create .envrc (direnv file) - should NOT be copied
             create_file(source.path(), ".envrc", "export FOO=bar");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             // Verify .envrc was NOT copied
             assert!(
@@ -4692,7 +4713,7 @@ mod tests {
             // Create .environment file - should NOT be copied
             create_file(source.path(), ".environment", "some config");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 !dest.path().join(".environment").exists(),
@@ -4708,7 +4729,7 @@ mod tests {
             // Create nested .env file
             create_file(source.path(), "packages/api/.env", "API_KEY=secret");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 file_has_content(dest.path(), "packages/api/.env", "API_KEY=secret"),
@@ -4727,7 +4748,7 @@ mod tests {
             create_file(source.path(), "app/.env", "APP=3");
             create_file(source.path(), "app/.env.production", "PROD=4");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(file_has_content(dest.path(), ".env", "ROOT=1"));
             assert!(file_has_content(dest.path(), ".env.local", "LOCAL=2"));
@@ -4749,7 +4770,7 @@ mod tests {
             // Create normal .env (should be copied)
             create_file(source.path(), ".env", "NORMAL=y");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 file_has_content(dest.path(), ".env", "NORMAL=y"),
@@ -4783,7 +4804,7 @@ mod tests {
             // Create normal .env (should be copied)
             create_file(source.path(), ".env", "NORMAL=y");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 file_has_content(dest.path(), ".env", "NORMAL=y"),
@@ -4805,7 +4826,7 @@ mod tests {
             // Create normal .env (should be copied)
             create_file(source.path(), ".env", "NORMAL=y");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 file_has_content(dest.path(), ".env", "NORMAL=y"),
@@ -4850,7 +4871,7 @@ mod tests {
             create_file(source.path(), ".env.local", "UNTRACKED_SECRET=untracked");
 
             // Copy env files
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             // Verify: tracked file should NOT be copied
             assert!(
@@ -4876,7 +4897,7 @@ mod tests {
             // post-checkout hook during `git worktree add`.
             create_file(dest.path(), ".env.local", "WORKTREE=generated-by-hook");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 file_has_content(dest.path(), ".env.local", "WORKTREE=generated-by-hook"),
@@ -4892,11 +4913,15 @@ mod tests {
             create_file(source.path(), ".env.local", "MAIN=from-main");
             create_file(dest.path(), ".env.local", "WORKTREE=generated-by-hook");
 
-            let summary = copy_untracked_env_files(source.path(), dest.path(), true);
+            let summary = copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert_eq!(
                 summary,
-                EnvCopySummary { copied: 0, kept: 1 },
+                EnvCopySummary {
+                    copied: 0,
+                    kept: 1,
+                    skipped: 0
+                },
                 "A skipped destination must count as kept, never as copied"
             );
         }
@@ -4989,7 +5014,7 @@ mod tests {
             // Nothing in the destination, so the copy must still happen.
             create_file(source.path(), ".env.local", "MAIN=from-main");
 
-            let summary = copy_untracked_env_files(source.path(), dest.path(), true);
+            let summary = copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 file_has_content(dest.path(), ".env.local", "MAIN=from-main"),
@@ -4997,7 +5022,11 @@ mod tests {
             );
             assert_eq!(
                 summary,
-                EnvCopySummary { copied: 1, kept: 0 },
+                EnvCopySummary {
+                    copied: 1,
+                    kept: 0,
+                    skipped: 0
+                },
                 "Copying must still be counted when nothing was skipped"
             );
         }
@@ -5012,7 +5041,7 @@ mod tests {
             // Only .env.local already exists in the new worktree.
             create_file(dest.path(), ".env.local", "B=already-here");
 
-            let summary = copy_untracked_env_files(source.path(), dest.path(), true);
+            let summary = copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 file_has_content(dest.path(), ".env", "A=1"),
@@ -5024,8 +5053,64 @@ mod tests {
             );
             assert_eq!(
                 summary,
-                EnvCopySummary { copied: 1, kept: 1 },
+                EnvCopySummary {
+                    copied: 1,
+                    kept: 1,
+                    skipped: 0
+                },
                 "Copy and keep must be accounted separately in a single pass"
+            );
+        }
+
+        /// Parse `raw` into one excluded directory, or panic.
+        fn excluded_dir(raw: &str) -> SparseExcludeDir {
+            SparseExcludeDir::parse(raw).unwrap_or_else(|e| panic!("{raw:?} must parse, got {e:?}"))
+        }
+
+        /// Issue #487 test 9: a `.env` under an excluded directory is not
+        /// copied, and it counts as skipped. A copy makes the excluded
+        /// directory in the new worktree again. The `.env` beside it is copied.
+        #[test]
+        fn test_env_under_an_excluded_directory_is_skipped_and_counted() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), "heavy/.env", "HEAVY=1");
+            create_file(source.path(), ".env", "TOP=1");
+
+            let summary = copy_untracked_env_files(
+                source.path(),
+                dest.path(),
+                &[excluded_dir("heavy")],
+                true,
+            );
+
+            assert!(
+                !dest.path().join("heavy").exists(),
+                "The copy must not make the excluded directory heavy/"
+            );
+            assert!(
+                file_has_content(dest.path(), ".env", "TOP=1"),
+                "A .env that is not under an excluded directory must be copied"
+            );
+            assert_eq!(
+                summary,
+                EnvCopySummary {
+                    copied: 1,
+                    kept: 0,
+                    skipped: 1
+                },
+                "A .env under an excluded directory counts as skipped, not copied or kept"
+            );
+        }
+
+        /// The stderr line names the file and the excluded directory, with a
+        /// trailing `/` on the directory.
+        #[test]
+        fn test_skipped_under_excluded_message_names_the_file_and_the_directory() {
+            assert_eq!(
+                skipped_under_excluded_message(Path::new("heavy/.env"), &excluded_dir("heavy")),
+                "Skipped: heavy/.env (under excluded heavy/)"
             );
         }
 
@@ -5042,7 +5127,7 @@ mod tests {
             // these bits into every worktree.
             set_mode(&source.path().join(".env"), 0o644);
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert_eq!(
                 mode_of(&dest.path().join(".env")),
@@ -5065,7 +5150,7 @@ mod tests {
             create_file(source.path(), "packages/api/.env", "NESTED=secret");
             set_mode(&source.path().join("packages/api/.env"), 0o644);
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert_eq!(
                 mode_of(&dest.path().join("packages/api/.env")),
@@ -5091,7 +5176,7 @@ mod tests {
             create_file(dest.path(), ".env", "WORKTREE=generated-by-hook");
             set_mode(&dest.path().join(".env"), 0o600);
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert_eq!(
                 mode_of(&dest.path().join(".env")),
@@ -5139,7 +5224,7 @@ mod tests {
             let dest_path = dest.path().join(".env");
             symlink(&target_path, &dest_path).expect("Failed to create dangling symlink");
 
-            let summary = copy_untracked_env_files(source.path(), dest.path(), true);
+            let summary = copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 !target_path.exists(),
@@ -5154,7 +5239,11 @@ mod tests {
             );
             assert_eq!(
                 summary,
-                EnvCopySummary { copied: 0, kept: 1 },
+                EnvCopySummary {
+                    copied: 0,
+                    kept: 1,
+                    skipped: 0
+                },
                 "A dangling symlink at the destination must count as kept, never as copied"
             );
         }

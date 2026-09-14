@@ -758,6 +758,59 @@ fn a_directory_named_with_each_glob_character_is_excluded_alone() {
     );
 }
 
+/// The stderr line of a run that does not copy the untracked `heavy/.env`,
+/// because it is under the excluded `heavy/`.
+const SKIPPED_HEAVY_ENV: &str = "Skipped: heavy/.env (under excluded heavy/)";
+
+/// Run `nwt -b <branch> --sparse-exclude heavy` in `repo` with the `.env` copy
+/// on and `extra` arguments, and hand back what it wrote.
+fn run_nwt_with_env_copy(repo: &Path, extra: &[&str]) -> Output {
+    nwt_command(repo)
+        .args(["-b", &unique_branch("sparse-env"), "--no-bootstrap-hooks"])
+        .args(["--sparse-exclude", HEAVY_DIR])
+        .args(extra)
+        .output()
+        .expect("run the nwt binary")
+}
+
+/// Test 9 of issue #487: an untracked `.env` under an excluded directory is
+/// not copied, and stderr names it.
+///
+/// The `.env` copy walks the main worktree. A copy of `heavy/.env` makes
+/// `heavy/` in the new worktree again, and that undoes the exclusion. The
+/// top-level `.env` is not under `heavy/`, so the copy takes it as before.
+#[test]
+fn an_untracked_env_under_an_excluded_directory_is_not_copied() {
+    const TOP_ENV: &str = ".env";
+    const TOP_ENV_CONTENTS: &str = "TOP=1\n";
+
+    let (_temp, repo) = repo_with_heavy_dir();
+    write_file(&repo, "heavy/.env", "HEAVY=1\n");
+    write_file(&repo, TOP_ENV, TOP_ENV_CONTENTS);
+
+    let output = run_nwt_with_env_copy(&repo, &[]);
+    let worktree = created_worktree(&output);
+
+    assert!(
+        !worktree.join(HEAVY_DIR).exists(),
+        "the .env copy must not make {HEAVY_DIR}/ in {}",
+        worktree.display()
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree.join(TOP_ENV))
+            .ok()
+            .as_deref(),
+        Some(TOP_ENV_CONTENTS),
+        "the top-level .env must be copied into the new worktree"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.lines().any(|line| line == SKIPPED_HEAVY_ENV),
+        "stderr must hold the line {SKIPPED_HEAVY_ENV:?}, but it holds:\n{stderr}"
+    );
+}
+
 /// A value that the lexical rules refuse exits with its own code, names the
 /// value on stderr, prints no path, and makes nothing: no worktrees directory,
 /// no worktree, and no branch.
