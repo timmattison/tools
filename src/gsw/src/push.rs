@@ -587,9 +587,9 @@ pub(crate) struct PushOutcome {
 /// state below describes: a question, a push in flight, and the outcome of
 /// one. It is **not** the push's alone. The `G` key runs a command of the
 /// user's own, and a command that refuses says why — so
-/// [`PushUi::post_error`] and [`PushUi::post_notice`] are the two doors
-/// another feature posts through, and they are what keeps the two features
-/// from painting over each other.
+/// [`PushUi::post_error`], [`PushUi::post_notice`] and
+/// [`PushUi::post_progress`] are the doors another feature posts through, and
+/// they are what keeps the features from painting over each other.
 ///
 /// Watch mode holds one of these and asks it two questions — what mode are we
 /// in, and what does the pane show. It never learns whether a prompt or an
@@ -696,6 +696,14 @@ enum Life {
         /// clock — the same clock [`PushUi::overlay`] is later given.
         posted_at: Instant,
     },
+    /// Stays until the next message takes the row. gsw's own words about work
+    /// that is still in flight, posted through [`PushUi::post_progress`].
+    ///
+    /// Neither a key nor the clock removes it, because the words stay true
+    /// until the work ends, and the end of the work posts a message of its
+    /// own. It shows no age for the same reason. It is drawn as a report at
+    /// age zero, because it is gsw's news and that news is current.
+    UntilReplaced,
 }
 
 impl Life {
@@ -709,20 +717,26 @@ impl Life {
     /// rather than report the zero age it plainly has.
     fn elapsed(&self, now: Instant) -> Option<Duration> {
         match self {
-            Self::UntilDismissed => None,
+            Self::UntilDismissed | Self::UntilReplaced => None,
             Self::Fading { posted_at } => Some(now.saturating_duration_since(*posted_at)),
         }
     }
 
-    /// What is left of this life for a message that must wait for the row.
+    /// What is left of this life for a message that must wait for the row, or
+    /// `None` for a message that must not wait.
     ///
     /// The instant goes on purpose, and [`HeldLife`] says why: it is the
     /// instant the message was posted, and a message that waits reaches the
     /// row later than that.
-    fn kind(&self) -> HeldLife {
+    ///
+    /// [`Life::UntilReplaced`] gives `None`. Its words are true only while
+    /// the work they describe is in flight, and a message that waits reaches
+    /// the row after an unknown time. So a busy row drops such a message.
+    fn kind(&self) -> Option<HeldLife> {
         match self {
-            Self::UntilDismissed => HeldLife::UntilDismissed,
-            Self::Fading { .. } => HeldLife::Fading,
+            Self::UntilDismissed => Some(HeldLife::UntilDismissed),
+            Self::Fading { .. } => Some(HeldLife::Fading),
+            Self::UntilReplaced => None,
         }
     }
 }
@@ -1099,7 +1113,15 @@ impl PushUi {
     /// nowhere, and they never wait in [`PushUi::held`]. A held notice reaches
     /// the row after the run it describes has ended, and it then says that a
     /// run is in flight when none is.
-    pub(crate) fn post_progress(&mut self, _line: String) {}
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the m key posts through this later in #496")
+    )]
+    pub(crate) fn post_progress(&mut self, line: String) {
+        // The answer goes unread. A notice that did not reach the row went
+        // nowhere, and the caller keeps no state that stands on it.
+        let _ = self.post(line, Life::UntilReplaced);
+    }
 
     /// Put `line` on the row with `life`, or hold it until the row is free.
     ///
@@ -1123,11 +1145,13 @@ impl PushUi {
     fn post(&mut self, line: String, life: Life) -> Posted {
         match self.state {
             State::Asking { .. } | State::Running { .. } => {
-                if self.held.len() < MAX_HELD_MESSAGES {
-                    self.held.push_back(HeldMessage {
-                        line,
-                        life: life.kind(),
-                    });
+                // A life with no kind to hold is dropped here, as a message
+                // that finds the queue full is. See [`Life::kind`].
+                match life.kind() {
+                    Some(kind) if self.held.len() < MAX_HELD_MESSAGES => {
+                        self.held.push_back(HeldMessage { line, life: kind });
+                    }
+                    Some(_) | None => {}
                 }
                 Posted::Held
             }
@@ -1144,9 +1168,22 @@ impl PushUi {
     /// Handle a key with no other meaning: clear a status message if one is up.
     /// Leaves a question or a running push alone — neither is the user's to
     /// dismiss by pressing an unrelated key.
+    ///
+    /// A progress notice stays too. Its words are true until its work ends,
+    /// and a key does not end that work. See [`Life::UntilReplaced`].
     pub(crate) fn dismiss(&mut self) {
-        if matches!(self.state, State::Status { .. }) {
-            self.state = State::Idle;
+        match self.state {
+            State::Status {
+                life: Life::UntilDismissed | Life::Fading { .. },
+                ..
+            } => self.state = State::Idle,
+            State::Status {
+                life: Life::UntilReplaced,
+                ..
+            }
+            | State::Idle
+            | State::Asking { .. }
+            | State::Running { .. } => {}
         }
     }
 
@@ -1254,7 +1291,6 @@ impl PushUi {
                 rows
             }
             State::Status { lines, life } => {
-                let elapsed = life.elapsed(now);
                 // Which rows go when the pane cannot hold them all, decided
                 // here rather than by the clamp at the end of this function.
                 // That clamp drops from the end, and the end is where a
@@ -1272,11 +1308,13 @@ impl PushUi {
                     .iter()
                     .enumerate()
                     .skip(dropped)
-                    .map(|(row, line)| match elapsed {
+                    .map(|(row, line)| match life {
                         // Appended *before* the truncation, so the age is part
                         // of what the pane has to fit rather than something
                         // added to a row already measured against its width.
-                        Some(elapsed) => {
+                        // Saturating for the reason [`Life::elapsed`] gives.
+                        Life::Fading { posted_at } => {
+                            let elapsed = now.saturating_duration_since(*posted_at);
                             let line = if row == last {
                                 format!("{line} ({} ago)", format_age_detailed(elapsed))
                             } else {
@@ -1285,7 +1323,16 @@ impl PushUi {
                             colorize_status(&truncate_right(&line, width), elapsed, self.truecolor)
                                 .to_string()
                         }
-                        None => truncate_right(line, width).red().to_string(),
+                        // gsw's news about work in flight. It does not age, so
+                        // it keeps the look of a report at age zero.
+                        Life::UntilReplaced => colorize_status(
+                            &truncate_right(line, width),
+                            Duration::ZERO,
+                            self.truecolor,
+                        )
+                        .to_string(),
+                        // git's words, which wait for a key.
+                        Life::UntilDismissed => truncate_right(line, width).red().to_string(),
                     })
                     .collect()
             }
@@ -3702,8 +3749,11 @@ mod ui_tests {
     fn the_next_message_replaces_a_progress_notice() {
         // Each of these messages is newer news than the notice. The result of
         // the run is one of them, and a key that asks a question is another.
+        /// One way to post a newer message onto the row at an instant.
+        type Replace = fn(&mut PushUi, Instant);
+
         let now = t0();
-        let replacements: [(&str, fn(&mut PushUi, Instant), &str); 4] = [
+        let replacements: [(&str, Replace, &str); 4] = [
             (
                 "a notice",
                 |ui, now| {
