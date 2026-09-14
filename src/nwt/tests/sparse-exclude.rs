@@ -1043,6 +1043,81 @@ fn checkout_default_remote_picks_the_branch_that_two_remotes_hold() {
     );
 }
 
+/// The file name of the log that [`install_recording_hook`] writes.
+const HOOK_LOG: &str = "post-checkout.log";
+
+/// The word the recording hook writes when its working directory holds
+/// [`HEAVY_DIR`].
+const SAW_HEAVY: &str = "heavy";
+
+/// The word the recording hook writes when its working directory does not hold
+/// [`HEAVY_DIR`].
+const SAW_NO_HEAVY: &str = "no-heavy";
+
+/// Install a `post-checkout` hook into `hooks_dir` that appends one line to
+/// `log` each time it runs, and point `core.hooksPath` of `repo` at it.
+///
+/// The line is the arguments of the hook, a `|`, and [`SAW_HEAVY`] or
+/// [`SAW_NO_HEAVY`] for what the working directory of the hook holds. Git runs
+/// the hook in the new worktree.
+#[cfg(unix)]
+fn install_recording_hook(repo: &Path, hooks_dir: &Path, log: &Path) {
+    let log = log.to_str().expect("utf-8 log path");
+    assert!(
+        !log.contains('\''),
+        "the log path goes into single quotes, so it cannot hold one: {log}"
+    );
+
+    support::install_post_checkout_hook(
+        repo,
+        hooks_dir,
+        &format!(
+            "if [ -e {HEAVY_DIR} ]; then seen={SAW_HEAVY}; else seen={SAW_NO_HEAVY}; fi\n\
+             printf '%s|%s\\n' \"$*\" \"$seen\" >> '{log}'\n"
+        ),
+    );
+}
+
+/// Test 7 of issue #487: the `post-checkout` hook of a sparse run gets the
+/// arguments that a plain add gives, runs one time, and sees the tree without
+/// the excluded directory.
+///
+/// `git worktree add --no-checkout` runs no hook, so the sparse path runs it
+/// with `git hook run` after the files are written. A hook that reads the null
+/// old ref to find a new worktree must see the same list as before:
+/// `<null object id> <HEAD> 1`. The null object id has the length of the hash.
+#[cfg(unix)]
+#[test]
+fn the_post_checkout_hook_gets_the_arguments_of_a_plain_add_and_sees_the_sparse_tree() {
+    let (_temp, repo) = repo_with_heavy_dir();
+    let hooks = tempfile::TempDir::new().expect("create the hooks directory");
+    let log = hooks.path().join(HOOK_LOG);
+    install_recording_hook(&repo, hooks.path(), &log);
+
+    created_worktree(&run_nwt(&repo, &unique_branch("hook-plain"), &[]));
+    created_worktree(&run_nwt(
+        &repo,
+        &unique_branch("hook-sparse"),
+        &["--sparse-exclude", HEAVY_DIR],
+    ));
+
+    let head = git_stdout(&repo, &["rev-parse", "HEAD"])
+        .trim_end()
+        .to_owned();
+    let arguments = format!("{} {head} 1", "0".repeat(head.len()));
+    let recorded = std::fs::read_to_string(&log).unwrap_or_default();
+
+    assert_eq!(
+        recorded.lines().collect::<Vec<&str>>(),
+        vec![
+            format!("{arguments}|{SAW_HEAVY}"),
+            format!("{arguments}|{SAW_NO_HEAVY}"),
+        ],
+        "the plain run and then the sparse run must each run the hook one time, with the \
+         same arguments, and the sparse run must hide {HEAVY_DIR}/ from it"
+    );
+}
+
 /// A value that the lexical rules refuse exits with its own code, names the
 /// value on stderr, prints no path, and makes nothing: no worktrees directory,
 /// no worktree, and no branch.
