@@ -675,11 +675,13 @@ enum State {
 ///
 /// The split is between what gsw said and what git said, and it is one decision
 /// rather than two because the two halves are the same fact. Everything gsw
-/// composes itself — a push that worked, a push it would not run — is a
-/// *report*: the user pressed a key, the answer came back, and a monitor that
-/// holds it on screen for the rest of the session is spending a row on news.
-/// git's error text is a *remedy*: the user has to read it and act on it, so
-/// gsw must not take it away while they are looking at another pane.
+/// composes itself about work that has ended — a push that worked, a push it
+/// would not run — is a *report*: the user pressed a key, the answer came back,
+/// and a monitor that holds it on screen for the rest of the session is
+/// spending a row on news. git's error text is a *remedy*: the user has to read
+/// it and act on it, so gsw must not take it away while they are looking at
+/// another pane. gsw's news about work still in flight is neither, and
+/// [`Life::UntilReplaced`] says how long it stays.
 ///
 /// The age and the fade ride on this enum rather than on a flag beside it,
 /// because a message that goes away on its own has to say how old it is — or it
@@ -1297,10 +1299,10 @@ impl PushUi {
                 let dropped = lines.len().saturating_sub(Overlay::rows_to_spare(dims));
                 // The age goes on the last row, which for every message that
                 // has one is the only row: a success and a refusal are one
-                // sentence each, and git's several-line error text is the one
-                // kind that never ages. Numbered before the drop above, so the
-                // row that carries it is the message's last and not merely the
-                // last one that fitted.
+                // sentence each. The two kinds that never age are git's
+                // several-line error text and a progress notice. Numbered
+                // before the drop above, so the row that carries it is the
+                // message's last and not merely the last one that fitted.
                 let last = lines.len().saturating_sub(1);
                 lines
                     .iter()
