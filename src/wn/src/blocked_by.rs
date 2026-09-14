@@ -747,6 +747,56 @@ mod tests {
             numbers: &[168],
         },
         Case {
+            name: "a nested list item after a blank line",
+            body: "## Blocked by\n\n- The solver\n\n    - #168\n",
+            numbers: &[168],
+        },
+        Case {
+            name: "a nested list item after a blank line, indented by a tab",
+            body: "## Blocked by\n\n- The solver\n\n\t- #168\n",
+            numbers: &[168],
+        },
+        Case {
+            name: "a paragraph inside a list item after a blank line",
+            body: "## Blocked by\n\n- The solver\n\n    #9\n",
+            numbers: &[9],
+        },
+        Case {
+            name: "indented code inside a list item after a blank line",
+            body: "## Blocked by\n\n- The solver\n\n      #9\n",
+            numbers: &[],
+        },
+        Case {
+            name: "indented code after prose that ends the list",
+            body: "## Blocked by\n\n- #5\n\nSome prose.\n\n    #9\n",
+            numbers: &[5],
+        },
+        Case {
+            name: "a paragraph of the outer item after a nested item",
+            body: "## Blocked by\n\n- A\n\n    - #6\n\n  #7\n",
+            numbers: &[6, 7],
+        },
+        Case {
+            name: "a code fence inside a list item after a blank line",
+            body: "## Blocked by\n\n- The solver\n\n    ```\n    - #9\n    ```\n\n    #11\n",
+            numbers: &[11],
+        },
+        Case {
+            name: "an HTML comment inside a list item after a blank line",
+            body: "## Blocked by\n\n- The solver\n\n    <!--\n    - #9\n    -->\n\n    #11\n",
+            numbers: &[11],
+        },
+        Case {
+            name: "indented code after a list that a block quote holds",
+            body: "## Blocked by\n\n> - #5\n\n    #9\n",
+            numbers: &[5],
+        },
+        Case {
+            name: "indented code after a block quote that ends the list",
+            body: "## Blocked by\n\n- #5\n\n> quote\n\n    #9\n",
+            numbers: &[5],
+        },
+        Case {
             name: "a subheading inside the section",
             body: "## Blocked by\n\n### Before the solver\n\n- #11\n",
             numbers: &[11],
