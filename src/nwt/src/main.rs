@@ -858,7 +858,10 @@ const REMOTE_TRACKING_PREFIX: &str = "refs/remotes/";
 ///    so does this function.
 /// 2. Else, when exactly one ref `refs/remotes/<remote>/<name>` exists, git
 ///    checks it out, and this function returns it.
-/// 3. Else git refuses the add with `fatal: invalid reference: <name>`. This
+/// 3. Else, when more than one such ref exists, `checkout.defaultRemote` names
+///    a remote, and that remote holds one of them, git checks that ref out, and
+///    this function returns it.
+/// 4. Else git refuses the add with `fatal: invalid reference: <name>`. This
 ///    function returns `name`, so `git ls-tree` refuses it too, and the run
 ///    exits as a failed add.
 ///
@@ -894,11 +897,34 @@ fn resolve_checkout_ref(repo_root: &Path, name: &str) -> Result<String, SparseEx
     let listed = String::from_utf8_lossy(&listed.stdout);
     let candidates: Vec<&str> = listed.lines().collect();
 
-    Ok(match candidates.as_slice() {
-        [only] => (*only).to_owned(),
-        _ => name.to_owned(),
-    })
+    match candidates.as_slice() {
+        [] => return Ok(name.to_owned()),
+        [only] => return Ok((*only).to_owned()),
+        _ => {}
+    }
+
+    // Git asks for the default remote only when more than one remote holds
+    // the branch, and so does this function.
+    let mut default_remote = production_git_command(repo_root);
+    default_remote.args(["config", "--get", CHECKOUT_DEFAULT_REMOTE_KEY]);
+    let configured = sparse_check_output(default_remote, "config")?;
+    if configured.status.success() {
+        let remote = String::from_utf8_lossy(&configured.stdout);
+        let preferred = format!(
+            "{REMOTE_TRACKING_PREFIX}{}/{name}",
+            remote.trim_end_matches('\n')
+        );
+        if candidates.contains(&preferred.as_str()) {
+            return Ok(preferred);
+        }
+    }
+
+    Ok(name.to_owned())
 }
+
+/// The git configuration key that names the remote whose branch git checks
+/// out when more than one remote holds a branch of the name.
+const CHECKOUT_DEFAULT_REMOTE_KEY: &str = "checkout.defaultRemote";
 
 /// Parse every `--sparse-exclude` value, and make sure that git tracks each
 /// one as a directory at the ref that the new worktree checks out.
