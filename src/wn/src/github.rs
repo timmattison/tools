@@ -535,6 +535,56 @@ mod tests {
     }
 
     #[test]
+    fn a_repository_reads_every_character_github_permits() {
+        let repo =
+            Repo::parse("a-b_c.d/My.Repo-1_x").expect("GitHub permits every character of it");
+        assert_eq!(repo.owner(), "a-b_c.d");
+        assert_eq!(repo.name(), "My.Repo-1_x");
+    }
+
+    #[test]
+    fn a_repository_refuses_a_character_github_permits_in_no_name() {
+        // GitHub permits only ASCII letters, digits, `-`, `_` and `.` in an
+        // owner and in a name. A `Repo` reaches standard error through
+        // `Display`, and an ESC character there writes a raw escape sequence
+        // to the terminal.
+        let long = format!("owner/{}!", "a".repeat(4096));
+        for spec in [
+            "café/tools",
+            "日本語/x",
+            "owner/🎉",
+            "own er/tools",
+            "owner/to ols",
+            "owner/\u{1b}[31mred",
+            "\u{1b}/tools",
+            "owner/na\nme",
+            "owner/tools\t",
+            long.as_str(),
+        ] {
+            assert!(
+                Repo::parse(spec).is_err(),
+                "{spec:?} holds a character GitHub permits in no name"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_character_is_quoted_and_the_message_names_the_characters_github_permits() {
+        let refused =
+            Repo::parse("owner/\u{1b}[31mred").expect_err("GitHub permits no ESC in a name");
+        let message = refused.to_string();
+        assert!(
+            !message.contains('\u{1b}'),
+            "the message writes no raw ESC, in {message:?}"
+        );
+        assert_eq!(
+            message,
+            "\"owner/\\u{1b}[31mred\" is not a repository. Write it as owner/name, \
+             with ASCII letters, digits, -, _ and . in each part"
+        );
+    }
+
+    #[test]
     fn the_query_asks_about_every_number_once() {
         let query = build_query(&chain(&[277, 278]));
         assert!(

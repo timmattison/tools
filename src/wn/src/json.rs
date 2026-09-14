@@ -871,16 +871,29 @@ mod tests {
     }
 
     #[test]
-    fn a_repository_of_multi_byte_characters_reads() {
-        // An owner and a name are divided on a character, and never on a
-        // byte, so a name of multi-byte characters reads as it stands.
-        assert_eq!(
-            repo_named_by(&edited(
+    fn a_repository_of_characters_github_permits_in_no_name_is_a_refusal() {
+        // GitHub permits only ASCII letters, digits, `-`, `_` and `.` in an
+        // owner and in a name. A later message repeats the repository of the
+        // plan, and a JSON escape puts the ESC character into it, so such a
+        // name is not the schema.
+        for written in [r#""café/日本語🎉""#, "\"owner/\x5cu001b[31mred\""] {
+            let refused = refusal(&edited(
                 "\"repo\": \"timmattison/tools\"",
-                "\"repo\": \"café/日本語🎉\""
-            )),
-            Some("café/日本語🎉".to_string())
-        );
+                &format!("\"repo\": {written}"),
+            ));
+            assert_eq!(
+                refused,
+                JsonError::Wrong {
+                    path: Path::root(REPO),
+                    wanted: Kind::Repository,
+                },
+                "with {written}"
+            );
+            assert!(
+                !refused.to_string().contains('\u{1b}'),
+                "the refusal writes no raw ESC, with {written}"
+            );
+        }
     }
 
     #[test]

@@ -1107,4 +1107,24 @@ Run wn --refresh to build a new plan, or run wn --repo owner/a to answer the pla
         assert!(!message.contains(notes), "{message}");
         assert!(!message.contains(name), "{message}");
     }
+
+    #[test]
+    fn a_plan_whose_repository_holds_an_escape_writes_no_escape_to_the_terminal() {
+        // A JSON escape puts the ESC character into `repo`, and a message that
+        // repeats the repository would write a raw escape sequence to the
+        // terminal. GitHub permits no such name, so the plan is refused, and
+        // the refusal repeats nothing of it.
+        // `\x5c` is the backslash, so the text holds the JSON escape of the
+        // ESC character. A raw ESC in the text is no JSON document at all.
+        let text = plan_for("owner/\x5cu001b[31mred");
+        let Err(refused) = reading_of(&text) else {
+            panic!("the plan reads, and its repository holds the ESC character");
+        };
+        let message = refused.to_string();
+        assert!(
+            message.contains("repo is not a repository"),
+            "the refusal is about the repository, in {message:?}"
+        );
+        assert!(!message.contains('\u{1b}'), "{message:?}");
+    }
 }
