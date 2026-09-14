@@ -1524,7 +1524,8 @@ fn production_git_command(dir: &Path) -> Command {
     command
 }
 
-/// Run `command` to its end with its output captured.
+/// Run `command` to its end with its output captured, and hand back what it
+/// wrote to stdout.
 ///
 /// `step` names the command in the error message. Nothing the command writes
 /// reaches the stdout of `nwt`, because the shell wrapper reads the worktree
@@ -1534,13 +1535,13 @@ fn production_git_command(dir: &Path) -> Command {
 ///
 /// Returns a message that names `step` when git cannot start, or when it exits
 /// with a status that is not zero. The message holds what git wrote to stderr.
-fn run_sparse_step(mut command: Command, step: &str) -> Result<(), String> {
+fn run_sparse_step(mut command: Command, step: &str) -> Result<String, String> {
     let output = command
         .output()
         .map_err(|e| format!("could not run {step} in the new worktree: {e}"))?;
 
     if output.status.success() {
-        return Ok(());
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
     }
 
     Err(format!(
@@ -1563,12 +1564,14 @@ fn run_sparse_step(mut command: Command, step: &str) -> Result<(), String> {
 ///    other worktree stay full.
 /// 2. `git read-tree -mu HEAD` fills the index and writes each file that the
 ///    patterns include.
+/// 3. `git rev-parse HEAD` gives the commit that the worktree checks out, which
+///    [`run_post_checkout_hook`] hands to the hook.
 ///
 /// # Errors
 ///
 /// Returns the message of [`run_sparse_step`] for the first step that fails.
 /// The worktree and the branch stay.
-fn apply_sparse_checkout(worktree: &Path, excludes: &[SparseExcludeDir]) -> Result<(), String> {
+fn apply_sparse_checkout(worktree: &Path, excludes: &[SparseExcludeDir]) -> Result<String, String> {
     let mut set = production_git_command(worktree);
     set.args([
         "sparse-checkout",
@@ -1581,7 +1584,71 @@ fn apply_sparse_checkout(worktree: &Path, excludes: &[SparseExcludeDir]) -> Resu
 
     let mut read_tree = production_git_command(worktree);
     read_tree.args(["read-tree", "-mu", "HEAD"]);
-    run_sparse_step(read_tree, "git read-tree -mu HEAD")
+    run_sparse_step(read_tree, "git read-tree -mu HEAD")?;
+
+    let mut rev_parse = production_git_command(worktree);
+    rev_parse.args(["rev-parse", "HEAD"]);
+    let head = run_sparse_step(rev_parse, "git rev-parse HEAD")?;
+    Ok(head.trim_end().to_owned())
+}
+
+/// The name of the hook that git runs after it checks a tree out.
+const POST_CHECKOUT_HOOK: &str = "post-checkout";
+
+/// The third argument of the `post-checkout` hook for a checkout of a branch,
+/// as `git worktree add` gives it. The value `0` is a checkout of files.
+const POST_CHECKOUT_OF_A_BRANCH: &str = "1";
+
+/// The null object id of a repository whose object ids have the length of
+/// `head`.
+///
+/// `git worktree add` gives the null object id to the `post-checkout` hook as
+/// the old `HEAD`. Its length is the length of the hash: 40 zeros for SHA-1,
+/// and 64 zeros for SHA-256.
+fn null_object_id(head: &str) -> String {
+    "0".repeat(head.len())
+}
+
+/// Run the `post-checkout` hook of the repository in the sparse `worktree`, as
+/// a plain `git worktree add` runs it.
+///
+/// `git worktree add --no-checkout` runs no hook. So after the files are
+/// written, this function runs
+/// `git hook run --ignore-missing post-checkout -- <null object id> <head> 1`.
+/// Those are the arguments of a plain add, so a hook that reads the null old
+/// ref to find a new worktree sees no difference. `git hook run` obeys
+/// `core.hooksPath`, and `--ignore-missing` makes a repository without the hook
+/// a success.
+///
+/// Git sends the stdout of the hook to its own stderr, and this function sends
+/// the stdout of git to the stderr of `nwt` too. The shell wrapper reads the
+/// worktree path from stdout, and a word of a hook there breaks it. Stderr is
+/// inherited, so the user sees what the hook says, as with a plain add.
+///
+/// The hook environment is not the same as under a plain add. Both run the
+/// hook with the worktree as its working directory. `git hook run` also sets
+/// `GIT_DIR` to the git directory of the worktree (`.git/worktrees/<name>`),
+/// and `git worktree add` sets no `GIT_DIR`.
+///
+/// # Errors
+///
+/// Returns the error of the start when git cannot start.
+fn run_post_checkout_hook(worktree: &Path, head: &str) -> io::Result<ExitStatus> {
+    let mut hook = production_git_command(worktree);
+    hook.args([
+        "hook",
+        "run",
+        "--ignore-missing",
+        POST_CHECKOUT_HOOK,
+        "--",
+        &null_object_id(head),
+        head,
+        POST_CHECKOUT_OF_A_BRANCH,
+    ])
+    .stdout(Stdio::from(io::stderr()))
+    .stderr(Stdio::inherit());
+
+    hook.status()
 }
 
 /// Attempts to create a git worktree at the given path.
@@ -1591,6 +1658,7 @@ fn apply_sparse_checkout(worktree: &Path, excludes: &[SparseExcludeDir]) -> Resu
 /// When `sparse_excludes` is not empty, the add runs with `--no-checkout`, and
 /// [`apply_sparse_checkout`] then writes the files without those directories.
 /// A failure of that step gives [`WorktreeResult::SparseCheckoutFailed`].
+/// [`run_post_checkout_hook`] then runs the hook that the add did not run.
 ///
 /// This function displays git's progress output (e.g., "Updating files: X%") in real-time
 /// while also capturing stderr for error classification. This is done by spawning a thread
@@ -1695,9 +1763,14 @@ fn try_create_worktree(
         if sparse_excludes.is_empty() {
             return WorktreeResult::Success;
         }
-        match apply_sparse_checkout(Path::new(worktree_path), sparse_excludes) {
-            Ok(()) => WorktreeResult::Success,
-            Err(message) => WorktreeResult::SparseCheckoutFailed(message),
+        let worktree = Path::new(worktree_path);
+        let head = match apply_sparse_checkout(worktree, sparse_excludes) {
+            Ok(head) => head,
+            Err(message) => return WorktreeResult::SparseCheckoutFailed(message),
+        };
+        match run_post_checkout_hook(worktree, &head) {
+            Ok(_status) => WorktreeResult::Success,
+            Err(e) => WorktreeResult::CommandError(e),
         }
     } else {
         // Ask git whether the branch is there. Do not read the reason it gave.
