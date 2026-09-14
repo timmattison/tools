@@ -33,11 +33,11 @@
 
 mod support;
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-use support::{git_stdout, init_repo, nanos, nwt_command};
+use support::{difference, git_stdout, init_repo, nanos, nwt_command, snapshot};
 
 /// The suffix `nwt` adds to the repository name to name the directory that
 /// holds every new worktree.
@@ -60,25 +60,6 @@ const ABSENT_HOOKS_DIR: &str = "no-such-hooks-directory";
 
 /// The file name of the stated global configuration.
 const GLOBAL_CONFIG_FILE: &str = "stated-global-config";
-
-/// What one path of a snapshot holds.
-///
-/// A directory carries no content of its own, a file carries its bytes, and a
-/// link carries the path it names. Reading a link rather than following it
-/// keeps the snapshot a statement about this directory alone.
-#[derive(Debug, Eq, PartialEq)]
-enum Held {
-    Directory,
-    File(Vec<u8>),
-    Link(PathBuf),
-}
-
-/// Every path under one directory, with what each path holds.
-///
-/// A `BTreeMap` keys on the relative path and orders by it, so two snapshots of
-/// one directory compare the same way on every run and a difference reads in
-/// path order.
-type Snapshot = BTreeMap<String, Held>;
 
 /// Resolve a path before an assertion reads it.
 ///
@@ -118,89 +99,29 @@ fn expected_worktrees_dir(main_worktree: &Path) -> PathBuf {
     main_worktree.with_file_name(format!("{name}{WORKTREES_SUFFIX}"))
 }
 
-/// The path of `path` under `root`, spelled with forward slashes.
+/// The `nwt` command for `source`, with five git variables that aim git at the
+/// repository at `decoy`.
 ///
-/// # Panics
+/// The five variables cover four distinct ways a leaked variable redirects
+/// git: the repository it finds (`GIT_DIR`, `GIT_WORK_TREE`), the index it
+/// stages into (`GIT_INDEX_FILE`), the store it writes objects to
+/// (`GIT_OBJECT_DIRECTORY`), and the configuration it reads
+/// (`GIT_CONFIG_PARAMETERS`). The last one carries no path at all, so no list
+/// of location names ever catches it; only a sweep of the whole prefix does.
 ///
-/// Panics if `path` does not lie under `root`.
-fn relative_name(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or_else(|e| panic!("{} lies under {}: {e}", path.display(), root.display()))
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-/// Record every path under `dir` into `into`, and descend into each directory.
-///
-/// # Panics
-///
-/// Panics if a directory cannot be read, or a file cannot be read back.
-fn record(root: &Path, dir: &Path, into: &mut Snapshot) {
-    for entry in fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
-        let path = entry
-            .unwrap_or_else(|e| panic!("read an entry of {}: {e}", dir.display()))
-            .path();
-        let name = relative_name(root, &path);
-
-        // `symlink_metadata` reads the entry itself. `metadata` follows a link,
-        // so a link that points outside the decoy would put another directory's
-        // bytes into a snapshot of this one.
-        let kind = fs::symlink_metadata(&path)
-            .unwrap_or_else(|e| panic!("stat {}: {e}", path.display()))
-            .file_type();
-
-        if kind.is_dir() {
-            into.insert(name, Held::Directory);
-            record(root, &path, into);
-        } else if kind.is_symlink() {
-            let target =
-                fs::read_link(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-            into.insert(name, Held::Link(target));
-        } else {
-            let bytes = fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-            into.insert(name, Held::File(bytes));
-        }
-    }
-}
-
-/// Every path under `root`, with the bytes of every file.
-///
-/// A count of refs or of objects is not enough to say a repository is
-/// untouched: a write that replaces one object with another keeps the count.
-/// The whole tree, content included, is what makes the word "byte-identical"
-/// true.
-fn snapshot(root: &Path) -> Snapshot {
-    let mut held = Snapshot::new();
-    record(root, root, &mut held);
-    held
-}
-
-/// How `after` differs from `before`, one line per path, in path order.
-///
-/// An empty list means the two snapshots are equal. Naming each path, and
-/// whether it appeared, vanished or changed, is what turns a failure into
-/// evidence of which command wrote where.
-fn difference(before: &Snapshot, after: &Snapshot) -> Vec<String> {
-    let mut lines = Vec::new();
-
-    for (path, held) in after {
-        match before.get(path) {
-            None => lines.push(format!("appeared: {path}")),
-            Some(was) if was != held => lines.push(format!("changed:  {path}")),
-            Some(_) => {}
-        }
-    }
-
-    for path in before.keys() {
-        if !after.contains_key(path) {
-            lines.push(format!("vanished: {path}"));
-        }
-    }
-
-    lines.sort();
-    lines
+/// Every variable goes on the child, never on this process: a sibling test
+/// thread spawns git of its own, and a process-wide variable would aim it at
+/// the decoy.
+fn hostile_nwt_command(source: &Path, decoy: &Path) -> Command {
+    let decoy_git_dir = decoy.join(".git");
+    let mut command = nwt_command(source);
+    command
+        .env("GIT_DIR", &decoy_git_dir)
+        .env("GIT_WORK_TREE", decoy)
+        .env("GIT_INDEX_FILE", decoy_git_dir.join("index"))
+        .env("GIT_OBJECT_DIRECTORY", decoy_git_dir.join("objects"))
+        .env("GIT_CONFIG_PARAMETERS", "'nwt.envleakprobe=leaked'");
+    command
 }
 
 /// Every worktree the repository at `main_worktree` holds, resolved.
@@ -227,13 +148,8 @@ fn head_commit(repo: &Path) -> String {
 /// `GIT_CONFIG_PARAMETERS` that name the repository being committed to. A git
 /// child of `nwt` that keeps them acts on that repository instead.
 ///
-/// The five variables below are aimed at a decoy repository, and cover four
-/// distinct ways a leaked variable redirects git: the repository it finds
-/// (`GIT_DIR`, `GIT_WORK_TREE`), the index it stages into (`GIT_INDEX_FILE`),
-/// the store it writes objects to (`GIT_OBJECT_DIRECTORY`), and the
-/// configuration it reads (`GIT_CONFIG_PARAMETERS`). The last one carries no
-/// path at all, so no list of location names ever catches it; only a sweep of
-/// the whole prefix does.
+/// The five variables of [`hostile_nwt_command`] are aimed at a decoy
+/// repository.
 ///
 /// Three assertions, and each one has a job. The decoy must be byte-identical,
 /// which is the damage. The worktree must land beside the source repository
@@ -250,21 +166,12 @@ fn the_binary_leaves_the_repository_the_environment_names_untouched() {
     let (_source_temp, source) = init_repo();
     let (_decoy_temp, decoy) = init_repo();
 
-    let decoy_git_dir = decoy.join(".git");
     let before = snapshot(&decoy);
     let source_head_before = head_commit(&source);
     let branch = unique_branch("hostile-env");
 
-    // Every variable goes on the child, never on this process: a sibling test
-    // thread spawns git of its own, and a process-wide variable would aim it
-    // here.
-    let output = nwt_command(&source)
+    let output = hostile_nwt_command(&source, &decoy)
         .args(["-b", &branch, "--no-copy-env", "--no-bootstrap-hooks"])
-        .env("GIT_DIR", &decoy_git_dir)
-        .env("GIT_WORK_TREE", &decoy)
-        .env("GIT_INDEX_FILE", decoy_git_dir.join("index"))
-        .env("GIT_OBJECT_DIRECTORY", decoy_git_dir.join("objects"))
-        .env("GIT_CONFIG_PARAMETERS", "'nwt.envleakprobe=leaked'")
         .output()
         .expect("run the nwt binary");
 

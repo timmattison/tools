@@ -16,7 +16,7 @@ mod support;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
-use support::{git_stdout, init_repo, nanos, nwt_command, run_git};
+use support::{clone_of, git_stdout, nanos, nwt_command, repo_with_files, run_git, write_file};
 
 /// The directory the tests exclude.
 const HEAVY_DIR: &str = "heavy";
@@ -34,35 +34,6 @@ const HEAVY_FILES: &[&str] = &["heavy/big.txt", "heavy/sub/deep.txt"];
 /// resource. The process id and a nanosecond clock reading keep them apart.
 fn unique_branch(label: &str) -> String {
     format!("{label}-{}-{}", std::process::id(), nanos())
-}
-
-/// Write `contents` to `relative` under `repo`, and make the parent
-/// directories first.
-fn write_file(repo: &Path, relative: &str, contents: &str) {
-    let path = repo.join(relative);
-    let parent = path.parent().expect("a file path has a parent");
-    std::fs::create_dir_all(parent).unwrap_or_else(|e| panic!("create {}: {e}", parent.display()));
-    std::fs::write(&path, contents).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
-}
-
-/// Make a repository whose second commit adds `files`, and hand back the
-/// temporary directory that holds it (keep it alive) and the repository.
-fn repo_with_files(files: &[&str]) -> (tempfile::TempDir, PathBuf) {
-    let (temp, repo) = init_repo();
-
-    for file in files {
-        write_file(&repo, file, &format!("{file}\n"));
-    }
-    assert!(run_git(&repo, &["add", "--", "."]), "git add failed");
-    assert!(
-        run_git(
-            &repo,
-            &["-c", "commit.gpgsign=false", "commit", "-m", "add the tree"]
-        ),
-        "git commit failed"
-    );
-
-    (temp, repo)
 }
 
 /// Make a repository that holds [`KEPT_FILES`] and [`HEAVY_FILES`].
@@ -952,26 +923,6 @@ fn source_with_a_heavy_remote_branch() -> (tempfile::TempDir, PathBuf) {
     );
 
     (temp, repo)
-}
-
-/// Clone `source` into a new temporary directory, and hand back the temporary
-/// directory (keep it alive) and the clone.
-///
-/// The clone holds the checked-out branch of `source` as a local branch, and
-/// every other branch only as `origin/<branch>`. The clone is named `repo`, as
-/// `init_repo` names a repository, so [`assert_made_nothing`] can read it.
-fn clone_of(source: &Path) -> (tempfile::TempDir, PathBuf) {
-    let temp = tempfile::TempDir::new().expect("create a temporary directory");
-    let clone = temp.path().join("repo");
-    let source = source.to_str().expect("utf-8 source path");
-    let target = clone.to_str().expect("utf-8 clone path");
-
-    assert!(
-        run_git(temp.path(), &["clone", "--quiet", source, target]),
-        "git clone failed"
-    );
-
-    (temp, clone)
 }
 
 /// Demand that `clone` has no local branch [`REMOTE_ONLY_BRANCH`], so only
