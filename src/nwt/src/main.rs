@@ -532,6 +532,9 @@ enum SparseExcludeError {
     /// Git cannot read `at_ref`, so it cannot tell what the ref tracks. This is
     /// a bad ref and not a bad directory. `stderr` holds what git wrote.
     UnreadableRef { at_ref: String, stderr: String },
+    /// Git did not start, so it cannot tell what the ref tracks. `error` holds
+    /// the reason that the operating system gave.
+    GitCommand { error: String },
 }
 
 impl fmt::Display for SparseExcludeError {
@@ -572,6 +575,10 @@ impl fmt::Display for SparseExcludeError {
                 "git cannot read the ref '{}' to check --sparse-exclude: {stderr}",
                 at_ref.escape_debug()
             ),
+            Self::GitCommand { error } => write!(
+                f,
+                "could not run git ls-tree to check --sparse-exclude: {error}"
+            ),
         }
     }
 }
@@ -582,7 +589,8 @@ impl SparseExcludeError {
     /// A refused directory exits [`exit_codes::INVALID_SPARSE_EXCLUDE`]. A ref
     /// that git cannot read exits [`exit_codes::WORKTREE_FAILED`], because
     /// `git worktree add` fails for the same ref without the flag, and that is
-    /// the code such a failure gets.
+    /// the code such a failure gets. A git that does not start exits
+    /// [`exit_codes::GIT_COMMAND_ERROR`], as it does for `git worktree add`.
     fn exit_code(&self) -> i32 {
         match self {
             Self::Empty { .. }
@@ -591,6 +599,7 @@ impl SparseExcludeError {
             | Self::ControlCharacter { .. }
             | Self::NotTrackedDirectory { .. } => exit_codes::INVALID_SPARSE_EXCLUDE,
             Self::UnreadableRef { .. } => exit_codes::WORKTREE_FAILED,
+            Self::GitCommand { .. } => exit_codes::GIT_COMMAND_ERROR,
         }
     }
 }
@@ -3806,6 +3815,34 @@ mod tests {
             Err(SparseExcludeError::Absolute {
                 raw: "/abs".to_owned()
             })
+        );
+    }
+
+    /// A git that does not start is a failed git command, and not a directory
+    /// that git does not track.
+    ///
+    /// A missing working directory makes the start of git fail in the same
+    /// way that a missing `git` program does. The directory is under a new
+    /// temporary directory, so no parallel run can make it.
+    #[test]
+    fn resolve_sparse_excludes_reports_a_git_that_does_not_start() {
+        let temp = tempfile::TempDir::new().expect("create a temporary directory");
+        let missing = temp.path().join("no-such-repository");
+        let raw = vec!["heavy".to_owned()];
+
+        let error = resolve_sparse_excludes(&missing, None, &raw)
+            .expect_err("a git that does not start must stop the run");
+
+        assert!(
+            matches!(error, SparseExcludeError::GitCommand { .. }),
+            "the refusal must be GitCommand, got {error:?}"
+        );
+        assert_eq!(error.exit_code(), exit_codes::GIT_COMMAND_ERROR);
+        assert!(
+            error
+                .to_string()
+                .starts_with("could not run git ls-tree to check --sparse-exclude: "),
+            "the message must name the git command: {error}"
         );
     }
 
