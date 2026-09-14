@@ -3309,12 +3309,12 @@ const WAVE_LEFT_OUT_ANSWER: &str = concat!(
     "→ #168  The slope\n",
     "· #170  The cell slider  waits for #168\n",
     "\n",
-    "#170 waits for #168: the issue says so, and the plan does not.\n",
+    "#170 waits for #168: the issue says so, and the order does not.\n",
     "Start #168 next with 'si 168'\n",
 );
 
 /// The sentence a plan that puts `#170` before `#168` is refused with.
-const WAVE_REFUSAL: &str = "the plan puts #170 before #168, but #170 says it is blocked by #168. \
+const WAVE_REFUSAL: &str = "the order puts #170 before #168, but #170 says it is blocked by #168. \
                             Fix the order, or run wn --refresh to build a new plan";
 
 /// The count of GraphQL queries the fake `gh` was sent.

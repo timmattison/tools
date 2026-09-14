@@ -428,7 +428,7 @@ mod tests {
         );
         assert_eq!(
             err.to_string(),
-            "the plan puts #170 before #168, but #170 says it is blocked by #168. \
+            "the order puts #170 before #168, but #170 says it is blocked by #168. \
              Fix the order, or run wn --refresh to build a new plan"
         );
     }
@@ -604,8 +604,16 @@ mod tests {
             );
         }
         assert!(
-            !message.starts_with("the plan puts"),
+            !message.starts_with("the order puts"),
             "no edge of the plan alone goes against a blocker, in {message}"
+        );
+        // The same message answers a chain, a table and a picture, so it names
+        // the order and never one form of input.
+        assert!(
+            message.ends_with(
+                "once the blockers each issue names join the order, so no step can start first"
+            ),
+            "the refusal names the order, in {message}"
         );
     }
 }
