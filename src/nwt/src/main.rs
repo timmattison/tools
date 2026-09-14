@@ -495,10 +495,6 @@ mod exit_codes {
     pub const SHELL_SETUP_ERROR: i32 = 14;
     /// A `--sparse-exclude` value is not a tracked directory inside the
     /// repository. `nwt` refuses it before it makes anything.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "wired into main by the next slice of issue #487")
-    )]
     pub const INVALID_SPARSE_EXCLUDE: i32 = 15;
 }
 
@@ -513,10 +509,6 @@ const MAX_ATTEMPTS: u32 = 10;
 /// the user gave and not the normalized form. `nwt` refuses the value before it
 /// makes anything: no directory, no branch, and no `worktrees/<name>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired into main by the next slice of issue #487")
-)]
 enum SparseExcludeError {
     /// The value names no directory. It is empty, or it holds only `.` and `/`.
     Empty { raw: String },
@@ -559,16 +551,8 @@ impl fmt::Display for SparseExcludeError {
 /// The field is private, and [`SparseExcludeDir::parse`] is the only
 /// constructor. So every value that reaches git obeys these rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired into main by the next slice of issue #487")
-)]
 struct SparseExcludeDir(String);
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired into main by the next slice of issue #487")
-)]
 impl SparseExcludeDir {
     /// Parse one `--sparse-exclude` value and normalize it.
     ///
@@ -641,10 +625,6 @@ impl SparseExcludeDir {
 ///
 /// This is the one place that holds these rules. Every sparse pattern comes
 /// from [`SparseExcludeDir::pattern`], and that method calls this function.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired into main by the next slice of issue #487")
-)]
 fn escape_sparse_pattern(s: &str) -> String {
     let mut escaped = String::with_capacity(s.len());
 
@@ -659,6 +639,31 @@ fn escape_sparse_pattern(s: &str) -> String {
     }
 
     escaped
+}
+
+/// The non-cone sparse pattern that includes every path of the repository.
+///
+/// A non-cone pattern list without an include pattern includes nothing. So the
+/// list starts with this pattern, and each `--sparse-exclude` pattern after it
+/// takes one directory back out.
+const SPARSE_INCLUDE_EVERYTHING: &str = "/*";
+
+/// Parse every `--sparse-exclude` value of the command line, in the order the
+/// user gave.
+///
+/// `main` calls this after it knows the repository and before it makes
+/// anything, so a refused value makes no directory, no branch, and no
+/// `worktrees/<name>`. The check is lexical only (see
+/// [`SparseExcludeDir::parse`]).
+///
+/// # Errors
+///
+/// Returns the refusal of the first value that [`SparseExcludeDir::parse`]
+/// refuses.
+fn parse_sparse_excludes(raw: &[String]) -> Result<Vec<SparseExcludeDir>, SparseExcludeError> {
+    raw.iter()
+        .map(|value| SparseExcludeDir::parse(value))
+        .collect()
 }
 
 /// Create a new git worktree with a Docker-style random name.
@@ -954,10 +959,6 @@ struct Cli {
     /// worktrees stay full. Run `git sparse-checkout disable` in the worktree
     /// to write the directory.
     #[arg(long = "sparse-exclude", value_name = "DIR", action = clap::ArgAction::Append)]
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "wired into main by the next slice of issue #487")
-    )]
     sparse_exclude: Vec<String>,
 
     /// Install shell integration to automatically cd into new worktrees.
@@ -1121,6 +1122,10 @@ enum WorktreeResult {
     GitError(String),
     /// Failed to execute git command
     CommandError(std::io::Error),
+    /// Git made the `--no-checkout` worktree, but a step that writes its files
+    /// through the sparse patterns failed. The value names the step and holds
+    /// what git wrote to stderr.
+    SparseCheckoutFailed(String),
 }
 
 /// True when `branch` is already a branch of the repository at `repo_root`.
@@ -1161,9 +1166,92 @@ fn branch_exists(repo_root: &Path, branch: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// A production `git` command that runs in `dir`.
+///
+/// Each git child that the sparse checkout adds starts here, so none of them
+/// can forget the shed. The command takes
+/// [`gitscratch::shed_inherited_git_environment_keeping_user_intent`], which
+/// sheds the whole inherited `GIT_` prefix and keeps the six names of
+/// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`]. An inherited `GIT_DIR` or
+/// `GIT_WORK_TREE` otherwise aims the command at the repository that a
+/// launching hook names, and not at `dir`. Stdin is null, so a git that asks a
+/// question gets no answer and does not stop the run.
+///
+/// The caller adds the arguments and decides where the output goes.
+fn production_git_command(dir: &Path) -> Command {
+    let mut command = Command::new("git");
+    shed_inherited_git_environment_keeping_user_intent(&mut command);
+    command.current_dir(dir).stdin(Stdio::null());
+    command
+}
+
+/// Run `command` to its end with its output captured.
+///
+/// `step` names the command in the error message. Nothing the command writes
+/// reaches the stdout of `nwt`, because the shell wrapper reads the worktree
+/// path from that stream.
+///
+/// # Errors
+///
+/// Returns a message that names `step` when git cannot start, or when it exits
+/// with a status that is not zero. The message holds what git wrote to stderr.
+fn run_sparse_step(mut command: Command, step: &str) -> Result<(), String> {
+    let output = command
+        .output()
+        .map_err(|e| format!("could not run {step} in the new worktree: {e}"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "{step} failed in the new worktree ({}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
+}
+
+/// Write the files of a `--no-checkout` worktree through sparse patterns that
+/// leave out each directory of `excludes`.
+///
+/// A plain `git worktree add` writes every file before a pattern can apply. So
+/// the add runs with `--no-checkout`, and this function does the rest in the
+/// new worktree:
+///
+/// 1. `git sparse-checkout set --no-cone '/*' '!/<dir>/'...` writes
+///    `core.sparseCheckout` into the `config.worktree` of this worktree and the
+///    patterns into its `info/sparse-checkout`. The main worktree and every
+///    other worktree stay full.
+/// 2. `git read-tree -mu HEAD` fills the index and writes each file that the
+///    patterns include.
+///
+/// # Errors
+///
+/// Returns the message of [`run_sparse_step`] for the first step that fails.
+/// The worktree and the branch stay.
+fn apply_sparse_checkout(worktree: &Path, excludes: &[SparseExcludeDir]) -> Result<(), String> {
+    let mut set = production_git_command(worktree);
+    set.args([
+        "sparse-checkout",
+        "set",
+        "--no-cone",
+        SPARSE_INCLUDE_EVERYTHING,
+    ])
+    .args(excludes.iter().map(SparseExcludeDir::pattern));
+    run_sparse_step(set, "git sparse-checkout set")?;
+
+    let mut read_tree = production_git_command(worktree);
+    read_tree.args(["read-tree", "-mu", "HEAD"]);
+    run_sparse_step(read_tree, "git read-tree -mu HEAD")
+}
+
 /// Attempts to create a git worktree at the given path.
 ///
 /// Returns a `WorktreeResult` indicating success or the type of failure.
+///
+/// When `sparse_excludes` is not empty, the add runs with `--no-checkout`, and
+/// [`apply_sparse_checkout`] then writes the files without those directories.
+/// A failure of that step gives [`WorktreeResult::SparseCheckoutFailed`].
 ///
 /// This function displays git's progress output (e.g., "Updating files: X%") in real-time
 /// while also capturing stderr for error classification. This is done by spawning a thread
@@ -1200,14 +1288,20 @@ fn try_create_worktree(
     worktree_path: &str,
     branch_name: &str,
     checkout_ref: Option<&str>,
+    sparse_excludes: &[SparseExcludeDir],
 ) -> WorktreeResult {
     let mut cmd = Command::new("git");
     shed_inherited_git_environment_keeping_user_intent(&mut cmd);
 
+    cmd.args(["worktree", "add"]);
+    if !sparse_excludes.is_empty() {
+        // The files wait until the sparse patterns are in place.
+        cmd.arg("--no-checkout");
+    }
     if let Some(ref_name) = checkout_ref {
-        cmd.args(["worktree", "add", worktree_path, ref_name]);
+        cmd.args([worktree_path, ref_name]);
     } else {
-        cmd.args(["worktree", "add", worktree_path, "-b", branch_name]);
+        cmd.args([worktree_path, "-b", branch_name]);
     }
 
     // Spawn the process with piped stderr so we can both display progress and capture errors.
@@ -1259,7 +1353,13 @@ fn try_create_worktree(
         .unwrap_or_else(|_| "Error: Failed to capture stderr output from git command".to_string());
 
     if status.success() {
-        WorktreeResult::Success
+        if sparse_excludes.is_empty() {
+            return WorktreeResult::Success;
+        }
+        match apply_sparse_checkout(Path::new(worktree_path), sparse_excludes) {
+            Ok(()) => WorktreeResult::Success,
+            Err(message) => WorktreeResult::SparseCheckoutFailed(message),
+        }
     } else {
         // Ask git whether the branch is there. Do not read the reason it gave.
         //
@@ -1850,6 +1950,16 @@ fn main() {
         }
     };
 
+    // Refuse a bad `--sparse-exclude` value before anything is made, so a
+    // refusal leaves no directory, no branch, and no `worktrees/<name>`.
+    let sparse_excludes = match parse_sparse_excludes(&cli.sparse_exclude) {
+        Ok(dirs) => dirs,
+        Err(e) => {
+            error!(config.quiet, "Error: {e}");
+            exit(exit_codes::INVALID_SPARSE_EXCLUDE);
+        }
+    };
+
     // Ask where this repository keeps its worktrees. The repository states the
     // answer with `nwt.worktreesDir`, and the default stands when it says
     // nothing.
@@ -1962,6 +2072,7 @@ fn main() {
             worktree_path_str,
             branch_name,
             config.checkout.as_deref(),
+            &sparse_excludes,
         ) {
             WorktreeResult::Success => {
                 // Compute shortened tab name for terminal multiplexers.
@@ -2213,6 +2324,10 @@ fn main() {
             WorktreeResult::CommandError(e) => {
                 error!(config.quiet, "Error running git command: {}", e);
                 exit(exit_codes::GIT_COMMAND_ERROR);
+            }
+            WorktreeResult::SparseCheckoutFailed(message) => {
+                error!(config.quiet, "Error: {}", message);
+                exit(exit_codes::WORKTREE_FAILED);
             }
         }
     }
