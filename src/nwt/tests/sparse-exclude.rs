@@ -1415,6 +1415,99 @@ fn a_failed_read_tree_deletes_the_branch_that_the_checkout_dwim_made() {
     assert_only_a_remote_holds_the_branch(&clone);
 }
 
+/// Demand that `output` is a run that failed with exit 7 and printed no path.
+fn assert_failed_without_a_path(output: &Output) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(WORKTREE_FAILED),
+        "the run must exit {WORKTREE_FAILED}.\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.is_empty(),
+        "a failed run prints no path. stdout: {stdout:?}"
+    );
+}
+
+/// A failed sparse step keeps a worktrees directory that already holds a
+/// worktree, and it keeps that worktree. This is the contract of
+/// `tests/failed-run-leaves-nothing.rs` for the sparse cleanup.
+#[cfg(unix)]
+#[test]
+fn a_failed_sparse_step_keeps_a_worktrees_directory_that_holds_a_worktree() {
+    let (_temp, repo) = repo_with_heavy_dir();
+    let first = created_worktree(&run_nwt(&repo, &unique_branch("first"), &[]));
+    let worktrees_dir = first
+        .parent()
+        .expect("a worktree has a parent directory")
+        .to_path_buf();
+    let second = unique_branch("second");
+    let fake = FakeGit::refusing(&["read-tree"]);
+
+    let output = run_nwt_with_fake_git(
+        &repo,
+        &fake,
+        &["-b", &second, "--sparse-exclude", HEAVY_DIR],
+    );
+
+    assert_failed_without_a_path(&output);
+    assert!(
+        !worktrees_dir.join(&second).exists(),
+        "the failed run must remove its own worktree"
+    );
+    assert_no_branch(&repo, &second);
+    assert!(
+        worktrees_dir.is_dir(),
+        "the failed run took {} away, and another run made it",
+        worktrees_dir.display()
+    );
+    assert_files_present(&first, KEPT_FILES);
+    let listing = git_stdout(&repo, &["worktree", "list", "--porcelain"]);
+    let entry = format!("worktree {}", canonical(&first).display());
+    assert!(
+        listing.lines().any(|line| line == entry),
+        "git must still list the first worktree:\n{listing}"
+    );
+}
+
+/// A failed sparse step keeps an empty worktrees directory that was there
+/// before the run.
+///
+/// The directory is empty after the removal of the worktree, so only the stop
+/// at the nearest directory that existed before the add keeps it.
+#[cfg(unix)]
+#[test]
+fn a_failed_sparse_step_keeps_an_empty_worktrees_directory_that_was_there() {
+    let (temp, repo) = repo_with_heavy_dir();
+    let worktrees_dir = temp.path().join(format!("repo{WORKTREES_SUFFIX}"));
+    std::fs::create_dir(&worktrees_dir).expect("create the empty worktrees directory");
+    let branch = unique_branch("sparse-empty-dir");
+    let fake = FakeGit::refusing(&["read-tree"]);
+
+    let output = run_nwt_with_fake_git(
+        &repo,
+        &fake,
+        &["-b", &branch, "--sparse-exclude", HEAVY_DIR],
+    );
+
+    assert_failed_without_a_path(&output);
+    assert_no_branch(&repo, &branch);
+    assert!(
+        worktrees_dir.is_dir(),
+        "the failed run took away {}, which was there before the run",
+        worktrees_dir.display()
+    );
+    assert!(
+        std::fs::read_dir(&worktrees_dir)
+            .expect("read the worktrees directory")
+            .next()
+            .is_none(),
+        "the failed run must remove its own worktree from {}",
+        worktrees_dir.display()
+    );
+}
+
 /// Nothing that the hook step writes to stdout reaches the stdout of `nwt`,
 /// which holds only the worktree path.
 ///
