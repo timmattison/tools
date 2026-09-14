@@ -1118,6 +1118,163 @@ fn the_post_checkout_hook_gets_the_arguments_of_a_plain_add_and_sees_the_sparse_
     );
 }
 
+/// The exit status of a git call that [`FakeGit::refusing`] refuses.
+///
+/// No real git exits with it, so a run that reports it reports the fake.
+#[cfg(unix)]
+const FAKE_GIT_EXIT_STATUS: i32 = 97;
+
+/// The first executable `git` on the `PATH` of this test process.
+///
+/// The test finds git where the shell finds it, and names no fixed path.
+#[cfg(unix)]
+fn real_git() -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = std::env::var_os("PATH").expect("PATH is set");
+    std::env::split_paths(&path)
+        .map(|dir| dir.join("git"))
+        .find(|candidate| {
+            std::fs::metadata(candidate)
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
+        .expect("an executable git on PATH")
+}
+
+/// A `git` program in a temporary directory that reacts when an argument of a
+/// call is one of its trigger words, and hands each call to the real git.
+///
+/// A test puts [`FakeGit::path_env`] into the `PATH` of the `nwt` child only,
+/// and never into the environment of the test process. `nwt` finds `git`
+/// through `PATH`, so each git child of `nwt` runs the fake. A git child of git
+/// itself does not, because git puts its own exec path first in `PATH`.
+///
+/// Unix only: the fake is a POSIX `sh` script that the Unix permission bits
+/// make executable.
+#[cfg(unix)]
+struct FakeGit {
+    /// The directory that holds the fake. The fake goes away with it.
+    dir: tempfile::TempDir,
+}
+
+#[cfg(unix)]
+impl FakeGit {
+    /// A fake that writes a line to stderr and exits with
+    /// [`FAKE_GIT_EXIT_STATUS`] when an argument is one of `triggers`.
+    fn refusing(triggers: &[&str]) -> Self {
+        Self::reacting(
+            triggers,
+            &format!("echo \"fake git refuses $argument\" >&2; exit {FAKE_GIT_EXIT_STATUS}"),
+        )
+    }
+
+    /// A fake that writes `word` to its stdout when an argument is `trigger`,
+    /// and then runs the real git.
+    fn writing_stdout(trigger: &str, word: &str) -> Self {
+        Self::reacting(&[trigger], &format!("echo {word}"))
+    }
+
+    /// Write the fake: for each argument that is one of `triggers`, run the
+    /// shell text `reaction`. Then run the real git with every argument.
+    fn reacting(triggers: &[&str], reaction: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        let real = real_git();
+        let real = real.to_str().expect("utf-8 git path");
+        assert!(
+            !real.contains('\''),
+            "the git path goes into single quotes, so it cannot hold one: {real}"
+        );
+
+        let dir = tempfile::TempDir::new().expect("create the fake git directory");
+        let fake = dir.path().join("git");
+        let script = format!(
+            "#!/bin/sh\n\
+             for argument in \"$@\"; do\n\
+             \x20 case \"$argument\" in\n\
+             \x20   {}) {reaction} ;;\n\
+             \x20 esac\n\
+             done\n\
+             exec '{real}' \"$@\"\n",
+            triggers.join("|")
+        );
+        std::fs::write(&fake, script).expect("write the fake git");
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755))
+            .expect("make the fake git executable");
+
+        Self { dir }
+    }
+
+    /// A `PATH` value with the directory of the fake first, and the `PATH` of
+    /// this test process after it.
+    fn path_env(&self) -> std::ffi::OsString {
+        let mut dirs = vec![self.dir.path().to_path_buf()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            dirs.extend(std::env::split_paths(&existing));
+        }
+        std::env::join_paths(dirs).expect("join the PATH value")
+    }
+}
+
+/// Run `nwt` in `repo` with `arguments`, without the `.env` copy and the hook
+/// bootstrap, with `fake` first on the `PATH` of the child, and hand back what
+/// it wrote.
+#[cfg(unix)]
+fn run_nwt_with_fake_git(repo: &Path, fake: &FakeGit, arguments: &[&str]) -> Output {
+    nwt_command(repo)
+        .args(arguments)
+        .args(["--no-copy-env", "--no-bootstrap-hooks"])
+        .env("PATH", fake.path_env())
+        .output()
+        .expect("run the nwt binary")
+}
+
+/// Nothing that the hook step writes to stdout reaches the stdout of `nwt`,
+/// which holds only the worktree path.
+///
+/// Git 2.55 sends the stdout of a hook to its own stderr, so a hook alone
+/// cannot prove where `nwt` sends the stdout of `git hook run`. The fake git
+/// writes to its own stdout when it runs `hook`, and that word must show on
+/// stderr. The word of the hook must show on stderr too, which proves that the
+/// hook ran.
+#[cfg(unix)]
+#[test]
+fn nothing_the_hook_step_writes_to_stdout_reaches_the_stdout_of_nwt() {
+    const HOOK_WORD: &str = "the-hook-wrote-this";
+    const GIT_WORD: &str = "git-hook-run-wrote-this";
+
+    let (_temp, repo) = repo_with_heavy_dir();
+    let hooks = tempfile::TempDir::new().expect("create the hooks directory");
+    support::install_post_checkout_hook(&repo, hooks.path(), &format!("echo {HOOK_WORD}\n"));
+    let fake = FakeGit::writing_stdout("hook", GIT_WORD);
+    let branch = unique_branch("hook-stdout");
+
+    let output = run_nwt_with_fake_git(
+        &repo,
+        &fake,
+        &["-b", &branch, "--sparse-exclude", HEAVY_DIR],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "nwt failed ({:?}):\n{stderr}",
+        output.status.code()
+    );
+    assert_eq!(
+        stdout,
+        format!("{}\n", expected_worktree(&repo, &branch).display()),
+        "stdout must be the worktree path and one line break"
+    );
+    for word in [HOOK_WORD, GIT_WORD] {
+        assert!(
+            stderr.lines().any(|line| line == word),
+            "{word} must show on stderr, but stderr holds:\n{stderr}"
+        );
+    }
+}
+
 /// A value that the lexical rules refuse exits with its own code, names the
 /// value on stderr, prints no path, and makes nothing: no worktrees directory,
 /// no worktree, and no branch.
