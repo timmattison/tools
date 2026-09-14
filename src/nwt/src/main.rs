@@ -1462,8 +1462,9 @@ enum WorktreeResult {
     /// Failed to execute git command
     CommandError(std::io::Error),
     /// Git made the `--no-checkout` worktree, but a step that writes its files
-    /// through the sparse patterns failed. The value names the step and holds
-    /// what git wrote to stderr.
+    /// through the sparse patterns failed. The run removed the worktree and
+    /// what else it made. The value names the step and holds what git wrote to
+    /// stderr.
     SparseCheckoutFailed(String),
     /// Git made the sparse worktree, and the `post-checkout` hook that
     /// [`run_post_checkout_hook`] ran exited with this status. The worktree and
@@ -1574,7 +1575,8 @@ fn run_sparse_step(mut command: Command, step: &str) -> Result<String, String> {
 /// # Errors
 ///
 /// Returns the message of [`run_sparse_step`] for the first step that fails.
-/// The worktree and the branch stay.
+/// The worktree is broken then, and [`try_create_worktree`] calls
+/// [`remove_broken_sparse_worktree`] to remove what the run made.
 fn apply_sparse_checkout(worktree: &Path, excludes: &[SparseExcludeDir]) -> Result<String, String> {
     let mut set = production_git_command(worktree);
     set.args([
@@ -1655,14 +1657,72 @@ fn run_post_checkout_hook(worktree: &Path, head: &str) -> io::Result<ExitStatus>
     hook.status()
 }
 
+/// The nearest ancestor of `path` that exists.
+///
+/// `git worktree add` makes each directory between that ancestor and the new
+/// worktree. [`remove_broken_sparse_worktree`] removes those directories, and
+/// it stops at this ancestor, so a directory that was there before the run
+/// stays. [`try_create_worktree`] asks before the add, because after the add
+/// every ancestor exists.
+fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .skip(1)
+        .find(|ancestor| ancestor.exists())
+        .map(Path::to_path_buf)
+}
+
+/// Remove what a sparse run made, after a sparse step broke the new worktree.
+///
+/// A failure of `git sparse-checkout set`, `git read-tree -mu HEAD`, or
+/// `git rev-parse HEAD` leaves a worktree without the files it must hold. Such
+/// a worktree is of no use, so the run takes back each thing that it made:
+///
+/// 1. `git worktree remove --force <worktree>`, in `repo_root`, removes the
+///    directory and its entry in `.git/worktrees`. A `--no-checkout` worktree
+///    has an empty index, so git sees each file of `HEAD` as deleted, and it
+///    refuses a removal without `--force`.
+/// 2. `git branch -D <made_branch>` deletes the branch that the add made. Only
+///    the add wrote to that branch, so the delete loses no commit.
+/// 3. [`fs::remove_dir`] removes each parent directory of the worktree, from
+///    the nearest parent upward. It stops at `existing_ancestor`, which was
+///    there before the add, and at the first directory that is not empty. It
+///    never removes a directory that holds something.
+fn remove_broken_sparse_worktree(
+    repo_root: &Path,
+    worktree: &Path,
+    made_branch: Option<&str>,
+    existing_ancestor: Option<&Path>,
+) {
+    let mut remove = production_git_command(repo_root);
+    remove.args(["worktree", "remove", "--force"]).arg(worktree);
+    let _removal = remove.output();
+
+    if let Some(branch) = made_branch {
+        let mut delete = production_git_command(repo_root);
+        delete.args(["branch", "-D", branch]);
+        let _deletion = delete.output();
+    }
+
+    let mut parent = worktree.parent();
+    while let Some(dir) = parent {
+        if Some(dir) == existing_ancestor || fs::remove_dir(dir).is_err() {
+            break;
+        }
+        parent = dir.parent();
+    }
+}
+
 /// Attempts to create a git worktree at the given path.
 ///
 /// Returns a `WorktreeResult` indicating success or the type of failure.
 ///
 /// When `sparse_excludes` is not empty, the add runs with `--no-checkout`, and
 /// [`apply_sparse_checkout`] then writes the files without those directories.
-/// A failure of that step gives [`WorktreeResult::SparseCheckoutFailed`].
-/// [`run_post_checkout_hook`] then runs the hook that the add did not run.
+/// When that step fails, [`remove_broken_sparse_worktree`] removes what the run
+/// made, and the result is [`WorktreeResult::SparseCheckoutFailed`].
+/// [`run_post_checkout_hook`] then runs the hook that the add did not run. A
+/// hook that fails keeps the worktree, and the result is
+/// [`WorktreeResult::PostCheckoutHookFailed`].
 ///
 /// This function displays git's progress output (e.g., "Updating files: X%") in real-time
 /// while also capturing stderr for error classification. This is done by spawning a thread
@@ -1701,6 +1761,14 @@ fn try_create_worktree(
     checkout_ref: Option<&str>,
     sparse_excludes: &[SparseExcludeDir],
 ) -> WorktreeResult {
+    // A sparse run that breaks removes the directories that the add makes.
+    // After the add every ancestor exists, so the run looks before the add.
+    let existing_ancestor = if sparse_excludes.is_empty() {
+        None
+    } else {
+        nearest_existing_ancestor(Path::new(worktree_path))
+    };
+
     let mut cmd = Command::new("git");
     shed_inherited_git_environment_keeping_user_intent(&mut cmd);
 
@@ -1770,7 +1838,17 @@ fn try_create_worktree(
         let worktree = Path::new(worktree_path);
         let head = match apply_sparse_checkout(worktree, sparse_excludes) {
             Ok(head) => head,
-            Err(message) => return WorktreeResult::SparseCheckoutFailed(message),
+            Err(message) => {
+                // `-b <branch>` and a random name make the branch in the add.
+                let made_branch = checkout_ref.is_none().then_some(branch_name);
+                remove_broken_sparse_worktree(
+                    repo_root,
+                    worktree,
+                    made_branch,
+                    existing_ancestor.as_deref(),
+                );
+                return WorktreeResult::SparseCheckoutFailed(message);
+            }
         };
         match run_post_checkout_hook(worktree, &head) {
             Ok(status) if status.success() => WorktreeResult::Success,
