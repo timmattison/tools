@@ -651,6 +651,10 @@ const SPARSE_INCLUDE_EVERYTHING: &str = "/*";
 /// Parse every `--sparse-exclude` value of the command line, in the order the
 /// user gave.
 ///
+/// Two values that name one directory (`heavy` and `heavy/`) give that
+/// directory one time, at the position of the first value. So git gets one
+/// pattern for each directory, and the notice names each directory one time.
+///
 /// `main` calls this after it knows the repository and before it makes
 /// anything, so a refused value makes no directory, no branch, and no
 /// `worktrees/<name>`. The check is lexical only (see
@@ -661,9 +665,16 @@ const SPARSE_INCLUDE_EVERYTHING: &str = "/*";
 /// Returns the refusal of the first value that [`SparseExcludeDir::parse`]
 /// refuses.
 fn parse_sparse_excludes(raw: &[String]) -> Result<Vec<SparseExcludeDir>, SparseExcludeError> {
-    raw.iter()
-        .map(|value| SparseExcludeDir::parse(value))
-        .collect()
+    let mut dirs: Vec<SparseExcludeDir> = Vec::with_capacity(raw.len());
+
+    for value in raw {
+        let dir = SparseExcludeDir::parse(value)?;
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+
+    Ok(dirs)
 }
 
 /// Create a new git worktree with a Docker-style random name.
