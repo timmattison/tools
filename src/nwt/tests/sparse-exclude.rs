@@ -1508,6 +1508,30 @@ fn a_failed_sparse_step_keeps_an_empty_worktrees_directory_that_was_there() {
     );
 }
 
+/// A failed sparse `-c <branch>` run keeps a local branch that was there before
+/// the run.
+///
+/// The broken worktree had that branch checked out, but the run did not make
+/// it. So the cleanup removes the worktree and keeps the branch, and the work
+/// of the user on it stays.
+#[cfg(unix)]
+#[test]
+fn a_failed_sparse_checkout_of_a_local_branch_keeps_the_branch() {
+    let (temp, repo) = repo_with_heavy_dir();
+    let branch = unique_branch("sparse-keep-local");
+    assert!(run_git(&repo, &["branch", &branch]), "git branch failed");
+    let before = local_branches(&repo);
+    let fake = FakeGit::refusing(&["read-tree"]);
+
+    let output = run_nwt_with_fake_git(
+        &repo,
+        &fake,
+        &["-c", &branch, "--sparse-exclude", HEAVY_DIR],
+    );
+
+    assert_the_failed_step_left_nothing(&temp, &repo, &before, &output);
+}
+
 /// Nothing that the hook step writes to stdout reaches the stdout of `nwt`,
 /// which holds only the worktree path.
 ///
