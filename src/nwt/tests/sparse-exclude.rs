@@ -569,6 +569,103 @@ fn a_directory_that_is_not_at_the_checkout_ref_is_refused() {
     assert_made_nothing(&temp, &repo);
 }
 
+/// Demand that `worktree` does not hold `excluded`, holds each of `kept`, and
+/// has no change for `git status` to report.
+fn assert_sparse_worktree(worktree: &Path, excluded: &str, kept: &[&str]) {
+    assert!(
+        !worktree.join(excluded).exists(),
+        "{excluded}/ must be out of the worktree at {}",
+        worktree.display()
+    );
+    assert_files_present(worktree, kept);
+
+    let status = git_stdout(worktree, &["status", "--short"]);
+    assert!(
+        status.is_empty(),
+        "a sparse worktree has no change to report, but git status says:\n{status}"
+    );
+}
+
+/// A tracked directory passes the check at the ref in each form that names
+/// it.
+///
+/// - `heavy/` names the directory `heavy`, but `git ls-tree -d` prints the
+///   children of `heavy/` and not `heavy`. The check must ask git about the
+///   normalized value.
+/// - `heavy/sub` is a directory below a directory. Git prints its full path.
+/// - `café` holds a character that is not ASCII. Without `-z`, git prints the
+///   name in quotes with octal escapes, and no entry is equal to the value.
+#[test]
+fn a_tracked_directory_passes_the_check_in_each_form() {
+    const MULTIBYTE_DIR: &str = "café";
+    const MULTIBYTE_FILE: &str = "café/menu.txt";
+
+    let files: Vec<&str> = KEPT_FILES
+        .iter()
+        .chain(HEAVY_FILES)
+        .chain(&[MULTIBYTE_FILE])
+        .copied()
+        .filter(|file| *file != "README.md")
+        .collect();
+    let (_temp, repo) = repo_with_files(&files);
+
+    for (raw, excluded) in [
+        ("heavy/", HEAVY_DIR),
+        ("heavy/sub", "heavy/sub"),
+        (MULTIBYTE_DIR, MULTIBYTE_DIR),
+    ] {
+        let output = run_nwt(
+            &repo,
+            &unique_branch("sparse-form"),
+            &["--sparse-exclude", raw],
+        );
+        let worktree = created_worktree(&output);
+
+        assert_sparse_worktree(&worktree, excluded, KEPT_FILES);
+    }
+}
+
+/// With `-c <ref>`, a directory that git tracks at that ref passes the check,
+/// although `HEAD` does not track it and the disk does not hold it.
+#[test]
+fn a_directory_at_the_checkout_ref_passes_although_head_lacks_it() {
+    let (_temp, repo) = repo_with_a_tag_before_a_move();
+    assert!(
+        !repo.join(TAG_ONLY_DIR).exists(),
+        "the main worktree must not hold {TAG_ONLY_DIR}/ on disk"
+    );
+
+    let output = run_nwt_checkout(&repo, OLD_TAG, &["--sparse-exclude", TAG_ONLY_DIR]);
+    let worktree = created_worktree(&output);
+
+    assert_sparse_worktree(&worktree, TAG_ONLY_DIR, &["README.md", "heavy.txt"]);
+}
+
+/// Test 8 of issue #487: `-c <tag>` gives a detached sparse worktree at the
+/// commit of the tag.
+#[test]
+fn a_checkout_of_a_tag_gives_a_detached_sparse_worktree() {
+    const TAG: &str = "v1";
+
+    let (_temp, repo) = repo_with_heavy_dir();
+    assert!(run_git(&repo, &["tag", TAG]), "git tag failed");
+
+    let output = run_nwt_checkout(&repo, TAG, &["--sparse-exclude", HEAVY_DIR]);
+    let worktree = created_worktree(&output);
+
+    assert_eq!(
+        git_stdout(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).trim_end(),
+        "HEAD",
+        "a worktree of a tag has a detached HEAD"
+    );
+    assert_eq!(
+        git_stdout(&worktree, &["rev-parse", "HEAD"]),
+        git_stdout(&repo, &["rev-parse", &format!("{TAG}^{{commit}}")]),
+        "the worktree must check out the commit of the tag"
+    );
+    assert_sparse_worktree(&worktree, HEAVY_DIR, KEPT_FILES);
+}
+
 /// A value that the lexical rules refuse exits with its own code, names the
 /// value on stderr, prints no path, and makes nothing: no worktrees directory,
 /// no worktree, and no branch.
