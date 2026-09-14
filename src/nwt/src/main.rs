@@ -1206,9 +1206,9 @@ SPARSE WORKTREES:
     after a plain add. When git cannot start the hook step, the worktree stays and
     nwt exits 6.
 
-    When 'git sparse-checkout set' or 'git read-tree' fails, the worktree is broken.
-    nwt then removes the worktree, the branch that the run made, and the empty
-    directories that the run made, and it exits 7.
+    When 'git sparse-checkout set', 'git read-tree -mu HEAD', or 'git rev-parse HEAD'
+    fails, the worktree is broken. nwt then removes the worktree, the branch that the
+    run made, and the empty directories that the run made, and it exits 7.
 
     Limits:
       - The flag saves disk space in the worktree only. All worktrees share one object
