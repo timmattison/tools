@@ -1005,6 +1005,44 @@ fn two_remotes_that_hold_the_branch_fail_like_the_add_and_make_nothing() {
     assert_only_a_remote_holds_the_branch(&fixture.repo);
 }
 
+/// When two remotes hold the branch, `checkout.defaultRemote` names the remote
+/// whose branch git checks out, and the check reads that branch.
+///
+/// `origin/foo` does not track `heavy/`, and `upstream/foo` does. A check that
+/// reads `origin/foo` refuses the run with exit 15. A check that reads neither
+/// exits 7.
+#[test]
+fn checkout_default_remote_picks_the_branch_that_two_remotes_hold() {
+    let fixture = clone_with_two_remotes_holding_the_branch();
+    assert!(
+        run_git(
+            &fixture.repo,
+            &["config", "checkout.defaultRemote", SECOND_REMOTE]
+        ),
+        "git config failed"
+    );
+
+    let output = run_nwt_checkout(
+        &fixture.repo,
+        REMOTE_ONLY_BRANCH,
+        &["--sparse-exclude", HEAVY_DIR],
+    );
+    let worktree = created_worktree(&output);
+
+    assert_sparse_worktree(&worktree, HEAVY_DIR, KEPT_FILES);
+    assert_eq!(
+        git_stdout(&worktree, &["rev-parse", "HEAD"]),
+        git_stdout(
+            &fixture.repo,
+            &[
+                "rev-parse",
+                &format!("refs/remotes/{SECOND_REMOTE}/{REMOTE_ONLY_BRANCH}")
+            ]
+        ),
+        "the worktree must check out the branch of {SECOND_REMOTE}"
+    );
+}
+
 /// A value that the lexical rules refuse exits with its own code, names the
 /// value on stderr, prints no path, and makes nothing: no worktrees directory,
 /// no worktree, and no branch.
