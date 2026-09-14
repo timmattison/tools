@@ -576,6 +576,10 @@ mod tests {
             body: "## Depends on\n\n**#17 (R2 upload).** There is nothing in the bucket until #17 runs.\n",
             numbers: &[17],
         },
+        Case { name: "a heading that names its blocker on its own line", body: "## Blocked by #41\n\nLand it first.\n", numbers: &[41] },
+        Case { name: "a heading with a colon and two numbers", body: "## Blocked by: #41 and #42\n", numbers: &[41, 42] },
+        Case { name: "a heading with a number and an item under it", body: "### Blocked by #41\n\n- #42\n", numbers: &[41, 42] },
+        Case { name: "a setext heading with a number", body: "Blocked by #41\n--------------\n\n- #42\n", numbers: &[41, 42] },
         // The block under the heading, in the shapes it arrives in.
         Case { name: "every list marker", body: "## Blocked by\n\n* #1\n+ #2\n1. #3\n2) #4\n", numbers: &[1, 2, 3, 4] },
         Case { name: "a task list item, open and done", body: "## Blocked by\n\n- [ ] #5\n- [x] #6\n", numbers: &[5, 6] },
@@ -604,6 +608,11 @@ mod tests {
             name: "a subheading inside the section",
             body: "## Blocked by\n\n### Before the solver\n\n- #11\n",
             numbers: &[11],
+        },
+        Case {
+            name: "a subheading that names a number inside the section",
+            body: "## Blocked by\n\n### #11 (the solver)\n\n- #12\n",
+            numbers: &[11, 12],
         },
         Case { name: "one number named twice", body: "## Blocked by\n\n- #9\n- #9 (again)\n", numbers: &[9] },
         // The forms that name an issue and are not a blocker.
@@ -675,9 +684,16 @@ mod tests {
             numbers: &[11],
         },
         Case { name: "a Blocks heading, which is the other direction", body: "## Blocks\n\n- #12\n", numbers: &[] },
+        Case { name: "a Blocks heading that names a number", body: "## Blocks #12\n", numbers: &[] },
+        Case { name: "a heading that starts with a number, outside any section", body: "## #41 lands first\n", numbers: &[] },
         Case {
             name: "a heading of the same level ends the section",
             body: "## Blocked by\n\n- #11\n\n## Acceptance criteria\n\n- #12 still passes\n",
+            numbers: &[11],
+        },
+        Case {
+            name: "a heading that ends the section and names a number",
+            body: "## Blocked by\n\n- #11\n\n## Notes on #12\n",
             numbers: &[11],
         },
         Case {
