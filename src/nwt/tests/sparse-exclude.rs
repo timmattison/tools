@@ -666,6 +666,33 @@ fn a_checkout_of_a_tag_gives_a_detached_sparse_worktree() {
     assert_sparse_worktree(&worktree, HEAVY_DIR, KEPT_FILES);
 }
 
+/// The exit code `nwt` returns when git cannot make the worktree. A `-c <ref>`
+/// that names no commit gets it without `--sparse-exclude` too.
+const WORKTREE_FAILED: i32 = 7;
+
+/// A `-c <ref>` that git cannot read is a bad ref and not a bad directory. So
+/// the run exits with the code that a bad ref gets without the flag, names the
+/// ref, and makes nothing.
+///
+/// `git ls-tree` exits with a status that is not zero for such a ref, and a
+/// check that reads only its output takes the ref for a ref without the
+/// directory.
+#[test]
+fn a_checkout_ref_that_git_cannot_read_is_a_failed_add_and_makes_nothing() {
+    const MISSING_REF: &str = "no-such-ref";
+
+    let (temp, repo) = repo_with_heavy_dir();
+
+    let output = run_nwt_checkout(&repo, MISSING_REF, &["--sparse-exclude", HEAVY_DIR]);
+
+    assert_refused(
+        &output,
+        WORKTREE_FAILED,
+        &format!("Error: git cannot read the ref '{MISSING_REF}' to check --sparse-exclude: "),
+    );
+    assert_made_nothing(&temp, &repo);
+}
+
 /// A value that the lexical rules refuse exits with its own code, names the
 /// value on stderr, prints no path, and makes nothing: no worktrees directory,
 /// no worktree, and no branch.
