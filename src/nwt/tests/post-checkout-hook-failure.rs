@@ -23,7 +23,7 @@ mod support;
 
 use std::path::{Path, PathBuf};
 
-use support::{git_stdout, init_repo, nanos, nwt_command, run_git};
+use support::{git_stdout, init_repo, install_post_checkout_hook, nanos, nwt_command, run_git};
 
 /// The exit code `nwt` returns when git does not make the worktree.
 const WORKTREE_FAILED: i32 = 7;
@@ -51,29 +51,10 @@ fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|e| panic!("canonicalize {}: {e}", path.display()))
 }
 
-/// Write an executable `post-checkout` hook that exits with
-/// [`HOOK_EXIT_STATUS`] into `hooks_dir`, and point `core.hooksPath` of `repo`
-/// at that directory.
-///
-/// The fixture sets `core.hooksPath` in the repository, and does not write into
-/// `.git/hooks`. The host `~/.gitconfig` can set a global `core.hooksPath`, and
-/// git then ignores `.git/hooks`. A value in the repository configuration
-/// overrides the global value.
+/// Install a `post-checkout` hook that exits with [`HOOK_EXIT_STATUS`] into
+/// `hooks_dir`, and point `core.hooksPath` of `repo` at that directory.
 fn install_failing_post_checkout_hook(repo: &Path, hooks_dir: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let hook = hooks_dir.join("post-checkout");
-    std::fs::write(&hook, format!("#!/bin/sh\nexit {HOOK_EXIT_STATUS}\n"))
-        .expect("write the post-checkout hook");
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
-        .expect("make the post-checkout hook executable");
-
-    let hooks_dir = canonical(hooks_dir);
-    let hooks_dir = hooks_dir.to_str().expect("utf-8 hooks directory");
-    assert!(
-        run_git(repo, &["config", "core.hooksPath", hooks_dir]),
-        "git config core.hooksPath failed"
-    );
+    install_post_checkout_hook(repo, hooks_dir, &format!("exit {HOOK_EXIT_STATUS}\n"));
 }
 
 /// A plain add whose `post-checkout` hook fails keeps the worktree and the

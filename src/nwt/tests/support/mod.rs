@@ -170,6 +170,41 @@ pub fn init_repo() -> (TempDir, PathBuf) {
     (temp, repo)
 }
 
+/// Write an executable `post-checkout` hook into `hooks_dir`, and point
+/// `core.hooksPath` of `repo` at that directory.
+///
+/// `body` is the shell script after the `#!/bin/sh` line. The hook runs with
+/// the new worktree as its working directory.
+///
+/// The fixture sets `core.hooksPath` in the repository, and does not write into
+/// `.git/hooks`. The host `~/.gitconfig` can set a global `core.hooksPath`, and
+/// git then ignores `.git/hooks`. A value in the repository configuration
+/// overrides the global value.
+///
+/// Unix only: the hook is a POSIX `sh` script that the Unix permission bits
+/// make executable.
+///
+/// # Panics
+///
+/// Panics when the hook cannot be written or made executable, or when
+/// `git config` fails.
+#[cfg(unix)]
+pub fn install_post_checkout_hook(repo: &Path, hooks_dir: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let hook = hooks_dir.join("post-checkout");
+    std::fs::write(&hook, format!("#!/bin/sh\n{body}")).expect("write the post-checkout hook");
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+        .expect("make the post-checkout hook executable");
+
+    let hooks_dir = std::fs::canonicalize(hooks_dir).expect("resolve the hooks directory");
+    let hooks_dir = hooks_dir.to_str().expect("utf-8 hooks directory");
+    assert!(
+        run_git(repo, &["config", "core.hooksPath", hooks_dir]),
+        "git config core.hooksPath failed"
+    );
+}
+
 /// Builds a [`Command`] that runs the real `nwt` binary against `repo`.
 ///
 /// This is the single, mandatory entrance every integration test uses to spawn
