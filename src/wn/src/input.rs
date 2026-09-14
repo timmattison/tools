@@ -267,6 +267,14 @@ The first line of it is {line:?}.",
     /// [`Repo::is_same_repository`] compares the two, because GitHub names a
     /// repository without regard to letter case.
     ///
+    /// Only a text from the clipboard is refused. The reader typed an argument
+    /// and built a pipe on purpose, and `wn --refresh` does not replace such a
+    /// text, so it is not the repair for one. A plan this run built was not on
+    /// the clipboard before the run, so it is no stale cache. A text that
+    /// names no repository is not refused either. A chain, a table, a picture,
+    /// and a JSON document without `repo` say nothing about the repository,
+    /// and `wn` has no way to find out which repository such a text is for.
+    ///
     /// The message writes nothing out of the clipboard except the repository
     /// the plan names. This is the rule of [`Chain::blame`]: the clipboard
     /// holds a password or a token as readily as it holds a plan.
@@ -280,6 +288,9 @@ The first line of it is {line:?}.",
         named: Option<&Repo>,
         run: &Repo,
     ) -> Result<(), InputError> {
+        if self.source != Source::Clipboard {
+            return Ok(());
+        }
         match named {
             Some(plan) if !plan.is_same_repository(run) => Err(InputError::AnotherRepository {
                 plan: plan.clone(),
