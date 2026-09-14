@@ -985,6 +985,24 @@ mod tests {
         panic!("GitHub was asked before the refusal")
     }
 
+    /// The error [`reached_github`] gives.
+    const REACHED_THE_QUERY: &str = "reached the query";
+
+    /// A query that fails with [`REACHED_THE_QUERY`].
+    ///
+    /// It fails rather than answers, so a run that reaches it prints no rows,
+    /// and the error it gives back proves that the run passed the refusal.
+    fn reached_github(_wanted: &[IssueNumber]) -> Result<Vec<Entry>> {
+        Err(anyhow::anyhow!(REACHED_THE_QUERY))
+    }
+
+    /// Assert that `outcome` is the error of [`reached_github`], and so that
+    /// nothing refused the run before the query.
+    fn reaches_the_query(outcome: Result<ExitCode>) {
+        let err = outcome.expect_err("the query fails, so the run fails");
+        assert_eq!(err.to_string(), REACHED_THE_QUERY);
+    }
+
     /// What [`respond`] gives for `chain` in a run for `repo`, with `fetch` as
     /// the query.
     fn responded(
@@ -1010,5 +1028,19 @@ mod tests {
 CAUTION: wn --refresh REPLACES WHAT IS ON THE CLIPBOARD. WHAT IS ON IT NOW IS LOST.\n\
 Run wn --refresh to build a new plan, or run wn --repo owner/a to answer the plan on the clipboard."
         );
+    }
+
+    #[test]
+    fn a_plan_from_the_clipboard_for_the_repository_of_the_run_in_other_letter_case_reaches_the_query(
+    ) {
+        // GitHub names a repository without regard to letter case. A plan the
+        // skill wrote as `TimMattison/Tools` is a plan for the repository `gh`
+        // names `timmattison/tools`.
+        let chain = from_the_clipboard(&plan_for("TimMattison/Tools"));
+        reaches_the_query(responded(
+            &chain,
+            &repository("timmattison/tools"),
+            &reached_github,
+        ));
     }
 }

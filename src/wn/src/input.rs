@@ -1301,6 +1301,20 @@ Unset it to build one. Pass it as an argument, in quotes: wn \"#277 → #278\""
     }
 
     #[test]
+    fn a_plan_that_names_the_repository_of_the_run_in_other_letter_case_is_not_refused() {
+        // GitHub names a repository without regard to letter case, so these
+        // two names are one repository. A refusal here sends the reader to
+        // replace a plan that is true.
+        assert_eq!(
+            clipboard_chain(PLAN_FOR_A).refuse_another_repository(
+                Some(&repository("TimMattison/Tools")),
+                &repository("timmattison/tools")
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn a_value_with_a_character_in_it_turns_the_clipboard_off() {
         assert!(!clipboard_is_off(None));
         assert!(!clipboard_is_off(Some("")));
