@@ -149,10 +149,11 @@ impl Entry {
 
 /// What GitHub says about each number of a plan, keyed by the number.
 ///
-/// A plan asks GitHub once for the whole page of text. One number stands in
-/// two streams, and two queries for it cost twice and can give two answers. So
-/// the answers arrive as one list, and each stream reads the numbers it names
-/// out of this.
+/// One query answers every number the plan names. Each round of blockers that
+/// stand nowhere in the plan costs one query more, and its answers join the
+/// same `States`. One number stands in two streams, and two queries for it
+/// cost twice and can give two answers. So the answers arrive as one list, and
+/// each stream reads the numbers it names out of this.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct States {
     /// The answer of GitHub for each number it answered for.

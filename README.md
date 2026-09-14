@@ -1364,7 +1364,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     blocker the repository does not have keeps its row and its note, and the run exits `1`,
     because a blocker that is a typo is a stream that waits forever.
   - Every plan is held to what its own issues say comes first, because a person or a run of a
-    model writes the plan and either can get the order wrong. The one query asks for the body of
+    model writes the plan and either can get the order wrong. The query asks for the body of
     every issue, and a body names a blocker in the shape the `to-issues` skill writes: a list item
     or a paragraph under a `Blocked by` or `Depends on` heading, or a block that starts with that
     label, as in `**Blocked by:** #12`. A heading is a block too, so `## Blocked by #12` names #12

@@ -2398,10 +2398,10 @@ Notes: Disjoint.";
 
     #[test]
     fn the_numbers_of_a_plan_hold_a_blocker_that_stands_in_no_order_field() {
-        // One query answers the whole plan, so every number of the plan is in
-        // this list. A blocker is sometimes the work of no stream of the plan,
-        // and a reader that walks the chains alone leaves that number out. The
-        // answer then says nothing about the work a stream waits for.
+        // The first query asks about every number of the plan, and this list
+        // holds those numbers. A blocker is sometimes the work of no stream of
+        // the plan, and a reader that walks the chains alone leaves that number
+        // out. The answer then says nothing about the work a stream waits for.
         assert_eq!(
             numbers_of(&plan_of(&table_that_waits_for("#96"))),
             vec![1, 96]

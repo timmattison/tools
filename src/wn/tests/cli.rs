@@ -1399,8 +1399,9 @@ fn refuses_a_plan_that_names_no_order_field() {
 
 #[test]
 fn a_number_that_stands_in_two_streams_is_asked_about_once() {
-    // The whole plan is one query, as one chain is. #330 stands in both
-    // streams, and it costs one alias and is reported in both.
+    // Every number of this plan goes in one query, as the numbers of a chain
+    // do. #330 stands in both streams, and it costs one alias and is reported
+    // in both.
     let gh = FakeGh::new(PLAN_ISSUES);
     let output = run_with_stdin(
         &gh,

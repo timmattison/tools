@@ -185,7 +185,7 @@ fn alias(number: IssueNumber) -> String {
     format!("i{}", number.get())
 }
 
-/// Build the one query that asks about every number of the chain.
+/// Build one query that asks about every number of `numbers`.
 #[must_use]
 pub fn build_query(numbers: &[IssueNumber]) -> String {
     let fields: String = numbers
@@ -547,7 +547,7 @@ mod tests {
     #[test]
     fn the_query_asks_for_the_body_of_an_issue() {
         // The body is where an issue says what blocks it, and the answer holds
-        // a plan to that. The one query carries it, so the check costs no
+        // a plan to that. The query carries it, so the check costs no
         // second round trip.
         let query = build_query(&chain(&[1]));
         assert!(

@@ -2545,10 +2545,11 @@ Notes: Disjoint.";
 
     #[test]
     fn the_numbers_of_a_graph_name_each_one_once_and_the_work_first() {
-        // One query answers the whole picture, so this list is what the query
-        // asks about. `#2` stands twice in the picture and is one node, so it
-        // is asked about one time. A pair gives two numbers, the pull request
-        // ahead of the issue it closes, because the pull request is the work.
+        // The first query asks about every number of the picture, and this list
+        // is what it asks about. `#2` stands twice in the picture and is one
+        // node, so it is asked about one time. A pair gives two numbers, the
+        // pull request ahead of the issue it closes, because the pull request
+        // is the work.
         let graph = graph_of(
             "\
 #1 ──→ #2 ──┐
@@ -2708,7 +2709,7 @@ Notes: Disjoint.";
     fn a_blocker_that_stands_in_no_order_field_is_a_node_of_its_own() {
         // A blocker the repository does not have must reach the rows and turn
         // the run red, and a row of the answer is the only place that says so.
-        // So the number is a node, and the one query names it.
+        // So the number is a node, and the first query names it.
         let graph = graph_of_plan(&table_of(&[("S1", "#91", "#96")]));
         assert_eq!(nodes(&graph), vec![91, 96]);
         assert_eq!(edges(&graph), vec![(96, 91)]);
