@@ -1118,12 +1118,6 @@ fn the_post_checkout_hook_gets_the_arguments_of_a_plain_add_and_sees_the_sparse_
     );
 }
 
-/// The exit status of a git call that [`FakeGit::refusing`] refuses.
-///
-/// No real git exits with it, so a run that reports it reports the fake.
-#[cfg(unix)]
-const FAKE_GIT_EXIT_STATUS: i32 = 97;
-
 /// The first executable `git` on the `PATH` of this test process.
 ///
 /// The test finds git where the shell finds it, and names no fixed path.
@@ -1159,15 +1153,6 @@ struct FakeGit {
 
 #[cfg(unix)]
 impl FakeGit {
-    /// A fake that writes a line to stderr and exits with
-    /// [`FAKE_GIT_EXIT_STATUS`] when an argument is one of `triggers`.
-    fn refusing(triggers: &[&str]) -> Self {
-        Self::reacting(
-            triggers,
-            &format!("echo \"fake git refuses $argument\" >&2; exit {FAKE_GIT_EXIT_STATUS}"),
-        )
-    }
-
     /// A fake that writes `word` to its stdout when an argument is `trigger`,
     /// and then runs the real git.
     fn writing_stdout(trigger: &str, word: &str) -> Self {
