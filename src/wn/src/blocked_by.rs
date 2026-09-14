@@ -26,6 +26,10 @@
 //!   the next heading of the same level or higher.
 //! * Its own text starts with one of those labels, as in `**Blocked by:** #12`.
 //!
+//! A heading is a block too, so the same two rules read its own text:
+//! `## Blocked by #41` opens a section and names #41. A heading that ends a
+//! section stands outside it.
+//!
 //! # Only the numbers at the start of a block count
 //!
 //! `#3, #4 and #5` and `#5 (test-taking UI)` are blockers. A block that starts
@@ -104,31 +108,34 @@ struct Open {
 /// A number of another repository is read past and names nothing, and so is a
 /// span struck through and a number GitHub cannot give an issue: zero, or one
 /// too large for a `u64`.
+///
+/// A heading ends or opens a section before the walk reads its own text. So a
+/// heading that ends a section names nothing unless it starts with a label.
 #[must_use]
 pub fn read(body: &str) -> Vec<IssueNumber> {
     let mut numbers: Vec<IssueNumber> = Vec::new();
     // The level of the heading whose section the walk stands in.
     let mut section: Option<usize> = None;
     for block in blocks_of(body) {
-        match block {
-            Block::Heading { level, text } => {
-                if section.is_some_and(|open| level <= open) {
-                    section = None;
-                }
-                if section.is_none() && after_label(undecorated(&text)).is_some() {
-                    section = Some(level);
-                }
+        let (level, text) = match block {
+            Block::Heading { level, text } => (Some(level), text),
+            Block::Text(text) => (None, text),
+        };
+        let (labelled, named) = head_of(&text);
+        if let Some(level) = level {
+            if section.is_some_and(|open| level <= open) {
+                section = None;
             }
-            Block::Text(text) => {
-                let (labelled, named) = head_of(&text);
-                if section.is_none() && !labelled {
-                    continue;
-                }
-                for number in named {
-                    if !numbers.contains(&number) {
-                        numbers.push(number);
-                    }
-                }
+            if section.is_none() && labelled {
+                section = Some(level);
+            }
+        }
+        if section.is_none() && !labelled {
+            continue;
+        }
+        for number in named {
+            if !numbers.contains(&number) {
+                numbers.push(number);
             }
         }
     }
