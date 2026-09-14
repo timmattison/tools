@@ -493,6 +493,13 @@ mod exit_codes {
     pub const TMUX_NOT_RUNNING: i32 = 13;
     /// Shell setup failed
     pub const SHELL_SETUP_ERROR: i32 = 14;
+    /// A `--sparse-exclude` value is not a tracked directory inside the
+    /// repository. `nwt` refuses it before it makes anything.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "wired into main by the next slice of issue #487")
+    )]
+    pub const INVALID_SPARSE_EXCLUDE: i32 = 14;
 }
 
 /// Maximum attempts to find an available directory name before giving up.
@@ -2954,6 +2961,7 @@ mod tests {
             exit_codes::CONFIG_ERROR,
             exit_codes::TMUX_NOT_RUNNING,
             exit_codes::SHELL_SETUP_ERROR,
+            exit_codes::INVALID_SPARSE_EXCLUDE,
         ];
 
         let mut sorted = codes.to_vec();
@@ -2961,6 +2969,38 @@ mod tests {
         sorted.dedup();
 
         assert_eq!(sorted.len(), codes.len(), "All exit codes should be unique");
+    }
+
+    /// A refused `--sparse-exclude` value exits 15, and `--help` says so.
+    ///
+    /// A script that runs `nwt` reads the EXIT CODES list to tell a bad flag
+    /// from a failed add. The entry is built from the constant, so a change of
+    /// the value without a change of the help text fails here.
+    #[test]
+    fn test_exit_codes_section_lists_invalid_sparse_exclude() {
+        use clap::CommandFactory;
+
+        assert_eq!(
+            exit_codes::INVALID_SPARSE_EXCLUDE,
+            15,
+            "issue #487 gives a refused --sparse-exclude value exit code 15"
+        );
+
+        let long_about = Cli::command()
+            .get_long_about()
+            .expect("nwt sets long_about")
+            .to_string();
+        let (_, section) = long_about
+            .split_once("EXIT CODES:")
+            .expect("--help has an EXIT CODES section");
+        let entry = format!(
+            "{} Invalid --sparse-exclude directory",
+            exit_codes::INVALID_SPARSE_EXCLUDE
+        );
+        assert!(
+            section.lines().any(|line| line.trim() == entry),
+            "the EXIT CODES section of --help must list {entry:?}:\n{section}"
+        );
     }
 
     #[test]
