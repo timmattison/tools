@@ -1084,6 +1084,23 @@ impl PushUi {
         self.post(line, Life::Fading { posted_at: now })
     }
 
+    /// Put gsw's words about work in flight under the frame, until the next
+    /// message takes the row.
+    ///
+    /// The third door into the row. The `m` key posts through it while a
+    /// measurement runs, and the words tell the user that a press of `m` does
+    /// nothing now. That stays true until the run ends, so neither a key nor
+    /// the clock takes the notice away, and the notice shows no age. The
+    /// message that reports the end of the run replaces it, as does any other
+    /// message.
+    ///
+    /// A question and a push in flight own the row here, as at the other two
+    /// doors. The difference is what happens to the words then: they go
+    /// nowhere, and they never wait in [`PushUi::held`]. A held notice reaches
+    /// the row after the run it describes has ended, and it then says that a
+    /// run is in flight when none is.
+    pub(crate) fn post_progress(&mut self, _line: String) {}
+
     /// Put `line` on the row with `life`, or hold it until the row is free.
     ///
     /// The body both doors share, so the rule about who owns the row is
@@ -3530,6 +3547,206 @@ mod ui_tests {
                     "line {line:?} exceeds width {width}",
                 );
             }
+        }
+    }
+
+    /// What a progress notice says. The words belong to the `m` key, and the
+    /// tests below are about how long the notice stays and how it looks.
+    const PROGRESS: &str = "Running grind and grime against main…";
+
+    #[test]
+    fn a_progress_notice_goes_on_a_free_row_and_does_not_age() {
+        // The notice says that a press of `m` does nothing now. That stays
+        // true until the run ends, so the notice has no age to report and no
+        // reason to wake the loop.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        ui.post_progress(PROGRESS.to_string());
+
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now),
+            PROGRESS,
+            "the notice must reach the row, with no age after it",
+        );
+        assert_eq!(
+            ui.next_tick(),
+            None,
+            "a notice that does not age must not wake the loop",
+        );
+
+        // A status on the row is news, so the row is free for the notice.
+        let mut ui = PushUi::new(false);
+        let _ = ui.post_notice(NOTICE.to_string(), now);
+        ui.post_progress(PROGRESS.to_string());
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now),
+            PROGRESS,
+            "the notice must replace a status that is on the row",
+        );
+    }
+
+    #[test]
+    fn a_key_with_no_meaning_leaves_a_progress_notice_on_the_row() {
+        // A key that took the notice away would say that the run had ended,
+        // and a press of `m` would still do nothing.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        ui.post_progress(PROGRESS.to_string());
+
+        ui.dismiss();
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now),
+            PROGRESS,
+            "a key must not take the notice away",
+        );
+    }
+
+    #[test]
+    fn the_clock_leaves_a_progress_notice_on_the_row() {
+        // A rebase replay of a long branch can take longer than a status
+        // lives, and the run is still in flight for all of that time.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        ui.post_progress(PROGRESS.to_string());
+
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now + STATUS_LIFETIME * 3),
+            PROGRESS,
+            "the clock must not take the notice away, and the notice shows no age",
+        );
+        assert_eq!(ui.next_tick(), None, "the notice still does not age");
+    }
+
+    #[test]
+    fn a_progress_notice_is_drawn_like_a_fresh_status_for_as_long_as_it_stays() {
+        // The notice is gsw's own words about news that is still true. So it
+        // looks like a status at age zero, and not like git's words, which are
+        // red. It does not fade, because a fade says that the words are
+        // leaving.
+        //
+        // The color is in the escape bytes, so the rows must carry real ones.
+        // `testcolor::with_forced_ansi` makes them do so, as in the fade tests
+        // above. One cadence before the end of `STATUS_LIFETIME` is where a
+        // fading status is darkest and still on screen.
+        let start = t0();
+        let late = start + STATUS_LIFETIME - STATUS_CADENCE;
+
+        let (deep_fresh, deep_late, coarse_late) = testcolor::with_forced_ansi(|| {
+            let mut deep = PushUi::new(true);
+            deep.post_progress(PROGRESS.to_string());
+            let deep_fresh = deep.overlay(tall_pane(80), start).text();
+            let deep_late = deep.overlay(tall_pane(80), late).text();
+
+            let mut coarse = PushUi::new(false);
+            coarse.post_progress(PROGRESS.to_string());
+            let coarse_late = coarse.overlay(tall_pane(80), late).text();
+            (deep_fresh, deep_late, coarse_late)
+        });
+
+        assert_eq!(testcolor::strip_ansi(&deep_fresh), PROGRESS);
+        assert_eq!(
+            max_red_channel(&deep_fresh),
+            STATUS_RGB.0,
+            "the notice must be drawn in the color of a status at age zero, got {deep_fresh:?}",
+        );
+        assert_eq!(
+            max_red_channel(&deep_late),
+            STATUS_RGB.0,
+            "the notice must not fade, got {deep_late:?}",
+        );
+        assert_eq!(
+            coarse_late, PROGRESS,
+            "with no truecolor the notice stays plain, and it never dims",
+        );
+    }
+
+    #[test]
+    fn a_progress_notice_never_waits_for_a_busy_row() {
+        // A notice that reached the row after its run ended would say that a
+        // run is in flight when none is. So a push in flight or a question
+        // that owns the row takes the notice away for good.
+        let now = t0();
+
+        let mut ui = pushing(now);
+        ui.post_progress(PROGRESS.to_string());
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output: "error: failed to push some refs\n".to_string(),
+            },
+            now,
+        );
+        let seen = drained(&mut ui, now);
+        assert!(
+            !seen.iter().any(|text| text.contains(PROGRESS)),
+            "a notice posted during a push must never reach the row, got {seen:?}",
+        );
+
+        let mut ui = asking();
+        ui.post_progress(PROGRESS.to_string());
+        ui.cancel();
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now),
+            "",
+            "a notice posted during a question must never reach the row",
+        );
+
+        // The control. The same door on the row that is free now puts the
+        // notice there, so the two checks above are about a busy row, and not
+        // about a door that does nothing.
+        ui.post_progress(PROGRESS.to_string());
+        assert_eq!(painted(&mut ui, tall_pane(80), now), PROGRESS);
+    }
+
+    #[test]
+    fn the_next_message_replaces_a_progress_notice() {
+        // Each of these messages is newer news than the notice. The result of
+        // the run is one of them, and a key that asks a question is another.
+        let now = t0();
+        let replacements: [(&str, fn(&mut PushUi, Instant), &str); 4] = [
+            (
+                "a notice",
+                |ui, now| {
+                    let _ = ui.post_notice(NOTICE.to_string(), now);
+                },
+                NOTICE,
+            ),
+            (
+                "an error",
+                |ui, _| ui.post_error("branch main names no issue".to_string()),
+                "branch main names no issue",
+            ),
+            (
+                "another progress notice",
+                |ui, _| ui.post_progress("Running grind and grime against master…".to_string()),
+                "against master…",
+            ),
+            (
+                "a press of p",
+                |ui, now| ui.request(&snapshot(None), tall_pane(80), now),
+                CONFIRM_HINT,
+            ),
+        ];
+
+        for (what, replace, shows) in replacements {
+            let mut ui = PushUi::new(false);
+            ui.post_progress(PROGRESS.to_string());
+            assert_eq!(
+                painted(&mut ui, tall_pane(80), now),
+                PROGRESS,
+                "the notice must be on the row before {what}",
+            );
+
+            replace(&mut ui, now);
+            let text = painted(&mut ui, tall_pane(80), now);
+            assert!(
+                text.contains(shows),
+                "{what} must take the row, got {text:?}"
+            );
+            assert!(
+                !text.contains(PROGRESS),
+                "{what} must replace the progress notice, got {text:?}",
+            );
         }
     }
 }
