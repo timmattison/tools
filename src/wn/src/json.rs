@@ -15,8 +15,8 @@
 //!
 //! # What it reads
 //!
-//! `streams`, and nothing else. Each element of the `order` array of a stream
-//! is one step:
+//! `streams` for the answer, and `generated` and `repo` beside it. Each element
+//! of the `order` array of a stream is one step:
 //!
 //! * `issue` is the issue number.
 //! * `pr`, when it stands, is the pull request that does the work of that
