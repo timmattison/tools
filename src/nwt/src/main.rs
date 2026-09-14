@@ -500,6 +500,76 @@ mod exit_codes {
 /// With 10 attempts, the probability of failure when <2000 worktrees exist is negligible.
 const MAX_ATTEMPTS: u32 = 10;
 
+/// The reason `nwt` refuses a `--sparse-exclude` value.
+///
+/// Each variant keeps the value as the user typed it, so the message names what
+/// the user gave and not the normalized form. `nwt` refuses the value before it
+/// makes anything: no directory, no branch, and no `worktrees/<name>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "wired into main by the next slice of issue #487")
+)]
+enum SparseExcludeError {
+    /// The value names no directory. It is empty, or it holds only `.` and `/`.
+    Empty { raw: String },
+    /// The value starts at the root of the file system. A sparse pattern is
+    /// relative to the root of the repository.
+    Absolute { raw: String },
+    /// The value holds a `..` component, so it can point out of the repository.
+    ParentComponent { raw: String },
+}
+
+impl fmt::Display for SparseExcludeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("invalid --sparse-exclude value")
+    }
+}
+
+/// One tracked directory that `--sparse-exclude` keeps out of a new worktree.
+///
+/// The value is relative to the root of the repository, and `/` separates its
+/// components. It has no empty component, no `.` component, no `..` component,
+/// and no trailing `/`. Thus `heavy`, `heavy/`, and `./heavy` give the same
+/// value, and two flags that name one directory are equal.
+///
+/// The field is private, and [`SparseExcludeDir::parse`] is the only
+/// constructor. So every value that reaches git obeys these rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "wired into main by the next slice of issue #487")
+)]
+struct SparseExcludeDir(String);
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "wired into main by the next slice of issue #487")
+)]
+impl SparseExcludeDir {
+    /// Parse one `--sparse-exclude` value and normalize it.
+    ///
+    /// The check is lexical only. It does not ask git whether the directory is
+    /// tracked.
+    ///
+    /// # Errors
+    ///
+    /// - [`SparseExcludeError::Absolute`] when `raw` starts at the root of the
+    ///   file system.
+    /// - [`SparseExcludeError::ParentComponent`] when `raw` holds a `..`
+    ///   component.
+    /// - [`SparseExcludeError::Empty`] when nothing is left after the empty and
+    ///   `.` components are removed.
+    fn parse(raw: &str) -> Result<Self, SparseExcludeError> {
+        Ok(Self(raw.to_owned()))
+    }
+
+    /// The normalized path, relative to the root of the repository.
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Create a new git worktree with a Docker-style random name.
 ///
 /// This tool simplifies creating git worktrees by automatically generating
@@ -3114,6 +3184,95 @@ mod tests {
             result.is_err(),
             "Should fail when both --shell-setup and --tmux are provided"
         );
+    }
+
+    /// Values that name one directory parse to one normalized value.
+    ///
+    /// A trailing `/`, a leading `./`, and a doubled `/` do not change the
+    /// directory. Multi-byte names stay intact, because the parse splits on `/`
+    /// and never on a byte offset.
+    #[test]
+    fn sparse_exclude_dir_parse_normalizes_a_relative_path() {
+        let cases = [
+            ("heavy", "heavy"),
+            ("heavy/", "heavy"),
+            ("assets/video/", "assets/video"),
+            ("./heavy", "heavy"),
+            ("a//b", "a/b"),
+            ("日本語/🎉", "日本語/🎉"),
+            ("café", "café"),
+        ];
+
+        for (raw, expected) in cases {
+            let dir = SparseExcludeDir::parse(raw)
+                .unwrap_or_else(|e| panic!("{raw:?} must parse, got {e:?}"));
+            assert_eq!(dir.as_str(), expected, "the normalized value of {raw:?}");
+        }
+
+        assert_eq!(
+            SparseExcludeDir::parse("heavy"),
+            SparseExcludeDir::parse("heavy/"),
+            "'heavy' and 'heavy/' are the same flag"
+        );
+    }
+
+    /// Values that point out of the repository, or at nothing, are refused.
+    ///
+    /// Each case names the variant it gets, so a value refused for the wrong
+    /// reason fails too.
+    #[test]
+    fn sparse_exclude_dir_parse_refuses_a_path_outside_the_repository() {
+        let absolute = |raw: &str| SparseExcludeError::Absolute {
+            raw: raw.to_owned(),
+        };
+        let parent = |raw: &str| SparseExcludeError::ParentComponent {
+            raw: raw.to_owned(),
+        };
+        let empty = |raw: &str| SparseExcludeError::Empty {
+            raw: raw.to_owned(),
+        };
+
+        let cases = [
+            ("/abs", absolute("/abs")),
+            ("..", parent("..")),
+            ("a/../b", parent("a/../b")),
+            ("../x", parent("../x")),
+            ("", empty("")),
+            (".", empty(".")),
+            ("./", empty("./")),
+        ];
+
+        for (raw, expected) in cases {
+            assert_eq!(
+                SparseExcludeDir::parse(raw),
+                Err(expected),
+                "the refusal of {raw:?}"
+            );
+        }
+    }
+
+    /// The message of a refusal names the value the user typed and the reason.
+    #[test]
+    fn sparse_exclude_error_names_the_value_and_the_reason() {
+        let cases = [
+            ("/abs", "absolute path"),
+            ("a/../b", "'..' component"),
+            ("./", "names no directory"),
+        ];
+
+        for (raw, reason) in cases {
+            let message = SparseExcludeDir::parse(raw)
+                .expect_err("the value must be refused")
+                .to_string();
+            assert!(
+                message.contains(&format!("--sparse-exclude '{raw}'")),
+                "the message must name the value {raw:?}: {message}"
+            );
+            assert!(
+                message.contains(reason),
+                "the message must give the reason {reason:?}: {message}"
+            );
+        }
     }
 
     // Unix-specific tests for shell command execution.
