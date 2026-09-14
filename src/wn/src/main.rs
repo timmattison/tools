@@ -7,11 +7,12 @@
 //!
 //! `wn` puts the two together. It reads the chain, asks GitHub about every
 //! number in it with one query, prints one row for each with its state and its
-//! title, and names the first one that is still open.
+//! title, and names the first one that is still open. Each round of blockers
+//! that stand nowhere in the chain costs one query more.
 //!
 //! A plan of parallel work is a second shape of input. It holds several chains
-//! side by side, one for each stream, and `wn` answers the whole page with one
-//! query as well. The shape of the text says which reader takes it, so no flag
+//! side by side, one for each stream, and `wn` answers every number of the page
+//! with one query as well. The shape of the text says which reader takes it, so no flag
 //! and no subcommand stands between the reader and the answer.
 //!
 //! A plan drawn as a picture is the third shape. It says the one thing a chain
@@ -33,6 +34,12 @@
 //! code fence around the document comes off before that character is read,
 //! because a run of a model at a high level of effort writes such a fence.
 //!
+//! Whatever the shape, the answer holds the order to what the issues say. The
+//! body of an issue names its blockers under `Blocked by`, and a plan that puts
+//! an issue before its own blocker is refused rather than answered. A plan once
+//! put #170 before #168 while #170 said #168 blocked it, and the reader it sent
+//! to #170 found that out by opening the issue.
+//!
 //! The reader who has no plan at all has a repository full of open issues
 //! instead. That plan is one `claude` run away, and `wn` already knows the
 //! repository, so `wn` builds it: the run is the fourth input, after the
@@ -41,8 +48,10 @@
 //! clipboard is the cache the next run reads through the clipboard input that
 //! already stands.
 
+mod blocked_by;
 mod build;
 mod chain;
+mod declared;
 mod envelope;
 mod github;
 mod graph;
@@ -65,9 +74,10 @@ use colored::Colorize;
 use termwindow::{effective_terminal_width, should_force_colors};
 use thiserror::Error;
 
-use crate::chain::parse_chain;
+use crate::chain::{parse_chain, IssueNumber};
+use crate::declared::{LeftOut, Settled};
 use crate::github::Repo;
-use crate::report::Report;
+use crate::report::{Report, States};
 
 /// The columns `wn` removes from the window on top of the one column
 /// [`effective_terminal_width`] always keeps empty. `wn` draws nothing beside
@@ -161,6 +171,13 @@ one character, because a text whose first character that is not a space is `{` i
 and nothing else `wn` reads starts that way. A Markdown code fence around the document comes off \
 before that character is read, because a run of a model at a high level of effort writes one. A \
 document that does not parse is an error and never a walk on to the next reader.\n\n\
+Every shape is held to what its own issues say comes first. The query asks for the body of each \
+issue, and a list item under a `Blocked by` or `Depends on` heading, or a block that starts with \
+that label, names a blocker. A plan that puts an issue before its own blocker is refused with the \
+pair named, because an answer to it sends somebody to work that cannot start. A blocker the plan \
+leaves out joins the answer instead, and a note says the issue named that wait and the plan did \
+not. A blocker that stands nowhere in the plan costs one more query, and a finished one changes \
+nothing.\n\n\
 Quote the chain. A shell reads an unquoted `#` as the start of a comment.\n\n\
 The chain comes out of the first input that holds one: the argument, then standard input, then \
 the system clipboard, then a run of claude that builds a plan. So `wn` alone answers the chain \
@@ -352,24 +369,13 @@ fn run(
     let reading = reading.map_err(|err| chain.blame(err))?;
     let repo = repo_of(cli)?;
 
-    let (code, age) = match &reading {
-        // Only a plan written as JSON carries the moment it was built, so only
-        // this arm asks for a note about the age of the plan.
-        Reading::Document(document) => (
-            answer_graph(document.graph(), &repo, width, start)?,
-            document.age_note(Utc::now()),
-        ),
-        Reading::Plan(plan) => (answer_plan(plan, &repo, width, start)?, None),
-        Reading::Picture(graph) => (answer_graph(graph, &repo, width, start)?, None),
-        Reading::Chain(numbers) => {
-            let entries = github::fetch(&repo, numbers)?;
-            let report = Report::build(entries);
-            println!(
-                "{}",
-                render::render(&report, &repo.to_string(), width, start)
-            );
-            (exit_status(report.missing().is_empty()), None)
-        }
+    let code = answer(&reading, &repo, width, start)?;
+    // Only a plan written as JSON carries the moment it was built, so only it
+    // earns a note about the age of the plan.
+    let age = if let Reading::Document(document) = &reading {
+        document.age_note(Utc::now())
+    } else {
+        None
     };
 
     for note in age.into_iter().chain(kept) {
@@ -538,32 +544,90 @@ fn repo_of(cli: &Cli) -> Result<Repo> {
     }
 }
 
-/// Ask GitHub about the whole plan, print one block for each stream, and give
-/// the status the run exits with.
+/// Ask GitHub about the work `reading` names, hold its order to what the issues
+/// say comes first, print the answer, and give the status the run exits with.
 ///
-/// One query answers the plan. [`plan::Plan::numbers`] gives every number of
-/// every stream once, so a number that stands in two streams costs one alias
-/// of the query and is reported in both streams. A query for each stream would
-/// spend one round trip and one unit of the rate limit for each of them, and
-/// could give two answers for one number.
+/// One query answers the whole text. Each reading gives every number it names
+/// once, so a number that stands in two places costs one alias of the query
+/// and is reported in both. A query for each stream would spend one round trip
+/// and one unit of the rate limit for each of them, and could give two answers
+/// for one number. The body of each issue comes with that query, and a blocker
+/// that stands nowhere in the text costs one query more for each round of
+/// [`declared::settle`].
+///
+/// Every shape of input goes through that function. A text that agrees with
+/// its issues is answered by the reader of its own shape, as it always was. A
+/// text that leaves a blocker out is answered as a graph, because the blocker
+/// joins one step to another, and that is what a graph says and a chain or a
+/// set of streams that stand apart does not.
 ///
 /// # Errors
 ///
 /// Fails for the reasons [`github::fetch`] fails: `gh` is not installed, the
-/// repository cannot be read, or GitHub could not answer for one number.
+/// repository cannot be read, or GitHub could not answer for one number. Fails
+/// with [`declared::OrderError`] for a text that puts an issue before its own
+/// blocker, and for a plan whose own order holds a cycle once the issues add a
+/// wait to it.
+fn answer(reading: &Reading, repo: &Repo, width: usize, start: &StartCommand) -> Result<ExitCode> {
+    let streams;
+    let line;
+    // `each_stream` holds the steps of each stream the reader of streams
+    // answers on its own, and nothing for a text that reader does not answer.
+    let (graph, numbers, each_stream): (_, _, Vec<&[plan::Step]>) = match reading {
+        Reading::Document(document) => (document.graph(), document.graph().numbers(), Vec::new()),
+        Reading::Picture(graph) => (graph, graph.numbers(), Vec::new()),
+        Reading::Plan(plan) => {
+            streams = graph::of_streams(plan);
+            let each_stream = plan
+                .streams()
+                .iter()
+                .map(crate::plan::Stream::steps)
+                .collect();
+            (&streams, plan.numbers(), each_stream)
+        }
+        // A chain is one line of its graph, so a walk of that graph already
+        // puts a blocker before the step in that line.
+        Reading::Chain(chain) => {
+            line = graph::of_chain(chain);
+            (&line, chain.clone(), Vec::new())
+        }
+    };
+
+    let fetch = |wanted: &[IssueNumber]| github::fetch(repo, wanted);
+    let states = States::of(fetch(&numbers)?);
+    Ok(
+        match declared::settle(graph, &each_stream, states, &fetch)? {
+            Settled::Agrees(states) => match reading {
+                Reading::Plan(plan) => answer_plan(plan, &states, repo, width, start),
+                Reading::Chain(chain) => answer_chain(chain, &states, repo, width, start),
+                Reading::Document(_) | Reading::Picture(_) => {
+                    answer_graph(graph, &states, Vec::new(), repo, width, start)
+                }
+            },
+            Settled::Adds {
+                graph,
+                states,
+                left_out,
+            } => answer_graph(&graph, &states, left_out, repo, width, start),
+        },
+    )
+}
+
+/// Print one block for each stream of `plan`, and give the status the run
+/// exits with.
 fn answer_plan(
     plan: &plan::Plan,
+    states: &States,
     repo: &Repo,
     width: usize,
     start: &StartCommand,
-) -> Result<ExitCode> {
-    let states = report::States::of(github::fetch(repo, &plan.numbers())?);
+) -> ExitCode {
     let streams: Vec<render::StreamReport> = plan
         .streams()
         .iter()
         .map(|stream| render::StreamReport {
             label: stream.label().to_string(),
-            report: Report::of_steps(stream.steps(), &states),
+            report: Report::of_steps(stream.steps(), states),
         })
         .collect();
     println!(
@@ -571,43 +635,54 @@ fn answer_plan(
         render::render_plan(&streams, &repo.to_string(), width, start)
     );
 
-    Ok(exit_status(
+    exit_status(
         streams
             .iter()
             .all(|stream| stream.report.missing().is_empty()),
-    ))
+    )
 }
 
-/// Ask GitHub about the whole picture, print the rows, and give the status the
+/// Print the rows of one chain and the issue to start, and give the status the
 /// run exits with.
-///
-/// One query answers the picture, as one query answers a chain and a plan.
-/// [`graph::Graph::numbers`] gives every number of the picture once, so a step
-/// that stands in two places costs one alias of the query and is reported in
-/// both of them.
+fn answer_chain(
+    chain: &[IssueNumber],
+    states: &States,
+    repo: &Repo,
+    width: usize,
+    start: &StartCommand,
+) -> ExitCode {
+    let report = Report::build(chain.iter().map(|number| states.entry(*number)).collect());
+    println!(
+        "{}",
+        render::render(&report, &repo.to_string(), width, start)
+    );
+    exit_status(report.missing().is_empty())
+}
+
+/// Print the rows of a graph, the notes they earn, and every issue somebody can
+/// start now, and give the status the run exits with.
 ///
 /// The answer names every step somebody can start now, and not one of them.
 /// Two streams that join are two people who work at the same time, which is
 /// the whole reason somebody draws the picture.
 ///
-/// # Errors
-///
-/// Fails for the reasons [`github::fetch`] fails: `gh` is not installed, the
-/// repository cannot be read, or GitHub could not answer for one number.
+/// `left_out` names the blockers the text did not write and the issues did, so
+/// a row that waits for one of them says where the wait came from.
 fn answer_graph(
     graph: &graph::Graph,
+    states: &States,
+    left_out: Vec<LeftOut>,
     repo: &Repo,
     width: usize,
     start: &StartCommand,
-) -> Result<ExitCode> {
-    let states = report::States::of(github::fetch(repo, &graph.numbers())?);
-    let report = Report::of_graph(graph, &states);
+) -> ExitCode {
+    let report = Report::of_graph(graph, states).with_left_out(left_out);
     println!(
         "{}",
         render::render_graph(&report, &repo.to_string(), width, start)
     );
 
-    Ok(exit_status(report.missing().is_empty()))
+    exit_status(report.missing().is_empty())
 }
 
 /// The status a run that printed an answer exits with.

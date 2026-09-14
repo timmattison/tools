@@ -204,7 +204,7 @@ impl Plan {
     /// The number of a step comes before the number the step closes, because
     /// the pull request is the work and the issue is what the work finishes.
     /// A number that stands in two streams arrives once, so one query to
-    /// GitHub answers the whole plan.
+    /// GitHub answers every number of the plan.
     ///
     /// The chain of a stream comes first and the work it waits for after it.
     /// The work a stream waits for is sometimes the work of no stream of the
@@ -2398,10 +2398,10 @@ Notes: Disjoint.";
 
     #[test]
     fn the_numbers_of_a_plan_hold_a_blocker_that_stands_in_no_order_field() {
-        // One query answers the whole plan, so every number of the plan is in
-        // this list. A blocker is sometimes the work of no stream of the plan,
-        // and a reader that walks the chains alone leaves that number out. The
-        // answer then says nothing about the work a stream waits for.
+        // The first query asks about every number of the plan, and this list
+        // holds those numbers. A blocker is sometimes the work of no stream of
+        // the plan, and a reader that walks the chains alone leaves that number
+        // out. The answer then says nothing about the work a stream waits for.
         assert_eq!(
             numbers_of(&plan_of(&table_that_waits_for("#96"))),
             vec![1, 96]

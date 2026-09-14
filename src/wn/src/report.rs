@@ -25,8 +25,10 @@
 //! link nobody wrote, and nothing else would say so.
 //!
 //! A plan also names one number in two streams. [`States`] holds the answer
-//! of GitHub for each number once, so one query answers the whole plan and
-//! every stream that names a number reads the same state for it.
+//! of GitHub for each number once, so one query answers every number the plan
+//! names and every stream that names a number reads the same state for it.
+//! Each round of blockers that stand nowhere in the plan costs one query more,
+//! and its answers join the same [`States`].
 //!
 //! # One report answers a chain, a stream, and a graph
 //!
@@ -49,6 +51,7 @@
 use std::collections::HashMap;
 
 use crate::chain::IssueNumber;
+use crate::declared::LeftOut;
 use crate::graph::Graph;
 use crate::plan::Step;
 
@@ -119,6 +122,13 @@ pub struct Entry {
     /// The issue this work closes, when the step names one. `None` for every
     /// step of a chain, because a chain writes one number for each step.
     pub closes: Option<Closes>,
+    /// The numbers the body of the issue names as work that comes before it,
+    /// with its own number left out. [`crate::blocked_by::read`] states which
+    /// forms count.
+    ///
+    /// Empty for a pull request, whose body `wn` does not ask for, and for a
+    /// number GitHub gave no answer for.
+    pub blocked_by: Vec<IssueNumber>,
 }
 
 impl Entry {
@@ -139,10 +149,11 @@ impl Entry {
 
 /// What GitHub says about each number of a plan, keyed by the number.
 ///
-/// A plan asks GitHub once for the whole page of text. One number stands in
-/// two streams, and two queries for it cost twice and can give two answers. So
-/// the answers arrive as one list, and each stream reads the numbers it names
-/// out of this.
+/// One query answers every number the plan names. Each round of blockers that
+/// stand nowhere in the plan costs one query more, and its answers join the
+/// same `States`. One number stands in two streams, and two queries for it
+/// cost twice and can give two answers. So the answers arrive as one list, and
+/// each stream reads the numbers it names out of this.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct States {
     /// The answer of GitHub for each number it answered for.
@@ -177,7 +188,26 @@ impl States {
             title: String::new(),
             status: Status::Missing,
             closes: None,
+            blocked_by: Vec::new(),
         })
+    }
+
+    /// Whether GitHub was asked about `number` and answered.
+    ///
+    /// [`entry`](Self::entry) gives a missing entry for a number nobody asked
+    /// about and for a number the repository does not have alike. This parts
+    /// the two, for a caller that must ask about a number before it reads one.
+    #[must_use]
+    pub fn knows(&self, number: IssueNumber) -> bool {
+        self.entries.contains_key(&number)
+    }
+
+    /// Hold what GitHub said about each number of `entries` as well.
+    ///
+    /// A number already held takes the later answer, as [`of`](Self::of) does.
+    pub fn extend(&mut self, entries: Vec<Entry>) {
+        self.entries
+            .extend(entries.into_iter().map(|entry| (entry.number, entry)));
     }
 }
 
@@ -201,6 +231,10 @@ pub struct Report {
     /// every position of a chain and of a stream, because a reader of one line
     /// of work reads the line above the row and needs no list.
     waits: Vec<Vec<IssueNumber>>,
+    /// The steps that wait for work the plan did not say they wait for, and
+    /// that work. Empty unless [`crate::declared::settle`] added a blocker, so
+    /// the note it earns names where a wait came from.
+    left_out: Vec<LeftOut>,
 }
 
 impl Report {
@@ -227,6 +261,7 @@ impl Report {
             ready: next.into_iter().collect(),
             out_of_order,
             waits,
+            left_out: Vec::new(),
         }
     }
 
@@ -302,7 +337,21 @@ impl Report {
             ready,
             out_of_order,
             waits,
+            left_out: Vec::new(),
         }
+    }
+
+    /// This report, with the blockers the plan left out and the issues named.
+    #[must_use]
+    pub fn with_left_out(self, left_out: Vec<LeftOut>) -> Self {
+        Self { left_out, ..self }
+    }
+
+    /// The steps that wait for work the plan did not say they wait for, in
+    /// the order they were found.
+    #[must_use]
+    pub fn left_out(&self) -> &[LeftOut] {
+        &self.left_out
     }
 
     /// The chain, in the order it was written.
@@ -449,6 +498,7 @@ mod tests {
             title: format!("title of {number}"),
             status,
             closes: None,
+            blocked_by: Vec::new(),
         }
     }
 

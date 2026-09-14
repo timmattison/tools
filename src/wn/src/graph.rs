@@ -1083,6 +1083,24 @@ impl Graph {
             .map_or(NO_POSITIONS, Vec::as_slice)
     }
 
+    /// Every edge of the graph, as the number of the step before and the number
+    /// of the step after, in the order of the steps after.
+    ///
+    /// [`of_parts`] takes edges in this shape, so a caller that adds an edge to
+    /// a graph builds the new graph out of these and the edge it adds.
+    #[must_use]
+    pub(crate) fn edges(&self) -> Vec<(IssueNumber, IssueNumber)> {
+        self.before
+            .iter()
+            .zip(&self.steps)
+            .flat_map(|(before, later)| {
+                before
+                    .iter()
+                    .map(move |&earlier| (self.steps[earlier].number(), later.number()))
+            })
+            .collect()
+    }
+
     /// The positions of the steps that come after the step at each position.
     ///
     /// A [`Graph`] holds the steps before each step, because that is the
@@ -1227,9 +1245,9 @@ impl Graph {
     /// The number of a step comes before the number the step closes, because
     /// the pull request is the work and the issue is what the work finishes.
     /// A number that stands twice in the picture is one node, so it arrives
-    /// once and one query to GitHub answers the whole picture. This is the
-    /// rule `Plan::numbers` states for a plan, and a graph states it the same
-    /// way so one query answers either shape.
+    /// once and one query to GitHub answers every number of the picture. This
+    /// is the rule `Plan::numbers` states for a plan, and a graph states it the
+    /// same way so one query answers the numbers of either shape.
     #[must_use]
     pub fn numbers(&self) -> Vec<IssueNumber> {
         let mut numbers: Vec<IssueNumber> = Vec::new();
@@ -1480,6 +1498,45 @@ pub(crate) fn of_parts(
     Graph::of_edges(steps, edges)
         .refuse_cycle()
         .map(Graph::in_topological_order)
+}
+
+/// The graph a plan of streams draws, with its steps in the order of the plan
+/// and no cycle refused.
+///
+/// [`of_plan`] claims no graph for a plan whose streams stand apart, because
+/// the reader of streams answers it. [`crate::declared::settle`] still needs
+/// the edges of such a plan, to hold them to what the issues say comes first,
+/// so this builds them whatever the plan draws. It refuses nothing, because a
+/// plan can name one number in two orders. The reader of streams answers such
+/// a plan while the issues add no wait to it and no order puts an issue before
+/// its own blocker. Once the issues add a wait, the answer must be a graph, and
+/// a graph cannot hold the cycle of the two orders. So the run refuses, and the
+/// refusal names the cycle and the wait.
+pub(crate) fn of_streams(plan: &Plan) -> Graph {
+    let ordered: Vec<Step> = plan
+        .streams()
+        .iter()
+        .flat_map(|stream| stream.steps())
+        .copied()
+        .collect();
+    let work = Work::of(&ordered);
+    let mut edges = chains_of(plan);
+    edges.extend(crossings_of(plan, &work));
+    Graph::of_edges(nodes_of(plan, &work), &edges)
+}
+
+/// The graph one chain draws: each number comes before the number after it.
+///
+/// A chain holds each number once, because [`crate::chain::parse_chain`] keeps
+/// the first place of a number and drops the rest, so it draws no cycle.
+pub(crate) fn of_chain(numbers: &[IssueNumber]) -> Graph {
+    let steps: Vec<Step> = numbers
+        .iter()
+        .map(|number| Step::new(*number, None))
+        .collect();
+    let edges: Vec<(IssueNumber, IssueNumber)> =
+        numbers.windows(2).map(|pair| (pair[0], pair[1])).collect();
+    Graph::of_edges(steps, &edges)
 }
 
 /// The step that does the work of every number a plan names.
@@ -2489,10 +2546,11 @@ Notes: Disjoint.";
 
     #[test]
     fn the_numbers_of_a_graph_name_each_one_once_and_the_work_first() {
-        // One query answers the whole picture, so this list is what the query
-        // asks about. `#2` stands twice in the picture and is one node, so it
-        // is asked about one time. A pair gives two numbers, the pull request
-        // ahead of the issue it closes, because the pull request is the work.
+        // The first query asks about every number of the picture, and this list
+        // is what it asks about. `#2` stands twice in the picture and is one
+        // node, so it is asked about one time. A pair gives two numbers, the
+        // pull request ahead of the issue it closes, because the pull request
+        // is the work.
         let graph = graph_of(
             "\
 #1 ──→ #2 ──┐
@@ -2652,7 +2710,7 @@ Notes: Disjoint.";
     fn a_blocker_that_stands_in_no_order_field_is_a_node_of_its_own() {
         // A blocker the repository does not have must reach the rows and turn
         // the run red, and a row of the answer is the only place that says so.
-        // So the number is a node, and the one query names it.
+        // So the number is a node, and the first query names it.
         let graph = graph_of_plan(&table_of(&[("S1", "#91", "#96")]));
         assert_eq!(nodes(&graph), vec![91, 96]);
         assert_eq!(edges(&graph), vec![(96, 91)]);
