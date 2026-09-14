@@ -577,6 +577,10 @@ mod tests {
             numbers: &[26],
         },
         Case { name: "several numbers in one item", body: "## Blocked by\n\n- #3, #4 and #5\n", numbers: &[3, 4, 5] },
+        Case { name: "several numbers with a serial comma", body: "## Blocked by\n\n- #3, #4, and #5\n", numbers: &[3, 4, 5] },
+        Case { name: "two numbers with a comma and the word and", body: "## Blocked by\n\n- #3, and #4\n", numbers: &[3, 4] },
+        Case { name: "a bold label with a serial comma", body: "**Blocked by:** #11, #12, and #13.\n", numbers: &[11, 12, 13] },
+        Case { name: "a comma and the word and before prose", body: "## Blocked by\n\n- #3, and it lands first\n", numbers: &[3] },
         Case { name: "a bare number as a paragraph", body: "## Blocked by\n\n#168\n", numbers: &[168] },
         Case {
             name: "a nested list item indented by four spaces",
