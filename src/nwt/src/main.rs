@@ -529,6 +529,9 @@ enum SparseExcludeError {
         dir: SparseExcludeDir,
         at_ref: String,
     },
+    /// Git cannot read `at_ref`, so it cannot tell what the ref tracks. This is
+    /// a bad ref and not a bad directory. `stderr` holds what git wrote.
+    UnreadableRef { at_ref: String, stderr: String },
 }
 
 impl fmt::Display for SparseExcludeError {
@@ -564,6 +567,30 @@ impl fmt::Display for SparseExcludeError {
                 dir.as_str(),
                 at_ref.escape_debug()
             ),
+            Self::UnreadableRef { at_ref, stderr } => write!(
+                f,
+                "git cannot read the ref '{}' to check --sparse-exclude: {stderr}",
+                at_ref.escape_debug()
+            ),
+        }
+    }
+}
+
+impl SparseExcludeError {
+    /// The exit code of `nwt` for this refusal.
+    ///
+    /// A refused directory exits [`exit_codes::INVALID_SPARSE_EXCLUDE`]. A ref
+    /// that git cannot read exits [`exit_codes::WORKTREE_FAILED`], because
+    /// `git worktree add` fails for the same ref without the flag, and that is
+    /// the code such a failure gets.
+    fn exit_code(&self) -> i32 {
+        match self {
+            Self::Empty { .. }
+            | Self::Absolute { .. }
+            | Self::ParentComponent { .. }
+            | Self::ControlCharacter { .. }
+            | Self::NotTrackedDirectory { .. } => exit_codes::INVALID_SPARSE_EXCLUDE,
+            Self::UnreadableRef { .. } => exit_codes::WORKTREE_FAILED,
         }
     }
 }
@@ -722,7 +749,8 @@ const SPARSE_DEFAULT_REF: &str = "HEAD";
 /// The command is
 /// `git --literal-pathspecs ls-tree -z -d --name-only <at_ref> -- <dir>`, in
 /// `repo_root`. Git exits 0 for a directory, for a file, and for a missing
-/// path, so only the output gives the answer:
+/// path, so only the output gives the answer. Git exits with a status that is
+/// not zero only when it cannot read `at_ref`.
 ///
 /// - A directory prints its own path.
 /// - A file and a missing path print nothing.
@@ -731,8 +759,19 @@ const SPARSE_DEFAULT_REF: &str = "HEAD";
 ///
 /// `-z` ends each entry with a NUL and stops git from quoting a path that
 /// holds a `\`, a `"`, or a character that is not ASCII. `--literal-pathspecs`
-/// stops git from reading `*`, `?`, or `[` in `dir` as a glob.
-fn tracks_directory(repo_root: &Path, at_ref: &str, dir: &SparseExcludeDir) -> bool {
+/// makes sure that git never reads `*`, `?`, or `[` in `dir` as a glob. The
+/// `ls-tree` of git 2.55 does not read a glob without it either, so this flag
+/// is protection against a later git, and no test shows a difference today.
+///
+/// # Errors
+///
+/// Returns [`SparseExcludeError::UnreadableRef`] when git exits with a status
+/// that is not zero. Git does that for a ref that names no commit and no tree.
+fn tracks_directory(
+    repo_root: &Path,
+    at_ref: &str,
+    dir: &SparseExcludeDir,
+) -> Result<bool, SparseExcludeError> {
     let mut ls_tree = production_git_command(repo_root);
     ls_tree.args([
         "--literal-pathspecs",
@@ -746,13 +785,20 @@ fn tracks_directory(repo_root: &Path, at_ref: &str, dir: &SparseExcludeDir) -> b
     ]);
 
     let Ok(output) = ls_tree.output() else {
-        return false;
+        return Ok(false);
     };
 
-    output
+    if !output.status.success() {
+        return Err(SparseExcludeError::UnreadableRef {
+            at_ref: at_ref.to_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
+    }
+
+    Ok(output
         .stdout
         .split(|byte| *byte == b'\0')
-        .any(|entry| entry == dir.as_str().as_bytes())
+        .any(|entry| entry == dir.as_str().as_bytes()))
 }
 
 /// Parse every `--sparse-exclude` value, and make sure that git tracks each
@@ -778,6 +824,7 @@ fn tracks_directory(repo_root: &Path, at_ref: &str, dir: &SparseExcludeDir) -> b
 ///   lexical rules refuse.
 /// - [`SparseExcludeError::NotTrackedDirectory`] for the first directory that
 ///   git does not track as a directory at the ref.
+/// - [`SparseExcludeError::UnreadableRef`] when git cannot read the ref.
 fn resolve_sparse_excludes(
     repo_root: &Path,
     checkout_ref: Option<&str>,
@@ -787,7 +834,7 @@ fn resolve_sparse_excludes(
     let at_ref = checkout_ref.unwrap_or(SPARSE_DEFAULT_REF);
 
     for dir in &dirs {
-        if !tracks_directory(repo_root, at_ref, dir) {
+        if !tracks_directory(repo_root, at_ref, dir)? {
             return Err(SparseExcludeError::NotTrackedDirectory {
                 dir: dir.clone(),
                 at_ref: at_ref.to_owned(),
@@ -2105,7 +2152,9 @@ fn main() {
 
     // Refuse a bad `--sparse-exclude` value before anything is made, so a
     // refusal leaves no directory, no branch, and no `worktrees/<name>`. Git
-    // checks each directory at the ref that the new worktree checks out.
+    // checks each directory at the ref that the new worktree checks out. A
+    // ref that git cannot read exits like a failed add, and not like a bad
+    // directory.
     let sparse_excludes = match resolve_sparse_excludes(
         &repo_root,
         config.checkout.as_deref(),
@@ -2114,7 +2163,7 @@ fn main() {
         Ok(dirs) => dirs,
         Err(e) => {
             error!(config.quiet, "Error: {e}");
-            exit(exit_codes::INVALID_SPARSE_EXCLUDE);
+            exit(e.exit_code());
         }
     };
 
