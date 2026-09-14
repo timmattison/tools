@@ -39,7 +39,9 @@
 //! no blocker. A paragraph that wraps is one block, so a line that
 //! happens to start with a number is still inside that prose. A number struck
 //! through, as in `~~#21~~`, counts for nothing, because an author strikes a
-//! blocker through to take it back.
+//! blocker through to take it back. The tildes of a block pair as GitHub pairs
+//! them ([`Strikes`] gives the rule and the Markdown it leaves out), so the item
+//! `~~#21 ~~ #22` starts with tildes and names no blocker.
 //!
 //! This reader acts on what it reads: a blocker it names can refuse a plan. So a
 //! phrase in the middle of a sentence is not read, because a line of a tracker
@@ -50,6 +52,7 @@
 
 use crate::chain::IssueNumber;
 use crate::github::Repo;
+use crate::strike::Strikes;
 
 /// The labels that name work which comes before the issue. A heading carries
 /// one to open a section, and a block carries one at its start. They are ASCII,
@@ -78,10 +81,6 @@ const COMMENT_OPEN: &str = "<!--";
 
 /// The text that closes an HTML comment.
 const COMMENT_CLOSE: &str = "-->";
-
-/// The most tildes that open a span struck through. One more opens a code fence
-/// at the start of a line, and it strikes nothing inside a block.
-const MAX_STRIKE_MARKS: usize = 2;
 
 /// The deepest level of a heading.
 const MAX_HEADING_LEVEL: usize = 6;
@@ -486,9 +485,8 @@ fn is_word(c: char) -> bool {
 /// (arrows, shapes, dingbats, the older emoji), U+1F000 to U+1FAFF (the newer
 /// emoji), the zero width joiner, and the emoji selector.
 ///
-/// A tilde is not decoration. It opens a span struck through, and
-/// [`after_strike`] reads past that span, so a struck label or number names
-/// nothing.
+/// A tilde is not decoration. It can open a span struck through, and
+/// [`read_past`] reads past that span, so a struck label or number names nothing.
 fn is_decoration(c: char) -> bool {
     c.is_whitespace()
         || matches!(
@@ -520,6 +518,7 @@ fn after_label(text: &str) -> Option<&str> {
 /// Whether the text of a block starts with a label, and the numbers at its
 /// start. `repo` is the repository of the issue.
 fn head_of(text: &str, repo: &Repo) -> (bool, Vec<IssueNumber>) {
+    let strikes = Strikes::of(text);
     let mut rest = undecorated(without_task_box(text));
     let labelled = match after_label(rest) {
         Some(after) => {
@@ -536,7 +535,7 @@ fn head_of(text: &str, repo: &Repo) -> (bool, Vec<IssueNumber>) {
         if let Some((number, after)) = reference(rest, repo) {
             numbers.extend(number);
             rest = after;
-        } else if let Some(after) = read_past(rest) {
+        } else if let Some(after) = read_past(rest, &strikes) {
             rest = after;
         } else {
             break;
@@ -550,7 +549,7 @@ fn head_of(text: &str, repo: &Repo) -> (bool, Vec<IssueNumber>) {
         rest = undecorated(rest);
         if let Some(after) = separator(rest) {
             rest = after;
-        } else if reference(rest, repo).is_none() && read_past(rest).is_none() {
+        } else if reference(rest, repo).is_none() && read_past(rest, &strikes).is_none() {
             break;
         }
     }
@@ -698,31 +697,11 @@ fn other_reference(text: &str) -> Option<&str> {
 /// The text after what `text` starts with that names nothing and that a list
 /// continues past, or `None` when it starts with no such thing: a number of
 /// another repository, or a span struck through.
-fn read_past(text: &str) -> Option<&str> {
-    other_reference(text).or_else(|| after_strike(text))
-}
-
-/// The text after the span struck through that `text` opens with, or `None`
-/// when it opens none.
 ///
-/// One or two tildes open the span, as GitHub renders both `~#21~` and
-/// `~~#21~~`. The next run of the same number of tildes closes it. A span that
-/// nothing closes is no strike, and the tildes stay in front of the text.
-fn after_strike(text: &str) -> Option<&str> {
-    let inside = text.trim_start_matches('~');
-    let marks = text.len() - inside.len();
-    if !(1..=MAX_STRIKE_MARKS).contains(&marks) {
-        return None;
-    }
-    let mut rest = inside;
-    loop {
-        let run = rest.get(rest.find('~')?..)?;
-        let after = run.trim_start_matches('~');
-        if run.len() - after.len() == marks {
-            return Some(after);
-        }
-        rest = after;
-    }
+/// `strikes` holds the strikes of the block, and `text` is the end of that
+/// block.
+fn read_past<'a>(text: &'a str, strikes: &Strikes<'a>) -> Option<&'a str> {
+    other_reference(text).or_else(|| strikes.after(text))
 }
 
 /// The text after the parenthesis that closes the one `text` opens with, or
@@ -1043,6 +1022,74 @@ mod tests {
         Case { name: "a strike that nothing closes", body: "## Blocked by\n\n- ~~#21 #22\n", numbers: &[] },
         Case { name: "a label struck through", body: "~~**Blocked by:** #12~~\n", numbers: &[] },
         Case { name: "a heading struck through", body: "## ~~Blocked by~~\n\n- #7\n", numbers: &[] },
+        Case { name: "tildes that follow a space close no strike", body: "## Blocked by\n\n- ~~#21 ~~ #22\n", numbers: &[] },
+        Case { name: "a tilde that a space follows opens no strike", body: "## Blocked by\n\n- ~ #21~ #22\n", numbers: &[] },
+        Case {
+            name: "a strike goes on past tildes that follow a space",
+            body: "## Blocked by\n\n- ~~#21 ~~ #22~~ #23\n",
+            numbers: &[23],
+        },
+        // Punctuation next to a run of tildes changes where the run opens and
+        // closes. A run of one tilde and a run of two tildes can pair and strike
+        // nothing, and the delimiters between them then open and close nothing.
+        Case { name: "tildes between two numbers open no strike", body: "## Blocked by\n\n- #20~~#21~~ #22\n", numbers: &[20] },
+        Case {
+            name: "tildes after a symbol and before a number open no strike",
+            body: "## Blocked by\n\n- \u{1f6a7}~~#21~~ #22\n",
+            numbers: &[],
+        },
+        Case {
+            name: "tildes after a parenthesis and before a word close no strike",
+            body: "## Blocked by\n\n- ~~#21 (x)~~and #22\n",
+            numbers: &[],
+        },
+        Case { name: "a tilde between two numbers stops a strike", body: "## Blocked by\n\n- ~~#21~#22~~ #23\n", numbers: &[] },
+        Case { name: "a tilde that only closes stops a strike", body: "## Blocked by\n\n- ~~#21 a~ b~~ #22\n", numbers: &[] },
+        Case { name: "a tilde that only opens stops a strike", body: "## Blocked by\n\n- ~~#21 a ~b~~ #22\n", numbers: &[] },
+        Case {
+            name: "the nearest tildes that open take the tildes that close",
+            body: "## Blocked by\n\n- ~~#21 ~~b~~ #22\n",
+            numbers: &[],
+        },
+        Case {
+            name: "a tilde and two tildes that pair let the strike around them close",
+            body: "## Blocked by\n\n- ~~#21 a ~b~~ c~~ #22\n",
+            numbers: &[22],
+        },
+        Case {
+            name: "a tilde that opens and closes lets a strike go past it",
+            body: "## Blocked by\n\n- ~~#21 a~b~~ #22\n",
+            numbers: &[22],
+        },
+        Case { name: "a strike inside bold marks", body: "## Blocked by\n\n- **~~#12~~** #13\n", numbers: &[13] },
+        // GitHub reads fewer characters as space than the White_Space property of
+        // Unicode holds. A line separator, a vertical tab, and a next line are not
+        // space to GitHub, so tildes next to them can open or close a strike.
+        Case {
+            name: "tildes that follow a line separator close a strike",
+            body: "## Blocked by\n\n- ~~#21\u{2028}~~ #22\n",
+            numbers: &[22],
+        },
+        Case {
+            name: "tildes that follow a vertical tab close a strike",
+            body: "## Blocked by\n\n- ~~#21\u{b}~~ #22\n",
+            numbers: &[22],
+        },
+        Case {
+            name: "tildes that follow a next line close a strike",
+            body: "## Blocked by\n\n- ~~#21\u{85}~~ #22\n",
+            numbers: &[22],
+        },
+        Case {
+            name: "tildes that a line separator follows open a strike",
+            body: "## Blocked by\n\n- ~~\u{2028}#21~~ #22\n",
+            numbers: &[22],
+        },
+        Case {
+            name: "tildes that follow a no-break space close no strike",
+            body: "## Blocked by\n\n- ~~#21\u{a0}~~ #22\n",
+            numbers: &[],
+        },
         Case { name: "a number that is zero", body: "## Blocked by\n\n- #0\n", numbers: &[] },
         Case {
             name: "a number too large for any issue",
@@ -1079,6 +1126,16 @@ mod tests {
         Case {
             name: "a phrase in the middle of a sentence",
             body: "This slice is blocked by #9 until it lands.\n",
+            numbers: &[],
+        },
+        Case {
+            name: "a phrase between two tildes that mean approximately",
+            body: "This takes ~2h. It is blocked by #7. It saves ~30% of the time.\n",
+            numbers: &[],
+        },
+        Case {
+            name: "a phrase between two tildes with a space on each side",
+            body: "The fix takes 2 ~ 3 days. It is blocked by #9. The test takes 1 ~ 2 days.\n",
             numbers: &[],
         },
         Case {
