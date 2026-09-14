@@ -32,6 +32,11 @@
 //!   cell of a record read the issue of a pair the same way this reader reads
 //!   the number `94`.
 //!
+//! `repo` is read too, when it stands. It names the repository the plan was
+//! built for, written as `owner/name`, and a later check compares it with the
+//! repository of the run. The same numbers name other work in another
+//! repository, so a plan of one repository is no answer about the next one.
+//!
 //! `housekeeping` and `warnings` are read past. They stand in the document
 //! because the person who ran the skill wants them, and `wn` answers one
 //! question.
@@ -281,6 +286,14 @@ impl Document {
     /// The document names it because a plan is a claim about the issues of
     /// one repository. The same numbers name other work in every other
     /// repository.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the check that compares this repository with the repository of the run \
+                      is the next slice of #489, and only the tests read it until then"
+        )
+    )]
     #[must_use]
     pub fn repo(&self) -> Option<&Repo> {
         self.repo.as_ref()
@@ -420,12 +433,28 @@ fn document_of(text: &str) -> Result<Document, JsonError> {
 
 /// The repository `document` says the plan was built for, when it says one.
 ///
+/// The key is optional for the reason `generated` is: every written form of a
+/// plan names no repository, and a document a reader wrote by hand need not
+/// name one either. A key that stands and is not written as `owner/name` is a
+/// refusal all the same. A later check compares this repository with the
+/// repository of the run, and a reader that took `tools` for a repository
+/// would compare a guess.
+///
 /// # Errors
 ///
 /// Gives [`JsonError::Wrong`] for a `repo` that is not a string, and for a
 /// string that is not written as `owner/name`.
-fn repo_of(_document: &Value) -> Result<Option<Repo>, JsonError> {
-    Ok(None)
+fn repo_of(document: &Value) -> Result<Option<Repo>, JsonError> {
+    let Some(value) = optional(document, REPO) else {
+        return Ok(None);
+    };
+    let wrong = || JsonError::Wrong {
+        path: Path::root(REPO),
+        wanted: Kind::Repository,
+    };
+    let written = value.as_str().ok_or_else(wrong)?;
+    let read = Repo::parse(written).map_err(|_| wrong())?;
+    Ok(Some(read))
 }
 
 /// The moment `document` says it was built, when it says one.
