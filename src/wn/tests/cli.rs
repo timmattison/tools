@@ -3442,6 +3442,39 @@ fn a_finished_blocker_outside_the_chain_changes_nothing() {
     assert_eq!(queries_sent(&gh), 2, "asked {}", gh.recorded_args());
 }
 
+/// What GitHub says about `#50`, whose body names its blocker by the URL of
+/// `#51` in [`REPO`], and about `#51`, which is open. Three marks close the raw
+/// string, because a body holds `"##`.
+const URL_BLOCKER_ISSUES: &str = r###"{"data":{"repository":{
+"i50":{"__typename":"Issue","number":50,"title":"The fiftieth","state":"OPEN","stateReason":null,
+       "body":"## Blocked by\n\n- https://github.com/timmattison/tools/issues/51\n"},
+"i51":{"__typename":"Issue","number":51,"title":"The fifty-first","state":"OPEN","stateReason":null,"body":""}
+}}}"###;
+
+#[test]
+fn a_blocker_named_by_the_url_of_its_issue_joins_the_answer() {
+    // A pasted URL is a common way to name an issue, and GitHub renders it as
+    // a link to #51. So #50 waits for #51, and the run names #51 first. The run
+    // asks about #50, reads the URL, and then asks about #51.
+    let gh = FakeGh::new(URL_BLOCKER_ISSUES);
+    let output = run(&gh, &["--repo", REPO, "#50"], "80", false);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let answer = stdout(&output);
+    assert!(
+        answer.contains("Start #51 next with 'si 51'"),
+        "the answer names #51, in {answer}"
+    );
+    assert!(
+        !answer.contains("Start #50"),
+        "the answer does not name #50, in {answer}"
+    );
+    assert!(
+        answer.contains(&format!("{WAITS_FOR}#51")),
+        "#50 waits for #51, in {answer}"
+    );
+    assert_eq!(queries_sent(&gh), 2, "asked {}", gh.recorded_args());
+}
+
 /// A plan of streams that names `#1` and `#2` in two orders, and a third
 /// stream that holds `#5` alone.
 const KNOTTED_PLAN: &str = "\

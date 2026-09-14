@@ -209,13 +209,17 @@ pub fn build_query(numbers: &[IssueNumber]) -> String {
 /// Read the answer of the query back into one entry for each number, in the
 /// order the numbers were asked about.
 ///
+/// `repo` is the repository the query asked about. The body of an issue names
+/// a blocker by the URL of an issue of that repository too, so the reader of
+/// the body needs it.
+///
 /// # Errors
 ///
 /// Fails when the body is not JSON, when it carries no repository (a name
 /// nobody can read, or a credential that cannot see it), when GitHub could
 /// not answer for one number of the chain, or when GitHub gives a state this
 /// tool does not know.
-pub fn parse_response(body: &str, numbers: &[IssueNumber]) -> Result<Vec<Entry>> {
+pub fn parse_response(body: &str, repo: &Repo, numbers: &[IssueNumber]) -> Result<Vec<Entry>> {
     let answer: Value = serde_json::from_str(body)
         .with_context(|| format!("GitHub answered with no JSON: {}", body.trim()))?;
 
@@ -229,7 +233,7 @@ pub fn parse_response(body: &str, numbers: &[IssueNumber]) -> Result<Vec<Entry>>
     let reasons = Reasons::read(&answer);
     numbers
         .iter()
-        .map(|number| entry_of(repository, &reasons, *number))
+        .map(|number| entry_of(repository, &reasons, repo, *number))
         .collect()
 }
 
@@ -307,7 +311,15 @@ impl<'a> Reasons<'a> {
 }
 
 /// Read one number out of the answer.
-fn entry_of(repository: &Value, reasons: &Reasons<'_>, number: IssueNumber) -> Result<Entry> {
+///
+/// `repository` is the part of the answer that holds the aliases, and `repo`
+/// is the repository the query asked about.
+fn entry_of(
+    repository: &Value,
+    reasons: &Reasons<'_>,
+    repo: &Repo,
+    number: IssueNumber,
+) -> Result<Entry> {
     // An alias GitHub could not resolve is null, and one it never carried is
     // absent. Two answers arrive in that shape, and the reason beside the
     // null parts them: a number the repository does not have, which is one
@@ -350,7 +362,7 @@ fn entry_of(repository: &Value, reasons: &Reasons<'_>, number: IssueNumber) -> R
         blocked_by: node
             .get("body")
             .and_then(Value::as_str)
-            .map(blocked_by::read)
+            .map(|body| blocked_by::read(body, repo))
             .unwrap_or_default()
             .into_iter()
             .filter(|blocker| *blocker != number)
@@ -429,7 +441,7 @@ pub fn fetch(repo: &Repo, numbers: &[IssueNumber]) -> Result<Vec<Entry>> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("`{GH} api graphql` answered nothing: {}", stderr.trim());
     }
-    parse_response(&body, numbers)
+    parse_response(&body, repo, numbers)
 }
 
 #[cfg(test)]
@@ -441,6 +453,14 @@ mod tests {
             .iter()
             .map(|n| IssueNumber::new(*n).expect("the test number is an issue number"))
             .collect()
+    }
+
+    /// The repository every answer of these tests comes from.
+    const TEST_REPO: &str = "timmattison/tools";
+
+    /// [`TEST_REPO`], as the reader of an answer takes it.
+    fn repo() -> Repo {
+        Repo::parse(TEST_REPO).expect("the test repository is a repository")
     }
 
     fn statuses(entries: &[Entry]) -> Vec<(u64, Status)> {
@@ -545,7 +565,8 @@ mod tests {
                     "body":"## Blocked by\n\n- #168\n- #170\n\nIt can run beside #169."},
             "i168":{"__typename":"Issue","number":168,"title":"Slope","state":"OPEN","stateReason":null,"body":null}
         }}}"###;
-        let entries = parse_response(body, &chain(&[170, 168])).expect("that body is an answer");
+        let entries =
+            parse_response(body, &repo(), &chain(&[170, 168])).expect("that body is an answer");
         assert_eq!(entries[0].blocked_by, chain(&[168]));
         assert!(
             entries[1].blocked_by.is_empty(),
@@ -560,7 +581,8 @@ mod tests {
             "i277":{"__typename":"Issue","number":277,"title":"First","state":"CLOSED","stateReason":"COMPLETED"},
             "i278":{"__typename":"Issue","number":278,"title":"Second","state":"OPEN","stateReason":null}
         }}}"#;
-        let entries = parse_response(body, &chain(&[277, 278])).expect("that body is an answer");
+        let entries =
+            parse_response(body, &repo(), &chain(&[277, 278])).expect("that body is an answer");
         assert_eq!(
             statuses(&entries),
             vec![(277, Status::Done), (278, Status::Open)]
@@ -576,7 +598,8 @@ mod tests {
             "i2":{"__typename":"Issue","number":2,"title":"Two","state":"CLOSED","stateReason":"DUPLICATE"},
             "i3":{"__typename":"Issue","number":3,"title":"Three","state":"CLOSED","stateReason":"REOPENED"}
         }}}"#;
-        let entries = parse_response(body, &chain(&[1, 2, 3])).expect("that body is an answer");
+        let entries =
+            parse_response(body, &repo(), &chain(&[1, 2, 3])).expect("that body is an answer");
         assert_eq!(
             statuses(&entries),
             vec![
@@ -596,7 +619,8 @@ mod tests {
             "i2":{"__typename":"PullRequest","number":2,"title":"Two","state":"CLOSED"},
             "i3":{"__typename":"PullRequest","number":3,"title":"Three","state":"OPEN"}
         }}}"#;
-        let entries = parse_response(body, &chain(&[1, 2, 3])).expect("that body is an answer");
+        let entries =
+            parse_response(body, &repo(), &chain(&[1, 2, 3])).expect("that body is an answer");
         assert_eq!(
             statuses(&entries),
             vec![(1, Status::Done), (2, Status::Dropped), (3, Status::Open)]
@@ -611,7 +635,8 @@ mod tests {
             "i277":{"__typename":"Issue","number":277,"title":"First","state":"OPEN","stateReason":null},
             "i999":null
         }},"errors":[{"type":"NOT_FOUND","path":["repository","i999"],"message":"Could not resolve to an issue or pull request with the number of 999."}]}"#;
-        let entries = parse_response(body, &chain(&[277, 999])).expect("that body is an answer");
+        let entries =
+            parse_response(body, &repo(), &chain(&[277, 999])).expect("that body is an answer");
         assert_eq!(
             statuses(&entries),
             vec![(277, Status::Open), (999, Status::Missing)]
@@ -622,7 +647,7 @@ mod tests {
     #[test]
     fn an_alias_the_answer_never_carried_is_missing() {
         let body = r#"{"data":{"repository":{}}}"#;
-        let entries = parse_response(body, &chain(&[1])).expect("that body is an answer");
+        let entries = parse_response(body, &repo(), &chain(&[1])).expect("that body is an answer");
         assert_eq!(statuses(&entries), vec![(1, Status::Missing)]);
     }
 
@@ -637,7 +662,7 @@ mod tests {
         // The last type is one this tool has never seen, because a type that
         // is not NOT_FOUND is a refusal whether this tool knows it or not.
         for kind in ["FORBIDDEN", "INTERNAL", "SERVICE_UNAVAILABLE", "RATIONED"] {
-            let err = parse_response(&refused_body(kind), &chain(&[42]))
+            let err = parse_response(&refused_body(kind), &repo(), &chain(&[42]))
                 .expect_err("GitHub could not answer for that number");
             assert!(
                 err.to_string().contains(REFUSED_MESSAGE),
@@ -658,7 +683,7 @@ mod tests {
             "i5":{"__typename":"Issue","number":5,"title":"Five","state":"OPEN","stateReason":null},
             "i6":{"__typename":"Issue","number":6,"title":"Six","state":"OPEN","stateReason":null}
         }},"errors":[{"type":"SERVICE_UNAVAILABLE","path":["repository","i4"],"message":"Something went wrong while executing your query."}]}"#;
-        let err = parse_response(body, &chain(&[1, 2, 3, 4, 5, 6]))
+        let err = parse_response(body, &repo(), &chain(&[1, 2, 3, 4, 5, 6]))
             .expect_err("GitHub could not answer for one of the six");
         assert!(
             err.to_string().contains("#4"),
@@ -679,7 +704,7 @@ mod tests {
             {"type":"NOT_FOUND","path":["repository","i999"],"message":"Could not resolve to an issue or pull request with the number of 999."},
             {"type":"FORBIDDEN","path":["repository","i42"],"message":"Resource not accessible by integration"}
         ]}"#;
-        let err = parse_response(body, &chain(&[277, 999, 42]))
+        let err = parse_response(body, &repo(), &chain(&[277, 999, 42]))
             .expect_err("GitHub could not answer for #42");
         assert!(
             err.to_string().contains(REFUSED_MESSAGE),
@@ -699,7 +724,8 @@ mod tests {
         let body = r#"{"data":{"repository":{"i999":null}},
             "errors":[{"type":"FORBIDDEN","path":["repository","i1"],
             "message":"Resource not accessible by integration"}]}"#;
-        let entries = parse_response(body, &chain(&[999])).expect("that body is an answer");
+        let entries =
+            parse_response(body, &repo(), &chain(&[999])).expect("that body is an answer");
         assert_eq!(statuses(&entries), vec![(999, Status::Missing)]);
     }
 
@@ -712,7 +738,8 @@ mod tests {
             {"type":"FORBIDDEN","message":"Resource not accessible by integration"},
             {"type":"INTERNAL","path":[1,2],"message":"Something went wrong."}
         ]}"#;
-        let entries = parse_response(body, &chain(&[999])).expect("that body is an answer");
+        let entries =
+            parse_response(body, &repo(), &chain(&[999])).expect("that body is an answer");
         assert_eq!(statuses(&entries), vec![(999, Status::Missing)]);
     }
 
@@ -724,7 +751,8 @@ mod tests {
             "i1":{"__typename":"Issue","number":1,"title":"One","state":"OPEN","stateReason":null},
             "i2":{"__typename":"Issue","number":2,"title":"Two","state":"OPEN","stateReason":null}
         }}}"#;
-        let entries = parse_response(body, &chain(&[1, 2, 3])).expect("that body is an answer");
+        let entries =
+            parse_response(body, &repo(), &chain(&[1, 2, 3])).expect("that body is an answer");
         assert_eq!(
             entries.iter().map(|e| e.number.get()).collect::<Vec<_>>(),
             vec![1, 2, 3]
@@ -736,7 +764,8 @@ mod tests {
         // A repository nobody can read answers null, and reporting every issue
         // of the chain as missing would hide the one real problem.
         let body = r#"{"data":{"repository":null},"errors":[{"type":"NOT_FOUND","message":"Could not resolve to a Repository with the name 'timmattison/nope'."}]}"#;
-        let err = parse_response(body, &chain(&[1])).expect_err("no repository is an error");
+        let err =
+            parse_response(body, &repo(), &chain(&[1])).expect_err("no repository is an error");
         assert!(
             err.to_string()
                 .contains("Could not resolve to a Repository"),
@@ -746,7 +775,7 @@ mod tests {
 
     #[test]
     fn a_body_that_is_not_json_is_an_error() {
-        let err = parse_response("gh: command not found", &chain(&[1]))
+        let err = parse_response("gh: command not found", &repo(), &chain(&[1]))
             .expect_err("that body is not an answer");
         assert!(
             err.to_string().contains("gh: command not found"),
@@ -761,7 +790,7 @@ mod tests {
         let body = r#"{"data":{"repository":{
             "i1":{"__typename":"Issue","number":1,"title":"One","state":"HIBERNATING","stateReason":null}
         }}}"#;
-        let err = parse_response(body, &chain(&[1])).expect_err("that state is unknown");
+        let err = parse_response(body, &repo(), &chain(&[1])).expect_err("that state is unknown");
         assert!(
             err.to_string().contains("HIBERNATING"),
             "the error names the state, in {err:#}"

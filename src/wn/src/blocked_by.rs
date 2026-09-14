@@ -47,6 +47,7 @@
 //! and its table of forms stands beside the table of this module.
 
 use crate::chain::IssueNumber;
+use crate::github::Repo;
 
 /// The labels that name work which comes before the issue. A heading carries
 /// one to open a section, and a block carries one at its start. They are ASCII,
@@ -112,7 +113,7 @@ struct Open {
 /// A heading ends or opens a section before the walk reads its own text. So a
 /// heading that ends a section names nothing unless it starts with a label.
 #[must_use]
-pub fn read(body: &str) -> Vec<IssueNumber> {
+pub fn read(body: &str, _repo: &Repo) -> Vec<IssueNumber> {
     let mut numbers: Vec<IssueNumber> = Vec::new();
     // The level of the heading whose section the walk stands in.
     let mut section: Option<usize> = None;
@@ -607,6 +608,31 @@ mod tests {
         Case { name: "a comma and the word and before prose", body: "## Blocked by\n\n- #3, and it lands first\n", numbers: &[3] },
         Case { name: "a bare number as a paragraph", body: "## Blocked by\n\n#168\n", numbers: &[168] },
         Case {
+            name: "the URL of an issue of the repository",
+            body: "## Blocked by\n\n- https://github.com/timmattison/example/issues/51\n",
+            numbers: &[51],
+        },
+        Case {
+            name: "the URL of a pull request of the repository",
+            body: "## Blocked by\n\n- https://github.com/timmattison/example/pull/52\n",
+            numbers: &[52],
+        },
+        Case {
+            name: "the URL of an issue in an autolink",
+            body: "## Blocked by\n\n- <https://github.com/timmattison/example/issues/51>\n",
+            numbers: &[51],
+        },
+        Case {
+            name: "the URL of an issue in another case, with a fragment",
+            body: "## Blocked by\n\n- https://github.com/TimMattison/Example/issues/51#issuecomment-7\n",
+            numbers: &[51],
+        },
+        Case {
+            name: "a bold label with the URL of an issue and a number",
+            body: "**Blocked by:** https://github.com/timmattison/example/issues/51 and #52\n",
+            numbers: &[51, 52],
+        },
+        Case {
             name: "a nested list item indented by four spaces",
             body: "## Blocked by\n\n- The solver\n    - #168\n",
             numbers: &[168],
@@ -714,6 +740,26 @@ mod tests {
             numbers: &[5],
         },
         Case {
+            name: "the URL of an issue of another repository",
+            body: "## Blocked by\n\n- https://github.com/timmattison/muxiavelli/issues/294\n- #5\n",
+            numbers: &[5],
+        },
+        Case {
+            name: "the URL of an issue of another repository before a comma",
+            body: "## Blocked by\n\n- https://github.com/timmattison/muxiavelli/issues/294, #5\n",
+            numbers: &[5],
+        },
+        Case {
+            name: "the URL of a file of the repository",
+            body: "## Blocked by\n\n- https://github.com/timmattison/example/blob/main/README.md\n",
+            numbers: &[],
+        },
+        Case {
+            name: "the URL of an issue whose number is zero",
+            body: "## Blocked by\n\n- https://github.com/timmattison/example/issues/0\n",
+            numbers: &[],
+        },
+        Case {
             name: "a blocker struck through",
             body: "## Blocked by\n\n- ~~#21~~ (no longer needed)\n",
             numbers: &[],
@@ -773,12 +819,19 @@ mod tests {
         },
     ];
 
+    /// The repository every case of [`CASES`] is the body of an issue of.
+    const REPO: &str = "timmattison/example";
+
     #[test]
     fn every_form_of_a_blocker_reads_as_its_case_says() {
+        let repo = Repo::parse(REPO).expect("the repository of the cases is a repository");
         let wrong: Vec<String> = CASES
             .iter()
             .filter_map(|case| {
-                let read: Vec<u64> = read(case.body).iter().map(|number| number.get()).collect();
+                let read: Vec<u64> = read(case.body, &repo)
+                    .iter()
+                    .map(|number| number.get())
+                    .collect();
                 (read != case.numbers).then(|| {
                     format!(
                         "{}: read {read:?} and wanted {:?} out of {:?}",
