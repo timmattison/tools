@@ -9,6 +9,9 @@
 //! The words name `grind` and `grime` all the same, because those are the names
 //! the user knows.
 
+use std::path::Path;
+use std::sync::atomic::AtomicBool;
+
 use gitscratch::Conflicts;
 
 use crate::lines::LineSplitter;
@@ -124,6 +127,26 @@ pub(crate) fn running_notice(branch: &str) -> String {
     format!(concat!("Running ", tools!(), " against {}…"), branch)
 }
 
+/// Measure a rebase of HEAD onto the default branch, then a merge of the
+/// default branch into HEAD, as `grind` and `grime` do.
+///
+/// `on_started` gets the name of the branch once that name is known, before any
+/// scratch worktree exists. It does not run when the run is refused or when
+/// HEAD is on the default branch, because no replay starts then.
+///
+/// Returns `None` when `stop` was set before a replay started. The run was
+/// abandoned, and nobody reads its outcome.
+pub(crate) fn measure(
+    workdir: &Path,
+    stop: &AtomicBool,
+    on_started: impl FnOnce(&str),
+) -> Option<ConflictsOutcome> {
+    let _ = (workdir, stop, on_started);
+    Some(ConflictsOutcome::Refused {
+        reason: String::new(),
+    })
+}
+
 /// The words for the result of one replay: `operation clean`, the counts, or
 /// `operation failed: reason`.
 ///
@@ -170,11 +193,13 @@ fn one_row(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroUsize;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::AtomicBool;
 
+    use gitscratch::testing::{default_branch_choice_repo, not_a_repository, TestRepo};
     use gitscratch::{Conflicts, Stops};
 
-    use super::{running_notice, ConflictsOutcome, WAITING_NOTICE};
+    use super::{measure, running_notice, ConflictsOutcome, WAITING_NOTICE};
 
     /// A replay that hit no conflict.
     fn clean() -> Conflicts {
@@ -351,5 +376,197 @@ mod tests {
     #[test]
     fn the_waiting_notice_names_both_tools() {
         assert_eq!(WAITING_NOTICE, "Waiting for grind and grime to finish…");
+    }
+
+    /// How many worktrees the repository of `repo` has registered, the main
+    /// worktree included.
+    ///
+    /// A count and not a list of paths. A temporary directory on macOS sits
+    /// behind a symbolic link, and git prints the resolved path, so a
+    /// comparison of paths fails for a reason this module does not own.
+    fn worktrees(repo: &TestRepo) -> usize {
+        repo.git(&["worktree", "list", "--porcelain"])
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .count()
+    }
+
+    /// Measure `workdir` with a stop flag that nothing sets, and collect each
+    /// branch name that `on_started` got.
+    fn measure_collecting(workdir: &Path) -> (Option<ConflictsOutcome>, Vec<String>) {
+        let stop = AtomicBool::new(false);
+        let mut started = Vec::new();
+        let outcome = measure(workdir, &stop, |branch| started.push(branch.to_owned()));
+        (outcome, started)
+    }
+
+    /// The reason of a refusal, or a panic that names what came back instead.
+    fn refusal(outcome: Option<ConflictsOutcome>) -> String {
+        match outcome {
+            Some(ConflictsOutcome::Refused { reason }) => reason,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// The fixture puts HEAD on `work` and its only default branch at `master`,
+    /// and both of them rewrite one line. So each replay conflicts in one hunk
+    /// of one file, and the rebase stops once.
+    #[test]
+    fn a_branch_that_conflicts_with_the_default_branch_is_measured_in_both_halves() {
+        let repo = default_branch_choice_repo(&["master"]);
+
+        let (outcome, started) = measure_collecting(repo.path());
+
+        let one_hunk = conflicted(&[("shared.txt", 1)], 1);
+        let expected = ConflictsOutcome::Measured {
+            branch: "master".to_owned(),
+            rebase: Ok(one_hunk.clone()),
+            merge: Ok(one_hunk),
+            dirty: false,
+        };
+        assert_eq!(outcome.as_ref(), Some(&expected));
+        assert_eq!(
+            expected.line(),
+            "master: rebase 1 hunk in 1 file, 1 stop · merge 1 hunk in 1 file",
+        );
+        assert_eq!(
+            started,
+            ["master"],
+            "on_started gets the branch exactly once"
+        );
+        assert_eq!(
+            worktrees(&repo),
+            1,
+            "both scratch worktrees are gone after the run"
+        );
+    }
+
+    #[test]
+    fn a_branch_that_does_not_conflict_is_measured_clean() {
+        let repo = default_branch_choice_repo(&["main"]);
+
+        let (outcome, started) = measure_collecting(repo.path());
+
+        assert_eq!(
+            outcome,
+            Some(ConflictsOutcome::Measured {
+                branch: "main".to_owned(),
+                rebase: Ok(clean()),
+                merge: Ok(clean()),
+                dirty: false,
+            }),
+        );
+        assert_eq!(started, ["main"]);
+    }
+
+    /// A rebase of the default branch onto itself is clean by definition. So
+    /// no replay runs, and `on_started`, which runs before the first scratch
+    /// worktree exists, does not run either.
+    #[test]
+    fn head_on_the_default_branch_runs_no_replay() {
+        let repo = default_branch_choice_repo(&["main"]);
+        repo.checkout("main");
+
+        let (outcome, started) = measure_collecting(repo.path());
+
+        assert_eq!(
+            outcome,
+            Some(ConflictsOutcome::OnDefault {
+                branch: "main".to_owned(),
+            }),
+        );
+        assert!(
+            started.is_empty(),
+            "a run with nothing to compare started a replay: {started:?}"
+        );
+        assert_eq!(worktrees(&repo), 1);
+    }
+
+    /// A detached HEAD is on no branch, so it is not on the default branch.
+    /// `grind` measures it, and so does `m`.
+    #[test]
+    fn a_detached_head_is_measured_even_at_the_default_branch() {
+        let repo = default_branch_choice_repo(&["main"]);
+        repo.git(&["checkout", "-q", "--detach", "main"]);
+
+        let (outcome, started) = measure_collecting(repo.path());
+
+        assert_eq!(
+            outcome,
+            Some(ConflictsOutcome::Measured {
+                branch: "main".to_owned(),
+                rebase: Ok(clean()),
+                merge: Ok(clean()),
+                dirty: false,
+            }),
+        );
+        assert_eq!(started, ["main"]);
+    }
+
+    #[test]
+    fn a_repository_with_no_default_branch_is_refused_with_the_reason() {
+        let repo = default_branch_choice_repo(&[]);
+
+        let (outcome, started) = measure_collecting(repo.path());
+
+        let reason = refusal(outcome);
+        assert!(
+            reason.contains("no default branch resolves here"),
+            "the refusal does not say why: {reason:?}"
+        );
+        assert!(!reason.contains('\n'), "the reason spans rows: {reason:?}");
+        assert!(started.is_empty());
+    }
+
+    #[test]
+    fn an_empty_repository_is_refused_with_the_reason() {
+        let repo = TestRepo::init();
+
+        let reason = refusal(measure_collecting(repo.path()).0);
+
+        assert!(
+            reason.contains("no commit at HEAD"),
+            "the refusal does not say why: {reason:?}"
+        );
+    }
+
+    #[test]
+    fn a_directory_outside_every_repository_is_refused_with_the_reason() {
+        let outside = not_a_repository();
+
+        let reason = refusal(measure_collecting(outside.path()).0);
+
+        assert!(
+            reason.contains("is not inside a git repository"),
+            "the refusal does not say why: {reason:?}"
+        );
+    }
+
+    #[test]
+    fn uncommitted_work_marks_the_run_dirty() {
+        let repo = default_branch_choice_repo(&["main"]);
+        repo.write_file("new.txt", "work nobody committed\n");
+
+        let (outcome, _) = measure_collecting(repo.path());
+
+        match outcome {
+            Some(ConflictsOutcome::Measured { dirty, .. }) => {
+                assert!(dirty, "the uncommitted file did not mark the run dirty");
+            }
+            other => panic!("expected a measured run, got {other:?}"),
+        }
+    }
+
+    /// gsw sets the flag when it quits. A replay that starts after that holds
+    /// a scratch worktree that nobody waits for.
+    #[test]
+    fn a_stop_set_before_the_run_starts_no_replay() {
+        let repo = default_branch_choice_repo(&["master"]);
+        let stop = AtomicBool::new(true);
+
+        let outcome = measure(repo.path(), &stop, |_| {});
+
+        assert_eq!(outcome, None);
+        assert_eq!(worktrees(&repo), 1);
     }
 }
