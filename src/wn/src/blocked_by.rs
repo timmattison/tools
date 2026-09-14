@@ -1043,6 +1043,13 @@ mod tests {
         Case { name: "a strike that nothing closes", body: "## Blocked by\n\n- ~~#21 #22\n", numbers: &[] },
         Case { name: "a label struck through", body: "~~**Blocked by:** #12~~\n", numbers: &[] },
         Case { name: "a heading struck through", body: "## ~~Blocked by~~\n\n- #7\n", numbers: &[] },
+        Case { name: "tildes that follow a space close no strike", body: "## Blocked by\n\n- ~~#21 ~~ #22\n", numbers: &[] },
+        Case { name: "a tilde that a space follows opens no strike", body: "## Blocked by\n\n- ~ #21~ #22\n", numbers: &[] },
+        Case {
+            name: "a strike goes on past tildes that follow a space",
+            body: "## Blocked by\n\n- ~~#21 ~~ #22~~ #23\n",
+            numbers: &[23],
+        },
         Case { name: "a number that is zero", body: "## Blocked by\n\n- #0\n", numbers: &[] },
         Case {
             name: "a number too large for any issue",
@@ -1079,6 +1086,16 @@ mod tests {
         Case {
             name: "a phrase in the middle of a sentence",
             body: "This slice is blocked by #9 until it lands.\n",
+            numbers: &[],
+        },
+        Case {
+            name: "a phrase between two tildes that mean approximately",
+            body: "This takes ~2h. It is blocked by #7. It saves ~30% of the time.\n",
+            numbers: &[],
+        },
+        Case {
+            name: "a phrase between two tildes with a space on each side",
+            body: "The fix takes 2 ~ 3 days. It is blocked by #9. The test takes 1 ~ 2 days.\n",
             numbers: &[],
         },
         Case {
