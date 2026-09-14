@@ -1377,7 +1377,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     costs one more query for each round of such blockers. A finished one changes nothing, and an
     open one joins the answer with the blockers it names in turn. Only an open issue names a
     blocker and only an open blocker holds work back, so work that is already done never refuses
-    a plan. A chain goes through the same check, so `wn "#170"` names #168 first.
+    a plan. A chain goes through the same check, so `wn "#170"` names #168 first. A plan of
+    streams that names one number in two orders answers while no issue adds a wait to it, and
+    once an issue does, the answer must be a graph and a graph cannot hold that cycle, so the run
+    exits `2` and names both: `the order returns to #1 and #2, and #5 waits for #6`.
   - A plan drawn as a picture is a third shape of input, and it says the one thing that no chain
     and no table says: two streams that join.
 

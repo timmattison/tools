@@ -565,7 +565,8 @@ fn repo_of(cli: &Cli) -> Result<Repo> {
 /// Fails for the reasons [`github::fetch`] fails: `gh` is not installed, the
 /// repository cannot be read, or GitHub could not answer for one number. Fails
 /// with [`declared::OrderError`] for a text that puts an issue before its own
-/// blocker.
+/// blocker, and for a plan whose own order holds a cycle once the issues add a
+/// wait to it.
 fn answer(reading: &Reading, repo: &Repo, width: usize, start: &StartCommand) -> Result<ExitCode> {
     let streams;
     let line;

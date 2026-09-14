@@ -13,7 +13,9 @@
 //! * The plan puts an issue before its own blocker. That is a refusal, because
 //!   an answer to that plan sends somebody to work that cannot start.
 //! * The plan leaves a blocker out. The blocker joins the graph, the answer
-//!   says the step waits for it, and a note says the plan did not.
+//!   says the step waits for it, and a note says the plan did not. A plan
+//!   whose own order holds a cycle cannot become a graph, so that plan is
+//!   refused, and the refusal names the wait as well as the cycle.
 //!
 //! A blocker that stands nowhere in the plan is asked about, because the plan
 //! says nothing about its state. A finished one changes nothing. An open one
@@ -22,7 +24,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::chain::{list, IssueNumber};
-use crate::graph::{of_parts, Graph, Work};
+use crate::graph::{of_parts, Graph, GraphError, Work};
 use crate::plan::Step;
 use crate::report::{Entry, States};
 
@@ -68,7 +70,8 @@ pub enum Settled {
 /// # Errors
 ///
 /// Gives an [`OrderError`] for a plan that puts an issue before its own
-/// blocker, and for blockers that come before each other. Gives the error of
+/// blocker, for blockers that come before each other, and for an order with a
+/// cycle of its own once the issues add a wait to it. Gives the error of
 /// `fetch` when GitHub cannot answer.
 pub fn settle(
     graph: &Graph,
@@ -138,11 +141,36 @@ pub fn settle(
     }
     let mut edges = plan_edges;
     edges.extend(added);
+    let graph = of_parts(steps, &edges).map_err(|err| knotted(err, &left_out))?;
     Ok(Settled::Adds {
-        graph: of_parts(steps, &edges)?,
+        graph,
         states,
         left_out,
     })
+}
+
+/// The refusal of a graph that the edges of the plan and the waits the issues
+/// add cannot build.
+///
+/// A wait joins a blocker to a step only when no walk returns from that step
+/// to that blocker, so no cycle runs through a wait. A cycle that `err` names
+/// is thus a cycle of the plan alone, and the reader of streams answered that
+/// plan before the issues added a wait. The wait is what changed, so the
+/// refusal names the first wait of `left_out` with the cycle. Any other error
+/// of the graph passes through as it is.
+fn knotted(err: GraphError, left_out: &[LeftOut]) -> anyhow::Error {
+    let wait = left_out
+        .first()
+        .and_then(|held| held.blockers.first().map(|&blocker| (held.step, blocker)));
+    match (err, wait) {
+        (GraphError::Cycle(cycle), Some((step, blocker))) => OrderError::Knotted {
+            cycle,
+            step,
+            blocker,
+        }
+        .into(),
+        (err, _) => err.into(),
+    }
 }
 
 /// Every blocker the issues of `step` name, with the number of the issue that
@@ -213,6 +241,9 @@ fn path(edges: &[Edge], from: IssueNumber, to: IssueNumber) -> Option<Vec<IssueN
     None
 }
 
+/// The sentence that closes a refusal the reader repairs in the order itself.
+const FIX_THE_ORDER: &str = "Fix the order, or run wn --refresh to build a new plan";
+
 /// Why a plan cannot be answered once its issues are read.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum OrderError {
@@ -222,8 +253,8 @@ pub enum OrderError {
     /// `listed_by` is `step` itself, or the issue `step` closes. `named` is
     /// `blocker` itself, or an issue whose work `blocker` does.
     #[error(
-        "the order puts {step} before {blocker}, but {listed_by} says it is blocked by {named}. \
-         Fix the order, or run wn --refresh to build a new plan"
+        "the order puts {step} before {blocker}, but {listed_by} says it is blocked by {named}. {}",
+        FIX_THE_ORDER
     )]
     Reversed {
         step: IssueNumber,
@@ -240,6 +271,30 @@ pub enum OrderError {
         list(.0)
     )]
     Cycle(Vec<IssueNumber>),
+    /// The order returns to the steps of `cycle`, and the issues add a wait:
+    /// `step` waits for `blocker`.
+    ///
+    /// A plan of streams can name one number in two orders. The reader of
+    /// streams answers each stream on its own, so it answers such a plan while
+    /// the issues add no wait. A wait joins one step to another, and only a
+    /// graph can show that. A graph cannot hold the cycle, so the run refuses.
+    /// An answer of streams would name `step` as ready while `blocker` is
+    /// open, and that is the failure this check exists to stop.
+    ///
+    /// No cycle runs through a wait the issues add, so the steps of `cycle`
+    /// are steps of the order alone. The message names the wait as well,
+    /// because the wait is why an order that answered before now refuses.
+    #[error(
+        "the order returns to {}, and {step} waits for {blocker}, \
+         which only an order with no cycle can show. {}",
+        list(.cycle),
+        FIX_THE_ORDER
+    )]
+    Knotted {
+        cycle: Vec<IssueNumber>,
+        step: IssueNumber,
+        blocker: IssueNumber,
+    },
 }
 
 #[cfg(test)]
@@ -650,9 +705,14 @@ mod tests {
              which only an order with no cycle can show. \
              Fix the order, or run wn --refresh to build a new plan"
         );
-        assert!(
-            err.downcast_ref::<OrderError>().is_some(),
-            "the refusal is an order error, and it is {err:#}"
+        assert_eq!(
+            err.downcast_ref::<OrderError>(),
+            Some(&OrderError::Knotted {
+                cycle: numbers(&[1, 2]),
+                step: issue(5),
+                blocker: issue(6),
+            }),
+            "the refusal is an order error that names the knot and the wait, and it is {err:#}"
         );
     }
 }

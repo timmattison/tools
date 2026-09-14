@@ -1506,9 +1506,11 @@ pub(crate) fn of_parts(
 /// [`of_plan`] claims no graph for a plan whose streams stand apart, because
 /// the reader of streams answers it. [`crate::declared::settle`] still needs
 /// the edges of such a plan, to hold them to what the issues say comes first,
-/// so this builds them whatever the plan draws. It refuses nothing: the reader
-/// of streams answers a plan that names one number in two orders, and only an
-/// edge the issues add can turn that into a refusal.
+/// so this builds them whatever the plan draws. It refuses nothing, because a
+/// plan can name one number in two orders. The reader of streams answers such
+/// a plan while the issues add no wait to it. Once they add one, the answer
+/// must be a graph, and a graph cannot hold the cycle of the two orders. So the
+/// run refuses, and the refusal names the cycle and the wait.
 pub(crate) fn of_streams(plan: &Plan) -> Graph {
     let ordered: Vec<Step> = plan
         .streams()
