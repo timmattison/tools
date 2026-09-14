@@ -1532,6 +1532,47 @@ fn a_failed_sparse_checkout_of_a_local_branch_keeps_the_branch() {
     assert_the_failed_step_left_nothing(&temp, &repo, &before, &output);
 }
 
+/// When a cleanup step fails too, the message says so and names what is left,
+/// so the user can remove it by hand.
+///
+/// The fake git refuses `read-tree`, which breaks the worktree, and `remove`,
+/// which stops `git worktree remove --force`. The worktree then stays, and git
+/// refuses to delete the branch that the worktree holds. A run that reports
+/// only the failed step lets the user think that nothing is left.
+#[cfg(unix)]
+#[test]
+fn a_failed_cleanup_step_names_what_is_left() {
+    let (_temp, repo) = repo_with_heavy_dir();
+    let branch = unique_branch("sparse-cleanup-fails");
+    let fake = FakeGit::refusing(&["read-tree", "remove"]);
+
+    let output = run_nwt_with_fake_git(
+        &repo,
+        &fake,
+        &["-b", &branch, "--sparse-exclude", HEAVY_DIR],
+    );
+
+    assert_failed_without_a_path(&output);
+    let worktree = expected_worktree(&repo, &branch);
+    assert!(
+        worktree.is_dir(),
+        "the fake git stops the removal, so the worktree stays: {}",
+        worktree.display()
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for named in [
+        "fake git refuses read-tree".to_owned(),
+        format!("could not remove the worktree at '{}'", worktree.display()),
+        format!("could not delete the branch '{branch}'"),
+    ] {
+        assert!(
+            stderr.contains(&named),
+            "stderr must hold {named:?}:\n{stderr}"
+        );
+    }
+}
+
 /// Nothing that the hook step writes to stdout reaches the stdout of `nwt`,
 /// which holds only the worktree path.
 ///
