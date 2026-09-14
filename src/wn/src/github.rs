@@ -46,7 +46,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::blocked_by;
-use crate::chain::IssueNumber;
+use crate::chain::{IssueNumber, Snippet};
 use crate::report::{Entry, Status};
 
 /// The GitHub CLI, which carries the credential and the host.
@@ -59,19 +59,75 @@ pub struct Repo {
     name: String,
 }
 
+/// The advice of a refusal of [`Repo::parse`] for the form or for a character.
+const REPOSITORY_FORM: &str =
+    "Write it as owner/name, with ASCII letters, digits, -, _ and . in each part";
+
+/// The most characters GitHub permits in an owner, which is a user or an
+/// organization.
+const MAX_OWNER_CHARS: usize = 39;
+
+/// The most characters GitHub permits in the name of a repository.
+const MAX_NAME_CHARS: usize = 100;
+
+/// Whether GitHub permits `character` in an owner or in a name.
+fn is_permitted_in_a_name(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+}
+
+/// The argument of a refused [`Repo::parse`], as its message quotes it.
+///
+/// The argument is escaped with `{:?}` first and cut with [`Snippet::new`]
+/// after. The escape writes a control character as text, such as `\u{1b}`,
+/// and it puts the quotes at the two ends. The trim of the snippet then finds
+/// a quote at each end and keeps a space inside the quotes. A space at the end
+/// of `owner/tools ` is what refuses it, and a quote that dropped the space
+/// would show the reader a name GitHub permits.
+///
+/// Write the snippet with `{}`, because it already holds its quotes. A long
+/// argument keeps its opening quote, and the mark of the cut stands where the
+/// closing quote stood.
+fn quoted(spec: &str) -> Snippet {
+    Snippet::new(&format!("{spec:?}"))
+}
+
 impl Repo {
     /// Read a repository out of an `owner/name` argument.
     ///
+    /// GitHub permits only ASCII letters, digits, `-`, `_` and `.` in an owner
+    /// and in a name. It permits at most `MAX_OWNER_CHARS` (39) characters in
+    /// an owner and at most `MAX_NAME_CHARS` (100) in a name. A `Repo` holds
+    /// nothing else. So a `Repo` puts no control character, no escape
+    /// sequence, and no more than 140 characters on a terminal through
+    /// `Display`, and [`Repo::is_same_repository`] compares ASCII case alone.
+    /// The argument arrives from a command line, from `gh`, and from a plan on
+    /// the clipboard, and all three come through this function.
+    ///
     /// # Errors
     ///
-    /// Fails when the argument is not two non-empty parts divided by one `/`.
+    /// Fails when the argument is not two non-empty parts divided by one `/`,
+    /// when a part holds a character GitHub permits in no name, and when the
+    /// owner holds more than 39 characters or the name more than 100. The
+    /// message quotes the argument escaped with `{:?}` and then cut, so a
+    /// control character in it is escaped, a space at either end stays inside
+    /// the quotes, and a long argument is cut.
     pub fn parse(spec: &str) -> Result<Self> {
+        let refused = |advice: &str| anyhow!("{} is not a repository. {advice}", quoted(spec));
+        let is_a_part = |part: &str| !part.is_empty() && part.chars().all(is_permitted_in_a_name);
         let mut parts = spec.split('/');
         let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
-            bail!("{spec:?} is not a repository. Write it as owner/name");
+            return Err(refused(REPOSITORY_FORM));
         };
-        if owner.is_empty() || name.is_empty() {
-            bail!("{spec:?} is not a repository. Write it as owner/name");
+        if !(is_a_part(owner) && is_a_part(name)) {
+            return Err(refused(REPOSITORY_FORM));
+        }
+        // A count of characters, and never of bytes, so the check holds
+        // whichever check runs first.
+        if owner.chars().count() > MAX_OWNER_CHARS || name.chars().count() > MAX_NAME_CHARS {
+            return Err(refused(&format!(
+                "GitHub permits at most {MAX_OWNER_CHARS} characters in an owner \
+                 and {MAX_NAME_CHARS} in a name"
+            )));
         }
         Ok(Self {
             owner: owner.to_string(),
@@ -89,6 +145,21 @@ impl Repo {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Whether `other` names the same repository as this one.
+    ///
+    /// GitHub names a repository without regard to letter case, so
+    /// `TimMattison/Tools` and `timmattison/tools` are one repository. GitHub
+    /// permits only ASCII letters, digits, `-`, `_` and `.` in an owner and in
+    /// a name, and [`Repo::parse`] refuses every other character, so ASCII
+    /// case is the whole rule.
+    ///
+    /// The derived `PartialEq` compares the letters as they are written. Use
+    /// this function to find out whether two texts are about one repository.
+    #[must_use]
+    pub fn is_same_repository(&self, other: &Repo) -> bool {
+        self.owner.eq_ignore_ascii_case(&other.owner) && self.name.eq_ignore_ascii_case(&other.name)
     }
 }
 
@@ -498,6 +569,15 @@ mod tests {
     }
 
     #[test]
+    fn a_repository_is_the_same_repository_whatever_the_letter_case() {
+        let written = |spec: &str| Repo::parse(spec).expect("the test names a repository");
+        assert!(written("TimMattison/Tools").is_same_repository(&written("timmattison/tools")));
+        assert!(written("timmattison/tools").is_same_repository(&written("TIMMATTISON/TOOLS")));
+        assert!(!written("timmattison/tools").is_same_repository(&written("other/tools")));
+        assert!(!written("timmattison/tools").is_same_repository(&written("timmattison/other")));
+    }
+
+    #[test]
     fn a_repository_refuses_everything_that_is_not_two_parts() {
         for spec in ["tools", "timmattison/", "/tools", "", "a/b/c", "a//b"] {
             assert!(
@@ -505,6 +585,170 @@ mod tests {
                 "{spec:?} is not a repository name"
             );
         }
+    }
+
+    #[test]
+    fn a_repository_reads_every_character_github_permits() {
+        let repo =
+            Repo::parse("a-b_c.d/My.Repo-1_x").expect("GitHub permits every character of it");
+        assert_eq!(repo.owner(), "a-b_c.d");
+        assert_eq!(repo.name(), "My.Repo-1_x");
+    }
+
+    #[test]
+    fn a_repository_refuses_a_character_github_permits_in_no_name() {
+        // GitHub permits only ASCII letters, digits, `-`, `_` and `.` in an
+        // owner and in a name. A `Repo` reaches standard error through
+        // `Display`, and an ESC character there writes a raw escape sequence
+        // to the terminal.
+        let long = format!("owner/{}!", "a".repeat(4096));
+        for spec in [
+            "café/tools",
+            "日本語/x",
+            "owner/🎉",
+            "own er/tools",
+            "owner/to ols",
+            "owner/\u{1b}[31mred",
+            "\u{1b}/tools",
+            "owner/na\nme",
+            "owner/tools\t",
+            long.as_str(),
+        ] {
+            assert!(
+                Repo::parse(spec).is_err(),
+                "{spec:?} holds a character GitHub permits in no name"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_character_is_quoted_and_the_message_names_the_characters_github_permits() {
+        let refused =
+            Repo::parse("owner/\u{1b}[31mred").expect_err("GitHub permits no ESC in a name");
+        let message = refused.to_string();
+        assert!(
+            !message.contains('\u{1b}'),
+            "the message writes no raw ESC, in {message:?}"
+        );
+        assert_eq!(
+            message,
+            "\"owner/\\u{1b}[31mred\" is not a repository. Write it as owner/name, \
+             with ASCII letters, digits, -, _ and . in each part"
+        );
+    }
+
+    #[test]
+    fn a_repository_reads_an_owner_and_a_name_as_long_as_github_permits() {
+        // GitHub limits an owner to 39 characters and a name to 100.
+        let owner = "a".repeat(39);
+        let name = "b".repeat(100);
+        let repo =
+            Repo::parse(&format!("{owner}/{name}")).expect("GitHub permits both of these lengths");
+        assert_eq!(repo.owner(), owner);
+        assert_eq!(repo.name(), name);
+    }
+
+    #[test]
+    fn a_repository_refuses_a_part_longer_than_github_permits() {
+        // A `Repo` reaches standard error through `Display`, and a part of
+        // thousands of characters reaches it whole. GitHub permits every
+        // character of these, so only the length refuses them.
+        for spec in [
+            format!("{}/tools", "a".repeat(40)),
+            format!("owner/{}", "b".repeat(101)),
+            format!("{}/tools", "a".repeat(4096)),
+            format!("owner/{}", "b".repeat(4096)),
+        ] {
+            assert!(
+                Repo::parse(&spec).is_err(),
+                "a part of the {} characters is longer than GitHub permits",
+                spec.chars().count()
+            );
+        }
+    }
+
+    #[test]
+    fn a_part_longer_than_github_permits_is_refused_with_the_limits() {
+        let owner = "a".repeat(40);
+        let message = Repo::parse(&format!("{owner}/tools"))
+            .expect_err("GitHub permits no owner of 40 characters")
+            .to_string();
+        assert_eq!(
+            message,
+            format!(
+                "\"{owner}/tools\" is not a repository. GitHub permits at most 39 characters \
+                 in an owner and 100 in a name"
+            )
+        );
+    }
+
+    #[test]
+    fn the_refusal_of_a_long_repository_repeats_a_cut_of_it() {
+        // A message that repeats thousands of characters hides its own advice.
+        // Every refusal cuts the text it quotes, whichever rule refused it.
+        let too_long = [
+            format!("{}/tools", "a".repeat(4096)),
+            format!("owner/{}", "b".repeat(4096)),
+        ];
+        let not_the_form = [
+            format!("{}!/tools", "a".repeat(4096)),
+            format!("a/b/{}", "c".repeat(4096)),
+        ];
+        for spec in too_long.iter().chain(&not_the_form) {
+            let message = Repo::parse(spec)
+                .expect_err("GitHub permits no such repository")
+                .to_string();
+            assert!(
+                message.chars().count() < 200,
+                "the message holds {} characters: {message:?}",
+                message.chars().count()
+            );
+        }
+        for spec in &too_long {
+            let message = Repo::parse(spec)
+                .expect_err("GitHub permits no part this long")
+                .to_string();
+            assert!(
+                message.contains("at most 39 characters in an owner and 100 in a name"),
+                "the message names the limits: {message:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_repository_keeps_the_space_that_refused_it() {
+        // A quote that drops the space around the argument shows the reader a
+        // name GitHub permits, and the reader cannot find what refused it.
+        for (spec, quote) in [
+            ("owner/tools ", "\"owner/tools \""),
+            (" owner/tools", "\" owner/tools\""),
+            ("owner/\ttools", "\"owner/\\ttools\""),
+        ] {
+            let message = Repo::parse(spec)
+                .expect_err("GitHub permits no space in a name")
+                .to_string();
+            assert!(
+                message.starts_with(&format!("{quote} is not a repository. ")),
+                "the message quotes {spec:?} whole: {message:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_refused_repository_is_escaped_and_then_cut() {
+        // The cut takes the opening quote and the characters after it, and
+        // the mark of the cut stands where the closing quote stood.
+        let message = Repo::parse(&format!("{}/tools", "a".repeat(4096)))
+            .expect_err("GitHub permits no owner of 4096 characters")
+            .to_string();
+        assert_eq!(
+            message,
+            format!(
+                "\"{}… is not a repository. GitHub permits at most 39 characters in an owner \
+                 and 100 in a name",
+                "a".repeat(crate::chain::SNIPPET_CHARS - 1)
+            )
+        );
     }
 
     #[test]

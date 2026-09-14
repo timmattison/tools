@@ -44,6 +44,7 @@ use thiserror::Error;
 
 use crate::build::{BuildError, NO_CLAUDE_ENV};
 use crate::chain::Snippet;
+use crate::github::Repo;
 
 /// The variable that turns the clipboard fallback off. Any value with a
 /// character in it turns it off.
@@ -249,6 +250,59 @@ The first line of it is {line:?}.",
             ),
         }
     }
+
+    /// Refuse a plan on the clipboard that is for a repository other than the
+    /// repository of this run.
+    ///
+    /// The clipboard became the cache of a plan in #438. A cache with no key
+    /// answers for every repository. A reader builds a plan in one checkout,
+    /// changes to a checkout of another repository, and types `wn`. The plan
+    /// is still on the clipboard, and its numbers name other issues in the
+    /// second repository. GitHub answers for those numbers, and nothing in the
+    /// answer shows that it is for the wrong repository.
+    ///
+    /// This module still never reads the text. `named` is the repository the
+    /// caller found in the text, and it is `None` for a text that names no
+    /// repository. `run` is the repository this run asks GitHub about.
+    /// [`Repo::is_same_repository`] compares the two, because GitHub names a
+    /// repository without regard to letter case.
+    ///
+    /// Only a text from the clipboard is refused. The reader typed an argument
+    /// and built a pipe on purpose, and `wn --refresh` does not replace such a
+    /// text, so it is not the repair for one. A plan this run built is not
+    /// refused. A run that builds refuses a `--repo` for another repository
+    /// before it runs `claude`, with [`crate::build::refuse_another_repository`],
+    /// so a built plan is for the repository of the run. The skill can still
+    /// write a name `gh` does not give, such as the old name of a renamed
+    /// repository, and such a plan is true. A text that names no repository is
+    /// not refused either. A chain, a table, a picture,
+    /// and a JSON document without `repo` say nothing about the repository,
+    /// and `wn` has no way to find out which repository such a text is for.
+    ///
+    /// The message writes nothing out of the clipboard except the repository
+    /// the plan names. This is the rule of [`Chain::blame`]: the clipboard
+    /// holds a password or a token as readily as it holds a plan.
+    ///
+    /// # Errors
+    ///
+    /// Gives [`InputError::AnotherRepository`] for a plan on the clipboard
+    /// that names a repository other than `run`.
+    pub fn refuse_another_repository(
+        &self,
+        named: Option<&Repo>,
+        run: &Repo,
+    ) -> Result<(), InputError> {
+        if self.source != Source::Clipboard {
+            return Ok(());
+        }
+        match named {
+            Some(plan) if !plan.is_same_repository(run) => Err(InputError::AnotherRepository {
+                plan: plan.clone(),
+                run: run.clone(),
+            }),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// The note a run that kept its plan earns.
@@ -421,6 +475,26 @@ pub enum InputError {
          Unset it to build one. {PASS_IT_AS_AN_ARGUMENT}"
     )]
     RefreshWithoutClaude,
+    /// The clipboard holds a plan for one repository, and this run is for
+    /// another repository.
+    ///
+    /// The caution stands before the step it warns about. The last line does
+    /// not name the repository of the run beside `wn --refresh`: that run
+    /// builds a plan for the current directory, and it refuses a `--repo` that
+    /// names another repository. The first line already names the repository
+    /// of the run.
+    #[error(
+        "the plan on the clipboard is for {plan}, and this run is for {run}.\n\
+         CAUTION: wn --refresh REPLACES WHAT IS ON THE CLIPBOARD. WHAT IS ON IT NOW IS LOST.\n\
+         Run wn --refresh to build a new plan, or run wn --repo {plan} to answer the plan \
+         on the clipboard."
+    )]
+    AnotherRepository {
+        /// The repository the plan names.
+        plan: Repo,
+        /// The repository this run asks GitHub about.
+        run: Repo,
+    },
 }
 
 /// Whether `value`, the value of [`NO_CLIPBOARD_ENV`], turns the fallback off.
@@ -1218,6 +1292,90 @@ Unset it to build one. Pass it as an argument, in quotes: wn \"#277 → #278\""
 \"```json\" is not an issue number. The first line of it is \"```json\"."
         );
         assert!(!message.contains("clipboard"), "{message}");
+    }
+
+    /// A plan written as JSON for `owner/a`.
+    ///
+    /// This module never reads the text, so the tests hand the repository to
+    /// the check themselves. The text only shows what such a clipboard holds.
+    const PLAN_FOR_A: &str = "{\"version\": 1, \"repo\": \"owner/a\", \"streams\": []}";
+
+    /// The repository `spec` names.
+    fn repository(spec: &str) -> Repo {
+        Repo::parse(spec).expect("the test names a repository")
+    }
+
+    #[test]
+    fn a_plan_on_the_clipboard_for_another_repository_is_refused() {
+        let plan = repository("owner/a");
+        let run = repository("owner/b");
+        assert_eq!(
+            clipboard_chain(PLAN_FOR_A).refuse_another_repository(Some(&plan), &run),
+            Err(InputError::AnotherRepository {
+                plan: plan.clone(),
+                run: run.clone(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_plan_that_names_the_repository_of_the_run_in_other_letter_case_is_not_refused() {
+        // GitHub names a repository without regard to letter case, so these
+        // two names are one repository. A refusal here sends the reader to
+        // replace a plan that is true.
+        assert_eq!(
+            clipboard_chain(PLAN_FOR_A).refuse_another_repository(
+                Some(&repository("TimMattison/Tools")),
+                &repository("timmattison/tools")
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_plan_for_another_repository_that_the_reader_typed_or_piped_is_not_refused() {
+        // The reader chose this text on purpose, so it is the plan they want
+        // answered. `wn --refresh` does not replace an argument or a pipe, so
+        // a refusal would name a repair that repairs nothing.
+        let plan = repository("owner/a");
+        let run = repository("owner/b");
+        let argument = arguments(&[PLAN_FOR_A]);
+        let typed = Sources {
+            argument: &argument,
+            stdin: None,
+            clipboard: None,
+            plan: None,
+            refresh: false,
+        }
+        .chain()
+        .expect("the argument holds the plan");
+        assert_eq!(typed.refuse_another_repository(Some(&plan), &run), Ok(()));
+
+        let stdin = || -> std::io::Result<String> { Ok(PLAN_FOR_A.to_string()) };
+        let piped = Sources {
+            argument: &[],
+            stdin: Some(&stdin),
+            clipboard: None,
+            plan: None,
+            refresh: false,
+        }
+        .chain()
+        .expect("the pipe holds the plan");
+        assert_eq!(piped.refuse_another_repository(Some(&plan), &run), Ok(()));
+    }
+
+    #[test]
+    fn a_plan_for_another_repository_that_this_run_built_is_not_refused() {
+        // A run that builds refuses a `--repo` for another repository before it
+        // runs `claude`, so a plan this run built is for the repository of the
+        // run. The skill can still write a name `gh` does not give, such as
+        // the old name of a renamed repository, and a refusal of that plan
+        // would refuse a plan that is true.
+        assert_eq!(
+            built_chain(PLAN_FOR_A)
+                .refuse_another_repository(Some(&repository("owner/a")), &repository("owner/b")),
+            Ok(())
+        );
     }
 
     #[test]
