@@ -529,8 +529,8 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     budget pushes the timed refresh out past the interval, and the countdown shows the longer wait
     rather than promising one it will not keep.
   - Watch-mode keys: `q` or Ctrl-C quits, `r` forces an immediate refresh, `p` pushes the
-    current branch, and `G` opens the issue the branch names. Ctrl-C quits from anywhere,
-    including while a push is in flight.
+    current branch, `G` opens the issue the branch names, and `m` measures a rebase and a merge
+    against the default branch. Ctrl-C quits from anywhere, including while a push is in flight.
   - `p` always asks first, and the question names the branch, the remote, and how much is going —
     so what you confirm is what runs. If the checkout moves in another pane between the question
     and your answer, the push is refused rather than redirected at the branch that is there now:
@@ -656,6 +656,31 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       arrives only when the last writer lets go — so a background child your command leaves behind
       would hold the run open long after your shell exited, which is the same held key by another
       road. A file has no such end to wait for.
+  - `m` measures, in gsw's own process, what `grind` and `grime` measure: a rebase of HEAD onto
+    the default branch and a merge of that branch into HEAD. The default branch is `main`, else
+    `master`, chosen by the same call both tools make. gsw does not need either tool on the `PATH`.
+    - While the run is in flight, the bottom row says `Running grind and grime against main…`.
+      That notice does not fade, and a key does not remove it, because it tells you that `m` does
+      nothing now. One run at a time is the rule, so ten presses start one run. A question or a
+      push in flight owns the row, so a run that starts then shows no notice.
+    - When the run ends, one line takes the place of the notice and fades off the screen after a
+      minute, like the result of a push: `main: rebase clean · merge clean`, or
+      `main: rebase 3 hunks in 2 files, 2 stops · merge 1 hunk in 1 file`. The counts are conflict
+      hunks, the number both tools report. The words for them come from `gitscratch`, so gsw,
+      `grind`, and `grime` never name one number in two ways. The merge half names no stops,
+      because a merge stops once or never. A dirty work tree adds `· uncommitted work not
+      included`. A half that fails shows its reason and no number — `merge failed: <reason>` —
+      and the other half still shows its result. The line is cut to the pane width and never
+      wraps.
+    - On the default branch itself, `m` runs no replay and says `on main — nothing to compare`. A
+      repository with no default branch, or with no commit at HEAD, gets the reason as a fading
+      line, and `m` works again at once. A detached HEAD is measured, as `grind` measures one.
+    - The two replays run one after the other on a thread of their own, in the scratch worktrees
+      of `gitscratch`: no hook runs, and your refs do not move. The replay is read-only for your
+      repository, so `m` works while a push is in flight. A quit during a run shows
+      `Waiting for grind and grime to finish…` and waits for the replay in flight to remove its
+      scratch worktree. The second replay does not start. A scratch worktree that a quit abandoned
+      would stay registered in your repository and point at a deleted directory.
   - To install: `cargo install --git https://github.com/timmattison/tools gsw`
 - seescc (sccache stats viewer)
   - Self-refreshing terminal viewer for [sccache](https://github.com/mozilla/sccache) statistics —

@@ -26,6 +26,7 @@ use crossterm::terminal::{
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
+use crate::conflicts::ConflictsWorker;
 use crate::push::{PushCommand, PushUi};
 use crate::render::Snapshot;
 use crate::repo::RepoHandle;
@@ -686,26 +687,12 @@ enum Event {
     /// Sent before the first replay starts. A run that is refused, or that
     /// finds HEAD on the default branch, starts no replay and sends none of
     /// these, because its outcome follows at once.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the measuring thread of slice C of #496 sends this"
-        )
-    )]
     ConflictsStarted(String),
     /// A run of `m` has ended, and this is what it found.
     ///
     /// Always arrives after the [`Event::ConflictsStarted`] of the same run,
     /// because one thread sends both on this one channel. A run that a quit
     /// abandoned sends none, because nobody reads it.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the measuring thread of slice C of #496 sends this"
-        )
-    )]
     ConflictsFinished(crate::conflicts::ConflictsOutcome),
 }
 
@@ -1087,6 +1074,13 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     let issue_tx = tx.clone();
     spawn_issue_probe(shell.clone(), tx.clone());
 
+    // The worker that measures for `m`. It reports on the channel of the loop,
+    // as the push and the issue key do. The quit below waits for it, because a
+    // replay that the process abandons keeps a scratch worktree registered in
+    // the repository of the user.
+    let mut conflicts = ConflictsWorker::new();
+    let conflicts_tx = tx.clone();
+
     // Where the person who reads this screen sits, read once and beside the
     // shell above. A session does not change under a running process, and the
     // read costs one `ps`.
@@ -1102,7 +1096,7 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     // handle; the watcher clones everything it needs, so this borrow ends here.
     let _watcher = spawn_fs_watcher(handle.repo(), ignore.clone(), tx)?;
 
-    event_loop(
+    let result = event_loop(
         &rx,
         DEBOUNCE,
         &mut displayed,
@@ -1157,11 +1151,37 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                     );
                 }
             },
-            // Nothing starts yet. The next slice of #496 starts the measuring
-            // thread here, and holds it until the quit.
-            start_conflicts: || {},
+            start_conflicts: || {
+                // No work tree means no HEAD to measure. The same `Option` the
+                // push honors, honored here.
+                if let Some(workdir) = workdir.clone() {
+                    let started_tx = conflicts_tx.clone();
+                    let finish_tx = conflicts_tx.clone();
+                    conflicts.start(
+                        workdir,
+                        move |branch| {
+                            let _ = started_tx.send(Event::ConflictsStarted(branch));
+                        },
+                        move |outcome| {
+                            let _ = finish_tx.send(Event::ConflictsFinished(outcome));
+                        },
+                    );
+                }
+            },
         },
-    )
+    );
+
+    // Before the guard restores the terminal, and on every way out of the
+    // loop. A run in the middle of a replay finishes that replay and removes
+    // its scratch worktree. The notice tells the user why the quit takes a
+    // moment. The frame goes away with the quit, so the notice takes the whole
+    // screen.
+    conflicts.shutdown(|notice| {
+        let width = current_dimensions(cfg.width_offset).width;
+        let _ = paint_output(&textfit::truncate_right(notice, width));
+    });
+
+    result
 }
 
 /// Ask the shell, once, whether the issue command exists, and report the
