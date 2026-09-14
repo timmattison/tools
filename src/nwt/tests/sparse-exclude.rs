@@ -200,3 +200,247 @@ fn two_flags_exclude_two_directories_and_the_notice_names_both() {
         "stderr must hold the one notice line {NOTICE:?}, but it holds:\n{stderr}"
     );
 }
+
+/// The exit code `nwt` returns when it refuses a `--sparse-exclude` value.
+const INVALID_SPARSE_EXCLUDE: i32 = 15;
+
+/// The suffix `nwt` adds to the repository name to name the directory that
+/// holds every new worktree.
+const WORKTREES_SUFFIX: &str = "-worktrees";
+
+/// Resolve a path before a comparison reads it.
+///
+/// Git prints resolved paths, and macOS reaches every temporary directory
+/// through a symbolic link: `/var` resolves to `/private/var`.
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|e| panic!("canonicalize {}: {e}", path.display()))
+}
+
+/// The directory `nwt -b <branch>` makes in `repo`, resolved.
+///
+/// A branch name that holds only letters, digits, and `-` is also the name of
+/// the directory.
+fn expected_worktree(repo: &Path, branch: &str) -> PathBuf {
+    let repo = canonical(repo);
+    let name = repo
+        .file_name()
+        .expect("the repository has a name")
+        .to_str()
+        .expect("utf-8 repository name");
+    repo.with_file_name(format!("{name}{WORKTREES_SUFFIX}"))
+        .join(branch)
+}
+
+/// Test 2 of issue #487, the question that started it: a later `nwt` without
+/// the flag gives a full worktree, and the sparse worktree and the main
+/// worktree keep what they had.
+#[test]
+fn a_later_worktree_without_the_flag_is_full() {
+    let (_temp, repo) = repo_with_heavy_dir();
+
+    let sparse = created_worktree(&run_nwt(
+        &repo,
+        &unique_branch("sparse-first"),
+        &["--sparse-exclude", HEAVY_DIR],
+    ));
+    let full = created_worktree(&run_nwt(&repo, &unique_branch("full-second"), &[]));
+
+    assert_files_present(&full, KEPT_FILES);
+    assert_files_present(&full, HEAVY_FILES);
+    let status = git_stdout(&full, &["status", "--short"]);
+    assert!(
+        status.is_empty(),
+        "a full worktree has no change to report, but git status says:\n{status}"
+    );
+
+    assert!(
+        !sparse.join(HEAVY_DIR).exists(),
+        "the full worktree must not give {HEAVY_DIR}/ back to the sparse worktree at {}",
+        sparse.display()
+    );
+    assert_files_present(&repo, HEAVY_FILES);
+}
+
+/// Test 3 of issue #487: the sparse settings belong to the new worktree only.
+///
+/// `git sparse-checkout set` in the new worktree writes `core.sparseCheckout`
+/// into `.git/worktrees/<name>/config.worktree` and the patterns into
+/// `.git/worktrees/<name>/info/sparse-checkout`. The main worktree reads
+/// `core.sparseCheckout` as unset and has no pattern file. The test asks git
+/// for `<name>`, and does not guess it from the branch.
+#[test]
+fn the_sparse_settings_are_in_the_new_worktree_only() {
+    let (_temp, repo) = repo_with_heavy_dir();
+    let worktree = created_worktree(&run_nwt(
+        &repo,
+        &unique_branch("sparse-scope"),
+        &["--sparse-exclude", HEAVY_DIR],
+    ));
+
+    let worktree_git_dir =
+        PathBuf::from(git_stdout(&worktree, &["rev-parse", "--absolute-git-dir"]).trim_end());
+    assert_eq!(
+        canonical(&worktree_git_dir).parent(),
+        Some(canonical(&repo.join(".git").join("worktrees")).as_path()),
+        "the git directory of the new worktree must be under .git/worktrees"
+    );
+
+    let config_worktree = worktree_git_dir.join("config.worktree");
+    let config_worktree = config_worktree.to_str().expect("utf-8 config path");
+    assert_eq!(
+        git_stdout(
+            &repo,
+            &[
+                "config",
+                "--file",
+                config_worktree,
+                "--get",
+                "core.sparseCheckout"
+            ]
+        )
+        .trim_end(),
+        "true",
+        "config.worktree of the new worktree must turn sparse checkout on"
+    );
+
+    let patterns = std::fs::read_to_string(worktree_git_dir.join("info").join("sparse-checkout"))
+        .expect("read the sparse-checkout file of the new worktree");
+    let expected_pattern = format!("!/{HEAVY_DIR}/");
+    assert!(
+        patterns.lines().any(|line| line == expected_pattern),
+        "the pattern file of the new worktree must hold {expected_pattern:?}:\n{patterns}"
+    );
+
+    // `run_git` answers with a bool. `git config --get` exits 1 for a key that
+    // is not set, and `git_stdout` panics on that.
+    assert!(
+        !run_git(&repo, &["config", "--get", "core.sparseCheckout"]),
+        "the main worktree must read core.sparseCheckout as unset"
+    );
+    assert!(
+        !repo
+            .join(".git")
+            .join("info")
+            .join("sparse-checkout")
+            .exists(),
+        "the main worktree must have no sparse-checkout pattern file"
+    );
+    assert_files_present(&repo, HEAVY_FILES);
+}
+
+/// Test 10 of issue #487: stdout holds the worktree path and one line break,
+/// and nothing else.
+///
+/// The shell wrapper runs `dir=$(command nwt "$@")` and changes to `$dir`. A
+/// word from a git child or from the notice on stdout breaks that.
+#[test]
+fn stdout_is_only_the_worktree_path() {
+    let (_temp, repo) = repo_with_heavy_dir();
+    let branch = unique_branch("sparse-stdout");
+
+    let output = run_nwt(&repo, &branch, &["--sparse-exclude", HEAVY_DIR]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "nwt failed ({:?}):\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        stdout,
+        format!("{}\n", expected_worktree(&repo, &branch).display()),
+        "stdout must be the worktree path and one line break"
+    );
+}
+
+/// Test 11 of issue #487: `git sparse-checkout disable` in the new worktree
+/// writes the excluded directory. This is the way back that the notice names.
+#[test]
+fn sparse_checkout_disable_writes_the_excluded_directory() {
+    let (_temp, repo) = repo_with_heavy_dir();
+    let worktree = created_worktree(&run_nwt(
+        &repo,
+        &unique_branch("sparse-disable"),
+        &["--sparse-exclude", HEAVY_DIR],
+    ));
+    assert!(
+        !worktree.join(HEAVY_DIR).exists(),
+        "the fixture must start without {HEAVY_DIR}/"
+    );
+
+    assert!(
+        run_git(&worktree, &["sparse-checkout", "disable"]),
+        "git sparse-checkout disable failed in {}",
+        worktree.display()
+    );
+
+    assert_files_present(&worktree, HEAVY_FILES);
+    assert_files_present(&worktree, KEPT_FILES);
+    let status = git_stdout(&worktree, &["status", "--short"]);
+    assert!(
+        status.is_empty(),
+        "a worktree made full again has no change to report, but git status says:\n{status}"
+    );
+}
+
+/// A value that the lexical rules refuse exits with its own code, names the
+/// value on stderr, prints no path, and makes nothing: no worktrees directory
+/// and no branch.
+///
+/// A later slice of issue #487 adds the check at the ref, and with it a missing
+/// path and a tracked file.
+#[test]
+fn a_lexically_bad_value_is_refused_and_makes_nothing() {
+    for raw in ["/abs", "..", "a/../b", "./"] {
+        let (temp, repo) = repo_with_heavy_dir();
+        let branch = unique_branch("sparse-refused");
+
+        let output = run_nwt(&repo, &branch, &["--sparse-exclude", raw]);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert_eq!(
+            output.status.code(),
+            Some(INVALID_SPARSE_EXCLUDE),
+            "--sparse-exclude {raw:?} must exit {INVALID_SPARSE_EXCLUDE}:\n{stderr}"
+        );
+        assert!(
+            stdout.is_empty(),
+            "a refused run prints no path. stdout: {stdout:?}"
+        );
+        let named = format!("Error: --sparse-exclude '{raw}'");
+        assert!(
+            stderr.contains(&named),
+            "stderr must name the value with {named:?}:\n{stderr}"
+        );
+
+        let left: Vec<String> = std::fs::read_dir(temp.path())
+            .expect("read the temporary directory")
+            .map(|entry| {
+                entry
+                    .expect("read one directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(
+            left,
+            vec!["repo".to_string()],
+            "a refused --sparse-exclude {raw:?} must make no worktrees directory"
+        );
+        assert!(
+            !run_git(
+                &repo,
+                &[
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{branch}")
+                ]
+            ),
+            "a refused --sparse-exclude {raw:?} must make no branch"
+        );
+    }
+}
