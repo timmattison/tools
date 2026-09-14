@@ -1665,6 +1665,18 @@ fn run_sparse_step(mut command: Command, step: &str) -> Result<String, String> {
     ))
 }
 
+/// The names of the steps of [`apply_sparse_checkout`], in the order that it
+/// runs them. [`run_sparse_step`] puts each name into its error message.
+///
+/// A failure of each step breaks the worktree, and the run removes it. The
+/// `--help` text and the README name each step in that failure. A test reads
+/// this array, so a new step must come here, and the documents must name it.
+const SPARSE_STEPS: [&str; 3] = [
+    "git sparse-checkout set",
+    "git read-tree -mu HEAD",
+    "git rev-parse HEAD",
+];
+
 /// Write the files of a `--no-checkout` worktree through sparse patterns that
 /// leave out each directory of `excludes`.
 ///
@@ -1687,6 +1699,8 @@ fn run_sparse_step(mut command: Command, step: &str) -> Result<String, String> {
 /// The worktree is broken then, and [`try_create_worktree`] calls
 /// [`remove_broken_sparse_worktree`] to remove what the run made.
 fn apply_sparse_checkout(worktree: &Path, excludes: &[SparseExcludeDir]) -> Result<String, String> {
+    let [set_step, read_tree_step, rev_parse_step] = SPARSE_STEPS;
+
     let mut set = production_git_command(worktree);
     set.args([
         "sparse-checkout",
@@ -1695,15 +1709,15 @@ fn apply_sparse_checkout(worktree: &Path, excludes: &[SparseExcludeDir]) -> Resu
         SPARSE_INCLUDE_EVERYTHING,
     ])
     .args(excludes.iter().map(SparseExcludeDir::pattern));
-    run_sparse_step(set, "git sparse-checkout set")?;
+    run_sparse_step(set, set_step)?;
 
     let mut read_tree = production_git_command(worktree);
     read_tree.args(["read-tree", "-mu", "HEAD"]);
-    run_sparse_step(read_tree, "git read-tree -mu HEAD")?;
+    run_sparse_step(read_tree, read_tree_step)?;
 
     let mut rev_parse = production_git_command(worktree);
     rev_parse.args(["rev-parse", "HEAD"]);
-    let head = run_sparse_step(rev_parse, "git rev-parse HEAD")?;
+    let head = run_sparse_step(rev_parse, rev_parse_step)?;
     Ok(head.trim_end().to_owned())
 }
 
@@ -4507,6 +4521,87 @@ mod tests {
         section.lines().any(|line| line.trim() == sample)
     }
 
+    /// The two documents of `--sparse-exclude`: the SPARSE WORKTREES section of
+    /// `--help`, and the `### Sparse worktrees` section inside the `## nwt`
+    /// section of the README.
+    ///
+    /// `include_str!` stays in `#[cfg(test)]`, so the README goes into the test
+    /// binary only and not into the `nwt` that ships.
+    fn sparse_doc_sections() -> (String, &'static str) {
+        use clap::CommandFactory;
+
+        let long_about = Cli::command()
+            .get_long_about()
+            .expect("nwt sets long_about")
+            .to_string();
+        let help_section =
+            doc_section(&long_about, "\nSPARSE WORKTREES:\n", "\nEXAMPLES:\n").to_owned();
+        let nwt_section = doc_section(
+            include_str!("../../../README.md"),
+            "\n## nwt (new worktree)\n",
+            "\n## ",
+        );
+        let readme_section = doc_section(nwt_section, "\n### Sparse worktrees\n", "\n### ");
+        (help_section, readme_section)
+    }
+
+    /// `text` with each run of whitespace as one space. A phrase that a line
+    /// break splits in `text` then matches as one phrase.
+    fn join_lines(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// The first paragraph of `section` that holds `phrase`, as one line. An
+    /// empty string when no paragraph holds it. A line that holds only
+    /// whitespace ends a paragraph.
+    fn paragraph_holding(section: &str, phrase: &str) -> String {
+        let mut paragraphs = vec![String::new()];
+        for line in section.lines() {
+            if line.trim().is_empty() {
+                paragraphs.push(String::new());
+            } else if let Some(paragraph) = paragraphs.last_mut() {
+                paragraph.push(' ');
+                paragraph.push_str(line);
+            }
+        }
+        paragraphs
+            .iter()
+            .map(|paragraph| join_lines(paragraph))
+            .find(|paragraph| paragraph.contains(phrase))
+            .unwrap_or_default()
+    }
+
+    /// A failure of each step of [`SPARSE_STEPS`] breaks the worktree, and
+    /// the run removes it. The SPARSE WORKTREES section of `--help` says so,
+    /// and so does the `### Sparse worktrees` section of the README. Each
+    /// document says it in the paragraph that holds "the worktree is broken".
+    ///
+    /// [`apply_sparse_checkout`] passes the names of [`SPARSE_STEPS`] to
+    /// [`run_sparse_step`], and this test reads the same array. Add a step to
+    /// the code alone, and this test fails and names the document that did
+    /// not change.
+    #[test]
+    fn test_help_and_readme_name_each_sparse_step_whose_failure_removes_the_worktree() {
+        const BROKEN_WORKTREE: &str = "the worktree is broken";
+
+        let (help_section, readme_section) = sparse_doc_sections();
+        let help_paragraph = paragraph_holding(&help_section, BROKEN_WORKTREE);
+        let readme_paragraph = paragraph_holding(readme_section, BROKEN_WORKTREE);
+
+        for step in SPARSE_STEPS {
+            assert!(
+                help_paragraph.contains(step),
+                "the SPARSE WORKTREES section of --help must name {step:?} where it says \
+                 {BROKEN_WORKTREE:?}: {help_paragraph:?}"
+            );
+            assert!(
+                readme_paragraph.contains(step),
+                "the ### Sparse worktrees section of README.md must name {step:?} where it \
+                 says {BROKEN_WORKTREE:?}: {readme_paragraph:?}"
+            );
+        }
+    }
+
     /// The sparse notice and the `Skipped:` line of a `.env` under an excluded
     /// directory show as samples in two documents. The SPARSE WORKTREES section
     /// of `--help` holds them, and so does the `## nwt` section of the README.
@@ -4516,36 +4611,23 @@ mod tests {
     /// [`skipped_under_excluded_message`], and each document must hold that
     /// line as a line of its own. Change the wording in the code alone, and
     /// this test fails and names the document that did not change.
-    ///
-    /// `include_str!` stays in `#[cfg(test)]`, so the README goes into the test
-    /// binary only and not into the `nwt` that ships.
     #[test]
     fn test_help_and_readme_samples_match_the_sparse_lines() {
-        use clap::CommandFactory;
-
         let heavy = sparse_dirs(&["heavy"]);
         let notice = sparse_exclude_notice(&heavy);
         let skipped = skipped_under_excluded_message(Path::new("heavy/.env"), &heavy[0]);
 
-        let long_about = Cli::command()
-            .get_long_about()
-            .expect("nwt sets long_about")
-            .to_string();
-        let help_section = doc_section(&long_about, "\nSPARSE WORKTREES:\n", "\nEXAMPLES:\n");
-        let readme_section = doc_section(
-            include_str!("../../../README.md"),
-            "\n## nwt (new worktree)\n",
-            "\n## ",
-        );
+        let (help_section, readme_section) = sparse_doc_sections();
 
         for sample in [&notice, &skipped] {
             assert!(
-                has_sample_line(help_section, sample),
+                has_sample_line(&help_section, sample),
                 "the SPARSE WORKTREES section of --help must hold the runtime line: {sample}"
             );
             assert!(
                 has_sample_line(readme_section, sample),
-                "the ## nwt section of README.md must hold the runtime line: {sample}"
+                "the ### Sparse worktrees section of README.md must hold the runtime line: \
+                 {sample}"
             );
         }
     }
