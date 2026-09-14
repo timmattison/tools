@@ -1,9 +1,10 @@
 //! Asking GitHub what it holds for each number of the chain.
 //!
-//! The whole chain is one question, and it is asked as one GraphQL query with
-//! one alias for each number. A REST call for each issue would ask the same
-//! thing in six round trips, spend six units of the rate limit, and answer a
-//! chain of six issues six times slower.
+//! Every number of the chain is one question, and it is asked as one GraphQL
+//! query with one alias for each number. A REST call for each issue would ask
+//! the same thing in six round trips, spend six units of the rate limit, and
+//! answer a chain of six issues six times slower. Each round of blockers that
+//! stand nowhere in the text costs one query more, through the same [`fetch`].
 //!
 //! The query goes through `gh`, and it goes through `gh` for the credential.
 //! The GitHub CLI already holds a token for the host the repository lives on,

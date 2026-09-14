@@ -25,8 +25,10 @@
 //! link nobody wrote, and nothing else would say so.
 //!
 //! A plan also names one number in two streams. [`States`] holds the answer
-//! of GitHub for each number once, so one query answers the whole plan and
-//! every stream that names a number reads the same state for it.
+//! of GitHub for each number once, so one query answers every number the plan
+//! names and every stream that names a number reads the same state for it.
+//! Each round of blockers that stand nowhere in the plan costs one query more,
+//! and its answers join the same [`States`].
 //!
 //! # One report answers a chain, a stream, and a graph
 //!

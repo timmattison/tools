@@ -1245,9 +1245,9 @@ impl Graph {
     /// The number of a step comes before the number the step closes, because
     /// the pull request is the work and the issue is what the work finishes.
     /// A number that stands twice in the picture is one node, so it arrives
-    /// once and one query to GitHub answers the whole picture. This is the
-    /// rule `Plan::numbers` states for a plan, and a graph states it the same
-    /// way so one query answers either shape.
+    /// once and one query to GitHub answers every number of the picture. This
+    /// is the rule `Plan::numbers` states for a plan, and a graph states it the
+    /// same way so one query answers the numbers of either shape.
     #[must_use]
     pub fn numbers(&self) -> Vec<IssueNumber> {
         let mut numbers: Vec<IssueNumber> = Vec::new();

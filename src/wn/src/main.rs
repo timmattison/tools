@@ -7,11 +7,12 @@
 //!
 //! `wn` puts the two together. It reads the chain, asks GitHub about every
 //! number in it with one query, prints one row for each with its state and its
-//! title, and names the first one that is still open.
+//! title, and names the first one that is still open. Each round of blockers
+//! that stand nowhere in the chain costs one query more.
 //!
 //! A plan of parallel work is a second shape of input. It holds several chains
-//! side by side, one for each stream, and `wn` answers the whole page with one
-//! query as well. The shape of the text says which reader takes it, so no flag
+//! side by side, one for each stream, and `wn` answers every number of the page
+//! with one query as well. The shape of the text says which reader takes it, so no flag
 //! and no subcommand stands between the reader and the answer.
 //!
 //! A plan drawn as a picture is the third shape. It says the one thing a chain

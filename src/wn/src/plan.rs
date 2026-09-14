@@ -204,7 +204,7 @@ impl Plan {
     /// The number of a step comes before the number the step closes, because
     /// the pull request is the work and the issue is what the work finishes.
     /// A number that stands in two streams arrives once, so one query to
-    /// GitHub answers the whole plan.
+    /// GitHub answers every number of the plan.
     ///
     /// The chain of a stream comes first and the work it waits for after it.
     /// The work a stream waits for is sometimes the work of no stream of the

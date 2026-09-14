@@ -1244,11 +1244,12 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     variable is a common accident. The clipboard is also the cache a run of `claude` writes its
     plan to, so a reader who turns the clipboard off turns that cache off with it: every bare
     `wn` then pays for a new run and keeps nothing.
-  - The whole chain is one GraphQL query through `gh`, so a chain of six issues costs one round
-    trip and one unit of the rate limit, and the credential is the one `gh` already holds. Pull
-    request numbers work too: merged counts as done, and closed without a merge counts as
-    dropped. An issue closed as not planned or as a duplicate is marked `⊘` rather than `✓`,
-    because the chain walked past it rather than through it.
+  - One GraphQL query through `gh` answers every number of the chain, so a chain of six issues
+    costs one round trip and one unit of the rate limit, and the credential is the one `gh`
+    already holds. Each round of blockers that stand nowhere in the chain costs one query more, as
+    the order check below says. Pull request numbers work too: merged counts as done, and closed
+    without a merge counts as dropped. An issue closed as not planned or as a duplicate is marked
+    `⊘` rather than `✓`, because the chain walked past it rather than through it.
   - Two things earn a note under the answer. A number the repository does not have is reported
     and never named as the next issue, and the run exits `1` — a typo in a chain of six is
     otherwise invisible, because the other five still name an issue to start. An issue that is
@@ -1307,11 +1308,12 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     and `#4 (in flight (rebasing), PR #15)` still gives the row `#15 (#4)`. A group that never
     closes is refused, because where it ends is a guess — and a nested parenthesis closes the group
     it opened and no other, so `#4 (a (b) c` is refused as well.
-  - The whole plan is one GraphQL query, as one chain is. A plan of seven streams and eighteen
-    numbers costs one round trip and one unit of the rate limit, and a number that stands in two
-    streams is asked about once and reported in both. A stream that names a number the repository
-    does not have keeps its row and its note, the other streams still answer, and the run exits
-    `1`.
+  - One GraphQL query answers every number of the plan, as it does for one chain. A plan of seven
+    streams and eighteen numbers costs one round trip and one unit of the rate limit, and a number
+    that stands in two streams is asked about once and reported in both. Each round of blockers
+    that stand nowhere in the plan costs one query more, as the order check below says. A stream
+    that names a number the repository does not have keeps its row and its note, the other streams
+    still answer, and the run exits `1`.
   - A fifth column carries the one edge a table of streams could not: one stream that waits for a
     step of another. `Waits for` stands beside `Stream`, `Order`, `Zone`, and `Notes`, it is
     matched with the case ignored as those four are, and the record form writes it as the field
@@ -1457,11 +1459,13 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     nobody can guess. A cycle is refused and its numbers are named, because a cycle has no
     step to start and an answer of "nothing is ready" hides the reason. A net with no port at all
     is dropped without a word, which is why the border of a box-drawn table costs nothing.
-  - The whole picture is one GraphQL query, as one chain and one plan are, so a step that stands
-    in two places is asked about once and reported in both. The run exits `0` when the repository
-    holds every number of the picture, `1` when the picture names a number the repository does not
-    have, and `2` for a picture `wn` could not read and for a cycle. `wn` draws no graph back: the
-    answer is the rows and what each row waits for, because a layout engine is a separate decision.
+  - One GraphQL query answers every number of the picture, as it does for one chain and one plan,
+    so a step that stands in two places is asked about once and reported in both. Each round of
+    blockers that stand nowhere in the picture costs one query more, as the order check above
+    says. The run exits `0` when the repository holds every number of the picture, `1` when the
+    picture names a number the repository does not have, and `2` for a picture `wn` could not read
+    and for a cycle. `wn` draws no graph back: the answer is the rows and what each row waits for,
+    because a layout engine is a separate decision.
   - A plan written as JSON is a fifth shape of input, and it is the shape a program hands back.
     The four written forms were each written for a person to read, and three of them carry layout
     the reader has to undo — a column width, a border, a cell that wrapped onto a second line.
