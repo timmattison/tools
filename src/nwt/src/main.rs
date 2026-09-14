@@ -1681,9 +1681,15 @@ struct EnvCopySummary {
 
 /// The stderr line for an untracked `.env` that the copy does not take,
 /// because it is under the excluded directory `dir`.
+///
+/// The directory shows with a trailing `/`, as the sparse checkout notice
+/// shows it.
 fn skipped_under_excluded_message(relative_path: &Path, dir: &SparseExcludeDir) -> String {
-    let _ = (relative_path, dir);
-    String::new()
+    format!(
+        "Skipped: {} (under excluded {}/)",
+        relative_path.display(),
+        dir.as_str()
+    )
 }
 
 /// Builds the user-facing line announcing a destination `.env` that was left alone.
@@ -1760,7 +1766,12 @@ fn copy_env_file(source: &Path, dest: &Path) -> io::Result<()> {
 /// This function:
 /// 1. Gets all tracked files from git in a single call (for performance)
 /// 2. Walks the main repo looking for `.env` or `.env.*` files (e.g., `.env.local`)
-/// 3. Skips the `.git` directory, tracked files, and unrelated dotfiles like `.envrc`
+/// 3. Skips the `.git` directory, tracked files, and unrelated dotfiles like `.envrc`.
+///    It also skips each untracked file under a directory of `excluded`, the
+///    `--sparse-exclude` directories of the new worktree, because a copy makes that
+///    directory in the worktree again. Each such skip counts in
+///    [`EnvCopySummary::skipped`] and prints one `Skipped:` line (see
+///    [`skipped_under_excluded_message`]).
 /// 4. Skips any destination that already exists, leaving it completely untouched —
 ///    a `post-checkout` hook runs during `git worktree add` (before this copy), so a
 ///    worktree-specific .env it generated must win over the main worktree's version
@@ -1788,7 +1799,6 @@ fn copy_untracked_env_files(
     excluded: &[SparseExcludeDir],
     quiet: bool,
 ) -> EnvCopySummary {
-    let _ = excluded;
     // Get all tracked files in a single git call for performance
     let tracked_files = get_tracked_files(main_repo);
     let mut summary = EnvCopySummary::default();
@@ -1828,6 +1838,21 @@ fn copy_untracked_env_files(
             Ok(rel) => rel,
             Err(_) => continue,
         };
+
+        // A sparse worktree does not hold an excluded directory, and a copy
+        // into it makes that directory again. `Path::starts_with` compares
+        // whole components, so `heavy2/.env` is not under `heavy`.
+        if let Some(dir) = excluded
+            .iter()
+            .find(|dir| relative_path.starts_with(Path::new(dir.as_str())))
+        {
+            summary.skipped += 1;
+            if !quiet {
+                eprintln!("{}", skipped_under_excluded_message(relative_path, dir));
+            }
+            continue;
+        }
+
         let dest_path = worktree.join(relative_path);
 
         // Never clobber something the new worktree already has. Repo
