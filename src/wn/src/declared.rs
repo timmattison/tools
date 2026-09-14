@@ -9,7 +9,9 @@
 //! So the answer reads both claims, and three things can come of that:
 //!
 //! * The plan holds every blocker its open issues name, and it answers as it
-//!   always did.
+//!   always did. The order holds a blocker when a walk from the blocker
+//!   reaches the step and passes no finished step. A plan of streams must
+//!   also put the blocker before the step in each stream that holds the step.
 //! * The plan puts an issue before its own blocker. That is a refusal, because
 //!   an answer to that plan sends somebody to work that cannot start.
 //! * The plan leaves a blocker out. The blocker joins the graph, the answer
@@ -44,9 +46,9 @@ pub struct LeftOut {
 
 /// The plan, once what its issues say comes first is part of it.
 pub enum Settled {
-    /// The plan holds every blocker its open issues name. `states` holds what
-    /// GitHub said about every number, those asked about while settling
-    /// included.
+    /// The plan holds every blocker its open issues name, as [`holds`] says.
+    /// `states` holds what GitHub said about every number, those asked about
+    /// while settling included.
     Agrees(States),
     /// The plan left a blocker out, and `graph` holds it.
     Adds {
@@ -63,9 +65,16 @@ pub enum Settled {
 
 /// The plan `graph` draws, held to what its open issues say comes first.
 ///
-/// `states` is what GitHub said about every number of `graph`. `fetch` asks
-/// GitHub about more numbers, and it is called only for a blocker whose state
-/// nobody asked about yet.
+/// `streams` holds the steps of each stream that the reader of streams answers
+/// on its own. It is empty for a text that reader does not answer. `states` is
+/// what GitHub said about every number of `graph`. `fetch` asks GitHub about
+/// more numbers, and it is called only for a blocker whose state nobody asked
+/// about yet.
+///
+/// The plan holds a blocker only where the answer holds the step back, as
+/// [`holds`] says. So the chain `#20 → #10 → #30`, with #10 done and #30
+/// blocked by open #20, adds a wait and answers as a graph. That answer still
+/// names #20, and it still says that #10 closed out of order.
 ///
 /// # Errors
 ///
@@ -75,7 +84,7 @@ pub enum Settled {
 /// `fetch` when GitHub cannot answer.
 pub fn settle(
     graph: &Graph,
-    _streams: &[&[Step]],
+    streams: &[&[Step]],
     states: States,
     fetch: &dyn Fn(&[IssueNumber]) -> anyhow::Result<Vec<Entry>>,
 ) -> anyhow::Result<Settled> {
@@ -106,10 +115,10 @@ pub fn settle(
                 if blocker == step.number() || states.entry(blocker).status.is_finished() {
                     continue;
                 }
-                let order: Vec<Edge> = plan_edges.iter().chain(&added).copied().collect();
-                if path(&order, blocker, step.number()).is_some() {
-                    continue;
-                }
+                // The refusal comes before the held check. An order with no
+                // cycle cannot walk both ways between two steps, so only a
+                // knotted plan of streams changes. Each stream of that plan
+                // answers alone, and one of them names the step first.
                 if path(&plan_edges, step.number(), blocker).is_some() {
                     return Err(OrderError::Reversed {
                         step: step.number(),
@@ -118,6 +127,10 @@ pub fn settle(
                         named,
                     }
                     .into());
+                }
+                let order: Vec<Edge> = plan_edges.iter().chain(&added).copied().collect();
+                if holds(&order, streams, &states, blocker, step.number()) {
+                    continue;
                 }
                 if let Some(cycle) = path(&order, step.number(), blocker) {
                     return Err(OrderError::Cycle(cycle).into());
@@ -172,6 +185,43 @@ fn knotted(err: GraphError, left_out: &[LeftOut]) -> anyhow::Error {
         .into(),
         (err, _) => err.into(),
     }
+}
+
+/// Whether the answer holds `step` back while `blocker` is not finished.
+///
+/// A graph lets a step start once the steps just before it are finished. So a
+/// walk of `order` from `blocker` to `step` holds the wait only when no step
+/// between the two ends is finished. The reader of streams answers each stream
+/// on its own. So `blocker` must also stand before `step` in each stream of
+/// `streams` that holds `step`.
+///
+/// `step` is open, because only an open step names a blocker.
+fn holds(
+    order: &[Edge],
+    streams: &[&[Step]],
+    states: &States,
+    blocker: IssueNumber,
+    step: IssueNumber,
+) -> bool {
+    // A walk never passes through a finished step, so every edge into one
+    // goes out. `step` is open, so no edge into `step` goes out.
+    let unfinished: Vec<Edge> = order
+        .iter()
+        .filter(|(_, after)| !states.entry(*after).status.is_finished())
+        .copied()
+        .collect();
+    path(&unfinished, blocker, step).is_some()
+        && streams.iter().all(|stream| {
+            stream
+                .iter()
+                .position(|held| held.number() == step)
+                .is_none_or(|at| {
+                    stream
+                        .iter()
+                        .take(at)
+                        .any(|earlier| earlier.number() == blocker)
+                })
+        })
 }
 
 /// Every blocker the issues of `step` name, with the number of the issue that
@@ -277,8 +327,10 @@ pub enum OrderError {
     ///
     /// A plan of streams can name one number in two orders. The reader of
     /// streams answers each stream on its own, so it answers such a plan while
-    /// the issues add no wait. A wait joins one step to another, and only a
-    /// graph can show that. A graph cannot hold the cycle, so the run refuses.
+    /// the issues add no wait. An issue that one of the orders puts before its
+    /// own blocker is refused as [`OrderError::Reversed`], even when the other
+    /// order puts the blocker first. A wait joins one step to another, and only
+    /// a graph can show that. A graph cannot hold the cycle, so the run refuses.
     /// An answer of streams would name `step` as ready while `blocker` is
     /// open, and that is the failure this check exists to stop.
     ///

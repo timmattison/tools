@@ -1508,9 +1508,10 @@ pub(crate) fn of_parts(
 /// the edges of such a plan, to hold them to what the issues say comes first,
 /// so this builds them whatever the plan draws. It refuses nothing, because a
 /// plan can name one number in two orders. The reader of streams answers such
-/// a plan while the issues add no wait to it. Once they add one, the answer
-/// must be a graph, and a graph cannot hold the cycle of the two orders. So the
-/// run refuses, and the refusal names the cycle and the wait.
+/// a plan while the issues add no wait to it and no order puts an issue before
+/// its own blocker. Once the issues add a wait, the answer must be a graph, and
+/// a graph cannot hold the cycle of the two orders. So the run refuses, and the
+/// refusal names the cycle and the wait.
 pub(crate) fn of_streams(plan: &Plan) -> Graph {
     let ordered: Vec<Step> = plan
         .streams()

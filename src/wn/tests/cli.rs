@@ -3608,6 +3608,10 @@ fn a_blocker_held_only_through_another_stream_and_finished_work_joins_the_answer
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     let answer = stdout(&output);
     assert!(
+        answer.contains("#10 is already closed, out of order."),
+        "the answer still says #10 closed out of order, in {answer}"
+    );
+    assert!(
         answer.contains("Start #20 next with 'si 20'"),
         "the answer names #20, in {answer}"
     );
