@@ -493,12 +493,519 @@ mod exit_codes {
     pub const TMUX_NOT_RUNNING: i32 = 13;
     /// Shell setup failed
     pub const SHELL_SETUP_ERROR: i32 = 14;
+    /// `nwt` refuses a `--sparse-exclude` value: an empty value, an absolute
+    /// path, a path with a `..` component, a value with a control character,
+    /// or a path that git does not track as a directory at the ref. `nwt`
+    /// refuses it before it makes anything.
+    pub const INVALID_SPARSE_EXCLUDE: i32 = 15;
 }
 
 /// Maximum attempts to find an available directory name before giving up.
 /// The `names` crate has ~100 adjectives and ~200 nouns, giving ~20,000 combinations.
 /// With 10 attempts, the probability of failure when <2000 worktrees exist is negligible.
 const MAX_ATTEMPTS: u32 = 10;
+
+/// The reason `nwt` refuses a `--sparse-exclude` value.
+///
+/// Each lexical variant keeps the value as the user typed it, so the message
+/// names what the user gave and not the normalized form.
+/// [`SparseExcludeError::NotTrackedDirectory`] keeps the normalized directory,
+/// because that is the path that git checked. `nwt` refuses the value before
+/// it makes anything: no directory, no branch, and no `worktrees/<name>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SparseExcludeError {
+    /// The value names no directory. It is empty, or it holds only `.` and `/`.
+    Empty { raw: String },
+    /// The value starts at the root of the file system. A sparse pattern is
+    /// relative to the root of the repository.
+    Absolute { raw: String },
+    /// The value holds a `..` component, so it can point out of the repository.
+    ParentComponent { raw: String },
+    /// The value holds an ASCII control character. A sparse pattern file holds
+    /// one pattern on each line, so a line break in a value makes two patterns.
+    ControlCharacter { raw: String },
+    /// Git does not track the directory as a directory at `at_ref`, the ref
+    /// that the new worktree checks out. The path is missing at that ref, is a
+    /// file there, or is a directory only on disk.
+    NotTrackedDirectory {
+        dir: SparseExcludeDir,
+        at_ref: String,
+    },
+    /// Git cannot read `at_ref`, so it cannot tell what the ref tracks. This is
+    /// a bad ref and not a bad directory. `stderr` holds what git wrote.
+    UnreadableRef { at_ref: String, stderr: String },
+    /// Git did not start, so it cannot tell what the ref tracks. `command`
+    /// names the git subcommand, and `error` holds the reason that the
+    /// operating system gave.
+    GitCommand {
+        command: &'static str,
+        error: String,
+    },
+}
+
+impl fmt::Display for SparseExcludeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty { raw } => write!(
+                f,
+                "--sparse-exclude '{raw}' names no directory. Give a directory path \
+                 relative to the root of the repository."
+            ),
+            Self::Absolute { raw } => write!(
+                f,
+                "--sparse-exclude '{raw}' is an absolute path. Give a path relative to \
+                 the root of the repository."
+            ),
+            Self::ParentComponent { raw } => write!(
+                f,
+                "--sparse-exclude '{raw}' has a '..' component. Give a path inside the \
+                 repository."
+            ),
+            // The escapes keep the message on one line, and they keep an
+            // escape sequence in the value away from the terminal.
+            Self::ControlCharacter { raw } => write!(
+                f,
+                "--sparse-exclude '{}' holds a control character. Give a directory \
+                 name without control characters.",
+                raw.escape_debug()
+            ),
+            Self::NotTrackedDirectory { dir, at_ref } => write!(
+                f,
+                "--sparse-exclude '{}' is not a directory that git tracks at '{}'. Give a \
+                 directory that git tracks at that ref.",
+                dir.as_str(),
+                at_ref.escape_debug()
+            ),
+            Self::UnreadableRef { at_ref, stderr } => write!(
+                f,
+                "git cannot read the ref '{}' to check --sparse-exclude: {stderr}",
+                at_ref.escape_debug()
+            ),
+            Self::GitCommand { command, error } => write!(
+                f,
+                "could not run git {command} to check --sparse-exclude: {error}"
+            ),
+        }
+    }
+}
+
+impl SparseExcludeError {
+    /// The exit code of `nwt` for this refusal.
+    ///
+    /// A refused directory exits [`exit_codes::INVALID_SPARSE_EXCLUDE`]. A ref
+    /// that git cannot read exits [`exit_codes::WORKTREE_FAILED`], because
+    /// `git worktree add` fails for the same ref without the flag, and that is
+    /// the code such a failure gets. A git that does not start exits
+    /// [`exit_codes::GIT_COMMAND_ERROR`], as it does for `git worktree add`.
+    fn exit_code(&self) -> i32 {
+        match self {
+            Self::Empty { .. }
+            | Self::Absolute { .. }
+            | Self::ParentComponent { .. }
+            | Self::ControlCharacter { .. }
+            | Self::NotTrackedDirectory { .. } => exit_codes::INVALID_SPARSE_EXCLUDE,
+            Self::UnreadableRef { .. } => exit_codes::WORKTREE_FAILED,
+            Self::GitCommand { .. } => exit_codes::GIT_COMMAND_ERROR,
+        }
+    }
+}
+
+/// One tracked directory that `--sparse-exclude` keeps out of a new worktree.
+///
+/// The value is relative to the root of the repository, and `/` separates its
+/// components. It has no empty component, no `.` component, no `..` component,
+/// and no trailing `/`. Thus `heavy`, `heavy/`, and `./heavy` give the same
+/// value, and two flags that name one directory are equal.
+///
+/// The field is private, and [`SparseExcludeDir::parse`] is the only
+/// constructor. So every value that reaches git obeys these rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SparseExcludeDir(String);
+
+impl SparseExcludeDir {
+    /// Parse one `--sparse-exclude` value and normalize it.
+    ///
+    /// The check is lexical only. It does not ask git whether the directory is
+    /// tracked.
+    ///
+    /// # Errors
+    ///
+    /// - [`SparseExcludeError::ControlCharacter`] when `raw` holds an ASCII
+    ///   control character. This check comes first.
+    /// - [`SparseExcludeError::Absolute`] when `raw` starts at the root of the
+    ///   file system.
+    /// - [`SparseExcludeError::ParentComponent`] when `raw` holds a `..`
+    ///   component.
+    /// - [`SparseExcludeError::Empty`] when nothing is left after the empty and
+    ///   `.` components are removed.
+    fn parse(raw: &str) -> Result<Self, SparseExcludeError> {
+        if contains_control_chars(raw) {
+            return Err(SparseExcludeError::ControlCharacter {
+                raw: raw.to_owned(),
+            });
+        }
+
+        let path = Path::new(raw);
+        if raw.starts_with('/') || path.has_root() || path.is_absolute() {
+            return Err(SparseExcludeError::Absolute {
+                raw: raw.to_owned(),
+            });
+        }
+
+        // Split on `/` and never on a byte offset, so a multi-byte name stays
+        // intact. An empty component comes from `//` or a trailing `/`.
+        let components: Vec<&str> = raw
+            .split('/')
+            .filter(|component| !component.is_empty() && *component != ".")
+            .collect();
+
+        if components.contains(&"..") {
+            return Err(SparseExcludeError::ParentComponent {
+                raw: raw.to_owned(),
+            });
+        }
+        if components.is_empty() {
+            return Err(SparseExcludeError::Empty {
+                raw: raw.to_owned(),
+            });
+        }
+
+        Ok(Self(components.join("/")))
+    }
+
+    /// The normalized path, relative to the root of the repository.
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The non-cone sparse pattern that excludes this directory.
+    ///
+    /// The pattern is `!/` + the escaped path + `/`. The leading `/` anchors
+    /// the pattern at the root of the repository, so `!/heavy/` does not
+    /// exclude `src/heavy/`. The trailing `/` matches a directory only, so it
+    /// does not exclude a file named `heavy`.
+    fn pattern(&self) -> String {
+        format!("!/{}/", escape_sparse_pattern(self.as_str()))
+    }
+}
+
+/// Escape a path so that a non-cone sparse pattern matches its name literally.
+///
+/// Non-cone sparse patterns use gitignore syntax. A directory named
+/// `we[ir]d dir` written as `!/we[ir]d dir/` excluded nothing, and git gave no
+/// error. So an unescaped name fails silently: `nwt` reports success and writes
+/// the heavy directory.
+///
+/// This function puts `\` before every `\`, `[`, `]`, `*`, and `?`, and before
+/// a `!` or a `#` at the start of `s`. A `!` or a `#` at a different position
+/// is literal in gitignore syntax, so it stays as it is.
+///
+/// This is the one place that holds these rules. Every sparse pattern comes
+/// from [`SparseExcludeDir::pattern`], and that method calls this function.
+fn escape_sparse_pattern(s: &str) -> String {
+    let mut escaped = String::with_capacity(s.len());
+
+    // Walk characters and never bytes, so a multi-byte name stays intact.
+    for (index, character) in s.chars().enumerate() {
+        let always_special = matches!(character, '\\' | '[' | ']' | '*' | '?');
+        let leading_special = index == 0 && matches!(character, '!' | '#');
+        if always_special || leading_special {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+
+    escaped
+}
+
+/// The non-cone sparse pattern that includes every path of the repository.
+///
+/// A non-cone pattern list without an include pattern includes nothing. So the
+/// list starts with this pattern, and each `--sparse-exclude` pattern after it
+/// takes one directory back out.
+const SPARSE_INCLUDE_EVERYTHING: &str = "/*";
+
+/// Parse every `--sparse-exclude` value of the command line, in the order the
+/// user gave.
+///
+/// Two values that name one directory (`heavy` and `heavy/`) give that
+/// directory one time, at the position of the first value. So git gets one
+/// pattern for each directory, and the notice names each directory one time.
+///
+/// The check is lexical only (see [`SparseExcludeDir::parse`]).
+/// [`resolve_sparse_excludes`] calls this, and then asks git about each
+/// directory.
+///
+/// # Errors
+///
+/// Returns the refusal of the first value that [`SparseExcludeDir::parse`]
+/// refuses.
+fn parse_sparse_excludes(raw: &[String]) -> Result<Vec<SparseExcludeDir>, SparseExcludeError> {
+    let mut dirs: Vec<SparseExcludeDir> = Vec::with_capacity(raw.len());
+
+    for value in raw {
+        let dir = SparseExcludeDir::parse(value)?;
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+
+    Ok(dirs)
+}
+
+/// The ref that a new worktree checks out when the user gives no `-c <ref>`.
+///
+/// `git worktree add <path> -b <branch>` starts the branch at `HEAD` of the
+/// worktree it runs in, and `nwt` runs it in the main worktree.
+const SPARSE_DEFAULT_REF: &str = "HEAD";
+
+/// Ask git whether it tracks `dir` as a directory at `tree_ref`.
+///
+/// `tree_ref` is the ref that git reads. `at_ref` is the ref as the user typed
+/// it, and each message names it. The two differ for a branch that only a
+/// remote holds (see [`resolve_checkout_ref`]).
+///
+/// The command is
+/// `git --literal-pathspecs ls-tree -z -d --name-only <tree_ref> -- <dir>`, in
+/// `repo_root`. Git exits 0 for a directory, for a file, and for a missing
+/// path, so only the output gives the answer. Git exits with a status that is
+/// not zero only when it cannot read `tree_ref`.
+///
+/// - A directory prints its own path.
+/// - A file and a missing path print nothing.
+/// - `heavy/` prints the children of `heavy` and not `heavy` itself. So only
+///   an entry that is equal to `dir` counts, and `dir` has no trailing `/`.
+///
+/// `-z` ends each entry with a NUL and stops git from quoting a path that
+/// holds a `\`, a `"`, or a character that is not ASCII. `--literal-pathspecs`
+/// makes sure that git never reads `*`, `?`, or `[` in `dir` as a glob. The
+/// `ls-tree` of git 2.55 does not read a glob without it either, so this flag
+/// is protection against a later git, and no test shows a difference today.
+///
+/// # Errors
+///
+/// - [`SparseExcludeError::UnreadableRef`] when git exits with a status that is
+///   not zero. Git does that for a ref that names no commit and no tree.
+/// - [`SparseExcludeError::GitCommand`] when git does not start.
+fn tracks_directory(
+    repo_root: &Path,
+    at_ref: &str,
+    tree_ref: &str,
+    dir: &SparseExcludeDir,
+) -> Result<bool, SparseExcludeError> {
+    let mut ls_tree = production_git_command(repo_root);
+    ls_tree.args([
+        "--literal-pathspecs",
+        "ls-tree",
+        "-z",
+        "-d",
+        "--name-only",
+        tree_ref,
+        "--",
+        dir.as_str(),
+    ]);
+
+    let output = sparse_check_output(ls_tree, "ls-tree")?;
+
+    if !output.status.success() {
+        return Err(SparseExcludeError::UnreadableRef {
+            at_ref: at_ref.to_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
+    }
+
+    Ok(output
+        .stdout
+        .split(|byte| *byte == b'\0')
+        .any(|entry| entry == dir.as_str().as_bytes()))
+}
+
+/// Run one git child of the `--sparse-exclude` check to its end, with its
+/// output captured.
+///
+/// # Errors
+///
+/// [`SparseExcludeError::GitCommand`], which names `subcommand`, when git does
+/// not start.
+fn sparse_check_output(
+    mut command: Command,
+    subcommand: &'static str,
+) -> Result<std::process::Output, SparseExcludeError> {
+    command
+        .output()
+        .map_err(|e| SparseExcludeError::GitCommand {
+            command: subcommand,
+            error: e.to_string(),
+        })
+}
+
+/// The prefix of every remote-tracking ref.
+const REMOTE_TRACKING_PREFIX: &str = "refs/remotes/";
+
+/// The ref that `git ls-tree` reads for the `-c <name>` that the user typed.
+///
+/// This function mirrors the checkout DWIM of git (`unique_tracking_name` in
+/// `checkout.c`). `git worktree add <path> <name>` runs that DWIM for a `name`
+/// that names no commit. It finds the remote-tracking branch `<remote>/<name>`,
+/// makes a local branch `name` that tracks it, and checks that branch out. So
+/// `nwt -c foo` works in a clone that holds `foo` only as `origin/foo`.
+/// `git ls-tree foo` does not run the DWIM, and it cannot read `foo`. Without
+/// this function, the check of `--sparse-exclude` refuses a run that works
+/// without the flag.
+///
+/// The steps are the steps of git:
+///
+/// 1. When `name` resolves to a commit
+///    (`git rev-parse --verify --quiet <name>^{commit}`), git takes `name`, and
+///    so does this function.
+/// 2. Else, when exactly one ref `refs/remotes/<remote>/<name>` exists, git
+///    checks it out, and this function returns it.
+/// 3. Else, when more than one such ref exists, `checkout.defaultRemote` names
+///    a remote, and that remote holds one of them, git checks that ref out, and
+///    this function returns it.
+/// 4. Else git refuses the add with `fatal: invalid reference: <name>`. This
+///    function returns `name`, so `git ls-tree` refuses it too, and the run
+///    exits as a failed add.
+///
+/// Git finds the remote-tracking branch through the fetch refspec of each
+/// remote. This function reads `refs/remotes/<remote>/<name>`, where the
+/// default refspec puts it. A remote with a different refspec can give a
+/// different answer.
+///
+/// # Errors
+///
+/// [`SparseExcludeError::GitCommand`] when git does not start.
+fn resolve_checkout_ref(repo_root: &Path, name: &str) -> Result<String, SparseExcludeError> {
+    let mut verify = production_git_command(repo_root);
+    verify.args([
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        &format!("{name}^{{commit}}"),
+    ]);
+    if sparse_check_output(verify, "rev-parse")?.status.success() {
+        return Ok(name.to_owned());
+    }
+
+    // A `*` in a `for-each-ref` pattern does not match a `/`, so each listed
+    // ref is `refs/remotes/<one remote>/<name>`.
+    let mut list = production_git_command(repo_root);
+    list.args([
+        "for-each-ref",
+        "--format=%(refname)",
+        &format!("{REMOTE_TRACKING_PREFIX}*/{name}"),
+    ]);
+    let listed = sparse_check_output(list, "for-each-ref")?;
+    let listed = String::from_utf8_lossy(&listed.stdout);
+    let candidates: Vec<&str> = listed.lines().collect();
+
+    match candidates.as_slice() {
+        [] => return Ok(name.to_owned()),
+        [only] => return Ok((*only).to_owned()),
+        _ => {}
+    }
+
+    // Git asks for the default remote only when more than one remote holds
+    // the branch, and so does this function.
+    let mut default_remote = production_git_command(repo_root);
+    default_remote.args(["config", "--get", CHECKOUT_DEFAULT_REMOTE_KEY]);
+    let configured = sparse_check_output(default_remote, "config")?;
+    if configured.status.success() {
+        let remote = String::from_utf8_lossy(&configured.stdout);
+        let preferred = format!(
+            "{REMOTE_TRACKING_PREFIX}{}/{name}",
+            remote.trim_end_matches('\n')
+        );
+        if candidates.contains(&preferred.as_str()) {
+            return Ok(preferred);
+        }
+    }
+
+    Ok(name.to_owned())
+}
+
+/// The git configuration key that names the remote whose branch git checks
+/// out when more than one remote holds a branch of the name.
+const CHECKOUT_DEFAULT_REMOTE_KEY: &str = "checkout.defaultRemote";
+
+/// Parse every `--sparse-exclude` value, and make sure that git tracks each
+/// one as a directory at the ref that the new worktree checks out.
+///
+/// That ref is `checkout_ref` when the user gives `-c <ref>`, and
+/// [`SPARSE_DEFAULT_REF`] when not. `checkout_ref` goes through
+/// [`resolve_checkout_ref`] first, because `git worktree add` sends a name
+/// that names no commit through the checkout DWIM of git. Each message still
+/// names `checkout_ref` as the user typed it. The check reads the ref and not the disk,
+/// because the files of the new worktree come from the ref. Git runs in
+/// `repo_root`, the main worktree.
+///
+/// A sparse pattern for a path that is not a tracked directory excludes
+/// nothing, and git gives no error. Without this check, `nwt` reports success
+/// and writes everything.
+///
+/// `main` calls this after it knows the repository and before it makes
+/// anything, so a refused value makes no directory, no branch, and no
+/// `worktrees/<name>`. Every value is parsed before git runs, so a lexical
+/// refusal costs no git child.
+///
+/// # Errors
+///
+/// - The refusal of [`parse_sparse_excludes`], for the first value that the
+///   lexical rules refuse.
+/// - [`SparseExcludeError::NotTrackedDirectory`] for the first directory that
+///   git does not track as a directory at the ref.
+/// - [`SparseExcludeError::UnreadableRef`] when git cannot read the ref.
+/// - [`SparseExcludeError::GitCommand`] when git does not start.
+fn resolve_sparse_excludes(
+    repo_root: &Path,
+    checkout_ref: Option<&str>,
+    raw: &[String],
+) -> Result<Vec<SparseExcludeDir>, SparseExcludeError> {
+    let dirs = parse_sparse_excludes(raw)?;
+    // A run without the flag asks git nothing, so a plain `-c <ref>` runs
+    // exactly the git children it ran before the flag existed.
+    if dirs.is_empty() {
+        return Ok(dirs);
+    }
+
+    let at_ref = checkout_ref.unwrap_or(SPARSE_DEFAULT_REF);
+    let tree_ref = match checkout_ref {
+        Some(name) => resolve_checkout_ref(repo_root, name)?,
+        None => SPARSE_DEFAULT_REF.to_owned(),
+    };
+
+    for dir in &dirs {
+        if !tracks_directory(repo_root, at_ref, &tree_ref, dir)? {
+            return Err(SparseExcludeError::NotTrackedDirectory {
+                dir: dir.clone(),
+                at_ref: at_ref.to_owned(),
+            });
+        }
+    }
+
+    Ok(dirs)
+}
+
+/// The one stderr line that tells the user which directories the new worktree
+/// does not hold, and how to get them.
+///
+/// Each directory shows as the user reads it, with a trailing `/` and without
+/// the escapes of its pattern. One directory ends with "get it", and more end
+/// with "get them". `main` prints this line to stderr after the path, because
+/// the shell wrapper reads the path from stdout.
+fn sparse_exclude_notice(excluded: &[SparseExcludeDir]) -> String {
+    let names: Vec<String> = excluded
+        .iter()
+        .map(|dir| format!("{}/", dir.as_str()))
+        .collect();
+    let pronoun = if excluded.len() == 1 { "it" } else { "them" };
+
+    format!(
+        "Excluded {} (sparse checkout). Run 'git sparse-checkout disable' in the worktree \
+         to get {pronoun}.",
+        names.join(", ")
+    )
+}
 
 /// Create a new git worktree with a Docker-style random name.
 ///
@@ -645,6 +1152,78 @@ HOOK BOOTSTRAP:
     worktree would otherwise be ungated. Because that signal must never be
     invisible, this warning is printed to stderr even with --quiet.
 
+SPARSE WORKTREES:
+    --sparse-exclude DIR makes the new worktree a sparse checkout without the tracked
+    directory DIR. Use the flag one time for each directory:
+
+        nwt -b issue-12 --sparse-exclude assets/video --sparse-exclude fixtures/large
+
+    DIR is relative to the root of the repository, and 'heavy' and 'heavy/' are the
+    same directory. Each directory becomes the non-cone pattern '!/DIR/', after '/*'.
+    Thus '!/heavy/' excludes only the top-level directory 'heavy'. It does not exclude
+    the file 'heavy.txt' or the directory 'src/heavy/'. nwt escapes the glob
+    characters of each name, so the pattern matches the name literally.
+
+    nwt checks each value before it makes anything, and a refused value makes no
+    directory and no branch. nwt refuses an absolute path, a path with a '..'
+    component, an empty value, and a value with a control character. It also refuses
+    a path that is not a directory that git tracks at the ref the worktree checks
+    out. Each of these refusals exits 15. A ref that git cannot read exits 7.
+
+    For a '-c BRANCH' that only a remote holds, git makes a local branch that tracks
+    the remote branch. nwt then checks the remote branch that git picks. nwt finds it
+    at 'refs/remotes/REMOTE/BRANCH', so a remote with a different fetch refspec can
+    give a different result.
+
+    Only the new worktree is sparse. The main worktree, the other worktrees, and
+    later worktrees that nwt makes without the flag stay full. There is one
+    exception. When the main worktree is sparse, git copies its patterns into each
+    new worktree. Then --sparse-exclude replaces those patterns, and it does not add
+    to them. A directory that only the main worktree excludes comes back.
+
+    The sparse checkout writes 'extensions.worktreeConfig=true' into the shared
+    .git/config. This setting does not make other worktrees sparse. It stays after
+    you remove the worktree.
+
+    To get the excluded directories, run 'git sparse-checkout disable' in the worktree.
+
+    After nwt makes the worktree, it prints this line to stderr:
+
+        Excluded heavy/ (sparse checkout). Run 'git sparse-checkout disable' in the worktree to get it.
+
+    The .env copy does not take an untracked .env under an excluded directory,
+    because a copy writes that directory into the worktree again. nwt prints this
+    line for each such file:
+
+        Skipped: heavy/.env (under excluded heavy/)
+
+    --quiet hides both lines.
+
+    'git worktree add --no-checkout' runs no hook. So nwt runs the post-checkout hook
+    after it writes the files, with the arguments of a plain add. The hook sees the
+    sparse tree. It also sees GIT_DIR and GIT_WORK_TREE set, and a plain add sets
+    neither. A hook that fails keeps the worktree and the branch, and nwt exits 7, as
+    after a plain add. When git cannot start the hook step, the worktree stays and
+    nwt exits 6.
+
+    --sparse-exclude needs git 2.36.0 or later. nwt runs the post-checkout hook with
+    'git hook run', and git 2.36.0 added that command. On an older git, nwt reports
+    that the post-checkout hook failed and exits 7, though the repository has no hook.
+
+    When 'git sparse-checkout set', 'git read-tree -mu HEAD', or 'git rev-parse HEAD'
+    fails, the worktree is broken. nwt then removes the worktree, the branch that the
+    run made, and the empty directories that the run made, and it exits 7.
+
+    Limits:
+      - The flag saves disk space in the worktree only. All worktrees share one object
+        store, so the blobs of the excluded directory stay in .git. Only a partial
+        clone (git clone --filter=blob:none) keeps them out, for the whole clone.
+      - Commits and diffs still include the excluded directory. Git does not write it
+        to disk, but it does not delete it from the branch.
+      - A build or a test that reads the excluded directory fails in that worktree.
+      - When an excluded directory holds a workspace package, the install of HOOK
+        BOOTSTRAP can fail. nwt then warns and continues.
+
 EXAMPLES:
     nwt                              # Random name for both directory and branch
     nwt -b issue-42                  # Branch 'issue-42', directory 'issue-42'
@@ -659,6 +1238,7 @@ EXAMPLES:
     nwt --tmux --run \"npm install\"   # Run command in a new tmux window
     nwt --no-copy-env                # Skip copying .env files
     nwt --no-bootstrap-hooks         # Skip running install to set up git hooks
+    nwt --sparse-exclude assets      # Leave the tracked directory assets/ out
     nwt --shell-setup                # Install shell integration for auto-cd
 
 SHELL INTEGRATION:
@@ -679,7 +1259,8 @@ EXIT CODES:
     10 Tmux command failed
     12 Config file error (invalid TOML, validation failed)
     13 Not running inside tmux (--tmux specified)
-    14 Shell setup failed"
+    14 Shell setup failed
+    15 Invalid --sparse-exclude directory"
 )]
 struct Cli {
     /// Specify branch name instead of generating a random one.
@@ -785,6 +1366,21 @@ struct Cli {
     #[arg(long)]
     no_bootstrap_hooks: bool,
 
+    /// Make the new worktree a sparse checkout without the tracked directory DIR.
+    ///
+    /// DIR is relative to the root of the repository, and `heavy` and `heavy/`
+    /// are the same directory. Use the flag one time for each directory to
+    /// exclude. Before nwt makes anything, it refuses a DIR that git does not
+    /// track as a directory at the ref that the worktree checks out.
+    ///
+    /// Only the new worktree is sparse. Other worktrees stay full. Run
+    /// `git sparse-checkout disable` in the worktree to write the directories.
+    ///
+    /// The SPARSE WORKTREES section of --help gives the limits, the
+    /// post-checkout hook, and the exception for a sparse main worktree.
+    #[arg(long = "sparse-exclude", value_name = "DIR", action = clap::ArgAction::Append)]
+    sparse_exclude: Vec<String>,
+
     /// Install shell integration to automatically cd into new worktrees.
     ///
     /// Adds a shell function to your ~/.zshrc or ~/.bashrc that wraps nwt
@@ -795,7 +1391,7 @@ struct Cli {
     ///
     /// To activate after installation, run `source ~/.zshrc` (or `~/.bashrc`)
     /// or open a new terminal.
-    #[arg(long, conflicts_with_all = ["branch", "checkout", "quiet", "run", "tmux", "no_copy_env", "no_bootstrap_hooks", "random_directory"])]
+    #[arg(long, conflicts_with_all = ["branch", "checkout", "quiet", "run", "tmux", "no_copy_env", "no_bootstrap_hooks", "random_directory", "sparse_exclude"])]
     shell_setup: bool,
 }
 
@@ -946,6 +1542,20 @@ enum WorktreeResult {
     GitError(String),
     /// Failed to execute git command
     CommandError(std::io::Error),
+    /// Git made the `--no-checkout` worktree, but a step that writes its files
+    /// through the sparse patterns failed. The run removed the worktree and
+    /// what else it made. The value names the step and holds what git wrote to
+    /// stderr.
+    SparseCheckoutFailed(String),
+    /// Git made the sparse worktree, and the `post-checkout` hook that
+    /// [`run_post_checkout_hook`] ran exited with this status. The worktree and
+    /// the branch stay, as a plain add keeps them when its hook fails.
+    PostCheckoutHookFailed(ExitStatus),
+    /// Git made the sparse worktree, but the `git hook run` of
+    /// [`run_post_checkout_hook`] could not start, with this error. The
+    /// worktree holds its sparse files, so the worktree and the branch stay,
+    /// as they stay when the hook fails.
+    PostCheckoutHookNotStarted(io::Error),
 }
 
 /// True when `branch` is already a branch of the repository at `repo_root`.
@@ -986,9 +1596,339 @@ fn branch_exists(repo_root: &Path, branch: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// The exit status of `git show-ref --verify` for a ref that is not there.
+const SHOW_REF_MISSING_STATUS: i32 = 1;
+
+/// True when git answers that `branch` is not a branch of the repository at
+/// `repo_root`.
+///
+/// `git show-ref --verify --quiet refs/heads/<branch>` exits
+/// [`SHOW_REF_MISSING_STATUS`] for a branch that is not there. Each other
+/// answer, a git that does not start included, is not a known absence. So a
+/// cleanup that deletes a branch only when it was absent before the run never
+/// deletes a branch that git did not report on.
+///
+/// [`branch_exists`] asks the same question for another purpose. It takes each
+/// failure as "not there", and that reading is the safe one for a failed add.
+fn branch_known_absent(repo_root: &Path, branch: &str) -> bool {
+    let mut show_ref = production_git_command(repo_root);
+    show_ref
+        .args(["show-ref", "--verify", "--quiet"])
+        .arg(format!("refs/heads/{branch}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    show_ref
+        .status()
+        .is_ok_and(|status| status.code() == Some(SHOW_REF_MISSING_STATUS))
+}
+
+/// A production `git` command that runs in `dir`.
+///
+/// Each git child that the sparse checkout adds starts here, so none of them
+/// can forget the shed. The command takes
+/// [`gitscratch::shed_inherited_git_environment_keeping_user_intent`], which
+/// sheds the whole inherited `GIT_` prefix and keeps the six names of
+/// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`]. An inherited `GIT_DIR` or
+/// `GIT_WORK_TREE` otherwise aims the command at the repository that a
+/// launching hook names, and not at `dir`. Stdin is null, so a git that asks a
+/// question gets no answer and does not stop the run.
+///
+/// The caller adds the arguments and decides where the output goes.
+fn production_git_command(dir: &Path) -> Command {
+    let mut command = Command::new("git");
+    shed_inherited_git_environment_keeping_user_intent(&mut command);
+    command.current_dir(dir).stdin(Stdio::null());
+    command
+}
+
+/// Run `command` to its end with its output captured, and hand back what it
+/// wrote to stdout.
+///
+/// `step` names the command in the error message. Nothing the command writes
+/// reaches the stdout of `nwt`, because the shell wrapper reads the worktree
+/// path from that stream.
+///
+/// # Errors
+///
+/// Returns a message that names `step` when git cannot start, or when it exits
+/// with a status that is not zero. The message holds what git wrote to stderr.
+fn run_sparse_step(mut command: Command, step: &str) -> Result<String, String> {
+    let output = command
+        .output()
+        .map_err(|e| format!("could not run {step} in the new worktree: {e}"))?;
+
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+    }
+
+    Err(format!(
+        "{step} failed in the new worktree ({}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
+}
+
+/// The names of the steps of [`apply_sparse_checkout`], in the order that it
+/// runs them. [`run_sparse_step`] puts each name into its error message.
+///
+/// A failure of each step breaks the worktree, and the run removes it. The
+/// `--help` text and the README name each step in that failure. A test reads
+/// this array, so a new step must come here, and the documents must name it.
+const SPARSE_STEPS: [&str; 3] = [
+    "git sparse-checkout set",
+    "git read-tree -mu HEAD",
+    "git rev-parse HEAD",
+];
+
+/// Write the files of a `--no-checkout` worktree through sparse patterns that
+/// leave out each directory of `excludes`.
+///
+/// A plain `git worktree add` writes every file before a pattern can apply. So
+/// the add runs with `--no-checkout`, and this function does the rest in the
+/// new worktree:
+///
+/// 1. `git sparse-checkout set --no-cone '/*' '!/<dir>/'...` writes
+///    `core.sparseCheckout` into the `config.worktree` of this worktree and the
+///    patterns into its `info/sparse-checkout`. The main worktree and every
+///    other worktree stay full.
+/// 2. `git read-tree -mu HEAD` fills the index and writes each file that the
+///    patterns include.
+/// 3. `git rev-parse HEAD` gives the commit that the worktree checks out, which
+///    [`run_post_checkout_hook`] hands to the hook.
+///
+/// # Errors
+///
+/// Returns the message of [`run_sparse_step`] for the first step that fails.
+/// The worktree is broken then, and [`try_create_worktree`] calls
+/// [`remove_broken_sparse_worktree`] to remove what the run made.
+fn apply_sparse_checkout(worktree: &Path, excludes: &[SparseExcludeDir]) -> Result<String, String> {
+    let [set_step, read_tree_step, rev_parse_step] = SPARSE_STEPS;
+
+    let mut set = production_git_command(worktree);
+    set.args([
+        "sparse-checkout",
+        "set",
+        "--no-cone",
+        SPARSE_INCLUDE_EVERYTHING,
+    ])
+    .args(excludes.iter().map(SparseExcludeDir::pattern));
+    run_sparse_step(set, set_step)?;
+
+    let mut read_tree = production_git_command(worktree);
+    read_tree.args(["read-tree", "-mu", "HEAD"]);
+    run_sparse_step(read_tree, read_tree_step)?;
+
+    let mut rev_parse = production_git_command(worktree);
+    rev_parse.args(["rev-parse", "HEAD"]);
+    let head = run_sparse_step(rev_parse, rev_parse_step)?;
+    Ok(head.trim_end().to_owned())
+}
+
+/// The name of the hook that git runs after it checks a tree out.
+const POST_CHECKOUT_HOOK: &str = "post-checkout";
+
+/// The variable that tells git where the working tree of a repository is.
+///
+/// [`run_post_checkout_hook`] sets it for the hook, because `git hook run`
+/// exports `GIT_DIR` for the hook and no working tree.
+const GIT_WORK_TREE_VARIABLE: &str = "GIT_WORK_TREE";
+
+/// The third argument of the `post-checkout` hook for a checkout of a branch,
+/// as `git worktree add` gives it. The value `0` is a checkout of files.
+const POST_CHECKOUT_OF_A_BRANCH: &str = "1";
+
+/// The null object id of a repository whose object ids have the length of
+/// `head`.
+///
+/// `git worktree add` gives the null object id to the `post-checkout` hook as
+/// the old `HEAD`. Its length is the length of the hash: 40 zeros for SHA-1,
+/// and 64 zeros for SHA-256.
+fn null_object_id(head: &str) -> String {
+    "0".repeat(head.len())
+}
+
+/// Run the `post-checkout` hook of the repository in the sparse `worktree`, as
+/// a plain `git worktree add` runs it.
+///
+/// `git worktree add --no-checkout` runs no hook. So after the files are
+/// written, this function runs
+/// `git hook run --ignore-missing post-checkout -- <null object id> <head> 1`.
+/// Those are the arguments of a plain add, so a hook that reads the null old
+/// ref to find a new worktree sees no difference. `git hook run` obeys
+/// `core.hooksPath`, and `--ignore-missing` makes a repository without the hook
+/// a success.
+///
+/// Git sends the stdout of the hook to its own stderr, and this function sends
+/// the stdout of git to the stderr of `nwt` too. The shell wrapper reads the
+/// worktree path from stdout, and a word of a hook there breaks it. Stderr is
+/// inherited, so the user sees what the hook says, as with a plain add.
+///
+/// A plain add and `git hook run` both run the hook with the worktree as its
+/// working directory. A plain add exports neither `GIT_DIR` nor `GIT_WORK_TREE` for the hook, so git in the
+/// hook finds the worktree from the directory it runs in. `git hook run`
+/// exports `GIT_DIR` for the hook, with the git directory of the worktree
+/// (`.git/worktrees/<name>`) as its value. When `GIT_DIR` is set and
+/// `GIT_WORK_TREE` is not, git takes the directory it runs in as the top level.
+/// A hook that changes to `sub/` then sees `sub/` as the root, each file of
+/// `sub/` as deleted, and each file of `sub/` again as untracked.
+///
+/// So this function sets [`GIT_WORK_TREE_VARIABLE`] to `worktree` on the
+/// command. `git hook run` passes it to the hook, and git in the hook then
+/// finds the worktree root from each subdirectory, as under a plain add. The
+/// value is set after [`production_git_command`] sheds the inherited
+/// environment, so the value of `nwt` wins over a value that a launching hook
+/// exported. `worktree` is an absolute path: git reads a relative value from
+/// the directory that the hook runs in.
+///
+/// # Errors
+///
+/// Returns the error of the start when git cannot start.
+fn run_post_checkout_hook(worktree: &Path, head: &str) -> io::Result<ExitStatus> {
+    let mut hook = production_git_command(worktree);
+    hook.env(GIT_WORK_TREE_VARIABLE, worktree)
+        .args([
+            "hook",
+            "run",
+            "--ignore-missing",
+            POST_CHECKOUT_HOOK,
+            "--",
+            &null_object_id(head),
+            head,
+            POST_CHECKOUT_OF_A_BRANCH,
+        ])
+        .stdout(Stdio::from(io::stderr()))
+        .stderr(Stdio::inherit());
+
+    hook.status()
+}
+
+/// The nearest ancestor of `path` that exists.
+///
+/// `git worktree add` makes each directory between that ancestor and the new
+/// worktree. [`remove_broken_sparse_worktree`] removes those directories, and
+/// it stops at this ancestor, so a directory that was there before the run
+/// stays. [`try_create_worktree`] asks before the add, because after the add
+/// every ancestor exists.
+fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .skip(1)
+        .find(|ancestor| ancestor.exists())
+        .map(Path::to_path_buf)
+}
+
+/// Remove what a sparse run made, after a sparse step broke the new worktree.
+///
+/// A failure of `git sparse-checkout set`, `git read-tree -mu HEAD`, or
+/// `git rev-parse HEAD` leaves a worktree without the files it must hold. Such
+/// a worktree is of no use, so the run takes back each thing that it made:
+///
+/// 1. `git worktree remove --force <worktree>`, in `repo_root`, removes the
+///    directory and its entry in `.git/worktrees`. A `--no-checkout` worktree
+///    has an empty index, so git sees each file of `HEAD` as deleted, and it
+///    refuses a removal without `--force`.
+/// 2. `git branch -D <made_branch>` deletes the branch that the add made. Only
+///    the add wrote to that branch, so the delete loses no commit.
+/// 3. [`fs::remove_dir`] removes each parent directory of the worktree, from
+///    the nearest parent upward. It stops at `existing_ancestor`, which was
+///    there before the add, and at the first directory that is not empty. It
+///    never removes a directory that holds something.
+///
+/// Each step runs, also when an earlier step failed. A worktree that stays
+/// holds its branch, so git refuses to delete that branch too, and the message
+/// then names both.
+///
+/// Returns one line for each step that failed. Each line names what is left
+/// and the command that removes it by hand. An empty list means that nothing
+/// is left. A directory that is not empty is a stop, and not a failure.
+fn remove_broken_sparse_worktree(
+    repo_root: &Path,
+    worktree: &Path,
+    made_branch: Option<&str>,
+    existing_ancestor: Option<&Path>,
+) -> Vec<String> {
+    let mut left = Vec::new();
+
+    let mut remove = production_git_command(repo_root);
+    remove.args(["worktree", "remove", "--force"]).arg(worktree);
+    if let Err(reason) = run_cleanup_step(remove) {
+        left.push(format!(
+            "nwt could not remove the worktree at '{}': {reason}. Remove it with: git worktree \
+             remove --force {}",
+            worktree.display(),
+            shellquote::shell_quote(&worktree.to_string_lossy())
+        ));
+    }
+
+    if let Some(branch) = made_branch {
+        let mut delete = production_git_command(repo_root);
+        delete.args(["branch", "-D", branch]);
+        if let Err(reason) = run_cleanup_step(delete) {
+            left.push(format!(
+                "nwt could not delete the branch '{branch}': {reason}. Delete it with: git branch \
+                 -D {}",
+                shellquote::shell_quote(branch)
+            ));
+        }
+    }
+
+    let mut parent = worktree.parent();
+    while let Some(dir) = parent {
+        if Some(dir) == existing_ancestor {
+            break;
+        }
+        match fs::remove_dir(dir) {
+            Ok(()) => parent = dir.parent(),
+            Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty => break,
+            Err(e) => {
+                left.push(format!(
+                    "nwt could not remove the empty directory '{}': {e}. Remove it by hand.",
+                    dir.display()
+                ));
+                break;
+            }
+        }
+    }
+
+    left
+}
+
+/// Run one git child of the cleanup of a broken sparse worktree to its end,
+/// with its output captured.
+///
+/// # Errors
+///
+/// Returns why the step failed: the error of the start when git cannot start,
+/// or what git wrote to stderr and its exit status.
+fn run_cleanup_step(mut command: Command) -> Result<(), String> {
+    let output = command
+        .output()
+        .map_err(|e| format!("git could not start: {e}"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "{} ({})",
+        String::from_utf8_lossy(&output.stderr).trim(),
+        output.status
+    ))
+}
+
 /// Attempts to create a git worktree at the given path.
 ///
 /// Returns a `WorktreeResult` indicating success or the type of failure.
+///
+/// When `sparse_excludes` is not empty, the add runs with `--no-checkout`, and
+/// [`apply_sparse_checkout`] then writes the files without those directories.
+/// When that step fails, [`remove_broken_sparse_worktree`] removes what the run
+/// made, and the result is [`WorktreeResult::SparseCheckoutFailed`].
+/// [`run_post_checkout_hook`] then runs the hook that the add did not run. A
+/// hook that fails keeps the worktree, and the result is
+/// [`WorktreeResult::PostCheckoutHookFailed`]. A `git hook run` that cannot
+/// start keeps the worktree too, and the result is
+/// [`WorktreeResult::PostCheckoutHookNotStarted`].
 ///
 /// This function displays git's progress output (e.g., "Updating files: X%") in real-time
 /// while also capturing stderr for error classification. This is done by spawning a thread
@@ -996,9 +1936,13 @@ fn branch_exists(repo_root: &Path, branch: &str) -> bool {
 ///
 /// # The inherited git environment
 ///
-/// This is the one git child of `nwt` that writes. `git worktree add` makes a
+/// `git worktree add` is the first git child of `nwt` that writes. It makes a
 /// branch ref, a reflog and a whole `worktrees/<name>` directory in the
-/// repository it reaches. Git obeys the environment before it obeys the
+/// repository it reaches. The sparse path adds more children that write:
+/// `git sparse-checkout set`, `git read-tree -mu HEAD`, `git hook run`, and the
+/// `git worktree remove --force` and `git branch -D` of the cleanup. Each of
+/// them starts from [`production_git_command`], which takes the same production
+/// entrance as the add. Git obeys the environment before it obeys the
 /// directory a command was pointed at, so an inherited `GIT_DIR` sends all of
 /// that into another repository — the repository being committed to, for a
 /// `nwt` that a git hook started.
@@ -1025,14 +1969,33 @@ fn try_create_worktree(
     worktree_path: &str,
     branch_name: &str,
     checkout_ref: Option<&str>,
+    sparse_excludes: &[SparseExcludeDir],
 ) -> WorktreeResult {
+    // A sparse run that breaks removes the directories that the add makes.
+    // After the add every ancestor exists, so the run looks before the add.
+    let existing_ancestor = if sparse_excludes.is_empty() {
+        None
+    } else {
+        nearest_existing_ancestor(Path::new(worktree_path))
+    };
+    // Git's checkout DWIM can make a local branch for `-c <ref>`. The cleanup
+    // deletes that branch only when git said before the add that it was not
+    // there, so a branch that the user had stays.
+    let checkout_branch_absent = !sparse_excludes.is_empty()
+        && checkout_ref.is_some_and(|name| branch_known_absent(repo_root, name));
+
     let mut cmd = Command::new("git");
     shed_inherited_git_environment_keeping_user_intent(&mut cmd);
 
+    cmd.args(["worktree", "add"]);
+    if !sparse_excludes.is_empty() {
+        // The files wait until the sparse patterns are in place.
+        cmd.arg("--no-checkout");
+    }
     if let Some(ref_name) = checkout_ref {
-        cmd.args(["worktree", "add", worktree_path, ref_name]);
+        cmd.args([worktree_path, ref_name]);
     } else {
-        cmd.args(["worktree", "add", worktree_path, "-b", branch_name]);
+        cmd.args([worktree_path, "-b", branch_name]);
     }
 
     // Spawn the process with piped stderr so we can both display progress and capture errors.
@@ -1084,7 +2047,41 @@ fn try_create_worktree(
         .unwrap_or_else(|_| "Error: Failed to capture stderr output from git command".to_string());
 
     if status.success() {
-        WorktreeResult::Success
+        if sparse_excludes.is_empty() {
+            return WorktreeResult::Success;
+        }
+        let worktree = Path::new(worktree_path);
+        let head = match apply_sparse_checkout(worktree, sparse_excludes) {
+            Ok(head) => head,
+            Err(message) => {
+                // `-b <branch>` and a random name make the branch in the add.
+                // `-c <ref>` makes one only through git's checkout DWIM, and
+                // only when no branch of that name was there before the add.
+                let made_branch = match checkout_ref {
+                    None => Some(branch_name),
+                    Some(name) if checkout_branch_absent && branch_exists(repo_root, name) => {
+                        Some(name)
+                    }
+                    Some(_) => None,
+                };
+                let left = remove_broken_sparse_worktree(
+                    repo_root,
+                    worktree,
+                    made_branch,
+                    existing_ancestor.as_deref(),
+                );
+                // Each thing that the cleanup could not remove gets a line of
+                // its own after the failed step.
+                let mut lines = vec![message];
+                lines.extend(left);
+                return WorktreeResult::SparseCheckoutFailed(lines.join("\n"));
+            }
+        };
+        match run_post_checkout_hook(worktree, &head) {
+            Ok(status) if status.success() => WorktreeResult::Success,
+            Ok(status) => WorktreeResult::PostCheckoutHookFailed(status),
+            Err(e) => WorktreeResult::PostCheckoutHookNotStarted(e),
+        }
     } else {
         // Ask git whether the branch is there. Do not read the reason it gave.
         //
@@ -1101,9 +2098,11 @@ fn try_create_worktree(
         // reword. The question is asked only after the add failed, so it costs
         // nothing on the path that works.
         //
-        // A checkout run makes no branch, so it can have no branch collision.
-        // Its `branch_name` is the directory name, which can name a branch by
-        // coincidence, and asking about that one would report the wrong reason.
+        // A checkout run makes a branch only through git's checkout DWIM, and
+        // git does that only when no branch of that name exists. So a checkout
+        // run can have no branch collision. Its `branch_name` is the directory
+        // name, which can name a branch by coincidence, and asking about that
+        // one would report the wrong reason.
         if checkout_ref.is_none() && branch_exists(repo_root, branch_name) {
             return WorktreeResult::BranchExists(branch_name.to_string());
         }
@@ -1186,6 +2185,22 @@ struct EnvCopySummary {
     copied: usize,
     /// Destinations that already existed and were deliberately left alone.
     kept: usize,
+    /// Files under a `--sparse-exclude` directory, which the copy does not
+    /// take. A copy makes the excluded directory in the new worktree again.
+    skipped: usize,
+}
+
+/// The stderr line for an untracked `.env` that the copy does not take,
+/// because it is under the excluded directory `dir`.
+///
+/// The directory shows with a trailing `/`, as the sparse checkout notice
+/// shows it.
+fn skipped_under_excluded_message(relative_path: &Path, dir: &SparseExcludeDir) -> String {
+    format!(
+        "Skipped: {} (under excluded {}/)",
+        relative_path.display(),
+        dir.as_str()
+    )
 }
 
 /// Builds the user-facing line announcing a destination `.env` that was left alone.
@@ -1262,7 +2277,12 @@ fn copy_env_file(source: &Path, dest: &Path) -> io::Result<()> {
 /// This function:
 /// 1. Gets all tracked files from git in a single call (for performance)
 /// 2. Walks the main repo looking for `.env` or `.env.*` files (e.g., `.env.local`)
-/// 3. Skips the `.git` directory, tracked files, and unrelated dotfiles like `.envrc`
+/// 3. Skips the `.git` directory, tracked files, and unrelated dotfiles like `.envrc`.
+///    It also skips each untracked file under a directory of `excluded`, the
+///    `--sparse-exclude` directories of the new worktree, because a copy makes that
+///    directory in the worktree again. Each such skip counts in
+///    [`EnvCopySummary::skipped`] and prints one `Skipped:` line (see
+///    [`skipped_under_excluded_message`]).
 /// 4. Skips any destination that already exists, leaving it completely untouched —
 ///    a `post-checkout` hook runs during `git worktree add` (before this copy), so a
 ///    worktree-specific .env it generated must win over the main worktree's version
@@ -1284,7 +2304,12 @@ fn copy_env_file(source: &Path, dest: &Path) -> io::Result<()> {
 ///
 /// Returns an [`EnvCopySummary`] recording how many files were copied and how many
 /// existing destinations were kept.
-fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) -> EnvCopySummary {
+fn copy_untracked_env_files(
+    main_repo: &Path,
+    worktree: &Path,
+    excluded: &[SparseExcludeDir],
+    quiet: bool,
+) -> EnvCopySummary {
     // Get all tracked files in a single git call for performance
     let tracked_files = get_tracked_files(main_repo);
     let mut summary = EnvCopySummary::default();
@@ -1324,6 +2349,21 @@ fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) -> E
             Ok(rel) => rel,
             Err(_) => continue,
         };
+
+        // A sparse worktree does not hold an excluded directory, and a copy
+        // into it makes that directory again. `Path::starts_with` compares
+        // whole components, so `heavy2/.env` is not under `heavy`.
+        if let Some(dir) = excluded
+            .iter()
+            .find(|dir| relative_path.starts_with(Path::new(dir.as_str())))
+        {
+            summary.skipped += 1;
+            if !quiet {
+                eprintln!("{}", skipped_under_excluded_message(relative_path, dir));
+            }
+            continue;
+        }
+
         let dest_path = worktree.join(relative_path);
 
         // Never clobber something the new worktree already has. Repo
@@ -1675,6 +2715,23 @@ fn main() {
         }
     };
 
+    // Refuse a bad `--sparse-exclude` value before anything is made, so a
+    // refusal leaves no directory, no branch, and no `worktrees/<name>`. Git
+    // checks each directory at the ref that the new worktree checks out. A
+    // ref that git cannot read exits like a failed add, and not like a bad
+    // directory.
+    let sparse_excludes = match resolve_sparse_excludes(
+        &repo_root,
+        config.checkout.as_deref(),
+        &cli.sparse_exclude,
+    ) {
+        Ok(dirs) => dirs,
+        Err(e) => {
+            error!(config.quiet, "Error: {e}");
+            exit(e.exit_code());
+        }
+    };
+
     // Ask where this repository keeps its worktrees. The repository states the
     // answer with `nwt.worktreesDir`, and the default stands when it says
     // nothing.
@@ -1787,6 +2844,7 @@ fn main() {
             worktree_path_str,
             branch_name,
             config.checkout.as_deref(),
+            &sparse_excludes,
         ) {
             WorktreeResult::Success => {
                 // Compute shortened tab name for terminal multiplexers.
@@ -1809,9 +2867,20 @@ fn main() {
 
                 println!("{}", worktree_path.display());
 
+                // The shell wrapper reads the path from stdout, so the notice
+                // goes to stderr.
+                if !sparse_excludes.is_empty() && !config.quiet {
+                    eprintln!("{}", sparse_exclude_notice(&sparse_excludes));
+                }
+
                 // Copy untracked .env files from main worktree to new worktree
                 if config.copy_env {
-                    copy_untracked_env_files(&repo_root, &worktree_path, config.quiet);
+                    copy_untracked_env_files(
+                        &repo_root,
+                        &worktree_path,
+                        &sparse_excludes,
+                        config.quiet,
+                    );
                 }
 
                 // Rename Zellij tab if running inside Zellij, unless tab renaming
@@ -2037,6 +3106,35 @@ fn main() {
             }
             WorktreeResult::CommandError(e) => {
                 error!(config.quiet, "Error running git command: {}", e);
+                exit(exit_codes::GIT_COMMAND_ERROR);
+            }
+            WorktreeResult::SparseCheckoutFailed(message) => {
+                error!(config.quiet, "Error: {}", message);
+                exit(exit_codes::WORKTREE_FAILED);
+            }
+            WorktreeResult::PostCheckoutHookFailed(status) => {
+                // A plain add keeps the worktree when its hook fails, and so
+                // does this path. No path goes to stdout, so the shell wrapper
+                // stays put, and this line tells the user where the worktree is.
+                error!(
+                    config.quiet,
+                    "Error: the post-checkout hook failed ({}). The new worktree stays at '{}'.",
+                    status,
+                    worktree_path.display()
+                );
+                exit(exit_codes::WORKTREE_FAILED);
+            }
+            WorktreeResult::PostCheckoutHookNotStarted(e) => {
+                // A git command that cannot start exits GIT_COMMAND_ERROR. The
+                // worktree holds its sparse files and stays, so this line names
+                // the step and tells the user where the worktree is.
+                error!(
+                    config.quiet,
+                    "Error: git could not start the post-checkout hook step ({}). The new \
+                     worktree stays at '{}'.",
+                    e,
+                    worktree_path.display()
+                );
                 exit(exit_codes::GIT_COMMAND_ERROR);
             }
         }
@@ -2787,6 +3885,7 @@ mod tests {
             exit_codes::CONFIG_ERROR,
             exit_codes::TMUX_NOT_RUNNING,
             exit_codes::SHELL_SETUP_ERROR,
+            exit_codes::INVALID_SPARSE_EXCLUDE,
         ];
 
         let mut sorted = codes.to_vec();
@@ -2794,6 +3893,38 @@ mod tests {
         sorted.dedup();
 
         assert_eq!(sorted.len(), codes.len(), "All exit codes should be unique");
+    }
+
+    /// A refused `--sparse-exclude` value exits 15, and `--help` says so.
+    ///
+    /// A script that runs `nwt` reads the EXIT CODES list to tell a bad flag
+    /// from a failed add. The entry is built from the constant, so a change of
+    /// the value without a change of the help text fails here.
+    #[test]
+    fn test_exit_codes_section_lists_invalid_sparse_exclude() {
+        use clap::CommandFactory;
+
+        assert_eq!(
+            exit_codes::INVALID_SPARSE_EXCLUDE,
+            15,
+            "issue #487 gives a refused --sparse-exclude value exit code 15"
+        );
+
+        let long_about = Cli::command()
+            .get_long_about()
+            .expect("nwt sets long_about")
+            .to_string();
+        let (_, section) = long_about
+            .split_once("EXIT CODES:")
+            .expect("--help has an EXIT CODES section");
+        let entry = format!(
+            "{} Invalid --sparse-exclude directory",
+            exit_codes::INVALID_SPARSE_EXCLUDE
+        );
+        assert!(
+            section.lines().any(|line| line.trim() == entry),
+            "the EXIT CODES section of --help must list {entry:?}:\n{section}"
+        );
     }
 
     #[test]
@@ -3116,6 +4247,583 @@ mod tests {
         );
     }
 
+    /// Values that name one directory parse to one normalized value.
+    ///
+    /// A trailing `/`, a leading `./`, and a doubled `/` do not change the
+    /// directory. Multi-byte names stay intact, because the parse splits on `/`
+    /// and never on a byte offset.
+    #[test]
+    fn sparse_exclude_dir_parse_normalizes_a_relative_path() {
+        let cases = [
+            ("heavy", "heavy"),
+            ("heavy/", "heavy"),
+            ("assets/video/", "assets/video"),
+            ("./heavy", "heavy"),
+            ("a//b", "a/b"),
+            ("日本語/🎉", "日本語/🎉"),
+            ("café", "café"),
+        ];
+
+        for (raw, expected) in cases {
+            let dir = SparseExcludeDir::parse(raw)
+                .unwrap_or_else(|e| panic!("{raw:?} must parse, got {e:?}"));
+            assert_eq!(dir.as_str(), expected, "the normalized value of {raw:?}");
+        }
+
+        assert_eq!(
+            SparseExcludeDir::parse("heavy"),
+            SparseExcludeDir::parse("heavy/"),
+            "'heavy' and 'heavy/' are the same flag"
+        );
+    }
+
+    /// Values that point out of the repository, or at nothing, are refused.
+    ///
+    /// Each case names the variant it gets, so a value refused for the wrong
+    /// reason fails too.
+    #[test]
+    fn sparse_exclude_dir_parse_refuses_a_path_outside_the_repository() {
+        let absolute = |raw: &str| SparseExcludeError::Absolute {
+            raw: raw.to_owned(),
+        };
+        let parent = |raw: &str| SparseExcludeError::ParentComponent {
+            raw: raw.to_owned(),
+        };
+        let empty = |raw: &str| SparseExcludeError::Empty {
+            raw: raw.to_owned(),
+        };
+
+        let cases = [
+            ("/abs", absolute("/abs")),
+            ("..", parent("..")),
+            ("a/../b", parent("a/../b")),
+            ("../x", parent("../x")),
+            ("", empty("")),
+            (".", empty(".")),
+            ("./", empty("./")),
+        ];
+
+        for (raw, expected) in cases {
+            assert_eq!(
+                SparseExcludeDir::parse(raw),
+                Err(expected),
+                "the refusal of {raw:?}"
+            );
+        }
+    }
+
+    /// A value that holds an ASCII control character is refused, wherever the
+    /// character is.
+    ///
+    /// A line break in a value becomes a line break in the sparse pattern file,
+    /// and so two patterns. The control character check comes first, so a
+    /// value that also breaks a different rule still gets this variant.
+    #[test]
+    fn sparse_exclude_dir_parse_refuses_a_control_character() {
+        let cases = ["a\nb", "heavy\r", "\theavy", "a\u{7f}b", "/abs\n"];
+
+        for raw in cases {
+            assert_eq!(
+                SparseExcludeDir::parse(raw),
+                Err(SparseExcludeError::ControlCharacter {
+                    raw: raw.to_owned()
+                }),
+                "the refusal of {raw:?}"
+            );
+        }
+    }
+
+    /// The message of a control character refusal shows the character as an
+    /// escape, so the message stays on one line.
+    #[test]
+    fn sparse_exclude_error_escapes_a_control_character() {
+        let message = SparseExcludeDir::parse("a\nb")
+            .expect_err("the value must be refused")
+            .to_string();
+
+        assert_eq!(
+            message,
+            "--sparse-exclude 'a\\nb' holds a control character. Give a directory name \
+             without control characters."
+        );
+    }
+
+    /// The message of a refusal names the value the user typed and the reason.
+    #[test]
+    fn sparse_exclude_error_names_the_value_and_the_reason() {
+        let cases = [
+            ("/abs", "absolute path"),
+            ("a/../b", "'..' component"),
+            ("./", "names no directory"),
+        ];
+
+        for (raw, reason) in cases {
+            let message = SparseExcludeDir::parse(raw)
+                .expect_err("the value must be refused")
+                .to_string();
+            assert!(
+                message.contains(&format!("--sparse-exclude '{raw}'")),
+                "the message must name the value {raw:?}: {message}"
+            );
+            assert!(
+                message.contains(reason),
+                "the message must give the reason {reason:?}: {message}"
+            );
+        }
+    }
+
+    /// Two flags that name one directory give that directory one time, at the
+    /// position of the first flag. `heavy` and `heavy/` are the same directory,
+    /// so git gets one pattern for it and the notice names it one time.
+    #[test]
+    fn parse_sparse_excludes_drops_a_duplicate_and_keeps_the_first_order() {
+        let raw: Vec<String> = ["heavy", "assets/video", "heavy/", "./assets/video", "docs"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+
+        let dirs = parse_sparse_excludes(&raw).expect("every value must parse");
+        let names: Vec<&str> = dirs.iter().map(SparseExcludeDir::as_str).collect();
+
+        assert_eq!(names, vec!["heavy", "assets/video", "docs"]);
+    }
+
+    /// The first refused value stops the parse, and its refusal comes back.
+    #[test]
+    fn parse_sparse_excludes_returns_the_first_refusal() {
+        let raw: Vec<String> = ["heavy", "/abs", "../up"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+
+        assert_eq!(
+            parse_sparse_excludes(&raw),
+            Err(SparseExcludeError::Absolute {
+                raw: "/abs".to_owned()
+            })
+        );
+    }
+
+    /// A git that does not start is a failed git command, and not a directory
+    /// that git does not track.
+    ///
+    /// A missing working directory makes the start of git fail in the same
+    /// way that a missing `git` program does. The directory is under a new
+    /// temporary directory, so no parallel run can make it.
+    #[test]
+    fn resolve_sparse_excludes_reports_a_git_that_does_not_start() {
+        let temp = tempfile::TempDir::new().expect("create a temporary directory");
+        let missing = temp.path().join("no-such-repository");
+        let raw = vec!["heavy".to_owned()];
+
+        let error = resolve_sparse_excludes(&missing, None, &raw)
+            .expect_err("a git that does not start must stop the run");
+
+        assert!(
+            matches!(error, SparseExcludeError::GitCommand { .. }),
+            "the refusal must be GitCommand, got {error:?}"
+        );
+        assert_eq!(error.exit_code(), exit_codes::GIT_COMMAND_ERROR);
+        assert!(
+            error
+                .to_string()
+                .starts_with("could not run git ls-tree to check --sparse-exclude: "),
+            "the message must name the git command: {error}"
+        );
+    }
+
+    /// A run without `--sparse-exclude` asks git nothing, also with `-c <ref>`.
+    /// So a plain `nwt -c <ref>` runs the git children it ran before the flag
+    /// existed.
+    ///
+    /// The working directory is missing, so each git child fails to start. An
+    /// answer of `Ok` proves that no child ran.
+    #[test]
+    fn resolve_sparse_excludes_asks_git_nothing_without_a_value() {
+        let temp = tempfile::TempDir::new().expect("create a temporary directory");
+        let missing = temp.path().join("no-such-repository");
+
+        assert_eq!(
+            resolve_sparse_excludes(&missing, Some("foo"), &[]),
+            Ok(Vec::new())
+        );
+    }
+
+    /// With `-c <ref>`, the first git child of the check is `git rev-parse`,
+    /// and a failure to start it names that subcommand and not `ls-tree`.
+    #[test]
+    fn resolve_sparse_excludes_names_the_git_subcommand_that_does_not_start() {
+        let temp = tempfile::TempDir::new().expect("create a temporary directory");
+        let missing = temp.path().join("no-such-repository");
+        let raw = vec!["heavy".to_owned()];
+
+        let error = resolve_sparse_excludes(&missing, Some("foo"), &raw)
+            .expect_err("a git that does not start must stop the run");
+
+        assert!(
+            error
+                .to_string()
+                .starts_with("could not run git rev-parse to check --sparse-exclude: "),
+            "the message must name git rev-parse: {error}"
+        );
+        assert_eq!(error.exit_code(), exit_codes::GIT_COMMAND_ERROR);
+    }
+
+    /// Parse each of `raw` into a directory, or panic.
+    fn sparse_dirs(raw: &[&str]) -> Vec<SparseExcludeDir> {
+        raw.iter()
+            .map(|value| {
+                SparseExcludeDir::parse(value)
+                    .unwrap_or_else(|e| panic!("{value:?} must parse, got {e:?}"))
+            })
+            .collect()
+    }
+
+    /// One directory: the notice names it with a trailing `/`, and says "it".
+    #[test]
+    fn sparse_exclude_notice_names_one_directory_as_it() {
+        assert_eq!(
+            sparse_exclude_notice(&sparse_dirs(&["heavy"])),
+            "Excluded heavy/ (sparse checkout). Run 'git sparse-checkout disable' in the \
+             worktree to get it."
+        );
+    }
+
+    /// Two directories: the notice names both in the order given, and says
+    /// "them".
+    #[test]
+    fn sparse_exclude_notice_names_two_directories_as_them() {
+        assert_eq!(
+            sparse_exclude_notice(&sparse_dirs(&["assets/video", "fixtures/large"])),
+            "Excluded assets/video/, fixtures/large/ (sparse checkout). Run 'git \
+             sparse-checkout disable' in the worktree to get them."
+        );
+    }
+
+    /// The notice shows the name the user reads, not the escaped pattern, and
+    /// multi-byte names stay intact.
+    #[test]
+    fn sparse_exclude_notice_shows_unescaped_multi_byte_names() {
+        assert_eq!(
+            sparse_exclude_notice(&sparse_dirs(&["we[ir]d dir", "日本語", "café 🎉"])),
+            "Excluded we[ir]d dir/, 日本語/, café 🎉/ (sparse checkout). Run 'git \
+             sparse-checkout disable' in the worktree to get them."
+        );
+    }
+
+    /// The text of `document` from the line `heading` to the next line that
+    /// starts with `next_heading`. An empty string when `heading` is not there.
+    fn doc_section<'a>(document: &'a str, heading: &str, next_heading: &str) -> &'a str {
+        document.split_once(heading).map_or("", |(_, rest)| {
+            rest.split_once(next_heading)
+                .map_or(rest, |(section, _)| section)
+        })
+    }
+
+    /// True when one line of `section`, without its indentation, is `sample`.
+    fn has_sample_line(section: &str, sample: &str) -> bool {
+        section.lines().any(|line| line.trim() == sample)
+    }
+
+    /// The two documents of `--sparse-exclude`: the SPARSE WORKTREES section of
+    /// `--help`, and the `### Sparse worktrees` section inside the `## nwt`
+    /// section of the README.
+    ///
+    /// `include_str!` stays in `#[cfg(test)]`, so the README goes into the test
+    /// binary only and not into the `nwt` that ships.
+    fn sparse_doc_sections() -> (String, &'static str) {
+        use clap::CommandFactory;
+
+        let long_about = Cli::command()
+            .get_long_about()
+            .expect("nwt sets long_about")
+            .to_string();
+        let help_section =
+            doc_section(&long_about, "\nSPARSE WORKTREES:\n", "\nEXAMPLES:\n").to_owned();
+        let nwt_section = doc_section(
+            include_str!("../../../README.md"),
+            "\n## nwt (new worktree)\n",
+            "\n## ",
+        );
+        let readme_section = doc_section(nwt_section, "\n### Sparse worktrees\n", "\n### ");
+        (help_section, readme_section)
+    }
+
+    /// `text` with each run of whitespace as one space. A phrase that a line
+    /// break splits in `text` then matches as one phrase.
+    fn join_lines(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// The first paragraph of `section` that holds `phrase`, as one line. An
+    /// empty string when no paragraph holds it. A line that holds only
+    /// whitespace ends a paragraph.
+    fn paragraph_holding(section: &str, phrase: &str) -> String {
+        let mut paragraphs = vec![String::new()];
+        for line in section.lines() {
+            if line.trim().is_empty() {
+                paragraphs.push(String::new());
+            } else if let Some(paragraph) = paragraphs.last_mut() {
+                paragraph.push(' ');
+                paragraph.push_str(line);
+            }
+        }
+        paragraphs
+            .iter()
+            .map(|paragraph| join_lines(paragraph))
+            .find(|paragraph| paragraph.contains(phrase))
+            .unwrap_or_default()
+    }
+
+    /// A failure of each step of [`SPARSE_STEPS`] breaks the worktree, and
+    /// the run removes it. The SPARSE WORKTREES section of `--help` says so,
+    /// and so does the `### Sparse worktrees` section of the README. Each
+    /// document says it in the paragraph that holds "the worktree is broken".
+    ///
+    /// [`apply_sparse_checkout`] passes the names of [`SPARSE_STEPS`] to
+    /// [`run_sparse_step`], and this test reads the same array. Add a step to
+    /// the code alone, and this test fails and names the document that did
+    /// not change.
+    #[test]
+    fn test_help_and_readme_name_each_sparse_step_whose_failure_removes_the_worktree() {
+        const BROKEN_WORKTREE: &str = "the worktree is broken";
+
+        let (help_section, readme_section) = sparse_doc_sections();
+        let help_paragraph = paragraph_holding(&help_section, BROKEN_WORKTREE);
+        let readme_paragraph = paragraph_holding(readme_section, BROKEN_WORKTREE);
+
+        for step in SPARSE_STEPS {
+            assert!(
+                help_paragraph.contains(step),
+                "the SPARSE WORKTREES section of --help must name {step:?} where it says \
+                 {BROKEN_WORKTREE:?}: {help_paragraph:?}"
+            );
+            assert!(
+                readme_paragraph.contains(step),
+                "the ### Sparse worktrees section of README.md must name {step:?} where it \
+                 says {BROKEN_WORKTREE:?}: {readme_paragraph:?}"
+            );
+        }
+    }
+
+    /// The first release of git that has `git hook run --ignore-missing`.
+    ///
+    /// [`run_post_checkout_hook`] runs the `post-checkout` hook with that
+    /// command, so `--sparse-exclude` needs this release or a later one.
+    /// `builtin/hook.c` is not in the git source at `v2.35.0`, and it is there
+    /// at `v2.36.0`. `git sparse-checkout set --no-cone` is older, so it sets
+    /// no higher minimum. On an older git, `git hook run` exits with a status
+    /// that is not zero, and `nwt` reports a failed hook for a repository
+    /// that has no hook.
+    const MINIMUM_SPARSE_GIT_VERSION: &str = "2.36.0";
+
+    /// The SPARSE WORKTREES section of `--help` and the `### Sparse worktrees`
+    /// section of the README both state [`MINIMUM_SPARSE_GIT_VERSION`] as the
+    /// minimum git of `--sparse-exclude`.
+    ///
+    /// Each section is joined to one line first, so a statement that a line
+    /// break splits still matches.
+    #[test]
+    fn test_help_and_readme_state_the_minimum_git_version_of_sparse_exclude() {
+        let statement = format!("git {MINIMUM_SPARSE_GIT_VERSION} or later");
+        let (help_section, readme_section) = sparse_doc_sections();
+
+        assert!(
+            join_lines(&help_section).contains(&statement),
+            "the SPARSE WORKTREES section of --help must say that --sparse-exclude needs \
+             {statement:?}"
+        );
+        assert!(
+            join_lines(readme_section).contains(&statement),
+            "the ### Sparse worktrees section of README.md must say that --sparse-exclude \
+             needs {statement:?}"
+        );
+    }
+
+    /// The sparse notice and the `Skipped:` line of a `.env` under an excluded
+    /// directory show as samples in two documents. The SPARSE WORKTREES section
+    /// of `--help` holds them, and so does the `## nwt` section of the README.
+    ///
+    /// The samples are copies, and only the functions run. So this test builds
+    /// each line with [`sparse_exclude_notice`] and
+    /// [`skipped_under_excluded_message`], and each document must hold that
+    /// line as a line of its own. Change the wording in the code alone, and
+    /// this test fails and names the document that did not change.
+    #[test]
+    fn test_help_and_readme_samples_match_the_sparse_lines() {
+        let heavy = sparse_dirs(&["heavy"]);
+        let notice = sparse_exclude_notice(&heavy);
+        let skipped = skipped_under_excluded_message(Path::new("heavy/.env"), &heavy[0]);
+
+        let (help_section, readme_section) = sparse_doc_sections();
+
+        for sample in [&notice, &skipped] {
+            assert!(
+                has_sample_line(&help_section, sample),
+                "the SPARSE WORKTREES section of --help must hold the runtime line: {sample}"
+            );
+            assert!(
+                has_sample_line(readme_section, sample),
+                "the ### Sparse worktrees section of README.md must hold the runtime line: \
+                 {sample}"
+            );
+        }
+    }
+
+    // One mutation fixture for each rule of `escape_sparse_pattern`. Remove one
+    // rule from the function, and exactly one of these tests fails. Each input
+    // holds the character two times where it can, so a rule that escapes only
+    // the first occurrence fails too.
+
+    #[test]
+    fn escape_sparse_pattern_escapes_every_backslash() {
+        assert_eq!(escape_sparse_pattern(r"a\b\c"), r"a\\b\\c");
+    }
+
+    #[test]
+    fn escape_sparse_pattern_escapes_every_open_bracket() {
+        assert_eq!(escape_sparse_pattern("a[b[c"), r"a\[b\[c");
+    }
+
+    #[test]
+    fn escape_sparse_pattern_escapes_every_close_bracket() {
+        assert_eq!(escape_sparse_pattern("a]b]c"), r"a\]b\]c");
+    }
+
+    #[test]
+    fn escape_sparse_pattern_escapes_every_star() {
+        assert_eq!(escape_sparse_pattern("a*b*c"), r"a\*b\*c");
+    }
+
+    #[test]
+    fn escape_sparse_pattern_escapes_every_question_mark() {
+        assert_eq!(escape_sparse_pattern("a?b?c"), r"a\?b\?c");
+    }
+
+    #[test]
+    fn escape_sparse_pattern_escapes_a_leading_exclamation_mark() {
+        assert_eq!(escape_sparse_pattern("!heavy"), r"\!heavy");
+    }
+
+    #[test]
+    fn escape_sparse_pattern_escapes_a_leading_number_sign() {
+        assert_eq!(escape_sparse_pattern("#heavy"), r"\#heavy");
+    }
+
+    /// A `!` or a `#` after the first character is literal in gitignore
+    /// syntax, so an escape there is noise.
+    #[test]
+    fn escape_sparse_pattern_keeps_a_later_exclamation_mark_and_number_sign() {
+        assert_eq!(escape_sparse_pattern("a!b#c/!d/#e"), "a!b#c/!d/#e");
+    }
+
+    /// A name without a special character comes back unchanged, spaces and
+    /// multi-byte characters included.
+    #[test]
+    fn escape_sparse_pattern_keeps_a_plain_name() {
+        assert_eq!(
+            escape_sparse_pattern("heavy dir/日本語/café 🎉"),
+            "heavy dir/日本語/café 🎉"
+        );
+    }
+
+    /// The pattern is anchored at the root, matches a directory only, and
+    /// holds the escaped name. An unescaped `we[ir]d dir` excluded nothing.
+    #[test]
+    fn sparse_exclude_dir_pattern_anchors_and_escapes_the_directory() {
+        let dir = SparseExcludeDir::parse("we[ir]d dir/").expect("the value must parse");
+        assert_eq!(dir.pattern(), r"!/we\[ir\]d dir/");
+    }
+
+    /// `--sparse-exclude` takes one directory. A run without the flag excludes
+    /// nothing.
+    #[test]
+    fn test_cli_sparse_exclude_parses_alone() {
+        use clap::Parser;
+
+        let cli = Cli::try_parse_from(["nwt", "--sparse-exclude", "heavy"])
+            .expect("Should accept --sparse-exclude alone");
+        assert_eq!(cli.sparse_exclude, vec!["heavy".to_string()]);
+
+        let plain = Cli::try_parse_from(["nwt"]).expect("Should parse without flags");
+        assert!(
+            plain.sparse_exclude.is_empty(),
+            "A run without --sparse-exclude excludes nothing"
+        );
+    }
+
+    /// Each occurrence adds one directory, in the order the user gave.
+    #[test]
+    fn test_cli_sparse_exclude_is_repeatable() {
+        use clap::Parser;
+
+        let cli = Cli::try_parse_from([
+            "nwt",
+            "--sparse-exclude",
+            "assets/video",
+            "--sparse-exclude",
+            "fixtures/large",
+        ])
+        .expect("Should accept --sparse-exclude two times");
+        assert_eq!(
+            cli.sparse_exclude,
+            vec!["assets/video".to_string(), "fixtures/large".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_cli_sparse_exclude_with_branch() {
+        use clap::Parser;
+
+        // `--branch` takes one or more values, so this also proves that the
+        // flag ends the list of branch words.
+        let cli = Cli::try_parse_from(["nwt", "-b", "issue-12", "--sparse-exclude", "heavy"])
+            .expect("Should accept --sparse-exclude with --branch");
+        assert_eq!(cli.branch, Some(vec!["issue-12".to_string()]));
+        assert_eq!(cli.sparse_exclude, vec!["heavy".to_string()]);
+    }
+
+    #[test]
+    fn test_cli_sparse_exclude_with_checkout() {
+        use clap::Parser;
+
+        let cli = Cli::try_parse_from(["nwt", "-c", "v1", "--sparse-exclude", "heavy"])
+            .expect("Should accept --sparse-exclude with --checkout");
+        assert_eq!(cli.checkout, Some("v1".to_string()));
+        assert_eq!(cli.sparse_exclude, vec!["heavy".to_string()]);
+    }
+
+    /// The help text names the value `DIR`, which is the word the docs use.
+    #[test]
+    fn test_cli_sparse_exclude_value_name_is_dir() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        let arg = cmd
+            .get_arguments()
+            .find(|arg| arg.get_long() == Some("sparse-exclude"))
+            .expect("nwt defines --sparse-exclude");
+        let names: Vec<&str> = arg
+            .get_value_names()
+            .unwrap_or_default()
+            .iter()
+            .map(|name| name.as_str())
+            .collect();
+        assert_eq!(names, ["DIR"]);
+    }
+
+    #[test]
+    fn test_cli_shell_setup_conflicts_with_sparse_exclude() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        // --shell-setup makes no worktree, so a directory to exclude is a mistake
+        let err = cmd
+            .try_get_matches_from(["nwt", "--shell-setup", "--sparse-exclude", "heavy"])
+            .expect_err("Should fail when both --shell-setup and --sparse-exclude are provided");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
     // Unix-specific tests for shell command execution.
     // These tests use Unix commands like `true`, `false`, `pwd`, and `sh`.
     #[cfg(unix)]
@@ -3368,6 +5076,7 @@ mod tests {
                 run: None,
                 tmux: false,
                 shell_setup: false,
+                sparse_exclude: Vec::new(),
             };
             let config = NwtConfig {
                 branch: Some("config-branch".to_string()),
@@ -3407,6 +5116,7 @@ mod tests {
                 run: None,
                 tmux: false,
                 shell_setup: false,
+                sparse_exclude: Vec::new(),
             };
             let config = NwtConfig {
                 branch: Some("config-branch".to_string()),
@@ -3439,6 +5149,7 @@ mod tests {
                 run: None,
                 tmux: false,
                 shell_setup: false,
+                sparse_exclude: Vec::new(),
             };
             let merged = merge_config(&cli, None);
 
@@ -3462,6 +5173,7 @@ mod tests {
                 run: None,
                 tmux: false,
                 shell_setup: false,
+                sparse_exclude: Vec::new(),
             };
             let config = NwtConfig {
                 branch: None,
@@ -3490,6 +5202,7 @@ mod tests {
                 run: None,
                 tmux: false,
                 shell_setup: false,
+                sparse_exclude: Vec::new(),
             };
             let config = NwtConfig {
                 branch: None,
@@ -3519,6 +5232,7 @@ mod tests {
                 run: None,
                 tmux: false,
                 shell_setup: false,
+                sparse_exclude: Vec::new(),
             };
             let merged = merge_config(&cli, None);
             assert!(merged.bootstrap_hooks);
@@ -3537,6 +5251,7 @@ mod tests {
                 run: None,
                 tmux: false,
                 shell_setup: false,
+                sparse_exclude: Vec::new(),
             };
             let config = NwtConfig {
                 branch: None,
@@ -3564,6 +5279,7 @@ mod tests {
                 run: None,
                 tmux: false,
                 shell_setup: false,
+                sparse_exclude: Vec::new(),
             };
             let config = NwtConfig {
                 branch: None,
@@ -3688,7 +5404,7 @@ mod tests {
             create_file(source.path(), ".env", "SECRET=value");
 
             // Copy env files (no git, so all .env files are "untracked")
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             // Verify the file was copied
             assert!(
@@ -3705,7 +5421,7 @@ mod tests {
             // Create .env.local file
             create_file(source.path(), ".env.local", "LOCAL_SECRET=local");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 file_has_content(dest.path(), ".env.local", "LOCAL_SECRET=local"),
@@ -3721,7 +5437,7 @@ mod tests {
             // Create .env.development file
             create_file(source.path(), ".env.development", "DEV=true");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 file_has_content(dest.path(), ".env.development", "DEV=true"),
@@ -3737,7 +5453,7 @@ mod tests {
             // Create .envrc (direnv file) - should NOT be copied
             create_file(source.path(), ".envrc", "export FOO=bar");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             // Verify .envrc was NOT copied
             assert!(
@@ -3754,7 +5470,7 @@ mod tests {
             // Create .environment file - should NOT be copied
             create_file(source.path(), ".environment", "some config");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 !dest.path().join(".environment").exists(),
@@ -3770,7 +5486,7 @@ mod tests {
             // Create nested .env file
             create_file(source.path(), "packages/api/.env", "API_KEY=secret");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 file_has_content(dest.path(), "packages/api/.env", "API_KEY=secret"),
@@ -3789,7 +5505,7 @@ mod tests {
             create_file(source.path(), "app/.env", "APP=3");
             create_file(source.path(), "app/.env.production", "PROD=4");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(file_has_content(dest.path(), ".env", "ROOT=1"));
             assert!(file_has_content(dest.path(), ".env.local", "LOCAL=2"));
@@ -3811,7 +5527,7 @@ mod tests {
             // Create normal .env (should be copied)
             create_file(source.path(), ".env", "NORMAL=y");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 file_has_content(dest.path(), ".env", "NORMAL=y"),
@@ -3845,7 +5561,7 @@ mod tests {
             // Create normal .env (should be copied)
             create_file(source.path(), ".env", "NORMAL=y");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 file_has_content(dest.path(), ".env", "NORMAL=y"),
@@ -3867,7 +5583,7 @@ mod tests {
             // Create normal .env (should be copied)
             create_file(source.path(), ".env", "NORMAL=y");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 file_has_content(dest.path(), ".env", "NORMAL=y"),
@@ -3912,7 +5628,7 @@ mod tests {
             create_file(source.path(), ".env.local", "UNTRACKED_SECRET=untracked");
 
             // Copy env files
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             // Verify: tracked file should NOT be copied
             assert!(
@@ -3938,7 +5654,7 @@ mod tests {
             // post-checkout hook during `git worktree add`.
             create_file(dest.path(), ".env.local", "WORKTREE=generated-by-hook");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 file_has_content(dest.path(), ".env.local", "WORKTREE=generated-by-hook"),
@@ -3954,11 +5670,15 @@ mod tests {
             create_file(source.path(), ".env.local", "MAIN=from-main");
             create_file(dest.path(), ".env.local", "WORKTREE=generated-by-hook");
 
-            let summary = copy_untracked_env_files(source.path(), dest.path(), true);
+            let summary = copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert_eq!(
                 summary,
-                EnvCopySummary { copied: 0, kept: 1 },
+                EnvCopySummary {
+                    copied: 0,
+                    kept: 1,
+                    skipped: 0
+                },
                 "A skipped destination must count as kept, never as copied"
             );
         }
@@ -4051,7 +5771,7 @@ mod tests {
             // Nothing in the destination, so the copy must still happen.
             create_file(source.path(), ".env.local", "MAIN=from-main");
 
-            let summary = copy_untracked_env_files(source.path(), dest.path(), true);
+            let summary = copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 file_has_content(dest.path(), ".env.local", "MAIN=from-main"),
@@ -4059,7 +5779,11 @@ mod tests {
             );
             assert_eq!(
                 summary,
-                EnvCopySummary { copied: 1, kept: 0 },
+                EnvCopySummary {
+                    copied: 1,
+                    kept: 0,
+                    skipped: 0
+                },
                 "Copying must still be counted when nothing was skipped"
             );
         }
@@ -4074,7 +5798,7 @@ mod tests {
             // Only .env.local already exists in the new worktree.
             create_file(dest.path(), ".env.local", "B=already-here");
 
-            let summary = copy_untracked_env_files(source.path(), dest.path(), true);
+            let summary = copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 file_has_content(dest.path(), ".env", "A=1"),
@@ -4086,8 +5810,102 @@ mod tests {
             );
             assert_eq!(
                 summary,
-                EnvCopySummary { copied: 1, kept: 1 },
+                EnvCopySummary {
+                    copied: 1,
+                    kept: 1,
+                    skipped: 0
+                },
                 "Copy and keep must be accounted separately in a single pass"
+            );
+        }
+
+        /// Parse `raw` into one excluded directory, or panic.
+        fn excluded_dir(raw: &str) -> SparseExcludeDir {
+            SparseExcludeDir::parse(raw).unwrap_or_else(|e| panic!("{raw:?} must parse, got {e:?}"))
+        }
+
+        /// Issue #487 test 9: a `.env` under an excluded directory is not
+        /// copied, and it counts as skipped. A copy makes the excluded
+        /// directory in the new worktree again. The `.env` beside it is copied.
+        #[test]
+        fn test_env_under_an_excluded_directory_is_skipped_and_counted() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), "heavy/.env", "HEAVY=1");
+            create_file(source.path(), ".env", "TOP=1");
+
+            let summary = copy_untracked_env_files(
+                source.path(),
+                dest.path(),
+                &[excluded_dir("heavy")],
+                true,
+            );
+
+            assert!(
+                !dest.path().join("heavy").exists(),
+                "The copy must not make the excluded directory heavy/"
+            );
+            assert!(
+                file_has_content(dest.path(), ".env", "TOP=1"),
+                "A .env that is not under an excluded directory must be copied"
+            );
+            assert_eq!(
+                summary,
+                EnvCopySummary {
+                    copied: 1,
+                    kept: 0,
+                    skipped: 1
+                },
+                "A .env under an excluded directory counts as skipped, not copied or kept"
+            );
+        }
+
+        /// The stderr line names the file and the excluded directory, with a
+        /// trailing `/` on the directory.
+        #[test]
+        fn test_skipped_under_excluded_message_names_the_file_and_the_directory() {
+            assert_eq!(
+                skipped_under_excluded_message(Path::new("heavy/.env"), &excluded_dir("heavy")),
+                "Skipped: heavy/.env (under excluded heavy/)"
+            );
+        }
+
+        /// A `.env` whose path only starts with the text of an excluded
+        /// directory is not under it. `heavy2/` shares the first five
+        /// characters, and `src/heavy/` shares the last component. Both are
+        /// copied, and nothing counts as skipped.
+        #[test]
+        fn test_env_beside_an_excluded_directory_is_still_copied() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), "heavy2/.env", "SIBLING=1");
+            create_file(source.path(), "src/heavy/.env", "NESTED=1");
+
+            let summary = copy_untracked_env_files(
+                source.path(),
+                dest.path(),
+                &[excluded_dir("heavy")],
+                true,
+            );
+
+            assert!(
+                file_has_content(dest.path(), "heavy2/.env", "SIBLING=1"),
+                "heavy2/.env is not under heavy/ and must be copied"
+            );
+            assert!(
+                file_has_content(dest.path(), "src/heavy/.env", "NESTED=1"),
+                "src/heavy/.env is not under heavy/ and must be copied"
+            );
+            assert_eq!(
+                summary,
+                EnvCopySummary {
+                    copied: 2,
+                    kept: 0,
+                    skipped: 0
+                },
+                "Nothing beside an excluded directory counts as skipped"
             );
         }
 
@@ -4104,7 +5922,7 @@ mod tests {
             // these bits into every worktree.
             set_mode(&source.path().join(".env"), 0o644);
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert_eq!(
                 mode_of(&dest.path().join(".env")),
@@ -4127,7 +5945,7 @@ mod tests {
             create_file(source.path(), "packages/api/.env", "NESTED=secret");
             set_mode(&source.path().join("packages/api/.env"), 0o644);
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert_eq!(
                 mode_of(&dest.path().join("packages/api/.env")),
@@ -4153,7 +5971,7 @@ mod tests {
             create_file(dest.path(), ".env", "WORKTREE=generated-by-hook");
             set_mode(&dest.path().join(".env"), 0o600);
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert_eq!(
                 mode_of(&dest.path().join(".env")),
@@ -4201,7 +6019,7 @@ mod tests {
             let dest_path = dest.path().join(".env");
             symlink(&target_path, &dest_path).expect("Failed to create dangling symlink");
 
-            let summary = copy_untracked_env_files(source.path(), dest.path(), true);
+            let summary = copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 !target_path.exists(),
@@ -4216,7 +6034,11 @@ mod tests {
             );
             assert_eq!(
                 summary,
-                EnvCopySummary { copied: 0, kept: 1 },
+                EnvCopySummary {
+                    copied: 0,
+                    kept: 1,
+                    skipped: 0
+                },
                 "A dangling symlink at the destination must count as kept, never as copied"
             );
         }

@@ -42,7 +42,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `ng` | Navel-Gaze — watches JS/TS files and re-runs `pnpm lint` (or `--typecheck`) on change. |
 | `nodenuke` | Removes `node_modules` directories and lock files throughout a repo. |
 | `nodeup` | Updates npm/pnpm/yarn packages across all `package.json` directories. |
-| `nwt` | New Worktree — creates a git worktree with a random Docker-style name. |
+| `nwt` | New Worktree — creates a git worktree with a random Docker-style name, and can leave a heavy tracked directory out of it. |
 | `occ` | Old Claude Code — lists running Claude Code sessions oldest release first, with pid, uptime, session id, and directory. |
 | `op-cache` | 1Password credential cache wrapping `op read` to avoid repeated prompts/Touch ID. |
 | `org-borg` | Bulk clone, update, and archive GitHub organization repositories via the GitHub CLI. |

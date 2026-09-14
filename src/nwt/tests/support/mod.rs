@@ -27,12 +27,125 @@
     reason = "shared across integration-test crates; not every test binary uses every helper"
 )]
 
+use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitscratch::shed_inherited_git_environment;
 use tempfile::TempDir;
+
+/// What one path of a [`Snapshot`] holds.
+///
+/// A directory carries no content of its own, a file carries its bytes, and a
+/// link carries the path it names. Reading a link rather than following it
+/// keeps the snapshot a statement about this directory alone.
+#[derive(Debug, Eq, PartialEq)]
+pub enum Held {
+    Directory,
+    File(Vec<u8>),
+    Link(PathBuf),
+}
+
+/// Every path under one directory, with what each path holds.
+///
+/// A `BTreeMap` keys on the relative path and orders by it, so two snapshots of
+/// one directory compare the same way on every run and a difference reads in
+/// path order.
+pub type Snapshot = BTreeMap<String, Held>;
+
+/// The path of `path` under `root`, spelled with forward slashes.
+///
+/// # Panics
+///
+/// Panics if `path` does not lie under `root`.
+fn relative_name(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or_else(|e| panic!("{} lies under {}: {e}", path.display(), root.display()))
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Record every path under `dir` into `into`, and descend into each directory.
+///
+/// # Panics
+///
+/// Panics if a directory cannot be read, or a file cannot be read back.
+fn record(root: &Path, dir: &Path, into: &mut Snapshot) {
+    for entry in fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
+        let path = entry
+            .unwrap_or_else(|e| panic!("read an entry of {}: {e}", dir.display()))
+            .path();
+        let name = relative_name(root, &path);
+
+        // `symlink_metadata` reads the entry itself. `metadata` follows a link,
+        // so a link that points outside the decoy would put another directory's
+        // bytes into a snapshot of this one.
+        let kind = fs::symlink_metadata(&path)
+            .unwrap_or_else(|e| panic!("stat {}: {e}", path.display()))
+            .file_type();
+
+        if kind.is_dir() {
+            into.insert(name, Held::Directory);
+            record(root, &path, into);
+        } else if kind.is_symlink() {
+            let target =
+                fs::read_link(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            into.insert(name, Held::Link(target));
+        } else {
+            let bytes = fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            into.insert(name, Held::File(bytes));
+        }
+    }
+}
+
+/// Every path under `root`, with the bytes of every file.
+///
+/// A count of refs or of objects is not enough to say a repository is
+/// untouched: a write that replaces one object with another keeps the count.
+/// The whole tree, content included, is what makes the word "byte-identical"
+/// true.
+///
+/// Each decoy test of `tests/production-git-env-isolation.rs` takes a snapshot
+/// of the decoy before and after its run: the plain `-b` run, the sparse `-b`
+/// run, and the sparse `-c` run. The helpers live here, so each of those tests
+/// reads the decoy with one rule, and a later test file that needs a decoy
+/// reads it with the same rule.
+pub fn snapshot(root: &Path) -> Snapshot {
+    let mut held = Snapshot::new();
+    record(root, root, &mut held);
+    held
+}
+
+/// How `after` differs from `before`, one line per path, in path order.
+///
+/// An empty list means the two snapshots are equal. Naming each path, and
+/// whether it appeared, vanished or changed, is what turns a failure into
+/// evidence of which command wrote where. [`snapshot`] names the tests that
+/// use it.
+pub fn difference(before: &Snapshot, after: &Snapshot) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    for (path, held) in after {
+        match before.get(path) {
+            None => lines.push(format!("appeared: {path}")),
+            Some(was) if was != held => lines.push(format!("changed:  {path}")),
+            Some(_) => {}
+        }
+    }
+
+    for path in before.keys() {
+        if !after.contains_key(path) {
+            lines.push(format!("vanished: {path}"));
+        }
+    }
+
+    lines.sort();
+    lines
+}
 
 /// Runs a git command in `dir` with stdin/stdout/stderr nulled, returning
 /// whether it succeeded. Output is nulled so concurrent test runs (a background
@@ -168,6 +281,106 @@ pub fn init_repo() -> (TempDir, PathBuf) {
     );
 
     (temp, repo)
+}
+
+/// Write `contents` to `relative` under `repo`, and make the parent
+/// directories first.
+///
+/// # Panics
+///
+/// Panics when a directory or the file cannot be written.
+pub fn write_file(repo: &Path, relative: &str, contents: &str) {
+    let path = repo.join(relative);
+    let parent = path.parent().expect("a file path has a parent");
+    std::fs::create_dir_all(parent).unwrap_or_else(|e| panic!("create {}: {e}", parent.display()));
+    std::fs::write(&path, contents).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+}
+
+/// Make a repository whose second commit adds `files`, and hand back the
+/// temporary directory that holds it (keep it alive) and the repository.
+///
+/// Each file holds its own path and a line break.
+///
+/// # Panics
+///
+/// Panics when [`init_repo`], a write, `git add`, or `git commit` fails.
+pub fn repo_with_files(files: &[&str]) -> (TempDir, PathBuf) {
+    let (temp, repo) = init_repo();
+
+    for file in files {
+        write_file(&repo, file, &format!("{file}\n"));
+    }
+    assert!(run_git(&repo, &["add", "--", "."]), "git add failed");
+    assert!(
+        run_git(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "add the tree"]
+        ),
+        "git commit failed"
+    );
+
+    (temp, repo)
+}
+
+/// Clone `source` into a new temporary directory, and hand back the temporary
+/// directory (keep it alive) and the clone.
+///
+/// The clone holds the checked-out branch of `source` as a local branch, and
+/// every other branch only as `origin/<branch>`. So `nwt -c <branch>` for such
+/// a branch goes through git's checkout DWIM. The clone is named `repo`, as
+/// [`init_repo`] names a repository, so a test that reads the temporary
+/// directory finds one entry with that name.
+///
+/// # Panics
+///
+/// Panics when a path is not UTF-8, or when `git clone` fails.
+pub fn clone_of(source: &Path) -> (TempDir, PathBuf) {
+    let temp = TempDir::new().expect("create a temporary directory");
+    let clone = temp.path().join("repo");
+    let source = source.to_str().expect("utf-8 source path");
+    let target = clone.to_str().expect("utf-8 clone path");
+
+    assert!(
+        run_git(temp.path(), &["clone", "--quiet", source, target]),
+        "git clone failed"
+    );
+
+    (temp, clone)
+}
+
+/// Write an executable `post-checkout` hook into `hooks_dir`, and point
+/// `core.hooksPath` of `repo` at that directory.
+///
+/// `body` is the shell script after the `#!/bin/sh` line. The hook runs with
+/// the new worktree as its working directory.
+///
+/// The fixture sets `core.hooksPath` in the repository, and does not write into
+/// `.git/hooks`. The host `~/.gitconfig` can set a global `core.hooksPath`, and
+/// git then ignores `.git/hooks`. A value in the repository configuration
+/// overrides the global value.
+///
+/// Unix only: the hook is a POSIX `sh` script that the Unix permission bits
+/// make executable.
+///
+/// # Panics
+///
+/// Panics when the hook cannot be written or made executable, or when
+/// `git config` fails.
+#[cfg(unix)]
+pub fn install_post_checkout_hook(repo: &Path, hooks_dir: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let hook = hooks_dir.join("post-checkout");
+    std::fs::write(&hook, format!("#!/bin/sh\n{body}")).expect("write the post-checkout hook");
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+        .expect("make the post-checkout hook executable");
+
+    let hooks_dir = std::fs::canonicalize(hooks_dir).expect("resolve the hooks directory");
+    let hooks_dir = hooks_dir.to_str().expect("utf-8 hooks directory");
+    assert!(
+        run_git(repo, &["config", "core.hooksPath", hooks_dir]),
+        "git config core.hooksPath failed"
+    );
 }
 
 /// Builds a [`Command`] that runs the real `nwt` binary against `repo`.

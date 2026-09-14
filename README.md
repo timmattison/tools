@@ -441,8 +441,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
 - nwt
   - New Worktree - Creates a new git worktree with a randomly generated Docker-style name
     (e.g., "absurd-rock", "zesty-penguin"). Supports config files (~/.nwt.toml), custom branch
-    names, checking out existing refs, running commands after creation, and opening worktrees
-    in new tmux windows. Worktrees are created in a `{repo-name}-worktrees` directory alongside
+    names, checking out existing refs, running commands after creation, opening worktrees
+    in new tmux windows, and sparse worktrees without a heavy tracked directory
+    (`--sparse-exclude`). Worktrees are created in a `{repo-name}-worktrees` directory alongside
     the repository.
   - To install: `cargo install --git https://github.com/timmattison/tools nwt`
 - cwt
@@ -2489,6 +2490,7 @@ nwt -b feature-branch         # Create with specific branch name
 nwt -c main                   # Check out existing ref
 nwt --run "pnpm install"      # Run command after creation
 nwt --tmux                    # Open in new tmux window
+nwt --sparse-exclude assets   # Leave the tracked directory assets/ out
 ```
 
 ### Options
@@ -2500,6 +2502,7 @@ nwt --tmux                    # Open in new tmux window
 - `--tmux`: Open the new worktree in a new tmux window (Unix only)
 - `--no-copy-env`: Skip copying untracked `.env` files from the main worktree into the new one
 - `--no-bootstrap-hooks`: Skip the package-manager install that regenerates git hooks (see Hook Bootstrap below)
+- `--sparse-exclude <DIR>`: Make the new worktree a sparse checkout without the tracked directory `<DIR>`, a path relative to the root of the repository. Use the flag one time for each directory. Only the new worktree is sparse, and `git sparse-checkout disable` in it writes the directories back. nwt refuses a `<DIR>` that git does not track as a directory at the ref, with exit code 15, before it makes anything (see Sparse worktrees below)
 - `--shell-setup`: Install shell integration for auto-cd into new worktrees (conflicts with all other flags)
 - `-q, --quiet`: Suppress non-error messages
 
@@ -2577,6 +2580,65 @@ Disable copying for a single invocation with `--no-copy-env`, or set `copy_env =
 After creating the worktree, if `package.json` at the worktree root declares a `prepare` script (the husky convention), nwt runs the project's package manager install so git-hook managers regenerate their hooks directory. This matters because `core.hooksPath` often points at a gitignored, generated directory (e.g. `.husky/_`) that a freshly created worktree doesn't have — without the install, git finds no hooks directory and silently runs nothing, so every commit bypasses lint/typecheck/test gates. The package manager is chosen by the `packageManager` field, then a lockfile, then pnpm. Repos without a `prepare` script are unaffected — no install is run.
 
 Disable the install for a single invocation with `--no-bootstrap-hooks`, or set `bootstrap_hooks = false` in `~/.nwt.toml` to disable it by default. When a synchronous `--run` command (without `--tmux`) already invokes a package manager install (e.g. `--run "pnpm install"`), nwt skips its own bootstrap install so dependencies are installed once, not twice. As a safety net, nwt verifies the effective `core.hooksPath` directory actually exists and prints a loud warning if it doesn't — whether bootstrap was skipped, failed, or didn't apply — since that missing directory is the only signal that commits in the new worktree would otherwise be ungated. When you pass a synchronous `--run` command (without `--tmux`), this check runs *after* that command finishes, so a `--run` that installs hooks (e.g. `pnpm install`) can create the directory before the check looks — no false alarm. With `--tmux`, the `--run` command runs asynchronously inside the new window, so the check necessarily runs before tmux is spawned.
+
+### Sparse worktrees
+
+`--sparse-exclude <DIR>` makes the new worktree a sparse checkout without the tracked directory `<DIR>`. Use the flag one time for each directory:
+
+```bash
+nwt -b issue-12 --sparse-exclude assets/video --sparse-exclude fixtures/large
+```
+
+`<DIR>` is relative to the root of the repository, and `heavy` and `heavy/` are the same directory. Each directory becomes the non-cone pattern `!/<DIR>/`, after the pattern `/*`. Thus `--sparse-exclude heavy` excludes only the top-level directory `heavy`. It does not exclude the file `heavy.txt` or the directory `src/heavy/`. nwt escapes the glob characters of each name, so the pattern matches the name literally. The flag has no `~/.nwt.toml` key, because a heavy directory belongs to one repository.
+
+**Checks.** nwt checks each value before it makes anything. A refused value makes no directory and no branch.
+
+| Value | Exit code |
+|---|---|
+| An absolute path, a path with a `..` component, an empty value, or a value with a control character | 15 |
+| A path that is not a directory that git tracks at the ref the worktree checks out: a missing path, a file, or a directory that is only on disk | 15 |
+| A value that passes the first row, when git cannot read the ref (for example, a `-c <ref>` that does not exist) | 7 |
+
+The check reads the ref and not the disk, because the files of the new worktree come from the ref. For a `-c <branch>` that only a remote holds, git makes a local branch that tracks the remote branch. nwt then checks the remote branch that git picks: the branch of the one remote that holds it, or of the remote that `checkout.defaultRemote` names. nwt finds that branch at `refs/remotes/<remote>/<branch>`, where the default fetch refspec puts it. A remote with a different fetch refspec can give a different result.
+
+**Scope.** Only the new worktree is sparse. Git keeps its sparse settings in `.git/worktrees/<name>/config.worktree` and `.git/worktrees/<name>/info/sparse-checkout`. The main worktree, the other worktrees, and later worktrees that nwt makes without the flag stay full.
+
+There is one exception. When the **main** worktree is sparse, git copies its patterns into each new worktree, with the flag or without it. With the flag, `--sparse-exclude` replaces the copied patterns and does not add to them. A directory that only the main worktree excludes is then present in the new worktree. nwt runs `git worktree add` in the main worktree, so a sparse linked worktree never gives its patterns to a new worktree.
+
+**One shared change.** The sparse checkout writes `extensions.worktreeConfig=true` into the shared `.git/config`. This setting does not make other worktrees sparse. It stays after you remove the worktree.
+
+**The way back.** Run `git sparse-checkout disable` in the worktree. Git then writes the excluded directories.
+
+**Output.** Stdout holds only the path of the worktree. After nwt makes the worktree, it prints this line to stderr:
+
+```text
+Excluded heavy/ (sparse checkout). Run 'git sparse-checkout disable' in the worktree to get it.
+```
+
+The `.env` copy does not take an untracked `.env` under an excluded directory, because a copy writes that directory into the worktree again. nwt prints this line for each such file:
+
+```text
+Skipped: heavy/.env (under excluded heavy/)
+```
+
+`-q`/`--quiet` hides both lines.
+
+**The post-checkout hook.** `git worktree add --no-checkout` runs no hook. So nwt runs the `post-checkout` hook of the repository after it writes the files. The hook gets the arguments of a plain add: the null object id, the new `HEAD`, and `1`. It sees the sparse tree. It also sees `GIT_DIR` and `GIT_WORK_TREE` set, and a plain add sets neither.
+
+**Git version.** `--sparse-exclude` needs git 2.36.0 or later. nwt runs the `post-checkout` hook with `git hook run`, and git 2.36.0 added that command. On an older git, nwt reports that the post-checkout hook failed and exits 7, though the repository has no hook.
+
+**Failures.**
+
+- A hook that fails keeps the worktree and the branch, and nwt exits 7, as after a plain add. The error names the exit status of the hook and the path of the worktree.
+- When git cannot start the hook step, the worktree and the branch stay, and nwt exits 6.
+- When `git sparse-checkout set`, `git read-tree -mu HEAD`, or `git rev-parse HEAD` fails, the worktree is broken. nwt removes the worktree, the branch that the run made, and the empty directories that the run made, and exits 7. When nwt cannot remove one of them, it names what is left and the command that removes it.
+
+**Limits.**
+
+- The flag saves disk space in the worktree only. All worktrees share one object store, so the blobs of the excluded directory stay in `.git`. Only a partial clone (`git clone --filter=blob:none`) keeps them out, and that applies to the whole clone.
+- Commits and diffs still include the excluded directory. Git does not write it to disk, but it does not delete it from the branch.
+- A build or a test that reads the excluded directory fails in that worktree.
+- When an excluded directory holds a workspace package, the install of Hook Bootstrap can fail. nwt then warns and continues.
 
 ### Examples
 
