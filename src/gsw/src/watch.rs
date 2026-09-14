@@ -686,12 +686,26 @@ enum Event {
     /// Sent before the first replay starts. A run that is refused, or that
     /// finds HEAD on the default branch, starts no replay and sends none of
     /// these, because its outcome follows at once.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the measuring thread of slice C of #496 sends this"
+        )
+    )]
     ConflictsStarted(String),
     /// A run of `m` has ended, and this is what it found.
     ///
     /// Always arrives after the [`Event::ConflictsStarted`] of the same run,
     /// because one thread sends both on this one channel. A run that a quit
     /// abandoned sends none, because nobody reads it.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the measuring thread of slice C of #496 sends this"
+        )
+    )]
     ConflictsFinished(crate::conflicts::ConflictsOutcome),
 }
 
@@ -889,10 +903,6 @@ impl IssueRun {
 ///
 /// An enum and not a `bool`, for the reason [`IssuePress`] gives: the loop does
 /// one thing for each answer, and each answer is one arm of one match.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the loop reads this in a later commit of #496")
-)]
 #[derive(Debug, PartialEq, Eq)]
 enum ConflictsPress {
     /// Start a run.
@@ -913,20 +923,12 @@ enum ConflictsPress {
 /// its outcome a moment before its thread ends, so that answer can say a run
 /// is in flight just after the outcome arrived, and a press then would do
 /// nothing for no reason the user can see.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the loop owns this in a later commit of #496")
-)]
 struct ConflictsRun {
     /// Whether a run is in flight. Set by the press that starts the run, and
     /// cleared by the outcome of that run.
     running: bool,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the loop owns this in a later commit of #496")
-)]
 impl ConflictsRun {
     /// No run in flight.
     fn new() -> Self {
@@ -1426,19 +1428,24 @@ enum Flow {
 ///
 /// The exception worth naming is a `p` that switches nothing. Nothing renders
 /// between two keys of one drain, so a rule the render path applies is applied
-/// after the second key has already been classified — which is why `dims` is
-/// threaded down to [`PushUi::request`]: a pane with no row to draw the
-/// question in raises no question, the mode does not move, and the `y` or Enter
-/// behind that `p` is read as the ordinary key it is. `dims` is the pane the
-/// last render measured, which is the pane the user was looking at when they
-/// pressed the key — the loop re-measures after this drain, not during it.
+/// after the second key has already been classified — which is why
+/// `cache.dims` is threaded down to [`PushUi::request`]: a pane with no row to
+/// draw the question in raises no question, the mode does not move, and the `y`
+/// or Enter behind that `p` is read as the ordinary key it is. `cache.dims` is
+/// the pane the last render measured, which is the pane the user was looking at
+/// when they pressed the key — the loop re-measures after this drain, not
+/// during it.
+///
+/// `cache` comes whole, and not as its snapshot and its pane, because the two
+/// always come from the one cache. `issue` and `conflicts` are the state of the
+/// two keys that start work off this thread, one run of each at a time.
 fn absorb<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIssue, StartConflicts>(
     event: Event,
     pending: &mut Pending,
     ui: &mut PushUi,
     issue: &mut IssueRun,
-    snapshot: &Snapshot,
-    dims: Dimensions,
+    conflicts: &mut ConflictsRun,
+    cache: &SnapshotCache,
     hooks: &mut LoopHooks<
         Collect,
         RenderFn,
@@ -1471,10 +1478,10 @@ where
                 if !matches!(action, Event::IssueRequested) {
                     issue.disarm();
                 }
-                return absorb(action, pending, ui, issue, snapshot, dims, hooks);
+                return absorb(action, pending, ui, issue, conflicts, cache, hooks);
             }
         }
-        Event::PushRequested => ui.request(snapshot, dims, clock()),
+        Event::PushRequested => ui.request(&cache.snapshot, cache.dims, clock()),
         // `confirm` yields the command only once, so a second `y` that raced
         // the mode change starts nothing.
         Event::PushConfirmed => {
@@ -1509,8 +1516,26 @@ where
             }
         }
         Event::IssueCommandFound(command) => issue.found(command),
-        // The loop starts no measurement yet. A later commit of #496 does.
-        Event::ConflictsRequested | Event::ConflictsStarted(_) | Event::ConflictsFinished(_) => {}
+        // The check and the start are one step on the thread of the loop, so
+        // a burst of presses starts one run. See [`ConflictsRun`].
+        Event::ConflictsRequested => match conflicts.press() {
+            ConflictsPress::Start => (hooks.start_conflicts)(),
+            ConflictsPress::Nothing => {}
+        },
+        // A busy row drops the notice and does not hold it. A held notice
+        // reaches the row after the outcome, and says that a run is in flight
+        // when none is. See [`PushUi::post_progress`].
+        Event::ConflictsStarted(branch) => {
+            ui.post_progress(crate::conflicts::running_notice(&branch));
+        }
+        Event::ConflictsFinished(outcome) => {
+            conflicts.finished();
+            // The outcome is gsw's report about a key the user pressed, so it
+            // fades. A busy row holds it until the row is free, as it holds
+            // every report. The answer goes unread, because no state here
+            // stands on where the line landed.
+            let _ = ui.post_notice(outcome.line(), clock());
+        }
         Event::IssueFinished(outcome) => {
             issue.finished();
             // A run that worked says nothing: the browser is the answer. A run
@@ -1630,6 +1655,9 @@ where
     // The probe answers on the loop's own channel, so the key is unbound until
     // it does and the loop never waits for it.
     let mut issue = IssueRun::new(session);
+    // The loop owns the state of `m`, and the thread that measures never
+    // touches it. So the one-run rule needs no lock.
+    let mut conflicts = ConflictsRun::new();
     loop {
         // Wait for the first event, or — when the decay timer is enabled — wake
         // after `interval` of quiet for a tick.
@@ -1659,8 +1687,8 @@ where
                         &mut pending,
                         &mut ui,
                         &mut issue,
-                        &cache.snapshot,
-                        cache.dims,
+                        &mut conflicts,
+                        &cache,
                         &mut hooks,
                     ) == Flow::Quit
                     {
@@ -1678,8 +1706,8 @@ where
                         &mut pending,
                         &mut ui,
                         &mut issue,
-                        &cache.snapshot,
-                        cache.dims,
+                        &mut conflicts,
+                        &cache,
                         &mut hooks,
                     ) == Flow::Quit
                     {
@@ -1714,8 +1742,8 @@ where
                             &mut pending,
                             &mut ui,
                             &mut issue,
-                            &cache.snapshot,
-                            cache.dims,
+                            &mut conflicts,
+                            &cache,
                             &mut hooks,
                         ) == Flow::Quit
                         {

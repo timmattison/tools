@@ -1113,10 +1113,6 @@ impl PushUi {
     /// nowhere, and they never wait in [`PushUi::held`]. A held notice reaches
     /// the row after the run it describes has ended, and it then says that a
     /// run is in flight when none is.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the m key posts through this later in #496")
-    )]
     pub(crate) fn post_progress(&mut self, line: String) {
         // The answer goes unread. A notice that did not reach the row went
         // nowhere, and the caller keeps no state that stands on it.

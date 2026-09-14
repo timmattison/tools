@@ -36,6 +36,13 @@ macro_rules! tools {
 /// The quit waits for that replay. A replay that gsw abandons keeps a scratch
 /// worktree registered in the repository of the user, so the wait is the price
 /// of a clean repository.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the quit of watch mode shows this from slice C of #496"
+    )
+)]
 pub(crate) const WAITING_NOTICE: &str = concat!("Waiting for ", tools!(), " to finish…");
 
 /// What joins the parts of a measured line.
@@ -153,6 +160,13 @@ pub(crate) fn running_notice(branch: &str) -> String {
 /// The two replays run one after the other on the calling thread, and never
 /// at the same time. Two scratch worktrees at once double the load on the disk
 /// and the processor, and the user sees no gain from that.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "only tests call this; the worker calls measure_probed"
+    )
+)]
 pub(crate) fn measure(
     workdir: &Path,
     stop: &AtomicBool,
@@ -299,6 +313,10 @@ fn reason(err: &anyhow::Error) -> String {
 /// The watch loop keeps `m` to one run at a time. The worker does not refuse a
 /// second run, and it keeps each thread until that thread ends. So a broken
 /// rule costs a longer wait at the quit, and never a worktree left behind.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "watch mode starts this from slice C of #496")
+)]
 #[derive(Default)]
 pub(crate) struct ConflictsWorker {
     /// Set when gsw quits. Every thread of this worker reads it.
@@ -307,6 +325,10 @@ pub(crate) struct ConflictsWorker {
     threads: Vec<JoinHandle<()>>,
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "watch mode starts this from slice C of #496")
+)]
 impl ConflictsWorker {
     /// A worker with no thread yet.
     pub(crate) fn new() -> Self {
