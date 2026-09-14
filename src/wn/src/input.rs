@@ -264,6 +264,8 @@ The first line of it is {line:?}.",
     /// This module still never reads the text. `named` is the repository the
     /// caller found in the text, and it is `None` for a text that names no
     /// repository. `run` is the repository this run asks GitHub about.
+    /// [`Repo::is_same_repository`] compares the two, because GitHub names a
+    /// repository without regard to letter case.
     ///
     /// The message writes nothing out of the clipboard except the repository
     /// the plan names. This is the rule of [`Chain::blame`]: the clipboard
@@ -279,7 +281,7 @@ The first line of it is {line:?}.",
         run: &Repo,
     ) -> Result<(), InputError> {
         match named {
-            Some(plan) if plan != run => Err(InputError::AnotherRepository {
+            Some(plan) if !plan.is_same_repository(run) => Err(InputError::AnotherRepository {
                 plan: plan.clone(),
                 run: run.clone(),
             }),

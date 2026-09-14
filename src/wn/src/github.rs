@@ -90,6 +90,20 @@ impl Repo {
     pub fn name(&self) -> &str {
         &self.name
     }
+
+    /// Whether `other` names the same repository as this one.
+    ///
+    /// GitHub names a repository without regard to letter case, so
+    /// `TimMattison/Tools` and `timmattison/tools` are one repository. GitHub
+    /// permits only ASCII letters, digits, `-`, `_` and `.` in an owner and in
+    /// a name, so ASCII case is the whole rule.
+    ///
+    /// The derived `PartialEq` compares the letters as they are written. Use
+    /// this function to find out whether two texts are about one repository.
+    #[must_use]
+    pub fn is_same_repository(&self, other: &Repo) -> bool {
+        self.owner.eq_ignore_ascii_case(&other.owner) && self.name.eq_ignore_ascii_case(&other.name)
+    }
 }
 
 impl fmt::Display for Repo {
@@ -495,6 +509,19 @@ mod tests {
         assert_eq!(repo.owner(), "timmattison");
         assert_eq!(repo.name(), "tools");
         assert_eq!(repo.to_string(), "timmattison/tools");
+    }
+
+    #[test]
+    fn a_repository_is_the_same_repository_whatever_the_letter_case() {
+        let written = |spec: &str| Repo::parse(spec).expect("the test names a repository");
+        assert!(written("TimMattison/Tools").is_same_repository(&written("timmattison/tools")));
+        assert!(written("timmattison/tools").is_same_repository(&written("TIMMATTISON/TOOLS")));
+        assert!(!written("timmattison/tools").is_same_repository(&written("other/tools")));
+        assert!(!written("timmattison/tools").is_same_repository(&written("timmattison/other")));
+        // GitHub permits no such name, and `parse` takes one all the same. A
+        // comparison of it with itself gives an answer and no panic.
+        assert!(written("日本語/café🎉").is_same_repository(&written("日本語/café🎉")));
+        assert!(!written("日本語/café🎉").is_same_repository(&written("日本語/CAFÉ🎉")));
     }
 
     #[test]
