@@ -20,18 +20,16 @@ pub(crate) const MAX_STRIKE_MARKS: usize = 2;
 ///
 /// One or two tildes open the span, as GitHub renders both `~#21~` and
 /// `~~#21~~`, but only when a character follows them and that character is not
-/// white space. A later run of the same number of tildes closes the span only
-/// when the character in front of that run is not white space. A run that cannot
-/// close is text, and the search goes on past it, so `~2h` and `~30%` strike
-/// nothing. A span that nothing closes is no strike, and the tildes stay in front
-/// of the text.
+/// space. A later run of the same number of tildes closes the span only when the
+/// character in front of that run is not space. A run that cannot close is text,
+/// and the search goes on past it, so `~2h` and `~30%` strike nothing. A span
+/// that nothing closes is no strike, and the tildes stay in front of the text.
 ///
-/// White space is what [`char::is_whitespace`] reads: the White_Space property
-/// of Unicode. The gather script of the skill reads the same set.
+/// Space is what [`is_space`] reads.
 pub(crate) fn after_strike(text: &str) -> Option<&str> {
     let inside = text.trim_start_matches('~');
     let marks = text.len() - inside.len();
-    let opens = inside.chars().next().is_some_and(|c| !c.is_whitespace());
+    let opens = inside.chars().next().is_some_and(|c| !is_space(c));
     if !(1..=MAX_STRIKE_MARKS).contains(&marks) || !opens {
         return None;
     }
@@ -41,11 +39,31 @@ pub(crate) fn after_strike(text: &str) -> Option<&str> {
         let before = rest.get(..at)?.chars().next_back();
         let run = rest.get(at..)?;
         let after = run.trim_start_matches('~');
-        if run.len() - after.len() == marks && !before.is_some_and(char::is_whitespace) {
+        if run.len() - after.len() == marks && !before.is_some_and(is_space) {
             return Some(after);
         }
         rest = after;
     }
+}
+
+/// Whether GitHub reads `c` as space next to a run of tildes.
+///
+/// The set is the set of `cmark_utf8proc_is_space` in `src/utf8.c` of
+/// cmark-gfm, the parser of GitHub: tab, line feed, form feed, carriage return,
+/// and every character of the Unicode category Zs. Zs holds space, no-break
+/// space, U+1680, U+2000 to U+200A, U+202F, U+205F, and U+3000.
+///
+/// This set is smaller than the White_Space property of Unicode, which
+/// [`char::is_whitespace`] reads. White_Space also holds U+000B, U+0085, U+2028,
+/// and U+2029. GitHub does not read those as space, so a run of tildes next to
+/// one of them can open or close a strike.
+fn is_space(c: char) -> bool {
+    let control = matches!(c, '\t' | '\n' | '\u{C}' | '\r');
+    let zs = matches!(
+        c,
+        ' ' | '\u{A0}' | '\u{1680}' | '\u{202F}' | '\u{205F}' | '\u{3000}'
+    ) || ('\u{2000}'..='\u{200A}').contains(&c);
+    control || zs
 }
 
 #[cfg(test)]

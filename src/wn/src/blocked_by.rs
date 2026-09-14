@@ -1029,7 +1029,7 @@ mod tests {
         },
         // GitHub reads fewer characters as space than the White_Space property of
         // Unicode holds. A line separator, a vertical tab, and a next line are not
-        // space to GitHub, so tildes after them close a strike.
+        // space to GitHub, so tildes next to them can open or close a strike.
         Case {
             name: "tildes that follow a line separator close a strike",
             body: "## Blocked by\n\n- ~~#21\u{2028}~~ #22\n",
