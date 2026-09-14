@@ -1470,6 +1470,11 @@ enum WorktreeResult {
     /// [`run_post_checkout_hook`] ran exited with this status. The worktree and
     /// the branch stay, as a plain add keeps them when its hook fails.
     PostCheckoutHookFailed(ExitStatus),
+    /// Git made the sparse worktree, but the `git hook run` of
+    /// [`run_post_checkout_hook`] could not start, with this error. The
+    /// worktree holds its sparse files, so the worktree and the branch stay,
+    /// as they stay when the hook fails.
+    PostCheckoutHookNotStarted(io::Error),
 }
 
 /// True when `branch` is already a branch of the repository at `repo_root`.
@@ -1826,7 +1831,9 @@ fn run_cleanup_step(mut command: Command) -> Result<(), String> {
 /// made, and the result is [`WorktreeResult::SparseCheckoutFailed`].
 /// [`run_post_checkout_hook`] then runs the hook that the add did not run. A
 /// hook that fails keeps the worktree, and the result is
-/// [`WorktreeResult::PostCheckoutHookFailed`].
+/// [`WorktreeResult::PostCheckoutHookFailed`]. A `git hook run` that cannot
+/// start keeps the worktree too, and the result is
+/// [`WorktreeResult::PostCheckoutHookNotStarted`].
 ///
 /// This function displays git's progress output (e.g., "Updating files: X%") in real-time
 /// while also capturing stderr for error classification. This is done by spawning a thread
@@ -1974,7 +1981,7 @@ fn try_create_worktree(
         match run_post_checkout_hook(worktree, &head) {
             Ok(status) if status.success() => WorktreeResult::Success,
             Ok(status) => WorktreeResult::PostCheckoutHookFailed(status),
-            Err(e) => WorktreeResult::CommandError(e),
+            Err(e) => WorktreeResult::PostCheckoutHookNotStarted(e),
         }
     } else {
         // Ask git whether the branch is there. Do not read the reason it gave.
@@ -3017,6 +3024,19 @@ fn main() {
                     worktree_path.display()
                 );
                 exit(exit_codes::WORKTREE_FAILED);
+            }
+            WorktreeResult::PostCheckoutHookNotStarted(e) => {
+                // A git command that cannot start exits GIT_COMMAND_ERROR. The
+                // worktree holds its sparse files and stays, so this line names
+                // the step and tells the user where the worktree is.
+                error!(
+                    config.quiet,
+                    "Error: git could not start the post-checkout hook step ({}). The new \
+                     worktree stays at '{}'.",
+                    e,
+                    worktree_path.display()
+                );
+                exit(exit_codes::GIT_COMMAND_ERROR);
             }
         }
     }
