@@ -278,8 +278,13 @@ The first line of it is {line:?}.",
         named: Option<&Repo>,
         run: &Repo,
     ) -> Result<(), InputError> {
-        let _ = (named, run);
-        Ok(())
+        match named {
+            Some(plan) if plan != run => Err(InputError::AnotherRepository {
+                plan: plan.clone(),
+                run: run.clone(),
+            }),
+            _ => Ok(()),
+        }
     }
 }
 
