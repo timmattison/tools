@@ -222,7 +222,7 @@ pub enum OrderError {
     /// `listed_by` is `step` itself, or the issue `step` closes. `named` is
     /// `blocker` itself, or an issue whose work `blocker` does.
     #[error(
-        "the plan puts {step} before {blocker}, but {listed_by} says it is blocked by {named}. \
+        "the order puts {step} before {blocker}, but {listed_by} says it is blocked by {named}. \
          Fix the order, or run wn --refresh to build a new plan"
     )]
     Reversed {
@@ -235,7 +235,7 @@ pub enum OrderError {
     /// name still return to where they started. The numbers are the walk from
     /// the step to its blocker, and the blocker comes before the step.
     #[error(
-        "the order returns to {} once the blockers each issue names join the plan, \
+        "the order returns to {} once the blockers each issue names join the order, \
          so no step can start first",
         list(.0)
     )]

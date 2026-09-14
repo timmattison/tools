@@ -1369,11 +1369,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     run beside #169.` under the heading blocks nothing. A phrase in the middle of a sentence counts
     for nothing either, because a line of a tracker such as `#12 (blocked by #11)` says what blocks
     another issue.
-  - A plan that puts an issue before its own blocker is refused, and the run exits `2`: `the plan
+  - A plan that puts an issue before its own blocker is refused, and the run exits `2`: `the order
     puts #170 before #168, but #170 says it is blocked by #168`. That is the plan that sent a
     reader to #170. A blocker the plan leaves out joins the answer instead, and the answer then
     reads the way a picture reads, with `waits for #168` on the row and the note `#170 waits for
-    #168: the issue says so, and the plan does not.` A blocker that stands nowhere in the plan
+    #168: the issue says so, and the order does not.` A blocker that stands nowhere in the plan
     costs one more query for each round of such blockers. A finished one changes nothing, and an
     open one joins the answer with the blockers it names in turn. Only an open issue names a
     blocker and only an open blocker holds work back, so work that is already done never refuses

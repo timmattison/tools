@@ -357,7 +357,7 @@ fn notes(report: &Report, repo: &str) -> Vec<String> {
     for left_out in report.left_out() {
         notes.push(
             format!(
-                "{} waits for {}: the issue says so, and the plan does not.",
+                "{} waits for {}: the issue says so, and the order does not.",
                 left_out.step,
                 list(&left_out.blockers)
             )
