@@ -40,7 +40,8 @@
 //! happens to start with a number is still inside that prose. A number struck
 //! through, as in `~~#21~~`, counts for nothing, because an author strikes a
 //! blocker through to take it back. Tildes strike through only where GitHub
-//! strikes through (`after_strike` gives the rule), so the item `~~#21 ~~ #22`
+//! strikes through ([`after_strike`](crate::strike::after_strike) gives the
+//! rule), so the item `~~#21 ~~ #22`
 //! starts with tildes and names no blocker.
 //!
 //! This reader acts on what it reads: a blocker it names can refuse a plan. So a
@@ -80,10 +81,6 @@ const COMMENT_OPEN: &str = "<!--";
 
 /// The text that closes an HTML comment.
 const COMMENT_CLOSE: &str = "-->";
-
-/// The most tildes that open a span struck through. One more opens a code fence
-/// at the start of a line, and it strikes nothing inside a block.
-const MAX_STRIKE_MARKS: usize = 2;
 
 /// The deepest level of a heading.
 const MAX_HEADING_LEVEL: usize = 6;
@@ -489,7 +486,8 @@ fn is_word(c: char) -> bool {
 /// emoji), the zero width joiner, and the emoji selector.
 ///
 /// A tilde is not decoration. It can open a span struck through, and
-/// [`after_strike`] reads past that span, so a struck label or number names
+/// [`after_strike`](crate::strike::after_strike) reads past that span, so a
+/// struck label or number names
 /// nothing.
 fn is_decoration(c: char) -> bool {
     c.is_whitespace()
@@ -701,40 +699,7 @@ fn other_reference(text: &str) -> Option<&str> {
 /// continues past, or `None` when it starts with no such thing: a number of
 /// another repository, or a span struck through.
 fn read_past(text: &str) -> Option<&str> {
-    other_reference(text).or_else(|| after_strike(text))
-}
-
-/// The text after the span struck through that `text` opens with, or `None`
-/// when it opens none.
-///
-/// One or two tildes open the span, as GitHub renders both `~#21~` and
-/// `~~#21~~`, but only when a character follows them and that character is not
-/// white space. A later run of the same number of tildes closes the span only
-/// when the character in front of that run is not white space. A run that cannot
-/// close is text, and the search goes on past it, so `~2h` and `~30%` strike
-/// nothing. A span that nothing closes is no strike, and the tildes stay in front
-/// of the text.
-///
-/// White space is what [`char::is_whitespace`] reads: the White_Space property
-/// of Unicode. The gather script of the skill reads the same set.
-fn after_strike(text: &str) -> Option<&str> {
-    let inside = text.trim_start_matches('~');
-    let marks = text.len() - inside.len();
-    let opens = inside.chars().next().is_some_and(|c| !c.is_whitespace());
-    if !(1..=MAX_STRIKE_MARKS).contains(&marks) || !opens {
-        return None;
-    }
-    let mut rest = inside;
-    loop {
-        let at = rest.find('~')?;
-        let before = rest.get(..at)?.chars().next_back();
-        let run = rest.get(at..)?;
-        let after = run.trim_start_matches('~');
-        if run.len() - after.len() == marks && !before.is_some_and(char::is_whitespace) {
-            return Some(after);
-        }
-        rest = after;
-    }
+    other_reference(text).or_else(|| crate::strike::after_strike(text))
 }
 
 /// The text after the parenthesis that closes the one `text` opens with, or

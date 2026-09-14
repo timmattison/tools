@@ -62,6 +62,7 @@ mod progress;
 mod render;
 mod report;
 mod stream;
+mod strike;
 
 use std::io::{IsTerminal, Read};
 use std::process::ExitCode;
