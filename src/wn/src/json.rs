@@ -903,6 +903,25 @@ mod tests {
     }
 
     #[test]
+    fn a_repository_longer_than_github_permits_is_a_refusal() {
+        // GitHub limits an owner to 39 characters and a name to 100. The
+        // refusal of a plan for another repository repeats the repository of
+        // the plan, and a `repo` of thousands of characters reaches standard
+        // error whole.
+        let written = format!("\"{}/tools\"", "a".repeat(4096));
+        assert_eq!(
+            refusal(&edited(
+                "\"repo\": \"timmattison/tools\"",
+                &format!("\"repo\": {written}"),
+            )),
+            JsonError::Wrong {
+                path: Path::root(REPO),
+                wanted: Kind::Repository,
+            }
+        );
+    }
+
+    #[test]
     fn a_plan_of_a_few_hours_earns_no_note() {
         let plan = plan_of(DOCUMENT);
         assert_eq!(plan.age_note(moment("2026-09-02T14:03:11Z")), None);

@@ -603,6 +603,84 @@ mod tests {
     }
 
     #[test]
+    fn a_repository_reads_an_owner_and_a_name_as_long_as_github_permits() {
+        // GitHub limits an owner to 39 characters and a name to 100.
+        let owner = "a".repeat(39);
+        let name = "b".repeat(100);
+        let repo =
+            Repo::parse(&format!("{owner}/{name}")).expect("GitHub permits both of these lengths");
+        assert_eq!(repo.owner(), owner);
+        assert_eq!(repo.name(), name);
+    }
+
+    #[test]
+    fn a_repository_refuses_a_part_longer_than_github_permits() {
+        // A `Repo` reaches standard error through `Display`, and a part of
+        // thousands of characters reaches it whole. GitHub permits every
+        // character of these, so only the length refuses them.
+        for spec in [
+            format!("{}/tools", "a".repeat(40)),
+            format!("owner/{}", "b".repeat(101)),
+            format!("{}/tools", "a".repeat(4096)),
+            format!("owner/{}", "b".repeat(4096)),
+        ] {
+            assert!(
+                Repo::parse(&spec).is_err(),
+                "a part of the {} characters is longer than GitHub permits",
+                spec.chars().count()
+            );
+        }
+    }
+
+    #[test]
+    fn a_part_longer_than_github_permits_is_refused_with_the_limits() {
+        let owner = "a".repeat(40);
+        let message = Repo::parse(&format!("{owner}/tools"))
+            .expect_err("GitHub permits no owner of 40 characters")
+            .to_string();
+        assert_eq!(
+            message,
+            format!(
+                "\"{owner}/tools\" is not a repository. GitHub permits at most 39 characters \
+                 in an owner and 100 in a name"
+            )
+        );
+    }
+
+    #[test]
+    fn the_refusal_of_a_long_repository_repeats_a_cut_of_it() {
+        // A message that repeats thousands of characters hides its own advice.
+        // Every refusal cuts the text it quotes, whichever rule refused it.
+        let too_long = [
+            format!("{}/tools", "a".repeat(4096)),
+            format!("owner/{}", "b".repeat(4096)),
+        ];
+        let not_the_form = [
+            format!("{}!/tools", "a".repeat(4096)),
+            format!("a/b/{}", "c".repeat(4096)),
+        ];
+        for spec in too_long.iter().chain(&not_the_form) {
+            let message = Repo::parse(spec)
+                .expect_err("GitHub permits no such repository")
+                .to_string();
+            assert!(
+                message.chars().count() < 200,
+                "the message holds {} characters: {message:?}",
+                message.chars().count()
+            );
+        }
+        for spec in &too_long {
+            let message = Repo::parse(spec)
+                .expect_err("GitHub permits no part this long")
+                .to_string();
+            assert!(
+                message.contains("at most 39 characters in an owner and 100 in a name"),
+                "the message names the limits: {message:?}"
+            );
+        }
+    }
+
+    #[test]
     fn the_query_asks_about_every_number_once() {
         let query = build_query(&chain(&[277, 278]));
         assert!(
