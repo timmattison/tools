@@ -75,6 +75,22 @@ fn is_permitted_in_a_name(character: char) -> bool {
     character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
 }
 
+/// The argument of a refused [`Repo::parse`], as its message quotes it.
+///
+/// The argument is escaped with `{:?}` first and cut with [`Snippet::new`]
+/// after. The escape writes a control character as text, such as `\u{1b}`,
+/// and it puts the quotes at the two ends. The trim of the snippet then finds
+/// a quote at each end and keeps a space inside the quotes. A space at the end
+/// of `owner/tools ` is what refuses it, and a quote that dropped the space
+/// would show the reader a name GitHub permits.
+///
+/// Write the snippet with `{}`, because it already holds its quotes. A long
+/// argument keeps its opening quote, and the mark of the cut stands where the
+/// closing quote stood.
+fn quoted(spec: &str) -> Snippet {
+    Snippet::new(&format!("{spec:?}"))
+}
+
 impl Repo {
     /// Read a repository out of an `owner/name` argument.
     ///
@@ -92,11 +108,11 @@ impl Repo {
     /// Fails when the argument is not two non-empty parts divided by one `/`,
     /// when a part holds a character GitHub permits in no name, and when the
     /// owner holds more than 39 characters or the name more than 100. The
-    /// message quotes a [`Snippet`] of the argument with `{:?}`, so a control
-    /// character in it is escaped and a long argument is cut.
+    /// message quotes the argument escaped with `{:?}` and then cut, so a
+    /// control character in it is escaped, a space at either end stays inside
+    /// the quotes, and a long argument is cut.
     pub fn parse(spec: &str) -> Result<Self> {
-        let refused =
-            |advice: &str| anyhow!("{:?} is not a repository. {advice}", Snippet::new(spec));
+        let refused = |advice: &str| anyhow!("{} is not a repository. {advice}", quoted(spec));
         let is_a_part = |part: &str| !part.is_empty() && part.chars().all(is_permitted_in_a_name);
         let mut parts = spec.split('/');
         let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
