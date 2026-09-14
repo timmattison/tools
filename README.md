@@ -1601,7 +1601,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     `wn` compares it with the repository of the run, which is the repository `--repo` names, or
     else the repository of the current directory. Letter case does not count, because GitHub
     names a repository without regard to it. When the two are not the same, `wn` stops before it
-    asks GitHub anything and exits `2`:
+    asks GitHub about any issue and exits `2`:
 
     ```
     $ wn

@@ -198,11 +198,12 @@ true. A plan older than a day says its age under the answer, because a plan is a
 backlog and a backlog moves.\n\n\
 A plan on the clipboard is for one repository, because the same numbers name other work in \
 another repository. A JSON plan names its repository in `repo`. When that repository is not the \
-repository of the run, `wn` stops before it asks GitHub. The repository of the run is the one \
---repo names, or else the repository of the current directory. Letter case does not count. The \
-message names the two repositories and two repairs. Run `wn --repo owner/name` to answer the plan \
-on the clipboard. CAUTION: `wn --refresh` REPLACES WHAT IS ON THE CLIPBOARD. Run it to build a new \
-plan. A plan from an argument or a pipe gets no check, and a plan this run built gets none either. \
+repository of the run, `wn` stops before it asks GitHub about any issue. The repository of the \
+run is the one --repo names, or else the repository of the current directory. Letter case does \
+not count. The message names the two repositories and two repairs. Run `wn --repo owner/name` to \
+answer the plan on the clipboard. CAUTION: `wn --refresh` REPLACES WHAT IS ON THE CLIPBOARD. Run \
+it to build a new plan. A plan from an argument or a pipe gets no check, and a plan this run built \
+gets none either. \
 A text that names no repository gets no check: a chain, a table, a picture, and a JSON plan \
 without `repo`.\n\n\
 Set WN_NO_CLAUDE to any value with a character in it to turn the run off, which gives back the \
@@ -579,9 +580,11 @@ fn named_repository(reading: &Reading) -> Option<&Repo> {
 /// answer `reading`.
 ///
 /// The refusal comes after the run resolved its repository, so a repository
-/// that `--repo` names is the repository of the run. The refusal comes before
-/// the first query, so a plan for another repository costs no call to GitHub
-/// and prints no rows of the wrong repository.
+/// that `--repo` names is the repository of the run. Without `--repo`, that
+/// resolution already asked `gh` for the name of the repository. The refusal
+/// comes before the first query about an issue, so a plan for another
+/// repository asks GitHub about no issue and prints no rows of the wrong
+/// repository.
 /// [`input::Chain::refuse_another_repository`] states which texts it refuses.
 ///
 /// `fetch` asks GitHub about numbers. It is an argument, so a test can prove
@@ -991,7 +994,7 @@ mod tests {
 
     /// A query that must never run.
     fn unasked_github(_wanted: &[IssueNumber]) -> Result<Vec<Entry>> {
-        panic!("GitHub was asked before the refusal")
+        panic!("GitHub was asked about an issue before the refusal")
     }
 
     /// The error [`reached_github`] gives.
@@ -1027,7 +1030,8 @@ mod tests {
     fn a_plan_from_the_clipboard_for_another_repository_is_refused_before_any_query() {
         // The numbers of a plan for `owner/a` name other issues in `owner/b`,
         // and GitHub answers for them all the same. The query panics, so this
-        // test fails when the run asks GitHub before it refuses the plan.
+        // test fails when the run asks GitHub about an issue before it refuses
+        // the plan.
         let chain = from_the_clipboard(&plan_for("owner/a"));
         let err = responded(&chain, &repository("owner/b"), &unasked_github)
             .expect_err("the plan is for another repository");
