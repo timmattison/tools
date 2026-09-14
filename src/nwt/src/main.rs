@@ -4602,6 +4602,40 @@ mod tests {
         }
     }
 
+    /// The first release of git that has `git hook run --ignore-missing`.
+    ///
+    /// [`run_post_checkout_hook`] runs the `post-checkout` hook with that
+    /// command, so `--sparse-exclude` needs this release or a later one.
+    /// `builtin/hook.c` is not in the git source at `v2.35.0`, and it is there
+    /// at `v2.36.0`. `git sparse-checkout set --no-cone` is older, so it sets
+    /// no higher minimum. On an older git, `git hook run` exits with a status
+    /// that is not zero, and `nwt` reports a failed hook for a repository
+    /// that has no hook.
+    const MINIMUM_SPARSE_GIT_VERSION: &str = "2.36.0";
+
+    /// The SPARSE WORKTREES section of `--help` and the `### Sparse worktrees`
+    /// section of the README both state [`MINIMUM_SPARSE_GIT_VERSION`] as the
+    /// minimum git of `--sparse-exclude`.
+    ///
+    /// Each section is joined to one line first, so a statement that a line
+    /// break splits still matches.
+    #[test]
+    fn test_help_and_readme_state_the_minimum_git_version_of_sparse_exclude() {
+        let statement = format!("git {MINIMUM_SPARSE_GIT_VERSION} or later");
+        let (help_section, readme_section) = sparse_doc_sections();
+
+        assert!(
+            join_lines(&help_section).contains(&statement),
+            "the SPARSE WORKTREES section of --help must say that --sparse-exclude needs \
+             {statement:?}"
+        );
+        assert!(
+            join_lines(readme_section).contains(&statement),
+            "the ### Sparse worktrees section of README.md must say that --sparse-exclude \
+             needs {statement:?}"
+        );
+    }
+
     /// The sparse notice and the `Skipped:` line of a `.env` under an excluded
     /// directory show as samples in two documents. The SPARSE WORKTREES section
     /// of `--help` holds them, and so does the `## nwt` section of the README.
