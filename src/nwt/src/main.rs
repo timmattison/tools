@@ -493,8 +493,10 @@ mod exit_codes {
     pub const TMUX_NOT_RUNNING: i32 = 13;
     /// Shell setup failed
     pub const SHELL_SETUP_ERROR: i32 = 14;
-    /// A `--sparse-exclude` value is not a tracked directory inside the
-    /// repository. `nwt` refuses it before it makes anything.
+    /// `nwt` refuses a `--sparse-exclude` value: an empty value, an absolute
+    /// path, a path with a `..` component, a value with a control character,
+    /// or a path that git does not track as a directory at the ref. `nwt`
+    /// refuses it before it makes anything.
     pub const INVALID_SPARSE_EXCLUDE: i32 = 15;
 }
 
