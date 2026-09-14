@@ -5139,6 +5139,44 @@ mod tests {
             );
         }
 
+        /// A `.env` whose path only starts with the text of an excluded
+        /// directory is not under it. `heavy2/` shares the first five
+        /// characters, and `src/heavy/` shares the last component. Both are
+        /// copied, and nothing counts as skipped.
+        #[test]
+        fn test_env_beside_an_excluded_directory_is_still_copied() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), "heavy2/.env", "SIBLING=1");
+            create_file(source.path(), "src/heavy/.env", "NESTED=1");
+
+            let summary = copy_untracked_env_files(
+                source.path(),
+                dest.path(),
+                &[excluded_dir("heavy")],
+                true,
+            );
+
+            assert!(
+                file_has_content(dest.path(), "heavy2/.env", "SIBLING=1"),
+                "heavy2/.env is not under heavy/ and must be copied"
+            );
+            assert!(
+                file_has_content(dest.path(), "src/heavy/.env", "NESTED=1"),
+                "src/heavy/.env is not under heavy/ and must be copied"
+            );
+            assert_eq!(
+                summary,
+                EnvCopySummary {
+                    copied: 2,
+                    kept: 0,
+                    skipped: 0
+                },
+                "Nothing beside an excluded directory counts as skipped"
+            );
+        }
+
         /// A `.env` holds secrets, so the copy in the new worktree must be owner-only
         /// regardless of how loose the main worktree's permissions are.
         #[cfg(unix)]

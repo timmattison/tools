@@ -811,6 +811,28 @@ fn an_untracked_env_under_an_excluded_directory_is_not_copied() {
     );
 }
 
+/// With `--quiet`, the copy still skips `heavy/.env`, and stderr holds no
+/// `Skipped:` line.
+#[test]
+fn quiet_skips_an_env_under_an_excluded_directory_without_a_line() {
+    let (_temp, repo) = repo_with_heavy_dir();
+    write_file(&repo, "heavy/.env", "HEAVY=1\n");
+
+    let output = run_nwt_with_env_copy(&repo, &["--quiet"]);
+    let worktree = created_worktree(&output);
+
+    assert!(
+        !worktree.join(HEAVY_DIR).exists(),
+        "the .env copy must not make {HEAVY_DIR}/ in {}",
+        worktree.display()
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Skipped:"),
+        "--quiet must print no Skipped: line, but stderr holds:\n{stderr}"
+    );
+}
+
 /// A value that the lexical rules refuse exits with its own code, names the
 /// value on stderr, prints no path, and makes nothing: no worktrees directory,
 /// no worktree, and no branch.
