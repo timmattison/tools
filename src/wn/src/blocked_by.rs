@@ -18,8 +18,9 @@
 //!
 //! A pattern over the text reads `Blocked by #168` on one line, and the list
 //! marker between the heading and the number stops it. So the body is cut into
-//! blocks first: headings, paragraphs and list items, with code fences skipped.
-//! A block names a blocker in two ways:
+//! blocks first: headings, paragraphs and list items, with code fences and HTML
+//! comments skipped. GitHub does not show a comment, and an issue template
+//! writes its examples in one. A block names a blocker in two ways:
 //!
 //! * It stands in the section of a `Blocked by` or `Depends on` heading, up to
 //!   the next heading of the same level or higher.
@@ -57,6 +58,12 @@ const MAX_INDENT: usize = 3;
 
 /// The fewest marks that open a code fence.
 const FENCE_MARKS: usize = 3;
+
+/// The text a line starts with to open an HTML comment.
+const COMMENT_OPEN: &str = "<!--";
+
+/// The text that closes an HTML comment.
+const COMMENT_CLOSE: &str = "-->";
 
 /// The most tildes that open a span struck through. One more opens a code fence
 /// at the start of a line, and it strikes nothing inside a block.
@@ -131,12 +138,19 @@ pub fn read(body: &str) -> Vec<IssueNumber> {
 /// The headings, paragraphs and list items of `body`, in order.
 ///
 /// A list item takes the lines that continue it, and a paragraph takes the lines
-/// that wrap it. A code fence and an indented code block give no block, and a
-/// block quote gives the blocks inside it.
+/// that wrap it. A code fence, an indented code block, and an HTML comment give
+/// no block, and a block quote gives the blocks inside it.
+///
+/// An HTML comment starts at a line that opens with [`COMMENT_OPEN`] and ends at
+/// the first line that holds [`COMMENT_CLOSE`], which can be the line that opens
+/// it. A comment that nothing closes runs to the end of the body. A comment
+/// inside a code fence is text of the fence, and a comment in the middle of a
+/// line is text of its block.
 fn blocks_of(body: &str) -> Vec<Block> {
     let mut blocks: Vec<Block> = Vec::new();
     let mut open: Option<Open> = None;
     let mut fence: Option<(char, usize)> = None;
+    let mut comment = false;
     for written in body.split('\n') {
         let mut line = written.strip_suffix('\r').unwrap_or(written);
         while let Some(inner) = quoted(line) {
@@ -149,9 +163,18 @@ fn blocks_of(body: &str) -> Vec<Block> {
             }
             continue;
         }
+        if comment {
+            comment = !line.contains(COMMENT_CLOSE);
+            continue;
+        }
         if let Some(opened) = fence_of(line) {
             close(&mut open, &mut blocks);
             fence = Some(opened);
+            continue;
+        }
+        if opens_comment(line) {
+            close(&mut open, &mut blocks);
+            comment = !line.contains(COMMENT_CLOSE);
             continue;
         }
         if line.trim().is_empty() {
@@ -243,6 +266,15 @@ fn closes_fence(line: &str, mark: char, length: usize) -> bool {
         let after = rest.trim_start_matches(mark);
         rest.chars().count() - after.chars().count() >= length && after.trim().is_empty()
     })
+}
+
+/// Whether `line` opens an HTML comment.
+///
+/// The comment can stop a paragraph or a list item, as CommonMark lets an HTML
+/// block of its second type do. A line indented by more than [`MAX_INDENT`]
+/// spaces opens no comment, because it is code or it continues a block.
+fn opens_comment(line: &str) -> bool {
+    unindented(line).is_some_and(|rest| rest.starts_with(COMMENT_OPEN))
 }
 
 /// The level and the text of the ATX heading `line` is, or `None` when it is
