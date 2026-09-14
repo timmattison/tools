@@ -1027,6 +1027,39 @@ mod tests {
             body: "## Blocked by\n\n- ~~#21 ~~ #22~~ #23\n",
             numbers: &[23],
         },
+        // Punctuation next to a run of tildes changes where the run opens and
+        // closes. A run of one tilde and a run of two tildes can pair and strike
+        // nothing, and the delimiters between them then open and close nothing.
+        Case { name: "tildes between two numbers open no strike", body: "## Blocked by\n\n- #20~~#21~~ #22\n", numbers: &[20] },
+        Case {
+            name: "tildes after a symbol and before a number open no strike",
+            body: "## Blocked by\n\n- \u{1f6a7}~~#21~~ #22\n",
+            numbers: &[],
+        },
+        Case {
+            name: "tildes after a parenthesis and before a word close no strike",
+            body: "## Blocked by\n\n- ~~#21 (x)~~and #22\n",
+            numbers: &[],
+        },
+        Case { name: "a tilde between two numbers stops a strike", body: "## Blocked by\n\n- ~~#21~#22~~ #23\n", numbers: &[] },
+        Case { name: "a tilde that only closes stops a strike", body: "## Blocked by\n\n- ~~#21 a~ b~~ #22\n", numbers: &[] },
+        Case { name: "a tilde that only opens stops a strike", body: "## Blocked by\n\n- ~~#21 a ~b~~ #22\n", numbers: &[] },
+        Case {
+            name: "the nearest tildes that open take the tildes that close",
+            body: "## Blocked by\n\n- ~~#21 ~~b~~ #22\n",
+            numbers: &[],
+        },
+        Case {
+            name: "a tilde and two tildes that pair let the strike around them close",
+            body: "## Blocked by\n\n- ~~#21 a ~b~~ c~~ #22\n",
+            numbers: &[22],
+        },
+        Case {
+            name: "a tilde that opens and closes lets a strike go past it",
+            body: "## Blocked by\n\n- ~~#21 a~b~~ #22\n",
+            numbers: &[22],
+        },
+        Case { name: "a strike inside bold marks", body: "## Blocked by\n\n- **~~#12~~** #13\n", numbers: &[13] },
         // GitHub reads fewer characters as space than the White_Space property of
         // Unicode holds. A line separator, a vertical tab, and a next line are not
         // space to GitHub, so tildes next to them can open or close a strike.
