@@ -1118,6 +1118,39 @@ fn the_post_checkout_hook_gets_the_arguments_of_a_plain_add_and_sees_the_sparse_
     );
 }
 
+/// A repository without a `post-checkout` hook gives a sparse run that works.
+///
+/// `git hook run` without `--ignore-missing` exits 1 with
+/// `cannot find a hook named post-checkout`, and the run then reports a failed
+/// hook. The fixture points `core.hooksPath` at an empty directory, so a hook
+/// that the host configuration names cannot take the place of the missing hook.
+#[test]
+fn a_repository_without_a_post_checkout_hook_gives_a_sparse_run_that_works() {
+    let (_temp, repo) = repo_with_heavy_dir();
+    let hooks = tempfile::TempDir::new().expect("create the empty hooks directory");
+    let hooks_dir = canonical(hooks.path());
+    assert!(
+        run_git(
+            &repo,
+            &[
+                "config",
+                "core.hooksPath",
+                hooks_dir.to_str().expect("utf-8 hooks directory")
+            ]
+        ),
+        "git config core.hooksPath failed"
+    );
+
+    let output = run_nwt(
+        &repo,
+        &unique_branch("no-hook"),
+        &["--sparse-exclude", HEAVY_DIR],
+    );
+    let worktree = created_worktree(&output);
+
+    assert_sparse_worktree(&worktree, HEAVY_DIR, KEPT_FILES);
+}
+
 /// The first executable `git` on the `PATH` of this test process.
 ///
 /// The test finds git where the shell finds it, and names no fixed path.
