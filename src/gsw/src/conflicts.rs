@@ -403,7 +403,9 @@ impl ConflictsWorker {
     /// `on_wait` gets [`WAITING_NOTICE`] before the wait, and only when a
     /// thread is still alive.
     pub(crate) fn shutdown(self, on_wait: impl FnOnce(&str)) {
-        let _ = on_wait;
+        if self.is_running() {
+            on_wait(WAITING_NOTICE);
+        }
         drop(self);
     }
 
