@@ -609,6 +609,37 @@ impl SparseExcludeDir {
     fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The non-cone sparse pattern that excludes this directory.
+    ///
+    /// The pattern is `!/` + the escaped path + `/`. The leading `/` anchors
+    /// the pattern at the root of the repository, so `!/heavy/` does not
+    /// exclude `src/heavy/`. The trailing `/` matches a directory only, so it
+    /// does not exclude a file named `heavy`.
+    fn pattern(&self) -> String {
+        format!("!/{}/", self.0)
+    }
+}
+
+/// Escape a path so that a non-cone sparse pattern matches its name literally.
+///
+/// Non-cone sparse patterns use gitignore syntax. A directory named
+/// `we[ir]d dir` written as `!/we[ir]d dir/` excluded nothing, and git gave no
+/// error. So an unescaped name fails silently: `nwt` reports success and writes
+/// the heavy directory.
+///
+/// This function puts `\` before every `\`, `[`, `]`, `*`, and `?`, and before
+/// a `!` or a `#` at the start of `s`. A `!` or a `#` at a different position
+/// is literal in gitignore syntax, so it stays as it is.
+///
+/// This is the one place that holds these rules. Every sparse pattern comes
+/// from [`SparseExcludeDir::pattern`], and that method calls this function.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "wired into main by the next slice of issue #487")
+)]
+fn escape_sparse_pattern(s: &str) -> String {
+    s.to_owned()
 }
 
 /// Create a new git worktree with a Docker-style random name.
@@ -3314,6 +3345,71 @@ mod tests {
                 "the message must give the reason {reason:?}: {message}"
             );
         }
+    }
+
+    // One mutation fixture for each rule of `escape_sparse_pattern`. Remove one
+    // rule from the function, and exactly one of these tests fails. Each input
+    // holds the character two times where it can, so a rule that escapes only
+    // the first occurrence fails too.
+
+    #[test]
+    fn escape_sparse_pattern_escapes_every_backslash() {
+        assert_eq!(escape_sparse_pattern(r"a\b\c"), r"a\\b\\c");
+    }
+
+    #[test]
+    fn escape_sparse_pattern_escapes_every_open_bracket() {
+        assert_eq!(escape_sparse_pattern("a[b[c"), r"a\[b\[c");
+    }
+
+    #[test]
+    fn escape_sparse_pattern_escapes_every_close_bracket() {
+        assert_eq!(escape_sparse_pattern("a]b]c"), r"a\]b\]c");
+    }
+
+    #[test]
+    fn escape_sparse_pattern_escapes_every_star() {
+        assert_eq!(escape_sparse_pattern("a*b*c"), r"a\*b\*c");
+    }
+
+    #[test]
+    fn escape_sparse_pattern_escapes_every_question_mark() {
+        assert_eq!(escape_sparse_pattern("a?b?c"), r"a\?b\?c");
+    }
+
+    #[test]
+    fn escape_sparse_pattern_escapes_a_leading_exclamation_mark() {
+        assert_eq!(escape_sparse_pattern("!heavy"), r"\!heavy");
+    }
+
+    #[test]
+    fn escape_sparse_pattern_escapes_a_leading_number_sign() {
+        assert_eq!(escape_sparse_pattern("#heavy"), r"\#heavy");
+    }
+
+    /// A `!` or a `#` after the first character is literal in gitignore
+    /// syntax, so an escape there is noise.
+    #[test]
+    fn escape_sparse_pattern_keeps_a_later_exclamation_mark_and_number_sign() {
+        assert_eq!(escape_sparse_pattern("a!b#c/!d/#e"), "a!b#c/!d/#e");
+    }
+
+    /// A name without a special character comes back unchanged, spaces and
+    /// multi-byte characters included.
+    #[test]
+    fn escape_sparse_pattern_keeps_a_plain_name() {
+        assert_eq!(
+            escape_sparse_pattern("heavy dir/日本語/café 🎉"),
+            "heavy dir/日本語/café 🎉"
+        );
+    }
+
+    /// The pattern is anchored at the root, matches a directory only, and
+    /// holds the escaped name. An unescaped `we[ir]d dir` excluded nothing.
+    #[test]
+    fn sparse_exclude_dir_pattern_anchors_and_escapes_the_directory() {
+        let dir = SparseExcludeDir::parse("we[ir]d dir/").expect("the value must parse");
+        assert_eq!(dir.pattern(), r"!/we\[ir\]d dir/");
     }
 
     // Unix-specific tests for shell command execution.
