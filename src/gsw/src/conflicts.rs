@@ -287,25 +287,38 @@ fn reason(err: &anyhow::Error) -> String {
 }
 
 /// Owns the threads that measure, and the stop flag they read.
+///
+/// A run is on a thread of its own, because a rebase replay of a long branch
+/// can take many seconds, and the watch loop must not wait for it.
+///
+/// A quit is the one time gsw waits for a run. `Scratch` removes its worktree
+/// in `Drop`, and a process that exits while a thread holds a `Scratch` never
+/// runs that `Drop`. The repository of the user then keeps a registered
+/// worktree that points at a deleted directory.
+///
+/// The watch loop keeps `m` to one run at a time. The worker does not refuse a
+/// second run, and it keeps each thread until that thread ends. So a broken
+/// rule costs a longer wait at the quit, and never a worktree left behind.
+#[derive(Default)]
 pub(crate) struct ConflictsWorker {
     /// Set when gsw quits. Every thread of this worker reads it.
     stop: Arc<AtomicBool>,
-    /// The threads this worker started.
+    /// The threads this worker started that were alive at the last `start`.
     threads: Vec<JoinHandle<()>>,
 }
 
 impl ConflictsWorker {
     /// A worker with no thread yet.
     pub(crate) fn new() -> Self {
-        Self {
-            stop: Arc::new(AtomicBool::new(false)),
-            threads: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Start one run on a thread of its own.
     ///
-    /// `on_started` and `on_finished` run on that thread.
+    /// `on_started` gets the branch before the first replay starts.
+    /// `on_finished` gets the outcome when the run ends. Both run on that
+    /// thread. A run that a quit abandoned hands over no outcome, because
+    /// nobody reads it.
     pub(crate) fn start(
         &mut self,
         workdir: PathBuf,
@@ -323,26 +336,65 @@ impl ConflictsWorker {
         on_finished: impl FnOnce(ConflictsOutcome) + Send + 'static,
         probe: impl FnMut(Replay, &AtomicBool) + Send + 'static,
     ) {
+        // A thread that ended holds no scratch worktree, so it leaves the
+        // list. The join of such a thread returns at once.
+        let (ended, alive): (Vec<_>, Vec<_>) = std::mem::take(&mut self.threads)
+            .into_iter()
+            .partition(JoinHandle::is_finished);
+        for thread in ended {
+            let _ = thread.join();
+        }
+        self.threads = alive;
+
         let stop = Arc::clone(&self.stop);
-        let _ = on_finished;
         self.threads.push(std::thread::spawn(move || {
-            let _ = measure_probed(
+            let outcome = measure_probed(
                 &workdir,
                 &stop,
                 |branch| on_started(branch.to_owned()),
                 probe,
             );
+            if let Some(outcome) = outcome {
+                on_finished(outcome);
+            }
         }));
     }
 
-    /// Whether a run is in flight.
+    /// Whether a thread of this worker is still alive.
+    ///
+    /// A run hands over its outcome a moment before its thread ends. So this
+    /// can read true just after `on_finished` ran. The watch loop keeps its own
+    /// state for the one-run rule, and it does not read this.
     pub(crate) fn is_running(&self) -> bool {
-        true
+        self.threads.iter().any(|thread| !thread.is_finished())
     }
 
-    /// Set the stop flag. Called when gsw quits.
+    /// Set the stop flag, then wait for every thread that is alive. Called when
+    /// gsw quits.
+    ///
+    /// A run that has not started a replay starts none. A run in the middle of
+    /// a replay finishes that replay, removes its scratch worktree, and starts
+    /// no other. A drop of the worker does the same, so a loop that leaves by
+    /// an error path waits as well. This method gives the quit a name at its
+    /// call site.
     pub(crate) fn shutdown(self) {
+        drop(self);
+    }
+
+    /// Set the stop flag, then join every thread.
+    fn stop_and_join(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        for thread in self.threads.drain(..) {
+            // The result of the join is dropped. A panic on that thread went to
+            // the panic hook already, and the quit can do nothing more about it.
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for ConflictsWorker {
+    fn drop(&mut self) {
+        self.stop_and_join();
     }
 }
 
