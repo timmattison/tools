@@ -571,35 +571,46 @@ fn repo_of(cli: &Cli) -> Result<Repo> {
 fn answer(reading: &Reading, repo: &Repo, width: usize, start: &StartCommand) -> Result<ExitCode> {
     let streams;
     let line;
-    let (graph, numbers) = match reading {
-        Reading::Document(document) => (document.graph(), document.graph().numbers()),
-        Reading::Picture(graph) => (graph, graph.numbers()),
+    // `each_stream` holds the steps of each stream the reader of streams
+    // answers on its own, and nothing for a text that reader does not answer.
+    let (graph, numbers, each_stream): (_, _, Vec<&[plan::Step]>) = match reading {
+        Reading::Document(document) => (document.graph(), document.graph().numbers(), Vec::new()),
+        Reading::Picture(graph) => (graph, graph.numbers(), Vec::new()),
         Reading::Plan(plan) => {
             streams = graph::of_streams(plan);
-            (&streams, plan.numbers())
+            let each_stream = plan
+                .streams()
+                .iter()
+                .map(crate::plan::Stream::steps)
+                .collect();
+            (&streams, plan.numbers(), each_stream)
         }
+        // A chain is one line of its graph, so a walk of that graph already
+        // puts a blocker before the step in that line.
         Reading::Chain(chain) => {
             line = graph::of_chain(chain);
-            (&line, chain.clone())
+            (&line, chain.clone(), Vec::new())
         }
     };
 
     let fetch = |wanted: &[IssueNumber]| github::fetch(repo, wanted);
     let states = States::of(fetch(&numbers)?);
-    Ok(match declared::settle(graph, states, &fetch)? {
-        Settled::Agrees(states) => match reading {
-            Reading::Plan(plan) => answer_plan(plan, &states, repo, width, start),
-            Reading::Chain(chain) => answer_chain(chain, &states, repo, width, start),
-            Reading::Document(_) | Reading::Picture(_) => {
-                answer_graph(graph, &states, Vec::new(), repo, width, start)
-            }
+    Ok(
+        match declared::settle(graph, &each_stream, states, &fetch)? {
+            Settled::Agrees(states) => match reading {
+                Reading::Plan(plan) => answer_plan(plan, &states, repo, width, start),
+                Reading::Chain(chain) => answer_chain(chain, &states, repo, width, start),
+                Reading::Document(_) | Reading::Picture(_) => {
+                    answer_graph(graph, &states, Vec::new(), repo, width, start)
+                }
+            },
+            Settled::Adds {
+                graph,
+                states,
+                left_out,
+            } => answer_graph(&graph, &states, left_out, repo, width, start),
         },
-        Settled::Adds {
-            graph,
-            states,
-            left_out,
-        } => answer_graph(&graph, &states, left_out, repo, width, start),
-    })
+    )
 }
 
 /// Print one block for each stream of `plan`, and give the status the run

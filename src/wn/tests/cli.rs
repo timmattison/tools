@@ -3543,3 +3543,123 @@ fn refuses_a_knotted_order_once_the_issues_add_a_wait_and_names_both() {
     );
     assert_eq!(stdout(&output), "", "nothing was printed as an answer");
 }
+
+/// What GitHub says about the knotted plan when `#1` says under `Blocked by`
+/// that `#2` comes first, and no other issue names a blocker.
+const KNOTTED_ISSUES_BLOCKED_INSIDE: &str = r###"{"data":{"repository":{
+"i1":{"__typename":"Issue","number":1,"title":"The first","state":"OPEN","stateReason":null,
+      "body":"## Blocked by\n\n- #2\n"},
+"i2":{"__typename":"Issue","number":2,"title":"The second","state":"OPEN","stateReason":null,"body":""},
+"i5":{"__typename":"Issue","number":5,"title":"The fifth","state":"OPEN","stateReason":null,"body":""}
+}}}"###;
+
+/// The sentence the knotted plan is refused with once `#1` says `#2` blocks
+/// it.
+const KNOTTED_REVERSED_REFUSAL: &str =
+    "the order puts #1 before #2, but #1 says it is blocked by #2. \
+     Fix the order, or run wn --refresh to build a new plan";
+
+#[test]
+fn refuses_a_blocker_inside_a_knot_that_one_order_puts_after_its_step() {
+    // S2 walks from #2 to #1, and S1 puts #1 before #2. The answer of S1 names
+    // #1 while #2 is open, and #1 says #2 blocks it. So the run refuses the
+    // order of S1, and it answers nothing.
+    let gh = FakeGh::new(KNOTTED_ISSUES_BLOCKED_INSIDE);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", KNOTTED_PLAN);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "the run could not answer, stdout: {}",
+        stdout(&output)
+    );
+    assert!(
+        stderr(&output).contains(KNOTTED_REVERSED_REFUSAL),
+        "the refusal names the pair, in {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+}
+
+/// A plan of streams that puts `#10` before `#30` in one stream, and `#20`
+/// before `#10` in another.
+const FINISHED_BETWEEN_PLAN: &str = "\
+| Stream | Order | Zone |
+|--------|-------|------|
+| S1 — first | #10 → #30 | src/first |
+| S2 — second | #20 → #10 | src/second |
+";
+
+/// What GitHub says about [`FINISHED_BETWEEN_PLAN`]: `#10` is done, `#20` is
+/// open, and `#30` says under `Blocked by` that `#20` comes first.
+const FINISHED_BETWEEN_ISSUES: &str = r###"{"data":{"repository":{
+"i10":{"__typename":"Issue","number":10,"title":"The tenth","state":"CLOSED","stateReason":"COMPLETED","body":""},
+"i30":{"__typename":"Issue","number":30,"title":"The thirtieth","state":"OPEN","stateReason":null,
+       "body":"## Blocked by\n\n- #20\n"},
+"i20":{"__typename":"Issue","number":20,"title":"The twentieth","state":"OPEN","stateReason":null,"body":""}
+}}}"###;
+
+#[test]
+fn a_blocker_held_only_through_another_stream_and_finished_work_joins_the_answer() {
+    // S1 names #30 once #10 is done, and only S2 holds #20. The walk from #20
+    // through #10 to #30 holds nothing back, because #10 is done. So #30 waits
+    // for #20, and the run names #20 alone.
+    let gh = FakeGh::new(FINISHED_BETWEEN_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", FINISHED_BETWEEN_PLAN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let answer = stdout(&output);
+    assert!(
+        answer.contains("Start #20 next with 'si 20'"),
+        "the answer names #20, in {answer}"
+    );
+    assert!(
+        !answer.contains("si 30"),
+        "the answer never names #30, in {answer}"
+    );
+    assert!(
+        answer
+            .lines()
+            .any(|row| row.contains("The thirtieth") && row.contains(&format!("{WAITS_FOR}#20"))),
+        "the row of #30 waits for #20, in {answer}"
+    );
+}
+
+/// A plan of streams that puts `#20` before `#30` in one stream, and that holds
+/// `#30` alone in another.
+const ONE_STREAM_HOLDS_PLAN: &str = "\
+| Stream | Order | Zone |
+|--------|-------|------|
+| S1 — first | #20 → #30 | src/first |
+| S2 — second | #30 | src/second |
+";
+
+/// What GitHub says about [`ONE_STREAM_HOLDS_PLAN`]: `#20` is open, and `#30`
+/// says under `Blocked by` that `#20` comes first.
+const ONE_STREAM_HOLDS_ISSUES: &str = r###"{"data":{"repository":{
+"i20":{"__typename":"Issue","number":20,"title":"The twentieth","state":"OPEN","stateReason":null,"body":""},
+"i30":{"__typename":"Issue","number":30,"title":"The thirtieth","state":"OPEN","stateReason":null,
+       "body":"## Blocked by\n\n- #20\n"}
+}}}"###;
+
+#[test]
+fn a_blocker_that_one_stream_holds_and_another_does_not_joins_the_answer() {
+    // The reader of streams answers S2 on its own, and S2 names #30 while #20
+    // is open. So #30 waits for #20, and the run names #20 alone.
+    let gh = FakeGh::new(ONE_STREAM_HOLDS_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", ONE_STREAM_HOLDS_PLAN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let answer = stdout(&output);
+    assert!(
+        answer.contains("Start #20 next with 'si 20'"),
+        "the answer names #20, in {answer}"
+    );
+    assert!(
+        !answer.contains("si 30"),
+        "the answer never names #30, in {answer}"
+    );
+    assert!(
+        answer
+            .lines()
+            .any(|row| row.contains("The thirtieth") && row.contains(&format!("{WAITS_FOR}#20"))),
+        "the row of #30 waits for #20, in {answer}"
+    );
+}

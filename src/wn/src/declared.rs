@@ -75,6 +75,7 @@ pub enum Settled {
 /// `fetch` when GitHub cannot answer.
 pub fn settle(
     graph: &Graph,
+    _streams: &[&[Step]],
     states: States,
     fetch: &dyn Fn(&[IssueNumber]) -> anyhow::Result<Vec<Entry>>,
 ) -> anyhow::Result<Settled> {
@@ -391,7 +392,26 @@ mod tests {
     }
 
     fn settled(graph: &Graph, states: Vec<Entry>, answers: &Answers) -> anyhow::Result<Settled> {
-        settle(graph, States::of(states), &|wanted| answers.fetch(wanted))
+        settle(graph, &[], States::of(states), &|wanted| {
+            answers.fetch(wanted)
+        })
+    }
+
+    /// The settle of the plan of streams `text` writes. The reader of streams
+    /// answers that plan one stream at a time, so the settle reads each stream.
+    fn settled_plan(text: &str, states: Vec<Entry>, answers: &Answers) -> anyhow::Result<Settled> {
+        let plan = crate::plan::parse(text).expect("the text is a plan");
+        let streams: Vec<&[Step]> = plan
+            .streams()
+            .iter()
+            .map(crate::plan::Stream::steps)
+            .collect();
+        settle(
+            &crate::graph::of_streams(&plan),
+            &streams,
+            States::of(states),
+            &|wanted| answers.fetch(wanted),
+        )
     }
 
     /// The refusal a settle gave, or a panic that says what it gave instead.
@@ -688,10 +708,9 @@ mod tests {
         // blocker. #5 names #6, so the answer must be a graph, and a graph
         // cannot hold the knot of #1 and #2. The refusal names the knot and
         // the wait, because the wait is what changed.
-        let plan = crate::plan::parse(KNOTTED_PLAN).expect("the text is a plan");
         let answers = Answers::of(vec![open(6, &[])]);
-        let result = settled(
-            &crate::graph::of_streams(&plan),
+        let result = settled_plan(
+            KNOTTED_PLAN,
             vec![open(1, &[]), open(2, &[]), open(5, &[6])],
             &answers,
         );
@@ -713,6 +732,93 @@ mod tests {
                 blocker: issue(6),
             }),
             "the refusal is an order error that names the knot and the wait, and it is {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_blocker_inside_a_knot_that_one_order_puts_after_its_step_is_refused() {
+        // S2 walks from #2 to #1, and S1 puts #1 before #2. #1 says #2 blocks
+        // it, so the answer of S1 names #1 while #2 is open.
+        let answers = Answers::of(Vec::new());
+        let err = refusal(settled_plan(
+            KNOTTED_PLAN,
+            vec![open(1, &[2]), open(2, &[]), open(5, &[])],
+            &answers,
+        ));
+        assert_eq!(
+            err,
+            OrderError::Reversed {
+                step: issue(1),
+                blocker: issue(2),
+                listed_by: issue(1),
+                named: issue(2),
+            }
+        );
+    }
+
+    #[test]
+    fn a_blocker_the_order_holds_only_through_finished_work_joins_the_graph() {
+        // The picture puts #20 before #10 and #10 before #30. #10 is done, so
+        // the graph lets #30 start while #20 is open. #30 says #20 blocks it,
+        // so #30 must wait for #20 itself.
+        let answers = Answers::of(Vec::new());
+        let (graph, _, left_out) = grown(settled(
+            &graph(&[step(20), step(10), step(30)], &[(20, 10), (10, 30)]),
+            vec![open(20, &[]), done(10, &[]), open(30, &[20])],
+            &answers,
+        ));
+        assert!(
+            before(&graph, 30).contains(&20),
+            "#30 waits for #20, and it waits for {:?}",
+            before(&graph, 30)
+        );
+        assert_eq!(
+            left_out,
+            vec![LeftOut {
+                step: issue(30),
+                blockers: numbers(&[20]),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_blocker_the_order_holds_through_open_work_agrees() {
+        // #10 is open, so #30 waits for #10, and #10 waits for #20. The walk
+        // from #20 to #30 holds #30 back, and the plan needs no more.
+        let answers = Answers::of(Vec::new());
+        agrees(settled(
+            &line(&[20, 10, 30]),
+            vec![open(20, &[]), open(10, &[]), open(30, &[20])],
+            &answers,
+        ));
+    }
+
+    /// A plan of streams that puts #20 before #30 in one stream, and that
+    /// holds #30 alone in another.
+    const TWO_STREAMS_OF_30: &str = "\
+| Stream | Order | Zone |
+|--------|-------|------|
+| S1 — first | #20 → #30 | a |
+| S2 — second | #30 | b |
+";
+
+    #[test]
+    fn a_blocker_that_one_stream_holds_and_another_does_not_joins_the_graph() {
+        // The reader of streams answers each stream on its own, so S2 names
+        // #30 while #20 is open. The edge of S1 holds nothing back in S2.
+        let answers = Answers::of(Vec::new());
+        let (graph, _, left_out) = grown(settled_plan(
+            TWO_STREAMS_OF_30,
+            vec![open(20, &[]), open(30, &[20])],
+            &answers,
+        ));
+        assert_eq!(before(&graph, 30), vec![20]);
+        assert_eq!(
+            left_out,
+            vec![LeftOut {
+                step: issue(30),
+                blockers: numbers(&[20]),
+            }]
         );
     }
 }
