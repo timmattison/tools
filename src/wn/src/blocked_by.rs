@@ -590,6 +590,41 @@ mod tests {
             body: "## Blocked by\n\n~~~\n- #9\n~~~\n\n- #11\n",
             numbers: &[11],
         },
+        Case {
+            name: "a section inside an HTML comment",
+            body: "<!--\n## Blocked by\n\n- #31\n-->\n\nReal text.\n",
+            numbers: &[],
+        },
+        Case {
+            name: "an HTML comment on one line under the heading",
+            body: "## Blocked by\n\n<!-- - #9 -->\n- #11\n",
+            numbers: &[11],
+        },
+        Case {
+            name: "an HTML comment that closes before the section goes on",
+            body: "## Blocked by\n\n<!--\n- #9\n-->\n- #11\n",
+            numbers: &[11],
+        },
+        Case {
+            name: "an HTML comment that nothing closes",
+            body: "## Blocked by\n\n- #11\n\n<!--\n- #12\n",
+            numbers: &[11],
+        },
+        Case {
+            name: "an HTML comment that interrupts a list item",
+            body: "## Blocked by\n\n- The solver\n<!-- it lands first -->\n#12\n",
+            numbers: &[12],
+        },
+        Case {
+            name: "an HTML comment after a number in the same item",
+            body: "## Blocked by\n\n- #5 <!-- was #4 -->\n",
+            numbers: &[5],
+        },
+        Case {
+            name: "an HTML comment inside a code fence opens none",
+            body: "## Blocked by\n\n```\n<!--\n```\n\n- #11\n",
+            numbers: &[11],
+        },
         Case { name: "a Blocks heading, which is the other direction", body: "## Blocks\n\n- #12\n", numbers: &[] },
         Case {
             name: "a heading of the same level ends the section",
