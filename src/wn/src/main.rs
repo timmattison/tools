@@ -1055,4 +1055,18 @@ Run wn --refresh to build a new plan, or run wn --repo owner/a to answer the pla
         let chain = from_the_clipboard(&plan_for("owner/a"));
         reaches_the_query(responded(&chain, &repo, &reached_github));
     }
+
+    #[test]
+    fn a_text_from_the_clipboard_that_names_no_repository_reaches_the_query() {
+        // A chain, a table, a picture, and a document without `repo` say
+        // nothing about the repository. `wn` cannot find out which repository
+        // such a text is for, so it answers the text as it did before.
+        for text in [CHAIN, TABLE_PLAN, PICTURE, DOCUMENT] {
+            reaches_the_query(responded(
+                &from_the_clipboard(text),
+                &repository("owner/b"),
+                &reached_github,
+            ));
+        }
+    }
 }
