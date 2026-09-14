@@ -1317,6 +1317,49 @@ Unset it to build one. Pass it as an argument, in quotes: wn \"#277 → #278\""
     }
 
     #[test]
+    fn a_plan_for_another_repository_that_the_reader_typed_or_piped_is_not_refused() {
+        // The reader chose this text on purpose, so it is the plan they want
+        // answered. `wn --refresh` does not replace an argument or a pipe, so
+        // a refusal would name a repair that repairs nothing.
+        let plan = repository("owner/a");
+        let run = repository("owner/b");
+        let argument = arguments(&[PLAN_FOR_A]);
+        let typed = Sources {
+            argument: &argument,
+            stdin: None,
+            clipboard: None,
+            plan: None,
+            refresh: false,
+        }
+        .chain()
+        .expect("the argument holds the plan");
+        assert_eq!(typed.refuse_another_repository(Some(&plan), &run), Ok(()));
+
+        let stdin = || -> std::io::Result<String> { Ok(PLAN_FOR_A.to_string()) };
+        let piped = Sources {
+            argument: &[],
+            stdin: Some(&stdin),
+            clipboard: None,
+            plan: None,
+            refresh: false,
+        }
+        .chain()
+        .expect("the pipe holds the plan");
+        assert_eq!(piped.refuse_another_repository(Some(&plan), &run), Ok(()));
+    }
+
+    #[test]
+    fn a_plan_for_another_repository_that_this_run_built_is_not_refused() {
+        // A plan this run built was not on the clipboard before the run, so it
+        // is no stale cache. `wn --refresh` would only build it again.
+        assert_eq!(
+            built_chain(PLAN_FOR_A)
+                .refuse_another_repository(Some(&repository("owner/a")), &repository("owner/b")),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn a_value_with_a_character_in_it_turns_the_clipboard_off() {
         assert!(!clipboard_is_off(None));
         assert!(!clipboard_is_off(Some("")));
