@@ -555,8 +555,9 @@ fn read_and_keep(
 ///
 /// # Errors
 ///
-/// Fails when the argument is not `owner/name`, and when `gh` can name no
-/// repository for the current directory.
+/// Fails when the argument is not `owner/name` in ASCII letters, digits, `-`,
+/// `_` and `.`, and when `gh` can name no repository for the current
+/// directory.
 fn repo_of(cli: &Cli) -> Result<Repo> {
     match &cli.repo {
         Some(spec) => Repo::parse(spec),

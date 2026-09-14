@@ -59,19 +59,40 @@ pub struct Repo {
     name: String,
 }
 
+/// The advice of every refusal of [`Repo::parse`].
+const REPOSITORY_FORM: &str =
+    "Write it as owner/name, with ASCII letters, digits, -, _ and . in each part";
+
+/// Whether GitHub permits `character` in an owner or in a name.
+fn is_permitted_in_a_name(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+}
+
 impl Repo {
     /// Read a repository out of an `owner/name` argument.
     ///
+    /// GitHub permits only ASCII letters, digits, `-`, `_` and `.` in an owner
+    /// and in a name, and a `Repo` holds no other character. So a `Repo` puts
+    /// no control character and no escape sequence on a terminal through
+    /// `Display`, and [`Repo::is_same_repository`] compares ASCII case alone.
+    /// The argument arrives from a command line, from `gh`, and from a plan on
+    /// the clipboard, and all three come through this function.
+    ///
     /// # Errors
     ///
-    /// Fails when the argument is not two non-empty parts divided by one `/`.
+    /// Fails when the argument is not two non-empty parts divided by one `/`,
+    /// and when a part holds a character GitHub permits in no name. The
+    /// message quotes the argument with `{:?}`, so a control character in it
+    /// is escaped.
     pub fn parse(spec: &str) -> Result<Self> {
+        let refused = || anyhow!("{spec:?} is not a repository. {REPOSITORY_FORM}");
+        let is_a_part = |part: &str| !part.is_empty() && part.chars().all(is_permitted_in_a_name);
         let mut parts = spec.split('/');
         let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
-            bail!("{spec:?} is not a repository. Write it as owner/name");
+            return Err(refused());
         };
-        if owner.is_empty() || name.is_empty() {
-            bail!("{spec:?} is not a repository. Write it as owner/name");
+        if !(is_a_part(owner) && is_a_part(name)) {
+            return Err(refused());
         }
         Ok(Self {
             owner: owner.to_string(),
@@ -96,7 +117,8 @@ impl Repo {
     /// GitHub names a repository without regard to letter case, so
     /// `TimMattison/Tools` and `timmattison/tools` are one repository. GitHub
     /// permits only ASCII letters, digits, `-`, `_` and `.` in an owner and in
-    /// a name, so ASCII case is the whole rule.
+    /// a name, and [`Repo::parse`] refuses every other character, so ASCII
+    /// case is the whole rule.
     ///
     /// The derived `PartialEq` compares the letters as they are written. Use
     /// this function to find out whether two texts are about one repository.
@@ -518,10 +540,6 @@ mod tests {
         assert!(written("timmattison/tools").is_same_repository(&written("TIMMATTISON/TOOLS")));
         assert!(!written("timmattison/tools").is_same_repository(&written("other/tools")));
         assert!(!written("timmattison/tools").is_same_repository(&written("timmattison/other")));
-        // GitHub permits no such name, and `parse` takes one all the same. A
-        // comparison of it with itself gives an answer and no panic.
-        assert!(written("日本語/café🎉").is_same_repository(&written("日本語/café🎉")));
-        assert!(!written("日本語/café🎉").is_same_repository(&written("日本語/CAFÉ🎉")));
     }
 
     #[test]

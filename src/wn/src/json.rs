@@ -432,10 +432,16 @@ fn document_of(text: &str) -> Result<Document, JsonError> {
 /// repository of the run, and a reader that took `tools` for a repository
 /// would compare a guess.
 ///
+/// A part that holds a character GitHub permits in no name is a refusal too.
+/// The refusal of a plan for another repository repeats this repository, and
+/// a JSON escape can put the ESC character into it. The refusal here repeats
+/// nothing of the value.
+///
 /// # Errors
 ///
 /// Gives [`JsonError::Wrong`] for a `repo` that is not a string, and for a
-/// string that is not written as `owner/name`.
+/// string that is not written as `owner/name` in ASCII letters, digits, `-`,
+/// `_` and `.`.
 fn repo_of(document: &Value) -> Result<Option<Repo>, JsonError> {
     let Some(value) = optional(document, REPO) else {
         return Ok(None);
