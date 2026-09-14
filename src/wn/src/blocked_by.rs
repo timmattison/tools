@@ -1027,6 +1027,34 @@ mod tests {
             body: "## Blocked by\n\n- ~~#21 ~~ #22~~ #23\n",
             numbers: &[23],
         },
+        // GitHub reads fewer characters as space than the White_Space property of
+        // Unicode holds. A line separator, a vertical tab, and a next line are not
+        // space to GitHub, so tildes after them close a strike.
+        Case {
+            name: "tildes that follow a line separator close a strike",
+            body: "## Blocked by\n\n- ~~#21\u{2028}~~ #22\n",
+            numbers: &[22],
+        },
+        Case {
+            name: "tildes that follow a vertical tab close a strike",
+            body: "## Blocked by\n\n- ~~#21\u{b}~~ #22\n",
+            numbers: &[22],
+        },
+        Case {
+            name: "tildes that follow a next line close a strike",
+            body: "## Blocked by\n\n- ~~#21\u{85}~~ #22\n",
+            numbers: &[22],
+        },
+        Case {
+            name: "tildes that a line separator follows open a strike",
+            body: "## Blocked by\n\n- ~~\u{2028}#21~~ #22\n",
+            numbers: &[22],
+        },
+        Case {
+            name: "tildes that follow a no-break space close no strike",
+            body: "## Blocked by\n\n- ~~#21\u{a0}~~ #22\n",
+            numbers: &[],
+        },
         Case { name: "a number that is zero", body: "## Blocked by\n\n- #0\n", numbers: &[] },
         Case {
             name: "a number too large for any issue",
