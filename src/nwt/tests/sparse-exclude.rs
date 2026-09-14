@@ -1210,6 +1210,51 @@ impl FakeGit {
     /// Write the fake: for each argument that is one of `triggers`, run the
     /// shell text `reaction`. Then run the real git with every argument.
     fn reacting(triggers: &[&str], reaction: &str) -> Self {
+        Self::scripted(|real, _dir| {
+            format!(
+                "#!/bin/sh\n\
+                 for argument in \"$@\"; do\n\
+                 \x20 case \"$argument\" in\n\
+                 \x20   {}) {reaction} ;;\n\
+                 \x20 esac\n\
+                 done\n\
+                 exec '{real}' \"$@\"\n",
+                triggers.join("|")
+            )
+        })
+    }
+
+    /// A fake that runs each call with the real git, and removes itself after
+    /// the `git rev-parse HEAD` that follows `git read-tree`.
+    ///
+    /// That `rev-parse` is the last sparse step before `git hook run`. With
+    /// [`FakeGit::alone_on_path`] as the `PATH` of the child, the start of
+    /// `git hook run` then finds no `git`. The fake names `rm` by its full
+    /// path, because that `PATH` holds no `rm`.
+    fn vanishing_after_the_head_lookup() -> Self {
+        Self::scripted(|real, dir| {
+            let fake = format!("{dir}/git");
+            let marker = format!("{dir}/read-tree-ran");
+            format!(
+                "#!/bin/sh\n\
+                 for argument in \"$@\"; do\n\
+                 \x20 case \"$argument\" in\n\
+                 \x20   read-tree) : > '{marker}' ;;\n\
+                 \x20   rev-parse) if [ -e '{marker}' ]; then\n\
+                 \x20     '{real}' \"$@\"; status=$?; /bin/rm -f '{fake}'; exit $status\n\
+                 \x20   fi ;;\n\
+                 \x20 esac\n\
+                 done\n\
+                 exec '{real}' \"$@\"\n"
+            )
+        })
+    }
+
+    /// Write the fake as the text that `script` makes from the path of the real
+    /// git and the directory of the fake, and make it executable.
+    ///
+    /// Both paths go into single quotes in the script, so neither can hold one.
+    fn scripted(script: impl FnOnce(&str, &str) -> String) -> Self {
         use std::os::unix::fs::PermissionsExt;
 
         let real = real_git();
@@ -1220,22 +1265,27 @@ impl FakeGit {
         );
 
         let dir = tempfile::TempDir::new().expect("create the fake git directory");
-        let fake = dir.path().join("git");
-        let script = format!(
-            "#!/bin/sh\n\
-             for argument in \"$@\"; do\n\
-             \x20 case \"$argument\" in\n\
-             \x20   {}) {reaction} ;;\n\
-             \x20 esac\n\
-             done\n\
-             exec '{real}' \"$@\"\n",
-            triggers.join("|")
+        let dir_text = dir.path().to_str().expect("utf-8 fake git directory");
+        assert!(
+            !dir_text.contains('\''),
+            "the fake git directory goes into single quotes, so it cannot hold one: {dir_text}"
         );
-        std::fs::write(&fake, script).expect("write the fake git");
+
+        let fake = dir.path().join("git");
+        std::fs::write(&fake, script(real, dir_text)).expect("write the fake git");
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755))
             .expect("make the fake git executable");
 
         Self { dir }
+    }
+
+    /// A `PATH` value that holds only the directory of the fake.
+    ///
+    /// Each git child of `nwt` finds the fake and no other `git`. The real git
+    /// that the fake runs puts its own exec path first in `PATH`, so git still
+    /// finds its own programs.
+    fn alone_on_path(&self) -> std::ffi::OsString {
+        self.dir.path().as_os_str().to_owned()
     }
 
     /// A `PATH` value with the directory of the fake first, and the `PATH` of
@@ -1615,6 +1665,61 @@ fn nothing_the_hook_step_writes_to_stdout_reaches_the_stdout_of_nwt() {
         assert!(
             stderr.lines().any(|line| line == word),
             "{word} must show on stderr, but stderr holds:\n{stderr}"
+        );
+    }
+}
+
+/// The exit code `nwt` returns when a git command cannot start.
+const GIT_COMMAND_ERROR: i32 = 6;
+
+/// A `git hook run` that cannot start exits 6, as each git command that cannot
+/// start does. The message names the post-checkout step and says that the new
+/// worktree stays.
+///
+/// The sparse files are in the worktree when the hook step starts, so the run
+/// keeps the worktree, as it keeps a worktree whose hook fails. The shell
+/// wrapper gets no path, so only the message tells the user where the worktree
+/// is.
+///
+/// The fake git removes itself after `git rev-parse HEAD`, the last sparse
+/// step, and the `PATH` of the child holds only the directory of the fake. So
+/// the start of `git hook run` finds no `git`.
+#[cfg(unix)]
+#[test]
+fn a_hook_step_that_cannot_start_says_that_the_worktree_stays() {
+    let (_temp, repo) = repo_with_heavy_dir();
+    let fake = FakeGit::vanishing_after_the_head_lookup();
+    let branch = unique_branch("hook-cannot-start");
+
+    let output = nwt_command(&repo)
+        .args(["-b", &branch, "--sparse-exclude", HEAVY_DIR])
+        .args(["--no-copy-env", "--no-bootstrap-hooks"])
+        .env("PATH", fake.alone_on_path())
+        .output()
+        .expect("run the nwt binary");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        output.status.code(),
+        Some(GIT_COMMAND_ERROR),
+        "a git hook run that cannot start is a git command that cannot start.\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "a failed run prints no path. stdout: {stdout:?}"
+    );
+
+    let worktree = expected_worktree(&repo, &branch);
+    assert_sparse_worktree(&worktree, HEAVY_DIR, KEPT_FILES);
+    for named in [
+        "post-checkout".to_owned(),
+        format!("The new worktree stays at '{}'.", worktree.display()),
+    ] {
+        assert!(
+            stderr.contains(&named),
+            "stderr must hold {named:?}:\n{stderr}"
         );
     }
 }
