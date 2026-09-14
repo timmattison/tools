@@ -1714,29 +1714,87 @@ fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
 ///    the nearest parent upward. It stops at `existing_ancestor`, which was
 ///    there before the add, and at the first directory that is not empty. It
 ///    never removes a directory that holds something.
+///
+/// Each step runs, also when an earlier step failed. A worktree that stays
+/// holds its branch, so git refuses to delete that branch too, and the message
+/// then names both.
+///
+/// Returns one line for each step that failed. Each line names what is left
+/// and the command that removes it by hand. An empty list means that nothing
+/// is left. A directory that is not empty is a stop, and not a failure.
 fn remove_broken_sparse_worktree(
     repo_root: &Path,
     worktree: &Path,
     made_branch: Option<&str>,
     existing_ancestor: Option<&Path>,
-) {
+) -> Vec<String> {
+    let mut left = Vec::new();
+
     let mut remove = production_git_command(repo_root);
     remove.args(["worktree", "remove", "--force"]).arg(worktree);
-    let _removal = remove.output();
+    if let Err(reason) = run_cleanup_step(remove) {
+        left.push(format!(
+            "nwt could not remove the worktree at '{}': {reason}. Remove it with: git worktree \
+             remove --force {}",
+            worktree.display(),
+            shellquote::shell_quote(&worktree.to_string_lossy())
+        ));
+    }
 
     if let Some(branch) = made_branch {
         let mut delete = production_git_command(repo_root);
         delete.args(["branch", "-D", branch]);
-        let _deletion = delete.output();
+        if let Err(reason) = run_cleanup_step(delete) {
+            left.push(format!(
+                "nwt could not delete the branch '{branch}': {reason}. Delete it with: git branch \
+                 -D {}",
+                shellquote::shell_quote(branch)
+            ));
+        }
     }
 
     let mut parent = worktree.parent();
     while let Some(dir) = parent {
-        if Some(dir) == existing_ancestor || fs::remove_dir(dir).is_err() {
+        if Some(dir) == existing_ancestor {
             break;
         }
-        parent = dir.parent();
+        match fs::remove_dir(dir) {
+            Ok(()) => parent = dir.parent(),
+            Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty => break,
+            Err(e) => {
+                left.push(format!(
+                    "nwt could not remove the empty directory '{}': {e}. Remove it by hand.",
+                    dir.display()
+                ));
+                break;
+            }
+        }
     }
+
+    left
+}
+
+/// Run one git child of the cleanup of a broken sparse worktree to its end,
+/// with its output captured.
+///
+/// # Errors
+///
+/// Returns why the step failed: the error of the start when git cannot start,
+/// or what git wrote to stderr and its exit status.
+fn run_cleanup_step(mut command: Command) -> Result<(), String> {
+    let output = command
+        .output()
+        .map_err(|e| format!("git could not start: {e}"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "{} ({})",
+        String::from_utf8_lossy(&output.stderr).trim(),
+        output.status
+    ))
 }
 
 /// Attempts to create a git worktree at the given path.
@@ -1881,13 +1939,17 @@ fn try_create_worktree(
                     }
                     Some(_) => None,
                 };
-                remove_broken_sparse_worktree(
+                let left = remove_broken_sparse_worktree(
                     repo_root,
                     worktree,
                     made_branch,
                     existing_ancestor.as_deref(),
                 );
-                return WorktreeResult::SparseCheckoutFailed(message);
+                // Each thing that the cleanup could not remove gets a line of
+                // its own after the failed step.
+                let mut lines = vec![message];
+                lines.extend(left);
+                return WorktreeResult::SparseCheckoutFailed(lines.join("\n"));
             }
         };
         match run_post_checkout_hook(worktree, &head) {
