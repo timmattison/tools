@@ -3528,6 +3528,38 @@ mod tests {
         }
     }
 
+    /// Two flags that name one directory give that directory one time, at the
+    /// position of the first flag. `heavy` and `heavy/` are the same directory,
+    /// so git gets one pattern for it and the notice names it one time.
+    #[test]
+    fn parse_sparse_excludes_drops_a_duplicate_and_keeps_the_first_order() {
+        let raw: Vec<String> = ["heavy", "assets/video", "heavy/", "./assets/video", "docs"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+
+        let dirs = parse_sparse_excludes(&raw).expect("every value must parse");
+        let names: Vec<&str> = dirs.iter().map(SparseExcludeDir::as_str).collect();
+
+        assert_eq!(names, vec!["heavy", "assets/video", "docs"]);
+    }
+
+    /// The first refused value stops the parse, and its refusal comes back.
+    #[test]
+    fn parse_sparse_excludes_returns_the_first_refusal() {
+        let raw: Vec<String> = ["heavy", "/abs", "../up"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+
+        assert_eq!(
+            parse_sparse_excludes(&raw),
+            Err(SparseExcludeError::Absolute {
+                raw: "/abs".to_owned()
+            })
+        );
+    }
+
     // One mutation fixture for each rule of `escape_sparse_pattern`. Remove one
     // rule from the function, and exactly one of these tests fails. Each input
     // holds the character two times where it can, so a rule that escapes only
