@@ -505,9 +505,11 @@ const MAX_ATTEMPTS: u32 = 10;
 
 /// The reason `nwt` refuses a `--sparse-exclude` value.
 ///
-/// Each variant keeps the value as the user typed it, so the message names what
-/// the user gave and not the normalized form. `nwt` refuses the value before it
-/// makes anything: no directory, no branch, and no `worktrees/<name>`.
+/// Each lexical variant keeps the value as the user typed it, so the message
+/// names what the user gave and not the normalized form.
+/// [`SparseExcludeError::NotTrackedDirectory`] keeps the normalized directory,
+/// because that is the path that git checked. `nwt` refuses the value before
+/// it makes anything: no directory, no branch, and no `worktrees/<name>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SparseExcludeError {
     /// The value names no directory. It is empty, or it holds only `.` and `/`.
@@ -520,6 +522,13 @@ enum SparseExcludeError {
     /// The value holds an ASCII control character. A sparse pattern file holds
     /// one pattern on each line, so a line break in a value makes two patterns.
     ControlCharacter { raw: String },
+    /// Git does not track the directory as a directory at `at_ref`, the ref
+    /// that the new worktree checks out. The path is missing at that ref, is a
+    /// file there, or is a directory only on disk.
+    NotTrackedDirectory {
+        dir: SparseExcludeDir,
+        at_ref: String,
+    },
 }
 
 impl fmt::Display for SparseExcludeError {
@@ -547,6 +556,13 @@ impl fmt::Display for SparseExcludeError {
                 "--sparse-exclude '{}' holds a control character. Give a directory \
                  name without control characters.",
                 raw.escape_debug()
+            ),
+            Self::NotTrackedDirectory { dir, at_ref } => write!(
+                f,
+                "--sparse-exclude '{}' is not a directory that git tracks at '{}'. Give a \
+                 directory that git tracks at that ref.",
+                dir.as_str(),
+                at_ref.escape_debug()
             ),
         }
     }
@@ -674,10 +690,9 @@ const SPARSE_INCLUDE_EVERYTHING: &str = "/*";
 /// directory one time, at the position of the first value. So git gets one
 /// pattern for each directory, and the notice names each directory one time.
 ///
-/// `main` calls this after it knows the repository and before it makes
-/// anything, so a refused value makes no directory, no branch, and no
-/// `worktrees/<name>`. The check is lexical only (see
-/// [`SparseExcludeDir::parse`]).
+/// The check is lexical only (see [`SparseExcludeDir::parse`]).
+/// [`resolve_sparse_excludes`] calls this, and then asks git about each
+/// directory.
 ///
 /// # Errors
 ///
@@ -690,6 +705,93 @@ fn parse_sparse_excludes(raw: &[String]) -> Result<Vec<SparseExcludeDir>, Sparse
         let dir = SparseExcludeDir::parse(value)?;
         if !dirs.contains(&dir) {
             dirs.push(dir);
+        }
+    }
+
+    Ok(dirs)
+}
+
+/// The ref that a new worktree checks out when the user gives no `-c <ref>`.
+///
+/// `git worktree add <path> -b <branch>` starts the branch at `HEAD` of the
+/// worktree it runs in, and `nwt` runs it in the main worktree.
+const SPARSE_DEFAULT_REF: &str = "HEAD";
+
+/// Ask git whether it tracks `dir` as a directory at `at_ref`.
+///
+/// The command is
+/// `git --literal-pathspecs ls-tree -z -d --name-only <at_ref> -- <dir>`, in
+/// `repo_root`. Git exits 0 for a directory, for a file, and for a missing
+/// path, so only the output gives the answer:
+///
+/// - A directory prints its own path.
+/// - A file and a missing path print nothing.
+/// - `heavy/` prints the children of `heavy` and not `heavy` itself. So only
+///   an entry that is equal to `dir` counts, and `dir` has no trailing `/`.
+///
+/// `-z` ends each entry with a NUL and stops git from quoting a path that
+/// holds a `\`, a `"`, or a character that is not ASCII. `--literal-pathspecs`
+/// stops git from reading `*`, `?`, or `[` in `dir` as a glob.
+fn tracks_directory(repo_root: &Path, at_ref: &str, dir: &SparseExcludeDir) -> bool {
+    let mut ls_tree = production_git_command(repo_root);
+    ls_tree.args([
+        "--literal-pathspecs",
+        "ls-tree",
+        "-z",
+        "-d",
+        "--name-only",
+        at_ref,
+        "--",
+        dir.as_str(),
+    ]);
+
+    let Ok(output) = ls_tree.output() else {
+        return false;
+    };
+
+    output
+        .stdout
+        .split(|byte| *byte == b'\0')
+        .any(|entry| entry == dir.as_str().as_bytes())
+}
+
+/// Parse every `--sparse-exclude` value, and make sure that git tracks each
+/// one as a directory at the ref that the new worktree checks out.
+///
+/// That ref is `checkout_ref` when the user gives `-c <ref>`, and
+/// [`SPARSE_DEFAULT_REF`] when not. The check reads the ref and not the disk,
+/// because the files of the new worktree come from the ref. Git runs in
+/// `repo_root`, the main worktree.
+///
+/// A sparse pattern for a path that is not a tracked directory excludes
+/// nothing, and git gives no error. Without this check, `nwt` reports success
+/// and writes everything.
+///
+/// `main` calls this after it knows the repository and before it makes
+/// anything, so a refused value makes no directory, no branch, and no
+/// `worktrees/<name>`. Every value is parsed before git runs, so a lexical
+/// refusal costs no git child.
+///
+/// # Errors
+///
+/// - The refusal of [`parse_sparse_excludes`], for the first value that the
+///   lexical rules refuse.
+/// - [`SparseExcludeError::NotTrackedDirectory`] for the first directory that
+///   git does not track as a directory at the ref.
+fn resolve_sparse_excludes(
+    repo_root: &Path,
+    checkout_ref: Option<&str>,
+    raw: &[String],
+) -> Result<Vec<SparseExcludeDir>, SparseExcludeError> {
+    let dirs = parse_sparse_excludes(raw)?;
+    let at_ref = checkout_ref.unwrap_or(SPARSE_DEFAULT_REF);
+
+    for dir in &dirs {
+        if !tracks_directory(repo_root, at_ref, dir) {
+            return Err(SparseExcludeError::NotTrackedDirectory {
+                dir: dir.clone(),
+                at_ref: at_ref.to_owned(),
+            });
         }
     }
 
@@ -2002,8 +2104,13 @@ fn main() {
     };
 
     // Refuse a bad `--sparse-exclude` value before anything is made, so a
-    // refusal leaves no directory, no branch, and no `worktrees/<name>`.
-    let sparse_excludes = match parse_sparse_excludes(&cli.sparse_exclude) {
+    // refusal leaves no directory, no branch, and no `worktrees/<name>`. Git
+    // checks each directory at the ref that the new worktree checks out.
+    let sparse_excludes = match resolve_sparse_excludes(
+        &repo_root,
+        config.checkout.as_deref(),
+        &cli.sparse_exclude,
+    ) {
         Ok(dirs) => dirs,
         Err(e) => {
             error!(config.quiet, "Error: {e}");
