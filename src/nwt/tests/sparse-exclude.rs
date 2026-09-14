@@ -1184,8 +1184,23 @@ struct FakeGit {
     dir: tempfile::TempDir,
 }
 
+/// The exit status of a git call that [`FakeGit::refusing`] refuses.
+///
+/// No real git exits with it, so a run that reports it reports the fake.
+#[cfg(unix)]
+const FAKE_GIT_EXIT_STATUS: i32 = 97;
+
 #[cfg(unix)]
 impl FakeGit {
+    /// A fake that writes a line to stderr and exits with
+    /// [`FAKE_GIT_EXIT_STATUS`] when an argument is one of `triggers`.
+    fn refusing(triggers: &[&str]) -> Self {
+        Self::reacting(
+            triggers,
+            &format!("echo \"fake git refuses $argument\" >&2; exit {FAKE_GIT_EXIT_STATUS}"),
+        )
+    }
+
     /// A fake that writes `word` to its stdout when an argument is `trigger`,
     /// and then runs the real git.
     fn writing_stdout(trigger: &str, word: &str) -> Self {
@@ -1245,6 +1260,111 @@ fn run_nwt_with_fake_git(repo: &Path, fake: &FakeGit, arguments: &[&str]) -> Out
         .env("PATH", fake.path_env())
         .output()
         .expect("run the nwt binary")
+}
+
+/// Demand that git holds no entry for a linked worktree of `repo`:
+/// `.git/worktrees` is absent or empty.
+///
+/// A removal of the directory alone leaves this entry, and git then lists the
+/// worktree as prunable. So the check reads the entries of git, and not only
+/// the disk.
+fn assert_no_worktree_entry(repo: &Path) {
+    let registry = repo.join(".git").join("worktrees");
+    let entries: Vec<String> = match std::fs::read_dir(&registry) {
+        Ok(read) => read
+            .map(|entry| {
+                entry
+                    .expect("read one directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => panic!("read {}: {e}", registry.display()),
+    };
+    assert!(
+        entries.is_empty(),
+        "a run that removed its worktree must leave no entry in {}: {entries:?}",
+        registry.display()
+    );
+}
+
+/// Every local branch of `repo`, as full ref names, sorted.
+fn local_branches(repo: &Path) -> Vec<String> {
+    let mut names: Vec<String> = git_stdout(
+        repo,
+        &["for-each-ref", "--format=%(refname)", "refs/heads/"],
+    )
+    .lines()
+    .map(str::to_owned)
+    .collect();
+    names.sort();
+    names
+}
+
+/// Demand that `output` is a sparse run that the fake git stopped, and that
+/// the run removed what it made: exit 7, no path on stdout, no worktrees
+/// directory, no worktree that git lists or holds an entry for, and the local
+/// branches of `branches_before` and no other.
+#[cfg(unix)]
+fn assert_the_failed_step_left_nothing(
+    temp: &tempfile::TempDir,
+    repo: &Path,
+    branches_before: &[String],
+    output: &Output,
+) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        output.status.code(),
+        Some(WORKTREE_FAILED),
+        "a failed sparse step is a worktree failure.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "a failed run prints no path. stdout: {stdout:?}"
+    );
+    assert!(
+        stderr.contains("fake git refuses"),
+        "the run must stop at the step that the fake git refuses:\n{stderr}"
+    );
+
+    assert_made_nothing(temp, repo);
+    assert_eq!(
+        local_branches(repo),
+        branches_before,
+        "the run must delete the branch it made, and only that branch"
+    );
+    assert_no_worktree_entry(repo);
+}
+
+/// A sparse run whose `git sparse-checkout set` fails removes the worktree, the
+/// branch, and the directories that it made. It exits 7 and prints no path.
+///
+/// The worktree is broken then: git made it with `--no-checkout`, so it holds
+/// no files and an empty index. The run covers `-b <branch>` and a random
+/// name, because both make a branch. The repository is fresh, so the
+/// worktrees directory is one of the directories that the run made.
+#[cfg(unix)]
+#[test]
+fn a_failed_sparse_checkout_set_removes_what_the_run_made() {
+    let fake = FakeGit::refusing(&["sparse-checkout"]);
+
+    for named in [true, false] {
+        let (temp, repo) = repo_with_heavy_dir();
+        let before = local_branches(&repo);
+        let branch = unique_branch("sparse-set-fails");
+        let mut arguments = vec!["--sparse-exclude", HEAVY_DIR];
+        if named {
+            arguments.extend(["-b", branch.as_str()]);
+        }
+
+        let output = run_nwt_with_fake_git(&repo, &fake, &arguments);
+
+        assert_the_failed_step_left_nothing(&temp, &repo, &before, &output);
+    }
 }
 
 /// Nothing that the hook step writes to stdout reaches the stdout of `nwt`,
