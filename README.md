@@ -1382,10 +1382,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     reader to #170. A blocker the plan leaves out joins the answer instead, and the answer then
     reads the way a picture reads, with `waits for #168` on the row and the note `#170 waits for
     #168: the issue says so, and the order does not.` A blocker that stands nowhere in the plan
-    costs one more query for each round of such blockers. A finished one changes nothing, and an
-    open one joins the answer with the blockers it names in turn. Only an open issue names a
-    blocker and only an open blocker holds work back, so work that is already done never refuses
-    a plan. A chain goes through the same check, so `wn "#170"` names #168 first. A blocker that
+    costs one more query for each round of such blockers. Only an open issue names a blocker, and
+    a finished blocker changes nothing, so work that is already done never refuses a plan. Any
+    other blocker holds work back. An open one joins the answer with the blockers it names in
+    turn, and a number the repository does not have joins it as a step that nobody can start,
+    because nothing is known about it. A chain goes through the same check, so `wn "#170"` names #168 first. A blocker that
     the order holds only through finished work, or only in another stream, joins the answer the
     same way. Without that wait, the answer names the issue while its blocker is open. A plan of
     streams that names one number in two orders answers while no issue adds a wait to it and

@@ -20,8 +20,10 @@
 //!   refused, and the refusal names the wait as well as the cycle.
 //!
 //! A blocker that stands nowhere in the plan is asked about, because the plan
-//! says nothing about its state. A finished one changes nothing. An open one
-//! joins the graph as a step, and the blockers it names are read in turn.
+//! says nothing about its state. A finished one changes nothing. Any other one
+//! joins the graph as a step, and a number the repository does not have is one
+//! of them, because nothing is known about it. The blockers an open one names
+//! are read in turn.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
