@@ -617,7 +617,7 @@ impl SparseExcludeDir {
     /// exclude `src/heavy/`. The trailing `/` matches a directory only, so it
     /// does not exclude a file named `heavy`.
     fn pattern(&self) -> String {
-        format!("!/{}/", self.0)
+        format!("!/{}/", escape_sparse_pattern(self.as_str()))
     }
 }
 
@@ -639,7 +639,19 @@ impl SparseExcludeDir {
     expect(dead_code, reason = "wired into main by the next slice of issue #487")
 )]
 fn escape_sparse_pattern(s: &str) -> String {
-    s.to_owned()
+    let mut escaped = String::with_capacity(s.len());
+
+    // Walk characters and never bytes, so a multi-byte name stays intact.
+    for (index, character) in s.chars().enumerate() {
+        let always_special = matches!(character, '\\' | '[' | ']' | '*' | '?');
+        let leading_special = index == 0 && matches!(character, '!' | '#');
+        if always_special || leading_special {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+
+    escaped
 }
 
 /// Create a new git worktree with a Docker-style random name.
