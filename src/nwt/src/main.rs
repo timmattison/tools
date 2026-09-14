@@ -522,7 +522,23 @@ enum SparseExcludeError {
 
 impl fmt::Display for SparseExcludeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("invalid --sparse-exclude value")
+        match self {
+            Self::Empty { raw } => write!(
+                f,
+                "--sparse-exclude '{raw}' names no directory. Give a directory path \
+                 relative to the root of the repository."
+            ),
+            Self::Absolute { raw } => write!(
+                f,
+                "--sparse-exclude '{raw}' is an absolute path. Give a path relative to \
+                 the root of the repository."
+            ),
+            Self::ParentComponent { raw } => write!(
+                f,
+                "--sparse-exclude '{raw}' has a '..' component. Give a path inside the \
+                 repository."
+            ),
+        }
     }
 }
 
@@ -561,7 +577,32 @@ impl SparseExcludeDir {
     /// - [`SparseExcludeError::Empty`] when nothing is left after the empty and
     ///   `.` components are removed.
     fn parse(raw: &str) -> Result<Self, SparseExcludeError> {
-        Ok(Self(raw.to_owned()))
+        let path = Path::new(raw);
+        if raw.starts_with('/') || path.has_root() || path.is_absolute() {
+            return Err(SparseExcludeError::Absolute {
+                raw: raw.to_owned(),
+            });
+        }
+
+        // Split on `/` and never on a byte offset, so a multi-byte name stays
+        // intact. An empty component comes from `//` or a trailing `/`.
+        let components: Vec<&str> = raw
+            .split('/')
+            .filter(|component| !component.is_empty() && *component != ".")
+            .collect();
+
+        if components.contains(&"..") {
+            return Err(SparseExcludeError::ParentComponent {
+                raw: raw.to_owned(),
+            });
+        }
+        if components.is_empty() {
+            return Err(SparseExcludeError::Empty {
+                raw: raw.to_owned(),
+            });
+        }
+
+        Ok(Self(components.join("/")))
     }
 
     /// The normalized path, relative to the root of the repository.
