@@ -1206,6 +1206,10 @@ SPARSE WORKTREES:
     after a plain add. When git cannot start the hook step, the worktree stays and
     nwt exits 6.
 
+    --sparse-exclude needs git 2.36.0 or later. nwt runs the post-checkout hook with
+    'git hook run', and git 2.36.0 added that command. On an older git, nwt reports
+    that the post-checkout hook failed and exits 7, though the repository has no hook.
+
     When 'git sparse-checkout set', 'git read-tree -mu HEAD', or 'git rev-parse HEAD'
     fails, the worktree is broken. nwt then removes the worktree, the branch that the
     run made, and the empty directories that the run made, and it exits 7.

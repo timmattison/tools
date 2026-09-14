@@ -2592,6 +2592,8 @@ Skipped: heavy/.env (under excluded heavy/)
 
 **The post-checkout hook.** `git worktree add --no-checkout` runs no hook. So nwt runs the `post-checkout` hook of the repository after it writes the files. The hook gets the arguments of a plain add: the null object id, the new `HEAD`, and `1`. It sees the sparse tree. It also sees `GIT_DIR` and `GIT_WORK_TREE` set, and a plain add sets neither.
 
+**Git version.** `--sparse-exclude` needs git 2.36.0 or later. nwt runs the `post-checkout` hook with `git hook run`, and git 2.36.0 added that command. On an older git, nwt reports that the post-checkout hook failed and exits 7, though the repository has no hook.
+
 **Failures.**
 
 - A hook that fails keeps the worktree and the branch, and nwt exits 7, as after a plain add. The error names the exit status of the hook and the path of the worktree.
