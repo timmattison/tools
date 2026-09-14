@@ -30,7 +30,9 @@
 //! `#3, #4 and #5` and `#5 (test-taking UI)` are blockers. A block that starts
 //! with a word is prose about other work, so `It can run beside #169.` under the
 //! heading names no blocker. A paragraph that wraps is one block, so a line that
-//! happens to start with a number is still inside that prose.
+//! happens to start with a number is still inside that prose. A number struck
+//! through, as in `~~#21~~`, counts for nothing, because an author strikes a
+//! blocker through to take it back.
 //!
 //! This reader acts on what it reads: a blocker it names can refuse a plan. So a
 //! phrase in the middle of a sentence is not read, because a line of a tracker
@@ -55,6 +57,10 @@ const MAX_INDENT: usize = 3;
 
 /// The fewest marks that open a code fence.
 const FENCE_MARKS: usize = 3;
+
+/// The most tildes that open a span struck through. One more opens a code fence
+/// at the start of a line, and it strikes nothing inside a block.
+const MAX_STRIKE_MARKS: usize = 2;
 
 /// The deepest level of a heading.
 const MAX_HEADING_LEVEL: usize = 6;
@@ -89,7 +95,8 @@ struct Open {
 /// the body writes them, each one once.
 ///
 /// A number of another repository is read past and names nothing, and so is a
-/// number GitHub cannot give an issue: zero, or one too large for a `u64`.
+/// span struck through and a number GitHub cannot give an issue: zero, or one
+/// too large for a `u64`.
 #[must_use]
 pub fn read(body: &str) -> Vec<IssueNumber> {
     let mut numbers: Vec<IssueNumber> = Vec::new();
@@ -309,12 +316,15 @@ fn is_word(c: char) -> bool {
 /// same ranges, so the two readers strip the same characters: U+2190 to U+2BFF
 /// (arrows, shapes, dingbats, the older emoji), U+1F000 to U+1FAFF (the newer
 /// emoji), the zero width joiner, and the emoji selector.
+///
+/// A tilde is not decoration. It opens a span struck through, and
+/// [`after_strike`] reads past that span, so a struck label or number names
+/// nothing.
 fn is_decoration(c: char) -> bool {
     c.is_whitespace()
         || matches!(
             c,
             '*' | '_'
-                | '~'
                 | '\u{200D}'
                 | '\u{FE0F}'
                 | '\u{2190}'..='\u{2BFF}'
@@ -357,7 +367,7 @@ fn head_of(text: &str) -> (bool, Vec<IssueNumber>) {
         if let Some((number, after)) = local_reference(rest) {
             numbers.extend(number);
             rest = after;
-        } else if let Some(after) = other_reference(rest) {
+        } else if let Some(after) = read_past(rest) {
             rest = after;
         } else {
             break;
@@ -371,7 +381,7 @@ fn head_of(text: &str) -> (bool, Vec<IssueNumber>) {
         rest = undecorated(rest);
         if let Some(after) = separator(rest) {
             rest = after;
-        } else if local_reference(rest).is_none() && other_reference(rest).is_none() {
+        } else if local_reference(rest).is_none() && read_past(rest).is_none() {
             break;
         }
     }
@@ -424,6 +434,36 @@ fn other_reference(text: &str) -> Option<&str> {
         return None;
     }
     local_reference(after_name).map(|(_, after)| after)
+}
+
+/// The text after what `text` starts with that names nothing and that a list
+/// continues past, or `None` when it starts with no such thing: a number of
+/// another repository, or a span struck through.
+fn read_past(text: &str) -> Option<&str> {
+    other_reference(text).or_else(|| after_strike(text))
+}
+
+/// The text after the span struck through that `text` opens with, or `None`
+/// when it opens none.
+///
+/// One or two tildes open the span, as GitHub renders both `~#21~` and
+/// `~~#21~~`. The next run of the same number of tildes closes it. A span that
+/// nothing closes is no strike, and the tildes stay in front of the text.
+fn after_strike(text: &str) -> Option<&str> {
+    let inside = text.trim_start_matches('~');
+    let marks = text.len() - inside.len();
+    if !(1..=MAX_STRIKE_MARKS).contains(&marks) {
+        return None;
+    }
+    let mut rest = inside;
+    loop {
+        let run = rest.get(rest.find('~')?..)?;
+        let after = run.trim_start_matches('~');
+        if run.len() - after.len() == marks {
+            return Some(after);
+        }
+        rest = after;
+    }
 }
 
 /// The text after the parenthesis that closes the one `text` opens with, or

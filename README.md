@@ -1368,7 +1368,8 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     label, as in `**Blocked by:** #12`. Only the numbers at the start of a block count, so `It can
     run beside #169.` under the heading blocks nothing. A phrase in the middle of a sentence counts
     for nothing either, because a line of a tracker such as `#12 (blocked by #11)` says what blocks
-    another issue.
+    another issue. A number struck through, as in `~~#21~~`, counts for nothing, because an author
+    strikes a blocker through to take it back.
   - A plan that puts an issue before its own blocker is refused, and the run exits `2`: `the order
     puts #170 before #168, but #170 says it is blocked by #168`. That is the plan that sent a
     reader to #170. A blocker the plan leaves out joins the answer instead, and the answer then
