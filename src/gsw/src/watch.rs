@@ -1914,13 +1914,16 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 ///   cannot be quit while it waits on the network is a monitor that has to be
 ///   killed from another pane.
 /// - [`InputMode::Normal`]: `q` quits, `r` forces a refresh, `p` asks to push,
-///   and `G` asks for the issue of the branch.
+///   `G` asks for the issue of the branch, and `m` asks to measure a rebase and
+///   a merge against the default branch.
 /// - [`InputMode::Confirm`]: `y` and Enter push, `n`, Esc, and `q` cancel.
 ///   Nothing else acts — with a question on screen, `q` is the answer "no",
 ///   not "quit", and `r` is not a refresh. That is why the mode exists.
-/// - [`InputMode::Pushing`]: `q` quits, `r` refreshes, and `G` still asks for
-///   the issue — a browser conflicts with nothing a push does. `p` is inert, so
-///   an impatient second press cannot start an overlapping push.
+/// - [`InputMode::Pushing`]: `q` quits, `r` refreshes, `G` still asks for the
+///   issue — a browser conflicts with nothing a push does — and `m` still asks
+///   to measure, because a measurement is read-only for the repository. `p` is
+///   inert, so an impatient second press cannot start an overlapping push.
+/// - `M` is not bound. It gives [`Event::Dismiss`] as every unbound key does.
 /// - `G` acts only where `issue` says a command exists. Where it does not, the
 ///   key gives [`Event::Dismiss`] like any other unbound key, which is the one
 ///   silent case this feature has.
@@ -1955,6 +1958,9 @@ fn classify_input(key: KeyEvent, mode: InputMode, issue: IssueKey) -> Option<Eve
             // reason to refuse. With no command behind it the key falls
             // through to `Dismiss`, which is what every unbound key gives.
             KeyCode::Char('G') if issue == IssueKey::Bound => Event::IssueRequested,
+            // A measurement is read-only for the repository of the user, so a
+            // push in flight is no reason to refuse it either.
+            KeyCode::Char('m') => Event::ConflictsRequested,
             _ => Event::Dismiss,
         },
         InputMode::Confirm => match code {
