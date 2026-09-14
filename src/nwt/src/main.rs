@@ -572,6 +572,8 @@ impl SparseExcludeDir {
     ///
     /// # Errors
     ///
+    /// - [`SparseExcludeError::ControlCharacter`] when `raw` holds an ASCII
+    ///   control character. This check comes first.
     /// - [`SparseExcludeError::Absolute`] when `raw` starts at the root of the
     ///   file system.
     /// - [`SparseExcludeError::ParentComponent`] when `raw` holds a `..`
@@ -579,6 +581,12 @@ impl SparseExcludeDir {
     /// - [`SparseExcludeError::Empty`] when nothing is left after the empty and
     ///   `.` components are removed.
     fn parse(raw: &str) -> Result<Self, SparseExcludeError> {
+        if contains_control_chars(raw) {
+            return Err(SparseExcludeError::ControlCharacter {
+                raw: raw.to_owned(),
+            });
+        }
+
         let path = Path::new(raw);
         if raw.starts_with('/') || path.has_root() || path.is_absolute() {
             return Err(SparseExcludeError::Absolute {
