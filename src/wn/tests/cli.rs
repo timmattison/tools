@@ -3441,3 +3441,71 @@ fn a_finished_blocker_outside_the_chain_changes_nothing() {
     );
     assert_eq!(queries_sent(&gh), 2, "asked {}", gh.recorded_args());
 }
+
+/// A plan of streams that names `#1` and `#2` in two orders, and a third
+/// stream that holds `#5` alone.
+const KNOTTED_PLAN: &str = "\
+| Stream | Order | Zone |
+|--------|-------|------|
+| S1 — first | #1 → #2 | src/first |
+| S2 — second | #2 → #1 | src/second |
+| S3 — third | #5 | src/third |
+";
+
+/// What GitHub says about the knotted plan when `#5` says under `Blocked by`
+/// that `#6` comes first. `#6` stands nowhere in the plan, and it is open.
+const KNOTTED_ISSUES_WAITING: &str = r###"{"data":{"repository":{
+"i1":{"__typename":"Issue","number":1,"title":"The first","state":"OPEN","stateReason":null,"body":""},
+"i2":{"__typename":"Issue","number":2,"title":"The second","state":"OPEN","stateReason":null,"body":""},
+"i5":{"__typename":"Issue","number":5,"title":"The fifth","state":"OPEN","stateReason":null,
+      "body":"## Blocked by\n\n- #6\n"},
+"i6":{"__typename":"Issue","number":6,"title":"The sixth","state":"OPEN","stateReason":null,"body":""}
+}}}"###;
+
+/// What GitHub says about the knotted plan when no issue names a blocker.
+const KNOTTED_ISSUES_APART: &str = r###"{"data":{"repository":{
+"i1":{"__typename":"Issue","number":1,"title":"The first","state":"OPEN","stateReason":null,"body":""},
+"i2":{"__typename":"Issue","number":2,"title":"The second","state":"OPEN","stateReason":null,"body":""},
+"i5":{"__typename":"Issue","number":5,"title":"The fifth","state":"OPEN","stateReason":null,"body":""}
+}}}"###;
+
+/// The sentence the knotted plan is refused with once `#5` waits for `#6`.
+const KNOTTED_REFUSAL: &str = "the order returns to #1 and #2, and #5 waits for #6, \
+                               which only an order with no cycle can show. \
+                               Fix the order, or run wn --refresh to build a new plan";
+
+#[test]
+fn a_knotted_order_with_no_wait_the_issues_add_answers_as_streams() {
+    // The reader of streams answers each stream on its own, so the two orders
+    // of #1 and #2 hold nothing back while no issue names a blocker.
+    let gh = FakeGh::new(KNOTTED_ISSUES_APART);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", KNOTTED_PLAN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).contains(SUMMARY_HEADING),
+        "the plan reader answered, in {}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn refuses_a_knotted_order_once_the_issues_add_a_wait_and_names_both() {
+    // The same plan, and #5 now says #6 comes first. An answer of streams
+    // would name #5 while #6 is open, and a graph cannot hold the knot of #1
+    // and #2. So the run refuses, and the refusal names the wait as well as
+    // the knot, because the wait is why a plan that answered now refuses.
+    let gh = FakeGh::new(KNOTTED_ISSUES_WAITING);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", KNOTTED_PLAN);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "the run could not answer, stdout: {}",
+        stdout(&output)
+    );
+    assert!(
+        stderr(&output).contains(KNOTTED_REFUSAL),
+        "the refusal names the knot and the wait, in {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+}

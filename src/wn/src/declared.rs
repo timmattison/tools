@@ -616,4 +616,43 @@ mod tests {
             "the refusal names the order, in {message}"
         );
     }
+
+    /// A plan of streams that names #1 and #2 in two orders, and a third
+    /// stream that holds #5 alone.
+    const KNOTTED_PLAN: &str = "\
+| Stream | Order | Zone |
+|--------|-------|------|
+| S1 — first | #1 → #2 | a |
+| S2 — second | #2 → #1 | b |
+| S3 — third | #5 | c |
+";
+
+    #[test]
+    fn a_knotted_order_that_the_issues_add_a_wait_to_is_refused_with_both() {
+        // The reader of streams answers this plan while no issue names a
+        // blocker. #5 names #6, so the answer must be a graph, and a graph
+        // cannot hold the knot of #1 and #2. The refusal names the knot and
+        // the wait, because the wait is what changed.
+        let plan = crate::plan::parse(KNOTTED_PLAN).expect("the text is a plan");
+        let answers = Answers::of(vec![open(6, &[])]);
+        let result = settled(
+            &crate::graph::of_streams(&plan),
+            vec![open(1, &[]), open(2, &[]), open(5, &[6])],
+            &answers,
+        );
+        let err = match result {
+            Ok(_) => panic!("the knotted order was refused, and it answered"),
+            Err(err) => err,
+        };
+        assert_eq!(
+            err.to_string(),
+            "the order returns to #1 and #2, and #5 waits for #6, \
+             which only an order with no cycle can show. \
+             Fix the order, or run wn --refresh to build a new plan"
+        );
+        assert!(
+            err.downcast_ref::<OrderError>().is_some(),
+            "the refusal is an order error, and it is {err:#}"
+        );
+    }
 }
