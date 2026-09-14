@@ -945,7 +945,7 @@ struct Cli {
     /// each directory to exclude. Only the new worktree is sparse. Other
     /// worktrees stay full. Run `git sparse-checkout disable` in the worktree
     /// to write the directory.
-    #[arg(long = "sparse-exclude", action = clap::ArgAction::Append)]
+    #[arg(long = "sparse-exclude", value_name = "DIR", action = clap::ArgAction::Append)]
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "wired into main by the next slice of issue #487")
@@ -962,7 +962,7 @@ struct Cli {
     ///
     /// To activate after installation, run `source ~/.zshrc` (or `~/.bashrc`)
     /// or open a new terminal.
-    #[arg(long, conflicts_with_all = ["branch", "checkout", "quiet", "run", "tmux", "no_copy_env", "no_bootstrap_hooks", "random_directory"])]
+    #[arg(long, conflicts_with_all = ["branch", "checkout", "quiet", "run", "tmux", "no_copy_env", "no_bootstrap_hooks", "random_directory", "sparse_exclude"])]
     shell_setup: bool,
 }
 

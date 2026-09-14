@@ -2467,6 +2467,7 @@ nwt --tmux                    # Open in new tmux window
 - `--tmux`: Open the new worktree in a new tmux window (Unix only)
 - `--no-copy-env`: Skip copying untracked `.env` files from the main worktree into the new one
 - `--no-bootstrap-hooks`: Skip the package-manager install that regenerates git hooks (see Hook Bootstrap below)
+- `--sparse-exclude <DIR>`: Make the new worktree a sparse checkout that does not write the tracked directory `<DIR>`. Use the flag one time for each directory. Other worktrees stay full.
 - `--shell-setup`: Install shell integration for auto-cd into new worktrees (conflicts with all other flags)
 - `-q, --quiet`: Suppress non-error messages
 
