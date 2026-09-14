@@ -866,6 +866,57 @@ impl IssueRun {
     }
 }
 
+/// What one press of `m` does.
+///
+/// An enum and not a `bool`, for the reason [`IssuePress`] gives: the loop does
+/// one thing for each answer, and each answer is one arm of one match.
+#[derive(Debug, PartialEq, Eq)]
+enum ConflictsPress {
+    /// Start a run.
+    Start,
+    /// Nothing at all, because a run is in flight.
+    Nothing,
+}
+
+/// The `m` key's own state, for the life of one watch-mode run.
+///
+/// Only one measurement can be in flight in one gsw process, so a user who
+/// presses `m` ten times starts one run. The loop owns this value, and the
+/// thread that measures never reads it or writes it. The single thread of the
+/// loop is what makes the check and the set in [`ConflictsRun::press`] one
+/// operation, so no lock is necessary.
+///
+/// The loop does not ask the worker whether a thread is alive. A run hands over
+/// its outcome a moment before its thread ends, so that answer can say a run
+/// is in flight just after the outcome arrived, and a press then would do
+/// nothing for no reason the user can see.
+struct ConflictsRun {
+    /// Whether a run is in flight. Set by the press that starts the run, and
+    /// cleared by the outcome of that run.
+    running: bool,
+}
+
+impl ConflictsRun {
+    /// No run in flight.
+    fn new() -> Self {
+        Self { running: false }
+    }
+
+    /// What one press of `m` does now.
+    ///
+    /// The press that starts a run marks the run in flight in the same step,
+    /// so every press after it answers nothing until
+    /// [`ConflictsRun::finished`].
+    fn press(&mut self) -> ConflictsPress {
+        ConflictsPress::Start
+    }
+
+    /// The outcome of the run arrived, so `m` starts a run again.
+    fn finished(&mut self) {
+        self.running = false;
+    }
+}
+
 /// The git work one watch-mode refresh performs: re-open the repository so
 /// configuration written since the last refresh takes effect, rebuild the
 /// watcher's ignore matcher from that fresh handle, then collect the snapshot.
@@ -4965,6 +5016,51 @@ mod push_loop_tests {
                 "no command must answer nothing in {session:?}",
             );
         }
+    }
+
+    #[test]
+    fn m_starts_one_run_and_nothing_more_until_that_run_finishes() {
+        // The user can press `m` ten times, and gsw starts one run. Two runs
+        // at once double the scratch worktrees and tell the user nothing new.
+        let mut conflicts = ConflictsRun::new();
+        assert_eq!(
+            conflicts.press(),
+            ConflictsPress::Start,
+            "the first press must start a run",
+        );
+        for press in 2..=10 {
+            assert_eq!(
+                conflicts.press(),
+                ConflictsPress::Nothing,
+                "press {press} must start nothing while the run is in flight",
+            );
+        }
+    }
+
+    #[test]
+    fn m_starts_a_new_run_once_the_run_has_finished() {
+        // The flag is a flag, not a latch. A press after the outcome arrived
+        // measures the repository again, because the user can change it
+        // between two presses.
+        let mut conflicts = ConflictsRun::new();
+        assert_eq!(conflicts.press(), ConflictsPress::Start);
+        assert_eq!(
+            conflicts.press(),
+            ConflictsPress::Nothing,
+            "the first run is in flight",
+        );
+
+        conflicts.finished();
+        assert_eq!(
+            conflicts.press(),
+            ConflictsPress::Start,
+            "a press after the run ended must start a new run",
+        );
+        assert_eq!(
+            conflicts.press(),
+            ConflictsPress::Nothing,
+            "the new run is the only run in flight",
+        );
     }
 
     #[test]
