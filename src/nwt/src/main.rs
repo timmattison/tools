@@ -679,12 +679,23 @@ fn parse_sparse_excludes(raw: &[String]) -> Result<Vec<SparseExcludeDir>, Sparse
 
 /// The one stderr line that tells the user which directories the new worktree
 /// does not hold, and how to get them.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the green commit prints this line from main")
-)]
-fn sparse_exclude_notice(_excluded: &[SparseExcludeDir]) -> String {
-    String::new()
+///
+/// Each directory shows as the user reads it, with a trailing `/` and without
+/// the escapes of its pattern. One directory ends with "get it", and more end
+/// with "get them". `main` prints this line to stderr after the path, because
+/// the shell wrapper reads the path from stdout.
+fn sparse_exclude_notice(excluded: &[SparseExcludeDir]) -> String {
+    let names: Vec<String> = excluded
+        .iter()
+        .map(|dir| format!("{}/", dir.as_str()))
+        .collect();
+    let pronoun = if excluded.len() == 1 { "it" } else { "them" };
+
+    format!(
+        "Excluded {} (sparse checkout). Run 'git sparse-checkout disable' in the worktree \
+         to get {pronoun}.",
+        names.join(", ")
+    )
 }
 
 /// Create a new git worktree with a Docker-style random name.
@@ -2115,6 +2126,12 @@ fn main() {
                 }
 
                 println!("{}", worktree_path.display());
+
+                // The shell wrapper reads the path from stdout, so the notice
+                // goes to stderr.
+                if !sparse_excludes.is_empty() && !config.quiet {
+                    eprintln!("{}", sparse_exclude_notice(&sparse_excludes));
+                }
 
                 // Copy untracked .env files from main worktree to new worktree
                 if config.copy_env {
