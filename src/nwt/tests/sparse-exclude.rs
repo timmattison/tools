@@ -456,6 +456,119 @@ fn assert_no_branch(repo: &Path, branch: &str) {
     );
 }
 
+/// The ref that a run without `-c` checks each directory at.
+const HEAD_REF: &str = "HEAD";
+
+/// The tag of the commit before [`HEAD_ONLY_DIR`] takes the place of
+/// [`TAG_ONLY_DIR`].
+const OLD_TAG: &str = "before-move";
+
+/// A directory that git tracks at [`OLD_TAG`] and not at `HEAD`.
+const TAG_ONLY_DIR: &str = "old-heavy";
+
+/// A directory that git tracks at `HEAD` and not at [`OLD_TAG`].
+const HEAD_ONLY_DIR: &str = "new-heavy";
+
+/// Run `nwt -c <reference>` in `repo` with `extra` arguments, without the
+/// `.env` copy and the hook bootstrap, and hand back what it wrote.
+fn run_nwt_checkout(repo: &Path, reference: &str, extra: &[&str]) -> Output {
+    nwt_command(repo)
+        .args(["-c", reference, "--no-copy-env", "--no-bootstrap-hooks"])
+        .args(extra)
+        .output()
+        .expect("run the nwt binary")
+}
+
+/// The stderr line of a run that refuses `dir`, because git does not track it
+/// as a directory at `at_ref`.
+fn not_tracked_message(dir: &str, at_ref: &str) -> String {
+    format!(
+        "Error: --sparse-exclude '{dir}' is not a directory that git tracks at '{at_ref}'. \
+         Give a directory that git tracks at that ref."
+    )
+}
+
+/// Make a repository whose tag [`OLD_TAG`] tracks [`TAG_ONLY_DIR`], and whose
+/// `HEAD` commit replaces that directory with [`HEAD_ONLY_DIR`].
+///
+/// Thus the main worktree holds [`HEAD_ONLY_DIR`] on disk and not
+/// [`TAG_ONLY_DIR`]. A check that reads the disk or `HEAD` gives the opposite
+/// answer to a check that reads the tag.
+fn repo_with_a_tag_before_a_move() -> (tempfile::TempDir, PathBuf) {
+    let tag_only_file = format!("{TAG_ONLY_DIR}/big.txt");
+    let (temp, repo) = repo_with_files(&["heavy.txt", &tag_only_file]);
+    assert!(run_git(&repo, &["tag", OLD_TAG]), "git tag failed");
+
+    assert!(
+        run_git(&repo, &["rm", "-r", "--quiet", "--", TAG_ONLY_DIR]),
+        "git rm failed"
+    );
+    write_file(&repo, &format!("{HEAD_ONLY_DIR}/big.txt"), "big\n");
+    assert!(run_git(&repo, &["add", "--", "."]), "git add failed");
+    assert!(
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "move the heavy dir"
+            ]
+        ),
+        "git commit failed"
+    );
+
+    (temp, repo)
+}
+
+/// Test 6 of issue #487, the half that asks git: a value that is not a
+/// tracked directory at `HEAD` exits with its own code, names the value and
+/// the ref, and makes nothing.
+///
+/// `git ls-tree -d` prints nothing for a missing path and for a file, and it
+/// exits 0 for both. The untracked `scratch/` is a directory on disk in the
+/// main worktree, so its refusal proves that the check reads the ref and not
+/// the disk. Without the check, git takes each pattern, excludes nothing, and
+/// `nwt` reports success.
+#[test]
+fn a_value_that_is_not_a_tracked_directory_is_refused_and_makes_nothing() {
+    for raw in ["nope", "heavy.txt", "scratch"] {
+        let (temp, repo) = repo_with_heavy_dir();
+        write_file(&repo, "scratch/notes.txt", "untracked\n");
+        let branch = unique_branch("sparse-untracked");
+
+        let output = run_nwt(&repo, &branch, &["--sparse-exclude", raw]);
+
+        assert_refused(
+            &output,
+            INVALID_SPARSE_EXCLUDE,
+            &not_tracked_message(raw, HEAD_REF),
+        );
+        assert_made_nothing(&temp, &repo);
+        assert_no_branch(&repo, &branch);
+    }
+}
+
+/// With `-c <ref>`, the check reads the ref that the worktree checks out.
+///
+/// [`HEAD_ONLY_DIR`] is on disk and at `HEAD`, but not at [`OLD_TAG`]. So a
+/// worktree of [`OLD_TAG`] has no such directory to exclude, and `nwt`
+/// refuses the value with the tag in the message.
+#[test]
+fn a_directory_that_is_not_at_the_checkout_ref_is_refused() {
+    let (temp, repo) = repo_with_a_tag_before_a_move();
+
+    let output = run_nwt_checkout(&repo, OLD_TAG, &["--sparse-exclude", HEAD_ONLY_DIR]);
+
+    assert_refused(
+        &output,
+        INVALID_SPARSE_EXCLUDE,
+        &not_tracked_message(HEAD_ONLY_DIR, OLD_TAG),
+    );
+    assert_made_nothing(&temp, &repo);
+}
+
 /// A value that the lexical rules refuse exits with its own code, names the
 /// value on stderr, prints no path, and makes nothing: no worktrees directory,
 /// no worktree, and no branch.
