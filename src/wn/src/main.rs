@@ -1043,4 +1043,16 @@ Run wn --refresh to build a new plan, or run wn --repo owner/a to answer the pla
             &reached_github,
         ));
     }
+
+    #[test]
+    fn a_repository_named_with_repo_is_the_repository_of_the_run() {
+        // A reader in a checkout of `owner/b` who types `wn --repo owner/a`
+        // asks about `owner/a`, so a plan for `owner/a` is the plan they
+        // want. `repo_of` runs no `gh` when the command line names the
+        // repository.
+        let cli = Cli::parse_from(["wn", "--repo", "owner/a"]);
+        let repo = repo_of(&cli).expect("the command line names a repository");
+        let chain = from_the_clipboard(&plan_for("owner/a"));
+        reaches_the_query(responded(&chain, &repo, &reached_github));
+    }
 }
