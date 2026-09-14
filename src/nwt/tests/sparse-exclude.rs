@@ -144,3 +144,59 @@ fn an_excluded_directory_is_absent_and_the_rest_is_present() {
         "a sparse worktree has no change to report, but git status says:\n{status}"
     );
 }
+
+/// Test 4 of issue #487: two flags exclude two directories, and the one stderr
+/// line names both.
+///
+/// Each excluded directory has a sibling that stays, so a pattern that takes
+/// out the parent directory fails too.
+#[test]
+fn two_flags_exclude_two_directories_and_the_notice_names_both() {
+    const EXCLUDED: &[&str] = &["assets/video", "fixtures/large"];
+    const EXCLUDED_FILES: &[&str] = &["assets/video/clip.txt", "fixtures/large/blob.txt"];
+    const KEPT: &[&str] = &["README.md", "assets/other.txt", "fixtures/small/tiny.txt"];
+    const NOTICE: &str = "Excluded assets/video/, fixtures/large/ (sparse checkout). Run \
+                          'git sparse-checkout disable' in the worktree to get them.";
+
+    let files: Vec<&str> = EXCLUDED_FILES
+        .iter()
+        .chain(KEPT)
+        .copied()
+        .filter(|file| *file != "README.md")
+        .collect();
+    let (_temp, repo) = repo_with_files(&files);
+    let branch = unique_branch("sparse-two");
+
+    let output = run_nwt(
+        &repo,
+        &branch,
+        &[
+            "--sparse-exclude",
+            EXCLUDED[0],
+            "--sparse-exclude",
+            EXCLUDED[1],
+        ],
+    );
+    let worktree = created_worktree(&output);
+
+    for dir in EXCLUDED {
+        assert!(
+            !worktree.join(dir).exists(),
+            "--sparse-exclude {dir} must keep {dir}/ out of {}",
+            worktree.display()
+        );
+    }
+    assert_files_present(&worktree, KEPT);
+
+    let status = git_stdout(&worktree, &["status", "--short"]);
+    assert!(
+        status.is_empty(),
+        "a sparse worktree has no change to report, but git status says:\n{status}"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.lines().any(|line| line == NOTICE),
+        "stderr must hold the one notice line {NOTICE:?}, but it holds:\n{stderr}"
+    );
+}

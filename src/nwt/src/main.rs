@@ -677,6 +677,16 @@ fn parse_sparse_excludes(raw: &[String]) -> Result<Vec<SparseExcludeDir>, Sparse
     Ok(dirs)
 }
 
+/// The one stderr line that tells the user which directories the new worktree
+/// does not hold, and how to get them.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the green commit prints this line from main")
+)]
+fn sparse_exclude_notice(_excluded: &[SparseExcludeDir]) -> String {
+    String::new()
+}
+
 /// Create a new git worktree with a Docker-style random name.
 ///
 /// This tool simplifies creating git worktrees by automatically generating
@@ -3568,6 +3578,48 @@ mod tests {
             Err(SparseExcludeError::Absolute {
                 raw: "/abs".to_owned()
             })
+        );
+    }
+
+    /// Parse each of `raw` into a directory, or panic.
+    fn sparse_dirs(raw: &[&str]) -> Vec<SparseExcludeDir> {
+        raw.iter()
+            .map(|value| {
+                SparseExcludeDir::parse(value)
+                    .unwrap_or_else(|e| panic!("{value:?} must parse, got {e:?}"))
+            })
+            .collect()
+    }
+
+    /// One directory: the notice names it with a trailing `/`, and says "it".
+    #[test]
+    fn sparse_exclude_notice_names_one_directory_as_it() {
+        assert_eq!(
+            sparse_exclude_notice(&sparse_dirs(&["heavy"])),
+            "Excluded heavy/ (sparse checkout). Run 'git sparse-checkout disable' in the \
+             worktree to get it."
+        );
+    }
+
+    /// Two directories: the notice names both in the order given, and says
+    /// "them".
+    #[test]
+    fn sparse_exclude_notice_names_two_directories_as_them() {
+        assert_eq!(
+            sparse_exclude_notice(&sparse_dirs(&["assets/video", "fixtures/large"])),
+            "Excluded assets/video/, fixtures/large/ (sparse checkout). Run 'git \
+             sparse-checkout disable' in the worktree to get them."
+        );
+    }
+
+    /// The notice shows the name the user reads, not the escaped pattern, and
+    /// multi-byte names stay intact.
+    #[test]
+    fn sparse_exclude_notice_shows_unescaped_multi_byte_names() {
+        assert_eq!(
+            sparse_exclude_notice(&sparse_dirs(&["we[ir]d dir", "日本語", "café 🎉"])),
+            "Excluded we[ir]d dir/, 日本語/, café 🎉/ (sparse checkout). Run 'git \
+             sparse-checkout disable' in the worktree to get them."
         );
     }
 
