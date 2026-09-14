@@ -674,6 +674,12 @@ enum Event {
     IssueCommandFound(crate::issue::IssueCommand),
     /// A run of the issue command has finished, either way.
     IssueFinished(crate::issue::IssueOutcome),
+    /// The user asked to measure a rebase and a merge against the default
+    /// branch (`m`).
+    ///
+    /// The loop starts a run only when no run is in flight. So a press during
+    /// a run does nothing, and [`ConflictsRun`] says why.
+    ConflictsRequested,
 }
 
 /// What keys mean right now.
@@ -1465,6 +1471,8 @@ where
             }
         }
         Event::IssueCommandFound(command) => issue.found(command),
+        // The loop starts no measurement yet. A later commit of #496 does.
+        Event::ConflictsRequested => {}
         Event::IssueFinished(outcome) => {
             issue.finished();
             // A run that worked says nothing: the browser is the answer. A run
@@ -3024,6 +3032,50 @@ mod tests {
                 assert!(
                     classify_input(g_release, mode, issue).is_none(),
                     "a release of `G` must be ignored in {mode:?} with {issue:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn m_measures_while_the_monitor_and_a_push_run_and_never_answers_the_question() {
+        // A measurement is read-only for the repository of the user, so a
+        // push in flight is no reason to refuse it. A question on screen owns
+        // its answer, so `m` there is a key with no meaning, and it must never
+        // push or cancel. The match on the mode is total, so a mode added
+        // later must say what `m` means in it.
+        let m_release = KeyEvent {
+            kind: KeyEventKind::Release,
+            ..press(KeyCode::Char('m'))
+        };
+        for mode in EVERY_MODE {
+            for issue in BOTH_AVAILABILITIES {
+                let m = classify_input(press(KeyCode::Char('m')), mode, issue);
+                match mode {
+                    InputMode::Normal | InputMode::Pushing => assert!(
+                        matches!(m, Some(Event::ConflictsRequested)),
+                        "`m` must ask to measure in {mode:?} with {issue:?}",
+                    ),
+                    InputMode::Confirm => assert!(
+                        matches!(m, Some(Event::Dismiss)),
+                        "`m` must not answer the push question with {issue:?}",
+                    ),
+                }
+
+                // A shifted key and an unshifted one are two keys, and only
+                // one of them was asked for.
+                assert!(
+                    matches!(
+                        classify_input(press(KeyCode::Char('M')), mode, issue),
+                        Some(Event::Dismiss),
+                    ),
+                    "`M` must stay unbound in {mode:?} with {issue:?}",
+                );
+
+                // Only a press acts, and the new key is no exception.
+                assert!(
+                    classify_input(m_release, mode, issue).is_none(),
+                    "a release of `m` must be ignored in {mode:?} with {issue:?}",
                 );
             }
         }
