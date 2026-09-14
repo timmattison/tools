@@ -532,9 +532,13 @@ enum SparseExcludeError {
     /// Git cannot read `at_ref`, so it cannot tell what the ref tracks. This is
     /// a bad ref and not a bad directory. `stderr` holds what git wrote.
     UnreadableRef { at_ref: String, stderr: String },
-    /// Git did not start, so it cannot tell what the ref tracks. `error` holds
-    /// the reason that the operating system gave.
-    GitCommand { error: String },
+    /// Git did not start, so it cannot tell what the ref tracks. `command`
+    /// names the git subcommand, and `error` holds the reason that the
+    /// operating system gave.
+    GitCommand {
+        command: &'static str,
+        error: String,
+    },
 }
 
 impl fmt::Display for SparseExcludeError {
@@ -575,9 +579,9 @@ impl fmt::Display for SparseExcludeError {
                 "git cannot read the ref '{}' to check --sparse-exclude: {stderr}",
                 at_ref.escape_debug()
             ),
-            Self::GitCommand { error } => write!(
+            Self::GitCommand { command, error } => write!(
                 f,
-                "could not run git ls-tree to check --sparse-exclude: {error}"
+                "could not run git {command} to check --sparse-exclude: {error}"
             ),
         }
     }
@@ -753,13 +757,17 @@ fn parse_sparse_excludes(raw: &[String]) -> Result<Vec<SparseExcludeDir>, Sparse
 /// worktree it runs in, and `nwt` runs it in the main worktree.
 const SPARSE_DEFAULT_REF: &str = "HEAD";
 
-/// Ask git whether it tracks `dir` as a directory at `at_ref`.
+/// Ask git whether it tracks `dir` as a directory at `tree_ref`.
+///
+/// `tree_ref` is the ref that git reads. `at_ref` is the ref as the user typed
+/// it, and each message names it. The two differ for a branch that only a
+/// remote holds (see [`resolve_checkout_ref`]).
 ///
 /// The command is
-/// `git --literal-pathspecs ls-tree -z -d --name-only <at_ref> -- <dir>`, in
+/// `git --literal-pathspecs ls-tree -z -d --name-only <tree_ref> -- <dir>`, in
 /// `repo_root`. Git exits 0 for a directory, for a file, and for a missing
 /// path, so only the output gives the answer. Git exits with a status that is
-/// not zero only when it cannot read `at_ref`.
+/// not zero only when it cannot read `tree_ref`.
 ///
 /// - A directory prints its own path.
 /// - A file and a missing path print nothing.
@@ -780,6 +788,7 @@ const SPARSE_DEFAULT_REF: &str = "HEAD";
 fn tracks_directory(
     repo_root: &Path,
     at_ref: &str,
+    tree_ref: &str,
     dir: &SparseExcludeDir,
 ) -> Result<bool, SparseExcludeError> {
     let mut ls_tree = production_git_command(repo_root);
@@ -789,16 +798,12 @@ fn tracks_directory(
         "-z",
         "-d",
         "--name-only",
-        at_ref,
+        tree_ref,
         "--",
         dir.as_str(),
     ]);
 
-    let output = ls_tree
-        .output()
-        .map_err(|e| SparseExcludeError::GitCommand {
-            error: e.to_string(),
-        })?;
+    let output = sparse_check_output(ls_tree, "ls-tree")?;
 
     if !output.status.success() {
         return Err(SparseExcludeError::UnreadableRef {
@@ -813,11 +818,96 @@ fn tracks_directory(
         .any(|entry| entry == dir.as_str().as_bytes()))
 }
 
+/// Run one git child of the `--sparse-exclude` check to its end, with its
+/// output captured.
+///
+/// # Errors
+///
+/// [`SparseExcludeError::GitCommand`], which names `subcommand`, when git does
+/// not start.
+fn sparse_check_output(
+    mut command: Command,
+    subcommand: &'static str,
+) -> Result<std::process::Output, SparseExcludeError> {
+    command
+        .output()
+        .map_err(|e| SparseExcludeError::GitCommand {
+            command: subcommand,
+            error: e.to_string(),
+        })
+}
+
+/// The prefix of every remote-tracking ref.
+const REMOTE_TRACKING_PREFIX: &str = "refs/remotes/";
+
+/// The ref that `git ls-tree` reads for the `-c <name>` that the user typed.
+///
+/// This function mirrors the checkout DWIM of git (`unique_tracking_name` in
+/// `checkout.c`). `git worktree add <path> <name>` runs that DWIM for a `name`
+/// that names no commit. It finds the remote-tracking branch `<remote>/<name>`,
+/// makes a local branch `name` that tracks it, and checks that branch out. So
+/// `nwt -c foo` works in a clone that holds `foo` only as `origin/foo`.
+/// `git ls-tree foo` does not run the DWIM, and it cannot read `foo`. Without
+/// this function, the check of `--sparse-exclude` refuses a run that works
+/// without the flag.
+///
+/// The steps are the steps of git:
+///
+/// 1. When `name` resolves to a commit
+///    (`git rev-parse --verify --quiet <name>^{commit}`), git takes `name`, and
+///    so does this function.
+/// 2. Else, when exactly one ref `refs/remotes/<remote>/<name>` exists, git
+///    checks it out, and this function returns it.
+/// 3. Else git refuses the add with `fatal: invalid reference: <name>`. This
+///    function returns `name`, so `git ls-tree` refuses it too, and the run
+///    exits as a failed add.
+///
+/// Git finds the remote-tracking branch through the fetch refspec of each
+/// remote. This function reads `refs/remotes/<remote>/<name>`, where the
+/// default refspec puts it. A remote with a different refspec can give a
+/// different answer.
+///
+/// # Errors
+///
+/// [`SparseExcludeError::GitCommand`] when git does not start.
+fn resolve_checkout_ref(repo_root: &Path, name: &str) -> Result<String, SparseExcludeError> {
+    let mut verify = production_git_command(repo_root);
+    verify.args([
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        &format!("{name}^{{commit}}"),
+    ]);
+    if sparse_check_output(verify, "rev-parse")?.status.success() {
+        return Ok(name.to_owned());
+    }
+
+    // A `*` in a `for-each-ref` pattern does not match a `/`, so each listed
+    // ref is `refs/remotes/<one remote>/<name>`.
+    let mut list = production_git_command(repo_root);
+    list.args([
+        "for-each-ref",
+        "--format=%(refname)",
+        &format!("{REMOTE_TRACKING_PREFIX}*/{name}"),
+    ]);
+    let listed = sparse_check_output(list, "for-each-ref")?;
+    let listed = String::from_utf8_lossy(&listed.stdout);
+    let candidates: Vec<&str> = listed.lines().collect();
+
+    Ok(match candidates.as_slice() {
+        [only] => (*only).to_owned(),
+        _ => name.to_owned(),
+    })
+}
+
 /// Parse every `--sparse-exclude` value, and make sure that git tracks each
 /// one as a directory at the ref that the new worktree checks out.
 ///
 /// That ref is `checkout_ref` when the user gives `-c <ref>`, and
-/// [`SPARSE_DEFAULT_REF`] when not. The check reads the ref and not the disk,
+/// [`SPARSE_DEFAULT_REF`] when not. `checkout_ref` goes through
+/// [`resolve_checkout_ref`] first, because `git worktree add` sends a name
+/// that names no commit through the checkout DWIM of git. Each message still
+/// names `checkout_ref` as the user typed it. The check reads the ref and not the disk,
 /// because the files of the new worktree come from the ref. Git runs in
 /// `repo_root`, the main worktree.
 ///
@@ -844,10 +934,20 @@ fn resolve_sparse_excludes(
     raw: &[String],
 ) -> Result<Vec<SparseExcludeDir>, SparseExcludeError> {
     let dirs = parse_sparse_excludes(raw)?;
+    // A run without the flag asks git nothing, so a plain `-c <ref>` runs
+    // exactly the git children it ran before the flag existed.
+    if dirs.is_empty() {
+        return Ok(dirs);
+    }
+
     let at_ref = checkout_ref.unwrap_or(SPARSE_DEFAULT_REF);
+    let tree_ref = match checkout_ref {
+        Some(name) => resolve_checkout_ref(repo_root, name)?,
+        None => SPARSE_DEFAULT_REF.to_owned(),
+    };
 
     for dir in &dirs {
-        if !tracks_directory(repo_root, at_ref, dir)? {
+        if !tracks_directory(repo_root, at_ref, &tree_ref, dir)? {
             return Err(SparseExcludeError::NotTrackedDirectory {
                 dir: dir.clone(),
                 at_ref: at_ref.to_owned(),
