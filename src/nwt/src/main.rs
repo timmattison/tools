@@ -1510,6 +1510,33 @@ fn branch_exists(repo_root: &Path, branch: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// The exit status of `git show-ref --verify` for a ref that is not there.
+const SHOW_REF_MISSING_STATUS: i32 = 1;
+
+/// True when git answers that `branch` is not a branch of the repository at
+/// `repo_root`.
+///
+/// `git show-ref --verify --quiet refs/heads/<branch>` exits
+/// [`SHOW_REF_MISSING_STATUS`] for a branch that is not there. Each other
+/// answer, a git that does not start included, is not a known absence. So a
+/// cleanup that deletes a branch only when it was absent before the run never
+/// deletes a branch that git did not report on.
+///
+/// [`branch_exists`] asks the same question for another purpose. It takes each
+/// failure as "not there", and that reading is the safe one for a failed add.
+fn branch_known_absent(repo_root: &Path, branch: &str) -> bool {
+    let mut show_ref = production_git_command(repo_root);
+    show_ref
+        .args(["show-ref", "--verify", "--quiet"])
+        .arg(format!("refs/heads/{branch}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    show_ref
+        .status()
+        .is_ok_and(|status| status.code() == Some(SHOW_REF_MISSING_STATUS))
+}
+
 /// A production `git` command that runs in `dir`.
 ///
 /// Each git child that the sparse checkout adds starts here, so none of them
@@ -1768,6 +1795,11 @@ fn try_create_worktree(
     } else {
         nearest_existing_ancestor(Path::new(worktree_path))
     };
+    // Git's checkout DWIM can make a local branch for `-c <ref>`. The cleanup
+    // deletes that branch only when git said before the add that it was not
+    // there, so a branch that the user had stays.
+    let checkout_branch_absent = !sparse_excludes.is_empty()
+        && checkout_ref.is_some_and(|name| branch_known_absent(repo_root, name));
 
     let mut cmd = Command::new("git");
     shed_inherited_git_environment_keeping_user_intent(&mut cmd);
@@ -1840,7 +1872,15 @@ fn try_create_worktree(
             Ok(head) => head,
             Err(message) => {
                 // `-b <branch>` and a random name make the branch in the add.
-                let made_branch = checkout_ref.is_none().then_some(branch_name);
+                // `-c <ref>` makes one only through git's checkout DWIM, and
+                // only when no branch of that name was there before the add.
+                let made_branch = match checkout_ref {
+                    None => Some(branch_name),
+                    Some(name) if checkout_branch_absent && branch_exists(repo_root, name) => {
+                        Some(name)
+                    }
+                    Some(_) => None,
+                };
                 remove_broken_sparse_worktree(
                     repo_root,
                     worktree,
@@ -1871,9 +1911,11 @@ fn try_create_worktree(
         // reword. The question is asked only after the add failed, so it costs
         // nothing on the path that works.
         //
-        // A checkout run makes no branch, so it can have no branch collision.
-        // Its `branch_name` is the directory name, which can name a branch by
-        // coincidence, and asking about that one would report the wrong reason.
+        // A checkout run makes a branch only through git's checkout DWIM, and
+        // git does that only when no branch of that name exists. So a checkout
+        // run can have no branch collision. Its `branch_name` is the directory
+        // name, which can name a branch by coincidence, and asking about that
+        // one would report the wrong reason.
         if checkout_ref.is_none() && branch_exists(repo_root, branch_name) {
             return WorktreeResult::BranchExists(branch_name.to_string());
         }
