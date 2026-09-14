@@ -1682,6 +1682,86 @@ fn a_sha256_repository_gives_the_hook_a_null_object_id_of_64_zeros() {
     );
 }
 
+/// The tracked directory below the root that the hook of
+/// [`the_post_checkout_hook_finds_the_worktree_root_from_a_subdirectory`]
+/// changes to before it asks git.
+const HOOK_SUB_DIR: &str = "sub";
+
+/// What the hook of a run wrote about the worktree that it ran in: the top
+/// level that `git rev-parse --show-toplevel` gave, resolved, and the output of
+/// `git status --short`.
+///
+/// The hook writes one file of each kind into `logs`, and names the files after
+/// the directory of the worktree. `-b <branch>` names that directory after the
+/// branch.
+#[cfg(unix)]
+fn what_the_hook_saw(logs: &Path, branch: &str) -> (PathBuf, String) {
+    let read = |extension: &str| {
+        let path = logs.join(format!("{branch}.{extension}"));
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("the hook must write {}: {e}", path.display()))
+    };
+
+    let top = read("top");
+    (canonical(Path::new(top.trim_end())), read("status"))
+}
+
+/// A `post-checkout` hook that changes to a subdirectory of the worktree finds
+/// the worktree root and a clean status, on the sparse path as under a plain
+/// add.
+///
+/// `git worktree add` runs the hook without `GIT_DIR`, so git finds the
+/// worktree from the working directory of the hook. `git hook run` sets
+/// `GIT_DIR` for the hook. Git takes the working directory as the top level
+/// when `GIT_DIR` is set and `GIT_WORK_TREE` is not. Without `GIT_WORK_TREE`,
+/// the hook thus sees `.../sub` as the root, each file of `sub/` as deleted, and
+/// `f` as untracked.
+///
+/// The plain run is the control. It states the answer that the sparse run must
+/// give, so the test holds parity and not a guess.
+#[cfg(unix)]
+#[test]
+fn the_post_checkout_hook_finds_the_worktree_root_from_a_subdirectory() {
+    let (_temp, repo) = repo_with_files(&[&format!("{HOOK_SUB_DIR}/f"), "heavy/a"]);
+    let hooks = tempfile::TempDir::new().expect("create the hooks directory");
+    let logs = tempfile::TempDir::new().expect("create the hook log directory");
+    let log_dir = canonical(logs.path());
+    let log_dir_text = log_dir.to_str().expect("utf-8 log directory");
+    assert!(
+        !log_dir_text.contains('\''),
+        "the log directory goes into single quotes, so it cannot hold one: {log_dir_text}"
+    );
+
+    support::install_post_checkout_hook(
+        &repo,
+        hooks.path(),
+        &format!(
+            "name=$(basename \"$(pwd -P)\")\n\
+             cd {HOOK_SUB_DIR} || exit 90\n\
+             git rev-parse --show-toplevel > '{log_dir_text}'/\"$name\".top\n\
+             git status --short > '{log_dir_text}'/\"$name\".status\n"
+        ),
+    );
+
+    let plain = unique_branch("hook-root-plain");
+    let sparse = unique_branch("hook-root-sparse");
+    created_worktree(&run_nwt(&repo, &plain, &[]));
+    created_worktree(&run_nwt(&repo, &sparse, &["--sparse-exclude", HEAVY_DIR]));
+
+    for branch in [&plain, &sparse] {
+        let (top, status) = what_the_hook_saw(&log_dir, branch);
+        assert_eq!(
+            top,
+            expected_worktree(&repo, branch),
+            "the hook of the run of {branch} must find the worktree root from {HOOK_SUB_DIR}/"
+        );
+        assert_eq!(
+            status, "",
+            "the hook of the run of {branch} must see a clean worktree from {HOOK_SUB_DIR}/"
+        );
+    }
+}
+
 /// A value that the lexical rules refuse exits with its own code, names the
 /// value on stderr, prints no path, and makes nothing: no worktrees directory,
 /// no worktree, and no branch.
