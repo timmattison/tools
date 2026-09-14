@@ -165,7 +165,7 @@ comes first. An empty cell and a plan with no such column are the common case an
 plan that names one blocker or more is one graph, so its answer is one row for each step, in the \
 order of the work, and one start line for each issue somebody can begin now.\n\n\
 A plan written as JSON is a fifth shape of input, and it is the shape a program hands back. `wn` \
-reads the `streams` of it and nothing else: the order array of a stream is a chain, and the \
+reads the `streams` of it for the answer: the order array of a stream is a chain, and the \
 waitsFor of a step names the work that comes before that step. JSON is tried first and claimed on \
 one character, because a text whose first character that is not a space is `{` is a JSON document \
 and nothing else `wn` reads starts that way. A Markdown code fence around the document comes off \
@@ -196,6 +196,15 @@ tool says so on the line under the answer.\n\n\
 what comes back. It is the one way past a plan that is still on the clipboard and no longer \
 true. A plan older than a day says its age under the answer, because a plan is a claim about a \
 backlog and a backlog moves.\n\n\
+A plan on the clipboard is for one repository, because the same numbers name other work in \
+another repository. A JSON plan names its repository in `repo`. When that repository is not the \
+repository of the run, `wn` stops before it asks GitHub. The repository of the run is the one \
+--repo names, or else the repository of the current directory. Letter case does not count. The \
+message names the two repositories and two repairs. Run `wn --repo owner/name` to answer the plan \
+on the clipboard. CAUTION: `wn --refresh` REPLACES WHAT IS ON THE CLIPBOARD. Run it to build a new \
+plan. A plan from an argument or a pipe gets no check, and a plan this run built gets none either. \
+A text that names no repository gets no check: a chain, a table, a picture, and a JSON plan \
+without `repo`.\n\n\
 Set WN_NO_CLAUDE to any value with a character in it to turn the run off, which gives back the \
 error a run with no chain printed before. Set WN_PLAN_TIMEOUT to a number of seconds to wait \
 something other than 600 for it.\n\n\

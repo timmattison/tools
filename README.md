@@ -1490,7 +1490,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       ]
     }
     ```
-  - `wn` reads `streams` and nothing else. The `order` array of a stream is a chain, so each step
+  - `wn` reads `streams` for the answer. The `order` array of a stream is a chain, so each step
     of it comes before the step after it. In one step, `issue` is the issue number, `pr` is the
     pull request that does the work of that issue — the same pair `PR#344 (#341)` writes, and it
     reaches the report as the row `#102 (#94)` — and `waitsFor` is the set of numbers that come
@@ -1520,7 +1520,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     run and names the version it read beside the version `wn` knows, because a consumer that
     guesses at a schema it does not know answers with the wrong plan. A document that is not the
     schema — a missing `streams`, a stream with no `order`, a step with no `issue`, a number that
-    is not a number — names the path in the document, so `streams[1].order[0].issue` says where to
+    is not a number, a `repo` not written as `owner/name` — names the path in the document, so `streams[1].order[0].issue` says where to
     look. A cycle names the numbers that hold the knot, as it does for a picture and for a `Waits
     for` column. A `waitsFor` that names a step of its own stream is refused by none of those: it
     is an edge `order` already carries.
@@ -1596,6 +1596,31 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     Run wn --refresh to build a new one.` — because a plan is a claim about a backlog, a backlog
     moves, and that note is the only thing that would tell the reader. `wn` reads the `generated`
     field of the document for it, and a document that names no moment says nothing about its age.
+  - A plan on the clipboard is for one repository. A JSON plan names that repository in `repo`,
+    written as `owner/name`, and the `plan-parallel-work` skill writes it into every JSON plan.
+    `wn` compares it with the repository of the run, which is the repository `--repo` names, or
+    else the repository of the current directory. Letter case does not count, because GitHub
+    names a repository without regard to it. When the two are not the same, `wn` stops before it
+    asks GitHub anything and exits `2`:
+
+    ```
+    $ wn
+    wn: the plan on the clipboard is for owner/a, and this run is for owner/b.
+    CAUTION: wn --refresh REPLACES WHAT IS ON THE CLIPBOARD. WHAT IS ON IT NOW IS LOST.
+    Run wn --refresh to build a new plan, or run wn --repo owner/a to answer the plan on the clipboard.
+    ```
+
+    Issue numbers repeat across repositories. When `wn` answers a stale plan against another
+    repository, it names real issues of that repository. The rows show the wrong titles and the
+    wrong states, and the start line sends the reader to an issue that is not in the plan. The
+    message writes nothing out of the clipboard except the repository the plan names, because a
+    clipboard holds a password as readily as it holds a plan.
+  - Only a text from the clipboard gets that check. A plan the reader passes as an argument or on
+    standard input is not refused, because the reader chose it on purpose and `wn --refresh` does
+    not replace it. A plan this run built is not refused either. A text that names no repository
+    gets no check and answers as before: a chain, the records of a plan, a Markdown table, a
+    box-drawn table, a picture, and a JSON document without `repo`. The run asks the skill for
+    `--json`, so a plan `wn` built and kept names its repository in the usual case.
   - Set `WN_NO_CLAUDE` to any value with a character in it to turn the run off, which gives back
     the error a run with no chain printed before. An empty value leaves it on, because an exported
     but empty variable is a common accident. `WN_PLAN_TIMEOUT` names the seconds a run may take,
