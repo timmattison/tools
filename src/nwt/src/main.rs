@@ -4412,6 +4412,65 @@ mod tests {
         );
     }
 
+    /// The text of `document` from the line `heading` to the next line that
+    /// starts with `next_heading`. An empty string when `heading` is not there.
+    fn doc_section<'a>(document: &'a str, heading: &str, next_heading: &str) -> &'a str {
+        document
+            .split_once(heading)
+            .map_or("", |(_, rest)| {
+                rest.split_once(next_heading)
+                    .map_or(rest, |(section, _)| section)
+            })
+    }
+
+    /// True when one line of `section`, without its indentation, is `sample`.
+    fn has_sample_line(section: &str, sample: &str) -> bool {
+        section.lines().any(|line| line.trim() == sample)
+    }
+
+    /// The sparse notice and the `Skipped:` line of a `.env` under an excluded
+    /// directory show as samples in two documents. The SPARSE WORKTREES section
+    /// of `--help` holds them, and so does the `## nwt` section of the README.
+    ///
+    /// The samples are copies, and only the functions run. So this test builds
+    /// each line with [`sparse_exclude_notice`] and
+    /// [`skipped_under_excluded_message`], and each document must hold that
+    /// line as a line of its own. Change the wording in the code alone, and
+    /// this test fails and names the document that did not change.
+    ///
+    /// `include_str!` stays in `#[cfg(test)]`, so the README goes into the test
+    /// binary only and not into the `nwt` that ships.
+    #[test]
+    fn test_help_and_readme_samples_match_the_sparse_lines() {
+        use clap::CommandFactory;
+
+        let heavy = sparse_dirs(&["heavy"]);
+        let notice = sparse_exclude_notice(&heavy);
+        let skipped = skipped_under_excluded_message(Path::new("heavy/.env"), &heavy[0]);
+
+        let long_about = Cli::command()
+            .get_long_about()
+            .expect("nwt sets long_about")
+            .to_string();
+        let help_section = doc_section(&long_about, "\nSPARSE WORKTREES:\n", "\nEXAMPLES:\n");
+        let readme_section = doc_section(
+            include_str!("../../../README.md"),
+            "\n## nwt (new worktree)\n",
+            "\n## ",
+        );
+
+        for sample in [&notice, &skipped] {
+            assert!(
+                has_sample_line(help_section, sample),
+                "the SPARSE WORKTREES section of --help must hold the runtime line: {sample}"
+            );
+            assert!(
+                has_sample_line(readme_section, sample),
+                "the ## nwt section of README.md must hold the runtime line: {sample}"
+            );
+        }
+    }
+
     // One mutation fixture for each rule of `escape_sparse_pattern`. Remove one
     // rule from the function, and exactly one of these tests fails. Each input
     // holds the character two times where it can, so a rule that escapes only
