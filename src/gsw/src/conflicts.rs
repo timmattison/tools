@@ -10,11 +10,13 @@
 //! the user knows.
 
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use gitscratch::Conflicts;
+use anyhow::Context as _;
+use gitscratch::{Conflicts, Repo, Uncommitted};
 
 use crate::lines::LineSplitter;
+use crate::repo::{branch_name, RepoHandle};
 
 /// The two tools a notice names, spelled once for every sentence that names
 /// them.
@@ -136,15 +138,121 @@ pub(crate) fn running_notice(branch: &str) -> String {
 ///
 /// Returns `None` when `stop` was set before a replay started. The run was
 /// abandoned, and nobody reads its outcome.
+///
+/// The two replays run one after the other on the calling thread, and never
+/// at the same time. Two scratch worktrees at once double the load on the disk
+/// and the processor, and the user sees no gain from that.
 pub(crate) fn measure(
     workdir: &Path,
     stop: &AtomicBool,
     on_started: impl FnOnce(&str),
 ) -> Option<ConflictsOutcome> {
-    let _ = (workdir, stop, on_started);
-    Some(ConflictsOutcome::Refused {
-        reason: String::new(),
+    let (repo, branch) = match open_against_default(workdir) {
+        Ok(opened) => opened,
+        Err(err) => {
+            return Some(ConflictsOutcome::Refused {
+                reason: reason(&err),
+            })
+        }
+    };
+
+    if head_is_on(workdir, &branch) {
+        return Some(ConflictsOutcome::OnDefault { branch });
+    }
+
+    on_started(&branch);
+
+    // Read before any scratch worktree exists. A `TMPDIR` under the repository
+    // puts the scratch worktree inside it, and `git status` then counts the
+    // scratch worktree as uncommitted work of the user. A count that cannot be
+    // read costs the note and not the answer, as it does in `grind`.
+    let dirty = repo.uncommitted_files().unwrap_or_default() != Uncommitted::new(0);
+
+    if stop.load(Ordering::SeqCst) {
+        return None;
+    }
+    let rebase = rebase_onto(&repo, &branch).map_err(|err| reason(&err));
+
+    // The check between the two replays. A quit waits only for the replay in
+    // flight, and the second replay never starts.
+    if stop.load(Ordering::SeqCst) {
+        return None;
+    }
+    let merge = merge_from(&repo, &branch).map_err(|err| reason(&err));
+
+    Some(ConflictsOutcome::Measured {
+        branch,
+        rebase,
+        merge,
+        dirty,
     })
+}
+
+/// Open the repository at `workdir`, and choose the branch to measure against.
+///
+/// The same calls `grind` and `grime` make, in the same order, before any
+/// scratch worktree exists. A revision that does not resolve then fails as a
+/// refusal with its own reason, and not as a failed replay.
+///
+/// # Errors
+///
+/// Returns an error if `workdir` is not inside a repository, if HEAD holds no
+/// commit, or if no default branch resolves.
+fn open_against_default(workdir: &Path) -> anyhow::Result<(Repo, String)> {
+    let repo = Repo::open(workdir)?;
+    repo.resolve("HEAD")
+        .context("there is no commit at HEAD to measure from")?;
+    let branch = repo.branch_or_default(None)?;
+    repo.resolve(&branch)?;
+    Ok((repo, branch))
+}
+
+/// Whether the branch checked out at `workdir` is `branch`.
+///
+/// Read through `gix` in this process, so the check starts no git child. A
+/// `gix::Repository` cannot cross a thread, so the check opens its own on the
+/// thread that measures.
+///
+/// A detached HEAD is on no branch, so it is never on `branch`. A repository
+/// that `gix` cannot open is not on `branch` either. Both then measure as
+/// usual, and a replay of the default branch onto itself reports clean, which
+/// is the correct answer.
+fn head_is_on(workdir: &Path, branch: &str) -> bool {
+    RepoHandle::discover(workdir).is_some_and(|handle| branch_name(handle.repo()) == branch)
+}
+
+/// Replay a rebase of HEAD onto `branch` in a scratch worktree.
+///
+/// The scratch worktree drops at the end of this function, and its `Drop`
+/// removes the worktree from the repository. So the worktree is gone before
+/// the next replay starts.
+///
+/// # Errors
+///
+/// Returns an error if the scratch worktree cannot be made, or if the replay
+/// fails without a conflict to measure.
+fn rebase_onto(repo: &Repo, branch: &str) -> anyhow::Result<Conflicts> {
+    let scratch = repo.scratch("HEAD")?;
+    scratch.replay_rebase(branch)
+}
+
+/// Replay a merge of `branch` into HEAD in a scratch worktree.
+///
+/// The scratch worktree drops at the end of this function, as it does in
+/// [`rebase_onto`].
+///
+/// # Errors
+///
+/// Returns an error if the scratch worktree cannot be made, or if git refuses
+/// the merge and leaves no conflict to measure.
+fn merge_from(repo: &Repo, branch: &str) -> anyhow::Result<Conflicts> {
+    let scratch = repo.scratch("HEAD")?;
+    scratch.replay_merge(branch)
+}
+
+/// The reason in `err`, with every cause in its chain, as one row.
+fn reason(err: &anyhow::Error) -> String {
+    one_row(&format!("{err:#}"))
 }
 
 /// The words for the result of one replay: `operation clean`, the counts, or
