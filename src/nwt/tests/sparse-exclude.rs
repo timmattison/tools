@@ -1275,6 +1275,69 @@ fn nothing_the_hook_step_writes_to_stdout_reaches_the_stdout_of_nwt() {
     }
 }
 
+/// In a repository whose object ids are SHA-256, the hook of a sparse run gets
+/// a null object id of 64 zeros, as a plain add gives it.
+///
+/// A null object id of 40 zeros is the SHA-1 value. A hook that compares the
+/// old ref with the null object id of its own repository does not find a new
+/// worktree with it.
+#[cfg(unix)]
+#[test]
+fn a_sha256_repository_gives_the_hook_a_null_object_id_of_64_zeros() {
+    const SHA256_HEX_LENGTH: usize = 64;
+
+    let temp = tempfile::TempDir::new().expect("create a temporary directory");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).expect("create the repository directory");
+    for arguments in [
+        &["init", "--quiet", "--object-format=sha256"][..],
+        &["config", "user.email", "test@example.com"],
+        &["config", "user.name", "Test User"],
+        &["config", "maintenance.auto", "false"],
+    ] {
+        assert!(run_git(&repo, arguments), "git {arguments:?} failed");
+    }
+    for file in KEPT_FILES.iter().chain(HEAVY_FILES) {
+        write_file(&repo, file, &format!("{file}\n"));
+    }
+    assert!(run_git(&repo, &["add", "--", "."]), "git add failed");
+    assert!(
+        run_git(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "add the tree"]
+        ),
+        "git commit failed"
+    );
+
+    let hooks = tempfile::TempDir::new().expect("create the hooks directory");
+    let log = hooks.path().join(HOOK_LOG);
+    install_recording_hook(&repo, hooks.path(), &log);
+
+    created_worktree(&run_nwt(
+        &repo,
+        &unique_branch("hook-sha256"),
+        &["--sparse-exclude", HEAVY_DIR],
+    ));
+
+    let head = git_stdout(&repo, &["rev-parse", "HEAD"])
+        .trim_end()
+        .to_owned();
+    assert_eq!(
+        head.len(),
+        SHA256_HEX_LENGTH,
+        "the fixture must be a SHA-256 repository"
+    );
+    let recorded = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(
+        recorded.lines().collect::<Vec<&str>>(),
+        vec![format!(
+            "{} {head} 1|{SAW_NO_HEAVY}",
+            "0".repeat(SHA256_HEX_LENGTH)
+        )],
+        "the hook must get the SHA-256 null object id"
+    );
+}
+
 /// A value that the lexical rules refuse exits with its own code, names the
 /// value on stderr, prints no path, and makes nothing: no worktrees directory,
 /// no worktree, and no branch.
