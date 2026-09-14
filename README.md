@@ -1366,7 +1366,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     every issue, and a body names a blocker in the shape the `to-issues` skill writes: a list item
     or a paragraph under a `Blocked by` or `Depends on` heading, or a block that starts with that
     label, as in `**Blocked by:** #12`. A heading is a block too, so `## Blocked by #12` names #12
-    on the line of the heading. Only the numbers at the start of a block count, so `It can run
+    on the line of the heading. The URL of an issue or a pull request of the repository, as in
+    `https://github.com/owner/name/issues/12`, names #12 the same way, and a URL of another
+    repository names nothing. Only the numbers at the start of a block count, so `It can run
     beside #169.` under the heading blocks nothing. A phrase in the middle of a sentence counts
     for nothing either, because a line of a tracker such as `#12 (blocked by #11)` says what blocks
     another issue. A number struck through, as in `~~#21~~`, counts for nothing, because an author

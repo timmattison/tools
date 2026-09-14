@@ -32,9 +32,11 @@
 //!
 //! # Only the numbers at the start of a block count
 //!
-//! `#3, #4 and #5` and `#5 (test-taking UI)` are blockers. A block that starts
-//! with a word is prose about other work, so `It can run beside #169.` under the
-//! heading names no blocker. A paragraph that wraps is one block, so a line that
+//! `#3, #4 and #5` and `#5 (test-taking UI)` are blockers, and so is the URL
+//! of an issue or a pull request of the repository, as in
+//! `https://github.com/owner/name/issues/5`. A block that starts with a word is
+//! prose about other work, so `It can run beside #169.` under the heading names
+//! no blocker. A paragraph that wraps is one block, so a line that
 //! happens to start with a number is still inside that prose. A number struck
 //! through, as in `~~#21~~`, counts for nothing, because an author strikes a
 //! blocker through to take it back.
@@ -80,6 +82,19 @@ const MAX_HEADING_LEVEL: usize = 6;
 /// The most digits the number of an ordered list item has.
 const MAX_ITEM_DIGITS: usize = 9;
 
+/// The schemes the URL of an issue starts with.
+const SCHEMES: &[&str] = &["https://", "http://"];
+
+/// The parts of a path that name an issue and a pull request, as in
+/// `issues/51` and `pull/52`.
+const ISSUE_PATHS: &[&str] = &["issues", "pull"];
+
+/// The mark that opens an autolink, as in `<https://github.com/o/n/issues/5>`.
+const AUTOLINK_OPEN: char = '<';
+
+/// The mark that closes an autolink.
+const AUTOLINK_CLOSE: char = '>';
+
 /// One block of a body.
 enum Block {
     /// A heading, its level, and its text with the marks taken off.
@@ -106,14 +121,18 @@ struct Open {
 /// The numbers `body` names as work that comes before its issue, in the order
 /// the body writes them, each one once.
 ///
-/// A number of another repository is read past and names nothing, and so is a
-/// span struck through and a number GitHub cannot give an issue: zero, or one
-/// too large for a `u64`.
+/// `repo` is the repository of the issue. A block names a blocker as a number,
+/// as in `#51`, or as the URL of an issue or a pull request of `repo`, as in
+/// `https://github.com/owner/name/issues/51`.
+///
+/// A number or a URL of another repository is read past and names nothing, and
+/// so is a span struck through and a number GitHub cannot give an issue: zero,
+/// or one too large for a `u64`.
 ///
 /// A heading ends or opens a section before the walk reads its own text. So a
 /// heading that ends a section names nothing unless it starts with a label.
 #[must_use]
-pub fn read(body: &str, _repo: &Repo) -> Vec<IssueNumber> {
+pub fn read(body: &str, repo: &Repo) -> Vec<IssueNumber> {
     let mut numbers: Vec<IssueNumber> = Vec::new();
     // The level of the heading whose section the walk stands in.
     let mut section: Option<usize> = None;
@@ -122,7 +141,7 @@ pub fn read(body: &str, _repo: &Repo) -> Vec<IssueNumber> {
             Block::Heading { level, text } => (Some(level), text),
             Block::Text(text) => (None, text),
         };
-        let (labelled, named) = head_of(&text);
+        let (labelled, named) = head_of(&text, repo);
         if let Some(level) = level {
             if section.is_some_and(|open| level <= open) {
                 section = None;
@@ -389,8 +408,8 @@ fn after_label(text: &str) -> Option<&str> {
 }
 
 /// Whether the text of a block starts with a label, and the numbers at its
-/// start.
-fn head_of(text: &str) -> (bool, Vec<IssueNumber>) {
+/// start. `repo` is the repository of the issue.
+fn head_of(text: &str, repo: &Repo) -> (bool, Vec<IssueNumber>) {
     let mut rest = undecorated(without_task_box(text));
     let labelled = match after_label(rest) {
         Some(after) => {
@@ -404,7 +423,7 @@ fn head_of(text: &str) -> (bool, Vec<IssueNumber>) {
     let mut numbers: Vec<IssueNumber> = Vec::new();
     loop {
         rest = undecorated(rest);
-        if let Some((number, after)) = local_reference(rest) {
+        if let Some((number, after)) = reference(rest, repo) {
             numbers.extend(number);
             rest = after;
         } else if let Some(after) = read_past(rest) {
@@ -421,7 +440,7 @@ fn head_of(text: &str) -> (bool, Vec<IssueNumber>) {
         rest = undecorated(rest);
         if let Some(after) = separator(rest) {
             rest = after;
-        } else if local_reference(rest).is_none() && read_past(rest).is_none() {
+        } else if reference(rest, repo).is_none() && read_past(rest).is_none() {
             break;
         }
     }
@@ -440,7 +459,18 @@ fn without_task_box(text: &str) -> &str {
         .unwrap_or(text)
 }
 
-/// The number of this repository `text` starts with, and the text after it, or
+/// The number of this repository `text` starts with, as `#51` or as the URL of
+/// an issue of `repo`, and the text after it, or `None` when it starts with
+/// neither.
+///
+/// The number is `None` for a URL of another repository, and when GitHub
+/// cannot give an issue that number. The text after it still comes back, so
+/// the caller reads past it.
+fn reference<'a>(text: &'a str, repo: &Repo) -> Option<(Option<IssueNumber>, &'a str)> {
+    local_reference(text).or_else(|| url_reference(text, repo))
+}
+
+/// The number `text` starts with, written as `#51`, and the text after it, or
 /// `None` when it starts with no such number.
 ///
 /// The number is `None` when GitHub cannot give an issue that number. The text
@@ -460,10 +490,89 @@ fn local_reference(text: &str) -> Option<(Option<IssueNumber>, &str)> {
     Some((digits.parse().ok().and_then(IssueNumber::new), after))
 }
 
+/// The number of the URL of an issue or a pull request that `text` starts
+/// with, and the text after the URL, or `None` when it starts with no such URL.
+///
+/// The URL is a scheme of [`SCHEMES`], a host, the owner and the name, and then
+/// a path of [`ISSUE_PATHS`] and the number, as in
+/// `https://github.com/owner/name/issues/51`. A slash after the number and a
+/// fragment such as `#issuecomment-7` are part of the URL. An autolink puts
+/// [`AUTOLINK_OPEN`] and [`AUTOLINK_CLOSE`] around it. Any host counts, because
+/// `gh` serves an enterprise host too and [`Repo`] holds no host.
+///
+/// The number is `None` when the owner and the name are not those of `repo`,
+/// and when GitHub cannot give an issue that number. The comparison ignores
+/// ASCII case, as GitHub does. A URL whose path names something other than an
+/// issue or a pull request, such as a file, gives `None`, so the list ends at
+/// it.
+fn url_reference<'a>(text: &'a str, repo: &Repo) -> Option<(Option<IssueNumber>, &'a str)> {
+    let autolink = text.strip_prefix(AUTOLINK_OPEN);
+    let url = autolink.unwrap_or(text);
+    let after_scheme = SCHEMES.iter().find_map(|scheme| url.strip_prefix(scheme))?;
+    let (_, after_host) = segment(after_scheme, is_host)?;
+    let (owner, after_owner) = segment(after_host, is_name)?;
+    let (name, after_name) = segment(after_owner, is_name)?;
+    let after_path = ISSUE_PATHS
+        .iter()
+        .find_map(|path| after_name.strip_prefix(path)?.strip_prefix('/'))?;
+    let end = after_path
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(after_path.len());
+    if end == 0 {
+        return None;
+    }
+    let (digits, after_digits) = after_path.split_at(end);
+    let rest = after_digits.strip_prefix('/').unwrap_or(after_digits);
+    let rest = rest
+        .strip_prefix('#')
+        .map_or(rest, |fragment| fragment.trim_start_matches(is_fragment));
+    let after = match autolink {
+        Some(_) => rest.strip_prefix(AUTOLINK_CLOSE)?,
+        None => rest,
+    };
+    if after
+        .chars()
+        .next()
+        .is_some_and(|c| is_word(c) || matches!(c, '/' | '#'))
+    {
+        return None;
+    }
+    let same = owner.eq_ignore_ascii_case(repo.owner()) && name.eq_ignore_ascii_case(repo.name());
+    let number = digits.parse().ok().and_then(IssueNumber::new);
+    Some((number.filter(|_| same), after))
+}
+
+/// The run of characters at the start of `text` that `is_part` accepts, and
+/// the text after the slash that ends the run, or `None` when the run is empty
+/// or no slash ends it.
+fn segment(text: &str, is_part: fn(char) -> bool) -> Option<(&str, &str)> {
+    let after = text.trim_start_matches(is_part);
+    let part = text.get(..text.len() - after.len())?;
+    if part.is_empty() {
+        return None;
+    }
+    Some((part, after.strip_prefix('/')?))
+}
+
+/// Whether `c` is a character of the host of a URL, with its port.
+fn is_host(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':')
+}
+
+/// Whether `c` is a character of the owner or the name of a repository.
+fn is_name(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')
+}
+
+/// Whether `c` is a character of the fragment GitHub puts after the URL of an
+/// issue, as in `#issuecomment-7` or `#discussion_r12`.
+fn is_fragment(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-')
+}
+
 /// The text after the number of another repository `text` starts with, as in
 /// `timmattison/muxiavelli#294`, or `None` when it starts with none.
 fn other_reference(text: &str) -> Option<&str> {
-    let is_name = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-');
     let after_owner = text.trim_start_matches(is_name);
     if after_owner.len() == text.len() {
         return None;
