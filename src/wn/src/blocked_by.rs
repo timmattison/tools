@@ -39,10 +39,9 @@
 //! no blocker. A paragraph that wraps is one block, so a line that
 //! happens to start with a number is still inside that prose. A number struck
 //! through, as in `~~#21~~`, counts for nothing, because an author strikes a
-//! blocker through to take it back. Tildes strike through only where GitHub
-//! strikes through ([`after_strike`](crate::strike::after_strike) gives the
-//! rule), so the item `~~#21 ~~ #22`
-//! starts with tildes and names no blocker.
+//! blocker through to take it back. The tildes of a block pair as GitHub pairs
+//! them ([`Strikes`] gives the rule and the Markdown it leaves out), so the item
+//! `~~#21 ~~ #22` starts with tildes and names no blocker.
 //!
 //! This reader acts on what it reads: a blocker it names can refuse a plan. So a
 //! phrase in the middle of a sentence is not read, because a line of a tracker
@@ -53,6 +52,7 @@
 
 use crate::chain::IssueNumber;
 use crate::github::Repo;
+use crate::strike::Strikes;
 
 /// The labels that name work which comes before the issue. A heading carries
 /// one to open a section, and a block carries one at its start. They are ASCII,
@@ -486,9 +486,7 @@ fn is_word(c: char) -> bool {
 /// emoji), the zero width joiner, and the emoji selector.
 ///
 /// A tilde is not decoration. It can open a span struck through, and
-/// [`after_strike`](crate::strike::after_strike) reads past that span, so a
-/// struck label or number names
-/// nothing.
+/// [`read_past`] reads past that span, so a struck label or number names nothing.
 fn is_decoration(c: char) -> bool {
     c.is_whitespace()
         || matches!(
@@ -520,6 +518,7 @@ fn after_label(text: &str) -> Option<&str> {
 /// Whether the text of a block starts with a label, and the numbers at its
 /// start. `repo` is the repository of the issue.
 fn head_of(text: &str, repo: &Repo) -> (bool, Vec<IssueNumber>) {
+    let strikes = Strikes::of(text);
     let mut rest = undecorated(without_task_box(text));
     let labelled = match after_label(rest) {
         Some(after) => {
@@ -536,7 +535,7 @@ fn head_of(text: &str, repo: &Repo) -> (bool, Vec<IssueNumber>) {
         if let Some((number, after)) = reference(rest, repo) {
             numbers.extend(number);
             rest = after;
-        } else if let Some(after) = read_past(rest) {
+        } else if let Some(after) = read_past(rest, &strikes) {
             rest = after;
         } else {
             break;
@@ -550,7 +549,7 @@ fn head_of(text: &str, repo: &Repo) -> (bool, Vec<IssueNumber>) {
         rest = undecorated(rest);
         if let Some(after) = separator(rest) {
             rest = after;
-        } else if reference(rest, repo).is_none() && read_past(rest).is_none() {
+        } else if reference(rest, repo).is_none() && read_past(rest, &strikes).is_none() {
             break;
         }
     }
@@ -698,8 +697,11 @@ fn other_reference(text: &str) -> Option<&str> {
 /// The text after what `text` starts with that names nothing and that a list
 /// continues past, or `None` when it starts with no such thing: a number of
 /// another repository, or a span struck through.
-fn read_past(text: &str) -> Option<&str> {
-    other_reference(text).or_else(|| crate::strike::after_strike(text))
+///
+/// `strikes` holds the strikes of the block, and `text` is the end of that
+/// block.
+fn read_past<'a>(text: &'a str, strikes: &Strikes<'a>) -> Option<&'a str> {
+    other_reference(text).or_else(|| strikes.after(text))
 }
 
 /// The text after the parenthesis that closes the one `text` opens with, or
