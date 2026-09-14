@@ -870,6 +870,10 @@ impl IssueRun {
 ///
 /// An enum and not a `bool`, for the reason [`IssuePress`] gives: the loop does
 /// one thing for each answer, and each answer is one arm of one match.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the loop reads this in a later commit of #496")
+)]
 #[derive(Debug, PartialEq, Eq)]
 enum ConflictsPress {
     /// Start a run.
@@ -890,12 +894,20 @@ enum ConflictsPress {
 /// its outcome a moment before its thread ends, so that answer can say a run
 /// is in flight just after the outcome arrived, and a press then would do
 /// nothing for no reason the user can see.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the loop owns this in a later commit of #496")
+)]
 struct ConflictsRun {
     /// Whether a run is in flight. Set by the press that starts the run, and
     /// cleared by the outcome of that run.
     running: bool,
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the loop owns this in a later commit of #496")
+)]
 impl ConflictsRun {
     /// No run in flight.
     fn new() -> Self {
@@ -908,6 +920,10 @@ impl ConflictsRun {
     /// so every press after it answers nothing until
     /// [`ConflictsRun::finished`].
     fn press(&mut self) -> ConflictsPress {
+        if self.running {
+            return ConflictsPress::Nothing;
+        }
+        self.running = true;
         ConflictsPress::Start
     }
 
