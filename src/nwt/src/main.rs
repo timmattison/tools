@@ -1916,9 +1916,13 @@ fn run_cleanup_step(mut command: Command) -> Result<(), String> {
 ///
 /// # The inherited git environment
 ///
-/// This is the one git child of `nwt` that writes. `git worktree add` makes a
+/// `git worktree add` is the first git child of `nwt` that writes. It makes a
 /// branch ref, a reflog and a whole `worktrees/<name>` directory in the
-/// repository it reaches. Git obeys the environment before it obeys the
+/// repository it reaches. The sparse path adds more children that write:
+/// `git sparse-checkout set`, `git read-tree -mu HEAD`, `git hook run`, and the
+/// `git worktree remove --force` and `git branch -D` of the cleanup. Each of
+/// them starts from [`production_git_command`], which takes the same production
+/// entrance as the add. Git obeys the environment before it obeys the
 /// directory a command was pointed at, so an inherited `GIT_DIR` sends all of
 /// that into another repository — the repository being committed to, for a
 /// `nwt` that a git hook started.
