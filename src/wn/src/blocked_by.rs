@@ -63,6 +63,13 @@ const AND: &str = "and";
 /// makes the line code.
 const MAX_INDENT: usize = 3;
 
+/// The columns of indent, past the content of the list item a line stands in,
+/// that make the line indented code.
+const CODE_INDENT: usize = MAX_INDENT + 1;
+
+/// A tab moves a line to the next column that is a multiple of this width.
+const TAB_WIDTH: usize = 4;
+
 /// The fewest marks that open a code fence.
 const FENCE_MARKS: usize = 3;
 
@@ -118,6 +125,47 @@ struct Open {
     lines: Vec<String>,
 }
 
+/// A column of a line, counted from zero.
+///
+/// A column is not a byte offset. A tab moves to the next column that is a
+/// multiple of [`TAB_WIDTH`], so one tab can fill more than one column.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Column(usize);
+
+impl Column {
+    /// The column a line starts at.
+    const START: Self = Self(0);
+
+    /// The column after `c`, when `c` stands at this column.
+    fn after(self, c: char) -> Self {
+        if c == '\t' {
+            Self(self.0 + TAB_WIDTH - self.0 % TAB_WIDTH)
+        } else {
+            Self(self.0 + 1)
+        }
+    }
+
+    /// The column after `text`, when `text` starts at this column.
+    fn past(self, text: &str) -> Self {
+        text.chars().fold(self, Self::after)
+    }
+
+    /// The number of columns from `start` to this column, or zero when `start`
+    /// stands after this column.
+    fn beyond(self, start: Self) -> usize {
+        self.0.saturating_sub(start.0)
+    }
+}
+
+/// A list item that a line opens.
+struct Item<'a> {
+    /// The text after the marker and the space after it.
+    text: &'a str,
+    /// The column the content of the item starts at. A later line indented to
+    /// this column stands inside the item.
+    content: Column,
+}
+
 /// The numbers `body` names as work that comes before its issue, in the order
 /// the body writes them, each one once.
 ///
@@ -168,6 +216,14 @@ pub fn read(body: &str, repo: &Repo) -> Vec<IssueNumber> {
 /// that wrap it. A code fence, an indented code block, and an HTML comment give
 /// no block, and a block quote gives the blocks inside it.
 ///
+/// A blank line ends a paragraph and a list item, but not the list. The content
+/// column of an item is the column of its text after the marker. A later line
+/// indented to that column stands inside the item, so it is a nested item, a
+/// paragraph, a fence or a comment, as at the start of a line. It is indented
+/// code only at [`CODE_INDENT`] columns past that column. A line indented less
+/// than the column, or a line at another quote depth, ends the item. A line that
+/// continues the open paragraph or item changes no list.
+///
 /// An HTML comment starts at a line that opens with [`COMMENT_OPEN`] and ends at
 /// the first line that holds [`COMMENT_CLOSE`], which can be the line that opens
 /// it. A comment that nothing closes runs to the end of the body. A comment
@@ -178,14 +234,40 @@ fn blocks_of(body: &str) -> Vec<Block> {
     let mut open: Option<Open> = None;
     let mut fence: Option<(char, usize)> = None;
     let mut comment = false;
+    // The content columns of the open list items, outermost first, so the
+    // columns rise. `items_depth` is the quote depth of their list.
+    let mut items: Vec<Column> = Vec::new();
+    let mut items_depth: usize = 0;
     for written in body.split('\n') {
         let mut line = written.strip_suffix('\r').unwrap_or(written);
+        let mut depth: usize = 0;
         while let Some(inner) = quoted(line) {
             line = inner;
+            depth += 1;
         }
 
+        // `rest` is the line as it stands inside the innermost item it is
+        // indented into, with its indent written in spaces. `inside` is the
+        // number of open items the line is indented into.
+        let words = line.trim_start_matches([' ', '\t']);
+        let indent = line
+            .chars()
+            .take_while(|c| matches!(c, ' ' | '\t'))
+            .fold(Column::START, Column::after);
+        let inside = if depth == items_depth {
+            items.partition_point(|column| *column <= indent)
+        } else {
+            0
+        };
+        let top = items
+            .get(..inside)
+            .and_then(<[Column]>::last)
+            .copied()
+            .unwrap_or(Column::START);
+        let rest = format!("{}{words}", " ".repeat(indent.beyond(top)));
+
         if let Some((mark, length)) = fence {
-            if closes_fence(line, mark, length) {
+            if closes_fence(&rest, mark, length) {
                 fence = None;
             }
             continue;
@@ -194,21 +276,40 @@ fn blocks_of(body: &str) -> Vec<Block> {
             comment = !line.contains(COMMENT_CLOSE);
             continue;
         }
-        if let Some(opened) = fence_of(line) {
-            close(&mut open, &mut blocks);
-            fence = Some(opened);
-            continue;
-        }
-        if opens_comment(line) {
-            close(&mut open, &mut blocks);
-            comment = !line.contains(COMMENT_CLOSE);
-            continue;
-        }
         if line.trim().is_empty() {
             close(&mut open, &mut blocks);
             continue;
         }
-        if let Some((level, text)) = atx_heading(line) {
+        let opened = fence_of(&rest);
+        let comment_opens = opens_comment(&rest);
+        let heading = atx_heading(&rest);
+        let underline = setext_underline(&rest);
+        let item = list_item(&rest, top);
+        // A line that starts a new block ends every item it is indented less
+        // than. A line that continues the open block changes no list.
+        let continues = open.as_ref().is_some_and(|block| {
+            opened.is_none()
+                && !comment_opens
+                && heading.is_none()
+                && item.is_none()
+                && (underline.is_none() || block.kind == Kind::Paragraph)
+        });
+        if !continues {
+            items.truncate(inside);
+            items_depth = depth;
+        }
+
+        if let Some(opened) = opened {
+            close(&mut open, &mut blocks);
+            fence = Some(opened);
+            continue;
+        }
+        if comment_opens {
+            close(&mut open, &mut blocks);
+            comment = !line.contains(COMMENT_CLOSE);
+            continue;
+        }
+        if let Some((level, text)) = heading {
             close(&mut open, &mut blocks);
             blocks.push(Block::Heading {
                 level,
@@ -216,7 +317,7 @@ fn blocks_of(body: &str) -> Vec<Block> {
             });
             continue;
         }
-        if let Some(level) = setext_underline(line) {
+        if let Some(level) = underline {
             match open.take() {
                 Some(Open {
                     kind: Kind::Paragraph,
@@ -232,11 +333,12 @@ fn blocks_of(body: &str) -> Vec<Block> {
             }
             continue;
         }
-        if open.is_none() && is_indented_code(line) {
+        if open.is_none() && indent.beyond(top) >= CODE_INDENT {
             continue;
         }
-        if let Some(text) = list_item(line) {
+        if let Some(Item { text, content }) = item {
             close(&mut open, &mut blocks);
+            items.push(content);
             open = Some(Open {
                 kind: Kind::Item,
                 lines: vec![text.trim().to_string()],
@@ -336,16 +438,15 @@ fn setext_underline(line: &str) -> Option<usize> {
         .then_some(if mark == '=' { 1 } else { 2 })
 }
 
-/// Whether `line` is indented far enough to be code.
-fn is_indented_code(line: &str) -> bool {
-    line.starts_with('\t') || unindented(line).is_none()
-}
-
-/// The text of the list item `line` opens, or `None` when it opens none.
+/// The list item `line` opens, or `None` when it opens none. `line` starts at
+/// column `from`.
 ///
 /// The marker can stand at any depth, so a nested item opens a block of its
 /// own and does not continue the item above it.
-fn list_item(line: &str) -> Option<&str> {
+///
+/// The content of the item starts after the spaces that follow the marker. An
+/// item with no text puts its content one column past the marker.
+fn list_item(line: &str, from: Column) -> Option<Item<'_>> {
     let rest = line.trim_start_matches([' ', '\t']);
     let after = if let Some(after) = rest.strip_prefix(['-', '*', '+']) {
         after
@@ -356,10 +457,19 @@ fn list_item(line: &str) -> Option<&str> {
         }
         digits.strip_prefix(['.', ')'])?
     };
-    if after.is_empty() {
-        return Some(after);
+    let text = after.trim_start_matches([' ', '\t']);
+    let marker = from.past(line.get(..line.len() - after.len())?);
+    if text.is_empty() {
+        return Some(Item {
+            text,
+            content: marker.after(' '),
+        });
     }
-    after.strip_prefix([' ', '\t'])
+    let space = after.get(..after.len() - text.len())?;
+    (!space.is_empty()).then(|| Item {
+        text,
+        content: marker.past(space),
+    })
 }
 
 /// Whether `c` is a character of a word, as the boundary after a label and
