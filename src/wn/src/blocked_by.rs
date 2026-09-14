@@ -519,10 +519,23 @@ fn after_group(text: &str) -> Option<&str> {
 
 /// The text after the separator `text` starts with, or `None` when it starts
 /// with none: a comma, an ampersand, a slash, or the word `and`.
+///
+/// A comma and the word `and` after it are one separator, as in the serial
+/// comma of `#3, #4, and #5`. Decoration can stand between the two. An
+/// ampersand and a slash take no word after them.
 fn separator(text: &str) -> Option<&str> {
-    if let Some(after) = text.strip_prefix([',', '&', '/']) {
+    if let Some(after) = text.strip_prefix(',') {
+        return Some(after_and(undecorated(after)).unwrap_or(after));
+    }
+    if let Some(after) = text.strip_prefix(['&', '/']) {
         return Some(after);
     }
+    after_and(text)
+}
+
+/// The text after the word `and` that `text` starts with, or `None` when it
+/// starts with no such word.
+fn after_and(text: &str) -> Option<&str> {
     let head = text.get(..AND.len())?;
     let after = text.get(AND.len()..)?;
     (head.eq_ignore_ascii_case(AND) && !after.chars().next().is_some_and(is_word)).then_some(after)
