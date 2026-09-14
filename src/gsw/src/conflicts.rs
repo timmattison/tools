@@ -11,6 +11,8 @@
 
 use gitscratch::Conflicts;
 
+use crate::lines::LineSplitter;
+
 /// The two tools a notice names, spelled once for every sentence that names
 /// them.
 ///
@@ -28,6 +30,27 @@ macro_rules! tools {
 /// worktree registered in the repository of the user, so the wait is the price
 /// of a clean repository.
 pub(crate) const WAITING_NOTICE: &str = concat!("Waiting for ", tools!(), " to finish…");
+
+/// What joins the parts of a measured line.
+const SEPARATOR: &str = " · ";
+
+/// The last part of a measured line when the work tree held uncommitted work.
+///
+/// `grind` and `grime` say the same thing on stderr. A replay starts from HEAD,
+/// so a count never includes that work.
+const DIRTY_NOTE: &str = "uncommitted work not included";
+
+/// Whether the words of one half name the count of stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopWords {
+    /// Name the stops. A rebase stops once for each commit that conflicts, so
+    /// the count is a measurement.
+    Named,
+    /// Leave the stops out. A merge stops once or never, so the count is a
+    /// constant. `grime` leaves it out for the same reason (see the comment on
+    /// `without_stops` in `src/grime/src/main.rs`).
+    Omitted,
+}
 
 /// What one press of `m` found.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,15 +85,86 @@ pub(crate) enum ConflictsOutcome {
 
 impl ConflictsOutcome {
     /// The one row that reports this outcome under the frame.
+    ///
+    /// The words for a count come only from the phrases of `gitscratch`, so
+    /// gsw, `grind` and `grime` never give one number two names.
+    ///
+    /// The row is not cut to a width here. The overlay under the frame cuts
+    /// every row it paints to the width of the pane.
     pub(crate) fn line(&self) -> String {
-        String::new()
+        match self {
+            Self::OnDefault { branch } => format!("on {branch} — nothing to compare"),
+            Self::Refused { reason } => {
+                format!(concat!(tools!(), " failed: {}"), one_row(reason))
+            }
+            Self::Measured {
+                branch,
+                rebase,
+                merge,
+                dirty,
+            } => {
+                let mut parts = vec![
+                    half("rebase", rebase, StopWords::Named),
+                    half("merge", merge, StopWords::Omitted),
+                ];
+                if *dirty {
+                    parts.push(DIRTY_NOTE.to_owned());
+                }
+                format!("{branch}: {}", parts.join(SEPARATOR))
+            }
+        }
     }
 }
 
 /// The notice on the bottom row while a run measures against `branch`.
+///
+/// The notice does not fade. It tells the user that a press of `m` does
+/// nothing until the run ends.
 pub(crate) fn running_notice(branch: &str) -> String {
-    let _ = branch;
-    String::new()
+    format!(concat!("Running ", tools!(), " against {}…"), branch)
+}
+
+/// The words for the result of one replay: `operation clean`, the counts, or
+/// `operation failed: reason`.
+///
+/// A failed half shows its reason and no number. A number in the line must
+/// never be a guess.
+fn half(operation: &str, result: &Result<Conflicts, String>, stops: StopWords) -> String {
+    match result {
+        Err(reason) => format!("{operation} failed: {}", one_row(reason)),
+        Ok(conflicts) if conflicts.is_clean() => format!("{operation} clean"),
+        Ok(conflicts) => {
+            let cost = format!(
+                "{} in {}",
+                conflicts.hunks().phrase(),
+                conflicts.files().phrase()
+            );
+            match stops {
+                StopWords::Named => format!("{operation} {cost}, {}", conflicts.stops().phrase()),
+                StopWords::Omitted => format!("{operation} {cost}"),
+            }
+        }
+    }
+}
+
+/// `text` as one row that is safe to paint: no escape sequence, no control
+/// character, and each run of whitespace as one space.
+///
+/// An error from `gitscratch` carries the stdout and the stderr of git, so it
+/// can span many lines. The overlay under the frame measures a row in display
+/// columns, and a newline or an escape sequence draws a different number of
+/// columns than it measures. [`LineSplitter`] is the one place in gsw that makes
+/// the text of a child process safe to paint, so this function uses it and does
+/// not keep a second copy of those rules.
+fn one_row(text: &str) -> String {
+    let mut splitter = LineSplitter::new();
+    let mut lines = splitter.feed(text.as_bytes());
+    lines.extend(splitter.finish());
+    lines
+        .iter()
+        .flat_map(|line| line.split_whitespace())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -151,7 +245,10 @@ mod tests {
         let merge = conflicted(&[("a.txt", 2), ("b.txt", 2)], 2);
         let line = measured(Ok(clean()), Ok(merge), false).line();
         assert_eq!(line, "main: rebase clean · merge 4 hunks in 2 files");
-        assert!(!line.contains("stop"), "the merge half named its stops: {line}");
+        assert!(
+            !line.contains("stop"),
+            "the merge half named its stops: {line}"
+        );
     }
 
     #[test]
@@ -223,7 +320,10 @@ mod tests {
             "main: rebase clean · merge failed: the merge failed and left nothing to resolve: \
              fatal: refusing",
         );
-        assert!(!failed_half.contains('\n'), "the line spans rows: {failed_half:?}");
+        assert!(
+            !failed_half.contains('\n'),
+            "the line spans rows: {failed_half:?}"
+        );
     }
 
     /// The overlay under the frame cuts a row to the width of the pane, and it
@@ -234,7 +334,10 @@ mod tests {
         let outcome = ConflictsOutcome::Refused {
             reason: "\u{1b}[31mfatal\u{1b}[0m: bad\u{7} revision".to_owned(),
         };
-        assert_eq!(outcome.line(), "grind and grime failed: fatal: bad revision");
+        assert_eq!(
+            outcome.line(),
+            "grind and grime failed: fatal: bad revision"
+        );
     }
 
     #[test]

@@ -22,10 +22,7 @@ mod child;
 /// Measuring a rebase and a merge against the default branch, for the `m` key.
 #[cfg_attr(
     not(test),
-    expect(
-        dead_code,
-        reason = "wired into watch mode by the next slice of #496"
-    )
+    expect(dead_code, reason = "wired into watch mode by the next slice of #496")
 )]
 mod conflicts;
 mod git;
