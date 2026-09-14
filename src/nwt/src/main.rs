@@ -774,8 +774,9 @@ const SPARSE_DEFAULT_REF: &str = "HEAD";
 ///
 /// # Errors
 ///
-/// Returns [`SparseExcludeError::UnreadableRef`] when git exits with a status
-/// that is not zero. Git does that for a ref that names no commit and no tree.
+/// - [`SparseExcludeError::UnreadableRef`] when git exits with a status that is
+///   not zero. Git does that for a ref that names no commit and no tree.
+/// - [`SparseExcludeError::GitCommand`] when git does not start.
 fn tracks_directory(
     repo_root: &Path,
     at_ref: &str,
@@ -793,9 +794,11 @@ fn tracks_directory(
         dir.as_str(),
     ]);
 
-    let Ok(output) = ls_tree.output() else {
-        return Ok(false);
-    };
+    let output = ls_tree
+        .output()
+        .map_err(|e| SparseExcludeError::GitCommand {
+            error: e.to_string(),
+        })?;
 
     if !output.status.success() {
         return Err(SparseExcludeError::UnreadableRef {
@@ -834,6 +837,7 @@ fn tracks_directory(
 /// - [`SparseExcludeError::NotTrackedDirectory`] for the first directory that
 ///   git does not track as a directory at the ref.
 /// - [`SparseExcludeError::UnreadableRef`] when git cannot read the ref.
+/// - [`SparseExcludeError::GitCommand`] when git does not start.
 fn resolve_sparse_excludes(
     repo_root: &Path,
     checkout_ref: Option<&str>,
