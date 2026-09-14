@@ -4022,6 +4022,43 @@ mod tests {
         );
     }
 
+    /// A run without `--sparse-exclude` asks git nothing, also with `-c <ref>`.
+    /// So a plain `nwt -c <ref>` runs the git children it ran before the flag
+    /// existed.
+    ///
+    /// The working directory is missing, so each git child fails to start. An
+    /// answer of `Ok` proves that no child ran.
+    #[test]
+    fn resolve_sparse_excludes_asks_git_nothing_without_a_value() {
+        let temp = tempfile::TempDir::new().expect("create a temporary directory");
+        let missing = temp.path().join("no-such-repository");
+
+        assert_eq!(
+            resolve_sparse_excludes(&missing, Some("foo"), &[]),
+            Ok(Vec::new())
+        );
+    }
+
+    /// With `-c <ref>`, the first git child of the check is `git rev-parse`,
+    /// and a failure to start it names that subcommand and not `ls-tree`.
+    #[test]
+    fn resolve_sparse_excludes_names_the_git_subcommand_that_does_not_start() {
+        let temp = tempfile::TempDir::new().expect("create a temporary directory");
+        let missing = temp.path().join("no-such-repository");
+        let raw = vec!["heavy".to_owned()];
+
+        let error = resolve_sparse_excludes(&missing, Some("foo"), &raw)
+            .expect_err("a git that does not start must stop the run");
+
+        assert!(
+            error
+                .to_string()
+                .starts_with("could not run git rev-parse to check --sparse-exclude: "),
+            "the message must name git rev-parse: {error}"
+        );
+        assert_eq!(error.exit_code(), exit_codes::GIT_COMMAND_ERROR);
+    }
+
     /// Parse each of `raw` into a directory, or panic.
     fn sparse_dirs(raw: &[&str]) -> Vec<SparseExcludeDir> {
         raw.iter()
