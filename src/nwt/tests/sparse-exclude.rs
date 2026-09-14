@@ -384,63 +384,106 @@ fn sparse_checkout_disable_writes_the_excluded_directory() {
     );
 }
 
-/// A value that the lexical rules refuse exits with its own code, names the
-/// value on stderr, prints no path, and makes nothing: no worktrees directory
-/// and no branch.
+/// Demand that `output` is a run that `nwt` refused with exit `code`: it
+/// printed no path, and stderr holds `named`.
+fn assert_refused(output: &Output, code: i32, named: &str) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        output.status.code(),
+        Some(code),
+        "the run must exit {code}.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "a refused run prints no path. stdout: {stdout:?}"
+    );
+    assert!(
+        stderr.contains(named),
+        "stderr must hold {named:?}:\n{stderr}"
+    );
+}
+
+/// Demand that a refused run in `repo` made nothing: no worktrees directory
+/// beside the repository, and no worktree that git knows about other than the
+/// main worktree.
 ///
-/// A later slice of issue #487 adds the check at the ref, and with it a missing
-/// path and a tracked file.
+/// `init_repo` puts the repository in a directory of its own, so the
+/// temporary directory holds only `repo` until `nwt` makes something.
+fn assert_made_nothing(temp: &tempfile::TempDir, repo: &Path) {
+    let left: Vec<String> = std::fs::read_dir(temp.path())
+        .expect("read the temporary directory")
+        .map(|entry| {
+            entry
+                .expect("read one directory entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(
+        left,
+        vec!["repo".to_string()],
+        "a refused run must make no worktrees directory"
+    );
+
+    let listed: Vec<PathBuf> = git_stdout(repo, &["worktree", "list", "--porcelain"])
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .map(PathBuf::from)
+        .collect();
+    assert_eq!(
+        listed,
+        vec![canonical(repo)],
+        "a refused run must leave the main worktree as the only worktree"
+    );
+}
+
+/// Demand that `repo` has no branch named `branch`.
+fn assert_no_branch(repo: &Path, branch: &str) {
+    assert!(
+        !run_git(
+            repo,
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}")
+            ]
+        ),
+        "a refused run must make no branch {branch}"
+    );
+}
+
+/// A value that the lexical rules refuse exits with its own code, names the
+/// value on stderr, prints no path, and makes nothing: no worktrees directory,
+/// no worktree, and no branch.
+///
+/// Each case pairs the value with the form the message shows. A control
+/// character shows as its escape, so the message stays on one line.
 #[test]
 fn a_lexically_bad_value_is_refused_and_makes_nothing() {
-    for raw in ["/abs", "..", "a/../b", "./"] {
+    let cases = [
+        ("/abs", "/abs"),
+        ("..", ".."),
+        ("a/../b", "a/../b"),
+        ("./", "./"),
+        ("a\nb", "a\\nb"),
+    ];
+
+    for (raw, shown) in cases {
         let (temp, repo) = repo_with_heavy_dir();
         let branch = unique_branch("sparse-refused");
 
         let output = run_nwt(&repo, &branch, &["--sparse-exclude", raw]);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
 
-        assert_eq!(
-            output.status.code(),
-            Some(INVALID_SPARSE_EXCLUDE),
-            "--sparse-exclude {raw:?} must exit {INVALID_SPARSE_EXCLUDE}:\n{stderr}"
+        assert_refused(
+            &output,
+            INVALID_SPARSE_EXCLUDE,
+            &format!("Error: --sparse-exclude '{shown}'"),
         );
-        assert!(
-            stdout.is_empty(),
-            "a refused run prints no path. stdout: {stdout:?}"
-        );
-        let named = format!("Error: --sparse-exclude '{raw}'");
-        assert!(
-            stderr.contains(&named),
-            "stderr must name the value with {named:?}:\n{stderr}"
-        );
-
-        let left: Vec<String> = std::fs::read_dir(temp.path())
-            .expect("read the temporary directory")
-            .map(|entry| {
-                entry
-                    .expect("read one directory entry")
-                    .file_name()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect();
-        assert_eq!(
-            left,
-            vec!["repo".to_string()],
-            "a refused --sparse-exclude {raw:?} must make no worktrees directory"
-        );
-        assert!(
-            !run_git(
-                &repo,
-                &[
-                    "show-ref",
-                    "--verify",
-                    "--quiet",
-                    &format!("refs/heads/{branch}")
-                ]
-            ),
-            "a refused --sparse-exclude {raw:?} must make no branch"
-        );
+        assert_made_nothing(&temp, &repo);
+        assert_no_branch(&repo, &branch);
     }
 }

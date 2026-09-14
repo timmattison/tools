@@ -517,6 +517,9 @@ enum SparseExcludeError {
     Absolute { raw: String },
     /// The value holds a `..` component, so it can point out of the repository.
     ParentComponent { raw: String },
+    /// The value holds an ASCII control character. A sparse pattern file holds
+    /// one pattern on each line, so a line break in a value makes two patterns.
+    ControlCharacter { raw: String },
 }
 
 impl fmt::Display for SparseExcludeError {
@@ -536,6 +539,14 @@ impl fmt::Display for SparseExcludeError {
                 f,
                 "--sparse-exclude '{raw}' has a '..' component. Give a path inside the \
                  repository."
+            ),
+            // The escapes keep the message on one line, and they keep an
+            // escape sequence in the value away from the terminal.
+            Self::ControlCharacter { raw } => write!(
+                f,
+                "--sparse-exclude '{}' holds a control character. Give a directory \
+                 name without control characters.",
+                raw.escape_debug()
             ),
         }
     }
@@ -3540,6 +3551,42 @@ mod tests {
                 "the refusal of {raw:?}"
             );
         }
+    }
+
+    /// A value that holds an ASCII control character is refused, wherever the
+    /// character is.
+    ///
+    /// A line break in a value becomes a line break in the sparse pattern file,
+    /// and so two patterns. The control character check comes first, so a
+    /// value that also breaks a different rule still gets this variant.
+    #[test]
+    fn sparse_exclude_dir_parse_refuses_a_control_character() {
+        let cases = ["a\nb", "heavy\r", "\theavy", "a\u{7f}b", "/abs\n"];
+
+        for raw in cases {
+            assert_eq!(
+                SparseExcludeDir::parse(raw),
+                Err(SparseExcludeError::ControlCharacter {
+                    raw: raw.to_owned()
+                }),
+                "the refusal of {raw:?}"
+            );
+        }
+    }
+
+    /// The message of a control character refusal shows the character as an
+    /// escape, so the message stays on one line.
+    #[test]
+    fn sparse_exclude_error_escapes_a_control_character() {
+        let message = SparseExcludeDir::parse("a\nb")
+            .expect_err("the value must be refused")
+            .to_string();
+
+        assert_eq!(
+            message,
+            "--sparse-exclude 'a\\nb' holds a control character. Give a directory name \
+             without control characters."
+        );
     }
 
     /// The message of a refusal names the value the user typed and the reason.
