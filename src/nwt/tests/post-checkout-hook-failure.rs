@@ -128,9 +128,9 @@ fn assert_the_failed_hook_kept_the_worktree(
 ///
 /// Today the error line on stderr says that the branch already exists. That
 /// line gives the wrong reason: `nwt` asks git whether the branch is there
-/// after a failed add, and the failed hook left it there. The sparse path of
-/// issue #487 names the hook instead, so this test does not hold the words of
-/// that line. It holds the exit code, the empty stdout, and what stays on disk
+/// after a failed add, and the failed hook left it there. Issue #495 tracks
+/// that defect. The sparse path of issue #487 names the hook instead, so this
+/// test does not hold the words of that line. It holds the exit code, the empty stdout, and what stays on disk
 /// and in git.
 #[test]
 fn a_failed_post_checkout_hook_keeps_the_worktree_and_the_branch() {
