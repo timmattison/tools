@@ -30,6 +30,10 @@ unicode-width.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+# The fixture repositories and `Conflicts::from_files`, for the tests of the
+# `m` key in `src/conflicts.rs`. The feature is on for the test targets only,
+# so the shipped binary has no way to state a cost that no replay measured.
+gitscratch = { workspace = true, features = ["testing"] }
 testcolor.workspace = true
 
 [lints]
