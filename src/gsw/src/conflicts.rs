@@ -9,8 +9,10 @@
 //! The words name `grind` and `grime` all the same, because those are the names
 //! the user knows.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 
 use anyhow::Context as _;
 use gitscratch::{Conflicts, Repo, Uncommitted};
@@ -55,6 +57,15 @@ enum StopWords {
     /// constant. `grime` leaves it out for the same reason (see the comment on
     /// `without_stops` in `src/grime/src/main.rs`).
     Omitted,
+}
+
+/// One of the two replays of a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Replay {
+    /// A rebase of HEAD onto the default branch, as `grind` does.
+    Rebase,
+    /// A merge of the default branch into HEAD, as `grime` does.
+    Merge,
 }
 
 /// What one press of `m` found.
@@ -147,6 +158,22 @@ pub(crate) fn measure(
     stop: &AtomicBool,
     on_started: impl FnOnce(&str),
 ) -> Option<ConflictsOutcome> {
+    measure_probed(workdir, stop, on_started, |_, _| {})
+}
+
+/// [`measure`], with `probe` called for each replay after its scratch worktree
+/// exists and before the replay starts.
+///
+/// The probe is the seam of the quit test. That test must stop a run while a
+/// scratch worktree exists, and nothing else can hold a run at that point. The
+/// probe gets the stop flag, so a test probe can wait for the quit. Production
+/// passes a probe that does nothing.
+fn measure_probed(
+    workdir: &Path,
+    stop: &AtomicBool,
+    on_started: impl FnOnce(&str),
+    mut probe: impl FnMut(Replay, &AtomicBool),
+) -> Option<ConflictsOutcome> {
     let (repo, branch) = match open_against_default(workdir) {
         Ok(opened) => opened,
         Err(err) => {
@@ -171,14 +198,20 @@ pub(crate) fn measure(
     if stop.load(Ordering::SeqCst) {
         return None;
     }
-    let rebase = rebase_onto(&repo, &branch).map_err(|err| reason(&err));
+    let rebase = replay(&repo, &branch, Replay::Rebase, || {
+        probe(Replay::Rebase, stop);
+    })
+    .map_err(|err| reason(&err));
 
     // The check between the two replays. A quit waits only for the replay in
     // flight, and the second replay never starts.
     if stop.load(Ordering::SeqCst) {
         return None;
     }
-    let merge = merge_from(&repo, &branch).map_err(|err| reason(&err));
+    let merge = replay(&repo, &branch, Replay::Merge, || {
+        probe(Replay::Merge, stop);
+    })
+    .map_err(|err| reason(&err));
 
     Some(ConflictsOutcome::Measured {
         branch,
@@ -221,7 +254,10 @@ fn head_is_on(workdir: &Path, branch: &str) -> bool {
     RepoHandle::discover(workdir).is_some_and(|handle| branch_name(handle.repo()) == branch)
 }
 
-/// Replay a rebase of HEAD onto `branch` in a scratch worktree.
+/// Run `which` replay against `branch` in a scratch worktree of HEAD.
+///
+/// `on_scratch` runs after the scratch worktree exists and before the replay
+/// starts. See [`measure_probed`].
 ///
 /// The scratch worktree drops at the end of this function, and its `Drop`
 /// removes the worktree from the repository. So the worktree is gone before
@@ -230,29 +266,84 @@ fn head_is_on(workdir: &Path, branch: &str) -> bool {
 /// # Errors
 ///
 /// Returns an error if the scratch worktree cannot be made, or if the replay
-/// fails without a conflict to measure.
-fn rebase_onto(repo: &Repo, branch: &str) -> anyhow::Result<Conflicts> {
+/// fails and leaves no conflict to measure.
+fn replay(
+    repo: &Repo,
+    branch: &str,
+    which: Replay,
+    on_scratch: impl FnOnce(),
+) -> anyhow::Result<Conflicts> {
     let scratch = repo.scratch("HEAD")?;
-    scratch.replay_rebase(branch)
-}
-
-/// Replay a merge of `branch` into HEAD in a scratch worktree.
-///
-/// The scratch worktree drops at the end of this function, as it does in
-/// [`rebase_onto`].
-///
-/// # Errors
-///
-/// Returns an error if the scratch worktree cannot be made, or if git refuses
-/// the merge and leaves no conflict to measure.
-fn merge_from(repo: &Repo, branch: &str) -> anyhow::Result<Conflicts> {
-    let scratch = repo.scratch("HEAD")?;
-    scratch.replay_merge(branch)
+    on_scratch();
+    match which {
+        Replay::Rebase => scratch.replay_rebase(branch),
+        Replay::Merge => scratch.replay_merge(branch),
+    }
 }
 
 /// The reason in `err`, with every cause in its chain, as one row.
 fn reason(err: &anyhow::Error) -> String {
     one_row(&format!("{err:#}"))
+}
+
+/// Owns the threads that measure, and the stop flag they read.
+pub(crate) struct ConflictsWorker {
+    /// Set when gsw quits. Every thread of this worker reads it.
+    stop: Arc<AtomicBool>,
+    /// The threads this worker started.
+    threads: Vec<JoinHandle<()>>,
+}
+
+impl ConflictsWorker {
+    /// A worker with no thread yet.
+    pub(crate) fn new() -> Self {
+        Self {
+            stop: Arc::new(AtomicBool::new(false)),
+            threads: Vec::new(),
+        }
+    }
+
+    /// Start one run on a thread of its own.
+    ///
+    /// `on_started` and `on_finished` run on that thread.
+    pub(crate) fn start(
+        &mut self,
+        workdir: PathBuf,
+        on_started: impl FnOnce(String) + Send + 'static,
+        on_finished: impl FnOnce(ConflictsOutcome) + Send + 'static,
+    ) {
+        self.start_probed(workdir, on_started, on_finished, |_, _| {});
+    }
+
+    /// [`ConflictsWorker::start`], with the probe of [`measure_probed`].
+    fn start_probed(
+        &mut self,
+        workdir: PathBuf,
+        on_started: impl FnOnce(String) + Send + 'static,
+        on_finished: impl FnOnce(ConflictsOutcome) + Send + 'static,
+        probe: impl FnMut(Replay, &AtomicBool) + Send + 'static,
+    ) {
+        let stop = Arc::clone(&self.stop);
+        let _ = on_finished;
+        self.threads.push(std::thread::spawn(move || {
+            let _ = measure_probed(
+                &workdir,
+                &stop,
+                |branch| on_started(branch.to_owned()),
+                probe,
+            );
+        }));
+    }
+
+    /// Whether a run is in flight.
+    pub(crate) fn is_running(&self) -> bool {
+        true
+    }
+
+    /// Set the stop flag. Called when gsw quits.
+    pub(crate) fn shutdown(self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
 }
 
 /// The words for the result of one replay: `operation clean`, the counts, or
@@ -302,12 +393,48 @@ fn one_row(text: &str) -> String {
 mod tests {
     use std::num::NonZeroUsize;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
 
     use gitscratch::testing::{default_branch_choice_repo, not_a_repository, TestRepo};
     use gitscratch::{Conflicts, Stops};
 
-    use super::{measure, running_notice, ConflictsOutcome, WAITING_NOTICE};
+    use super::{
+        measure, running_notice, ConflictsOutcome, ConflictsWorker, Replay, WAITING_NOTICE,
+    };
+
+    /// How long a test waits for the thread of a worker before the test fails.
+    ///
+    /// A run against a fixture takes well under a second. The bound is for a
+    /// thread that hangs, because a test that waits for such a thread holds
+    /// the suite for the life of the session.
+    const WAIT: Duration = Duration::from_secs(30);
+
+    /// How long the quit probe holds the rebase scratch worktree after it sees
+    /// the stop flag.
+    ///
+    /// A quit that does not join returns at once, and the test then lists the
+    /// worktrees while the probe still holds this one. The hold is the margin
+    /// between that listing and the removal of the scratch worktree. A quit
+    /// that joins waits it out, so it costs the test this long and no more.
+    const HOLD: Duration = Duration::from_millis(500);
+
+    /// How often a wait reads its condition again.
+    const POLL: Duration = Duration::from_millis(10);
+
+    /// Wait until `done` is true, or panic with `what` after [`WAIT`].
+    fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        let give_up_at = Instant::now() + WAIT;
+        while !done() {
+            assert!(
+                Instant::now() < give_up_at,
+                "{what} did not happen within {}s",
+                WAIT.as_secs()
+            );
+            std::thread::sleep(POLL);
+        }
+    }
 
     /// A replay that hit no conflict.
     fn clean() -> Conflicts {
@@ -676,5 +803,118 @@ mod tests {
 
         assert_eq!(outcome, None);
         assert_eq!(worktrees(&repo), 1);
+    }
+
+    /// A run on the thread of a worker hands its branch and its outcome to the
+    /// two callbacks, and the worker then reports no run in flight. A second
+    /// run after the first one ended starts as usual.
+    #[test]
+    fn a_worker_hands_over_the_outcome_and_then_reports_no_run() {
+        let repo = default_branch_choice_repo(&["master"]);
+        let mut worker = ConflictsWorker::new();
+
+        for run in 1..=2 {
+            let (started_tx, started_rx) = mpsc::channel();
+            let (finished_tx, finished_rx) = mpsc::channel();
+            worker.start(
+                repo.path().to_path_buf(),
+                move |branch| {
+                    let _ = started_tx.send(branch);
+                },
+                move |outcome| {
+                    let _ = finished_tx.send(outcome);
+                },
+            );
+
+            assert_eq!(
+                started_rx.recv_timeout(WAIT).as_deref(),
+                Ok("master"),
+                "run {run}: on_started did not get the branch",
+            );
+            let outcome = finished_rx
+                .recv_timeout(WAIT)
+                .unwrap_or_else(|err| panic!("run {run}: on_finished got no outcome: {err}"));
+            assert_eq!(
+                outcome.line(),
+                "master: rebase 1 hunk in 1 file, 1 stop · merge 1 hunk in 1 file",
+                "run {run}",
+            );
+
+            wait_until("the end of the run", || !worker.is_running());
+        }
+
+        worker.shutdown();
+        assert_eq!(worktrees(&repo), 1);
+    }
+
+    /// Quit with `quit` while the rebase replay holds its scratch worktree,
+    /// and check that the quit waited for that replay and started no other.
+    ///
+    /// `Scratch` removes its worktree in `Drop`. A process that exits while a
+    /// thread holds one never runs that `Drop`, and the repository of the user
+    /// keeps a registered worktree that points at a deleted directory. So a
+    /// quit must wait for the replay in flight.
+    ///
+    /// The probe holds the run in the middle: the scratch worktree exists and
+    /// the replay has not started. It waits there for the stop flag, and then
+    /// holds the worktree for [`HOLD`]. A quit that joins returns after the
+    /// worktree is gone. A quit that does not join returns while the probe
+    /// still holds it, and the listing below then finds two worktrees.
+    fn a_quit_in_the_middle_of_a_run_waits_for_the_replay(quit: impl FnOnce(ConflictsWorker)) {
+        let repo = default_branch_choice_repo(&["master"]);
+        let (probed_tx, probed_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let mut worker = ConflictsWorker::new();
+
+        worker.start_probed(
+            repo.path().to_path_buf(),
+            |_| {},
+            move |outcome| {
+                let _ = finished_tx.send(outcome);
+            },
+            move |replay, stop| {
+                let _ = probed_tx.send(replay);
+                if replay == Replay::Rebase {
+                    wait_until("the quit", || stop.load(Ordering::SeqCst));
+                    std::thread::sleep(HOLD);
+                }
+            },
+        );
+
+        assert_eq!(probed_rx.recv_timeout(WAIT), Ok(Replay::Rebase));
+        assert_eq!(
+            worktrees(&repo),
+            2,
+            "the rebase scratch worktree is registered while its replay is in flight",
+        );
+
+        quit(worker);
+
+        assert_eq!(
+            worktrees(&repo),
+            1,
+            "the quit returned while the replay still held its scratch worktree",
+        );
+        assert_eq!(
+            probed_rx.try_iter().collect::<Vec<_>>(),
+            [],
+            "the merge replay started after the quit",
+        );
+        assert!(
+            finished_rx.try_recv().is_err(),
+            "an abandoned run handed over an outcome",
+        );
+    }
+
+    #[test]
+    fn shutdown_in_the_middle_of_a_run_waits_for_the_replay() {
+        a_quit_in_the_middle_of_a_run_waits_for_the_replay(ConflictsWorker::shutdown);
+    }
+
+    /// A loop that leaves by an error path drops the worker and never calls
+    /// `shutdown`. The drop must wait all the same.
+    #[test]
+    fn a_dropped_worker_waits_for_the_replay_too() {
+        a_quit_in_the_middle_of_a_run_waits_for_the_replay(drop);
     }
 }
