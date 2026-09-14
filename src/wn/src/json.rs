@@ -286,14 +286,6 @@ impl Document {
     /// The document names it because a plan is a claim about the issues of
     /// one repository. The same numbers name other work in every other
     /// repository.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the check that compares this repository with the repository of the run \
-                      is the next slice of #489, and only the tests read it until then"
-        )
-    )]
     #[must_use]
     pub fn repo(&self) -> Option<&Repo> {
         self.repo.as_ref()

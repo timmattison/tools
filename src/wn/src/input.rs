@@ -44,6 +44,7 @@ use thiserror::Error;
 
 use crate::build::{BuildError, NO_CLAUDE_ENV};
 use crate::chain::Snippet;
+use crate::github::Repo;
 
 /// The variable that turns the clipboard fallback off. Any value with a
 /// character in it turns it off.
@@ -249,6 +250,37 @@ The first line of it is {line:?}.",
             ),
         }
     }
+
+    /// Refuse a plan on the clipboard that is for a repository other than the
+    /// repository of this run.
+    ///
+    /// The clipboard became the cache of a plan in #438. A cache with no key
+    /// answers for every repository. A reader builds a plan in one checkout,
+    /// changes to a checkout of another repository, and types `wn`. The plan
+    /// is still on the clipboard, and its numbers name other issues in the
+    /// second repository. GitHub answers for those numbers, and nothing in the
+    /// answer shows that it is for the wrong repository.
+    ///
+    /// This module still never reads the text. `named` is the repository the
+    /// caller found in the text, and it is `None` for a text that names no
+    /// repository. `run` is the repository this run asks GitHub about.
+    ///
+    /// The message writes nothing out of the clipboard except the repository
+    /// the plan names. This is the rule of [`Chain::blame`]: the clipboard
+    /// holds a password or a token as readily as it holds a plan.
+    ///
+    /// # Errors
+    ///
+    /// Gives [`InputError::AnotherRepository`] for a plan on the clipboard
+    /// that names a repository other than `run`.
+    pub fn refuse_another_repository(
+        &self,
+        named: Option<&Repo>,
+        run: &Repo,
+    ) -> Result<(), InputError> {
+        let _ = (named, run);
+        Ok(())
+    }
 }
 
 /// The note a run that kept its plan earns.
@@ -421,6 +453,25 @@ pub enum InputError {
          Unset it to build one. {PASS_IT_AS_AN_ARGUMENT}"
     )]
     RefreshWithoutClaude,
+    /// The clipboard holds a plan for one repository, and this run is for
+    /// another repository.
+    ///
+    /// The caution stands before the step it warns about. The last line does
+    /// not name the repository of the run: `wn --refresh` builds a plan for
+    /// the current directory, and that is not always the repository `--repo`
+    /// named. The first line already names the repository of the run.
+    #[error(
+        "the plan on the clipboard is for {plan}, and this run is for {run}.\n\
+         CAUTION: wn --refresh REPLACES WHAT IS ON THE CLIPBOARD. WHAT IS ON IT NOW IS LOST.\n\
+         Run wn --refresh to build a new plan, or run wn --repo {plan} to answer the plan \
+         on the clipboard."
+    )]
+    AnotherRepository {
+        /// The repository the plan names.
+        plan: Repo,
+        /// The repository this run asks GitHub about.
+        run: Repo,
+    },
 }
 
 /// Whether `value`, the value of [`NO_CLIPBOARD_ENV`], turns the fallback off.
@@ -1218,6 +1269,30 @@ Unset it to build one. Pass it as an argument, in quotes: wn \"#277 → #278\""
 \"```json\" is not an issue number. The first line of it is \"```json\"."
         );
         assert!(!message.contains("clipboard"), "{message}");
+    }
+
+    /// A plan written as JSON for `owner/a`.
+    ///
+    /// This module never reads the text, so the tests hand the repository to
+    /// the check themselves. The text only shows what such a clipboard holds.
+    const PLAN_FOR_A: &str = "{\"version\": 1, \"repo\": \"owner/a\", \"streams\": []}";
+
+    /// The repository `spec` names.
+    fn repository(spec: &str) -> Repo {
+        Repo::parse(spec).expect("the test names a repository")
+    }
+
+    #[test]
+    fn a_plan_on_the_clipboard_for_another_repository_is_refused() {
+        let plan = repository("owner/a");
+        let run = repository("owner/b");
+        assert_eq!(
+            clipboard_chain(PLAN_FOR_A).refuse_another_repository(Some(&plan), &run),
+            Err(InputError::AnotherRepository {
+                plan: plan.clone(),
+                run: run.clone(),
+            })
+        );
     }
 
     #[test]

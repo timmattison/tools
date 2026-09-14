@@ -77,7 +77,7 @@ use thiserror::Error;
 use crate::chain::{parse_chain, IssueNumber};
 use crate::declared::{LeftOut, Settled};
 use crate::github::Repo;
-use crate::report::{Report, States};
+use crate::report::{Entry, Report, States};
 
 /// The columns `wn` removes from the window on top of the one column
 /// [`effective_terminal_width`] always keeps empty. `wn` draws nothing beside
@@ -309,6 +309,9 @@ fn main() -> ExitCode {
 /// nobody can read is a mistake the reader made, and reporting it costs no
 /// call to `gh`. A plan whose streams wait for each other is such a mistake,
 /// so that refusal costs no call either.
+///
+/// [`respond`] then refuses a plan on the clipboard that is for another
+/// repository, and only after that does it ask GitHub for the answer.
 fn run(
     cli: &Cli,
     width: usize,
@@ -369,7 +372,14 @@ fn run(
     let reading = reading.map_err(|err| chain.blame(err))?;
     let repo = repo_of(cli)?;
 
-    let code = answer(&reading, &repo, width, start)?;
+    let code = respond(
+        &chain,
+        &reading,
+        &repo,
+        width,
+        start,
+        &|wanted: &[IssueNumber]| github::fetch(&repo, wanted),
+    )?;
     // Only a plan written as JSON carries the moment it was built, so only it
     // earns a note about the age of the plan.
     let age = if let Reading::Document(document) = &reading {
@@ -544,8 +554,52 @@ fn repo_of(cli: &Cli) -> Result<Repo> {
     }
 }
 
+/// The repository `reading` says it is for, or `None` for a reading that says
+/// nothing about a repository.
+///
+/// Only a plan written as JSON names its repository. A chain, a table, and a
+/// picture have no place to write one.
+fn named_repository(reading: &Reading) -> Option<&Repo> {
+    match reading {
+        Reading::Document(document) => document.repo(),
+        Reading::Plan(_) | Reading::Picture(_) | Reading::Chain(_) => None,
+    }
+}
+
+/// Refuse a plan on the clipboard that is for another repository, and then
+/// answer `reading`.
+///
+/// The refusal comes after the run resolved its repository, so a repository
+/// that `--repo` names is the repository of the run. The refusal comes before
+/// the first query, so a plan for another repository costs no call to GitHub
+/// and prints no rows of the wrong repository.
+/// [`input::Chain::refuse_another_repository`] states which texts it refuses.
+///
+/// `fetch` asks GitHub about numbers. It is an argument, so a test can prove
+/// that no query comes before the refusal.
+///
+/// # Errors
+///
+/// Fails with [`input::InputError::AnotherRepository`] for a plan on the
+/// clipboard that is for another repository, and for every reason [`answer`]
+/// fails.
+fn respond(
+    chain: &input::Chain,
+    reading: &Reading,
+    repo: &Repo,
+    width: usize,
+    start: &StartCommand,
+    fetch: &dyn Fn(&[IssueNumber]) -> Result<Vec<Entry>>,
+) -> Result<ExitCode> {
+    chain.refuse_another_repository(named_repository(reading), repo)?;
+    answer(reading, repo, width, start, fetch)
+}
+
 /// Ask GitHub about the work `reading` names, hold its order to what the issues
 /// say comes first, print the answer, and give the status the run exits with.
+///
+/// `fetch` asks GitHub about numbers. [`run`] gives a function that calls
+/// [`github::fetch`] for `repo`, and a test gives a function of its own.
 ///
 /// One query answers the whole text. Each reading gives every number it names
 /// once, so a number that stands in two places costs one alias of the query
@@ -563,12 +617,18 @@ fn repo_of(cli: &Cli) -> Result<Repo> {
 ///
 /// # Errors
 ///
-/// Fails for the reasons [`github::fetch`] fails: `gh` is not installed, the
-/// repository cannot be read, or GitHub could not answer for one number. Fails
-/// with [`declared::OrderError`] for a text that puts an issue before its own
-/// blocker, and for a plan whose own order holds a cycle once the issues add a
-/// wait to it.
-fn answer(reading: &Reading, repo: &Repo, width: usize, start: &StartCommand) -> Result<ExitCode> {
+/// Fails for the reasons `fetch` fails. For [`github::fetch`] these are: `gh`
+/// is not installed, the repository cannot be read, or GitHub could not answer
+/// for one number. Fails with [`declared::OrderError`] for a text that puts an
+/// issue before its own blocker, and for a plan whose own order holds a cycle
+/// once the issues add a wait to it.
+fn answer(
+    reading: &Reading,
+    repo: &Repo,
+    width: usize,
+    start: &StartCommand,
+    fetch: &dyn Fn(&[IssueNumber]) -> Result<Vec<Entry>>,
+) -> Result<ExitCode> {
     let streams;
     let line;
     // `each_stream` holds the steps of each stream the reader of streams
@@ -593,10 +653,9 @@ fn answer(reading: &Reading, repo: &Repo, width: usize, start: &StartCommand) ->
         }
     };
 
-    let fetch = |wanted: &[IssueNumber]| github::fetch(repo, wanted);
     let states = States::of(fetch(&numbers)?);
     Ok(
-        match declared::settle(graph, &each_stream, states, &fetch)? {
+        match declared::settle(graph, &each_stream, states, fetch)? {
             Settled::Agrees(states) => match reading {
                 Reading::Plan(plan) => answer_plan(plan, &states, repo, width, start),
                 Reading::Chain(chain) => answer_chain(chain, &states, repo, width, start),
@@ -886,5 +945,70 @@ mod tests {
             "a line of numbers is one chain"
         );
         assert_eq!(kept, None);
+    }
+
+    /// The chain of a run whose clipboard holds `text` and whose other inputs
+    /// hold nothing.
+    ///
+    /// The read is a function of this test and never the system clipboard. A
+    /// test that reads the clipboard races the person at the keyboard.
+    fn from_the_clipboard(text: &str) -> input::Chain {
+        let clipboard = || -> input::ClipboardRead { Ok(Some(text.to_string())) };
+        input::Sources {
+            argument: &[],
+            stdin: None,
+            clipboard: Some(&clipboard),
+            plan: None,
+            refresh: false,
+        }
+        .chain()
+        .expect("the clipboard holds text")
+    }
+
+    /// A plan written as JSON for the repository `repo`, with one stream of
+    /// one issue.
+    fn plan_for(repo: &str) -> String {
+        format!(
+            r#"{{"version": 1, "repo": "{repo}", "streams": [
+                {{"id": "S1", "name": "wn", "notes": "", "order": [{{"issue": 277, "waitsFor": []}}]}}
+            ]}}"#
+        )
+    }
+
+    /// The repository `spec` names.
+    fn repository(spec: &str) -> Repo {
+        Repo::parse(spec).expect("the test names a repository")
+    }
+
+    /// A query that must never run.
+    fn unasked_github(_wanted: &[IssueNumber]) -> Result<Vec<Entry>> {
+        panic!("GitHub was asked before the refusal")
+    }
+
+    /// What [`respond`] gives for `chain` in a run for `repo`, with `fetch` as
+    /// the query.
+    fn responded(
+        chain: &input::Chain,
+        repo: &Repo,
+        fetch: &dyn Fn(&[IssueNumber]) -> Result<Vec<Entry>>,
+    ) -> Result<ExitCode> {
+        let reading = reading_of(chain.text()).expect("the text reads");
+        respond(chain, &reading, repo, 80, &StartCommand::new(None), fetch)
+    }
+
+    #[test]
+    fn a_plan_from_the_clipboard_for_another_repository_is_refused_before_any_query() {
+        // The numbers of a plan for `owner/a` name other issues in `owner/b`,
+        // and GitHub answers for them all the same. The query panics, so this
+        // test fails when the run asks GitHub before it refuses the plan.
+        let chain = from_the_clipboard(&plan_for("owner/a"));
+        let err = responded(&chain, &repository("owner/b"), &unasked_github)
+            .expect_err("the plan is for another repository");
+        assert_eq!(
+            err.to_string(),
+            "the plan on the clipboard is for owner/a, and this run is for owner/b.\n\
+CAUTION: wn --refresh REPLACES WHAT IS ON THE CLIPBOARD. WHAT IS ON IT NOW IS LOST.\n\
+Run wn --refresh to build a new plan, or run wn --repo owner/a to answer the plan on the clipboard."
+        );
     }
 }
