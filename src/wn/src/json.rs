@@ -78,6 +78,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::chain::{IssueNumber, Snippet};
+use crate::github::Repo;
 use crate::graph::{of_parts, Graph, GraphError, Work};
 use crate::plan::Step;
 
@@ -119,6 +120,9 @@ const NAME: &str = "name";
 
 /// The key that names the moment the plan was built.
 const GENERATED: &str = "generated";
+
+/// The key that names the repository the plan was built for.
+const REPO: &str = "repo";
 
 /// The hours of a day, which is the age at which a plan earns a note.
 const HOURS_OF_A_DAY: i64 = 24;
@@ -174,6 +178,8 @@ pub enum Kind {
     Issue,
     /// A moment, written as RFC 3339 names one: `2026-09-02T14:03:11Z`.
     Time,
+    /// A repository, written as GitHub names one: `timmattison/tools`.
+    Repository,
 }
 
 impl Kind {
@@ -186,6 +192,7 @@ impl Kind {
             Self::Number => "a number",
             Self::Issue => "an issue number",
             Self::Time => "a moment, written as 2026-09-02T14:03:11Z",
+            Self::Repository => "a repository, written as owner/name",
         }
     }
 }
@@ -245,16 +252,20 @@ pub enum JsonError {
     Order(#[from] GraphError),
 }
 
-/// A plan written as JSON: the work it names, and the moment it was built.
+/// A plan written as JSON: the work it names, the moment it was built, and the
+/// repository it was built for.
 ///
-/// The two travel together because a plan is a claim about a backlog and a
+/// The three travel together because a plan is a claim about one backlog and a
 /// backlog moves. A reader who is handed the work alone has no way to know
-/// that the claim is three days old, and nothing else would tell them.
+/// that the claim is three days old, and nothing else would tell them. Nor has
+/// that reader a way to know that the claim is about another repository.
 pub struct Document {
     /// The work the plan names, and the order of it.
     graph: Graph,
     /// The moment the plan was built, when the document says.
     generated: Option<DateTime<Utc>>,
+    /// The repository the plan was built for, when the document says.
+    repo: Option<Repo>,
 }
 
 impl Document {
@@ -262,6 +273,17 @@ impl Document {
     #[must_use]
     pub fn graph(&self) -> &Graph {
         &self.graph
+    }
+
+    /// The repository the plan was built for, or `None` for a document that
+    /// names none.
+    ///
+    /// The document names it because a plan is a claim about the issues of
+    /// one repository. The same numbers name other work in every other
+    /// repository.
+    #[must_use]
+    pub fn repo(&self) -> Option<&Repo> {
+        self.repo.as_ref()
     }
 
     /// The note this plan earns at `now`, when it earns one.
@@ -392,7 +414,18 @@ fn document_of(text: &str) -> Result<Document, JsonError> {
     Ok(Document {
         graph: of_parts(nodes_of(&streams, &work), &edges_of(&streams))?,
         generated: generated_of(&document)?,
+        repo: repo_of(&document)?,
     })
+}
+
+/// The repository `document` says the plan was built for, when it says one.
+///
+/// # Errors
+///
+/// Gives [`JsonError::Wrong`] for a `repo` that is not a string, and for a
+/// string that is not written as `owner/name`.
+fn repo_of(_document: &Value) -> Result<Option<Repo>, JsonError> {
+    Ok(None)
 }
 
 /// The moment `document` says it was built, when it says one.
@@ -752,6 +785,80 @@ mod tests {
         assert_eq!(
             refused.to_string(),
             "generated is not a moment, written as 2026-09-02T14:03:11Z"
+        );
+    }
+
+    /// The repository `text` names, written as `owner/name`, or `None` for a
+    /// text that names none.
+    fn repo_named_by(text: &str) -> Option<String> {
+        plan_of(text).repo().map(ToString::to_string)
+    }
+
+    #[test]
+    fn the_document_says_the_repository_it_was_built_for() {
+        assert_eq!(
+            repo_named_by(DOCUMENT),
+            Some("timmattison/tools".to_string())
+        );
+    }
+
+    #[test]
+    fn a_document_that_names_no_repository_names_none() {
+        // A document a reader wrote by hand need not name a repository, and
+        // `null` is a key that stands nowhere, as it is for every other key.
+        assert_eq!(repo_named_by(&document_of("[]")), None);
+        assert_eq!(
+            repo_named_by(&edited("\"repo\": \"timmattison/tools\",", "")),
+            None
+        );
+        assert_eq!(
+            repo_named_by(&edited("\"repo\": \"timmattison/tools\"", "\"repo\": null")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_repository_that_is_not_owner_and_name_is_a_refusal() {
+        // A later check compares this repository with the repository of the
+        // run. A reader that took `tools` for a repository would compare a
+        // guess, so each of these is not the schema.
+        for written in ["5", "\"tools\"", "\"a/b/c\"", "\"\"", "\"/tools\""] {
+            assert_eq!(
+                refusal(&edited(
+                    "\"repo\": \"timmattison/tools\"",
+                    &format!("\"repo\": {written}")
+                )),
+                JsonError::Wrong {
+                    path: Path::root(REPO),
+                    wanted: Kind::Repository,
+                },
+                "with {written}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_repository_names_the_form_of_one() {
+        let refused = refusal(&edited(
+            "\"repo\": \"timmattison/tools\"",
+            "\"repo\": \"tools\"",
+        ));
+        assert_eq!(
+            refused.to_string(),
+            "repo is not a repository, written as owner/name"
+        );
+    }
+
+    #[test]
+    fn a_repository_of_multi_byte_characters_reads() {
+        // An owner and a name are divided on a character, and never on a
+        // byte, so a name of multi-byte characters reads as it stands.
+        assert_eq!(
+            repo_named_by(&edited(
+                "\"repo\": \"timmattison/tools\"",
+                "\"repo\": \"café/日本語🎉\""
+            )),
+            Some("café/日本語🎉".to_string())
         );
     }
 
