@@ -566,6 +566,21 @@ mod tests {
             body: "## Blocked by\n\n- timmattison/muxiavelli#294\n- #5\n",
             numbers: &[5],
         },
+        Case {
+            name: "a blocker struck through",
+            body: "## Blocked by\n\n- ~~#21~~ (no longer needed)\n",
+            numbers: &[],
+        },
+        Case { name: "a blocker struck through with one tilde", body: "## Blocked by\n\n- ~#21~\n", numbers: &[] },
+        Case { name: "a struck blocker and a live one", body: "## Blocked by\n\n- ~~#21~~ #22\n", numbers: &[22] },
+        Case {
+            name: "a struck blocker and a live one after a comma",
+            body: "## Blocked by\n\n- ~~#21~~, #22\n",
+            numbers: &[22],
+        },
+        Case { name: "a strike that nothing closes", body: "## Blocked by\n\n- ~~#21 #22\n", numbers: &[] },
+        Case { name: "a label struck through", body: "~~**Blocked by:** #12~~\n", numbers: &[] },
+        Case { name: "a heading struck through", body: "## ~~Blocked by~~\n\n- #7\n", numbers: &[] },
         Case { name: "a number that is zero", body: "## Blocked by\n\n- #0\n", numbers: &[] },
         Case {
             name: "a number too large for any issue",
