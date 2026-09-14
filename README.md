@@ -1521,10 +1521,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     guesses at a schema it does not know answers with the wrong plan. A document that is not the
     schema — a missing `streams`, a stream with no `order`, a step with no `issue`, a number that
     is not a number, a `repo` not written as `owner/name` in ASCII letters, digits, `-`, `_` and
-    `.` — names the path in the document, so `streams[1].order[0].issue` says where to look. A
-    cycle names the numbers that hold the knot, as it does for a picture and for a `Waits for`
-    column. A `waitsFor` that names a step of its own stream is refused by none of those: it is an
-    edge `order` already carries.
+    `.`, with at most 39 characters in the owner and 100 in the name — names the path in the
+    document, so `streams[1].order[0].issue` says where to look. A cycle names the numbers that
+    hold the knot, as it does for a picture and for a `Waits for` column. A `waitsFor` that names
+    a step of its own stream is refused by none of those: it is an edge `order` already carries.
   - An empty `streams` array is a plan with no work in it, and that is not an error. The answer
     reads `The plan holds no work. Nothing to start.` and the run exits `0`, and it asks GitHub
     nothing at all. Every other JSON plan earns the report a picture earns: one row for each step

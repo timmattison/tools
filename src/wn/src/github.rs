@@ -46,7 +46,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::blocked_by;
-use crate::chain::IssueNumber;
+use crate::chain::{IssueNumber, Snippet};
 use crate::report::{Entry, Status};
 
 /// The GitHub CLI, which carries the credential and the host.
@@ -59,9 +59,16 @@ pub struct Repo {
     name: String,
 }
 
-/// The advice of every refusal of [`Repo::parse`].
+/// The advice of a refusal of [`Repo::parse`] for the form or for a character.
 const REPOSITORY_FORM: &str =
     "Write it as owner/name, with ASCII letters, digits, -, _ and . in each part";
+
+/// The most characters GitHub permits in an owner, which is a user or an
+/// organization.
+const MAX_OWNER_CHARS: usize = 39;
+
+/// The most characters GitHub permits in the name of a repository.
+const MAX_NAME_CHARS: usize = 100;
 
 /// Whether GitHub permits `character` in an owner or in a name.
 fn is_permitted_in_a_name(character: char) -> bool {
@@ -72,8 +79,10 @@ impl Repo {
     /// Read a repository out of an `owner/name` argument.
     ///
     /// GitHub permits only ASCII letters, digits, `-`, `_` and `.` in an owner
-    /// and in a name, and a `Repo` holds no other character. So a `Repo` puts
-    /// no control character and no escape sequence on a terminal through
+    /// and in a name. It permits at most `MAX_OWNER_CHARS` (39) characters in
+    /// an owner and at most `MAX_NAME_CHARS` (100) in a name. A `Repo` holds
+    /// nothing else. So a `Repo` puts no control character, no escape
+    /// sequence, and no more than 140 characters on a terminal through
     /// `Display`, and [`Repo::is_same_repository`] compares ASCII case alone.
     /// The argument arrives from a command line, from `gh`, and from a plan on
     /// the clipboard, and all three come through this function.
@@ -81,18 +90,28 @@ impl Repo {
     /// # Errors
     ///
     /// Fails when the argument is not two non-empty parts divided by one `/`,
-    /// and when a part holds a character GitHub permits in no name. The
-    /// message quotes the argument with `{:?}`, so a control character in it
-    /// is escaped.
+    /// when a part holds a character GitHub permits in no name, and when the
+    /// owner holds more than 39 characters or the name more than 100. The
+    /// message quotes a [`Snippet`] of the argument with `{:?}`, so a control
+    /// character in it is escaped and a long argument is cut.
     pub fn parse(spec: &str) -> Result<Self> {
-        let refused = || anyhow!("{spec:?} is not a repository. {REPOSITORY_FORM}");
+        let refused =
+            |advice: &str| anyhow!("{:?} is not a repository. {advice}", Snippet::new(spec));
         let is_a_part = |part: &str| !part.is_empty() && part.chars().all(is_permitted_in_a_name);
         let mut parts = spec.split('/');
         let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
-            return Err(refused());
+            return Err(refused(REPOSITORY_FORM));
         };
         if !(is_a_part(owner) && is_a_part(name)) {
-            return Err(refused());
+            return Err(refused(REPOSITORY_FORM));
+        }
+        // A count of characters, and never of bytes, so the check holds
+        // whichever check runs first.
+        if owner.chars().count() > MAX_OWNER_CHARS || name.chars().count() > MAX_NAME_CHARS {
+            return Err(refused(&format!(
+                "GitHub permits at most {MAX_OWNER_CHARS} characters in an owner \
+                 and {MAX_NAME_CHARS} in a name"
+            )));
         }
         Ok(Self {
             owner: owner.to_string(),
