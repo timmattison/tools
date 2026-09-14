@@ -939,6 +939,19 @@ struct Cli {
     #[arg(long)]
     no_bootstrap_hooks: bool,
 
+    /// Make the new worktree a sparse checkout without the tracked directory DIR.
+    ///
+    /// DIR is relative to the root of the repository. Use the flag one time for
+    /// each directory to exclude. Only the new worktree is sparse. Other
+    /// worktrees stay full. Run `git sparse-checkout disable` in the worktree
+    /// to write the directory.
+    #[arg(long = "sparse-exclude", action = clap::ArgAction::Append)]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "wired into main by the next slice of issue #487")
+    )]
+    sparse_exclude: Vec<String>,
+
     /// Install shell integration to automatically cd into new worktrees.
     ///
     /// Adds a shell function to your ~/.zshrc or ~/.bashrc that wraps nwt
@@ -3424,6 +3437,95 @@ mod tests {
         assert_eq!(dir.pattern(), r"!/we\[ir\]d dir/");
     }
 
+    /// `--sparse-exclude` takes one directory. A run without the flag excludes
+    /// nothing.
+    #[test]
+    fn test_cli_sparse_exclude_parses_alone() {
+        use clap::Parser;
+
+        let cli = Cli::try_parse_from(["nwt", "--sparse-exclude", "heavy"])
+            .expect("Should accept --sparse-exclude alone");
+        assert_eq!(cli.sparse_exclude, vec!["heavy".to_string()]);
+
+        let plain = Cli::try_parse_from(["nwt"]).expect("Should parse without flags");
+        assert!(
+            plain.sparse_exclude.is_empty(),
+            "A run without --sparse-exclude excludes nothing"
+        );
+    }
+
+    /// Each occurrence adds one directory, in the order the user gave.
+    #[test]
+    fn test_cli_sparse_exclude_is_repeatable() {
+        use clap::Parser;
+
+        let cli = Cli::try_parse_from([
+            "nwt",
+            "--sparse-exclude",
+            "assets/video",
+            "--sparse-exclude",
+            "fixtures/large",
+        ])
+        .expect("Should accept --sparse-exclude two times");
+        assert_eq!(
+            cli.sparse_exclude,
+            vec!["assets/video".to_string(), "fixtures/large".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_cli_sparse_exclude_with_branch() {
+        use clap::Parser;
+
+        // `--branch` takes one or more values, so this also proves that the
+        // flag ends the list of branch words.
+        let cli = Cli::try_parse_from(["nwt", "-b", "issue-12", "--sparse-exclude", "heavy"])
+            .expect("Should accept --sparse-exclude with --branch");
+        assert_eq!(cli.branch, Some(vec!["issue-12".to_string()]));
+        assert_eq!(cli.sparse_exclude, vec!["heavy".to_string()]);
+    }
+
+    #[test]
+    fn test_cli_sparse_exclude_with_checkout() {
+        use clap::Parser;
+
+        let cli = Cli::try_parse_from(["nwt", "-c", "v1", "--sparse-exclude", "heavy"])
+            .expect("Should accept --sparse-exclude with --checkout");
+        assert_eq!(cli.checkout, Some("v1".to_string()));
+        assert_eq!(cli.sparse_exclude, vec!["heavy".to_string()]);
+    }
+
+    /// The help text names the value `DIR`, which is the word the docs use.
+    #[test]
+    fn test_cli_sparse_exclude_value_name_is_dir() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        let arg = cmd
+            .get_arguments()
+            .find(|arg| arg.get_long() == Some("sparse-exclude"))
+            .expect("nwt defines --sparse-exclude");
+        let names: Vec<&str> = arg
+            .get_value_names()
+            .unwrap_or_default()
+            .iter()
+            .map(|name| name.as_str())
+            .collect();
+        assert_eq!(names, ["DIR"]);
+    }
+
+    #[test]
+    fn test_cli_shell_setup_conflicts_with_sparse_exclude() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        // --shell-setup makes no worktree, so a directory to exclude is a mistake
+        let err = cmd
+            .try_get_matches_from(["nwt", "--shell-setup", "--sparse-exclude", "heavy"])
+            .expect_err("Should fail when both --shell-setup and --sparse-exclude are provided");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
     // Unix-specific tests for shell command execution.
     // These tests use Unix commands like `true`, `false`, `pwd`, and `sh`.
     #[cfg(unix)]
@@ -3676,6 +3778,7 @@ mod tests {
                 run: None,
                 tmux: false,
                 shell_setup: false,
+                sparse_exclude: Vec::new(),
             };
             let config = NwtConfig {
                 branch: Some("config-branch".to_string()),
@@ -3715,6 +3818,7 @@ mod tests {
                 run: None,
                 tmux: false,
                 shell_setup: false,
+                sparse_exclude: Vec::new(),
             };
             let config = NwtConfig {
                 branch: Some("config-branch".to_string()),
@@ -3747,6 +3851,7 @@ mod tests {
                 run: None,
                 tmux: false,
                 shell_setup: false,
+                sparse_exclude: Vec::new(),
             };
             let merged = merge_config(&cli, None);
 
@@ -3770,6 +3875,7 @@ mod tests {
                 run: None,
                 tmux: false,
                 shell_setup: false,
+                sparse_exclude: Vec::new(),
             };
             let config = NwtConfig {
                 branch: None,
@@ -3798,6 +3904,7 @@ mod tests {
                 run: None,
                 tmux: false,
                 shell_setup: false,
+                sparse_exclude: Vec::new(),
             };
             let config = NwtConfig {
                 branch: None,
@@ -3827,6 +3934,7 @@ mod tests {
                 run: None,
                 tmux: false,
                 shell_setup: false,
+                sparse_exclude: Vec::new(),
             };
             let merged = merge_config(&cli, None);
             assert!(merged.bootstrap_hooks);
@@ -3845,6 +3953,7 @@ mod tests {
                 run: None,
                 tmux: false,
                 shell_setup: false,
+                sparse_exclude: Vec::new(),
             };
             let config = NwtConfig {
                 branch: None,
@@ -3872,6 +3981,7 @@ mod tests {
                 run: None,
                 tmux: false,
                 shell_setup: false,
+                sparse_exclude: Vec::new(),
             };
             let config = NwtConfig {
                 branch: None,
