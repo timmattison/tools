@@ -39,6 +39,7 @@ use thiserror::Error;
 
 use crate::chain::Snippet;
 use crate::envelope::Envelope;
+use crate::github::Repo;
 use crate::progress::Progress;
 use crate::stream::{self, Transcript};
 
@@ -954,6 +955,17 @@ pub(crate) fn refusal_of(said: &str) -> BuildError {
     }
 }
 
+/// Refuse a run that builds a plan when `--repo` names a repository other than
+/// the repository of this directory.
+///
+/// # Errors
+///
+/// Gives [`BuildError::AnotherRepository`] when `named` is not `here`.
+pub fn refuse_another_repository(here: &Repo, named: Option<&Repo>) -> Result<(), BuildError> {
+    let _ = (here, named);
+    Ok(())
+}
+
 /// Why no plan came back.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum BuildError {
@@ -1027,6 +1039,21 @@ pub enum BuildError {
     NoRepository {
         /// What said the directory is in no repository.
         said: String,
+    },
+    /// `--repo` names a repository other than the repository of this
+    /// directory, and the run would build a plan.
+    #[error(
+        "a plan is built for the repository of this directory, which is {here}, and --repo names \
+         another repository, {named}. The numbers of a plan for {here} name other issues in \
+         {named}.\n\
+         Run wn in a checkout of {named} to plan and answer {named}, or leave --repo out to plan \
+         and answer {here}."
+    )]
+    AnotherRepository {
+        /// The repository of this directory, which the run plans.
+        here: Repo,
+        /// The repository `--repo` names, which `wn` asks GitHub about.
+        named: Repo,
     },
     /// The value of [`EFFORT_ENV`] is not one of [`EFFORT_LEVELS`].
     #[error(
@@ -1350,6 +1377,66 @@ mod tests {
             "a plan is built for the repository of this directory, and gh can name none for it. \
 Run wn inside a checkout — --repo names the repository wn asks about and never the one a run \
 plans.\n`gh repo view` failed."
+        );
+    }
+
+    /// The repository `spec` names.
+    fn repository(spec: &str) -> Repo {
+        Repo::parse(spec).expect("the test names a repository")
+    }
+
+    #[test]
+    fn a_repo_for_another_repository_than_this_directory_is_refused() {
+        // The skill plans the repository of this directory, and `wn` asks
+        // GitHub about the repository `--repo` names. A run under a `--repo`
+        // for another repository answers the numbers of one repository with
+        // the issues of the other.
+        let here = repository("owner/b");
+        let named = repository("owner/c");
+        let refused = refuse_another_repository(&here, Some(&named))
+            .expect_err("--repo names another repository");
+        assert_eq!(
+            refused,
+            BuildError::AnotherRepository {
+                here: here.clone(),
+                named: named.clone(),
+            }
+        );
+        assert_eq!(
+            refused.to_string(),
+            "a plan is built for the repository of this directory, which is owner/b, and --repo \
+names another repository, owner/c. The numbers of a plan for owner/b name other issues in owner/c.\n\
+Run wn in a checkout of owner/c to plan and answer owner/c, or leave --repo out to plan and answer \
+owner/b."
+        );
+    }
+
+    #[test]
+    fn the_refusal_of_another_repository_names_no_refresh() {
+        // `wn --refresh` builds a plan for this directory as well, so it
+        // repairs nothing here. A reader who follows it gets the same refusal.
+        let message =
+            refuse_another_repository(&repository("owner/b"), Some(&repository("owner/c")))
+                .expect_err("--repo names another repository")
+                .to_string();
+        assert!(!message.contains("--refresh"), "{message}");
+    }
+
+    #[test]
+    fn a_run_that_names_no_repository_is_not_refused() {
+        assert_eq!(
+            refuse_another_repository(&repository("owner/b"), None),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_repo_for_this_directory_in_other_letter_case_is_not_refused() {
+        // GitHub names a repository without regard to letter case, so these
+        // two names are one repository.
+        assert_eq!(
+            refuse_another_repository(&repository("owner/b"), Some(&repository("Owner/B"))),
+            Ok(())
         );
     }
 

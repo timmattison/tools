@@ -2611,6 +2611,60 @@ fn a_directory_that_is_in_no_repository_costs_no_run() {
     assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
 }
 
+/// A repository that is not [`REPO`], which the fake `gh` names for the current
+/// directory.
+const OTHER_REPO: &str = "owner/other";
+
+#[test]
+fn a_run_that_builds_refuses_a_repo_for_another_repository_before_it_runs_claude() {
+    // The skill plans the repository of the current directory, and `wn` asks
+    // GitHub about the repository `--repo` names. A build under a `--repo` for
+    // another repository answers the numbers of one repository with the issues
+    // of the other. The refusal stands before the run, so it costs no money and
+    // no minute. A run with nothing to read and a run with `--refresh` both
+    // build, so both are refused.
+    let empty: &[&str] = &["--repo", OTHER_REPO];
+    let refresh: &[&str] = &["--refresh", "--repo", OTHER_REPO, ONE_OPEN_CHAIN];
+    for args in [empty, refresh] {
+        let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+        let output = run_building(&gh, args, &[]);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{args:?}: the run could not answer"
+        );
+        let message = stderr(&output);
+        assert!(
+            message.starts_with(&format!(
+                "wn: a plan is built for the repository of this directory, which is {REPO}, and \
+                 --repo names another repository, {OTHER_REPO}."
+            )),
+            "{args:?}: {message}"
+        );
+        // `wn --refresh` builds for this directory as well, so it is no repair.
+        assert!(!message.contains("--refresh"), "{args:?}: {message}");
+        // The line that says a run is happening never printed.
+        assert!(!message.contains("with claude"), "{args:?}: {message}");
+        assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
+        assert!(
+            gh.sent_no_query(),
+            "{args:?}: the refusal asks about no issue, and it asked {}",
+            gh.recorded_args()
+        );
+        assert_eq!(stdout(&output), "", "{args:?}: no rows");
+    }
+}
+
+#[test]
+fn a_run_that_builds_under_a_repo_for_this_directory_in_other_letter_case_answers() {
+    // GitHub names a repository without regard to letter case, so this
+    // `--repo` names the repository the fake `gh` names for this directory.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(&gh, &["--repo", "TimMattison/Tools"], &[]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), JSON_ANSWER);
+}
+
 #[test]
 fn the_report_of_the_run_goes_to_standard_error_and_the_plan_goes_to_standard_output() {
     // The reader pays for the run, and the price is written on the pipe the
