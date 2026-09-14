@@ -833,6 +833,96 @@ fn quiet_skips_an_env_under_an_excluded_directory_without_a_line() {
     );
 }
 
+/// The branch that a clone holds only as a remote-tracking branch.
+const REMOTE_ONLY_BRANCH: &str = "foo";
+
+/// Make a source repository whose branch [`REMOTE_ONLY_BRANCH`] tracks
+/// [`KEPT_FILES`] and [`HEAVY_FILES`], and whose checked-out branch does not
+/// track [`HEAVY_DIR`].
+///
+/// A check that reads `HEAD` of a clone thus finds no [`HEAVY_DIR`] to
+/// exclude.
+fn source_with_a_heavy_remote_branch() -> (tempfile::TempDir, PathBuf) {
+    let (temp, repo) = repo_with_heavy_dir();
+    assert!(
+        run_git(&repo, &["branch", REMOTE_ONLY_BRANCH]),
+        "git branch failed"
+    );
+    assert!(
+        run_git(&repo, &["rm", "-r", "--quiet", "--", HEAVY_DIR]),
+        "git rm failed"
+    );
+    assert!(
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "drop the heavy dir"
+            ]
+        ),
+        "git commit failed"
+    );
+
+    (temp, repo)
+}
+
+/// Clone `source` into a new temporary directory, and hand back the temporary
+/// directory (keep it alive) and the clone.
+///
+/// The clone holds the checked-out branch of `source` as a local branch, and
+/// every other branch only as `origin/<branch>`. The clone is named `repo`, as
+/// `init_repo` names a repository, so [`assert_made_nothing`] can read it.
+fn clone_of(source: &Path) -> (tempfile::TempDir, PathBuf) {
+    let temp = tempfile::TempDir::new().expect("create a temporary directory");
+    let clone = temp.path().join("repo");
+    let source = source.to_str().expect("utf-8 source path");
+    let target = clone.to_str().expect("utf-8 clone path");
+
+    assert!(
+        run_git(temp.path(), &["clone", "--quiet", source, target]),
+        "git clone failed"
+    );
+
+    (temp, clone)
+}
+
+/// Demand that `clone` has no local branch [`REMOTE_ONLY_BRANCH`], so only
+/// git's checkout DWIM can find it.
+fn assert_only_a_remote_holds_the_branch(clone: &Path) {
+    let local = format!("refs/heads/{REMOTE_ONLY_BRANCH}");
+    assert!(
+        !run_git(clone, &["show-ref", "--verify", "--quiet", &local]),
+        "the fixture clone must not hold {local}"
+    );
+}
+
+/// With `-c <branch>` for a branch that the clone holds only as
+/// `origin/<branch>`, the check reads that remote-tracking branch.
+///
+/// A plain `nwt -c foo` works in such a clone, because `git worktree add`
+/// makes a local `foo` that tracks `origin/foo`. `git ls-tree foo` cannot read
+/// `foo`, so a check that reads only the name the user typed refuses a run
+/// that works without the flag.
+#[test]
+fn a_branch_that_only_a_remote_holds_passes_like_a_plain_checkout() {
+    let (_source_temp, source) = source_with_a_heavy_remote_branch();
+    let (_temp, clone) = clone_of(&source);
+    assert_only_a_remote_holds_the_branch(&clone);
+
+    let output = run_nwt_checkout(&clone, REMOTE_ONLY_BRANCH, &["--sparse-exclude", HEAVY_DIR]);
+    let worktree = created_worktree(&output);
+
+    assert_sparse_worktree(&worktree, HEAVY_DIR, KEPT_FILES);
+    assert_eq!(
+        git_stdout(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).trim_end(),
+        REMOTE_ONLY_BRANCH,
+        "the worktree must check out a local {REMOTE_ONLY_BRANCH}, as git's DWIM makes it"
+    );
+}
+
 /// A value that the lexical rules refuse exits with its own code, names the
 /// value on stderr, prints no path, and makes nothing: no worktrees directory,
 /// no worktree, and no branch.
