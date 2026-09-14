@@ -1389,6 +1389,32 @@ fn a_failed_read_tree_removes_what_the_run_made() {
     assert_the_failed_step_left_nothing(&temp, &repo, &before, &output);
 }
 
+/// A sparse `-c <branch>` run for a branch that only a remote holds deletes the
+/// local branch that git's checkout DWIM made, when `git read-tree -mu HEAD`
+/// fails.
+///
+/// `git worktree add <path> foo` makes a local `foo` that tracks `origin/foo`.
+/// That branch did not exist before the run, so the run made it, and the
+/// cleanup takes it back with the worktree.
+#[cfg(unix)]
+#[test]
+fn a_failed_read_tree_deletes_the_branch_that_the_checkout_dwim_made() {
+    let (_source_temp, source) = source_with_a_heavy_remote_branch();
+    let (temp, clone) = clone_of(&source);
+    assert_only_a_remote_holds_the_branch(&clone);
+    let before = local_branches(&clone);
+    let fake = FakeGit::refusing(&["read-tree"]);
+
+    let output = run_nwt_with_fake_git(
+        &clone,
+        &fake,
+        &["-c", REMOTE_ONLY_BRANCH, "--sparse-exclude", HEAVY_DIR],
+    );
+
+    assert_the_failed_step_left_nothing(&temp, &clone, &before, &output);
+    assert_only_a_remote_holds_the_branch(&clone);
+}
+
 /// Nothing that the hook step writes to stdout reaches the stdout of `nwt`,
 /// which holds only the worktree path.
 ///
