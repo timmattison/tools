@@ -693,6 +693,71 @@ fn a_checkout_ref_that_git_cannot_read_is_a_failed_add_and_makes_nothing() {
     assert_made_nothing(&temp, &repo);
 }
 
+/// Test 5 of issue #487: a directory whose name holds a gitignore special
+/// character is excluded, and only that directory.
+///
+/// An absent directory is not sufficient proof. The unescaped pattern `!/a*/`
+/// also excludes `a*`, because `*` matches the `*` too. So each case has a
+/// sibling that the unescaped pattern gets wrong, and the sibling must stay:
+///
+/// - `!/we[ir]d dir/` matches `weid dir` and `werd dir`, and not the
+///   directory itself.
+/// - `!/a*/` matches `ab` too.
+/// - `!/q?/` matches `qx` too.
+/// - `!/back\slash/` reads `\s` as `s`, so it matches `backslash`, and not the
+///   directory itself.
+///
+/// After the `!/` prefix, a `!` or a `#` is not at the start of the pattern,
+/// and git does not read it as special. So `!bang` and `#hash` cannot fail
+/// when the escape is removed. They prove that the escaped form still
+/// excludes such a directory.
+///
+/// A name with `\`, `*`, or `?` is not a legal file name on Windows.
+#[cfg(unix)]
+#[test]
+fn a_directory_named_with_each_glob_character_is_excluded_alone() {
+    const EXCLUDED: &[&str] = &["we[ir]d dir", "a*", "q?", r"back\slash", "!bang", "#hash"];
+    const SIBLINGS: &[&str] = &["weid dir", "ab", "qx", "backslash"];
+    const FILE: &str = "file.txt";
+
+    let files: Vec<String> = EXCLUDED
+        .iter()
+        .chain(SIBLINGS)
+        .map(|dir| format!("{dir}/{FILE}"))
+        .chain(std::iter::once("heavy.txt".to_owned()))
+        .collect();
+    let file_refs: Vec<&str> = files.iter().map(String::as_str).collect();
+    let (_temp, repo) = repo_with_files(&file_refs);
+
+    let flags: Vec<&str> = EXCLUDED
+        .iter()
+        .flat_map(|dir| ["--sparse-exclude", dir])
+        .collect();
+    let output = run_nwt(&repo, &unique_branch("sparse-glob"), &flags);
+    let worktree = created_worktree(&output);
+
+    for dir in EXCLUDED {
+        assert!(
+            !worktree.join(dir).exists(),
+            "--sparse-exclude {dir:?} must keep that directory out of {}",
+            worktree.display()
+        );
+    }
+    let kept: Vec<String> = SIBLINGS
+        .iter()
+        .map(|dir| format!("{dir}/{FILE}"))
+        .chain(["README.md".to_owned(), "heavy.txt".to_owned()])
+        .collect();
+    let kept_refs: Vec<&str> = kept.iter().map(String::as_str).collect();
+    assert_files_present(&worktree, &kept_refs);
+
+    let status = git_stdout(&worktree, &["status", "--short"]);
+    assert!(
+        status.is_empty(),
+        "a sparse worktree has no change to report, but git status says:\n{status}"
+    );
+}
+
 /// A value that the lexical rules refuse exits with its own code, names the
 /// value on stderr, prints no path, and makes nothing: no worktrees directory,
 /// no worktree, and no branch.
