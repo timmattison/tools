@@ -1150,6 +1150,74 @@ HOOK BOOTSTRAP:
     worktree would otherwise be ungated. Because that signal must never be
     invisible, this warning is printed to stderr even with --quiet.
 
+SPARSE WORKTREES:
+    --sparse-exclude DIR makes the new worktree a sparse checkout without the tracked
+    directory DIR. Use the flag one time for each directory:
+
+        nwt -b issue-12 --sparse-exclude assets/video --sparse-exclude fixtures/large
+
+    DIR is relative to the root of the repository, and 'heavy' and 'heavy/' are the
+    same directory. Each directory becomes the non-cone pattern '!/DIR/', after '/*'.
+    Thus '!/heavy/' excludes only the top-level directory 'heavy'. It does not exclude
+    the file 'heavy.txt' or the directory 'src/heavy/'. nwt escapes the glob
+    characters of each name, so the pattern matches the name literally.
+
+    nwt checks each value before it makes anything, and a refused value makes no
+    directory and no branch. nwt refuses an absolute path, a path with a '..'
+    component, an empty value, and a value with a control character. It also refuses
+    a path that is not a directory that git tracks at the ref the worktree checks
+    out. Each of these refusals exits 15. A ref that git cannot read exits 7.
+
+    For a '-c BRANCH' that only a remote holds, git makes a local branch that tracks
+    the remote branch. nwt then checks the remote branch that git picks. nwt finds it
+    at 'refs/remotes/REMOTE/BRANCH', so a remote with a different fetch refspec can
+    give a different result.
+
+    Only the new worktree is sparse. The main worktree, the other worktrees, and
+    later worktrees that nwt makes without the flag stay full. There is one
+    exception. When the main worktree is sparse, git copies its patterns into each
+    new worktree. Then --sparse-exclude replaces those patterns, and it does not add
+    to them. A directory that only the main worktree excludes comes back.
+
+    The sparse checkout writes 'extensions.worktreeConfig=true' into the shared
+    .git/config. This setting does not make other worktrees sparse. It stays after
+    you remove the worktree.
+
+    To get the excluded directories, run 'git sparse-checkout disable' in the worktree.
+
+    After nwt makes the worktree, it prints this line to stderr:
+
+        Excluded heavy/ (sparse checkout). Run 'git sparse-checkout disable' in the worktree to get it.
+
+    The .env copy does not take an untracked .env under an excluded directory,
+    because a copy writes that directory into the worktree again. nwt prints this
+    line for each such file:
+
+        Skipped: heavy/.env (under excluded heavy/)
+
+    --quiet hides both lines.
+
+    'git worktree add --no-checkout' runs no hook. So nwt runs the post-checkout hook
+    after it writes the files, with the arguments of a plain add. The hook sees the
+    sparse tree. It also sees GIT_DIR and GIT_WORK_TREE set, and a plain add sets
+    neither. A hook that fails keeps the worktree and the branch, and nwt exits 7, as
+    after a plain add. When git cannot start the hook step, the worktree stays and
+    nwt exits 6.
+
+    When 'git sparse-checkout set' or 'git read-tree' fails, the worktree is broken.
+    nwt then removes the worktree, the branch that the run made, and the empty
+    directories that the run made, and it exits 7.
+
+    Limits:
+      - The flag saves disk space in the worktree only. All worktrees share one object
+        store, so the blobs of the excluded directory stay in .git. Only a partial
+        clone (git clone --filter=blob:none) keeps them out, for the whole clone.
+      - Commits and diffs still include the excluded directory. Git does not write it
+        to disk, but it does not delete it from the branch.
+      - A build or a test that reads the excluded directory fails in that worktree.
+      - When an excluded directory holds a workspace package, the install of HOOK
+        BOOTSTRAP can fail. nwt then warns and continues.
+
 EXAMPLES:
     nwt                              # Random name for both directory and branch
     nwt -b issue-42                  # Branch 'issue-42', directory 'issue-42'
@@ -1164,6 +1232,7 @@ EXAMPLES:
     nwt --tmux --run \"npm install\"   # Run command in a new tmux window
     nwt --no-copy-env                # Skip copying .env files
     nwt --no-bootstrap-hooks         # Skip running install to set up git hooks
+    nwt --sparse-exclude assets      # Leave the tracked directory assets/ out
     nwt --shell-setup                # Install shell integration for auto-cd
 
 SHELL INTEGRATION:
@@ -1293,10 +1362,16 @@ struct Cli {
 
     /// Make the new worktree a sparse checkout without the tracked directory DIR.
     ///
-    /// DIR is relative to the root of the repository. Use the flag one time for
-    /// each directory to exclude. Only the new worktree is sparse. Other
-    /// worktrees stay full. Run `git sparse-checkout disable` in the worktree
-    /// to write the directory.
+    /// DIR is relative to the root of the repository, and `heavy` and `heavy/`
+    /// are the same directory. Use the flag one time for each directory to
+    /// exclude. Before nwt makes anything, it refuses a DIR that git does not
+    /// track as a directory at the ref that the worktree checks out.
+    ///
+    /// Only the new worktree is sparse. Other worktrees stay full. Run
+    /// `git sparse-checkout disable` in the worktree to write the directories.
+    ///
+    /// The SPARSE WORKTREES section of --help gives the limits, the
+    /// post-checkout hook, and the exception for a sparse main worktree.
     #[arg(long = "sparse-exclude", value_name = "DIR", action = clap::ArgAction::Append)]
     sparse_exclude: Vec<String>,
 
@@ -4415,12 +4490,10 @@ mod tests {
     /// The text of `document` from the line `heading` to the next line that
     /// starts with `next_heading`. An empty string when `heading` is not there.
     fn doc_section<'a>(document: &'a str, heading: &str, next_heading: &str) -> &'a str {
-        document
-            .split_once(heading)
-            .map_or("", |(_, rest)| {
-                rest.split_once(next_heading)
-                    .map_or(rest, |(section, _)| section)
-            })
+        document.split_once(heading).map_or("", |(_, rest)| {
+            rest.split_once(next_heading)
+                .map_or(rest, |(section, _)| section)
+        })
     }
 
     /// True when one line of `section`, without its indentation, is `sample`.
