@@ -499,7 +499,7 @@ mod exit_codes {
         not(test),
         expect(dead_code, reason = "wired into main by the next slice of issue #487")
     )]
-    pub const INVALID_SPARSE_EXCLUDE: i32 = 14;
+    pub const INVALID_SPARSE_EXCLUDE: i32 = 15;
 }
 
 /// Maximum attempts to find an available directory name before giving up.
@@ -840,7 +840,8 @@ EXIT CODES:
     10 Tmux command failed
     12 Config file error (invalid TOML, validation failed)
     13 Not running inside tmux (--tmux specified)
-    14 Shell setup failed"
+    14 Shell setup failed
+    15 Invalid --sparse-exclude directory"
 )]
 struct Cli {
     /// Specify branch name instead of generating a random one.
