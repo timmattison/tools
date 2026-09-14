@@ -700,6 +700,42 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_repository_keeps_the_space_that_refused_it() {
+        // A quote that drops the space around the argument shows the reader a
+        // name GitHub permits, and the reader cannot find what refused it.
+        for (spec, quote) in [
+            ("owner/tools ", "\"owner/tools \""),
+            (" owner/tools", "\" owner/tools\""),
+            ("owner/\ttools", "\"owner/\\ttools\""),
+        ] {
+            let message = Repo::parse(spec)
+                .expect_err("GitHub permits no space in a name")
+                .to_string();
+            assert!(
+                message.starts_with(&format!("{quote} is not a repository. ")),
+                "the message quotes {spec:?} whole: {message:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_refused_repository_is_escaped_and_then_cut() {
+        // The cut takes the opening quote and the characters after it, and
+        // the mark of the cut stands where the closing quote stood.
+        let message = Repo::parse(&format!("{}/tools", "a".repeat(4096)))
+            .expect_err("GitHub permits no owner of 4096 characters")
+            .to_string();
+        assert_eq!(
+            message,
+            format!(
+                "\"{}… is not a repository. GitHub permits at most 39 characters in an owner \
+                 and 100 in a name",
+                "a".repeat(crate::chain::SNIPPET_CHARS - 1)
+            )
+        );
+    }
+
+    #[test]
     fn the_query_asks_about_every_number_once() {
         let query = build_query(&chain(&[277, 278]));
         assert!(
