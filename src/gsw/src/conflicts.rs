@@ -399,7 +399,11 @@ impl ConflictsWorker {
     /// no other. A drop of the worker does the same, so a loop that leaves by
     /// an error path waits as well. This method gives the quit a name at its
     /// call site.
-    pub(crate) fn shutdown(self) {
+    ///
+    /// `on_wait` gets [`WAITING_NOTICE`] before the wait, and only when a
+    /// thread is still alive.
+    pub(crate) fn shutdown(self, on_wait: impl FnOnce(&str)) {
+        let _ = on_wait;
         drop(self);
     }
 
@@ -465,6 +469,7 @@ fn one_row(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::num::NonZeroUsize;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -917,8 +922,22 @@ mod tests {
             wait_until("the end of the run", || !worker.is_running());
         }
 
-        worker.shutdown();
+        let said = RefCell::new(Vec::new());
+        worker.shutdown(|notice| said.borrow_mut().push(notice.to_owned()));
         assert_eq!(worktrees(&repo), 1);
+        assert_eq!(
+            said.into_inner(),
+            Vec::<String>::new(),
+            "a quit with no run in flight waits for nothing, so it says nothing",
+        );
+    }
+
+    /// A worker that never started a run has nothing to wait for.
+    #[test]
+    fn an_idle_worker_says_nothing_at_the_quit() {
+        let said = RefCell::new(Vec::new());
+        ConflictsWorker::new().shutdown(|notice| said.borrow_mut().push(notice.to_owned()));
+        assert_eq!(said.into_inner(), Vec::<String>::new());
     }
 
     /// Quit with `quit` while the rebase replay holds its scratch worktree,
@@ -980,9 +999,19 @@ mod tests {
         );
     }
 
+    /// The quit through `shutdown` also names the wait. A replay can take many
+    /// seconds, and a screen that says nothing while gsw waits reads as a hang.
     #[test]
     fn shutdown_in_the_middle_of_a_run_waits_for_the_replay() {
-        a_quit_in_the_middle_of_a_run_waits_for_the_replay(ConflictsWorker::shutdown);
+        let said = RefCell::new(Vec::new());
+        a_quit_in_the_middle_of_a_run_waits_for_the_replay(|worker| {
+            worker.shutdown(|notice| said.borrow_mut().push(notice.to_owned()));
+        });
+        assert_eq!(
+            said.into_inner(),
+            [WAITING_NOTICE],
+            "a quit that waits for a replay must say so once",
+        );
     }
 
     /// A loop that leaves by an error path drops the worker and never calls
