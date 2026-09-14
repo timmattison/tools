@@ -923,6 +923,88 @@ fn a_branch_that_only_a_remote_holds_passes_like_a_plain_checkout() {
     );
 }
 
+/// The second remote of a clone that two remotes give [`REMOTE_ONLY_BRANCH`].
+const SECOND_REMOTE: &str = "upstream";
+
+/// A clone that two remotes give [`REMOTE_ONLY_BRANCH`].
+struct TwoRemoteClone {
+    /// The temporary directory that holds only the clone.
+    temp: tempfile::TempDir,
+    /// The clone.
+    repo: PathBuf,
+    /// The two source repositories, kept alive for the life of the clone.
+    _sources: [tempfile::TempDir; 2],
+}
+
+/// Make a clone whose `origin` holds a [`REMOTE_ONLY_BRANCH`] without
+/// [`HEAVY_DIR`], and whose [`SECOND_REMOTE`] holds one with it.
+///
+/// So a check that reads `origin` refuses [`HEAVY_DIR`] as a directory that
+/// git does not track, and a check that reads [`SECOND_REMOTE`] accepts it.
+fn clone_with_two_remotes_holding_the_branch() -> TwoRemoteClone {
+    let (light_temp, light) = repo_with_files(&["heavy.txt", "src/heavy/lib.txt"]);
+    assert!(
+        run_git(&light, &["branch", REMOTE_ONLY_BRANCH]),
+        "git branch failed"
+    );
+    let (heavy_temp, heavy) = source_with_a_heavy_remote_branch();
+
+    let (temp, repo) = clone_of(&light);
+    let heavy = heavy.to_str().expect("utf-8 source path");
+    assert!(
+        run_git(&repo, &["remote", "add", SECOND_REMOTE, heavy]),
+        "git remote add failed"
+    );
+    assert!(
+        run_git(&repo, &["fetch", "--quiet", SECOND_REMOTE]),
+        "git fetch failed"
+    );
+    assert_only_a_remote_holds_the_branch(&repo);
+
+    TwoRemoteClone {
+        temp,
+        repo,
+        _sources: [light_temp, heavy_temp],
+    }
+}
+
+/// When two remotes hold the branch and nothing names a default remote, git
+/// refuses the add with `fatal: invalid reference: foo`. So the run exits as a
+/// failed add, and it makes nothing.
+///
+/// A check that takes one of the two branches reads `origin/foo`, which does
+/// not track `heavy/`, and exits 15. The run reads no global and no system
+/// configuration, so a `checkout.defaultRemote` of the host cannot pick a
+/// remote.
+#[cfg(unix)]
+#[test]
+fn two_remotes_that_hold_the_branch_fail_like_the_add_and_make_nothing() {
+    let fixture = clone_with_two_remotes_holding_the_branch();
+
+    let output = nwt_command(&fixture.repo)
+        .args([
+            "-c",
+            REMOTE_ONLY_BRANCH,
+            "--no-copy-env",
+            "--no-bootstrap-hooks",
+        ])
+        .args(["--sparse-exclude", HEAVY_DIR])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("run the nwt binary");
+
+    assert_refused(
+        &output,
+        WORKTREE_FAILED,
+        &format!(
+            "Error: git cannot read the ref '{REMOTE_ONLY_BRANCH}' to check --sparse-exclude: "
+        ),
+    );
+    assert_made_nothing(&fixture.temp, &fixture.repo);
+    assert_only_a_remote_holds_the_branch(&fixture.repo);
+}
+
 /// A value that the lexical rules refuse exits with its own code, names the
 /// value on stderr, prints no path, and makes nothing: no worktrees directory,
 /// no worktree, and no branch.
