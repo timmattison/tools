@@ -202,10 +202,15 @@ repository of the run, `wn` stops before it asks GitHub about any issue. The rep
 run is the one --repo names, or else the repository of the current directory. Letter case does \
 not count. The message names the two repositories and two repairs. Run `wn --repo owner/name` to \
 answer the plan on the clipboard. CAUTION: `wn --refresh` REPLACES WHAT IS ON THE CLIPBOARD. Run \
-it to build a new plan. A plan from an argument or a pipe gets no check, and a plan this run built \
-gets none either. \
+it to build a new plan. A plan from an argument or a pipe gets no check. \
 A text that names no repository gets no check: a chain, a table, a picture, and a JSON plan \
 without `repo`.\n\n\
+A run that builds a plan refuses a --repo that names another repository, before it runs claude. \
+The plan is always for the repository of the current directory, so its numbers would name other \
+issues in the repository --repo names. Letter case does not count. The message names both \
+repositories and two repairs: run `wn` in a checkout of the --repo repository, or leave --repo \
+out. So a plan this run built is for the repository of the run, and the clipboard check does not \
+look at it.\n\n\
 Set WN_NO_CLAUDE to any value with a character in it to turn the run off, which gives back the \
 error a run with no chain printed before. Set WN_PLAN_TIMEOUT to a number of seconds to wait \
 something other than 600 for it.\n\n\
@@ -222,7 +227,8 @@ struct Cli {
     chain: Vec<String>,
 
     /// The repository to ask, as owner/name. Defaults to the repository of the
-    /// current directory.
+    /// current directory. A run that builds a plan refuses a repository other
+    /// than the repository of the current directory.
     #[arg(short = 'R', long, value_name = "OWNER/NAME")]
     repo: Option<String>,
 
@@ -315,10 +321,15 @@ fn main() -> ExitCode {
 /// function can answer a text and keep no plan. [`reading_of`] states which
 /// reader takes which text.
 ///
-/// The repository is resolved after the text is read, in every path. A text
-/// nobody can read is a mistake the reader made, and reporting it costs no
-/// call to `gh`. A plan whose streams wait for each other is such a mistake,
-/// so that refusal costs no call either.
+/// `--repo` is read first, before any input. A run that builds a plan compares
+/// it with the repository of the current directory before it runs `claude`,
+/// because the plan is always for that repository. A read of `--repo` costs no
+/// call to `gh`, so a malformed one is refused before any input is read.
+///
+/// Without `--repo`, the repository is resolved after the text is read, in
+/// every path. A text nobody can read is a mistake the reader made, and
+/// reporting it costs no call to `gh`. A plan whose streams wait for each
+/// other is such a mistake, so that refusal costs no call either.
 ///
 /// [`respond`] then refuses a plan on the clipboard that is for another
 /// repository, and only after that does it ask GitHub for the answer.
@@ -328,6 +339,9 @@ fn run(
     start: &StartCommand,
     environment: &Environment,
 ) -> Result<ExitCode> {
+    // `--repo` is read before any input, because a run that builds compares it
+    // with the repository of this directory before it runs `claude`.
+    let named = repo_named(cli)?;
     // Each input is a function rather than its text, so an input that a nearer
     // input already answered for is never touched. This matters for the
     // clipboard, which is one shared resource of the whole machine.
@@ -352,9 +366,14 @@ fn run(
         // rather than a crash. A run in a directory that is in no repository
         // would therefore spend a minute and real money and would then answer
         // that the plan holds no work. One cheap call refuses it first.
-        github::repo_of_here().map_err(|said| build::BuildError::NoRepository {
+        let here = github::repo_of_here().map_err(|said| build::BuildError::NoRepository {
             said: said.to_string(),
         })?;
+        // The plan is always for the repository of this directory, and `wn`
+        // asks GitHub about the repository `--repo` names. A `--repo` for
+        // another repository would answer the numbers of one repository with
+        // the issues of the other, so the same call refuses it before the run.
+        build::refuse_another_repository(&here, named.as_ref())?;
         eprintln!("{} {announcement}", "wn:".bold());
         build::plan(
             &paths,
@@ -380,7 +399,7 @@ fn run(
 
     let (reading, kept) = read_and_keep(&chain, (!environment.clipboard_off).then_some(write));
     let reading = reading.map_err(|err| chain.blame(err))?;
-    let repo = repo_of(cli)?;
+    let repo = repo_of(named.as_ref())?;
 
     let code = respond(
         &chain,
@@ -550,17 +569,29 @@ fn read_and_keep(
     (reading, kept)
 }
 
-/// The repository the command line names, or the repository of the current
-/// directory.
+/// The repository `--repo` names, or `None` when the command line names none.
 ///
 /// # Errors
 ///
 /// Fails when the argument is not `owner/name` in ASCII letters, digits, `-`,
-/// `_` and `.`, with at most 39 characters in the owner and 100 in the name,
-/// and when `gh` can name no repository for the current directory.
-fn repo_of(cli: &Cli) -> Result<Repo> {
-    match &cli.repo {
-        Some(spec) => Repo::parse(spec),
+/// `_` and `.`, with at most 39 characters in the owner and 100 in the name.
+fn repo_named(cli: &Cli) -> Result<Option<Repo>> {
+    cli.repo.as_deref().map(Repo::parse).transpose()
+}
+
+/// The repository the command line names, or the repository of the current
+/// directory.
+///
+/// `named` is what [`repo_named`] gave, so this function runs `gh` only when
+/// the command line names no repository.
+///
+/// # Errors
+///
+/// Fails when `named` is `None` and `gh` can name no repository for the
+/// current directory.
+fn repo_of(named: Option<&Repo>) -> Result<Repo> {
+    match named {
+        Some(repo) => Ok(repo.clone()),
         None => github::current_repo(),
     }
 }
@@ -1065,7 +1096,8 @@ Run wn --refresh to build a new plan, or run wn --repo owner/a to answer the pla
         // want. `repo_of` runs no `gh` when the command line names the
         // repository.
         let cli = Cli::parse_from(["wn", "--repo", "owner/a"]);
-        let repo = repo_of(&cli).expect("the command line names a repository");
+        let named = repo_named(&cli).expect("the command line names a repository");
+        let repo = repo_of(named.as_ref()).expect("the command line names a repository");
         let chain = from_the_clipboard(&plan_for("owner/a"));
         reaches_the_query(responded(&chain, &repo, &reached_github));
     }

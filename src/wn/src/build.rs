@@ -958,12 +958,32 @@ pub(crate) fn refusal_of(said: &str) -> BuildError {
 /// Refuse a run that builds a plan when `--repo` names a repository other than
 /// the repository of this directory.
 ///
+/// The skill plans the repository of the directory `wn` was run in, and `wn`
+/// asks GitHub about the repository `--repo` names. When the two differ, the
+/// numbers of the plan name other issues in the repository `wn` asks about,
+/// and GitHub answers for them all the same. So the refusal stands before the
+/// run. It costs no money and no minute, it writes nothing to the clipboard,
+/// and it holds for every shape of plan, also a plan that names no repository.
+///
+/// `here` is the repository of this directory. `named` is the repository
+/// `--repo` names, and it is `None` when the command line names none.
+/// [`Repo::is_same_repository`] compares the two, because GitHub names a
+/// repository without regard to letter case.
+///
+/// The message names no `wn --refresh`. That run builds a plan for this
+/// directory as well, so it repairs nothing.
+///
 /// # Errors
 ///
 /// Gives [`BuildError::AnotherRepository`] when `named` is not `here`.
 pub fn refuse_another_repository(here: &Repo, named: Option<&Repo>) -> Result<(), BuildError> {
-    let _ = (here, named);
-    Ok(())
+    match named {
+        Some(named) if !named.is_same_repository(here) => Err(BuildError::AnotherRepository {
+            here: here.clone(),
+            named: named.clone(),
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// Why no plan came back.
@@ -1030,7 +1050,9 @@ pub enum BuildError {
     ///
     /// It names which of the two repositories failed. `--repo` names the
     /// repository `wn` asks about and never the one a run plans, and the
-    /// reader of this message has often passed it already.
+    /// reader of this message has often passed it already. A run in a
+    /// checkout refuses a `--repo` that names another repository, with
+    /// [`BuildError::AnotherRepository`].
     #[error(
         "a plan is built for the repository of this directory, and gh can name none for it. \
          Run wn inside a checkout — --repo names the repository wn asks about and never the one \
@@ -1042,6 +1064,11 @@ pub enum BuildError {
     },
     /// `--repo` names a repository other than the repository of this
     /// directory, and the run would build a plan.
+    ///
+    /// The plan is always for the repository of this directory, so its
+    /// numbers would name other issues in the repository `--repo` names.
+    /// [`refuse_another_repository`] states the rule. The refusal stands
+    /// before the run, where it costs nothing.
     #[error(
         "a plan is built for the repository of this directory, which is {here}, and --repo names \
          another repository, {named}. The numbers of a plan for {here} name other issues in \
@@ -1395,13 +1422,7 @@ plans.\n`gh repo view` failed."
         let named = repository("owner/c");
         let refused = refuse_another_repository(&here, Some(&named))
             .expect_err("--repo names another repository");
-        assert_eq!(
-            refused,
-            BuildError::AnotherRepository {
-                here: here.clone(),
-                named: named.clone(),
-            }
-        );
+        assert_eq!(refused, BuildError::AnotherRepository { here, named });
         assert_eq!(
             refused.to_string(),
             "a plan is built for the repository of this directory, which is owner/b, and --repo \

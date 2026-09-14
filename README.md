@@ -1618,10 +1618,12 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     clipboard holds a password as readily as it holds a plan.
   - Only a text from the clipboard gets that check. A plan the reader passes as an argument or on
     standard input is not refused, because the reader chose it on purpose and `wn --refresh` does
-    not replace it. A plan this run built is not refused either. A text that names no repository
-    gets no check and answers as before: a chain, the records of a plan, a Markdown table, a
-    box-drawn table, a picture, and a JSON document without `repo`. The run asks the skill for
-    `--json`, so a plan `wn` built and kept names its repository in the usual case.
+    not replace it. A plan this run built is not refused either, because a run that builds refuses
+    a `--repo` for another repository before it runs `claude` (see the refusals below). A text
+    that names no repository gets no check and answers as before: a chain, the records of a plan,
+    a Markdown table, a box-drawn table, a picture, and a JSON document without `repo`. The run
+    asks the skill for `--json`, so a plan `wn` built and kept names its repository in the usual
+    case.
   - Set `WN_NO_CLAUDE` to any value with a character in it to turn the run off, which gives back
     the error a run with no chain printed before. An empty value leaves it on, because an exported
     but empty variable is a common accident. `WN_PLAN_TIMEOUT` names the seconds a run may take,
@@ -1674,9 +1676,14 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     refused before the run, not after it: the skill plans the repository of the directory `wn` was
     run in, and its gather script turns a `gh` or a `git` failure into a warning rather than a
     crash, so a run there would spend a minute and real money and would then answer that the plan
-    holds no work. One cheap `gh repo view` refuses it first. For the same reason `--repo` names
-    the repository `wn` asks about and never the one the run plans, so a build in one checkout with
-    `--repo` naming another gives numbers of two repositories. `wn --refresh` with `WN_NO_CLAUDE`
+    holds no work. One cheap `gh repo view` refuses it first. That same call names the repository
+    of the directory, and a run that builds refuses a `--repo` that names another repository,
+    before it runs `claude`. The plan is always for the repository of the directory, and `wn` asks
+    GitHub about the repository `--repo` names, so such a run would answer the numbers of one
+    repository with the issues of the other. Letter case does not count. The message names both
+    repositories and two repairs: run `wn` in a checkout of the `--repo` repository, or leave
+    `--repo` out to plan and answer the repository of the directory. It names no `wn --refresh`,
+    because that run builds for the directory as well. `wn --refresh` with `WN_NO_CLAUDE`
     set asks for two things at once — `--refresh` builds a plan by running `claude`, and the
     variable turns that run off — so the message names both and says to unset the variable. A
     `WN_PLAN_TIMEOUT` that names no number of seconds is refused and named back:

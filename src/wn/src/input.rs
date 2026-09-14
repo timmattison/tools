@@ -269,9 +269,13 @@ The first line of it is {line:?}.",
     ///
     /// Only a text from the clipboard is refused. The reader typed an argument
     /// and built a pipe on purpose, and `wn --refresh` does not replace such a
-    /// text, so it is not the repair for one. A plan this run built was not on
-    /// the clipboard before the run, so it is no stale cache. A text that
-    /// names no repository is not refused either. A chain, a table, a picture,
+    /// text, so it is not the repair for one. A plan this run built is not
+    /// refused. A run that builds refuses a `--repo` for another repository
+    /// before it runs `claude`, with [`crate::build::refuse_another_repository`],
+    /// so a built plan is for the repository of the run. The skill can still
+    /// write a name `gh` does not give, such as the old name of a renamed
+    /// repository, and such a plan is true. A text that names no repository is
+    /// not refused either. A chain, a table, a picture,
     /// and a JSON document without `repo` say nothing about the repository,
     /// and `wn` has no way to find out which repository such a text is for.
     ///
@@ -475,9 +479,10 @@ pub enum InputError {
     /// another repository.
     ///
     /// The caution stands before the step it warns about. The last line does
-    /// not name the repository of the run: `wn --refresh` builds a plan for
-    /// the current directory, and that is not always the repository `--repo`
-    /// named. The first line already names the repository of the run.
+    /// not name the repository of the run beside `wn --refresh`: that run
+    /// builds a plan for the current directory, and it refuses a `--repo` that
+    /// names another repository. The first line already names the repository
+    /// of the run.
     #[error(
         "the plan on the clipboard is for {plan}, and this run is for {run}.\n\
          CAUTION: wn --refresh REPLACES WHAT IS ON THE CLIPBOARD. WHAT IS ON IT NOW IS LOST.\n\
@@ -1361,8 +1366,11 @@ Unset it to build one. Pass it as an argument, in quotes: wn \"#277 → #278\""
 
     #[test]
     fn a_plan_for_another_repository_that_this_run_built_is_not_refused() {
-        // A plan this run built was not on the clipboard before the run, so it
-        // is no stale cache. `wn --refresh` would only build it again.
+        // A run that builds refuses a `--repo` for another repository before it
+        // runs `claude`, so a plan this run built is for the repository of the
+        // run. The skill can still write a name `gh` does not give, such as
+        // the old name of a renamed repository, and a refusal of that plan
+        // would refuse a plan that is true.
         assert_eq!(
             built_chain(PLAN_FOR_A)
                 .refuse_another_repository(Some(&repository("owner/a")), &repository("owner/b")),
