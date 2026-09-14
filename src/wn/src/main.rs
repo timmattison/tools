@@ -1069,4 +1069,29 @@ Run wn --refresh to build a new plan, or run wn --repo owner/a to answer the pla
             ));
         }
     }
+
+    #[test]
+    fn the_refusal_writes_nothing_out_of_the_clipboard_but_the_repository_of_the_plan() {
+        // A clipboard holds a password or a token as readily as it holds a
+        // plan, and a message that repeats it puts the secret in the
+        // scrollback and in every log of standard error. The plan names its
+        // repository, and that is the one thing the message needs.
+        let notes = "correct-horse-battery-staple";
+        let name = "hunter2-token";
+        let text = format!(
+            r#"{{"version": 1, "repo": "owner/a", "streams": [
+                {{"id": "S1", "name": "{name}", "notes": "{notes}", "order": [{{"issue": 277, "waitsFor": []}}]}}
+            ]}}"#
+        );
+        let message = responded(
+            &from_the_clipboard(&text),
+            &repository("owner/b"),
+            &unasked_github,
+        )
+        .expect_err("the plan is for another repository")
+        .to_string();
+        assert!(message.contains("owner/a"), "{message}");
+        assert!(!message.contains(notes), "{message}");
+        assert!(!message.contains(name), "{message}");
+    }
 }
