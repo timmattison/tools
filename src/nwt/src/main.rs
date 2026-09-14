@@ -1465,6 +1465,10 @@ enum WorktreeResult {
     /// through the sparse patterns failed. The value names the step and holds
     /// what git wrote to stderr.
     SparseCheckoutFailed(String),
+    /// Git made the sparse worktree, and the `post-checkout` hook that
+    /// [`run_post_checkout_hook`] ran exited with this status. The worktree and
+    /// the branch stay, as a plain add keeps them when its hook fails.
+    PostCheckoutHookFailed(ExitStatus),
 }
 
 /// True when `branch` is already a branch of the repository at `repo_root`.
@@ -1769,7 +1773,8 @@ fn try_create_worktree(
             Err(message) => return WorktreeResult::SparseCheckoutFailed(message),
         };
         match run_post_checkout_hook(worktree, &head) {
-            Ok(_status) => WorktreeResult::Success,
+            Ok(status) if status.success() => WorktreeResult::Success,
+            Ok(status) => WorktreeResult::PostCheckoutHookFailed(status),
             Err(e) => WorktreeResult::CommandError(e),
         }
     } else {
@@ -2798,6 +2803,18 @@ fn main() {
             }
             WorktreeResult::SparseCheckoutFailed(message) => {
                 error!(config.quiet, "Error: {}", message);
+                exit(exit_codes::WORKTREE_FAILED);
+            }
+            WorktreeResult::PostCheckoutHookFailed(status) => {
+                // A plain add keeps the worktree when its hook fails, and so
+                // does this path. No path goes to stdout, so the shell wrapper
+                // stays put, and this line tells the user where the worktree is.
+                error!(
+                    config.quiet,
+                    "Error: the post-checkout hook failed ({}). The new worktree stays at '{}'.",
+                    status,
+                    worktree_path.display()
+                );
                 exit(exit_codes::WORKTREE_FAILED);
             }
         }
