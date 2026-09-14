@@ -1367,6 +1367,28 @@ fn a_failed_sparse_checkout_set_removes_what_the_run_made() {
     }
 }
 
+/// A sparse run whose `git read-tree -mu HEAD` fails removes what it made, as a
+/// failed `git sparse-checkout set` does.
+///
+/// The patterns are in place then, but the worktree holds no files and an
+/// empty index. It is as broken as a worktree without patterns.
+#[cfg(unix)]
+#[test]
+fn a_failed_read_tree_removes_what_the_run_made() {
+    let fake = FakeGit::refusing(&["read-tree"]);
+    let (temp, repo) = repo_with_heavy_dir();
+    let before = local_branches(&repo);
+    let branch = unique_branch("sparse-read-tree-fails");
+
+    let output = run_nwt_with_fake_git(
+        &repo,
+        &fake,
+        &["-b", &branch, "--sparse-exclude", HEAVY_DIR],
+    );
+
+    assert_the_failed_step_left_nothing(&temp, &repo, &before, &output);
+}
+
 /// Nothing that the hook step writes to stdout reaches the stdout of `nwt`,
 /// which holds only the worktree path.
 ///
