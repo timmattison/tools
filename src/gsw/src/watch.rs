@@ -680,6 +680,19 @@ enum Event {
     /// The loop starts a run only when no run is in flight. So a press during
     /// a run does nothing, and [`ConflictsRun`] says why.
     ConflictsRequested,
+    /// A run of `m` knows the branch it measures against, and this is its
+    /// name.
+    ///
+    /// Sent before the first replay starts. A run that is refused, or that
+    /// finds HEAD on the default branch, starts no replay and sends none of
+    /// these, because its outcome follows at once.
+    ConflictsStarted(String),
+    /// A run of `m` has ended, and this is what it found.
+    ///
+    /// Always arrives after the [`Event::ConflictsStarted`] of the same run,
+    /// because one thread sends both on this one channel. A run that a quit
+    /// abandoned sends none, because nobody reads it.
+    ConflictsFinished(crate::conflicts::ConflictsOutcome),
 }
 
 /// What keys mean right now.
@@ -1142,6 +1155,9 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                     );
                 }
             },
+            // Nothing starts yet. The next slice of #496 starts the measuring
+            // thread here, and holds it until the quit.
+            start_conflicts: || {},
         },
     )
 }
@@ -1331,7 +1347,8 @@ struct LoopStart {
 /// these to the real git collect, render, terminal-size query, painter, and
 /// clock; tests inject counters and a controllable clock to assert which hooks
 /// ran — and with what age offset — without a TTY or real time.
-struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIssue> {
+struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIssue, StartConflicts>
+{
     /// Walk the repo into a fresh [`Snapshot`] (the expensive git work).
     collect: Collect,
     /// Render a snapshot at the given dimensions and timing.
@@ -1354,6 +1371,16 @@ struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIs
     /// it and sends the outcome back as [`Event::IssueFinished`]; tests record
     /// the command and decide for themselves when the outcome arrives.
     start_issue: StartIssue,
+    /// Start a measurement of a rebase and a merge against the default branch.
+    /// Production starts it on a thread of its own, which sends the branch
+    /// back as [`Event::ConflictsStarted`] and the outcome as
+    /// [`Event::ConflictsFinished`]. Tests count the runs and decide for
+    /// themselves when, or whether, those events arrive.
+    ///
+    /// It takes no argument, because the thread finds the branch itself. The
+    /// loop never waits for the run, because a rebase replay of a long branch
+    /// can take many seconds.
+    start_conflicts: StartConflicts,
 }
 
 /// The triggers one wake collected, before the render decides what to do with
@@ -1405,19 +1432,30 @@ enum Flow {
 /// behind that `p` is read as the ordinary key it is. `dims` is the pane the
 /// last render measured, which is the pane the user was looking at when they
 /// pressed the key — the loop re-measures after this drain, not during it.
-fn absorb<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIssue>(
+fn absorb<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIssue, StartConflicts>(
     event: Event,
     pending: &mut Pending,
     ui: &mut PushUi,
     issue: &mut IssueRun,
     snapshot: &Snapshot,
     dims: Dimensions,
-    hooks: &mut LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIssue>,
+    hooks: &mut LoopHooks<
+        Collect,
+        RenderFn,
+        Dims,
+        Paint,
+        Clock,
+        Tick,
+        StartPush,
+        StartIssue,
+        StartConflicts,
+    >,
 ) -> Flow
 where
     Clock: Fn() -> Instant,
     StartPush: FnMut(PushCommand),
     StartIssue: FnMut(crate::issue::IssueCommand),
+    StartConflicts: FnMut(),
 {
     let clock = &hooks.clock;
     match event {
@@ -1472,7 +1510,7 @@ where
         }
         Event::IssueCommandFound(command) => issue.found(command),
         // The loop starts no measurement yet. A later commit of #496 does.
-        Event::ConflictsRequested => {}
+        Event::ConflictsRequested | Event::ConflictsStarted(_) | Event::ConflictsFinished(_) => {}
         Event::IssueFinished(outcome) => {
             issue.finished();
             // A run that worked says nothing: the browser is the answer. A run
@@ -1554,12 +1592,22 @@ where
 /// to zero. The accepted cost: a repository deleted for good leaves a frozen
 /// (but visibly aging) frame until the user quits. That is the right failure for
 /// a monitor — a wrong-but-labeled-old screen beats no screen.
-fn event_loop<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIssue>(
+fn event_loop<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIssue, StartConflicts>(
     rx: &Receiver<Event>,
     debounce: Duration,
     displayed: &mut String,
     start: LoopStart,
-    mut hooks: LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIssue>,
+    mut hooks: LoopHooks<
+        Collect,
+        RenderFn,
+        Dims,
+        Paint,
+        Clock,
+        Tick,
+        StartPush,
+        StartIssue,
+        StartConflicts,
+    >,
 ) -> Result<()>
 where
     Collect: FnMut() -> Result<Snapshot>,
@@ -1570,6 +1618,7 @@ where
     Tick: Fn(Option<Duration>) -> Option<Duration>,
     StartPush: FnMut(PushCommand),
     StartIssue: FnMut(crate::issue::IssueCommand),
+    StartConflicts: FnMut(),
 {
     let LoopStart {
         mut cache,
@@ -3394,6 +3443,7 @@ mod tests {
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand| {},
                 start_issue: |_command: crate::issue::IssueCommand| {},
+                start_conflicts: || {},
             },
         )
         .expect("loop");
@@ -3442,6 +3492,7 @@ mod tests {
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand| {},
                 start_issue: |_command: crate::issue::IssueCommand| {},
+                start_conflicts: || {},
             },
         )
         .expect("loop");
@@ -3493,6 +3544,7 @@ mod tests {
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand| {},
                 start_issue: |_command: crate::issue::IssueCommand| {},
+                start_conflicts: || {},
             },
         )
         .expect("loop");
@@ -3546,6 +3598,7 @@ mod tests {
                 next_tick: timer_off,
                 start_push: |_command: PushCommand| {},
                 start_issue: |_command: crate::issue::IssueCommand| {},
+                start_conflicts: || {},
             },
         )
         .expect("loop");
@@ -3595,6 +3648,7 @@ mod tests {
                 next_tick: timer_off,
                 start_push: |_command: PushCommand| {},
                 start_issue: |_command: crate::issue::IssueCommand| {},
+                start_conflicts: || {},
             },
         )
         .expect("loop");
@@ -3641,6 +3695,7 @@ mod tests {
                 next_tick: timer_off,
                 start_push: |_command: PushCommand| {},
                 start_issue: |_command: crate::issue::IssueCommand| {},
+                start_conflicts: || {},
             },
         )
         .expect("loop");
@@ -3689,6 +3744,7 @@ mod tests {
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand| {},
                 start_issue: |_command: crate::issue::IssueCommand| {},
+                start_conflicts: || {},
             },
         )
         .expect("loop");
@@ -3737,6 +3793,7 @@ mod tests {
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand| {},
                 start_issue: |_command: crate::issue::IssueCommand| {},
+                start_conflicts: || {},
             },
         )
         .expect("loop");
@@ -3786,6 +3843,7 @@ mod tests {
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand| {},
                 start_issue: |_command: crate::issue::IssueCommand| {},
+                start_conflicts: || {},
             },
         )
         .expect("loop");
@@ -3841,6 +3899,7 @@ mod tests {
                 next_tick: timer_off,
                 start_push: |_command: PushCommand| {},
                 start_issue: |_command: crate::issue::IssueCommand| {},
+                start_conflicts: || {},
             },
         )
         .expect("loop");
@@ -3904,6 +3963,7 @@ mod tests {
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand| {},
                 start_issue: |_command: crate::issue::IssueCommand| {},
+                start_conflicts: || {},
             },
         )
         .expect("loop");
@@ -3989,6 +4049,7 @@ mod tests {
                 next_tick: timer_off,
                 start_push: |_command: PushCommand| {},
                 start_issue: |_command: crate::issue::IssueCommand| {},
+                start_conflicts: || {},
             },
         )
         .expect("loop");
@@ -4078,6 +4139,7 @@ mod tests {
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand| {},
                 start_issue: |_command: crate::issue::IssueCommand| {},
+                start_conflicts: || {},
             },
         )
         .expect("loop");
@@ -4148,6 +4210,7 @@ mod tests {
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand| {},
                 start_issue: |_command: crate::issue::IssueCommand| {},
+                start_conflicts: || {},
             },
         )
         .expect("loop");
@@ -4225,6 +4288,7 @@ mod tests {
                 next_tick: timer_off,
                 start_push: |_command: PushCommand| {},
                 start_issue: |_command: crate::issue::IssueCommand| {},
+                start_conflicts: || {},
             },
         )
         .expect("loop");
@@ -4301,6 +4365,7 @@ mod tests {
                 next_tick: timer_off,
                 start_push: |_command: PushCommand| {},
                 start_issue: |_command: crate::issue::IssueCommand| {},
+                start_conflicts: || {},
             },
         )
         .expect("loop");
@@ -4357,6 +4422,7 @@ mod tests {
                 next_tick: timer_off,
                 start_push: |_command: PushCommand| {},
                 start_issue: |_command: crate::issue::IssueCommand| {},
+                start_conflicts: || {},
             },
         )
         .expect("loop");
@@ -4426,6 +4492,7 @@ mod tests {
                 next_tick: timer_off,
                 start_push: |_command: PushCommand| {},
                 start_issue: |_command: crate::issue::IssueCommand| {},
+                start_conflicts: || {},
             },
         );
 
@@ -4519,6 +4586,7 @@ mod tests {
                 next_tick: timer_off,
                 start_push: |_command: PushCommand| {},
                 start_issue: |_command: crate::issue::IssueCommand| {},
+                start_conflicts: || {},
             },
         );
 
@@ -4636,6 +4704,7 @@ mod tests {
                 next_tick: timer_off,
                 start_push: |_command: PushCommand| {},
                 start_issue: |_command: crate::issue::IssueCommand| {},
+                start_conflicts: || {},
             },
         );
 
@@ -4732,10 +4801,12 @@ mod tests {
 mod push_loop_tests {
     use super::tests::{frame, stepping_clock, timer_off, TEST_DEBOUNCE, TEST_DIMS};
     use super::*;
+    use crate::conflicts::ConflictsOutcome;
     use crate::push::PushOutcome;
     use crossterm::event::{KeyCode, KeyModifiers};
     use std::cell::RefCell;
     use testcolor::strip_ansi;
+    use unicode_width::UnicodeWidthStr;
 
     /// A snapshot on an untracked `gsw-push` with `origin` available, so the
     /// push feature has something real to plan.
@@ -4800,6 +4871,8 @@ mod push_loop_tests {
         paints: Vec<String>,
         /// Every issue command the loop started a run of, in order.
         issue_runs: Vec<crate::issue::IssueCommand>,
+        /// How many measurements the loop started with `m`.
+        conflict_runs: usize,
     }
 
     /// Run the loop over a pre-loaded event queue and report what it did.
@@ -4931,6 +5004,7 @@ mod push_loop_tests {
                 start_issue: |command: crate::issue::IssueCommand| {
                     seen.borrow_mut().issue_runs.push(command);
                 },
+                start_conflicts: || seen.borrow_mut().conflict_runs += 1,
             },
         )
         .expect("loop");
@@ -5356,6 +5430,275 @@ mod push_loop_tests {
         );
     }
 
+    /// One press of `m`.
+    fn press_m() -> Event {
+        key(KeyCode::Char('m'))
+    }
+
+    /// The notice a run against `main` puts under the frame.
+    ///
+    /// Written out here rather than taken from the code it pins, so a change to
+    /// the words is a change these tests report.
+    const RUNNING_AGAINST_MAIN: &str = "Running grind and grime against main…";
+
+    /// The line that reports [`measured_clean`].
+    const MEASURED_CLEAN: &str = "main: rebase clean · merge clean";
+
+    /// The branch of a run against `main`, as the loop receives it.
+    fn started_against_main() -> Event {
+        Event::ConflictsStarted("main".to_string())
+    }
+
+    /// The outcome of a run, as the loop receives it.
+    fn finished(outcome: ConflictsOutcome) -> Event {
+        Event::ConflictsFinished(outcome)
+    }
+
+    /// A run against `main` whose two replays both came back clean.
+    fn measured_clean() -> ConflictsOutcome {
+        ConflictsOutcome::Measured {
+            branch: "main".to_string(),
+            rebase: Ok(gitscratch::Conflicts::nothing_replayed()),
+            merge: Ok(gitscratch::Conflicts::nothing_replayed()),
+            dirty: false,
+        }
+    }
+
+    /// A run against `main` whose rebase conflicted, in a work tree with
+    /// uncommitted work, so its line is far wider than a narrow pane.
+    fn measured_in_conflict() -> ConflictsOutcome {
+        let three_hunks = std::num::NonZeroUsize::new(3).expect("three is not zero");
+        ConflictsOutcome::Measured {
+            branch: "main".to_string(),
+            rebase: Ok(gitscratch::Conflicts::from_files(
+                [(std::path::PathBuf::from("shared.txt"), three_hunks)],
+                gitscratch::Stops::new(2),
+            )),
+            merge: Ok(gitscratch::Conflicts::nothing_replayed()),
+            dirty: true,
+        }
+    }
+
+    #[test]
+    fn three_m_presses_before_the_outcome_start_exactly_one_run() {
+        // The user can press `m` ten times, and gsw starts one run.
+        let (_screen, seen) = run_loop(vec![press_m(), press_m(), press_m(), Event::Quit]);
+        assert_eq!(seen.conflict_runs, 1, "one run at a time");
+    }
+
+    #[test]
+    fn an_m_after_the_outcome_starts_a_second_run() {
+        // The outcome frees the key, so the next press measures again.
+        let (_screen, seen) = run_loop(vec![
+            press_m(),
+            started_against_main(),
+            finished(measured_clean()),
+            press_m(),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            seen.conflict_runs, 2,
+            "a press after the outcome must start a second run",
+        );
+    }
+
+    #[test]
+    fn the_running_notice_stays_under_the_frame_through_a_key() {
+        // The notice says that a press of `m` does nothing now. That is true
+        // until the outcome arrives, and a key does not end the run.
+        let (screen, _seen) = run_loop(vec![
+            press_m(),
+            started_against_main(),
+            key(KeyCode::Char('x')),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME\n{RUNNING_AGAINST_MAIN}"),
+            "the notice must stay under the frame, with no age",
+        );
+    }
+
+    #[test]
+    fn the_outcome_replaces_the_running_notice_with_a_line_that_fades() {
+        // The age after the line is what a report that fades shows. A notice
+        // that stayed beside it, or a line that waited for a key, would show
+        // no age.
+        let (screen, _seen) = run_loop(vec![
+            press_m(),
+            started_against_main(),
+            finished(measured_clean()),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME\n{MEASURED_CLEAN} (0s ago)"),
+            "the outcome must take the row of the notice, and fade",
+        );
+    }
+
+    /// A push in flight, and a whole run of `m` inside it.
+    fn a_run_during_a_push() -> Vec<Event> {
+        vec![
+            Event::PushRequested,
+            Event::PushConfirmed,
+            press_m(),
+            started_against_main(),
+            finished(measured_clean()),
+        ]
+    }
+
+    #[test]
+    fn a_push_in_flight_keeps_the_notice_off_the_row_and_holds_the_outcome() {
+        // A push owns the row. A held notice would reach the row after the
+        // outcome and say that a run is in flight when none is, so the notice
+        // goes nowhere. The outcome is a report, so it waits for the row.
+        let mut events = a_run_during_a_push();
+        events.push(Event::Quit);
+        let (screen, seen) = run_loop(events);
+        assert_eq!(
+            seen.conflict_runs, 1,
+            "a push in flight is no reason to refuse a measurement",
+        );
+        let painted = strip_ansi(&screen);
+        assert!(
+            painted.contains("Pushing"),
+            "the push must keep the row, got {painted:?}",
+        );
+        assert!(
+            !painted.contains(RUNNING_AGAINST_MAIN),
+            "the notice must not reach a row the push owns, got {painted:?}",
+        );
+        assert!(
+            !painted.contains(MEASURED_CLEAN),
+            "the outcome must wait for the row, got {painted:?}",
+        );
+
+        // The push fails, and a key takes its error away. The row is free, so
+        // the outcome takes it, and the notice never does.
+        let mut events = a_run_during_a_push();
+        events.extend([
+            Event::PushFinished(PushOutcome {
+                success: false,
+                output: "error: failed to push some refs\n".to_string(),
+            }),
+            key(KeyCode::Char('x')),
+            Event::Quit,
+        ]);
+        let (screen, _seen) = run_loop(events);
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME\n{MEASURED_CLEAN} (0s ago)"),
+            "the held outcome must reach the row once the push gives it up",
+        );
+    }
+
+    /// A pane far narrower than either line of a run.
+    const NARROW: Dimensions = Dimensions {
+        width: 20,
+        height: 24,
+    };
+
+    /// The events of one case, built fresh for each run of the loop.
+    type Events = fn() -> Vec<Event>;
+
+    #[test]
+    fn a_pane_too_narrow_for_the_line_gets_one_row_that_does_not_wrap() {
+        // gsw paints nothing that wraps or scrolls the pane it measured. A row
+        // that wraps pushes the top row of the frame off the screen.
+        let cases: [(&str, Events, &str); 2] = [
+            (
+                "the running notice",
+                || vec![press_m(), started_against_main(), Event::Quit],
+                "Running grind",
+            ),
+            (
+                "the outcome",
+                || {
+                    vec![
+                        press_m(),
+                        started_against_main(),
+                        finished(measured_in_conflict()),
+                        Event::Quit,
+                    ]
+                },
+                "main: rebase",
+            ),
+        ];
+
+        for (what, events, starts_with) in cases {
+            let (screen, seen) = run_loop_in_pane(events(), NARROW);
+            let painted = strip_ansi(&screen);
+            for row in painted.lines() {
+                assert!(
+                    UnicodeWidthStr::width(row) <= NARROW.width,
+                    "{what}: the row {row:?} is wider than the pane",
+                );
+            }
+            assert_eq!(
+                seen.frame_heights.last().copied(),
+                Some(NARROW.height - 1),
+                "{what}: the line must take exactly one row from the frame",
+            );
+            assert_eq!(
+                painted.lines().count(),
+                NARROW.height,
+                "{what}: the screen must fill the pane exactly, got {painted:?}",
+            );
+            let last = painted.lines().last().unwrap_or_default();
+            assert!(
+                last.starts_with(starts_with),
+                "{what}: the bottom row must carry the line, got {last:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_run_shows_its_reason_as_a_fading_line_and_m_starts_again() {
+        // No default branch, a detached HEAD, an empty repository: gitscratch
+        // refuses with a reason. gsw must not crash, and `m` must work again
+        // after the line appears.
+        let (screen, seen) = run_loop(vec![
+            press_m(),
+            finished(ConflictsOutcome::Refused {
+                reason: "no default branch resolves here".to_string(),
+            }),
+            press_m(),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            strip_ansi(&screen),
+            "FRAME\ngrind and grime failed: no default branch resolves here (0s ago)",
+            "the reason must reach the row as a line that fades",
+        );
+        assert_eq!(
+            seen.conflict_runs, 2,
+            "a press after a refusal must start a new run",
+        );
+    }
+
+    #[test]
+    fn an_m_between_two_g_presses_on_a_remote_shell_takes_the_arming_away() {
+        // `m` is a key other than `G`, so it takes the arming away, as every
+        // such key does. The run it asks for still starts.
+        let (_screen, seen) = run_loop_remote(vec![
+            probe_answered(),
+            press_g(),
+            press_m(),
+            press_g(),
+            Event::Quit,
+        ]);
+        assert!(
+            seen.issue_runs.is_empty(),
+            "a press of `m` between the presses must leave the second one asking, got {:?}",
+            seen.issue_runs,
+        );
+        assert_eq!(
+            seen.conflict_runs, 1,
+            "the press of `m` must still start its run",
+        );
+    }
+
     #[test]
     fn the_loop_wakes_itself_to_take_an_expired_message_off_the_screen() {
         // A status message expires against the clock, and on a quiet
@@ -5419,6 +5762,7 @@ mod push_loop_tests {
                 next_tick: timer_off,
                 start_push: |_command: PushCommand| {},
                 start_issue: |_command: crate::issue::IssueCommand| {},
+                start_conflicts: || {},
             },
         )
         .expect("loop");
@@ -5825,6 +6169,7 @@ mod push_loop_tests {
                     start_issue: |command: crate::issue::IssueCommand| {
                         seen.borrow_mut().issue_runs.push(command);
                     },
+                    start_conflicts: || seen.borrow_mut().conflict_runs += 1,
                 },
             )
             .expect("loop");
