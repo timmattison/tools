@@ -19,6 +19,8 @@ mod age;
 mod bar;
 /// Starting a child process that cannot reach the terminal gsw is drawing on.
 mod child;
+/// Measuring a rebase and a merge against the default branch, for the `m` key.
+mod conflicts;
 mod git;
 /// Opening the issue that the branch names, through a command the user supplies.
 mod issue;
@@ -51,8 +53,9 @@ mod watch;
                   it renders once and exits.\n\n\
                   Watch-mode keys: q or Ctrl-C quits, r refreshes now, p pushes the current \
                   branch after a confirmation that names what it will do — a branch not yet on \
-                  the remote is confirmed as creating one — and G opens the issue the branch \
-                  names. A push whose branch stopped being \
+                  the remote is confirmed as creating one — G opens the issue the branch \
+                  names, and m measures a rebase and a merge against the default branch. \
+                  A push whose branch stopped being \
                   checked out between the question and the answer is refused, not redirected. \
                   p never force-pushes.\n\n\
                   G runs one command in your own interactive shell, with the work tree as its \
@@ -69,6 +72,13 @@ mod watch;
                   key. A run gets a minute: after that gsw stops waiting, says so under the \
                   frame, and gives the key back — the command itself keeps running, because it \
                   is yours, and it can be the process that holds the browser open.\n\n\
+                  m measures what grind and grime measure, in this process: a rebase of HEAD \
+                  onto the default branch (main, else master) and a merge of that branch into \
+                  HEAD. The bottom row says `Running grind and grime against main…` until the \
+                  run ends. Then one line such as `main: rebase clean · merge 1 hunk in 1 \
+                  file` takes its place and fades off after a minute. One run at a time: m \
+                  does nothing while a run is in flight. A quit during a run waits for the \
+                  replay in flight, so no scratch worktree stays behind.\n\n\
                   While a push runs, a notice reports how long it has taken, and up to six rows \
                   under it carry the newest output from git and from any pre-push hook. Each row \
                   arrives as the hook writes it, so a hook that builds and tests a workspace \
