@@ -384,6 +384,91 @@ fn sparse_checkout_disable_writes_the_excluded_directory() {
     );
 }
 
+/// The first pattern of every non-cone pattern list: include each path.
+const INCLUDE_EVERYTHING: &str = "/*";
+
+/// The lines of the sparse-checkout pattern file of `worktree`.
+///
+/// Each worktree has a pattern file of its own, in its own git directory. The
+/// test asks git for that directory, and does not guess it.
+fn sparse_patterns(worktree: &Path) -> Vec<String> {
+    let git_dir =
+        PathBuf::from(git_stdout(worktree, &["rev-parse", "--absolute-git-dir"]).trim_end());
+    let file = git_dir.join("info").join("sparse-checkout");
+    std::fs::read_to_string(&file)
+        .unwrap_or_else(|e| panic!("read {}: {e}", file.display()))
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Test 12 of issue #487: when the main worktree is sparse, git copies its
+/// patterns into a new worktree, and `--sparse-exclude` replaces them.
+///
+/// This test documents git behavior. `nwt` does not change it. `git worktree
+/// add` copies the sparse patterns of the worktree that it runs in, and `nwt`
+/// runs the add in the main worktree. So a sparse main worktree gives its
+/// patterns to each new worktree, also to a worktree that `nwt` makes without
+/// the flag.
+///
+/// Measured with git 2.55.0:
+///
+/// - Without the flag, the new worktree reads `core.sparseCheckout` as `true`,
+///   holds the patterns of the main worktree, and holds no `heavy/`.
+/// - With `--sparse-exclude src`, `git sparse-checkout set` replaces the copied
+///   patterns. The new worktree holds only the pattern of `nwt`, so it holds
+///   `heavy/` and no `src/`.
+#[test]
+fn a_sparse_main_worktree_gives_its_patterns_to_a_new_worktree() {
+    const SRC_DIR: &str = "src";
+
+    let (_temp, repo) = repo_with_heavy_dir();
+    let main_patterns = vec![INCLUDE_EVERYTHING.to_owned(), format!("!/{HEAVY_DIR}/")];
+    assert!(
+        run_git(
+            &repo,
+            &[
+                "sparse-checkout",
+                "set",
+                "--no-cone",
+                &main_patterns[0],
+                &main_patterns[1]
+            ]
+        ),
+        "git sparse-checkout set failed in the main worktree"
+    );
+    assert!(
+        !repo.join(HEAVY_DIR).exists(),
+        "the main worktree must be sparse before nwt runs"
+    );
+
+    let plain = created_worktree(&run_nwt(&repo, &unique_branch("sparse-main-plain"), &[]));
+    assert_sparse_worktree(&plain, HEAVY_DIR, KEPT_FILES);
+    assert_eq!(
+        git_stdout(&plain, &["config", "--get", "core.sparseCheckout"]).trim_end(),
+        "true",
+        "git must make the worktree without the flag sparse, as the main worktree is"
+    );
+    assert_eq!(
+        sparse_patterns(&plain),
+        main_patterns,
+        "git must copy the patterns of the main worktree into the worktree without the flag"
+    );
+
+    let excluding = created_worktree(&run_nwt(
+        &repo,
+        &unique_branch("sparse-main-src"),
+        &["--sparse-exclude", SRC_DIR],
+    ));
+    assert_sparse_worktree(&excluding, SRC_DIR, &["README.md", "heavy.txt"]);
+    assert_files_present(&excluding, HEAVY_FILES);
+    assert_eq!(
+        sparse_patterns(&excluding),
+        vec![INCLUDE_EVERYTHING.to_owned(), format!("!/{SRC_DIR}/")],
+        "git sparse-checkout set must replace the copied patterns with the pattern of nwt"
+    );
+}
+
 /// Demand that `output` is a run that `nwt` refused with exit `code`: it
 /// printed no path, and stderr holds `named`.
 fn assert_refused(output: &Output, code: i32, named: &str) {
