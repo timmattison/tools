@@ -1628,6 +1628,12 @@ fn apply_sparse_checkout(worktree: &Path, excludes: &[SparseExcludeDir]) -> Resu
 /// The name of the hook that git runs after it checks a tree out.
 const POST_CHECKOUT_HOOK: &str = "post-checkout";
 
+/// The variable that tells git where the working tree of a repository is.
+///
+/// [`run_post_checkout_hook`] sets it for the hook, because `git hook run`
+/// exports `GIT_DIR` for the hook and no working tree.
+const GIT_WORK_TREE_VARIABLE: &str = "GIT_WORK_TREE";
+
 /// The third argument of the `post-checkout` hook for a checkout of a branch,
 /// as `git worktree add` gives it. The value `0` is a checkout of files.
 const POST_CHECKOUT_OF_A_BRANCH: &str = "1";
@@ -1658,28 +1664,41 @@ fn null_object_id(head: &str) -> String {
 /// worktree path from stdout, and a word of a hook there breaks it. Stderr is
 /// inherited, so the user sees what the hook says, as with a plain add.
 ///
-/// The hook environment is not the same as under a plain add. Both run the
-/// hook with the worktree as its working directory. `git hook run` also sets
-/// `GIT_DIR` to the git directory of the worktree (`.git/worktrees/<name>`),
-/// and `git worktree add` sets no `GIT_DIR`.
+/// A plain add and `git hook run` both run the hook with the worktree as its
+/// working directory. A plain add exports neither `GIT_DIR` nor `GIT_WORK_TREE` for the hook, so git in the
+/// hook finds the worktree from the directory it runs in. `git hook run`
+/// exports `GIT_DIR` for the hook, with the git directory of the worktree
+/// (`.git/worktrees/<name>`) as its value. When `GIT_DIR` is set and
+/// `GIT_WORK_TREE` is not, git takes the directory it runs in as the top level.
+/// A hook that changes to `sub/` then sees `sub/` as the root, each file of
+/// `sub/` as deleted, and each file of `sub/` again as untracked.
+///
+/// So this function sets [`GIT_WORK_TREE_VARIABLE`] to `worktree` on the
+/// command. `git hook run` passes it to the hook, and git in the hook then
+/// finds the worktree root from each subdirectory, as under a plain add. The
+/// value is set after [`production_git_command`] sheds the inherited
+/// environment, so the value of `nwt` wins over a value that a launching hook
+/// exported. `worktree` is an absolute path: git reads a relative value from
+/// the directory that the hook runs in.
 ///
 /// # Errors
 ///
 /// Returns the error of the start when git cannot start.
 fn run_post_checkout_hook(worktree: &Path, head: &str) -> io::Result<ExitStatus> {
     let mut hook = production_git_command(worktree);
-    hook.args([
-        "hook",
-        "run",
-        "--ignore-missing",
-        POST_CHECKOUT_HOOK,
-        "--",
-        &null_object_id(head),
-        head,
-        POST_CHECKOUT_OF_A_BRANCH,
-    ])
-    .stdout(Stdio::from(io::stderr()))
-    .stderr(Stdio::inherit());
+    hook.env(GIT_WORK_TREE_VARIABLE, worktree)
+        .args([
+            "hook",
+            "run",
+            "--ignore-missing",
+            POST_CHECKOUT_HOOK,
+            "--",
+            &null_object_id(head),
+            head,
+            POST_CHECKOUT_OF_A_BRANCH,
+        ])
+        .stdout(Stdio::from(io::stderr()))
+        .stderr(Stdio::inherit());
 
     hook.status()
 }
