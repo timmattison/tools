@@ -7,14 +7,6 @@
 //! No row is wider than the pane, because a row that wraps pushes every row
 //! under it down one line. Each function measures display width, never bytes,
 //! so a multi-byte path loses whole characters and never panics.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the loop of watch mode draws the list from slice 5 of #499 on. The expectation \
-                  then fails the build, so slice 5 deletes this attribute"
-    )
-)]
 
 use colored::Colorize;
 use textfit::{pad_right, truncate_left, truncate_to_budget};

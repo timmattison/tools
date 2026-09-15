@@ -603,14 +603,6 @@ pub(crate) fn render_frame(
 /// hint and the list takes the rest. With one row, the list takes it and no
 /// hint shows. With no row, the answer is 0: the list cannot open, and an open
 /// list closes, so Enter never chooses a row that the user did not see.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the loop of watch mode calls it from slice 5 of #499 on. The expectation then \
-                  fails the build, so slice 5 deletes this attribute"
-    )
-)]
 pub(crate) fn list_rows(snapshot: &Snapshot, dims: watch::Dimensions) -> usize {
     let under = dims.height.saturating_sub(header_chrome(snapshot));
     match under {
@@ -633,14 +625,6 @@ pub(crate) fn list_rows(snapshot: &Snapshot, dims: watch::Dimensions) -> usize {
 ///
 /// Nothing on the frame ages, so [`Render::freshest_age`] is `None`. Nothing
 /// on the frame reads the [`RenderConfig`] either, so the call takes none.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the loop of watch mode draws the list from slice 5 of #499 on. The expectation \
-                  then fails the build, so slice 5 deletes this attribute"
-    )
-)]
 pub(crate) fn render_list_frame(
     snapshot: &Snapshot,
     dims: watch::Dimensions,

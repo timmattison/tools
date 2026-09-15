@@ -30,8 +30,8 @@ use crate::conflicts::ConflictsWorker;
 use crate::push::{PushCommand, PushUi};
 use crate::render::Snapshot;
 use crate::repo::RepoHandle;
-use crate::worktrees::{WorktreeEntry, WorktreePath};
-use crate::{collect_snapshot, render_frame, FrameTiming, Render, RenderConfig};
+use crate::worktrees::{WorktreeEntry, WorktreeList, WorktreePath};
+use crate::{collect_snapshot, render_frame, render_list_frame, FrameTiming, Render, RenderConfig};
 use termwindow::{
     effective_terminal_height, effective_terminal_width, DEFAULT_TERMINAL_HEIGHT,
     DEFAULT_TERMINAL_WIDTH,
@@ -1194,6 +1194,12 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             render: |snap: &Snapshot, dims: Dimensions, timing: FrameTiming| {
                 render_frame(snap, cfg, dims, timing)
             },
+            render_list: |snap: &Snapshot,
+                          dims: Dimensions,
+                          timing: FrameTiming,
+                          list: &WorktreeList| {
+                render_list_frame(snap, dims, timing, list)
+            },
             dimensions: || current_dimensions(cfg.width_offset),
             paint: |output: &str| paint_output(output),
             clock: Instant::now,
@@ -1581,6 +1587,7 @@ impl LoopState {
 struct LoopHooks<
     Collect,
     RenderFn,
+    RenderList,
     Dims,
     Paint,
     Clock,
@@ -1596,6 +1603,10 @@ struct LoopHooks<
     collect: Collect,
     /// Render a snapshot at the given dimensions and timing.
     render: RenderFn,
+    /// Render the frame of the open list of the worktrees: the head of the
+    /// frame of the snapshot, and the rows of the list under it. The loop
+    /// calls it in place of `render` while the list is open.
+    render_list: RenderList,
     /// Query the current terminal dimensions (re-evaluated on resize).
     dimensions: Dims,
     /// Paint a finished frame.
@@ -1704,6 +1715,7 @@ enum Flow {
 fn absorb<
     Collect,
     RenderFn,
+    RenderList,
     Dims,
     Paint,
     Clock,
@@ -1720,6 +1732,7 @@ fn absorb<
     hooks: &mut LoopHooks<
         Collect,
         RenderFn,
+        RenderList,
         Dims,
         Paint,
         Clock,
@@ -1793,11 +1806,7 @@ where
                 state.switch_to(home, clock, &mut hooks.switch);
             }
         }
-        Event::OpenList
-        | Event::ListUp
-        | Event::ListDown
-        | Event::ListGo
-        | Event::ListClose => {}
+        Event::OpenList | Event::ListUp | Event::ListDown | Event::ListGo | Event::ListClose => {}
         Event::IssueRequested => {
             // One read of the clock, for both halves of one press. The arming
             // and the message it stands for must end at the same moment, and
@@ -1938,6 +1947,9 @@ fn paths_of(entries: Vec<WorktreeEntry>) -> Vec<WorktreePath> {
 ///   nothing (suppression);
 /// - a walk that *fails* does not end the loop: the last good snapshot is
 ///   re-rendered at its true age and the next event retries (see below);
+/// - while the list of the worktrees is open, the frame is the frame of the
+///   list (`render_list` in `hooks`), and every other frame is the status
+///   frame (`render`);
 /// - [`Event::Quit`] ends the loop, as does every sender hanging up.
 ///
 /// A failed collect is absorbed rather than propagated because the failures are
@@ -1957,6 +1969,7 @@ fn paths_of(entries: Vec<WorktreeEntry>) -> Vec<WorktreePath> {
 fn event_loop<
     Collect,
     RenderFn,
+    RenderList,
     Dims,
     Paint,
     Clock,
@@ -1974,6 +1987,7 @@ fn event_loop<
     mut hooks: LoopHooks<
         Collect,
         RenderFn,
+        RenderList,
         Dims,
         Paint,
         Clock,
@@ -1988,6 +2002,7 @@ fn event_loop<
 where
     Collect: FnMut(&WorktreePath) -> Result<Snapshot>,
     RenderFn: FnMut(&Snapshot, Dimensions, FrameTiming) -> Render,
+    RenderList: FnMut(&Snapshot, Dimensions, FrameTiming, &WorktreeList) -> Render,
     Dims: Fn() -> Dimensions,
     Paint: FnMut(&str) -> Result<()>,
     Clock: Fn() -> Instant,
@@ -2148,6 +2163,44 @@ where
         if walk_now || saw_resize {
             state.cache.dims = (hooks.dimensions)();
         }
+
+        // The walk comes before the division of the pane below. It needs no
+        // pane size, and what it finds can change what goes under the frame.
+        if walk_now {
+            let collected = (hooks.collect)(&state.current);
+            // Measure the walk's wall-clock cost around collect and feed it to
+            // the throttle, which arms the next cooldown (= 100·cost) from it.
+            // Deliberately outside the match: a *failed* walk still paid for a
+            // status traversal, and a repo that is unreadable for a while fails
+            // every walk, so gating the retries on the same duty-cycle budget is
+            // what keeps a permanently-deleted repo from pinning a core.
+            let cost = (hooks.clock)().saturating_duration_since(now);
+            state.schedule.record(now, cost);
+            match collected {
+                Ok(snapshot) => {
+                    // Re-seed the collection time to the walk's start so a later
+                    // decay tick or resize advances ages from *this* walk, not
+                    // the previous one.
+                    state.cache.collected_at = now;
+                    state.cache.snapshot = snapshot;
+                }
+                Err(_) => {
+                    // A walk can fail for reasons that are none of the user's
+                    // business and usually transient: `git gc` swapping the ref
+                    // store, a worktree being pruned, `.git` renamed
+                    // mid-operation. Ending watch mode over that would make the
+                    // whole stale-configuration fallback in
+                    // [`RepoHandle::reopened`] pointless, so absorb it: keep the
+                    // last good snapshot and let the next event retry.
+                    // `collected_at` is pointedly NOT advanced — a collection
+                    // that never happened must not reset every displayed age to
+                    // "just now", or the monitor would claim freshness exactly
+                    // when it has none. The frame therefore keeps aging
+                    // truthfully while the repository is unreadable.
+                }
+            }
+        }
+
         // What the push overlay will paint under the frame, and how tall the
         // frame is left — one call, because they are one division of the pane
         // both have to share. The frame is rendered shorter by exactly what the
@@ -2175,65 +2228,24 @@ where
             ..state.cache.dims
         };
 
-        let render = if walk_now {
-            let collected = (hooks.collect)(&state.current);
-            // Measure the walk's wall-clock cost around collect and feed it to
-            // the throttle, which arms the next cooldown (= 100·cost) from it.
-            // Deliberately outside the match: a *failed* walk still paid for a
-            // status traversal, and a repo that is unreadable for a while fails
-            // every walk, so gating the retries on the same duty-cycle budget is
-            // what keeps a permanently-deleted repo from pinning a core.
-            let cost = (hooks.clock)().saturating_duration_since(now);
-            state.schedule.record(now, cost);
-            match collected {
-                Ok(snapshot) => {
-                    // Re-seed the collection time to the walk's start so a later
-                    // decay tick or resize advances ages from *this* walk, not
-                    // the previous one.
-                    state.cache.collected_at = now;
-                    state.cache.snapshot = snapshot;
-                    (hooks.render)(
-                        &state.cache.snapshot,
-                        frame_dims,
-                        timing(Duration::ZERO, &state.schedule, now),
-                    )
-                }
-                // A walk can fail for reasons that are none of the user's
-                // business and usually transient: `git gc` swapping the ref
-                // store, a worktree being pruned, `.git` renamed mid-operation.
-                // Ending watch mode over that would make the whole
-                // stale-configuration fallback in [`RepoHandle::reopened`]
-                // pointless, so absorb it: keep the last good snapshot and let
-                // the next event retry. `collected_at` is pointedly NOT advanced
-                // — a collection that never happened must not reset every
-                // displayed age to "just now", or the monitor would claim
-                // freshness exactly when it has none. The frame therefore keeps
-                // aging truthfully while the repository is unreadable.
-                Err(_) => {
-                    let age_offset = now.saturating_duration_since(state.cache.collected_at);
-                    (hooks.render)(
-                        &state.cache.snapshot,
-                        frame_dims,
-                        timing(age_offset, &state.schedule, now),
-                    )
-                }
+        // Every frame advances every displayed age by the time since the last
+        // walk that succeeded. A walk that succeeded on this wake moved the
+        // collection time to `now`, so its frame shows every age as it was
+        // collected. A walk that failed, a resize, a decay tick, and a change
+        // that the throttle deferred all leave the collection time where it
+        // was, so the cached snapshot goes on ageing truthfully.
+        let frame_timing = timing(
+            now.saturating_duration_since(state.cache.collected_at),
+            &state.schedule,
+            now,
+        );
+        // The open list of the worktrees takes the pane, so its frame replaces
+        // the status frame for as long as it is open.
+        let render = match state.ui.list() {
+            Some(list) => {
+                (hooks.render_list)(&state.cache.snapshot, frame_dims, frame_timing, list)
             }
-        } else if saw_resize {
-            let age_offset = now.saturating_duration_since(state.cache.collected_at);
-            (hooks.render)(
-                &state.cache.snapshot,
-                frame_dims,
-                timing(age_offset, &state.schedule, now),
-            )
-        } else {
-            // Decay tick, or an FS change the throttle deferred: re-render the
-            // cached snapshot, advancing every displayed age by the elapsed time.
-            let age_offset = now.saturating_duration_since(state.cache.collected_at);
-            (hooks.render)(
-                &state.cache.snapshot,
-                frame_dims,
-                timing(age_offset, &state.schedule, now),
-            )
+            None => (hooks.render)(&state.cache.snapshot, frame_dims, frame_timing),
         };
 
         // The painted screen is the frame with the push overlay under it. They
@@ -3872,6 +3884,18 @@ mod tests {
         Err("this loop test watches one worktree".to_string())
     }
 
+    /// A `render_list` hook for the loop tests that never open the list of the
+    /// worktrees. Their `worktrees` hook gives no worktree, so Down opens no
+    /// list, and the loop never calls it.
+    pub(super) fn no_list(
+        _snapshot: &Snapshot,
+        _dims: Dimensions,
+        _timing: FrameTiming,
+        _list: &WorktreeList,
+    ) -> Render {
+        frame("LIST")
+    }
+
     /// Build a [`Render`] with the given frame and no freshest age — enough for
     /// the event-driven loop tests, which don't exercise the cadence.
     pub(super) fn frame(output: &str) -> Render {
@@ -3983,6 +4007,7 @@ mod tests {
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -4037,6 +4062,7 @@ mod tests {
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -4094,6 +4120,7 @@ mod tests {
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -4153,6 +4180,7 @@ mod tests {
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -4208,6 +4236,7 @@ mod tests {
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -4260,6 +4289,7 @@ mod tests {
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -4314,6 +4344,7 @@ mod tests {
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -4368,6 +4399,7 @@ mod tests {
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -4423,6 +4455,7 @@ mod tests {
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -4484,6 +4517,7 @@ mod tests {
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -4553,6 +4587,7 @@ mod tests {
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -4644,6 +4679,7 @@ mod tests {
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -4739,6 +4775,7 @@ mod tests {
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -4815,6 +4852,7 @@ mod tests {
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -4898,6 +4936,7 @@ mod tests {
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -4980,6 +5019,7 @@ mod tests {
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -5042,6 +5082,7 @@ mod tests {
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -5117,6 +5158,7 @@ mod tests {
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 switch: no_switch,
+                render_list: no_list,
             },
         );
 
@@ -5216,6 +5258,7 @@ mod tests {
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 switch: no_switch,
+                render_list: no_list,
             },
         );
 
@@ -5339,6 +5382,7 @@ mod tests {
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 switch: no_switch,
+                render_list: no_list,
             },
         );
 
@@ -5434,7 +5478,7 @@ mod tests {
 #[cfg(test)]
 mod push_loop_tests {
     use super::tests::{
-        frame, loop_home, no_switch, stepping_clock, timer_off, TEST_DEBOUNCE, TEST_DIMS,
+        frame, loop_home, no_list, no_switch, stepping_clock, timer_off, TEST_DEBOUNCE, TEST_DIMS,
     };
     use super::*;
     use crate::conflicts::ConflictsOutcome;
@@ -5638,6 +5682,27 @@ mod push_loop_tests {
     /// a frame of the given size.
     type FrameText = Box<dyn Fn(&Snapshot, Dimensions) -> String>;
 
+    /// The text that the `render_list` hook of a loop test paints: `LIST`,
+    /// the branch of the snapshot, and the label of each row that a pane of
+    /// `dims` shows, with `>` before the cursor row and `⌂` after the home
+    /// row. For example `LIST bravo: alpha >bravo⌂ charlie`.
+    ///
+    /// The branch says which snapshot is under the list. The rows are the
+    /// window of [`crate::list_rows`] rows, as in the frame that production
+    /// draws.
+    fn list_frame_of(snapshot: &Snapshot, dims: Dimensions, list: &WorktreeList) -> String {
+        let rows: Vec<String> = list
+            .window(crate::list_rows(snapshot, dims))
+            .iter()
+            .map(|row| {
+                let cursor = if row.cursor { ">" } else { "" };
+                let home = if row.home { "⌂" } else { "" };
+                format!("{cursor}{}{home}", row.entry.label)
+            })
+            .collect();
+        format!("LIST {}: {}", snapshot.branch, rows.join(" "))
+    }
+
     /// How one loop run is set up.
     ///
     /// [`run_loop_in_session`] fills it for the tests that predate the arrow
@@ -5818,6 +5883,12 @@ mod push_loop_tests {
                     seen.frame_heights.push(frame_dims.height);
                     seen.timings.push(timing);
                     frame(&render(snap, frame_dims))
+                },
+                render_list: |snap: &Snapshot,
+                              frame_dims: Dimensions,
+                              _timing: FrameTiming,
+                              list: &WorktreeList| {
+                    frame(&list_frame_of(snap, frame_dims, list))
                 },
                 dimensions: move || dims,
                 paint: |output: &str| {
@@ -6623,6 +6694,7 @@ mod push_loop_tests {
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
                 switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -7039,6 +7111,7 @@ mod push_loop_tests {
                     },
                     worktrees: Vec::new,
                     switch: no_switch,
+                    render_list: no_list,
                 },
             )
             .expect("loop");
