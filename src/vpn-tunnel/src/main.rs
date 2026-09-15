@@ -166,6 +166,7 @@ fn run(cli: Cli) -> Result<()> {
                 &available_fields,
                 &running_tunnels,
                 existing_field.as_deref(),
+                &generator::gluetun_container_name(&container_prefix),
             )
             .map_err(|err| {
                 let mut msg =
@@ -394,6 +395,20 @@ fn read_credential_field(dir: &Path) -> Option<String> {
     None
 }
 
+/// The line that says how `generate` came to the credential it selected, or
+/// [`None`] when it took the first free credential.
+///
+/// The text carries no color, so a test of it does not depend on the terminal.
+fn selection_note(selected: &credential::SelectedCredential, output_dir: &Path) -> Option<String> {
+    match &selected.selection {
+        credential::Selection::Reused => Some(format!(
+            "Reused the credential that the .env in {} already names.",
+            output_dir.display()
+        )),
+        credential::Selection::FirstFree | credential::Selection::Replaced { .. } => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,5 +486,56 @@ mod tests {
     fn a_file_without_the_line_has_no_field() {
         let dir = env_dir("WIREGUARD_PRIVATE_KEY=k\n");
         assert_eq!(read_credential_field(dir.path()), None);
+    }
+
+    /// A credential that `select_credential` selected in the given way.
+    fn selected(
+        field_label: &str,
+        selection: credential::Selection,
+    ) -> credential::SelectedCredential {
+        credential::SelectedCredential {
+            field_label: field_label.to_string(),
+            key: "key".to_string(),
+            total: 2,
+            in_use: 1,
+            selection,
+        }
+    }
+
+    #[test]
+    fn a_reused_credential_says_that_the_env_names_it() {
+        let note = selection_note(
+            &selected("credential-2", credential::Selection::Reused),
+            Path::new("./vpn"),
+        );
+        assert_eq!(
+            note.as_deref(),
+            Some("Reused the credential that the .env in ./vpn already names.")
+        );
+    }
+
+    #[test]
+    fn a_first_free_credential_gets_no_note() {
+        let note = selection_note(
+            &selected("credential", credential::Selection::FirstFree),
+            Path::new("./vpn"),
+        );
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn a_replaced_credential_names_the_env_the_label_the_holder_and_the_selection() {
+        let selection = credential::Selection::Replaced {
+            named_label: "credential".to_string(),
+            holder: "a-gluetun".to_string(),
+        };
+        let note = selection_note(&selected("credential-2", selection), Path::new("./b"));
+        assert_eq!(
+            note.as_deref(),
+            Some(concat!(
+                "The .env in ./b names credential, but the running tunnel a-gluetun ",
+                "holds its key. This run selected credential-2."
+            ))
+        );
     }
 }
