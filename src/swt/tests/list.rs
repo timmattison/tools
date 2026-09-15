@@ -12,17 +12,29 @@
 
 mod support;
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
-use support::{exiting_check, git, run_swt, unique, write_swt_check, TestRepo};
+use support::{exiting_check, git, run_swt, unique, write_swt_check, TestRepo, SWT_CHECK};
 
 /// The namespace of the local branches. A test removes it from the full ref,
 /// so it compares the branch as a person spells it.
 const LOCAL_BRANCH_NAMESPACE: &str = "refs/heads/";
 
+/// The namespace of every branch that `swt create` makes.
+const SWT_BRANCH_NAMESPACE: &str = "swt";
+
 /// The branch of the parent in the tests that need only one parent. It has no
 /// `/`, so no test here depends on how a nested branch is read.
 const PARENT_BRANCH: &str = "issue-42";
+
+/// The branch of a parent whose name is a prefix of [`NESTED_PARENT_BRANCH`].
+const FLAT_PARENT_BRANCH: &str = "feat";
+
+/// A branch that has [`FLAT_PARENT_BRANCH`] and a `/` as its prefix. Git cannot
+/// hold this branch and [`FLAT_PARENT_BRANCH`] at the same time, so a fixture
+/// deletes this one before it makes the other.
+const NESTED_PARENT_BRANCH: &str = "feat/foo";
 
 /// A worktree that the real `swt create` made, as a test reads it back.
 struct Child {
@@ -74,6 +86,12 @@ fn checked_out_branch(path: &Path) -> String {
             )
         })
         .to_string()
+}
+
+/// `path` as the one argument that a git command takes. Every fixture path is
+/// UTF-8, because every name in it comes from [`unique`].
+fn path_arg(path: &Path) -> &str {
+    path.to_str().expect("utf-8 fixture path")
 }
 
 /// The line that `swt list` must print for `child`: the path, a tab, and the
@@ -130,6 +148,58 @@ fn a_parent_lists_exactly_its_children_as_a_path_a_tab_and_a_branch() {
         listing(&[&first, &second]),
         "stdout must hold exactly the children of {PARENT_BRANCH}, one line each, \
          in the order of their paths: {stderr}"
+    );
+}
+
+// Issue #500. A prefix is not sufficient: the children of `feat/foo` are not
+// children of `feat`. Git refuses `feat` and `feat/foo` in one repository at
+// the same time, so the fixture makes them one after the other. The child of
+// `feat/foo` stays after its parent branch is gone, which is also the real
+// case.
+#[test]
+fn a_child_of_a_longer_branch_is_not_a_child_of_its_prefix() {
+    let repo = TestRepo::new();
+    let nested_parent = repo.add_worktree_on("parent-nested", NESTED_PARENT_BRANCH);
+    let nested_child = create_child(&nested_parent.path, "nested");
+    // The override is untracked, so it goes first. The removal of the parent
+    // then needs no force, and the safe delete proves that the branch held no
+    // work.
+    fs::remove_file(nested_parent.path.join(SWT_CHECK))
+        .expect("the override of the nested parent should be removable");
+    repo.git(&["worktree", "remove", path_arg(&nested_parent.path)]);
+    repo.git(&["branch", "--delete", NESTED_PARENT_BRANCH]);
+    let flat_parent = repo.add_worktree_on("parent-flat", FLAT_PARENT_BRANCH);
+    let flat_child = create_child(&flat_parent.path, "flat");
+    // Mutation guard. It proves that the fixture sets the trap: the child of
+    // `feat/foo` is still a registered worktree, and its branch starts with the
+    // text that a child of `feat` starts with.
+    let nested_prefix = format!("{SWT_BRANCH_NAMESPACE}/{NESTED_PARENT_BRANCH}/");
+    assert!(
+        nested_child.branch.starts_with(&nested_prefix),
+        "fixture precondition: the child of {NESTED_PARENT_BRANCH} must be on a branch under \
+         {nested_prefix}, got {}",
+        nested_child.branch
+    );
+    let registry = repo.git(&["worktree", "list", "--porcelain"]);
+    assert!(
+        registry.contains(&format!("worktree {}\n", nested_child.path.display())),
+        "fixture precondition: the child of {NESTED_PARENT_BRANCH} must outlive its parent: \
+         {registry}"
+    );
+
+    let output = run_swt(&flat_parent.path, &["list"]);
+    let stderr = support::stderr(&output);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "swt list in {FLAT_PARENT_BRANCH} must succeed: {stderr}"
+    );
+    assert_eq!(
+        support::stdout(&output),
+        listing(&[&flat_child]),
+        "{FLAT_PARENT_BRANCH} must show only its own child, and not the child of \
+         {NESTED_PARENT_BRANCH}: {stderr}"
     );
 }
 
