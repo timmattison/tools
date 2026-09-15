@@ -80,10 +80,10 @@ pub const SWT_CHECK: &str = ".swt-check";
 /// that happens to start with a hyphen, and the command that owns it — not clap —
 /// must be the one to answer for it.
 ///
-/// The list lives here because both commands take such a value and each pins it
-/// separately: `create` refuses the name against its naming rule, `merge`
-/// resolves the path and reports that nothing is there. One list keeps the two
-/// halves from drifting into covering different spellings.
+/// The list lives here because `create` and `merge` both take such a value, and
+/// each pins it separately: `create` refuses the name against its naming rule,
+/// `merge` resolves the path and reports that nothing is there. One list keeps
+/// the two halves from drifting into covering different spellings.
 pub const OPTION_LOOKING_NAMES: [&str; 3] = ["-b", "-rf", "--force"];
 
 /// Suffix every worktree directory `swt create` builds carries.
