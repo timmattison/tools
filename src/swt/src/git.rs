@@ -258,13 +258,24 @@ pub fn worktree_dirt(cwd: &Path, include_untracked: bool) -> Result<String, GitF
 /// Kept as one string so the rule a name was judged against and the rule quoted
 /// back to the user can never drift apart.
 pub const WORKTREE_NAME_RULE: &str =
-    "allowed: letters, digits, '.', '_' and '-'; must not start with '-', and must not be '.' or '..'";
+    "allowed: letters, digits, '.', '_' and '-'; must not start with '-' or '.', and must not contain '..'";
 
-/// Names that are built only from allowed characters and are still meaningless
-/// as a path component: `.` resolves to the worktree parent directory itself and
-/// `..` resolves to its parent, so either one would have git create the worktree
-/// on top of a directory that already exists and belongs to someone else.
-const RESERVED_WORKTREE_NAMES: [&str; 2] = [".", ".."];
+/// The characters that a worktree name must not start with.
+///
+/// The name opens a component of the branch `swt/<name>-<token>`, and git
+/// refuses a ref component that starts with `.` (`git help check-ref-format`,
+/// rule 1). The limit on a leading `.` also refuses `.` and `..`. The name also
+/// opens the directory name `<name>-<token>.swt`, and a command that gets a
+/// relative path that starts with `-` reads it as options: `ls -b-abc123.swt`
+/// fails.
+const FORBIDDEN_FIRST_CHARS: [char; 2] = ['-', '.'];
+
+/// A sequence that git refuses anywhere in a ref (`git help check-ref-format`,
+/// rule 3). The allowed characters let git refuse a branch for this reason and
+/// for a leading `.` only: they exclude every other character that git
+/// refuses, and the token comes after the name, so the component cannot end
+/// with `.` or `.lock`.
+const FORBIDDEN_SEQUENCE: &str = "..";
 
 /// The character set a worktree name may be built from — the Rust spelling of
 /// the original `/^[A-Za-z0-9._-]+$/`.
@@ -310,8 +321,10 @@ impl fmt::Display for WorktreeName {
 /// branch name and a worktree path.
 ///
 /// Passing git argv arrays already removes the injection risk, but an unchecked
-/// name still yields nonsense: `../..` escapes the worktree parent directory, a
-/// leading `-` is read as an option, and `/` silently nests the branch.
+/// name still yields nonsense: `../..` escapes the worktree parent directory,
+/// `/` silently nests the branch, a leading `.` or a `..` anywhere gives a
+/// branch that git refuses, and a leading `-` gives a directory name that reads
+/// as options.
 ///
 /// `name` is the raw string as supplied on the command line. Returns the
 /// validated name, or `None` if it violates [`WORKTREE_NAME_RULE`] — callers are
@@ -324,10 +337,7 @@ pub fn validate_worktree_name(name: &str) -> Option<WorktreeName> {
     if name.is_empty() || !name.chars().all(is_worktree_name_char) {
         return None;
     }
-    if name.starts_with('-') {
-        return None;
-    }
-    if RESERVED_WORKTREE_NAMES.contains(&name) {
+    if name.starts_with(FORBIDDEN_FIRST_CHARS) || name.contains(FORBIDDEN_SEQUENCE) {
         return None;
     }
     Some(WorktreeName(name.to_string()))
@@ -357,11 +367,39 @@ mod tests {
         ("$(touch pwned)", "command substitution"),
         ("feat/foo", "a slash silently nests the branch and the path"),
         ("a\\b", "a backslash is a path separator on Windows"),
-        ("..", "escapes the worktree parent directory"),
-        (".", "resolves to the parent directory itself"),
+        (
+            "..",
+            "check-ref-format rules 1 and 3: a leading '.', and a '..'",
+        ),
+        (
+            ".",
+            "check-ref-format rule 1: a ref component must not start with '.'",
+        ),
+        (
+            ".hidden",
+            "check-ref-format rule 1: a ref component must not start with '.'",
+        ),
+        (
+            "v1..2",
+            "check-ref-format rule 3: a ref must not contain '..'",
+        ),
+        (
+            "a..",
+            "check-ref-format rule 3: a ref must not contain '..'",
+        ),
+        (
+            "...x",
+            "check-ref-format rules 1 and 3: a leading '.', and a '..'",
+        ),
         ("../evil", "path traversal"),
-        ("-b", "a leading dash is read as a git option"),
-        ("-rf", "a leading dash is read as a git option"),
+        (
+            "-b",
+            "a leading dash gives a directory name that reads as options",
+        ),
+        (
+            "-rf",
+            "a leading dash gives a directory name that reads as options",
+        ),
         ("", "an empty name yields an empty path component"),
         ("with\nnewline", "a newline breaks ref parsing"),
         ("'quoted'", "quotes are not part of a name"),
