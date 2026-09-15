@@ -552,7 +552,9 @@ mod tests {
 
     // The token is spliced into a branch name and a path component without any
     // further escaping, so every character it can produce has to be legal in
-    // both — which is the whole reason it is spelled in base 36.
+    // both — which is the whole reason it is spelled in base 36. Git judges the
+    // branch and the path parser judges the directory. The worktree name rule
+    // judges neither, because a rule cannot find a gap in itself (issue #502).
     #[test]
     fn a_token_is_base36_and_legal_in_both_a_branch_name_and_a_path_component() {
         let readings: [(u32, u128); 4] = [
@@ -561,22 +563,32 @@ mod tests {
             (u32::MAX, 1_706_651_234_567),
             (99_999, u128::from(u64::MAX)),
         ];
+        let scratch = TempDir::new().expect("scratch directory for git");
         for (pid, millis) in readings {
-            let token = UniqueToken::from_parts(pid, millis).to_string();
+            let token = UniqueToken::from_parts(pid, millis);
+            let spelled = token.to_string();
             assert!(
-                !token.is_empty(),
+                !spelled.is_empty(),
                 "an empty token distinguishes nothing: pid {pid}, millis {millis}"
             );
             assert!(
-                token
+                spelled
                     .chars()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
-                "a token must be base 36: {token:?}"
+                "a token must be base 36: {spelled:?}"
             );
+
+            let naming = WorktreeNaming::with_token(Path::new(ROOT), &name("fix-parser"), &token);
             assert!(
-                validate_worktree_name(&format!("fix-parser-{token}")).is_some(),
-                "a name with the token spliced in must stay inside the worktree name rule: \
-                 {token:?}"
+                git_accepts_branch(scratch.path(), naming.branch()),
+                "git must accept the branch with the token spliced in: {:?}",
+                naming.branch()
+            );
+            assert_eq!(
+                naming.path().parent(),
+                Path::new(ROOT).parent(),
+                "the token must add no path component: {:?}",
+                naming.path()
             );
         }
     }
