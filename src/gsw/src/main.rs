@@ -38,6 +38,9 @@ mod snapshot;
 /// build throwaway repositories, which the shipped binary never does.
 #[cfg(test)]
 mod testrepo;
+/// Bringing the branch up to date with the base, through a command the user
+/// supplies, for the `R` and `M` keys.
+mod update;
 mod watch;
 /// The worktrees of the repository, sorted by path, for the arrow keys.
 mod worktrees;
