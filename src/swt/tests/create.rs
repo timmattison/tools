@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 
 use support::{
-    exiting_check, git, run_swt, swt_command, unique, write_swt_check, TestRepo, SWT_CHECK,
-    TRACKED_FILE, WORKTREE_SUFFIX,
+    exiting_check, git, run_swt, swt_command, unique, write_swt_check, TestRepo, MAIN_BRANCH,
+    SWT_CHECK, TRACKED_FILE, WORKTREE_SUFFIX,
 };
 
 /// A check that records the directory it ran in. `pwd -P` asks the kernel rather
@@ -60,29 +60,50 @@ const SUBAGENT_FILE: &str = "subagent-only.txt";
 /// shared name a shared resource, which is the whole of the bug.
 const CONCURRENT_RUNS: usize = 2;
 
-/// The `git branch --list` pattern matching every branch a `swt create <name>`
-/// could have left behind.
-fn branch_pattern(name: &str) -> String {
-    format!("swt/{name}-*")
-}
+/// The branch of one parent in the naming test. A lightweight tag of the same
+/// name shadows it, so git spells its short name `heads/issue-42`. Only a read
+/// of the full ref gives the branch back as it is.
+const TAGGED_PARENT_BRANCH: &str = "issue-42";
 
-/// The uniqueness token in the directory `swt create <name>` built.
-///
-/// Panics when the path is not `<name>-<token>.swt`, because a path with no
-/// token in it is issue #284 exactly and deserves to be named as such.
-fn token_of_worktree(path: &Path, name: &str) -> String {
-    let file_name = path
-        .file_name()
+/// The branch of the other parent in the naming test. It contains a `/`, and
+/// the branch of a child must keep it as it is.
+const NESTED_PARENT_BRANCH: &str = "feat/foo";
+
+/// The last component of `path` as text: the name of a worktree directory.
+fn dir_name(path: &Path) -> String {
+    path.file_name()
         .expect("a worktree path names a directory")
         .to_string_lossy()
-        .into_owned();
+        .into_owned()
+}
+
+/// The uniqueness token in the directory that `swt create <name>` built for
+/// the parent worktree at `parent`.
+///
+/// Panics when the file name is not `<parent name>--<name>-<token>.swt`. A
+/// name with no token is issue #284, and a name with no parent is issue #500.
+/// The panic message shows the file name that the run built.
+fn token_of_worktree(path: &Path, parent: &Path, name: &str) -> String {
+    let file_name = dir_name(path);
     file_name
-        .strip_prefix(&format!("{name}-"))
+        .strip_prefix(&format!("{}--{name}-", dir_name(parent)))
         .and_then(|rest| rest.strip_suffix(WORKTREE_SUFFIX))
         .unwrap_or_else(|| {
-            panic!("the worktree path must embed a uniqueness token, got {file_name:?}")
+            panic!(
+                "the worktree directory must be <parent>--<name>-<token>{WORKTREE_SUFFIX}, \
+                 got {file_name:?}"
+            )
         })
         .to_string()
+}
+
+/// The branch that `swt create <name>` makes in a parent on `parent_branch`,
+/// for the run whose token is `token`.
+///
+/// The one statement of the branch format in this file, so that each test
+/// compares against the same spelling.
+fn child_branch(parent_branch: &str, name: &str, token: &str) -> String {
+    format!("swt/{parent_branch}/{name}-{token}")
 }
 
 /// Reads a uniqueness token out of `text`: whatever runs between the first
@@ -159,7 +180,7 @@ fn a_green_check_yields_a_worktree_a_branch_and_only_the_path_on_stdout() {
         "the verified worktree must still be there at {}",
         created.display()
     );
-    let branches = repo.branches(&branch_pattern(&name));
+    let branches = repo.created_branches(&name);
     assert_eq!(
         branches.len(),
         1,
@@ -170,7 +191,11 @@ fn a_green_check_yields_a_worktree_a_branch_and_only_the_path_on_stdout() {
     // keyed differently would be two worktrees wearing one name.
     assert_eq!(
         branches[0],
-        format!("swt/{name}-{}", token_of_worktree(&created, &name)),
+        child_branch(
+            MAIN_BRANCH,
+            &name,
+            &token_of_worktree(&created, repo.path(), &name)
+        ),
         "the worktree directory and its branch must be keyed on one token"
     );
 }
@@ -227,8 +252,7 @@ fn concurrent_creates_of_one_name_each_get_their_own_worktree_and_branch() {
         "the directories beside the repository must be exactly the ones reported"
     );
 
-    let mut branches = repo.branches(&branch_pattern(&name));
-    branches.sort();
+    let mut branches = repo.created_branches(&name);
     branches.dedup();
     assert_eq!(
         branches.len(),
@@ -238,11 +262,80 @@ fn concurrent_creates_of_one_name_each_get_their_own_worktree_and_branch() {
     // Each run's two names still belong to each other, which is what makes a
     // stray directory attributable to a branch afterwards.
     for path in &paths {
-        let branch = format!("swt/{name}-{}", token_of_worktree(path, &name));
+        let branch = child_branch(
+            MAIN_BRANCH,
+            &name,
+            &token_of_worktree(path, repo.path(), &name),
+        );
         assert!(
             branches.contains(&branch),
             "no branch {branch} for worktree {}: {branches:?}",
             path.display()
+        );
+    }
+}
+
+// Issue #500. Each name of a child worktree names its parent, so a person or a
+// tool can find the children of a parent again. The first parent proves that
+// the branch comes from the full ref: a tag of the same name changes its short
+// name. The second parent proves that a `/` in the parent branch stays as it is.
+#[test]
+fn a_child_names_its_parent_in_its_directory_and_in_its_branch() {
+    let repo = TestRepo::new();
+    let parents = [
+        repo.add_worktree_on("parent-a", TAGGED_PARENT_BRANCH),
+        repo.add_worktree_on("parent-b", NESTED_PARENT_BRANCH),
+    ];
+    repo.git(&["tag", TAGGED_PARENT_BRANCH]);
+    // Mutation guard for the tag. It proves that the fixture sets the trap: git
+    // now spells the short name of the branch with a `heads/` prefix.
+    assert_eq!(
+        git(&parents[0].path, &["symbolic-ref", "--short", "HEAD"]),
+        format!("heads/{TAGGED_PARENT_BRANCH}"),
+        "fixture precondition: the tag must make the short name of the branch ambiguous"
+    );
+
+    for parent in &parents {
+        // `swt` reads the override from the root of the worktree where it runs.
+        write_swt_check(&parent.path, &exiting_check(0));
+        let name = unique("fix-parser");
+
+        let output = run_swt(&parent.path, &["create", &name]);
+        let stderr = stderr_of(&output);
+
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "create in the parent on {} must succeed: {stderr}",
+            parent.branch
+        );
+        let stdout = stdout_of(&output);
+        let printed = stdout
+            .strip_suffix('\n')
+            .filter(|line| !line.contains('\n'))
+            .unwrap_or_else(|| panic!("stdout must be exactly one line, the path, got {stdout:?}"));
+        let created = PathBuf::from(printed);
+        assert_eq!(
+            created.parent(),
+            parent.path.parent(),
+            "the child must go in the directory that holds its parent"
+        );
+        assert_eq!(
+            repo.sole_created_worktree(&name),
+            created,
+            "the printed path must be the one worktree that the run made"
+        );
+        let token = token_of_worktree(&created, &parent.path, &name);
+        let branch = child_branch(&parent.branch, &name, &token);
+        assert_eq!(
+            repo.created_branches(&name),
+            vec![branch.clone()],
+            "the one branch of the run must name the parent branch and the token of the directory"
+        );
+        assert_eq!(
+            git(&created, &["symbolic-ref", "--quiet", "HEAD"]),
+            format!("refs/heads/{branch}"),
+            "the child worktree must have its own branch checked out"
         );
     }
 }
@@ -291,7 +384,7 @@ fn merge_takes_a_path_create_printed_and_removes_the_branch_it_names() {
         "a merged worktree must be removed: {stderr}"
     );
     assert!(
-        repo.branches(&branch_pattern(&name)).is_empty(),
+        repo.created_branches(&name).is_empty(),
         "a merged branch must be deleted: {stderr}"
     );
 }
@@ -361,7 +454,7 @@ fn a_repository_with_no_check_anywhere_fails_instead_of_reporting_a_vacuous_gree
         "an unverified worktree must not survive"
     );
     assert!(
-        repo.branches(&branch_pattern(&name)).is_empty(),
+        repo.created_branches(&name).is_empty(),
         "an unverified branch must not survive either"
     );
 }
@@ -393,24 +486,33 @@ fn a_red_check_tears_the_worktree_and_the_branch_down_and_says_so() {
         "a red check left an orphaned worktree: {stderr}"
     );
     assert!(
-        repo.branches(&branch_pattern(&name)).is_empty(),
+        repo.created_branches(&name).is_empty(),
         "a red check left an orphaned branch: {stderr}"
     );
     // The worktree is gone, so what it was called can only be read back out of
     // the report — which is also the only place the two names appear together,
     // and therefore the only place a run can be caught keying them differently.
-    let reported_path = format!("Cleaned up worktree {}/{name}-", repo.siblings().display());
+    let parent_name = dir_name(repo.path());
+    let reported_path = format!(
+        "Cleaned up worktree {}/{parent_name}--{name}-",
+        repo.siblings().display()
+    );
     let path_token = token_after(&stderr, &reported_path, WORKTREE_SUFFIX);
-    let branch_token = token_after(&stderr, &format!(" and branch swt/{name}-"), ".");
+    let branch_token = token_after(
+        &stderr,
+        &format!(" and branch swt/{MAIN_BRANCH}/{name}-"),
+        ".",
+    );
     assert_eq!(
         path_token, branch_token,
         "the cleaned-up directory and branch must have been keyed on one token: {stderr}"
     );
     assert!(
         stderr.contains(&format!(
-            "Cleaned up worktree {}/{name}-{path_token}{WORKTREE_SUFFIX} \
-             and branch swt/{name}-{branch_token}.",
-            repo.siblings().display()
+            "Cleaned up worktree {}/{parent_name}--{name}-{path_token}{WORKTREE_SUFFIX} \
+             and branch {}.",
+            repo.siblings().display(),
+            child_branch(MAIN_BRANCH, &name, &branch_token)
         )),
         "a cleanup that happened should be reported: {stderr}"
     );
@@ -451,7 +553,7 @@ fn a_teardown_that_failed_is_never_reported_as_a_cleanup() {
         "fixture precondition: {} should have survived teardown",
         worktree.display()
     );
-    let branches = repo.branches(&branch_pattern(&name));
+    let branches = repo.created_branches(&name);
     assert_eq!(
         branches.len(),
         1,
@@ -472,7 +574,7 @@ fn a_teardown_that_failed_is_never_reported_as_a_cleanup() {
     );
     assert!(
         stderr.contains(&format!(
-            "  git worktree remove --force '{}' && git branch -D swt/{name}-",
+            "  git worktree remove --force '{}' && git branch -D swt/{MAIN_BRANCH}/{name}-",
             worktree.display()
         )),
         "no copy-pasteable recovery command naming the quoted path and the branch: {stderr}"
@@ -520,7 +622,7 @@ fn uncommitted_parent_state_cannot_fake_a_green() {
         "the unverified worktree must be gone: {stderr}"
     );
     assert!(
-        repo.branches(&branch_pattern(&name)).is_empty(),
+        repo.created_branches(&name).is_empty(),
         "the unverified branch must be gone: {stderr}"
     );
 }

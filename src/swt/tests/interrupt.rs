@@ -118,12 +118,6 @@ fn beside_the_repo(repo: &TestRepo) -> Vec<String> {
     entries
 }
 
-/// The `git branch --list` pattern matching every branch a `swt create <name>`
-/// could have left behind.
-fn branch_pattern(name: &str) -> String {
-    format!("swt/{name}-*")
-}
-
 /// A PATH-shadowing `git` that announces `swt`'s teardown and then holds its
 /// first command open.
 ///
@@ -353,7 +347,7 @@ fn interrupted_create_leaves_nothing_behind(signal: c_int, expected_status: i32)
         worktree.display()
     );
     assert!(
-        repo.branches(&branch_pattern(&name)).is_empty(),
+        repo.created_branches(&name).is_empty(),
         "signal {signal} left an orphaned branch:\n{stderr}"
     );
     assert_eq!(
@@ -422,7 +416,7 @@ fn a_second_interrupt_cannot_truncate_the_teardown_the_first_asked_for() {
         worktree.display()
     );
     assert!(
-        repo.branches(&branch_pattern(&name)).is_empty(),
+        repo.created_branches(&name).is_empty(),
         "a second interrupt truncated teardown, orphaning the branch:\n{stderr}"
     );
 }

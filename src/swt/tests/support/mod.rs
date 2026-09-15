@@ -9,7 +9,8 @@
 //!
 //! - **The repository is a subdirectory of its [`TempDir`], never the temp dir
 //!   itself.** `swt create` places a new worktree at
-//!   `<repo>/../<name>-<token>.swt` — a *sibling* of the repo root. With the
+//!   `<repo>/../<repo name>--<name>-<token>.swt` — a *sibling* of the repo
+//!   root. With the
 //!   repo at the temp dir root that sibling
 //!   would land in the shared system temp directory, where it escapes cleanup
 //!   and where two concurrent runs of the same test collide on it.
@@ -61,6 +62,10 @@ const INHERITED_GIT_ENV: [&str; 4] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FIL
 /// Name of the repository directory inside each fixture's `TempDir`. The repo is
 /// a subdirectory so that a worktree created beside it stays inside the temp dir.
 const REPO_DIR: &str = "repo";
+
+/// The branch that every fixture repository starts on. A test reads it back as
+/// the parent branch of a child that `swt create` makes in the main checkout.
+pub const MAIN_BRANCH: &str = "main";
 
 /// The one file every fixture repository has committed, for tests that need a
 /// tracked path to modify, stage or delete.
@@ -229,7 +234,7 @@ impl TestRepo {
         let root = siblings.join(REPO_DIR);
         fs::create_dir(&root).expect("repo subdirectory");
 
-        git(&root, &["init", "--quiet", "-b", "main"]);
+        git(&root, &["init", "--quiet", "-b", MAIN_BRANCH]);
         for (key, value) in FIXTURE_CONFIG {
             git(&root, &["config", "--local", key, value]);
         }
@@ -292,13 +297,25 @@ impl TestRepo {
 
     /// Adds a linked worktree beside the repository, on a fresh branch at `HEAD`.
     pub fn add_worktree(&self, label: &str) -> LinkedWorktree {
-        let branch = unique(&format!("swt/{label}"));
+        self.add_worktree_on(label, &unique(&format!("swt/{label}")))
+    }
+
+    /// Adds a linked worktree beside the repository, on a new branch named
+    /// `branch` at `HEAD`.
+    ///
+    /// A test that pins the names of a child needs to choose the branch of the
+    /// parent, and [`TestRepo::add_worktree`] chooses a branch of its own. Each
+    /// fixture is a private temporary repository, so a fixed branch name cannot
+    /// meet a concurrent run. The directory name still comes from [`unique`], as
+    /// every other path in the suite does.
+    pub fn add_worktree_on(&self, label: &str, branch: &str) -> LinkedWorktree {
         let path = self.sibling(label);
         let path_arg = path.to_str().expect("utf-8 fixture path");
-        self.git(&[
-            "worktree", "add", "--quiet", "-b", &branch, path_arg, "HEAD",
-        ]);
-        LinkedWorktree { path, branch }
+        self.git(&["worktree", "add", "--quiet", "-b", branch, path_arg, "HEAD"]);
+        LinkedWorktree {
+            path,
+            branch: branch.to_string(),
+        }
     }
 
     /// Every directory beside the repository that a `swt create <name>` could
@@ -306,24 +323,36 @@ impl TestRepo {
     ///
     /// The worktree path carries a uniqueness token minted inside the child
     /// process, so a test cannot predict it and has to go looking. The scan
-    /// deliberately matches the un-tokenized `<name>.swt` as well as
-    /// `<name>-<token>.swt`: a regression that dropped the token again would
-    /// otherwise walk straight past every "nothing survived" assertion by
-    /// leaving an orphan under a name the scan was not looking for.
+    /// keeps each `.swt` entry whose file name contains `name`. That finds the
+    /// current format, `<parent>--<name>-<token>.swt`, for a parent of any
+    /// name. It also finds the older `<name>-<token>.swt` and the untokenized
+    /// `<name>.swt`. A regression to an older format thus cannot leave an
+    /// orphan that the "nothing survived" assertions do not see. Every name
+    /// comes from [`unique`], so a match on containment cannot find the
+    /// directory of another test.
     pub fn created_worktrees(&self, name: &str) -> Vec<PathBuf> {
         let mut found: Vec<PathBuf> = fs::read_dir(&self.siblings)
             .expect("the fixture's sibling directory should be readable")
             .filter_map(|entry| {
                 let entry = entry.expect("sibling directory entry");
                 let file_name = entry.file_name().to_string_lossy().into_owned();
-                let stem = file_name.strip_suffix(WORKTREE_SUFFIX)?;
-                let belongs = stem == name
-                    || stem
-                        .strip_prefix(name)
-                        .is_some_and(|token| token.starts_with('-'));
+                let belongs = file_name.ends_with(WORKTREE_SUFFIX) && file_name.contains(name);
                 belongs.then(|| entry.path())
             })
             .collect();
+        found.sort();
+        found
+    }
+
+    /// Every branch that a `swt create <name>` could have left behind, sorted.
+    ///
+    /// The `git branch --list` pattern is `swt/*<name>-*`. In that command a `*`
+    /// also matches a `/`, so the pattern finds `swt/<parent>/<name>-<token>`
+    /// for a parent branch of any depth. It also finds the older
+    /// `swt/<name>-<token>`. A regression to that format thus cannot leave a
+    /// branch that the "nothing survived" assertions do not see.
+    pub fn created_branches(&self, name: &str) -> Vec<String> {
+        let mut found = self.branches(&format!("swt/*{name}-*"));
         found.sort();
         found
     }
