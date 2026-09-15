@@ -642,13 +642,25 @@ pub(crate) fn list_rows(snapshot: &Snapshot, dims: watch::Dimensions) -> usize {
     )
 )]
 pub(crate) fn render_list_frame(
-    _snapshot: &Snapshot,
-    _dims: watch::Dimensions,
-    _timing: FrameTiming,
-    _list: &worktrees::WorktreeList,
+    snapshot: &Snapshot,
+    dims: watch::Dimensions,
+    timing: FrameTiming,
+    list: &worktrees::WorktreeList,
 ) -> Render {
+    let rows = list_rows(snapshot, dims);
+    let window = list.window(rows);
+    let mut lines = render::render_head(snapshot, dims.width, timing.refresh_status().as_ref());
+    lines.extend(render::list::rows(&window));
+    // Blank rows fill what a short list leaves, so the hint stays on the
+    // bottom row of the pane.
+    lines.resize(lines.len() + rows - window.len(), String::new());
+    // The hint takes the row that `list_rows` left under the list, when it
+    // left one.
+    if header_chrome(snapshot) + rows < dims.height {
+        lines.push(render::list::hint());
+    }
     Render {
-        output: String::new(),
+        output: lines.join("\n"),
         freshest_age: None,
     }
 }

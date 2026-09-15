@@ -16,6 +16,9 @@ use crate::bar::render_bar;
 use crate::git::FileStatus;
 use crate::worktrees::WorktreeBadge;
 
+/// The rows of the worktree list, and the hint under them.
+pub(crate) mod list;
+
 /// Everything render() needs to draw one frame.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
