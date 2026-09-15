@@ -5388,6 +5388,18 @@ mod push_loop_tests {
         switches: Vec<WorktreePath>,
         /// How many times the loop read the list of worktrees.
         listings: usize,
+        /// The worktree each walk read, in order.
+        collected_from: Vec<WorktreePath>,
+        /// The worktree each push started in, in the order of
+        /// [`Seen::pushes`].
+        push_paths: Vec<WorktreePath>,
+        /// The worktree and the generation of each run of the issue command,
+        /// in the order of [`Seen::issue_runs`].
+        issue_paths: Vec<(WorktreePath, Generation)>,
+        /// The worktree and the generation of each run of `m`, in order.
+        conflict_paths: Vec<(WorktreePath, Generation)>,
+        /// The timing of each frame the loop rendered, in order.
+        timings: Vec<FrameTiming>,
     }
 
     /// Run the loop over a pre-loaded event queue and report what it did.
@@ -5658,11 +5670,15 @@ mod push_loop_tests {
             },
             LoopHooks {
                 collect: |current: &WorktreePath| {
-                    seen.borrow_mut().collects += 1;
+                    let mut seen = seen.borrow_mut();
+                    seen.collects += 1;
+                    seen.collected_from.push(current.clone());
                     Ok(snapshot_of(current))
                 },
-                render: |snap: &Snapshot, frame_dims: Dimensions, _timing: FrameTiming| {
-                    seen.borrow_mut().frame_heights.push(frame_dims.height);
+                render: |snap: &Snapshot, frame_dims: Dimensions, timing: FrameTiming| {
+                    let mut seen = seen.borrow_mut();
+                    seen.frame_heights.push(frame_dims.height);
+                    seen.timings.push(timing);
                     frame(&render(snap, frame_dims))
                 },
                 dimensions: move || dims,
@@ -5672,16 +5688,22 @@ mod push_loop_tests {
                 },
                 clock,
                 next_tick: timer_off,
-                start_push: |command: PushCommand, _current: &WorktreePath| {
-                    seen.borrow_mut().pushes.push(command);
+                start_push: |command: PushCommand, current: &WorktreePath| {
+                    let mut seen = seen.borrow_mut();
+                    seen.pushes.push(command);
+                    seen.push_paths.push(current.clone());
                 },
                 start_issue: |command: crate::issue::IssueCommand,
-                              _current: &WorktreePath,
-                              _generation: Generation| {
-                    seen.borrow_mut().issue_runs.push(command);
+                              current: &WorktreePath,
+                              generation: Generation| {
+                    let mut seen = seen.borrow_mut();
+                    seen.issue_runs.push(command);
+                    seen.issue_paths.push((current.clone(), generation));
                 },
-                start_conflicts: |_current: &WorktreePath, _generation: Generation| {
-                    seen.borrow_mut().conflict_runs += 1;
+                start_conflicts: |current: &WorktreePath, generation: Generation| {
+                    let mut seen = seen.borrow_mut();
+                    seen.conflict_runs += 1;
+                    seen.conflict_paths.push((current.clone(), generation));
                 },
                 worktrees: || {
                     seen.borrow_mut().listings += 1;
@@ -7032,6 +7054,231 @@ mod push_loop_tests {
             strip_ansi(&screen),
             format!("FRAME {ALONE}\n{REFUSED_RUN_LINE} (0s ago)"),
             "with one worktree an arrow key must take nothing away",
+        );
+    }
+
+    /// The worktrees of `runs`, in order, without their generations.
+    fn paths_only(runs: &[(WorktreePath, Generation)]) -> Vec<WorktreePath> {
+        runs.iter().map(|(path, _)| path.clone()).collect()
+    }
+
+    /// A clock that gives `early` for its first `reads` reads, and `late` for
+    /// every read after them.
+    fn clock_that_jumps(early: Instant, reads: usize, late: Instant) -> impl Fn() -> Instant {
+        let count = std::cell::Cell::new(0_usize);
+        move || {
+            let read = count.get();
+            count.set(read + 1);
+            if read < reads {
+                early
+            } else {
+                late
+            }
+        }
+    }
+
+    /// How often the timed walk of the refresh-clock test runs.
+    const REFRESH: Duration = Duration::from_secs(60);
+
+    #[test]
+    fn right_and_left_go_on_from_the_worktree_the_last_switch_reached() {
+        // Three presses go once round the list of three and end at home, so
+        // each press starts from the worktree that the press before reached.
+        let (_screen, seen) = run_in(
+            World::three(),
+            vec![
+                key(KeyCode::Right),
+                key(KeyCode::Right),
+                key(KeyCode::Right),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE), worktree(ALPHA), worktree(BRAVO)],
+            "Right three times goes once round the list",
+        );
+
+        let (_screen, seen) = run_in(
+            World::three(),
+            vec![
+                key(KeyCode::Left),
+                key(KeyCode::Left),
+                key(KeyCode::Left),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(ALPHA), worktree(CHARLIE), worktree(BRAVO)],
+            "Left three times goes once round the list the other way",
+        );
+    }
+
+    #[test]
+    fn up_goes_to_the_home_worktree_and_up_on_it_again_does_nothing() {
+        let (screen, seen) = run_in(
+            World::three(),
+            vec![
+                key(KeyCode::Right),
+                key(KeyCode::Up),
+                key(KeyCode::Up),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE), worktree(BRAVO)],
+            "Up must go home once, and the second Up finds the frame at home",
+        );
+        assert_eq!(strip_ansi(&screen), format!("FRAME {BRAVO}"));
+    }
+
+    #[test]
+    fn the_painted_frame_after_a_switch_is_the_snapshot_the_switch_gave() {
+        // The frame must never show the snapshot of one worktree under the
+        // name of another.
+        let (screen, _seen) = run_in(World::three(), vec![key(KeyCode::Right), Event::Quit]);
+        assert_eq!(strip_ansi(&screen), format!("FRAME {CHARLIE}"));
+    }
+
+    #[test]
+    fn after_a_switch_a_filesystem_event_walks_the_new_worktree() {
+        // The harness reads the clock once for the cache, and the switch reads
+        // it twice: before and after it opens the worktree. The filesystem
+        // event is read a minute later, past the cooldown that the walk of the
+        // switch armed, so it walks.
+        let base = Instant::now();
+        let (_screen, seen) = drive(
+            vec![key(KeyCode::Right), Event::FsChanged, Event::Quit],
+            in_world(World::three()),
+            clock_that_jumps(base, 3, base + Duration::from_secs(60)),
+        );
+        assert_eq!(
+            seen.collected_from,
+            vec![worktree(CHARLIE)],
+            "the walk must read the worktree on the screen",
+        );
+    }
+
+    #[test]
+    fn after_a_switch_p_g_and_m_act_on_the_new_worktree() {
+        // Each key acts on the worktree on the screen at the press.
+        let (_screen, seen) = run_in(
+            World::three(),
+            vec![
+                probe_answered(),
+                key(KeyCode::Right),
+                key(KeyCode::Char('p')),
+                key(KeyCode::Char('y')),
+                press_g(),
+                press_m(),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.push_paths,
+            vec![worktree(CHARLIE)],
+            "`p` pushes from it"
+        );
+        assert_eq!(
+            seen.pushes.first().map(PushCommand::branch),
+            Some(CHARLIE),
+            "the push must name the branch of the worktree on the screen",
+        );
+        assert_eq!(
+            paths_only(&seen.issue_paths),
+            vec![worktree(CHARLIE)],
+            "`G` runs in it",
+        );
+        assert_eq!(
+            paths_only(&seen.conflict_paths),
+            vec![worktree(CHARLIE)],
+            "`m` measures it",
+        );
+    }
+
+    #[test]
+    fn a_burst_of_right_p_y_pushes_from_the_new_worktree() {
+        // One burst, read with no frame between its keys. The switch happens
+        // when Right is read, so `p` plans the push of the new worktree, as a
+        // `y` after a `p` in one burst reads the new mode.
+        let (_screen, seen) = run_in(
+            World::three(),
+            vec![
+                key(KeyCode::Right),
+                key(KeyCode::Char('p')),
+                key(KeyCode::Char('y')),
+                Event::Quit,
+            ],
+        );
+        let [command] = seen.pushes.as_slice() else {
+            panic!("one push must start, got {:?}", seen.pushes);
+        };
+        assert_eq!(command.args(), ["push", "-u", "origin", CHARLIE]);
+        assert_eq!(seen.push_paths, vec![worktree(CHARLIE)]);
+    }
+
+    #[test]
+    fn a_switch_starts_the_refresh_clock_again() {
+        // The switch walks the new worktree, so the next timed walk is a whole
+        // interval from the switch. The clock stands 50 seconds after the last
+        // walk of the old worktree, so with no switch 10 seconds are left.
+        let base = Instant::now();
+        let later = base + Duration::from_secs(50);
+        let refresh_in = |events: Vec<Event>| {
+            let (_screen, seen) = drive(
+                events,
+                Setup {
+                    schedule: WalkSchedule::new(Some(REFRESH), base, Duration::ZERO),
+                    ..in_world(World::three())
+                },
+                move || later,
+            );
+            seen.timings
+                .last()
+                .and_then(|timing| timing.next_refresh_in)
+        };
+
+        assert_eq!(
+            refresh_in(vec![key(KeyCode::Char('x')), Event::Quit]),
+            Some(Duration::from_secs(10)),
+            "with no switch, the clock of the old worktree runs on",
+        );
+        assert_eq!(
+            refresh_in(vec![key(KeyCode::Right), Event::Quit]),
+            Some(REFRESH),
+            "a switch starts the clock again",
+        );
+    }
+
+    #[test]
+    fn the_arrow_keys_do_nothing_while_a_push_runs() {
+        // The window under the frame belongs to the worktree that pushes. The
+        // switch comes before the push, so Up has a home to go to, and it
+        // still must not go there.
+        let (screen, seen) = run_in(
+            World::three(),
+            vec![
+                key(KeyCode::Right),
+                key(KeyCode::Char('p')),
+                key(KeyCode::Char('y')),
+                key(KeyCode::Up),
+                key(KeyCode::Left),
+                key(KeyCode::Right),
+                key(KeyCode::Down),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE)],
+            "no arrow key may switch while a push runs",
+        );
+        let painted = strip_ansi(&screen);
+        assert!(
+            painted.contains("Pushing"),
+            "the push window must stay, got {painted:?}",
         );
     }
 }
