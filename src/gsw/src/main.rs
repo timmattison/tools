@@ -650,14 +650,14 @@ pub(crate) fn render_list_frame(
     let rows = list_rows(snapshot, dims);
     let window = list.window(rows);
     let mut lines = render::render_head(snapshot, dims.width, timing.refresh_status().as_ref());
-    lines.extend(render::list::rows(&window));
+    lines.extend(render::list::rows(&window, dims.width));
     // Blank rows fill what a short list leaves, so the hint stays on the
     // bottom row of the pane.
     lines.resize(lines.len() + rows - window.len(), String::new());
     // The hint takes the row that `list_rows` left under the list, when it
     // left one.
     if header_chrome(snapshot) + rows < dims.height {
-        lines.push(render::list::hint());
+        lines.push(render::list::hint(dims.width));
     }
     Render {
         output: lines.join("\n"),
@@ -1304,7 +1304,9 @@ mod tests {
         // widest label, `  [日本語-🎉-café]`, takes 18 columns and the marker
         // takes 4, so from 22 columns on every label is whole. From 27
         // columns on, the path column holds `…café`. A multi-byte path loses
-        // whole characters, by columns, and never panics.
+        // whole characters, by columns, and never panics. A wide character
+        // that does not fit stays out whole, and a blank pads the column: at
+        // 29 columns the cell is `…-café ` and not half of `🎉`.
         let entries = multibyte_worktrees();
         let list = list_at(&entries, 4, 0);
         let snap = issue_snapshot();
@@ -1331,10 +1333,11 @@ mod tests {
                 );
             }
             if width >= 27 {
+                let label = format!("  [{MULTIBYTE}]");
                 assert!(
-                    shown
-                        .get(4)
-                        .is_some_and(|row| row.ends_with(&format!("café  [{MULTIBYTE}]"))),
+                    shown.get(4).is_some_and(|row| row
+                        .strip_suffix(&label)
+                        .is_some_and(|cell| cell.trim_end().ends_with("café"))),
                     "the multi-byte row keeps the end of its path at {width} columns: {shown:#?}",
                 );
             }
