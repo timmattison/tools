@@ -5585,6 +5585,10 @@ mod push_loop_tests {
         )
     }
 
+    /// The text that the render hook of a loop test paints for a snapshot, in
+    /// a frame of the given size.
+    type FrameText = Box<dyn Fn(&Snapshot, Dimensions) -> String>;
+
     /// How one loop run is set up.
     ///
     /// [`run_loop_in_session`] fills it for the tests that predate the arrow
@@ -5596,7 +5600,7 @@ mod push_loop_tests {
         dims: Dimensions,
         /// What the render hook paints for a snapshot, in a frame of the given
         /// size.
-        render: Box<dyn Fn(&Snapshot, Dimensions) -> String>,
+        render: FrameText,
         /// Where the person who reads the screen sits.
         session: crate::remote::Session,
         /// The walk schedule the loop starts from.
