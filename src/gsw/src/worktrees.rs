@@ -15,6 +15,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::repo::{branch_name, DETACHED_HEAD};
+
 /// The root of a worktree, in the one spelling that every comparison uses.
 ///
 /// Built only through [`resolve`](Self::resolve) (canonicalize) in production,
@@ -68,9 +70,29 @@ pub(crate) fn list_worktrees(_repo: &gix::Repository) -> Vec<WorktreeEntry> {
     Vec::new()
 }
 
+/// How many hex digits of the commit the label of a detached HEAD shows.
+///
+/// The length that `cwt` shows (`SHORT_COMMIT_HASH_LENGTH` in
+/// `src/cwt/src/worktree.rs`), so the two tools name a detached worktree the
+/// same way. `cwt` is a binary crate, so gsw cannot take its constant.
+const SHORT_HASH_LEN: usize = 7;
+
 /// The label of `repo`'s own HEAD: the branch, or `HEAD@<short hash>`.
-pub(crate) fn head_label(_repo: &gix::Repository) -> String {
-    String::new()
+///
+/// [`branch_name`] gives the branch. For a detached HEAD it gives
+/// [`DETACHED_HEAD`], and the label then adds `@` and the first
+/// [`SHORT_HASH_LEN`] hex digits of the commit, as `cwt` does. A detached HEAD
+/// whose commit gix cannot read gives [`DETACHED_HEAD`] alone: the HEAD is
+/// detached, and no hash is there to show.
+pub(crate) fn head_label(repo: &gix::Repository) -> String {
+    let branch = branch_name(repo);
+    if branch != DETACHED_HEAD {
+        return branch;
+    }
+    match repo.head_id() {
+        Ok(id) => format!("{DETACHED_HEAD}@{}", id.to_hex_with_len(SHORT_HASH_LEN)),
+        Err(_) => branch,
+    }
 }
 
 #[cfg(test)]
