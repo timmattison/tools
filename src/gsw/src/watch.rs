@@ -8,6 +8,7 @@
 //! ([`resolve_dimensions`], [`should_react`], [`next_tick`]) so it can be
 //! unit-tested without a pty.
 
+use std::cell::RefCell;
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -1074,6 +1075,101 @@ pub(crate) fn walk(
     collect_snapshot(repo, cfg)
 }
 
+/// Everything that is tied to the worktree that the loop watches: its path,
+/// the repository handle that each walk re-opens, the ignore matcher that each
+/// walk rebuilds, and the filesystem watcher that wakes the loop.
+///
+/// The four parts are one value, so a switch replaces all of them in one step,
+/// and no part stays on the old worktree. The drop of a `Watched` drops its
+/// watcher, and a watcher that is dropped sends no more events. So after a
+/// switch, a change in the old worktree wakes nothing.
+///
+/// [`run`] shares the one `Watched` between the hooks of the loop through a
+/// [`RefCell`]. The loop runs on one thread and calls one hook at a time, so no
+/// borrow ever meets another borrow.
+struct Watched {
+    /// The root of the worktree, in the one spelling that the loop compares.
+    path: WorktreePath,
+    /// The repository of the worktree. Each walk re-opens it, so configuration
+    /// that another pane writes takes effect. See [`walk`].
+    handle: RepoHandle,
+    /// The ignore matcher that the watcher reads at each event, and that each
+    /// walk rebuilds from disk. See [`LiveIgnore`].
+    ignore: LiveIgnore,
+    /// The watcher of the worktree and of its git directories. Nothing reads
+    /// it. It is here for its drop, which stops the events of this worktree.
+    _watcher: RecommendedWatcher,
+}
+
+impl Watched {
+    /// Watch the worktree at `path` through `handle`, which is open on it
+    /// already. The watcher sends its events on `tx`.
+    ///
+    /// [`run`] builds the first `Watched` here, from the handle that `main`
+    /// opened and from the home worktree that [`resolve_home`] resolved from
+    /// that same handle. So the handle is open on `path` by construction, and
+    /// no second discovery is necessary.
+    ///
+    /// # Errors
+    ///
+    /// Refuses with [`WATCHER_FAILED`] when the filesystem watcher does not
+    /// start, and with [`NOT_A_WORK_TREE`] when the repository has no work
+    /// tree to watch. Each reason names `path`.
+    fn from_handle(
+        handle: RepoHandle,
+        path: WorktreePath,
+        tx: Sender<Event>,
+    ) -> Result<Self, String> {
+        let ignore = LiveIgnore::new(handle.repo());
+        match spawn_fs_watcher(handle.repo(), ignore.clone(), tx) {
+            Ok(Some(watcher)) => Ok(Self {
+                path,
+                handle,
+                ignore,
+                _watcher: watcher,
+            }),
+            Ok(None) => Err(format!("{NOT_A_WORK_TREE}: {}", path.as_path().display())),
+            Err(error) => Err(format!(
+                "{WATCHER_FAILED}: {}: {error}",
+                path.as_path().display()
+            )),
+        }
+    }
+
+    /// Walk the worktree: [`walk`] re-opens the repository, rebuilds the
+    /// ignore matcher, and collects the snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Gives the error of [`walk`], which is the error of the status walk.
+    fn walk(&mut self, cfg: &RenderConfig, _home: &WorktreePath) -> Result<Snapshot> {
+        walk(&mut self.handle, &self.ignore, cfg)
+    }
+}
+
+/// Switch the watch to the worktree at `target`. The watcher of the new
+/// worktree sends its events on `tx`, and `home` is the worktree where the user
+/// started gsw.
+///
+/// It refuses every switch with [`ONE_WORKTREE`], and nothing changes.
+fn switch_watched(
+    _watched: &RefCell<Watched>,
+    _target: &WorktreePath,
+    _tx: Sender<Event>,
+    _cfg: &RenderConfig,
+    _home: &WorktreePath,
+) -> Result<Snapshot, String> {
+    Err(ONE_WORKTREE.to_string())
+}
+
+/// The worktrees that Left, Right, and Down read at each press.
+///
+/// It gives no worktree, so Left and Right find no target, and Down opens no
+/// list.
+fn listed(_watched: &RefCell<Watched>) -> Vec<WorktreeEntry> {
+    Vec::new()
+}
+
 /// Run the live watch loop: take over the alternate screen, seed the snapshot
 /// cache with one git walk, paint the first frame, then re-render on filesystem
 /// changes, terminal resizes, timed refreshes, and decay-timer ticks until the
@@ -1086,11 +1182,16 @@ pub(crate) fn walk(
 /// exit path.
 ///
 /// Takes the [`RepoHandle`] **by value**: watch mode owns the repository for
-/// the rest of the process, and each refresh mutates the handle in place by
-/// re-opening it. Borrowing instead would make the caller hold a mutable borrow
-/// across a call that never returns until the user quits, for no gain — nothing
-/// is left for it to do with the handle afterward.
-pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
+/// the rest of the process. The handle moves into the [`Watched`] of the home
+/// worktree, and each refresh re-opens it in place. Borrowing instead would
+/// make the caller hold a mutable borrow across a call that never returns until
+/// the user quits, for no gain — nothing is left for it to do with the handle
+/// afterward.
+///
+/// The hooks of the loop share one [`Watched`] through a [`RefCell`]. The
+/// `collect` hook walks it, the `worktrees` hook reads the list of its
+/// repository, and the `switch` hook replaces it through [`switch_watched`].
+pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     // Before the guard takes the screen, so a refusal prints on the screen the
     // user started from, and not on the alternate screen that the guard
     // clears when it goes.
@@ -1104,10 +1205,10 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     // Deliberately NOT `walk`: the handle was opened microseconds ago in
     // `main`, so nothing can have changed the config since, and a re-open here
     // would only pay for a config parse to read back what we already hold. The
-    // ignore matcher is equally fresh — `LiveIgnore::new` below builds it from
-    // that same just-opened handle — so skipping `walk`'s rebuild costs nothing
-    // either. Every *subsequent* refresh goes through `walk`, which re-opens the
-    // handle and rebuilds the matcher.
+    // ignore matcher is equally fresh — `Watched::from_handle` below builds it
+    // from that same just-opened handle — so skipping `walk`'s rebuild costs
+    // nothing either. Every *subsequent* refresh goes through `walk`, which
+    // re-opens the handle and rebuilds the matcher.
     let dims = current_dimensions(cfg.width_offset);
     let collected_at = Instant::now();
     let snapshot = collect_snapshot(handle.repo(), cfg)?;
@@ -1164,15 +1265,15 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     // read costs one `ps`.
     let session = crate::remote::Session::read();
 
-    // The one ignore matcher both threads share: the watcher callback reads it
-    // per event, and every `walk` below rebuilds it from disk so a `.gitignore`
-    // edited in another pane takes effect without a restart.
-    let ignore = LiveIgnore::new(handle.repo());
-
-    // The filesystem watcher must outlive the loop — dropping it stops watching.
-    // Started before the collect closure below takes its mutable borrow of the
-    // handle; the watcher clones everything it needs, so this borrow ends here.
-    let _watcher = spawn_fs_watcher(handle.repo(), ignore.clone(), tx)?;
+    // The worktree on the screen, as one value: its handle, the one ignore
+    // matcher that the watcher callback reads per event and that every walk
+    // rebuilds from disk, and the filesystem watcher. It starts on the home
+    // worktree, with the handle that `main` opened, so the start needs no
+    // second discovery. The hooks below share it, and its drop at the end of
+    // this function stops the watcher.
+    let switch_tx = tx.clone();
+    let watched =
+        RefCell::new(Watched::from_handle(handle, home.clone(), tx).map_err(anyhow::Error::msg)?);
 
     let result = event_loop(
         &rx,
@@ -1184,13 +1285,22 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             schedule,
             ui: PushUi::new(cfg.truecolor),
             session,
-            home,
+            home: home.clone(),
         },
         LoopHooks {
-            // The loop passes the worktree on the screen. The `switch` below
-            // refuses every switch, so that is always the home worktree, and
-            // the walk reads it through the handle that `main` opened on it.
-            collect: |_current: &WorktreePath| walk(&mut handle, &ignore, cfg),
+            // The loop passes the worktree on the screen. The loop moves to a
+            // worktree only when `switch` gives `Ok`, and `switch_watched`
+            // replaces `watched` only when it gives `Ok`, so the two always
+            // name the same worktree. The assertion states that in the debug
+            // build, which the tests run.
+            collect: |current: &WorktreePath| {
+                let mut watched = watched.borrow_mut();
+                debug_assert_eq!(
+                    current, &watched.path,
+                    "the loop and the watch must be on the same worktree",
+                );
+                watched.walk(cfg, &home)
+            },
             render: |snap: &Snapshot, dims: Dimensions, timing: FrameTiming| {
                 render_frame(snap, cfg, dims, timing)
             },
@@ -1256,15 +1366,12 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                     },
                 );
             },
-            // No worktree to go to. This loop keeps one repository handle and
-            // one filesystem watcher, and both are on the home worktree. So
-            // Left and Right find no target in this empty list, and do
-            // nothing.
-            worktrees: Vec::new,
-            // Refuses with a reason, and nothing changes. No key reaches it:
-            // Up on the home worktree does nothing, and Left and Right find no
-            // target in the empty list above.
-            switch: |_target: &WorktreePath| Err(ONE_WORKTREE.to_string()),
+            worktrees: || listed(&watched),
+            // Each switch gives the new watcher a sender of its own on the one
+            // channel of the loop.
+            switch: |target: &WorktreePath| {
+                switch_watched(&watched, target, switch_tx.clone(), cfg, &home)
+            },
         },
     );
 
@@ -1290,6 +1397,15 @@ const HOME_UNRESOLVED: &str = "gsw cannot resolve the work tree it started in";
 /// repository handle and one filesystem watcher, and both are on the home
 /// worktree.
 const ONE_WORKTREE: &str = "gsw watches the worktree it started in, and no other";
+
+/// Why gsw refuses to watch a directory that is not the root of a git work
+/// tree. The line names the directory after this text.
+const NOT_A_WORK_TREE: &str = "gsw cannot go to a directory that is not a git work tree";
+
+/// Why gsw refuses to watch a worktree when its filesystem watcher does not
+/// start. The line names the directory and then the error of the watcher after
+/// this text.
+const WATCHER_FAILED: &str = "gsw cannot watch the worktree for changes";
 
 /// What gsw says after it went back to the home worktree, after the path of
 /// the worktree that went away: `<path> no longer exists — back to the home
