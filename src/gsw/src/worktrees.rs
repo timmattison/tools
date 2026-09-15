@@ -61,8 +61,51 @@ pub(crate) struct WorktreeEntry {
 
 /// Every worktree of the repository that holds `repo`, sorted by path.
 /// Paths only: no HEAD is read. The loop calls this on every walk.
-pub(crate) fn worktree_paths(_repo: &gix::Repository) -> Vec<WorktreePath> {
-    Vec::new()
+///
+/// [`enumerate`] says which worktrees are in the list.
+pub(crate) fn worktree_paths(repo: &gix::Repository) -> Vec<WorktreePath> {
+    enumerate(repo)
+}
+
+/// Every worktree of the repository that holds `repo`, sorted by path.
+///
+/// - The main worktree, from [`gix::Repository::main_repo`], unless the main
+///   repository is bare.
+/// - Every linked worktree, from [`gix::Repository::worktrees`].
+///
+/// A worktree whose directory does not exist is skipped (git calls it
+/// prunable). So is a worktree whose `gitdir` file gix cannot read. A
+/// `worktrees` directory that cannot be read hides every linked worktree, and
+/// the main worktree stays in the list. No read fails the whole list.
+///
+/// gix gives the linked worktrees sorted by their admin dir
+/// (`.git/worktrees/<id>`), which is not the order of their paths. The sort
+/// here is by [`WorktreePath`], component by component, as `cwt` sorts by
+/// `PathBuf`.
+fn enumerate(repo: &gix::Repository) -> Vec<WorktreePath> {
+    let mut found: Vec<WorktreePath> = main_worktree(repo).into_iter().collect();
+    found.extend(
+        repo.worktrees()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(linked_worktree),
+    );
+    found.sort();
+    found
+}
+
+/// The main worktree of the repository that holds `repo`. `None` when the
+/// main repository is bare, when gix cannot open it, or when its directory
+/// does not exist.
+fn main_worktree(repo: &gix::Repository) -> Option<WorktreePath> {
+    let main = repo.main_repo().ok().filter(|main| !main.is_bare())?;
+    WorktreePath::resolve(main.workdir()?)
+}
+
+/// The linked worktree that `proxy` names. `None` when gix cannot read its
+/// `gitdir` file, or when its directory does not exist.
+fn linked_worktree(proxy: &gix::worktree::Proxy<'_>) -> Option<WorktreePath> {
+    WorktreePath::resolve(&proxy.base().ok()?)
 }
 
 /// The same worktrees in the same order, each with its label.
