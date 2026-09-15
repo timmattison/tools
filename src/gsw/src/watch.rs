@@ -2253,8 +2253,19 @@ where
         // snapshot sets how tall the head is, and before the overlay, so a
         // message that waited for the list reaches the row on the frame that
         // closes it.
-        if crate::list_rows(&state.cache.snapshot, state.cache.dims) == 0 {
-            let _ = state.ui.close_list();
+        //
+        // A list that stays open stores the scroll of the window that this
+        // frame shows, so the next move of the cursor starts from the window
+        // that the user saw.
+        match crate::list_rows(&state.cache.snapshot, state.cache.dims) {
+            0 => {
+                let _ = state.ui.close_list();
+            }
+            rows => {
+                if let Some(list) = state.ui.list_mut() {
+                    list.settle(rows);
+                }
+            }
         }
 
         // What the push overlay will paint under the frame, and how tall the
