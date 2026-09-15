@@ -2374,6 +2374,126 @@ mod ui_tests {
         assert_eq!(text, "", "a key is what clears it");
     }
 
+    /// Every kind of thing a switch of the worktree must take off the row, with
+    /// a name for a failed assertion. Each one describes the worktree that the
+    /// frame showed before the switch.
+    fn rows_a_switch_takes_away(now: Instant) -> Vec<(&'static str, PushUi)> {
+        let mut notice = PushUi::new(false);
+        let _ = notice.post_notice(NOTICE.to_string(), now);
+
+        let mut error = PushUi::new(false);
+        error.post_error("branch main names no issue".to_string());
+
+        let mut progress = PushUi::new(false);
+        progress.post_progress("Running grind and grime against main…".to_string());
+
+        // A push that ended leaves its outcome on the row, and a message that
+        // arrived during the push waits behind it.
+        let mut outcome_and_held = pushing(now);
+        outcome_and_held.post_error("held behind the push".to_string());
+        outcome_and_held.finished(
+            PushOutcome {
+                success: true,
+                output: String::new(),
+            },
+            now,
+        );
+
+        let mut question_and_held = asking();
+        question_and_held.post_error("held behind the question".to_string());
+
+        vec![
+            ("a notice that fades", notice),
+            ("an error that waits for a key", error),
+            ("a progress notice", progress),
+            (
+                "a push outcome with a message held behind it",
+                outcome_and_held,
+            ),
+            ("the question", asking()),
+            (
+                "a question with a message held behind it",
+                question_and_held,
+            ),
+        ]
+    }
+
+    #[test]
+    fn clear_takes_every_message_off_the_row_and_out_of_the_queue() {
+        // A switch of the worktree calls `clear`. Every message under the
+        // frame describes the worktree that the frame showed before, so the
+        // row must be empty after it, and no held message may take the row
+        // later. A question goes with the keys that answer it.
+        let now = t0();
+        for (what, mut ui) in rows_a_switch_takes_away(now) {
+            assert_ne!(
+                painted(&mut ui, tall_pane(80), now),
+                "",
+                "{what}: the row must carry something before the clear",
+            );
+
+            ui.clear();
+
+            // The mode is the one source of what the keys mean, so a question
+            // that left the mode left its keys too.
+            assert_eq!(ui.mode(), InputMode::Normal, "{what}: no question stays");
+            assert_eq!(
+                painted(&mut ui, tall_pane(80), now),
+                "",
+                "{what}: the row must be empty after the clear",
+            );
+            assert_eq!(
+                painted(&mut ui, tall_pane(80), now + STATUS_LIFETIME),
+                "",
+                "{what}: no held message may reach the row later",
+            );
+            assert_eq!(ui.next_tick(), None, "{what}: nothing is left to age");
+        }
+    }
+
+    #[test]
+    fn clear_leaves_a_running_push_alone_and_empties_the_queue() {
+        // The loop never switches while a push runs, so it never calls `clear`
+        // then. A call then leaves the push on the row with its window, and
+        // the outcome of the push still arrives. The held messages go all the
+        // same, because each one describes the worktree the frame showed
+        // before.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.output_line("Compiling gsw v0.1.0".to_string());
+        ui.post_error("held behind the push".to_string());
+
+        ui.clear();
+
+        assert_eq!(ui.mode(), InputMode::Pushing, "the push is still running");
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert!(
+            text.contains(RUNNING_NOTICE),
+            "the push must keep its row, got {text:?}",
+        );
+        assert!(
+            text.contains("Compiling gsw v0.1.0"),
+            "the push must keep its window, got {text:?}",
+        );
+
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output: "error: failed to push some refs\n".to_string(),
+            },
+            now,
+        );
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert!(
+            text.contains("error: failed to push some refs"),
+            "the outcome of the push must still arrive, got {text:?}",
+        );
+
+        ui.dismiss();
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert_eq!(text, "", "no held message may reach the row, got {text:?}");
+    }
+
     #[test]
     fn a_line_reported_while_pushing_appears_under_the_notice() {
         // The whole feature: a long pre-push hook leaves the user watching a
