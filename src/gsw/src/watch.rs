@@ -8488,6 +8488,47 @@ mod push_loop_tests {
         );
     }
 
+    /// A pane with room for the head of a frame, two rows of the list, and
+    /// the hint.
+    const TWO_ROWS_FOR_THE_LIST: Dimensions = Dimensions {
+        width: 80,
+        height: 5,
+    };
+
+    #[test]
+    fn a_list_longer_than_the_pane_scrolls_only_as_far_as_the_cursor_needs() {
+        // Six worktrees in a pane of two list rows. The window follows the
+        // cursor down. When the cursor comes back up one row, the window that
+        // the user saw still holds it, so the window stays where it was. A
+        // window that moved then would put the cursor row where the user did
+        // not look for it.
+        let names = [ALPHA, BRAVO, CHARLIE, "delta", "echo", "foxtrot"];
+        let (paints, _seen) = paints_of(
+            Setup {
+                dims: TWO_ROWS_FOR_THE_LIST,
+                measured: TWO_ROWS_FOR_THE_LIST,
+                ..in_world(World::of(&names, ALPHA))
+            },
+            vec![
+                vec![key(KeyCode::Down)],
+                vec![key(KeyCode::Down)],
+                vec![key(KeyCode::Down)],
+                vec![key(KeyCode::Down)],
+                vec![key(KeyCode::Up), Event::Quit],
+            ],
+        );
+        assert_eq!(
+            paints,
+            [
+                format!("LIST {ALPHA}: >{ALPHA}⌂ {BRAVO}"),
+                format!("LIST {ALPHA}: {ALPHA}⌂ >{BRAVO}"),
+                format!("LIST {ALPHA}: {BRAVO} >{CHARLIE}"),
+                format!("LIST {ALPHA}: {CHARLIE} >delta"),
+                format!("LIST {ALPHA}: >{CHARLIE} delta"),
+            ],
+        );
+    }
+
     #[test]
     fn up_and_down_move_the_cursor_stop_at_the_ends_and_neither_walk_nor_switch() {
         // The frame does not change while the cursor moves: gsw walks the new
