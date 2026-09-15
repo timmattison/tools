@@ -75,8 +75,9 @@ const DETACHED_HEAD_REFUSAL: &str =
     "HEAD is detached. A detached HEAD has no branch to relate the \
      new worktree to. Check out a branch, then run swt create again.";
 
-/// Namespace every branch `swt` creates lives under.
-const BRANCH_PREFIX: &str = "swt";
+/// Namespace every branch `swt` creates lives under. `list` builds the prefix
+/// of the children of a branch from it.
+pub(crate) const BRANCH_PREFIX: &str = "swt";
 
 /// Radix the uniqueness token is spelled in — the Rust spelling of the
 /// original's `Date.now().toString(36)`. Base 36 is the largest radix `char`

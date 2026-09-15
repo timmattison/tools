@@ -15,7 +15,9 @@
 //!
 //! Two newtypes carry names across this boundary. A [`WorktreeName`] passed
 //! [`validate_worktree_name`]. A [`BranchName`] came from git through
-//! [`head_branch`]. No other module can make either one.
+//! [`local_branch`], which reads the ref of a HEAD for [`head_branch`] and the
+//! branch of each registered worktree for `list`. No other module can make
+//! either one.
 
 use std::ffi::OsStr;
 use std::fmt;
@@ -335,8 +337,7 @@ pub fn head_branch(cwd: Option<&Path>) -> Result<HeadBranch, GitFailure> {
 ///
 /// The pure half of [`head_branch`]. It takes the outcome as an argument, so
 /// the unit tests pin each outcome without a repository. The unit tests of the
-/// naming step in `create` also make their `BranchName` values here, so no
-/// second constructor exists.
+/// naming step in `create` also make their `BranchName` values here.
 ///
 /// `read` is the outcome of [`HEAD_REF_ARGS`]. The ref is its first line,
 /// because [`run_git`] puts stdout before stderr. A warning on stderr thus
@@ -353,12 +354,25 @@ pub(crate) fn head_branch_from(read: Outcome) -> Result<HeadBranch, GitFailure> 
         };
     }
     let full_ref = read.out.lines().next().unwrap_or_default();
-    Ok(full_ref
+    Ok(local_branch(full_ref).map_or(HeadBranch::Detached, HeadBranch::Branch))
+}
+
+/// Reads a local branch out of a full ref that git gave, for example
+/// `refs/heads/feat/foo`.
+///
+/// The one constructor of [`BranchName`]. [`head_branch_from`] reads the ref of
+/// HEAD here, and `list` reads the `branch` field of each registered worktree
+/// here. Both refs come from git, so the rule of [`BranchName`] holds. No
+/// second copy of the namespace rule exists.
+///
+/// Removes `refs/heads/` and keeps every `/` after it. Returns `None` for a ref
+/// outside `refs/heads/`, and for `refs/heads/` with no name after it, because
+/// neither names a local branch.
+pub(crate) fn local_branch(full_ref: &str) -> Option<BranchName> {
+    full_ref
         .strip_prefix(LOCAL_BRANCH_NAMESPACE)
         .filter(|branch| !branch.is_empty())
-        .map_or(HeadBranch::Detached, |branch| {
-            HeadBranch::Branch(BranchName(branch.to_string()))
-        }))
+        .map(|branch| BranchName(branch.to_string()))
 }
 
 /// Human-readable statement of what a worktree name may contain.
