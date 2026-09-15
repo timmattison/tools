@@ -184,6 +184,38 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
     render_with_offset(snapshot, opts, Duration::ZERO)
 }
 
+/// The lines at the top of every frame: the header, the line of a merge or a
+/// rebase in progress, and the separator with the refresh clock of `refresh`.
+///
+/// Every frame of gsw starts with these lines. One function draws them, so no
+/// two frames draw them differently. The row budget of a frame counts exactly
+/// these lines as its header chrome (`header_chrome` in `main.rs`).
+pub(crate) fn render_head(
+    snapshot: &Snapshot,
+    width: usize,
+    refresh: Option<&RefreshStatus>,
+) -> Vec<String> {
+    let HeaderSegments {
+        prefix,
+        behind,
+        suffix,
+    } = header_segments(snapshot, width);
+    // The whole header is bold as before; the optional behind segment is
+    // additionally warning-colored (yellow) to flag that the branch needs a
+    // rebase. When `behind` is `None` the prefix+suffix reproduce today's
+    // line byte-for-byte.
+    let header_line = match behind {
+        Some(seg) => format!("{}{}{}", prefix.bold(), seg.yellow().bold(), suffix.bold()),
+        None => format!("{prefix}{suffix}").bold().to_string(),
+    };
+    let mut lines = vec![header_line];
+    if let Some(op) = &snapshot.operation {
+        lines.push(render_operation_line(op, width));
+    }
+    lines.push(render_separator(width, refresh));
+    lines
+}
+
 /// Produce the colored, multi-line frame with every displayed age advanced
 /// by `age_offset`.
 ///
@@ -197,26 +229,7 @@ pub(crate) fn render_with_offset(
     opts: &RenderOptions,
     age_offset: Duration,
 ) -> String {
-    let mut lines = Vec::new();
-
-    let HeaderSegments {
-        prefix,
-        behind,
-        suffix,
-    } = header_segments(snapshot, opts.terminal_width);
-    // The whole header is bold as before; the optional behind segment is
-    // additionally warning-colored (yellow) to flag that the branch needs a
-    // rebase. When `behind` is `None` the prefix+suffix reproduce today's
-    // line byte-for-byte.
-    let header_line = match behind {
-        Some(seg) => format!("{}{}{}", prefix.bold(), seg.yellow().bold(), suffix.bold()),
-        None => format!("{prefix}{suffix}").bold().to_string(),
-    };
-    lines.push(header_line);
-    if let Some(op) = &snapshot.operation {
-        lines.push(render_operation_line(op, opts.terminal_width));
-    }
-    lines.push(render_separator(opts.terminal_width, opts.refresh.as_ref()));
+    let mut lines = render_head(snapshot, opts.terminal_width, opts.refresh.as_ref());
 
     let display_count = match opts.max_files {
         Some(0) | None => snapshot.files.len(),

@@ -360,6 +360,28 @@ impl FrameTiming {
             next_refresh_in: interval,
         }
     }
+
+    /// The refresh clock that the separator of a frame at this timing shows,
+    /// or `None` when no walk is scheduled.
+    ///
+    /// The clock reports the same offset that every age on the frame is
+    /// advanced by. Every frame takes its clock from here, so no two frames
+    /// show different clocks for one timing.
+    fn refresh_status(self) -> Option<RefreshStatus> {
+        self.next_refresh_in.map(|next_refresh_in| RefreshStatus {
+            last_refresh_ago: self.age_offset,
+            next_refresh_in,
+        })
+    }
+}
+
+/// Rows at the top of every frame, above its content: the header, the line of
+/// a merge or a rebase in progress, and the separator.
+///
+/// [`render::render_head`] draws exactly these rows. Every row budget counts
+/// them from here, so no frame reserves a different number of rows for them.
+fn header_chrome(snapshot: &Snapshot) -> usize {
+    2 + usize::from(snapshot.operation.is_some())
 }
 
 /// A rendered frame plus the metadata watch mode needs to schedule its next
@@ -517,16 +539,15 @@ pub(crate) fn render_frame(
     let log_count = snapshot.log.len();
     // The operation indicator (merge/rebase) is one extra chrome row between
     // the header and the separator, present only when the snapshot carries an
-    // in-progress operation. Reserve it so the file list at the bottom isn't
-    // pushed past the fold.
-    let header_chrome: usize = 2 + usize::from(snapshot.operation.is_some());
+    // in-progress operation. `header_chrome` reserves it, so the file list at
+    // the bottom isn't pushed past the fold.
     let inter_chrome: usize = if file_count > 0 && log_count > 0 {
         1
     } else {
         0
     };
     let footer_chrome: usize = if file_count > 0 { 1 } else { 0 };
-    let chrome = header_chrome + inter_chrome + footer_chrome;
+    let chrome = header_chrome(snapshot) + inter_chrome + footer_chrome;
     let available_rows = terminal_height.saturating_sub(chrome).max(1);
     let (planned_file_cap, planned_log_cap) =
         plan_section_caps(file_count, log_count, available_rows);
@@ -553,12 +574,7 @@ pub(crate) fn render_frame(
         max_files: file_cap_opt,
         log_lines: log_cap,
         truecolor: cfg.truecolor,
-        // The clock renders only when a walk is actually scheduled, and it
-        // reports the same offset every age on this frame was advanced by.
-        refresh: timing.next_refresh_in.map(|next_refresh_in| RefreshStatus {
-            last_refresh_ago: age_offset,
-            next_refresh_in,
-        }),
+        refresh: timing.refresh_status(),
     };
 
     // One-shot mode and the watch seed walk render at offset zero, which is
