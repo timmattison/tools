@@ -1508,7 +1508,10 @@ impl LoopState {
     ///    under the frame goes, because each one describes the worktree the
     ///    frame showed before, and the `G` key loses its arming with the
     ///    message that armed it.
-    /// 3. On `Err`, nothing changes.
+    /// 3. On `Err`, the loop stays on the worktree it shows, and the reason
+    ///    takes the row on a line that fades, because it is gsw's report about
+    ///    a key the user pressed. The cache, the schedule, and the worktree do
+    ///    not change.
     ///
     /// [`absorb`] calls it when it reads the key, and not at the next frame. So
     /// a `p`, `G`, or `m` later in the same burst acts on the new worktree, as
@@ -1522,13 +1525,20 @@ impl LoopState {
         let now = clock();
         let opened = open(&target);
         let cost = clock().saturating_duration_since(now);
-        if let Ok(snapshot) = opened {
-            self.cache.snapshot = snapshot;
-            self.cache.collected_at = now;
-            self.schedule.record(now, cost);
-            self.current = target;
-            self.ui.clear();
-            self.issue.disarm();
+        match opened {
+            Ok(snapshot) => {
+                self.cache.snapshot = snapshot;
+                self.cache.collected_at = now;
+                self.schedule.record(now, cost);
+                self.current = target;
+                self.ui.clear();
+                self.issue.disarm();
+            }
+            // The answer goes unread: no state here stands on where the line
+            // landed.
+            Err(reason) => {
+                let _ = self.ui.post_notice(reason, now);
+            }
         }
     }
 }
