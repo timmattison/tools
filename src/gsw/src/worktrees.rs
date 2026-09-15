@@ -693,4 +693,50 @@ mod tests {
             "fake touches no filesystem, so it keeps a path that resolve refuses",
         );
     }
+
+    /// A worktree that git links through relative paths is in the list.
+    ///
+    /// `git worktree add --relative-paths` (and `worktree.useRelativePaths`)
+    /// writes the `gitdir` file as a path relative to the admin dir, and gix
+    /// gives that path back as it is. Resolved against the current directory
+    /// of the process, it names no directory, and the worktree drops out of
+    /// the list.
+    #[test]
+    fn a_worktree_linked_through_relative_paths_is_listed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("repo");
+        init_repo_at(&main);
+        let linked = dir.path().join("linked");
+        add_worktree(&main, &linked, &["--relative-paths", "-b", "linked"]);
+
+        let gitdir_file = main
+            .join(".git")
+            .join("worktrees")
+            .join("linked")
+            .join("gitdir");
+        let gitdir = std::fs::read_to_string(&gitdir_file).expect("read the gitdir file");
+        assert!(
+            Path::new(gitdir.trim()).is_relative(),
+            "git must write a relative path into the gitdir file: {gitdir}",
+        );
+
+        let repo = open(&main);
+        assert_eq!(
+            worktree_paths(&repo),
+            vec![resolved(&linked), resolved(&main)],
+        );
+        assert_eq!(
+            list_worktrees(&repo),
+            vec![
+                WorktreeEntry {
+                    path: resolved(&linked),
+                    label: "linked".to_string(),
+                },
+                WorktreeEntry {
+                    path: resolved(&main),
+                    label: "main".to_string(),
+                },
+            ],
+        );
+    }
 }
