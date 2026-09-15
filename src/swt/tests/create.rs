@@ -69,6 +69,10 @@ const TAGGED_PARENT_BRANCH: &str = "issue-42";
 /// the branch of a child must keep it as it is.
 const NESTED_PARENT_BRANCH: &str = "feat/foo";
 
+/// What the refusal of a parent on a detached HEAD must say: the fact, and what
+/// the user must do about it.
+const DETACHED_REFUSAL_PHRASES: [&str; 2] = ["HEAD is detached", "Check out a branch"];
+
 /// The last component of `path` as text: the name of a worktree directory.
 fn dir_name(path: &Path) -> String {
     path.file_name()
@@ -338,6 +342,58 @@ fn a_child_names_its_parent_in_its_directory_and_in_its_branch() {
             "the child worktree must have its own branch checked out"
         );
     }
+}
+
+// Issue #500. A parent on a detached HEAD has no branch, so a child cannot name
+// its parent. `swt create` must refuse it before it makes anything, and say why.
+// The check passes, so the refusal cannot come from a red check.
+#[test]
+fn a_parent_on_a_detached_head_is_refused_before_anything_exists() {
+    let repo = TestRepo::new();
+    repo.git(&["switch", "--quiet", "--detach"]);
+    let (on_a_branch, _) = repo.git_allowing_failure(&["symbolic-ref", "--quiet", "HEAD"]);
+    assert!(!on_a_branch, "fixture precondition: HEAD must be detached");
+    write_swt_check(repo.path(), &exiting_check(0));
+    let name = unique("detached");
+
+    let output = run_swt(repo.path(), &["create", &name]);
+    let stderr = support::stderr(&output);
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a parent on a detached HEAD must be refused: {stderr}"
+    );
+    for phrase in DETACHED_REFUSAL_PHRASES {
+        assert!(
+            stderr.contains(phrase),
+            "the refusal must say {phrase:?}, got {stderr:?}"
+        );
+    }
+    assert_eq!(
+        stdout_of(&output),
+        "",
+        "a refused create prints no path for a caller to capture"
+    );
+    assert_eq!(
+        beside_the_repo(&repo),
+        vec!["repo".to_string()],
+        "a refused create must make no directory: {stderr}"
+    );
+    let registered = repo.git(&["worktree", "list", "--porcelain"]);
+    assert_eq!(
+        registered
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .count(),
+        1,
+        "a refused create must register no worktree: {registered}"
+    );
+    assert_eq!(
+        repo.branches("swt/*"),
+        Vec::<String>::new(),
+        "a refused create must make no branch"
+    );
 }
 
 // The path format is `create`'s business and nobody else's: `merge` is handed the
