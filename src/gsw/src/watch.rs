@@ -1504,10 +1504,11 @@ impl LoopState {
     ///    again for the cost of the open.
     /// 2. On `Ok`, the snapshot of `target` goes into the cache, collected
     ///    now, and the schedule records the open as a walk, which starts the
-    ///    refresh clock again. The loop then watches `target`. Every message
-    ///    under the frame goes, because each one describes the worktree the
-    ///    frame showed before, and the `G` key loses its arming with the
-    ///    message that armed it.
+    ///    refresh clock again. The loop then watches `target`, and the
+    ///    generation moves on, so an outcome of a run that started before the
+    ///    switch is known as stale. Every message under the frame goes,
+    ///    because each one describes the worktree the frame showed before, and
+    ///    the `G` key loses its arming with the message that armed it.
     /// 3. On `Err`, the loop stays on the worktree it shows, and the reason
     ///    takes the row on a line that fades, because it is gsw's report about
     ///    a key the user pressed. The cache, the schedule, and the worktree do
@@ -1531,6 +1532,7 @@ impl LoopState {
                 self.cache.collected_at = now;
                 self.schedule.record(now, cost);
                 self.current = target;
+                self.generation = self.generation.next();
                 self.ui.clear();
                 self.issue.disarm();
             }
@@ -1540,6 +1542,13 @@ impl LoopState {
                 let _ = self.ui.post_notice(reason, now);
             }
         }
+    }
+
+    /// Whether an event with `generation` comes from a run that started before
+    /// the last switch, and so describes a worktree that the frame no longer
+    /// shows.
+    fn is_stale(&self, generation: Generation) -> bool {
+        generation != self.generation
     }
 }
 
@@ -1795,6 +1804,19 @@ where
             ConflictsPress::Start => (hooks.start_conflicts)(&state.current, state.generation),
             ConflictsPress::Nothing => {}
         },
+        // A run continues after a switch, in the worktree where it started. An
+        // event of such a run describes a worktree that the frame no longer
+        // shows, and a line under the frame must describe the worktree in the
+        // frame. So it posts nothing. An outcome still frees its key, because
+        // one run at a time is a rule for the whole process, and that run has
+        // ended.
+        Event::ConflictsStarted { generation, .. } if state.is_stale(generation) => {}
+        Event::ConflictsFinished { generation, .. } if state.is_stale(generation) => {
+            state.conflicts.finished();
+        }
+        Event::IssueFinished { generation, .. } if state.is_stale(generation) => {
+            state.issue.finished();
+        }
         // A busy row drops the notice and does not hold it. A held notice
         // reaches the row after the outcome, and says that a run is in flight
         // when none is. See [`PushUi::post_progress`].
