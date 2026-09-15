@@ -1504,7 +1504,10 @@ impl LoopState {
     ///    again for the cost of the open.
     /// 2. On `Ok`, the snapshot of `target` goes into the cache, collected
     ///    now, and the schedule records the open as a walk, which starts the
-    ///    refresh clock again. The loop then watches `target`.
+    ///    refresh clock again. The loop then watches `target`. Every message
+    ///    under the frame goes, because each one describes the worktree the
+    ///    frame showed before, and the `G` key loses its arming with the
+    ///    message that armed it.
     /// 3. On `Err`, nothing changes.
     ///
     /// [`absorb`] calls it when it reads the key, and not at the next frame. So
@@ -1524,6 +1527,8 @@ impl LoopState {
             self.cache.collected_at = now;
             self.schedule.record(now, cost);
             self.current = target;
+            self.ui.clear();
+            self.issue.disarm();
         }
     }
 }
