@@ -8336,6 +8336,92 @@ mod push_loop_tests {
     }
 
     #[test]
+    fn enter_goes_to_the_worktree_under_the_cursor_and_closes_the_list() {
+        // Enter takes the one switch that every key takes, so the frame shows
+        // the snapshot that the switch gave, and a run that starts after it
+        // carries the new generation.
+        let (screen, seen) = run_in(
+            World::three(),
+            vec![
+                key(KeyCode::Down),
+                key(KeyCode::Down),
+                key(KeyCode::Enter),
+                press_m(),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(seen.switches, vec![worktree(CHARLIE)], "Enter on charlie");
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {CHARLIE}"),
+            "the list must close on the frame of charlie",
+        );
+        assert_eq!(
+            seen.conflict_paths,
+            vec![(worktree(CHARLIE), after_one_switch())],
+            "`m` after Enter must measure charlie, in the new generation",
+        );
+
+        let (screen, seen) = run_in(
+            World::three(),
+            vec![
+                key(KeyCode::Down),
+                key(KeyCode::Up),
+                key(KeyCode::Enter),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(seen.switches, vec![worktree(ALPHA)], "Enter on alpha");
+        assert_eq!(strip_ansi(&screen), format!("FRAME {ALPHA}"));
+    }
+
+    #[test]
+    fn enter_on_the_current_worktree_closes_the_list_and_does_not_switch() {
+        // The frame shows that worktree already, so there is nothing to open
+        // and nothing to walk.
+        let (screen, seen) = run_in(
+            World::three(),
+            vec![key(KeyCode::Down), key(KeyCode::Enter), Event::Quit],
+        );
+        assert!(
+            seen.switches.is_empty(),
+            "Enter on the current worktree must not switch, got {:?}",
+            seen.switches,
+        );
+        assert_eq!(
+            seen.collects, 0,
+            "Enter on the current worktree must not walk"
+        );
+        assert_eq!(strip_ansi(&screen), format!("FRAME {BRAVO}"));
+    }
+
+    #[test]
+    fn enter_on_a_worktree_whose_open_fails_closes_the_list_and_shows_the_reason() {
+        // The chosen worktree stopped existing before Enter. The list closes,
+        // gsw stays on the worktree it showed, and the reason is gsw's report
+        // about a key, so it fades.
+        let (screen, seen) = run_in(
+            World::three().refusing(CHARLIE),
+            vec![
+                key(KeyCode::Down),
+                key(KeyCode::Down),
+                key(KeyCode::Enter),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE)],
+            "Enter tries charlie"
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {BRAVO}\n{} (0s ago)", refusal_of(CHARLIE)),
+            "the frame must stay on bravo, with the reason under it",
+        );
+    }
+
+    #[test]
     fn up_and_down_move_the_cursor_stop_at_the_ends_and_neither_walk_nor_switch() {
         // The frame does not change while the cursor moves: gsw walks the new
         // worktree only after Enter. Each burst below gets a frame. Down on
