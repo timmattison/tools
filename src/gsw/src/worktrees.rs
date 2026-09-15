@@ -145,7 +145,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{head_label, worktree_paths, WorktreePath};
+    use super::{head_label, list_worktrees, worktree_paths, WorktreeEntry, WorktreePath};
     use crate::testrepo::{git, git_stdout, init_repo, init_repo_at};
 
     /// How many hex digits of the commit a detached HEAD shows: the length
@@ -356,25 +356,35 @@ mod tests {
         assert_eq!(worktree_paths(&repo), vec![resolved(&linked)]);
     }
 
+    /// A directory name and a branch name with multi-byte characters: a
+    /// character of three bytes, a character of four bytes, and an accent.
+    const MULTIBYTE: &str = "日本語-🎉-café";
+
+    /// A repository at `repo` with one linked worktree at [`MULTIBYTE`], on
+    /// the branch [`MULTIBYTE`]. Gives the fixture, the main worktree, and the
+    /// linked worktree. `repo` sorts first: `r` is one byte, and every byte of
+    /// `日` is higher.
+    fn multibyte_fixture() -> (TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("repo");
+        init_repo_at(&main);
+        let linked = dir.path().join(MULTIBYTE);
+        add_worktree(&main, &linked, &["-b", MULTIBYTE]);
+        (dir, main, linked)
+    }
+
     /// A worktree directory whose name holds multi-byte characters is in the
     /// list, and its path keeps every character.
     #[test]
     fn a_multibyte_path_is_listed_and_round_trips() {
-        const NAME: &str = "日本語-🎉-café";
-        let dir = tempfile::tempdir().expect("tempdir");
-        let main = dir.path().join("repo");
-        init_repo_at(&main);
-        let linked = dir.path().join(NAME);
-        add_worktree(&main, &linked, &["-b", NAME]);
+        let (_dir, main, linked) = multibyte_fixture();
 
         let paths = worktree_paths(&open(&main));
 
-        // `repo` sorts before `日本語…`: `r` is one byte, and every byte of
-        // `日` is higher.
         assert_eq!(paths, vec![resolved(&main), resolved(&linked)]);
         assert_eq!(
             paths[1].as_path().file_name(),
-            Some(OsStr::new(NAME)),
+            Some(OsStr::new(MULTIBYTE)),
             "the path must keep every character of the directory name",
         );
     }
@@ -459,6 +469,131 @@ mod tests {
         let _worktrees = Unreadable::new(main.join(".git").join("worktrees"));
 
         assert_eq!(worktree_paths(&open(&main)), vec![resolved(&main)]);
+    }
+
+    /// The paths of the entries of a list, in the order of the list.
+    fn paths_of(entries: &[WorktreeEntry]) -> Vec<WorktreePath> {
+        entries.iter().map(|entry| entry.path.clone()).collect()
+    }
+
+    /// The list holds the same worktrees as the paths, in the same order, from
+    /// the main worktree and from each linked worktree. The header counts the
+    /// paths and Down shows the list, so the two must never disagree.
+    #[test]
+    fn the_list_has_the_same_paths_in_the_same_order_as_the_paths() {
+        let layout = Layout::new();
+        for asked_from in [layout.main(), layout.zulu(), layout.mike(), layout.alpha()] {
+            let repo = open(&asked_from);
+            let listed = paths_of(&list_worktrees(&repo));
+            assert_eq!(listed, layout.sorted(), "asked from {}", asked_from.display());
+            assert_eq!(
+                listed,
+                worktree_paths(&repo),
+                "asked from {}",
+                asked_from.display(),
+            );
+        }
+    }
+
+    /// Each entry carries the label of its own HEAD: the branch of a worktree
+    /// on a branch, and `HEAD@` with the short hash for a detached worktree.
+    #[test]
+    fn each_entry_is_labelled_with_its_branch_or_the_short_hash_of_its_head() {
+        let layout = Layout::new();
+        // A commit of its own moves the detached worktree off the commit of
+        // `main`, so a label read from the wrong repository shows the wrong
+        // hash.
+        git(
+            &layout.mike(),
+            &["commit", "-q", "--allow-empty", "-m", "detached work"],
+        );
+        let detached = detached_label(&layout.mike());
+        assert_ne!(
+            detached,
+            detached_label(&layout.main()),
+            "the detached worktree must be on a commit of its own",
+        );
+
+        assert_eq!(
+            list_worktrees(&open(&layout.main())),
+            vec![
+                WorktreeEntry {
+                    path: resolved(&layout.zulu()),
+                    label: "zulu".to_string(),
+                },
+                WorktreeEntry {
+                    path: resolved(&layout.mike()),
+                    label: detached,
+                },
+                WorktreeEntry {
+                    path: resolved(&layout.main()),
+                    label: "main".to_string(),
+                },
+                WorktreeEntry {
+                    path: resolved(&layout.alpha()),
+                    label: "alpha".to_string(),
+                },
+            ],
+        );
+    }
+
+    /// A multi-byte path and a multi-byte branch come through the list
+    /// unchanged.
+    #[test]
+    fn a_multibyte_path_and_branch_come_through_the_list_unchanged() {
+        let (_dir, main, linked) = multibyte_fixture();
+
+        assert_eq!(
+            list_worktrees(&open(&main)),
+            vec![
+                WorktreeEntry {
+                    path: resolved(&main),
+                    label: "main".to_string(),
+                },
+                WorktreeEntry {
+                    path: resolved(&linked),
+                    label: MULTIBYTE.to_string(),
+                },
+            ],
+        );
+    }
+
+    /// A worktree whose admin dir gix cannot open is in neither list. Its
+    /// directory exists and its `gitdir` file reads, so only the open fails.
+    /// The list cannot read its label, and a list of paths that kept it would
+    /// disagree with the list that Down shows.
+    #[cfg(unix)]
+    #[test]
+    fn a_worktree_whose_admin_dir_gix_cannot_open_is_in_neither_list() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("repo");
+        init_repo_at(&main);
+        let broken = dir.path().join("broken");
+        add_worktree(&main, &broken, &["-b", "broken"]);
+
+        // gix reads `commondir` first when it opens the admin dir of a linked
+        // worktree, and a read that fails there fails the open.
+        let admin = main.join(".git").join("worktrees").join("broken");
+        let _commondir = Unreadable::new(admin.join("commondir"));
+
+        let repo = open(&main);
+        let readable_bases = repo
+            .worktrees()
+            .expect("read the admin dirs")
+            .iter()
+            .filter(|proxy| proxy.base().is_ok())
+            .count();
+        assert_eq!(
+            readable_bases, 1,
+            "the gitdir file of the worktree must still read, so that only the open fails",
+        );
+        assert!(
+            broken.is_dir(),
+            "the directory of the worktree must exist, so that only the open fails",
+        );
+
+        assert_eq!(worktree_paths(&repo), vec![resolved(&main)]);
+        assert_eq!(paths_of(&list_worktrees(&repo)), vec![resolved(&main)]);
     }
 
     /// Two spellings of one directory resolve to one value.
