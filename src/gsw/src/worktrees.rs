@@ -367,7 +367,7 @@ mod tests {
 
     use super::{
         badge, head_label, list_worktrees, next, previous, worktree_paths, WorktreeBadge,
-        WorktreeEntry, WorktreePath,
+        WorktreeEntry, WorktreeList, WorktreePath,
     };
     use crate::testrepo::{git, git_stdout, init_repo, init_repo_at};
 
@@ -1125,5 +1125,118 @@ mod tests {
         let gone = fake_path("b");
         assert_eq!(badge(&paths, &gone, &paths[0], "gone".to_string()), None);
         assert_eq!(badge(&[], &gone, &gone, "gone".to_string()), None);
+    }
+
+    /// The labels of the list fixtures: a branch, three labels with
+    /// multi-byte characters (three bytes, four bytes, and an accent), and the
+    /// label of a detached HEAD.
+    const LIST_LABELS: [&str; 5] = ["main", "日本語", "🎉", "café", "HEAD@9ba6951"];
+
+    /// `count` entries, sorted by path: `/code/0`, `/code/1`, and on. The
+    /// labels take turns from [`LIST_LABELS`].
+    fn entries(count: usize) -> Vec<WorktreeEntry> {
+        assert!(count <= 10, "a path of one digit keeps the fixture sorted");
+        (0..count)
+            .map(|row| WorktreeEntry {
+                path: fake_path(&row.to_string()),
+                label: LIST_LABELS[row % LIST_LABELS.len()].to_string(),
+            })
+            .collect()
+    }
+
+    /// Open the list of `all`, with the current worktree on row `current` and
+    /// the home worktree on row `home`.
+    fn open_list(all: &[WorktreeEntry], current: usize, home: usize) -> WorktreeList {
+        WorktreeList::open(all.to_vec(), &all[current].path, all[home].path.clone())
+            .expect("a list with rows opens")
+    }
+
+    /// The list opens with the cursor on the worktree that gsw shows now, for
+    /// each row of the list.
+    #[test]
+    fn the_list_opens_with_the_cursor_on_the_current_worktree() {
+        let all = entries(5);
+        for (row, entry) in all.iter().enumerate() {
+            let list = open_list(&all, row, 0);
+            assert_eq!(
+                list.selected(),
+                entry,
+                "the current worktree is on row {row}"
+            );
+        }
+    }
+
+    /// A current worktree that is not in the list puts the cursor on the row
+    /// where it would sort. A current worktree that sorts after every row puts
+    /// the cursor on the last row.
+    #[test]
+    fn the_list_opens_with_the_cursor_where_a_current_worktree_not_in_it_would_sort() {
+        let all = entries(3);
+        let home = all[0].path.clone();
+        let cursor_for = |current: &str| {
+            WorktreeList::open(all.clone(), &fake_path(current), home.clone())
+                .expect("a list with rows opens")
+                .selected()
+                .clone()
+        };
+
+        assert_eq!(
+            cursor_for("0a"),
+            all[1],
+            "between the first row and the second row",
+        );
+        assert_eq!(cursor_for("!"), all[0], "before the first row");
+        assert_eq!(
+            cursor_for("z"),
+            all[2],
+            "after the last row: clamped to the last row",
+        );
+    }
+
+    /// A list with no row does not open, because it has no row for the
+    /// cursor.
+    #[test]
+    fn a_list_with_no_entries_does_not_open() {
+        let current = fake_path("0");
+        assert!(
+            WorktreeList::open(Vec::new(), &current, current.clone()).is_none(),
+            "a list with no row must not open",
+        );
+    }
+
+    /// Up on the top row and Down on the bottom row do nothing, because the
+    /// list does not wrap. Between them, each key moves the cursor one row.
+    #[test]
+    fn the_cursor_stops_at_the_top_row_and_at_the_bottom_row() {
+        let all = entries(3);
+        let mut list = open_list(&all, 0, 0);
+
+        list.up();
+        assert_eq!(list.selected(), &all[0], "Up on the top row does nothing");
+        list.down();
+        assert_eq!(list.selected(), &all[1]);
+        list.down();
+        assert_eq!(list.selected(), &all[2]);
+        list.down();
+        assert_eq!(
+            list.selected(),
+            &all[2],
+            "Down on the bottom row does nothing"
+        );
+        list.up();
+        assert_eq!(list.selected(), &all[1]);
+    }
+
+    /// A repository with one worktree opens a list of one row. Up and Down
+    /// both leave the cursor on that row.
+    #[test]
+    fn a_list_of_one_worktree_keeps_the_cursor_on_its_one_row() {
+        let all = entries(1);
+        let mut list = open_list(&all, 0, 0);
+
+        list.up();
+        assert_eq!(list.selected(), &all[0], "Up on the one row");
+        list.down();
+        assert_eq!(list.selected(), &all[0], "Down on the one row");
     }
 }
