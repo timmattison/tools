@@ -5834,6 +5834,7 @@ mod push_loop_tests {
             events,
             Setup {
                 dims,
+                measured: dims,
                 render: Box::new(move |_snapshot: &Snapshot, frame_dims: Dimensions| {
                     render_frame(frame_dims)
                 }),
@@ -5879,6 +5880,10 @@ mod push_loop_tests {
     struct Setup {
         /// The pane the loop renders into.
         dims: Dimensions,
+        /// The pane that the `dimensions` hook measures, which the loop reads
+        /// at each walk and each resize. It differs from `dims` only in a test
+        /// of a pane that changes size under the loop.
+        measured: Dimensions,
         /// What the render hook paints for a snapshot, in a frame of the given
         /// size.
         render: FrameText,
@@ -6025,6 +6030,7 @@ mod push_loop_tests {
     ) -> (String, Seen) {
         let Setup {
             dims,
+            measured,
             render,
             session,
             schedule,
@@ -6086,7 +6092,7 @@ mod push_loop_tests {
                     queue_next_burst();
                     frame(&list_frame_of(snap, frame_dims, list))
                 },
-                dimensions: move || dims,
+                dimensions: move || measured,
                 paint: |output: &str| {
                     seen.borrow_mut().paints.push(output.to_string());
                     Ok(())
@@ -7332,6 +7338,7 @@ mod push_loop_tests {
     fn in_world(world: World) -> Setup {
         Setup {
             dims: TEST_DIMS,
+            measured: TEST_DIMS,
             render: Box::new(frame_of),
             session: crate::remote::Session::Local,
             schedule: no_timed_refresh_for_push(),
@@ -8234,6 +8241,7 @@ mod push_loop_tests {
             events,
             Setup {
                 dims,
+                measured: dims,
                 ..in_world(World::three())
             },
             move || base,
@@ -8263,8 +8271,15 @@ mod push_loop_tests {
     /// a frozen clock. Gives every screen the loop painted, as visible glyphs,
     /// and what the hooks saw.
     fn paints_in(world: World, bursts: Vec<Vec<Event>>) -> (Vec<String>, Seen) {
+        paints_of(in_world(world), bursts)
+    }
+
+    /// Run the loop over `bursts` as `setup` says, on a frozen clock. Gives
+    /// every screen the loop painted, as visible glyphs, and what the hooks
+    /// saw.
+    fn paints_of(setup: Setup, bursts: Vec<Vec<Event>>) -> (Vec<String>, Seen) {
         let base = Instant::now();
-        let (_screen, seen) = drive_bursts(bursts, in_world(world), move || base);
+        let (_screen, seen) = drive_bursts(bursts, setup, move || base);
         let paints = seen.paints.iter().map(|paint| strip_ansi(paint)).collect();
         (paints, seen)
     }
@@ -8428,6 +8443,38 @@ mod push_loop_tests {
             strip_ansi(&screen),
             format!("FRAME {BRAVO}\n{} (0s ago)", refusal_of(CHARLIE)),
             "the frame must stay on bravo, with the reason under it",
+        );
+    }
+
+    #[test]
+    fn a_pane_that_shrinks_under_the_list_closes_it_and_shows_the_held_message() {
+        // The list closes when the pane leaves no row for it, so Enter never
+        // chooses a row that the user did not see. A message that waited for
+        // the list reaches the row on the frame that closes it, and not one
+        // frame later.
+        let (paints, seen) = paints_of(
+            Setup {
+                measured: NO_ROW_FOR_THE_LIST,
+                ..in_world(World::three())
+            },
+            vec![
+                vec![press_m(), key(KeyCode::Down)],
+                vec![finished(measured_clean())],
+                vec![Event::Resize, Event::Quit],
+            ],
+        );
+        assert_eq!(
+            paints,
+            [
+                format!("LIST {BRAVO}: {ALPHA} >{BRAVO}⌂ {CHARLIE}"),
+                format!("FRAME {BRAVO}\n{MEASURED_CLEAN} (0s ago)"),
+            ],
+            "the frame that closes the list must carry the message that waited for it",
+        );
+        assert_eq!(
+            seen.frame_heights.last().copied(),
+            Some(NO_ROW_FOR_THE_LIST.height - 1),
+            "the message takes one row of the shrunken pane from the frame",
         );
     }
 
