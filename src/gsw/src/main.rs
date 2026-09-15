@@ -611,8 +611,14 @@ pub(crate) fn render_frame(
                   fails the build, so slice 5 deletes this attribute"
     )
 )]
-pub(crate) fn list_rows(_snapshot: &Snapshot, _dims: watch::Dimensions) -> usize {
-    0
+pub(crate) fn list_rows(snapshot: &Snapshot, dims: watch::Dimensions) -> usize {
+    let under = dims.height.saturating_sub(header_chrome(snapshot));
+    match under {
+        // No row for the hint: the one row, if the pane has it, is the list.
+        0 | 1 => under,
+        // The bottom row is the hint.
+        _ => under - 1,
+    }
 }
 
 /// Fetch the `n` most recent commits as [`LogEntry`] records via gix.
