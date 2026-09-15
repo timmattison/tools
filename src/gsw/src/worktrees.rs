@@ -1257,4 +1257,198 @@ mod tests {
         list.down();
         assert_eq!(list.selected(), &all[0], "Down on the one row");
     }
+
+    /// A pane of `rows` list rows, drawn as text: the name of each row, with
+    /// `>` before the cursor row and `⌂` after the home row. For example
+    /// `"3 >4 5⌂"`.
+    fn sketch(list: &WorktreeList, rows: usize) -> String {
+        list.window(rows)
+            .iter()
+            .map(|row| {
+                let name = row
+                    .entry
+                    .path
+                    .as_path()
+                    .file_name()
+                    .and_then(OsStr::to_str)
+                    .expect("a fixture path has a name");
+                let cursor = if row.cursor { ">" } else { "" };
+                let home = if row.home { "⌂" } else { "" };
+                format!("{cursor}{name}{home}")
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Settle the list for a pane of `rows` rows, then draw that pane, as the
+    /// loop does before each frame of the list.
+    fn settle_and_sketch(list: &mut WorktreeList, rows: usize) -> String {
+        list.settle(rows);
+        sketch(list, rows)
+    }
+
+    /// The list marks the row of the home worktree, which Up goes to, and the
+    /// cursor row. A home worktree that is not in the list marks no row.
+    #[test]
+    fn the_list_marks_the_home_row_and_no_row_for_a_home_not_in_the_list() {
+        let all = entries(4);
+        assert_eq!(sketch(&open_list(&all, 0, 2), 4), ">0 1 2⌂ 3");
+        assert_eq!(sketch(&open_list(&all, 3, 3), 4), "0 1 2 >3⌂");
+
+        let gone = WorktreeList::open(all.clone(), &all[0].path, fake_path("gone"))
+            .expect("a list with rows opens");
+        assert_eq!(
+            sketch(&gone, 4),
+            ">0 1 2 3",
+            "a home worktree that is not in the list marks no row",
+        );
+    }
+
+    /// A list of ten rows in a pane of three rows. The cursor goes down to the
+    /// bottom row and back up to the top row, with a settle before each
+    /// frame. The window moves only when the cursor leaves it, and then by
+    /// one row, so the cursor row is always on the screen.
+    #[test]
+    fn the_window_follows_the_cursor_down_and_up_with_minimal_movement() {
+        let all = entries(10);
+        let mut list = open_list(&all, 0, 0);
+
+        let mut frames = vec![settle_and_sketch(&mut list, 3)];
+        for _ in 0..10 {
+            list.down();
+            frames.push(settle_and_sketch(&mut list, 3));
+        }
+        for _ in 0..10 {
+            list.up();
+            frames.push(settle_and_sketch(&mut list, 3));
+        }
+
+        assert_eq!(
+            frames,
+            [
+                ">0⌂ 1 2",
+                "0⌂ >1 2",
+                "0⌂ 1 >2",
+                "1 2 >3",
+                "2 3 >4",
+                "3 4 >5",
+                "4 5 >6",
+                "5 6 >7",
+                "6 7 >8",
+                "7 8 >9",
+                "7 8 >9", // Down on the bottom row: nothing moves.
+                "7 >8 9",
+                ">7 8 9",
+                ">6 7 8",
+                ">5 6 7",
+                ">4 5 6",
+                ">3 4 5",
+                ">2 3 4",
+                ">1 2 3",
+                ">0⌂ 1 2",
+                ">0⌂ 1 2", // Up on the top row: nothing moves.
+            ],
+        );
+    }
+
+    /// A pane that grows or shrinks keeps the cursor row on the screen. A
+    /// taller pane keeps the top row and shows more rows below it. A shorter
+    /// pane moves the window only as far as the cursor row needs.
+    #[test]
+    fn a_pane_that_grows_or_shrinks_keeps_the_cursor_row_on_the_screen() {
+        let all = entries(10);
+        let mut list = open_list(&all, 0, 0);
+        for _ in 0..4 {
+            list.down();
+            list.settle(3);
+        }
+        assert_eq!(settle_and_sketch(&mut list, 3), "2 3 >4");
+
+        assert_eq!(
+            settle_and_sketch(&mut list, 5),
+            "2 3 >4 5 6",
+            "a taller pane"
+        );
+        assert_eq!(settle_and_sketch(&mut list, 2), "3 >4", "a shorter pane");
+        assert_eq!(settle_and_sketch(&mut list, 1), ">4", "a pane of one row");
+        assert_eq!(
+            settle_and_sketch(&mut list, 3),
+            ">4 5 6",
+            "a taller pane again",
+        );
+    }
+
+    /// A list scrolled to its end, in a pane that grows. The pane shows more
+    /// rows above, and never an empty row below the last row. A pane taller
+    /// than the list shows every row.
+    #[test]
+    fn a_pane_that_grows_at_the_end_of_the_list_shows_more_rows_above() {
+        let all = entries(10);
+        let mut list = open_list(&all, 9, 0);
+        assert_eq!(settle_and_sketch(&mut list, 3), "7 8 >9");
+
+        assert_eq!(settle_and_sketch(&mut list, 5), "5 6 7 8 >9");
+        assert_eq!(
+            settle_and_sketch(&mut list, 12),
+            "0⌂ 1 2 3 4 5 6 7 8 >9",
+            "a pane taller than the list shows every row",
+        );
+    }
+
+    /// `window` stores nothing. It keeps the cursor row on the screen when no
+    /// settle ran after the cursor moved, and two calls give the same rows.
+    /// After a settle, the next move starts from the window that the user
+    /// saw.
+    #[test]
+    fn the_window_keeps_the_cursor_row_on_the_screen_without_a_settle() {
+        let all = entries(10);
+        let mut list = open_list(&all, 0, 0);
+        for _ in 0..6 {
+            list.down();
+        }
+
+        assert_eq!(sketch(&list, 3), "4 5 >6");
+        assert_eq!(
+            sketch(&list, 3),
+            "4 5 >6",
+            "a second call gives the same rows"
+        );
+
+        list.settle(3);
+        list.up();
+        assert_eq!(
+            sketch(&list, 3),
+            "4 >5 6",
+            "the window that the user saw still holds the cursor row, so it stays",
+        );
+    }
+
+    /// A pane of no rows shows no row, and the call does not panic, also with
+    /// the cursor on the bottom row. The loop never asks for such a pane,
+    /// because it closes the list first. A settle for no rows leaves the
+    /// window that the user saw.
+    #[test]
+    fn a_pane_of_no_rows_shows_no_row_and_moves_nothing() {
+        let all = entries(10);
+        let mut list = open_list(&all, 0, 0);
+        for _ in 0..5 {
+            list.down();
+            list.settle(3);
+        }
+        assert_eq!(sketch(&list, 3), "3 4 >5");
+
+        assert!(list.window(0).is_empty(), "a pane of no rows shows no row");
+        list.settle(0);
+        assert_eq!(
+            sketch(&list, 3),
+            "3 4 >5",
+            "a settle for no rows moves nothing",
+        );
+
+        let bottom = open_list(&all, 9, 0);
+        assert!(
+            bottom.window(0).is_empty(),
+            "a pane of no rows shows no row with the cursor on the bottom row",
+        );
+    }
 }
