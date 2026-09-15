@@ -207,9 +207,7 @@ fn run(cli: Cli) -> Result<()> {
                 "done:".green().bold(),
                 output_dir.display()
             );
-            // The count names what it counts: `select_credential` counts the
-            // credentials a running tunnel holds, which never includes the one
-            // it just handed out.
+            // The count is the number of credentials that a running tunnel holds.
             let held = if selected.in_use == 1 {
                 "1 held by a running tunnel".to_string()
             } else {
