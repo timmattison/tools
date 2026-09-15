@@ -1695,9 +1695,23 @@ where
         Event::PushOutput(line) => state.ui.output_line(line),
         Event::PushCancelled => state.ui.cancel(),
         Event::Dismiss => state.ui.dismiss(),
-        // The key table gives these in the normal mode, and the loop does not
-        // move on them in this commit.
-        Event::GoHome | Event::GoPrevious | Event::GoNext => {}
+        // Left and Right read the list again at each press, because `nwt` and
+        // `swt` add and remove worktrees while gsw runs. Where no other
+        // worktree is, neither finds a target, and nothing happens.
+        Event::GoPrevious => {
+            let paths = paths_of((hooks.worktrees)());
+            if let Some(target) = crate::worktrees::previous(&paths, &state.current) {
+                let _ = (hooks.switch)(target);
+            }
+        }
+        Event::GoNext => {
+            let paths = paths_of((hooks.worktrees)());
+            if let Some(target) = crate::worktrees::next(&paths, &state.current) {
+                let _ = (hooks.switch)(target);
+            }
+        }
+        // Up does not move the watch in this commit.
+        Event::GoHome => {}
         Event::IssueRequested => {
             // One read of the clock, for both halves of one press. The arming
             // and the message it stands for must end at the same moment, and
@@ -1769,6 +1783,15 @@ where
         }
     }
     Flow::Continue
+}
+
+/// The paths of `entries`, in their order.
+///
+/// Left and Right need the paths alone, and [`crate::worktrees::next`] and
+/// [`crate::worktrees::previous`] search them by sort order, which is the order
+/// the `worktrees` hook gives.
+fn paths_of(entries: Vec<WorktreeEntry>) -> Vec<WorktreePath> {
+    entries.into_iter().map(|entry| entry.path).collect()
 }
 
 /// The render loop's terminal-free core: wait for a filesystem event, a resize,
