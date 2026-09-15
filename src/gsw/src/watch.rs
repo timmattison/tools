@@ -8144,4 +8144,51 @@ mod push_loop_tests {
             seen.switches,
         );
     }
+
+    /// A pane with room for the header and the separator of a frame, and no
+    /// row under them.
+    const NO_ROW_FOR_THE_LIST: Dimensions = Dimensions {
+        width: 80,
+        height: 2,
+    };
+
+    /// A pane with room for the header, the separator, and one row under
+    /// them.
+    const ONE_ROW_FOR_THE_LIST: Dimensions = Dimensions {
+        width: 80,
+        height: 3,
+    };
+
+    /// Run the loop over `events` in the three worktrees, in a pane of `dims`,
+    /// on a frozen clock.
+    fn run_in_pane_of(dims: Dimensions, events: Vec<Event>) -> (String, Seen) {
+        let base = Instant::now();
+        drive(
+            events,
+            Setup {
+                dims,
+                ..in_world(World::three())
+            },
+            move || base,
+        )
+    }
+
+    #[test]
+    fn a_pane_too_short_for_the_list_opens_nothing() {
+        // Enter must never choose a row that the user did not see, as `p`
+        // never asks a question that the pane cannot show. A pane with no row
+        // under the separator opens no list, and does not read the list
+        // either. A pane with one row there opens a list of that one row.
+        let (screen, seen) =
+            run_in_pane_of(NO_ROW_FOR_THE_LIST, vec![key(KeyCode::Down), Event::Quit]);
+        assert_eq!(strip_ansi(&screen), format!("FRAME {BRAVO}"));
+        assert_eq!(
+            seen.listings, 0,
+            "a pane that cannot show the list must not read it",
+        );
+
+        let (screen, _seen) =
+            run_in_pane_of(ONE_ROW_FOR_THE_LIST, vec![key(KeyCode::Down), Event::Quit]);
+        assert_eq!(strip_ansi(&screen), format!("LIST {BRAVO}: >{BRAVO}⌂"));
+    }
 }
