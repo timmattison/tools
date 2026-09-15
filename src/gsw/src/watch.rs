@@ -730,11 +730,16 @@ enum Event {
 /// silently inherit another's bindings.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum InputMode {
-    /// Nothing is being asked. The monitor's ordinary keys apply.
+    /// Nothing is being asked. The monitor's ordinary keys apply, and Up,
+    /// Left, and Right move the watch between the worktrees.
     Normal,
-    /// A push confirmation is on screen and is waiting for an answer.
+    /// A push confirmation is on screen and is waiting for an answer. The
+    /// arrow keys never answer it.
     Confirm,
-    /// A push is running. `p` is inert here, so two pushes cannot overlap.
+    /// A push is running. `p` is inert here, so two pushes cannot overlap. The
+    /// arrow keys are inert too, because the window under the frame belongs to
+    /// the worktree that pushes, and a push that succeeds walks that worktree
+    /// again.
     Pushing,
 }
 
@@ -1690,7 +1695,8 @@ where
         Event::PushOutput(line) => state.ui.output_line(line),
         Event::PushCancelled => state.ui.cancel(),
         Event::Dismiss => state.ui.dismiss(),
-        // No key in the key table gives these yet.
+        // The key table gives these in the normal mode, and the loop does not
+        // move on them in this commit.
         Event::GoHome | Event::GoPrevious | Event::GoNext => {}
         Event::IssueRequested => {
             // One read of the clock, for both halves of one press. The arming
@@ -2196,14 +2202,20 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 ///   killed from another pane.
 /// - [`InputMode::Normal`]: `q` quits, `r` forces a refresh, `p` asks to push,
 ///   `G` asks for the issue of the branch, and `m` asks to measure a rebase and
-///   a merge against the default branch.
+///   a merge against the default branch. Up goes to the home worktree, Left to
+///   the previous worktree, and Right to the next worktree.
 /// - [`InputMode::Confirm`]: `y` and Enter push, `n`, Esc, and `q` cancel.
 ///   Nothing else acts — with a question on screen, `q` is the answer "no",
-///   not "quit", and `r` is not a refresh. That is why the mode exists.
+///   not "quit", `r` is not a refresh, and an arrow key is no answer at all.
+///   That is why the mode exists.
 /// - [`InputMode::Pushing`]: `q` quits, `r` refreshes, `G` still asks for the
 ///   issue — a browser conflicts with nothing a push does — and `m` still asks
 ///   to measure, because a measurement is read-only for the repository. `p` is
-///   inert, so an impatient second press cannot start an overlapping push.
+///   inert, so an impatient second press cannot start an overlapping push. The
+///   arrow keys are inert too: the window under the frame belongs to the
+///   worktree that pushes, so the watch stays on that worktree.
+/// - Down is not bound in any mode. It gives [`Event::Dismiss`] as every
+///   unbound key does.
 /// - `M` is not bound. It gives [`Event::Dismiss`] as every unbound key does.
 /// - `G` acts only where `issue` says a command exists. Where it does not, the
 ///   key gives [`Event::Dismiss`] like any other unbound key, which is the one
@@ -2232,8 +2244,8 @@ fn classify_input(key: KeyEvent, mode: InputMode, issue: IssueKey) -> Option<Eve
         InputMode::Normal | InputMode::Pushing => match code {
             KeyCode::Char('q') => Event::Quit,
             KeyCode::Char('r') => Event::ForceRefresh,
-            // The one key the two modes disagree on: a push already running
-            // makes a second request meaningless rather than harmless.
+            // A push already running makes a second request meaningless
+            // rather than harmless.
             KeyCode::Char('p') if mode == InputMode::Normal => Event::PushRequested,
             // A browser opens beside the monitor, so a push in flight is no
             // reason to refuse. With no command behind it the key falls
@@ -2242,6 +2254,12 @@ fn classify_input(key: KeyEvent, mode: InputMode, issue: IssueKey) -> Option<Eve
             // A measurement is read-only for the repository of the user, so a
             // push in flight is no reason to refuse it either.
             KeyCode::Char('m') => Event::ConflictsRequested,
+            // The arrow keys move the watch to another worktree. The window
+            // of a running push belongs to the worktree that pushes, so they
+            // act in the normal mode only, as `p` does.
+            KeyCode::Up if mode == InputMode::Normal => Event::GoHome,
+            KeyCode::Left if mode == InputMode::Normal => Event::GoPrevious,
+            KeyCode::Right if mode == InputMode::Normal => Event::GoNext,
             _ => Event::Dismiss,
         },
         InputMode::Confirm => match code {
