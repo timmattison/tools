@@ -157,16 +157,19 @@ fn run(cli: Cli) -> Result<()> {
                 .context("could not determine which credentials running tunnels hold")?;
 
             // A directory that was generated before names its credential in
-            // its own .env. Regenerating it keeps that credential: a second
-            // selection would hand this directory a key that a tunnel nobody
-            // has started yet may already carry.
+            // its own .env. A second run keeps that credential, because a new
+            // selection can hand this directory the key of a directory that
+            // nobody has started. The exception is a running tunnel of another
+            // name that holds the key. Then `select_credential` selects a free
+            // credential and names that tunnel.
             let existing_field = read_credential_field(&output_dir);
+            let gluetun_name = generator::gluetun_container_name(&container_prefix);
 
             let selected = credential::select_credential(
                 &available_fields,
                 &running_tunnels,
                 existing_field.as_deref(),
-                &generator::gluetun_container_name(&container_prefix),
+                &gluetun_name,
             )
             .map_err(|err| {
                 let mut msg =
@@ -217,11 +220,8 @@ fn run(cli: Cli) -> Result<()> {
                 credential_field.cyan(),
                 selected.total
             );
-            if existing_field.as_deref() == Some(credential_field.as_str()) {
-                println!(
-                    "Reused the credential that the .env in {} already names.",
-                    output_dir.display()
-                );
+            if let Some(note) = selection_note(&selected, &output_dir) {
+                println!("{note}");
             }
             println!("\nNext steps:");
             println!("  cd {} && ./start.sh", output_dir.display());
@@ -229,9 +229,9 @@ fn run(cli: Cli) -> Result<()> {
             println!("  ./logs.sh            # view logs");
             println!("  ./stop.sh            # tear down");
             println!("\nTo route a container through the VPN, add to your docker-compose.yml:");
-            println!("  network_mode: \"service:{container_prefix}-gluetun\"");
+            println!("  network_mode: \"service:{gluetun_name}\"");
             println!("  depends_on:");
-            println!("    {container_prefix}-gluetun:");
+            println!("    {gluetun_name}:");
             println!("      condition: service_healthy");
         }
         Commands::Up { dir } => {
@@ -395,8 +395,11 @@ fn read_credential_field(dir: &Path) -> Option<String> {
     None
 }
 
-/// The line that says how `generate` came to the credential it selected, or
-/// [`None`] when it took the first free credential.
+/// The line that says how `generate` came to the credential it selected.
+///
+/// A run that keeps the credential that the `.env` names says so. A run that
+/// does not keep it names the running tunnel that holds its key. For a run
+/// under the ordinary rule, this function returns [`None`].
 ///
 /// The text carries no color, so a test of it does not depend on the terminal.
 fn selection_note(selected: &credential::SelectedCredential, output_dir: &Path) -> Option<String> {
@@ -405,7 +408,16 @@ fn selection_note(selected: &credential::SelectedCredential, output_dir: &Path) 
             "Reused the credential that the .env in {} already names.",
             output_dir.display()
         )),
-        credential::Selection::FirstFree | credential::Selection::Replaced { .. } => None,
+        credential::Selection::Replaced {
+            named_label,
+            holder,
+        } => Some(format!(
+            "The .env in {} names {named_label}, but the running tunnel {holder} holds its key. \
+             This run selected {}.",
+            output_dir.display(),
+            selected.field_label
+        )),
+        credential::Selection::FirstFree => None,
     }
 }
 

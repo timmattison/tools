@@ -28,7 +28,7 @@ pub fn generate(
 ) -> Result<()> {
     fs::create_dir_all(output_dir)?;
 
-    let gluetun_name = format!("{container_prefix}-gluetun");
+    let gluetun_name = gluetun_container_name(container_prefix);
     let canonical_city = city.and_then(cities::canonical_city);
 
     // docker-compose.yml
