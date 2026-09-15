@@ -37,6 +37,8 @@ mod snapshot;
 #[cfg(test)]
 mod testrepo;
 mod watch;
+/// The worktrees of the repository, sorted by path, for the arrow keys.
+mod worktrees;
 
 #[derive(Parser)]
 #[command(name = "gsw")]

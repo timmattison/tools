@@ -49,6 +49,24 @@ pub(crate) fn git_allowing_failure(dir: &Path, args: &[&str]) {
     let _ = command(dir, args).status().expect("invoke git");
 }
 
+/// Run a git command in `dir` with the same isolation as [`git`], and give
+/// back what it wrote to standard output, with the surrounding whitespace
+/// removed.
+///
+/// A test reads the answer of git through this helper when git is the oracle,
+/// for example the full id of a commit that gix must shorten. The read goes
+/// through [`command`], so it answers about the fixture and never about a
+/// repository that the inherited environment names.
+///
+/// # Panics
+///
+/// Panics if git cannot be invoked, or if it exits non-zero.
+pub(crate) fn git_stdout(dir: &Path, args: &[&str]) -> String {
+    let output = command(dir, args).output().expect("invoke git");
+    assert!(output.status.success(), "git {args:?} failed");
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
 /// A git invocation in `dir` that takes its repository, and its configuration,
 /// from nothing it inherited.
 ///
@@ -93,13 +111,24 @@ fn command(dir: &Path, args: &[&str]) -> Command {
 /// callers must hold it for as long as they read the repository.
 pub(crate) fn init_repo() -> TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
-    let p = dir.path();
-    git(p, &["init", "-q", "-b", "main"]);
-    identity(p);
-    std::fs::write(p.join("a.txt"), "initial\n").expect("write a.txt");
-    git(p, &["add", "a.txt"]);
-    git(p, &["commit", "-q", "-m", "initial"]);
+    init_repo_at(dir.path());
     dir
+}
+
+/// The repository of [`init_repo`], built at `dir` instead of at the root of a
+/// temporary directory of its own. Makes `dir` first when it is absent.
+///
+/// A fixture that puts several checkouts side by side needs the main worktree
+/// at a path it chose, so that the order of the paths is the order that the
+/// test states. `dir` must be inside a [`TempDir`] that the caller holds, so
+/// the fixture stays parallel-safe.
+pub(crate) fn init_repo_at(dir: &Path) {
+    std::fs::create_dir_all(dir).expect("make the directory of the repository");
+    git(dir, &["init", "-q", "-b", "main"]);
+    identity(dir);
+    std::fs::write(dir.join("a.txt"), "initial\n").expect("write a.txt");
+    git(dir, &["add", "a.txt"]);
+    git(dir, &["commit", "-q", "-m", "initial"]);
 }
 
 /// Clone [`init_repo`]'s repo so the clone has a real `origin/main` upstream,
@@ -182,7 +211,7 @@ mod tests {
 
     use tempfile::NamedTempFile;
 
-    use super::{command, init_repo, FIXTURE_EMAIL};
+    use super::{git_stdout, init_repo, FIXTURE_EMAIL};
 
     /// The variable that tells this test binary it is the child, and that the
     /// child must do the work rather than start a child of its own.
@@ -269,17 +298,6 @@ mod tests {
                     .map_or(0, |objects| objects.filter_map(Result::ok).count())
             })
             .sum()
-    }
-
-    /// Run git in `dir` through [`command`] and hand back what it said.
-    ///
-    /// The read goes through the helper under test on purpose. A read through
-    /// a git invocation of its own would answer about a repository this test
-    /// never asked about.
-    fn read(dir: &Path, args: &[&str]) -> String {
-        let output = command(dir, args).output().expect("invoke git");
-        assert!(output.status.success(), "git {args:?} failed");
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
     /// Start this test binary again, with `test` named and the hostile
@@ -427,7 +445,10 @@ mod tests {
         );
 
         assert_eq!(
-            read(fixture.path(), &["log", "-1", "--format=%ae"]),
+            // The read goes through the helper under test on purpose. A read
+            // through a git invocation of its own would answer about a
+            // repository this test never asked about.
+            git_stdout(fixture.path(), &["log", "-1", "--format=%ae"]),
             FIXTURE_EMAIL,
             "the fixture commit carries the injected address. {CONFIG_PARAMETERS} reached git, \
              and git reads it ahead of every configuration file, so the two `/dev/null` pins do \
