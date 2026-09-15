@@ -206,10 +206,9 @@ impl WorktreeNaming {
 /// Creates a subagent worktree named `raw_name`, branched from a green HEAD.
 ///
 /// The name is checked before any git runs, because it becomes both a branch and
-/// a directory: `..` or a leading `-` would otherwise have git create the wrong
-/// thing somewhere else entirely, and the cheapest place to stop that is before
-/// anything exists to clean up. A rejected name is reported on stderr together
-/// with the rule it broke, and the command fails.
+/// a directory: a `/` would otherwise have git nest both, and the cheapest place
+/// to stop that is before anything exists to clean up. A rejected name is
+/// reported on stderr together with the rule it broke, and the command fails.
 ///
 /// On success the worktree's path — and nothing else — goes to stdout, so a
 /// caller can capture it cleanly. On a red check the worktree and its branch are
