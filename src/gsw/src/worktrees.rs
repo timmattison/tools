@@ -85,6 +85,13 @@ pub(crate) fn list_worktrees(repo: &gix::Repository) -> Vec<WorktreeEntry> {
         .collect()
 }
 
+/// The label of a linked worktree whose repository gix cannot open.
+///
+/// gsw cannot read the HEAD of that worktree, so it knows neither its branch
+/// nor its commit, and a guess would be a lie. The worktree stays in the list,
+/// so the list and [`worktree_paths`] always hold the same worktrees.
+const UNREADABLE_LABEL: &str = "?";
+
 /// One worktree that [`enumerate`] found: its root, and its repository, open.
 ///
 /// The open is part of the one enumeration, so a worktree whose admin dir gix
