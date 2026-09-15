@@ -36,6 +36,10 @@ const FLAT_PARENT_BRANCH: &str = "feat";
 /// deletes this one before it makes the other.
 const NESTED_PARENT_BRANCH: &str = "feat/foo";
 
+/// What the note for a branch with no children must say. The note must also
+/// name the branch.
+const NO_CHILDREN_PHRASE: &str = "No child worktrees";
+
 /// A worktree that the real `swt create` made, as a test reads it back.
 struct Child {
     /// The path that `swt create` printed on stdout.
@@ -88,6 +92,22 @@ fn checked_out_branch(path: &Path) -> String {
         .to_string()
 }
 
+/// Asserts that the registry of `repo` holds a worktree at each of `paths`.
+///
+/// A mutation guard for the fixtures. A test that expects `swt list` to leave a
+/// worktree out proves first that git knows the worktree, so an empty filter
+/// cannot pass the test. `why` says what the fixture needs the worktrees for.
+fn assert_registered(repo: &TestRepo, paths: &[&Path], why: &str) {
+    let registry = repo.git(&["worktree", "list", "--porcelain"]);
+    for path in paths {
+        assert!(
+            registry.contains(&format!("worktree {}\n", path.display())),
+            "fixture precondition: the registry must hold {} ({why}): {registry}",
+            path.display()
+        );
+    }
+}
+
 /// `path` as the one argument that a git command takes. Every fixture path is
 /// UTF-8, because every name in it comes from [`unique`].
 fn path_arg(path: &Path) -> &str {
@@ -124,16 +144,11 @@ fn a_parent_lists_exactly_its_children_as_a_path_a_tab_and_a_branch() {
     let second = create_child(&parent.path, "second");
     let child_of_main = create_child(repo.path(), "elsewhere");
     let old_format = repo.add_worktree("bystander");
-    // Mutation guard. It proves that the registry holds both bystanders, so an
-    // empty filter cannot pass this test.
-    let registry = repo.git(&["worktree", "list", "--porcelain"]);
-    for bystander in [&child_of_main.path, &old_format.path] {
-        assert!(
-            registry.contains(&format!("worktree {}\n", bystander.display())),
-            "fixture precondition: the registry must hold {}: {registry}",
-            bystander.display()
-        );
-    }
+    assert_registered(
+        &repo,
+        &[&child_of_main.path, &old_format.path],
+        "a worktree that is not a child of the parent",
+    );
 
     let output = run_swt(&parent.path, &["list"]);
     let stderr = support::stderr(&output);
@@ -180,11 +195,10 @@ fn a_child_of_a_longer_branch_is_not_a_child_of_its_prefix() {
          {nested_prefix}, got {}",
         nested_child.branch
     );
-    let registry = repo.git(&["worktree", "list", "--porcelain"]);
-    assert!(
-        registry.contains(&format!("worktree {}\n", nested_child.path.display())),
-        "fixture precondition: the child of {NESTED_PARENT_BRANCH} must outlive its parent: \
-         {registry}"
+    assert_registered(
+        &repo,
+        &[&nested_child.path],
+        "the child of a parent branch that is gone",
     );
 
     let output = run_swt(&flat_parent.path, &["list"]);
@@ -200,6 +214,46 @@ fn a_child_of_a_longer_branch_is_not_a_child_of_its_prefix() {
         listing(&[&flat_child]),
         "{FLAT_PARENT_BRANCH} must show only its own child, and not the child of \
          {NESTED_PARENT_BRANCH}: {stderr}"
+    );
+}
+
+// Issue #500. A branch with no children prints nothing on stdout, so
+// `[ -n "$(swt list)" ]` is a complete check. A note on stderr tells a person
+// why the output is empty. The status is 0, because no children is an answer
+// and not a failure. The registry holds a child of `main` and a worktree in the
+// old format, so the empty answer does not come from an empty registry.
+#[test]
+fn a_parent_with_no_children_prints_nothing_and_a_note_that_names_it() {
+    let repo = TestRepo::new();
+    let parent = repo.add_worktree_on("parent", PARENT_BRANCH);
+    let child_of_main = create_child(repo.path(), "elsewhere");
+    let old_format = repo.add_worktree("bystander");
+    assert_registered(
+        &repo,
+        &[&child_of_main.path, &old_format.path],
+        "a worktree that is not a child of the parent",
+    );
+
+    let output = run_swt(&parent.path, &["list"]);
+    let stderr = support::stderr(&output);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "no children is an answer, not a failure: {stderr}"
+    );
+    assert_eq!(
+        support::stdout(&output),
+        "",
+        "a branch with no children prints nothing on stdout"
+    );
+    let note = stderr
+        .strip_suffix('\n')
+        .filter(|line| !line.contains('\n'))
+        .unwrap_or_else(|| panic!("stderr must hold exactly one line, the note, got {stderr:?}"));
+    assert!(
+        note.contains(NO_CHILDREN_PHRASE) && note.contains(PARENT_BRANCH),
+        "the note must say {NO_CHILDREN_PHRASE:?} and name {PARENT_BRANCH}, got {note:?}"
     );
 }
 
