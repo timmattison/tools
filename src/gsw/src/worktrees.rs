@@ -269,15 +269,28 @@ pub(crate) struct WorktreeBadge {
     pub(crate) label: String,
 }
 
-/// `None` when the repository has one worktree (the header must not change)
-/// or when `current` is not in `paths`.
+/// The badge of `current` among `paths`, which is sorted.
+///
+/// `home` is the worktree where the user started gsw, and `label` is the
+/// label of `current`. `None` when the repository has one worktree, so the
+/// header of such a repository stays as it was. `None` too when `current` is
+/// not in `paths`, because no position is true for it.
 pub(crate) fn badge(
-    _paths: &[WorktreePath],
-    _current: &WorktreePath,
-    _home: &WorktreePath,
-    _label: String,
+    paths: &[WorktreePath],
+    current: &WorktreePath,
+    home: &WorktreePath,
+    label: String,
 ) -> Option<WorktreeBadge> {
-    None
+    if paths.len() < 2 {
+        return None;
+    }
+    let row = paths.binary_search(current).ok()?;
+    Some(WorktreeBadge {
+        position: row + 1,
+        count: paths.len(),
+        home: current == home,
+        label,
+    })
 }
 
 /// The list that Down opens: the entries, the cursor, and the scroll.
