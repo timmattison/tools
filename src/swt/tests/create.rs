@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 
 use support::{
-    exiting_check, git, run_swt, swt_command, unique, write_swt_check, TestRepo, MAIN_BRANCH,
-    SWT_CHECK, TRACKED_FILE, WORKTREE_SUFFIX,
+    exiting_check, git, run_swt, shell_command, swt_command, unique, write_swt_check, TestRepo,
+    MAIN_BRANCH, SWT_CHECK, TRACKED_FILE, WORKTREE_SUFFIX,
 };
 
 /// A check that records the directory it ran in. `pwd -P` asks the kernel rather
@@ -42,6 +42,22 @@ const PARENT_EDIT: &str = "MODIFIED\n";
 /// worktree still claims. No permission games, so it behaves the same for an
 /// unprivileged user and for root.
 const SABOTAGE_CHECK: &str = "#!/bin/sh\nrm -f .git\nexit 1\n";
+
+/// Parent branches that git accepts and that a shell does not read as one word.
+/// A bare `it's` opens a quote that never closes. A bare `fix;id` ends one
+/// command and starts a second. A bare `$(...)` runs a command that writes a
+/// file.
+const SHELL_HOSTILE_PARENT_BRANCHES: [&str; 3] = ["it's", "fix;id", "a$(touch${IFS}pwned)"];
+
+/// The text in stderr immediately before the recovery line that a failed
+/// teardown prints.
+const RECOVERY_LINE_LABEL: &str = "Remove it by hand:\n  ";
+
+/// A shell function that takes the place of git when a test runs a recovery
+/// line. It runs nothing. It prints the count of its arguments, then each
+/// argument, and it ends each one with a NUL. A shell function takes precedence
+/// over the `git` on `PATH`.
+const RECORDING_GIT: &str = r#"git() { printf '%s\0' "$#" "$@"; }"#;
 
 /// Decodes a finished run's stdout.
 fn stdout_of(output: &Output) -> String {
@@ -124,6 +140,35 @@ fn token_after(text: &str, label: &str, terminator: &str) -> String {
         .split_once(terminator)
         .unwrap_or_else(|| panic!("no {terminator:?} after {label:?} in: {text}"));
     token.to_string()
+}
+
+/// Reads back the calls that [`RECORDING_GIT`] printed, as one list of
+/// arguments for each call, in the order of the calls.
+///
+/// Panics when `stdout` does not have the shape that the function prints: a
+/// count, then that number of arguments, with a NUL at the end of each field.
+fn recorded_git_calls(stdout: &str) -> Vec<Vec<String>> {
+    let mut fields = stdout.split_terminator('\0');
+    let mut calls = Vec::new();
+    while let Some(count) = fields.next() {
+        let count: usize = count.parse().unwrap_or_else(|_| {
+            panic!(
+                "a recorded call must start with its argument count, got {count:?} in {stdout:?}"
+            )
+        });
+        let arguments: Vec<String> = fields
+            .by_ref()
+            .take(count)
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            arguments.len(),
+            count,
+            "a recorded call has fewer arguments than its count in {stdout:?}"
+        );
+        calls.push(arguments);
+    }
+    calls
 }
 
 /// Starts a `swt create <name>` without waiting for it, with both streams
@@ -630,11 +675,101 @@ fn a_teardown_that_failed_is_never_reported_as_a_cleanup() {
     );
     assert!(
         stderr.contains(&format!(
-            "  git worktree remove --force '{}' && git branch -D swt/{MAIN_BRANCH}/{name}-",
+            "  git worktree remove --force '{}' && git branch -D 'swt/{MAIN_BRANCH}/{name}-",
             worktree.display()
         )),
-        "no copy-pasteable recovery command naming the quoted path and the branch: {stderr}"
+        "no copy-pasteable recovery command naming the quoted path and the quoted branch: {stderr}"
     );
+}
+
+// Review finding R-20260915T193927Z#I1. A person pastes the recovery line into
+// a shell, so the line is a command line and not prose. Its branch holds the
+// parent branch as git gave it, and git accepts parent branches that a shell
+// does not read as one word. For each such parent, a shell must read the line
+// as exactly the two git commands that it names. A shell function takes the
+// place of git, so nothing real runs.
+#[test]
+fn a_shell_reads_the_recovery_line_as_the_two_commands_it_names() {
+    for parent_branch in SHELL_HOSTILE_PARENT_BRANCHES {
+        let repo = TestRepo::new();
+        let parent = repo.add_worktree_on("parent", parent_branch);
+        // `swt` reads the override from the root of the worktree where it runs.
+        write_swt_check(&parent.path, SABOTAGE_CHECK);
+        let name = unique("hostile");
+
+        let output = run_swt(&parent.path, &["create", &name]);
+        let stderr = stderr_of(&output);
+
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "a red check must fail the command for the parent on {parent_branch:?}: {stderr}"
+        );
+        assert!(
+            stderr.contains("Could not clean up"),
+            "fixture precondition: the teardown for the parent on {parent_branch:?} must fail: \
+             {stderr}"
+        );
+        // The worktree and its branch survive, so the line names real values.
+        let worktree = repo.sole_created_worktree(&name);
+        let branch = child_branch(
+            parent_branch,
+            &name,
+            &token_of_worktree(&worktree, &parent.path, &name),
+        );
+        assert_eq!(
+            repo.created_branches(&name),
+            vec![branch.clone()],
+            "fixture precondition: exactly one branch must survive, under the parent branch \
+             {parent_branch:?}"
+        );
+
+        // The recovery line runs from its label to the end of that line.
+        let recovery_line = token_after(&stderr, RECOVERY_LINE_LABEL, "\n");
+        // An empty directory, so a file that the line makes is easy to see.
+        let shell_dir = repo.sibling("recovery-shell");
+        fs::create_dir(&shell_dir).expect("an empty directory for the shell");
+        let pasted = shell_command(&shell_dir, &format!("{RECORDING_GIT}\n{recovery_line}"))
+            .output()
+            .expect("the shell should run");
+
+        assert_eq!(
+            pasted.status.code(),
+            Some(0),
+            "a shell must read the recovery line for the parent on {parent_branch:?} without \
+             an error: {recovery_line}\n{}",
+            stderr_of(&pasted)
+        );
+        assert_eq!(
+            recorded_git_calls(&stdout_of(&pasted)),
+            vec![
+                vec![
+                    "worktree",
+                    "remove",
+                    "--force",
+                    worktree.to_str().expect("utf-8 fixture path"),
+                ],
+                vec!["branch", "-D", branch.as_str()],
+            ],
+            "a shell must read each value in the recovery line as one argument: {recovery_line}"
+        );
+        let left_behind: Vec<String> = fs::read_dir(&shell_dir)
+            .expect("the directory of the shell should be readable")
+            .map(|entry| {
+                entry
+                    .expect("shell directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(
+            left_behind,
+            Vec::<String>::new(),
+            "a shell must run no command that the parent branch {parent_branch:?} spells: \
+             {recovery_line}"
+        );
+    }
 }
 
 // The reason the check runs in the fresh worktree at all. A check that passes
