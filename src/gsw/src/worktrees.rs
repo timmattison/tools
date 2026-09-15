@@ -335,7 +335,9 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{head_label, list_worktrees, worktree_paths, WorktreeEntry, WorktreePath};
+    use super::{
+        head_label, list_worktrees, next, previous, worktree_paths, WorktreeEntry, WorktreePath,
+    };
     use crate::testrepo::{git, git_stdout, init_repo, init_repo_at};
 
     /// How many hex digits of the commit a detached HEAD shows: the length
@@ -919,5 +921,124 @@ mod tests {
                 },
             ],
         );
+    }
+
+    /// The path `/code/<name>`, which no filesystem call touched.
+    fn fake_path(name: &str) -> WorktreePath {
+        WorktreePath::fake(format!("/code/{name}"))
+    }
+
+    /// The paths `/code/<name>` for each of `names`, in the order of `names`.
+    /// The model takes a sorted list, as the listing gives it, so the helper
+    /// refuses names out of order.
+    fn sorted_paths(names: &[&str]) -> Vec<WorktreePath> {
+        let paths: Vec<WorktreePath> = names.iter().copied().map(fake_path).collect();
+        assert!(paths.is_sorted(), "the fixture must be sorted: {names:?}");
+        paths
+    }
+
+    /// Right goes to the next worktree in path order. Right on the last
+    /// worktree wraps to the first, as `cwt -f` does.
+    #[test]
+    fn next_goes_to_the_next_path_and_wraps_from_the_last_to_the_first() {
+        let paths = sorted_paths(&["a", "b", "c", "d"]);
+
+        assert_eq!(next(&paths, &paths[0]), Some(&paths[1]));
+        assert_eq!(next(&paths, &paths[1]), Some(&paths[2]));
+        assert_eq!(next(&paths, &paths[2]), Some(&paths[3]));
+        assert_eq!(
+            next(&paths, &paths[3]),
+            Some(&paths[0]),
+            "Right on the last worktree wraps to the first",
+        );
+    }
+
+    /// Left goes to the previous worktree in path order. Left on the first
+    /// worktree wraps to the last, as `cwt -p` does.
+    #[test]
+    fn previous_goes_to_the_previous_path_and_wraps_from_the_first_to_the_last() {
+        let paths = sorted_paths(&["a", "b", "c", "d"]);
+
+        assert_eq!(
+            previous(&paths, &paths[0]),
+            Some(&paths[3]),
+            "Left on the first worktree wraps to the last",
+        );
+        assert_eq!(previous(&paths, &paths[1]), Some(&paths[0]));
+        assert_eq!(previous(&paths, &paths[2]), Some(&paths[1]));
+        assert_eq!(previous(&paths, &paths[3]), Some(&paths[2]));
+    }
+
+    /// With one worktree, Right and Left have no other worktree to go to.
+    /// With no worktree, the same is true.
+    #[test]
+    fn next_and_previous_give_none_for_one_worktree_and_for_no_worktree() {
+        let one = sorted_paths(&["a"]);
+        assert_eq!(next(&one, &one[0]), None);
+        assert_eq!(previous(&one, &one[0]), None);
+
+        let current = fake_path("a");
+        assert_eq!(next(&[], &current), None);
+        assert_eq!(previous(&[], &current), None);
+    }
+
+    /// A current worktree that is not in the list: the worktree on the screen
+    /// stopped existing after the last read of the list. Right goes to the
+    /// first path that sorts after it, and Left goes to the last path that
+    /// sorts before it. Past each end of the list, each key wraps.
+    #[test]
+    fn a_current_worktree_not_in_the_list_goes_to_the_paths_that_sort_around_it() {
+        let paths = sorted_paths(&["b", "d", "f"]);
+
+        let between = fake_path("c");
+        assert_eq!(next(&paths, &between), Some(&paths[1]));
+        assert_eq!(previous(&paths, &between), Some(&paths[0]));
+
+        let before_every_path = fake_path("a");
+        assert_eq!(next(&paths, &before_every_path), Some(&paths[0]));
+        assert_eq!(
+            previous(&paths, &before_every_path),
+            Some(&paths[2]),
+            "Left from before the first path wraps to the last",
+        );
+
+        let after_every_path = fake_path("g");
+        assert_eq!(
+            next(&paths, &after_every_path),
+            Some(&paths[0]),
+            "Right from after the last path wraps to the first",
+        );
+        assert_eq!(previous(&paths, &after_every_path), Some(&paths[2]));
+
+        // One worktree that is not the current worktree is a worktree to go
+        // to, from each side.
+        let one = sorted_paths(&["d"]);
+        assert_eq!(next(&one, &between), Some(&one[0]));
+        assert_eq!(previous(&one, &between), Some(&one[0]));
+    }
+
+    /// Neither function ever gives the current worktree, so a press that gives
+    /// a worktree always changes the worktree. The check covers every list of
+    /// up to four worktrees, with the current worktree on each row, and before,
+    /// between, and after the rows.
+    #[test]
+    fn next_and_previous_never_give_the_current_worktree() {
+        let names = ["b", "d", "f", "h"];
+        let outside = ["a", "c", "e", "g", "i"].map(fake_path);
+        for count in 0..=names.len() {
+            let paths = sorted_paths(&names[..count]);
+            for current in paths.iter().chain(&outside) {
+                assert_ne!(
+                    next(&paths, current),
+                    Some(current),
+                    "Right from {current:?} in {paths:?}",
+                );
+                assert_ne!(
+                    previous(&paths, current),
+                    Some(current),
+                    "Left from {current:?} in {paths:?}",
+                );
+            }
+        }
     }
 }
