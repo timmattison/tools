@@ -4,6 +4,11 @@
 //! the main worktree and every linked worktree, sorted by path, which is the
 //! order of `cwt`. Right and Left then visit the worktrees in the same order as
 //! `cwt -f` and `cwt -p`.
+//!
+//! The model of the navigation over that list is pure. [`next`], [`previous`],
+//! [`badge`], and [`WorktreeList`] read no git and no filesystem, so the loop
+//! decides each key from the paths alone, and the tests build their paths with
+//! `WorktreePath::fake`.
 #![cfg_attr(
     not(test),
     expect(
@@ -211,6 +216,116 @@ pub(crate) fn head_label(repo: &gix::Repository) -> String {
         Ok(id) => format!("{DETACHED_HEAD}@{}", id.to_hex_with_len(SHORT_HASH_LEN)),
         Err(_) => branch,
     }
+}
+
+/// Where Right goes from `current`. `paths` is sorted. `None` when there is
+/// no other worktree to go to. Wraps: Right on the last goes to the first.
+/// A `current` that is not in `paths` goes to the first path that sorts after
+/// it, or wraps to the first path.
+pub(crate) fn next<'a>(
+    _paths: &'a [WorktreePath],
+    _current: &WorktreePath,
+) -> Option<&'a WorktreePath> {
+    None
+}
+
+/// Where Left goes. The mirror of [`next`]. A `current` not in `paths` goes
+/// to the last path that sorts before it, or wraps to the last path.
+pub(crate) fn previous<'a>(
+    _paths: &'a [WorktreePath],
+    _current: &WorktreePath,
+) -> Option<&'a WorktreePath> {
+    None
+}
+
+/// The header segment that says which worktree the frame shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorktreeBadge {
+    /// 1-based position of the current worktree in the sorted list.
+    pub(crate) position: usize,
+    /// How many worktrees the list holds.
+    pub(crate) count: usize,
+    /// Whether the current worktree is the home worktree.
+    pub(crate) home: bool,
+    /// The branch, or `HEAD@<short hash>`. The header shows it in place of
+    /// the branch name.
+    pub(crate) label: String,
+}
+
+/// `None` when the repository has one worktree (the header must not change)
+/// or when `current` is not in `paths`.
+pub(crate) fn badge(
+    _paths: &[WorktreePath],
+    _current: &WorktreePath,
+    _home: &WorktreePath,
+    _label: String,
+) -> Option<WorktreeBadge> {
+    None
+}
+
+/// The list that Down opens: the entries, the cursor, and the scroll.
+#[derive(Debug)]
+pub(crate) struct WorktreeList {
+    /// Every worktree, sorted by path.
+    entries: Vec<WorktreeEntry>,
+    /// The row of the cursor.
+    cursor: usize,
+    /// The first row of the window at the last [`settle`](Self::settle).
+    top: usize,
+    /// The worktree where the user started gsw.
+    home: WorktreePath,
+}
+
+/// One row of the window that [`WorktreeList::window`] gives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ListRow<'a> {
+    /// The worktree of the row.
+    pub(crate) entry: &'a WorktreeEntry,
+    /// Whether the cursor is on the row.
+    pub(crate) cursor: bool,
+    /// Whether the row is the home worktree.
+    pub(crate) home: bool,
+}
+
+impl WorktreeList {
+    /// `None` when `entries` is empty. The cursor starts on `current`, or, for
+    /// a `current` not in the list, on the row where it would sort (clamped
+    /// to the last row).
+    pub(crate) fn open(
+        entries: Vec<WorktreeEntry>,
+        _current: &WorktreePath,
+        home: WorktreePath,
+    ) -> Option<Self> {
+        Some(Self {
+            entries,
+            cursor: 0,
+            top: 0,
+            home,
+        })
+    }
+
+    /// Up on the top row does nothing. The list does not wrap.
+    pub(crate) fn up(&mut self) {}
+
+    /// Down on the bottom row does nothing.
+    pub(crate) fn down(&mut self) {}
+
+    /// The worktree under the cursor: the worktree that Enter goes to.
+    pub(crate) fn selected(&self) -> &WorktreeEntry {
+        &self.entries[self.cursor]
+    }
+
+    /// The rows a pane of `rows` list rows shows, top to bottom. The cursor
+    /// row is always one of them. Pure: it clamps the stored scroll offset.
+    pub(crate) fn window(&self, _rows: usize) -> Vec<ListRow<'_>> {
+        Vec::new()
+    }
+
+    /// Store the scroll offset that `window(rows)` used, so the next move
+    /// starts from the window that the user saw. Minimal movement: the window
+    /// moves only when the cursor leaves it. It never leaves empty rows at the
+    /// bottom when the list is longer than the pane.
+    pub(crate) fn settle(&mut self, _rows: usize) {}
 }
 
 #[cfg(test)]
