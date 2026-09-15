@@ -75,9 +75,8 @@ const DETACHED_HEAD_REFUSAL: &str =
     "HEAD is detached. A detached HEAD has no branch to relate the \
      new worktree to. Check out a branch, then run swt create again.";
 
-/// Namespace every branch `swt` creates lives under. `list` builds the prefix
-/// of the children of a branch from it.
-pub(crate) const BRANCH_PREFIX: &str = "swt";
+/// Namespace every branch `swt` creates lives under.
+const BRANCH_PREFIX: &str = "swt";
 
 /// Radix the uniqueness token is spelled in — the Rust spelling of the
 /// original's `Date.now().toString(36)`. Base 36 is the largest radix `char`
@@ -257,6 +256,27 @@ impl WorktreeNaming {
     }
 }
 
+/// Reads the parent branch back out of the branch of a child.
+///
+/// The inverse of the branch that [`WorktreeNaming::with_token`] builds,
+/// `swt/<parent branch>/<name>-<token>`. The part `<name>-<token>` never
+/// contains a `/`, so the parent is exactly the text between `swt/` and the
+/// last `/`. The reader lives beside the builder, so the format and its reader
+/// cannot drift apart. `list` compares the result with the current branch.
+///
+/// `branch` is a local branch without `refs/heads/`. Returns `None` when the
+/// branch is not under `swt/`, or when it has no `/` after `swt/`. The older
+/// format `swt/<name>-<token>` is such a branch, so it names no parent. An
+/// empty parent or an empty child part also gives `None`, because neither
+/// names anything.
+pub(crate) fn parent_branch_of(branch: &str) -> Option<&str> {
+    let (parent, child) = branch
+        .strip_prefix(BRANCH_PREFIX)?
+        .strip_prefix('/')?
+        .rsplit_once('/')?;
+    (!parent.is_empty() && !child.is_empty()).then_some(parent)
+}
+
 /// Creates a subagent worktree named `raw_name`, branched from a green HEAD.
 ///
 /// The name is checked before any git runs, because it becomes both a branch and
@@ -378,7 +398,7 @@ fn report_teardown(path: &Path, branch: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{base36, UniqueToken, WorktreeNaming};
+    use super::{base36, parent_branch_of, UniqueToken, WorktreeNaming};
     use crate::git::{head_branch_from, validate_worktree_name, BranchName, HeadBranch};
     use crate::green_check::Outcome;
     use std::collections::BTreeSet;
@@ -555,6 +575,45 @@ mod tests {
             Some(("feat/foo", "fix-parser-abc123")),
             "the parent must be the text between `swt/` and the last `/`"
         );
+    }
+
+    // The reader must give back the parent that the builder put in, for a
+    // parent branch of any depth and in any script. `list` relies on this
+    // round trip to find the children of a branch.
+    #[test]
+    fn the_parent_branch_reads_back_out_of_the_branch_of_every_child() {
+        for parent in ["main", PARENT_BRANCH, "feat/foo", "a/b/c", "機能/café🎉"] {
+            let naming = naming_on(parent, "fix-parser", TOKEN);
+            assert_eq!(
+                parent_branch_of(naming.branch()),
+                Some(parent),
+                "the branch {:?} must name its parent {parent:?}",
+                naming.branch()
+            );
+        }
+    }
+
+    // A branch that the builder cannot make names no parent. The older format
+    // has no `/` after `swt/`, so a child made before issue #500 is the child
+    // of no branch. `swtx/` is not `swt/`, and an empty part names nothing.
+    #[test]
+    fn a_branch_outside_the_child_format_names_no_parent() {
+        for branch in [
+            "swt/fix-parser-abc123",
+            "main",
+            "feat/foo",
+            "swtx/main/fix-parser-abc123",
+            "swt",
+            "swt/",
+            "swt//fix-parser-abc123",
+            "swt/main/",
+        ] {
+            assert_eq!(
+                parent_branch_of(branch),
+                None,
+                "{branch:?} must name no parent"
+            );
+        }
     }
 
     // The directory name goes in as an `OsStr`, so a parent name that is not

@@ -19,12 +19,16 @@
 //! `-z` form each field ends with NUL, so a path with a newline stays in one
 //! field.
 //!
-//! A child is an entry whose branch starts with `swt/<current branch>/`.
+//! A child is an entry whose branch names the current branch as its parent.
+//! The parent is the text between `swt/` and the last `/` of the branch, and it
+//! must be equal to the current branch. A prefix is not sufficient: the
+//! children of `feat/foo` are not children of `feat`. A branch in the older
+//! format `swt/<name>-<token>` names no parent, so `list` never shows it.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use crate::create::BRANCH_PREFIX;
+use crate::create::parent_branch_of;
 use crate::git::{git, head_branch, local_branch, BranchName, HeadBranch};
 
 /// The query that reads the worktree registry of git. `--porcelain` gives the
@@ -133,16 +137,18 @@ impl Child {
 /// Keeps the entries of `registry` that are children of `parent`, and sorts
 /// them by path.
 ///
-/// The order of the registry is the order in which git lists its worktrees,
-/// and a caller cannot control it. A sort by path gives the same output for
-/// the same children.
+/// An entry is a child when the parent in its branch, as [`parent_branch_of`]
+/// reads it, is equal to `parent`. The order of the registry is the order in
+/// which git lists its worktrees, and a caller cannot control it. A sort by
+/// path gives the same output for the same children.
 fn children_of(registry: Vec<RegisteredWorktree>, parent: &BranchName) -> Vec<Child> {
-    let prefix = format!("{BRANCH_PREFIX}/{parent}/");
     let mut children: Vec<Child> = registry
         .into_iter()
         .filter_map(|entry| {
             let branch = entry.branch?;
-            branch.as_str().starts_with(&prefix).then_some(Child {
+            // Equality, not a prefix: the parent in `swt/feat/foo/x-1` is
+            // `feat/foo`, and that is not `feat`.
+            (parent_branch_of(branch.as_str()) == Some(parent.as_str())).then_some(Child {
                 path: entry.path,
                 branch,
             })
