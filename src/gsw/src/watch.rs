@@ -1497,6 +1497,37 @@ struct LoopState {
     generation: Generation,
 }
 
+impl LoopState {
+    /// Switch the loop to `target`. Every kind of switch goes through here.
+    ///
+    /// 1. Read the clock, open `target` through `open`, and read the clock
+    ///    again for the cost of the open.
+    /// 2. On `Ok`, the snapshot of `target` goes into the cache, collected
+    ///    now, and the schedule records the open as a walk, which starts the
+    ///    refresh clock again. The loop then watches `target`.
+    /// 3. On `Err`, nothing changes.
+    ///
+    /// [`absorb`] calls it when it reads the key, and not at the next frame. So
+    /// a `p`, `G`, or `m` later in the same burst acts on the new worktree, as
+    /// a `y` after a `p` in one burst reads the new mode.
+    fn switch_to(
+        &mut self,
+        target: WorktreePath,
+        clock: &impl Fn() -> Instant,
+        open: &mut impl FnMut(&WorktreePath) -> Result<Snapshot, String>,
+    ) {
+        let now = clock();
+        let opened = open(&target);
+        let cost = clock().saturating_duration_since(now);
+        if let Ok(snapshot) = opened {
+            self.cache.snapshot = snapshot;
+            self.cache.collected_at = now;
+            self.schedule.record(now, cost);
+            self.current = target;
+        }
+    }
+}
+
 /// The side-effecting hooks the watch loop drives, bundled so the loop stays one
 /// testable function instead of taking a fistful of closures. Production wires
 /// these to the real git collect, render, terminal-size query, painter, and
@@ -1700,18 +1731,23 @@ where
         // worktree is, neither finds a target, and nothing happens.
         Event::GoPrevious => {
             let paths = paths_of((hooks.worktrees)());
-            if let Some(target) = crate::worktrees::previous(&paths, &state.current) {
-                let _ = (hooks.switch)(target);
+            if let Some(target) = crate::worktrees::previous(&paths, &state.current).cloned() {
+                state.switch_to(target, clock, &mut hooks.switch);
             }
         }
         Event::GoNext => {
             let paths = paths_of((hooks.worktrees)());
-            if let Some(target) = crate::worktrees::next(&paths, &state.current) {
-                let _ = (hooks.switch)(target);
+            if let Some(target) = crate::worktrees::next(&paths, &state.current).cloned() {
+                state.switch_to(target, clock, &mut hooks.switch);
             }
         }
-        // Up does not move the watch in this commit.
-        Event::GoHome => {}
+        // Up on the home worktree does nothing: the frame shows it already.
+        Event::GoHome => {
+            if state.current != state.home {
+                let home = state.home.clone();
+                state.switch_to(home, clock, &mut hooks.switch);
+            }
+        }
         Event::IssueRequested => {
             // One read of the clock, for both halves of one press. The arming
             // and the message it stands for must end at the same moment, and
@@ -1817,6 +1853,11 @@ fn paths_of(entries: Vec<WorktreeEntry>) -> Vec<WorktreePath> {
 /// the terminal's color depth, which is the caller's to resolve — and owned for
 /// the rest of the loop because this is the only place that knows what is
 /// displayed (see [`Event::Key`] for why the reader thread must not).
+///
+/// The loop watches one worktree at a time, the current worktree, and it starts
+/// on `start.home`. The walk, `p`, `G`, and `m` act on the current worktree. The
+/// arrow keys change it through [`LoopState::switch_to`], inside [`absorb`], so
+/// the next key of the same burst already acts on the new worktree.
 ///
 /// `hooks` bundles the side effects (collect, render, terminal-size query, paint,
 /// clock, tick cadence) so the loop is one function testable without a TTY or
