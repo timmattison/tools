@@ -218,24 +218,41 @@ pub(crate) fn head_label(repo: &gix::Repository) -> String {
     }
 }
 
-/// Where Right goes from `current`. `paths` is sorted. `None` when there is
-/// no other worktree to go to. Wraps: Right on the last goes to the first.
-/// A `current` that is not in `paths` goes to the first path that sorts after
-/// it, or wraps to the first path.
+/// Where Right goes from `current`.
+///
+/// `paths` is sorted, as [`worktree_paths`] gives it. The answer is the path
+/// after `current`. Right on the last path wraps to the first, as `cwt -f`
+/// does. A `current` that is not in `paths` goes to the first path that sorts
+/// after it, or wraps to the first path. That occurs when the worktree on the
+/// screen stopped existing after the last read of the list.
+///
+/// `None` when there is no other worktree to go to: `paths` is empty, or it
+/// holds `current` alone. The answer is never `current` itself, so an answer
+/// always changes the worktree.
 pub(crate) fn next<'a>(
-    _paths: &'a [WorktreePath],
-    _current: &WorktreePath,
+    paths: &'a [WorktreePath],
+    current: &WorktreePath,
 ) -> Option<&'a WorktreePath> {
-    None
+    let after = paths.partition_point(|path| path <= current);
+    let target = paths.get(after).or_else(|| paths.first())?;
+    (target != current).then_some(target)
 }
 
-/// Where Left goes. The mirror of [`next`]. A `current` not in `paths` goes
-/// to the last path that sorts before it, or wraps to the last path.
+/// Where Left goes from `current`. The mirror of [`next`].
+///
+/// The answer is the path before `current`. Left on the first path wraps to
+/// the last, as `cwt -p` does. A `current` that is not in `paths` goes to the
+/// last path that sorts before it, or wraps to the last path. `None`, and
+/// never `current`, for the same reasons as [`next`].
 pub(crate) fn previous<'a>(
-    _paths: &'a [WorktreePath],
-    _current: &WorktreePath,
+    paths: &'a [WorktreePath],
+    current: &WorktreePath,
 ) -> Option<&'a WorktreePath> {
-    None
+    let before = paths.partition_point(|path| path < current);
+    let target = before
+        .checked_sub(1)
+        .map_or_else(|| paths.last(), |row| paths.get(row))?;
+    (target != current).then_some(target)
 }
 
 /// The header segment that says which worktree the frame shows.
