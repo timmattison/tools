@@ -26,8 +26,14 @@ pub(crate) struct WorktreePath(PathBuf);
 
 impl WorktreePath {
     /// `std::fs::canonicalize(path)`, or `None` when no directory is there.
-    pub(crate) fn resolve(_path: &Path) -> Option<Self> {
-        None
+    ///
+    /// A file at `path` gives `None` too, because a file is not the root of a
+    /// worktree.
+    pub(crate) fn resolve(path: &Path) -> Option<Self> {
+        std::fs::canonicalize(path)
+            .ok()
+            .filter(|resolved| resolved.is_dir())
+            .map(Self)
     }
 
     /// The path, for display and for the calls that open the worktree.
