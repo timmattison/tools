@@ -1836,7 +1836,17 @@ where
                 list.down();
             }
         }
-        Event::ListGo => {}
+        // Enter closes the list before the switch, so a switch that fails
+        // puts its reason on a free row. Enter on the worktree that the frame
+        // shows opens nothing, because the frame shows it already.
+        Event::ListGo => {
+            if let Some(list) = state.ui.close_list() {
+                let target = list.selected().path.clone();
+                if target != state.current {
+                    state.switch_to(target, clock, &mut hooks.switch);
+                }
+            }
+        }
         // The watch stays on the worktree that the frame showed before the
         // list opened. The row is free again, so the next frame posts the
         // oldest message that waited for the list.
