@@ -3668,6 +3668,12 @@ mod tests {
             Some(Event::GoHome) => "GoHome",
             Some(Event::GoPrevious) => "GoPrevious",
             Some(Event::GoNext) => "GoNext",
+            Some(Event::OpenList) => "OpenList",
+            Some(Event::ListUp) => "ListUp",
+            Some(Event::ListDown) => "ListDown",
+            Some(Event::ListGo) => "ListGo",
+            Some(Event::ListClose) => "ListClose",
+            Some(Event::Quit) => "Quit",
             Some(Event::Dismiss) => "Dismiss",
             Some(Event::PushConfirmed) => "PushConfirmed",
             Some(Event::PushCancelled) => "PushCancelled",
@@ -3676,25 +3682,121 @@ mod tests {
         }
     }
 
+    /// The keys of the table of the input modes: the four arrow keys, Enter,
+    /// and Esc, in that order.
+    const TABLE_KEYS: [KeyCode; 6] = [
+        KeyCode::Up,
+        KeyCode::Down,
+        KeyCode::Left,
+        KeyCode::Right,
+        KeyCode::Enter,
+        KeyCode::Esc,
+    ];
+
     #[test]
-    fn up_left_and_right_move_the_watch_in_normal_mode_and_down_stays_unbound() {
-        // Up goes to the home worktree, and Left and Right go to the
-        // neighbours in path order. Down opens nothing yet, so it gives what
-        // every unbound key gives.
-        let table = [
-            (KeyCode::Up, "GoHome"),
-            (KeyCode::Left, "GoPrevious"),
-            (KeyCode::Right, "GoNext"),
-            (KeyCode::Down, "Dismiss"),
+    fn each_arrow_key_enter_and_esc_mean_one_thing_in_each_input_mode() {
+        // The whole table, as the issue states it. In Normal, Up goes home,
+        // Left and Right go to the neighbours in path order, and Down opens
+        // the list. A question owns its answer, so an arrow key there answers
+        // nothing. A push in flight owns the window under the frame, so an
+        // arrow key there does nothing. In the list, Up and Down move the
+        // cursor, Enter goes, Esc closes, and Left and Right do nothing at
+        // all.
+        let table: [(InputMode, [&str; 6]); 4] = [
+            (
+                InputMode::Normal,
+                [
+                    "GoHome",
+                    "OpenList",
+                    "GoPrevious",
+                    "GoNext",
+                    "Dismiss",
+                    "Dismiss",
+                ],
+            ),
+            (
+                InputMode::Confirm,
+                [
+                    "Dismiss",
+                    "Dismiss",
+                    "Dismiss",
+                    "Dismiss",
+                    "PushConfirmed",
+                    "PushCancelled",
+                ],
+            ),
+            (InputMode::Pushing, ["Dismiss"; 6]),
+            (
+                InputMode::List,
+                [
+                    "ListUp",
+                    "ListDown",
+                    "nothing",
+                    "nothing",
+                    "ListGo",
+                    "ListClose",
+                ],
+            ),
         ];
+        assert_eq!(
+            table.map(|(mode, _)| mode),
+            EVERY_MODE,
+            "the table must cover every input mode",
+        );
         for issue in BOTH_AVAILABILITIES {
-            for (code, expected) in table {
+            for (mode, meanings) in table {
+                for (code, expected) in TABLE_KEYS.into_iter().zip(meanings) {
+                    assert_eq!(
+                        meaning(classify_input(press(code), mode, issue)),
+                        expected,
+                        "{code:?} in {mode:?} with {issue:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn in_the_list_q_closes_it_and_every_other_key_does_nothing() {
+        // `q` closes the list, as `q` answers "no" to the push question. The
+        // list takes the pane, so every other key does nothing at all: `r`
+        // does not walk, `p` does not ask, `G` and `m` start nothing, and no
+        // key takes a line off the row. Ctrl-C still quits.
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        for issue in BOTH_AVAILABILITIES {
+            assert_eq!(
+                meaning(classify_input(
+                    press(KeyCode::Char('q')),
+                    InputMode::List,
+                    issue
+                )),
+                "ListClose",
+                "`q` must close the list with {issue:?}",
+            );
+            for code in [
+                KeyCode::Char('r'),
+                KeyCode::Char('p'),
+                KeyCode::Char('G'),
+                KeyCode::Char('m'),
+                KeyCode::Char('y'),
+                KeyCode::Char('n'),
+                KeyCode::Char('Q'),
+                KeyCode::Char('x'),
+                KeyCode::Tab,
+                KeyCode::Backspace,
+                KeyCode::PageDown,
+            ] {
                 assert_eq!(
-                    meaning(classify_input(press(code), InputMode::Normal, issue)),
-                    expected,
-                    "{code:?} in Normal with {issue:?}",
+                    meaning(classify_input(press(code), InputMode::List, issue)),
+                    "nothing",
+                    "{code:?} must do nothing in the list with {issue:?}",
                 );
             }
+            assert_eq!(
+                meaning(classify_input(ctrl_c, InputMode::List, issue)),
+                "Quit",
+                "Ctrl-C must quit from the list with {issue:?}",
+            );
         }
     }
 
