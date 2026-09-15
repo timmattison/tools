@@ -15,7 +15,9 @@ mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use support::{exiting_check, git, run_swt, unique, write_swt_check, TestRepo, SWT_CHECK};
+use support::{
+    exiting_check, git, git_allowing_failure, run_swt, unique, write_swt_check, TestRepo, SWT_CHECK,
+};
 
 /// The namespace of the local branches. A test removes it from the full ref,
 /// so it compares the branch as a person spells it.
@@ -43,6 +45,10 @@ const NO_CHILDREN_PHRASE: &str = "No child worktrees";
 /// The word that git gives a worktree whose directory is gone. `swt list` adds
 /// the same word as a third field to the line of such a child.
 const PRUNABLE_FIELD: &str = "prunable";
+
+/// What the refusal on a detached HEAD must say: the fact, and what the user
+/// must do about it.
+const DETACHED_REFUSAL_PHRASES: [&str; 2] = ["HEAD is detached", "Check out a branch"];
 
 /// A worktree that the real `swt create` made, as a test reads it back.
 struct Child {
@@ -321,6 +327,48 @@ fn a_child_whose_directory_is_gone_is_listed_as_prunable() {
         expected,
         "the child whose directory is gone must carry the field {PRUNABLE_FIELD:?}, and only \
          that child: {stderr}"
+    );
+}
+
+// Issue #500. A detached HEAD has no branch, so `swt list` has no branch whose
+// children it can show. It must fail and say why, and it must print nothing
+// that a caller can take for a child. The parent made a child before it
+// detached, so the empty stdout does not come from an empty registry.
+#[test]
+fn list_on_a_detached_head_fails_and_says_why() {
+    let repo = TestRepo::new();
+    let parent = repo.add_worktree_on("parent", PARENT_BRANCH);
+    let child = create_child(&parent.path, "before-detach");
+    git(&parent.path, &["switch", "--quiet", "--detach"]);
+    let (on_a_branch, _) = git_allowing_failure(&parent.path, &["symbolic-ref", "--quiet", "HEAD"]);
+    assert!(
+        !on_a_branch,
+        "fixture precondition: HEAD of the parent must be detached"
+    );
+    assert_registered(
+        &repo,
+        &[&child.path],
+        "a child of the branch that the parent held before it detached",
+    );
+
+    let output = run_swt(&parent.path, &["list"]);
+    let stderr = support::stderr(&output);
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "swt list on a detached HEAD must fail: {stderr}"
+    );
+    for phrase in DETACHED_REFUSAL_PHRASES {
+        assert!(
+            stderr.contains(phrase),
+            "the refusal must say {phrase:?}, got {stderr:?}"
+        );
+    }
+    assert_eq!(
+        support::stdout(&output),
+        "",
+        "a refused list prints no line for a caller to read"
     );
 }
 
