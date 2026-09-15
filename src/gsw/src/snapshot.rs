@@ -68,6 +68,9 @@ pub fn build_snapshot(
         upstream: None,
         operation: None,
         push_remote: None,
+        // The walk of one worktree cannot know the other worktrees. Watch
+        // mode puts the badge on the snapshot after the walk.
+        worktree: None,
     }
 }
 

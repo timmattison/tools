@@ -14,6 +14,10 @@ use crate::age::{
 };
 use crate::bar::render_bar;
 use crate::git::FileStatus;
+use crate::worktrees::WorktreeBadge;
+
+/// The rows of the worktree list, and the hint under them.
+pub(crate) mod list;
 
 /// Everything render() needs to draw one frame.
 #[derive(Debug, Clone)]
@@ -42,6 +46,12 @@ pub struct Snapshot {
     pub push_remote: Option<String>,
     /// In-progress git operation (merge/rebase), or `None` for a clean tree.
     pub operation: Option<Operation>,
+    /// Which worktree of the repository the frame shows, for the header.
+    ///
+    /// Only watch mode sets it, because only watch mode moves between the
+    /// worktrees. It is `None` in one-shot mode, and `None` for a repository
+    /// with one worktree, so the header of such a frame stays as it was.
+    pub worktree: Option<WorktreeBadge>,
 }
 
 /// State of the local branch relative to its upstream tracking ref.
@@ -177,6 +187,38 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
     render_with_offset(snapshot, opts, Duration::ZERO)
 }
 
+/// The lines at the top of every frame: the header, the line of a merge or a
+/// rebase in progress, and the separator with the refresh clock of `refresh`.
+///
+/// Every frame of gsw starts with these lines. One function draws them, so no
+/// two frames draw them differently. The row budget of a frame counts exactly
+/// these lines as its header chrome (`header_chrome` in `main.rs`).
+pub(crate) fn render_head(
+    snapshot: &Snapshot,
+    width: usize,
+    refresh: Option<&RefreshStatus>,
+) -> Vec<String> {
+    let HeaderSegments {
+        prefix,
+        behind,
+        suffix,
+    } = header_segments(snapshot, width);
+    // The whole header is bold as before; the optional behind segment is
+    // additionally warning-colored (yellow) to flag that the branch needs a
+    // rebase. When `behind` is `None` the prefix+suffix reproduce today's
+    // line byte-for-byte.
+    let header_line = match behind {
+        Some(seg) => format!("{}{}{}", prefix.bold(), seg.yellow().bold(), suffix.bold()),
+        None => format!("{prefix}{suffix}").bold().to_string(),
+    };
+    let mut lines = vec![header_line];
+    if let Some(op) = &snapshot.operation {
+        lines.push(render_operation_line(op, width));
+    }
+    lines.push(render_separator(width, refresh));
+    lines
+}
+
 /// Produce the colored, multi-line frame with every displayed age advanced
 /// by `age_offset`.
 ///
@@ -190,26 +232,7 @@ pub(crate) fn render_with_offset(
     opts: &RenderOptions,
     age_offset: Duration,
 ) -> String {
-    let mut lines = Vec::new();
-
-    let HeaderSegments {
-        prefix,
-        behind,
-        suffix,
-    } = header_segments(snapshot, opts.terminal_width);
-    // The whole header is bold as before; the optional behind segment is
-    // additionally warning-colored (yellow) to flag that the branch needs a
-    // rebase. When `behind` is `None` the prefix+suffix reproduce today's
-    // line byte-for-byte.
-    let header_line = match behind {
-        Some(seg) => format!("{}{}{}", prefix.bold(), seg.yellow().bold(), suffix.bold()),
-        None => format!("{prefix}{suffix}").bold().to_string(),
-    };
-    lines.push(header_line);
-    if let Some(op) = &snapshot.operation {
-        lines.push(render_operation_line(op, opts.terminal_width));
-    }
-    lines.push(render_separator(opts.terminal_width, opts.refresh.as_ref()));
+    let mut lines = render_head(snapshot, opts.terminal_width, opts.refresh.as_ref());
 
     let display_count = match opts.max_files {
         Some(0) | None => snapshot.files.len(),
@@ -403,41 +426,83 @@ const HEADER_NAME_FLOOR: usize = 10;
 /// The header carries no age. Every age on the frame belongs to a row that
 /// names what it is aging — a file or a commit — and the newest commit's age
 /// sits on the first log row, directly beneath this line.
+///
+/// A snapshot with a worktree badge starts the header with the badge, and the
+/// label of the badge takes the place of the branch (see [`header_lead`] and
+/// [`header_name`]). The badge is part of the prefix, so each rung shrinks the
+/// line with the badge in it, and the shaving rung shaves the label where it
+/// shaves the branch. The hard cut takes text from the right, so the badge is
+/// the last text to go.
 fn header_segments(snap: &Snapshot, width: usize) -> HeaderSegments {
-    let compose = |branch: &str, base: &str, detail: UpstreamDetail| {
-        compose_header(snap, branch, base, detail)
-    };
+    let name = header_name(snap);
+    let compose =
+        |name: &str, base: &str, detail: UpstreamDetail| compose_header(snap, name, base, detail);
 
-    let full = compose(&snap.branch, &snap.base, UpstreamDetail::Full);
+    let full = compose(name, &snap.base, UpstreamDetail::Full);
     if full.width() <= width {
         return full;
     }
-    let counts_only = compose(&snap.branch, &snap.base, UpstreamDetail::CountsOnly);
+    let counts_only = compose(name, &snap.base, UpstreamDetail::CountsOnly);
     if counts_only.width() <= width {
         return counts_only;
     }
 
-    let (branch, base) = shave_names(
-        &snap.branch,
-        &snap.base,
-        counts_only.width().saturating_sub(width),
-    );
-    let shaved = compose(&branch, &base, UpstreamDetail::CountsOnly);
+    let (name, base) = shave_names(name, &snap.base, counts_only.width().saturating_sub(width));
+    let shaved = compose(&name, &base, UpstreamDetail::CountsOnly);
     if shaved.width() <= width {
         return shaved;
     }
-    let bare = compose(&branch, &base, UpstreamDetail::Omitted);
+    let bare = compose(&name, &base, UpstreamDetail::Omitted);
     if bare.width() <= width {
         return bare;
     }
     bare.clamp(width)
 }
 
-/// Build the header segments from an already-sized branch name, base name and
-/// upstream detail level.
+/// The name of the tool, where every header starts.
+const HEADER_TOOL: &str = "gsw";
+
+/// The mark of the home worktree, the worktree where the user started gsw:
+/// U+2302 HOUSE, one column wide. The header puts it before the position of
+/// the home worktree, and the list of the worktrees puts it after the row of
+/// the home worktree.
+const HOME_MARK: char = '⌂';
+
+/// The name that the header shows for HEAD: the label of the worktree badge,
+/// or the branch when the snapshot has no badge.
+///
+/// The label of a detached worktree is `HEAD@<short hash>`. The branch of such
+/// a worktree is `HEAD`, which names neither the worktree nor the commit.
+fn header_name(snap: &Snapshot) -> &str {
+    snap.worktree
+        .as_ref()
+        .map_or(snap.branch.as_str(), |badge| badge.label.as_str())
+}
+
+/// The text before the first `•` of the header.
+///
+/// With no badge it is `gsw` alone, so the header of one-shot mode and the
+/// header of a repository with one worktree stay as they were. With a badge,
+/// the position of the worktree follows: `gsw ⌂ 1/4` for the home worktree,
+/// and `gsw 3/4` for another worktree.
+fn header_lead(badge: Option<&WorktreeBadge>) -> String {
+    let Some(badge) = badge else {
+        return HEADER_TOOL.to_string();
+    };
+    let home = if badge.home {
+        format!(" {HOME_MARK}")
+    } else {
+        String::new()
+    };
+    format!("{HEADER_TOOL}{home} {}/{}", badge.position, badge.count)
+}
+
+/// Build the header segments from an already-sized name, base name and
+/// upstream detail level. `name` is the name of HEAD that [`header_name`]
+/// gives, shaved or whole.
 fn compose_header(
     snap: &Snapshot,
-    branch: &str,
+    name: &str,
     base: &str,
     detail: UpstreamDetail,
 ) -> HeaderSegments {
@@ -456,7 +521,8 @@ fn compose_header(
         })
         .unwrap_or_default();
     let prefix = format!(
-        "gsw • {branch} • {n} {word} ahead of {base}",
+        "{lead} • {name} • {n} {word} ahead of {base}",
+        lead = header_lead(snap.worktree.as_ref()),
         n = snap.commits_ahead,
         word = commit_word,
     );
@@ -474,6 +540,9 @@ fn compose_header(
 /// on a similar length instead of one being cut to the bone while the other
 /// keeps every character. Neither drops below [`HEADER_NAME_FLOOR`]; when
 /// that leaves `over` unmet, the next rung of the caller's ladder covers it.
+///
+/// `branch` is the name of HEAD that the header shows: the branch, or the
+/// label of the worktree badge (see [`header_name`]).
 fn shave_names(branch: &str, base: &str, over: usize) -> (String, String) {
     let mut branch_width = UnicodeWidthStr::width(branch);
     let mut base_width = UnicodeWidthStr::width(base);
@@ -1083,6 +1152,7 @@ mod tests {
             upstream: None,
             operation: None,
             push_remote: None,
+            worktree: None,
         }
     }
 
@@ -1555,6 +1625,178 @@ mod tests {
                 o.terminal_width,
             );
         }
+    }
+
+    /// The badge of the worktree at `position` of `count`, with `label`.
+    fn worktree_badge(position: usize, count: usize, home: bool, label: &str) -> WorktreeBadge {
+        WorktreeBadge {
+            position,
+            count,
+            home,
+            label: label.to_string(),
+        }
+    }
+
+    /// The header of `snap` in a pane of `width` columns, as visible glyphs.
+    ///
+    /// The frame is painted with the escape codes forced on, and then the
+    /// codes are taken out, so the comparison covers the painted header.
+    fn painted_header(snap: &Snapshot, width: usize) -> String {
+        painted_headers(snap, &[width]).remove(0)
+    }
+
+    /// The header of `snap` at each of `widths`, as visible glyphs. One lock
+    /// on the override of `colored` covers every width.
+    fn painted_headers(snap: &Snapshot, widths: &[usize]) -> Vec<String> {
+        let frames = testcolor::with_forced_ansi(|| {
+            widths
+                .iter()
+                .map(|&width| {
+                    let mut o = opts();
+                    o.terminal_width = width;
+                    render(snap, &o)
+                })
+                .collect::<Vec<_>>()
+        });
+        frames
+            .iter()
+            .map(|frame| strip_ansi(frame.lines().next().unwrap_or_default()))
+            .collect()
+    }
+
+    #[test]
+    fn the_header_of_the_home_worktree_shows_the_home_mark_and_the_position() {
+        // The first line of the example in the issue. The header must say
+        // which worktree the frame shows, and whether it is the worktree
+        // where the user started gsw.
+        let mut snap = snap_with(vec![]);
+        snap.branch = "main".into();
+        snap.commits_ahead = 0;
+        snap.worktree = Some(worktree_badge(1, 4, true, "main"));
+
+        assert_eq!(
+            painted_header(&snap, 80),
+            "gsw ⌂ 1/4 • main • 0 commits ahead of main",
+        );
+    }
+
+    #[test]
+    fn the_header_of_a_worktree_that_is_not_home_shows_the_position_and_no_home_mark() {
+        // The second line of the example in the issue. The badge is part of
+        // the header, so the ladder sheds the name of the tracking ref at 60
+        // columns, as it does with no badge.
+        let mut snap = snap_with(vec![]);
+        snap.branch = "issue-475".into();
+        snap.commits_ahead = 2;
+        snap.upstream = Some(UpstreamStatus {
+            name: "origin/issue-475".into(),
+            ahead: 2,
+            behind: 0,
+        });
+        snap.worktree = Some(worktree_badge(3, 4, false, "issue-475"));
+
+        assert_eq!(
+            painted_headers(&snap, &[80, 60]),
+            [
+                "gsw 3/4 • issue-475 • 2 commits ahead of main • ↑2 ↓0 origin/issue-475",
+                "gsw 3/4 • issue-475 • 2 commits ahead of main • ↑2 ↓0",
+            ],
+        );
+    }
+
+    #[test]
+    fn the_header_shows_the_label_of_a_detached_worktree_in_place_of_the_branch() {
+        // A detached worktree has no branch: its branch name is `HEAD`,
+        // which names no worktree. The label names the commit.
+        let mut snap = snap_with(vec![]);
+        snap.branch = "HEAD".into();
+        snap.worktree = Some(worktree_badge(2, 3, false, "HEAD@9ba6951"));
+
+        assert_eq!(
+            painted_header(&snap, 80),
+            "gsw 2/3 • HEAD@9ba6951 • 3 commits ahead of main",
+        );
+    }
+
+    #[test]
+    fn the_header_shaves_the_badge_label_in_place_of_the_branch() {
+        // The label takes the place of the branch on every rung of the
+        // ladder, so a long label is shaved from the middle as a long branch
+        // is. The branch name must not come back on a squeezed rung.
+        let mut snap = snap_with(vec![]);
+        snap.branch = "short".into();
+        snap.worktree = Some(worktree_badge(2, 3, false, LONG_BRANCH));
+
+        let widths = [100, 80, 60, 45, 40];
+        for (width, header) in widths.iter().zip(painted_headers(&snap, &widths)) {
+            assert!(
+                header.contains("featu") && header.contains("ever") && !header.contains("short"),
+                "the header at {width} columns must show both ends of the label and not the \
+                 branch: {header:?}",
+            );
+            assert!(
+                UnicodeWidthStr::width(header.as_str()) <= *width,
+                "the header is {} columns, past the {width}-column pane: {header:?}",
+                UnicodeWidthStr::width(header.as_str()),
+            );
+        }
+    }
+
+    #[test]
+    fn the_header_with_a_badge_never_exceeds_the_width_and_keeps_the_badge_to_the_last() {
+        // The header never wraps. The hard cut takes text from the right, so
+        // the badge is the last text to go: every pane wider than the badge
+        // shows it whole.
+        let mut snap = snap_with_overlong_header();
+        snap.commits_behind = 87;
+        for (home, lead) in [(true, "gsw ⌂ 12/14"), (false, "gsw 12/14")] {
+            snap.worktree = Some(worktree_badge(12, 14, home, LONG_BRANCH));
+            let widths: Vec<usize> = (0..=120).collect();
+            for (width, header) in widths.iter().zip(painted_headers(&snap, &widths)) {
+                assert!(
+                    UnicodeWidthStr::width(header.as_str()) <= *width,
+                    "the header is {} columns, past the {width}-column pane: {header:?}",
+                    UnicodeWidthStr::width(header.as_str()),
+                );
+                if *width > UnicodeWidthStr::width(lead) {
+                    assert!(
+                        header.starts_with(lead),
+                        "the header at {width} columns must start with the whole badge \
+                         {lead:?}: {header:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_multibyte_badge_label_never_panics_and_never_exceeds_the_width() {
+        // Double-width glyphs cost two columns each, an emoji costs two, and
+        // an accent costs one. A cut that counts bytes panics, and a cut that
+        // counts characters overflows.
+        const LABEL: &str = "日本語-🎉-café/とても長い名前のブランチ";
+        let mut snap = snap_with(vec![]);
+        snap.upstream = Some(UpstreamStatus {
+            name: format!("origin/{LABEL}"),
+            ahead: 1,
+            behind: 2,
+        });
+        snap.worktree = Some(worktree_badge(2, 3, false, LABEL));
+
+        let widths: Vec<usize> = (0..=120).collect();
+        let headers = painted_headers(&snap, &widths);
+        for (width, header) in widths.iter().zip(&headers) {
+            assert!(
+                UnicodeWidthStr::width(header.as_str()) <= *width,
+                "the header is {} columns, past the {width}-column pane: {header:?}",
+                UnicodeWidthStr::width(header.as_str()),
+            );
+        }
+        assert!(
+            headers[120].starts_with(&format!("gsw 2/3 • {LABEL} • ")),
+            "a wide pane shows the whole label: {:?}",
+            headers[120],
+        );
     }
 
     #[test]

@@ -529,8 +529,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     budget pushes the timed refresh out past the interval, and the countdown shows the longer wait
     rather than promising one it will not keep.
   - Watch-mode keys: `q` or Ctrl-C quits, `r` forces an immediate refresh, `p` pushes the
-    current branch, `G` opens the issue the branch names, and `m` measures a rebase and a merge
-    against the default branch. Ctrl-C quits from anywhere, including while a push is in flight.
+    current branch, `G` opens the issue the branch names, `m` measures a rebase and a merge
+    against the default branch, and the arrow keys move the watch between the worktrees of the
+    repository. Ctrl-C quits from anywhere, including while a push is in flight.
   - `p` always asks first, and the question names the branch, the remote, and how much is going —
     so what you confirm is what runs. If the checkout moves in another pane between the question
     and your answer, the push is refused rather than redirected at the branch that is there now:
@@ -681,6 +682,45 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       `Waiting for grind and grime to finish…` and waits for the replay in flight to remove its
       scratch worktree. The second replay does not start. A scratch worktree that a quit abandoned
       would stay registered in your repository and point at a deleted directory.
+  - The arrow keys move the watch between the worktrees of the repository: the main worktree and
+    every linked worktree, such as the ones `nwt` makes for each issue. The worktree where you
+    started gsw is the **home worktree**.
+    - Up goes to the home worktree. Left and Right go to the previous and the next worktree in
+      path order, which is the order of `cwt`, and they wrap as `cwt -p` and `cwt -f` do. Down
+      opens a list of the worktrees. In the list, Up and Down move the cursor, Enter goes to the
+      worktree under the cursor, and Esc or `q` closes the list and leaves you where you were.
+      Nothing else acts while the list is open, except Ctrl-C. The list opens on the worktree
+      that is on the screen, marks the home worktree with `⌂`, and scrolls when it is longer than
+      the pane. The frame does not change while the cursor moves: gsw walks a worktree only after
+      Enter.
+    - A worktree whose directory is gone is not in the list, and neither is a bare main
+      repository: gsw cannot show either one. A worktree whose HEAD gsw cannot read is in the list
+      with `?` in place of a branch. gsw reads the list again at each press, in its own process
+      through gix, so a worktree that `nwt` adds or `swt merge` removes while gsw runs is counted
+      at once. In a pane too short to show one row of the list, Down opens nothing, so Enter can
+      never pick a row that you did not see. A pane made that short while the list is open closes
+      the list.
+    - While the repository has more than one worktree, the header says which one you watch:
+      `gsw ⌂ 1/4 • main • 0 commits ahead of main` on the home worktree, and
+      `gsw 3/4 • issue-475 • 2 commits ahead of main` on another. A detached worktree shows
+      `HEAD@9ba6951` in place of a branch, in the header and in the list. With one worktree, the
+      header does not change. The segment shrinks with the rest of the header, and the header
+      still never wraps.
+    - A switch walks the new worktree at once and starts the refresh clock again. It moves the
+      filesystem watcher to the new worktree, and `p`, `G`, and `m` then act on the worktree that
+      is on the screen. Every line under the frame goes, because each one described the old
+      worktree. A worktree that gsw cannot open leaves you where you are, and the reason is a
+      fading line.
+    - The arrow keys do nothing while a push runs or while the push question is up: the push
+      belongs to the worktree it started in. An `m` or `G` run that is in flight at a switch goes
+      on in the worktree where it started, and the one-run rule of each key holds across the
+      switch. The result of that run is dropped when it arrives, because a line under the frame
+      must describe the worktree in the frame, and the key is free again then.
+    - When the worktree on the screen is removed — `git worktree remove`, `swt merge` — gsw goes
+      back to the home worktree and says `<path> no longer exists — back to the home worktree`.
+      While a push runs, the return waits for the push to end.
+    - gsw does not change the directory of the shell that started it. When gsw quits, the shell
+      is where it was. `cwt` changes the directory of a shell.
   - To install: `cargo install --git https://github.com/timmattison/tools gsw`
 - seescc (sccache stats viewer)
   - Self-refreshing terminal viewer for [sccache](https://github.com/mozilla/sccache) statistics —

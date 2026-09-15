@@ -8,6 +8,7 @@
 //! ([`resolve_dimensions`], [`should_react`], [`next_tick`]) so it can be
 //! unit-tested without a pty.
 
+use std::cell::RefCell;
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -30,7 +31,10 @@ use crate::conflicts::ConflictsWorker;
 use crate::push::{PushCommand, PushUi};
 use crate::render::Snapshot;
 use crate::repo::RepoHandle;
-use crate::{collect_snapshot, render_frame, FrameTiming, Render, RenderConfig};
+use crate::worktrees::{
+    head_label, list_worktrees, worktree_paths, WorktreeEntry, WorktreeList, WorktreePath,
+};
+use crate::{collect_snapshot, render_frame, render_list_frame, FrameTiming, Render, RenderConfig};
 use termwindow::{
     effective_terminal_height, effective_terminal_width, DEFAULT_TERMINAL_HEIGHT,
     DEFAULT_TERMINAL_WIDTH,
@@ -662,6 +666,28 @@ enum Event {
     /// screen and does nothing otherwise, which is what keeps a push error up
     /// until the user has actually looked at the screen.
     Dismiss,
+    /// The user asked to go to the home worktree (Up): the worktree where gsw
+    /// started.
+    GoHome,
+    /// The user asked to go to the previous worktree in path order (Left).
+    GoPrevious,
+    /// The user asked to go to the next worktree in path order (Right).
+    GoNext,
+    /// The user asked for the list of the worktrees (Down).
+    ///
+    /// The loop reads the list again at each press, and opens it only in a
+    /// pane that has a row for it, so Enter never chooses a row that the user
+    /// did not see.
+    OpenList,
+    /// The user moved the cursor of the open list one row up (Up).
+    ListUp,
+    /// The user moved the cursor of the open list one row down (Down).
+    ListDown,
+    /// The user chose the worktree under the cursor of the open list (Enter).
+    ListGo,
+    /// The user closed the open list (Esc or `q`). The watch stays on the
+    /// worktree that it showed before the list opened.
+    ListClose,
     /// The user asked for the issue of the branch (`G`).
     ///
     /// Only [`classify_input`] makes one, and it makes one only where the
@@ -674,7 +700,13 @@ enum Event {
     /// the key stays unbound and silent.
     IssueCommandFound(crate::issue::IssueCommand),
     /// A run of the issue command has finished, either way.
-    IssueFinished(crate::issue::IssueOutcome),
+    IssueFinished {
+        /// The generation that [`LoopHooks::start_issue`] was given for this
+        /// run: the generation of the worktree where the run started.
+        generation: Generation,
+        /// What the run did.
+        outcome: crate::issue::IssueOutcome,
+    },
     /// The user asked to measure a rebase and a merge against the default
     /// branch (`m`).
     ///
@@ -687,13 +719,25 @@ enum Event {
     /// Sent before the first replay starts. A run that is refused, or that
     /// finds HEAD on the default branch, starts no replay and sends none of
     /// these, because its outcome follows at once.
-    ConflictsStarted(String),
+    ConflictsStarted {
+        /// The generation that [`LoopHooks::start_conflicts`] was given for
+        /// this run: the generation of the worktree where the run started.
+        generation: Generation,
+        /// The branch the run measures against.
+        branch: String,
+    },
     /// A run of `m` has ended, and this is what it found.
     ///
     /// Always arrives after the [`Event::ConflictsStarted`] of the same run,
     /// because one thread sends both on this one channel. A run that a quit
     /// abandoned sends none, because nobody reads it.
-    ConflictsFinished(crate::conflicts::ConflictsOutcome),
+    ConflictsFinished {
+        /// The generation that [`LoopHooks::start_conflicts`] was given for
+        /// this run: the generation of the worktree where the run started.
+        generation: Generation,
+        /// What the run found.
+        outcome: crate::conflicts::ConflictsOutcome,
+    },
 }
 
 /// What keys mean right now.
@@ -704,12 +748,23 @@ enum Event {
 /// silently inherit another's bindings.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum InputMode {
-    /// Nothing is being asked. The monitor's ordinary keys apply.
+    /// Nothing is being asked. The monitor's ordinary keys apply. Up, Left,
+    /// and Right move the watch between the worktrees, and Down opens the list
+    /// of the worktrees.
     Normal,
-    /// A push confirmation is on screen and is waiting for an answer.
+    /// A push confirmation is on screen and is waiting for an answer. The
+    /// arrow keys never answer it.
     Confirm,
-    /// A push is running. `p` is inert here, so two pushes cannot overlap.
+    /// A push is running. `p` is inert here, so two pushes cannot overlap. The
+    /// arrow keys are inert too, because the window under the frame belongs to
+    /// the worktree that pushes, and a push that succeeds walks that worktree
+    /// again.
     Pushing,
+    /// The list of the worktrees is open. Up and Down move its cursor, Enter
+    /// goes to the worktree under the cursor, and Esc and `q` close it. Every
+    /// other key does nothing at all, because the list takes the pane, and a
+    /// key that acts on the frame acts on a frame that the user cannot see.
+    List,
 }
 
 /// Whether the `G` key has a command behind it.
@@ -941,6 +996,30 @@ impl ConflictsRun {
     }
 }
 
+/// How many times the loop has switched the worktree it watches: a stamp on
+/// the work that the loop starts.
+///
+/// A run of `G` or `m` continues after a switch, in the worktree where it
+/// started, so its outcome can arrive when the frame shows another worktree.
+/// A line under the frame must describe the worktree in the frame. So each run
+/// keeps the generation of its press, its events carry that generation back,
+/// and the loop compares it with its own. An outcome with an old generation
+/// frees its key and posts nothing.
+///
+/// A push carries no generation, because no switch happens while a push runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Generation(u64);
+
+impl Generation {
+    /// The generation after one more switch.
+    ///
+    /// A plain addition. A `u64` does not overflow in the life of a process:
+    /// at one switch per microsecond, that takes more than 500 000 years.
+    fn next(self) -> Self {
+        Self(self.0 + 1)
+    }
+}
+
 /// The git work one watch-mode refresh performs: re-open the repository so
 /// configuration written since the last refresh takes effect, rebuild the
 /// watcher's ignore matcher from that fresh handle, then collect the snapshot.
@@ -982,12 +1061,14 @@ impl ConflictsRun {
 /// *re-open* nor an unreadable ignore file is an error: the first degrades to the
 /// handle already in hand, the second to a matcher without that source.
 ///
-/// The one production caller, [`event_loop`], deliberately does **not** let that
-/// error out of watch mode: it keeps the last good snapshot, re-renders it at its
-/// true (still-advancing) age, arms the throttle from the failed walk's cost, and
-/// retries on the next event. So this signature says "this walk did not produce a
-/// snapshot", not "the monitor should stop" — a distinction worth preserving if a
-/// second caller ever appears.
+/// Production calls it through [`Watched::walk`], from two places, and neither
+/// lets that error out of watch mode. The `collect` hook of [`event_loop`]
+/// keeps the last good snapshot, re-renders it at its true (still-advancing)
+/// age, arms the throttle from the failed walk's cost, and retries on the next
+/// event. [`switch_watched`] refuses a worktree whose first walk fails, with a
+/// reason, and stays on the worktree it watched. So this signature says "this
+/// walk did not produce a snapshot", not "the monitor should stop" — a
+/// distinction worth preserving if another caller ever appears.
 pub(crate) fn walk(
     handle: &mut RepoHandle,
     ignore: &LiveIgnore,
@@ -996,6 +1077,200 @@ pub(crate) fn walk(
     let repo = handle.reopened();
     ignore.refresh(repo);
     collect_snapshot(repo, cfg)
+}
+
+/// Everything that is tied to the worktree that the loop watches: its path,
+/// the repository handle that each walk re-opens, the ignore matcher that each
+/// walk rebuilds, and the filesystem watcher that wakes the loop.
+///
+/// The four parts are one value, so a switch replaces all of them in one step,
+/// and no part stays on the old worktree. The drop of a `Watched` drops its
+/// watcher, and a watcher that is dropped sends no more events. So after a
+/// switch, a change in the old worktree wakes nothing.
+///
+/// [`run`] shares the one `Watched` between the hooks of the loop through a
+/// [`RefCell`]. The loop runs on one thread and calls one hook at a time, so no
+/// borrow ever meets another borrow.
+struct Watched {
+    /// The root of the worktree, in the one spelling that the loop compares.
+    path: WorktreePath,
+    /// The repository of the worktree. Each walk re-opens it, so configuration
+    /// that another pane writes takes effect. See [`walk`].
+    handle: RepoHandle,
+    /// The ignore matcher that the watcher reads at each event, and that each
+    /// walk rebuilds from disk. See [`LiveIgnore`].
+    ignore: LiveIgnore,
+    /// The watcher of the worktree and of its git directories. Nothing reads
+    /// it. It is here for its drop, which stops the events of this worktree.
+    _watcher: RecommendedWatcher,
+}
+
+impl Watched {
+    /// Watch the worktree at `path` through `handle`, which is open on it
+    /// already. The watcher sends its events on `tx`.
+    ///
+    /// [`run`] builds the first `Watched` here, from the handle that `main`
+    /// opened and from the home worktree that [`resolve_home`] resolved from
+    /// that same handle. So the handle is open on `path` by construction, and
+    /// no second discovery is necessary.
+    ///
+    /// # Errors
+    ///
+    /// Refuses with [`WATCHER_FAILED`] when the filesystem watcher does not
+    /// start, and with [`NOT_A_WORK_TREE`] when the repository has no work
+    /// tree to watch. Each reason names `path`.
+    fn from_handle(
+        handle: RepoHandle,
+        path: WorktreePath,
+        tx: Sender<Event>,
+    ) -> Result<Self, String> {
+        let ignore = LiveIgnore::new(handle.repo());
+        match spawn_fs_watcher(handle.repo(), ignore.clone(), tx) {
+            Ok(Some(watcher)) => Ok(Self {
+                path,
+                handle,
+                ignore,
+                _watcher: watcher,
+            }),
+            Ok(None) => Err(format!("{NOT_A_WORK_TREE}: {}", path.as_path().display())),
+            Err(error) => Err(format!(
+                "{WATCHER_FAILED}: {}: {error}",
+                path.as_path().display()
+            )),
+        }
+    }
+
+    /// Open the worktree at `path`, and watch it. The watcher sends its events
+    /// on `tx`. A switch opens its target here.
+    ///
+    /// [`RepoHandle::discover`] walks up from `path`, as git does. So a
+    /// directory of the list that lost its `.git` file opens the repository
+    /// around it: a linked worktree inside the main worktree opens the main
+    /// worktree. The open therefore makes sure that the work tree it opened
+    /// resolves to `path` itself. Without that check, the frame would show the
+    /// status of one worktree under the name of another.
+    ///
+    /// # Errors
+    ///
+    /// Refuses with [`DIRECTORY_GONE`] when no directory is at `path`. Refuses
+    /// with [`NOT_A_WORK_TREE`] when no git work tree opens at `path`, or when
+    /// the work tree that opens is not `path`. Refuses with the reasons of
+    /// [`from_handle`](Self::from_handle) too. Each reason names `path`.
+    fn open(path: &WorktreePath, tx: Sender<Event>) -> Result<Self, String> {
+        let shown = path.as_path().display();
+        if WorktreePath::resolve(path.as_path()).is_none() {
+            return Err(format!("{DIRECTORY_GONE}: {shown}"));
+        }
+        let handle = RepoHandle::discover(path.as_path())
+            .filter(|handle| {
+                handle
+                    .repo()
+                    .workdir()
+                    .and_then(WorktreePath::resolve)
+                    .as_ref()
+                    == Some(path)
+            })
+            .ok_or_else(|| format!("{NOT_A_WORK_TREE}: {shown}"))?;
+        Self::from_handle(handle, path.clone(), tx)
+    }
+
+    /// Walk the worktree, and put its badge on the snapshot. [`walk`] re-opens
+    /// the repository, rebuilds the ignore matcher, and collects the snapshot.
+    /// [`badged`] then reads the badge from the repository that the walk
+    /// re-opened. `home` is the worktree where the user started gsw.
+    ///
+    /// # Errors
+    ///
+    /// Gives the error of [`walk`], which is the error of the status walk.
+    fn walk(&mut self, cfg: &RenderConfig, home: &WorktreePath) -> Result<Snapshot> {
+        let snapshot = walk(&mut self.handle, &self.ignore, cfg)?;
+        Ok(badged(snapshot, self.handle.repo(), &self.path, home))
+    }
+}
+
+/// Put the badge of the worktree at `path` on `snapshot`, which a walk of
+/// `repo` collected. `home` is the worktree where the user started gsw.
+///
+/// The seed walk of [`run`] and every walk of a [`Watched`] go through here, so
+/// the first frame and every later frame name the worktree in the same way.
+///
+/// The paths come from [`worktree_paths`], which reads no HEAD and opens no
+/// linked worktree. Every walk pays for this call, and the cooldown after a
+/// walk is 100 times its cost, so the expensive [`list_worktrees`] is wrong
+/// here. The label comes from [`head_label`] of `repo`, which is the
+/// repository that the walk read, so the label and the snapshot agree.
+///
+/// [`list_worktrees`]: crate::worktrees::list_worktrees
+fn badged(
+    mut snapshot: Snapshot,
+    repo: &gix::Repository,
+    path: &WorktreePath,
+    home: &WorktreePath,
+) -> Snapshot {
+    snapshot.worktree =
+        crate::worktrees::badge(&worktree_paths(repo), path, home, head_label(repo));
+    snapshot
+}
+
+/// Switch the watch to the worktree at `target` as one step, and give the first
+/// frame of that worktree. The watcher of the new worktree sends its events on
+/// `tx`, and `home` is the worktree where the user started gsw.
+///
+/// 1. Open a candidate [`Watched`] on `target`. That starts its watcher.
+/// 2. Walk the candidate, which puts its badge on the snapshot.
+/// 3. Only when both work, the candidate takes the place of the old
+///    `Watched`. The drop of the old one stops its watcher, so a change in the
+///    old worktree wakes the loop no more.
+///
+/// The `switch` hook of [`run`] is this function, so the tests call exactly
+/// what production calls. It borrows `watched` only for the replacement, after
+/// the open and the walk, so no borrow meets another.
+///
+/// # Errors
+///
+/// Gives the reason of [`Watched::open`] when the open fails, and
+/// [`WALK_FAILED`] with the path and the error of the walk when the walk fails.
+/// Either way, `watched` stays on the worktree it watched, and the candidate
+/// goes away with its watcher.
+fn switch_watched(
+    watched: &RefCell<Watched>,
+    target: &WorktreePath,
+    tx: Sender<Event>,
+    cfg: &RenderConfig,
+    home: &WorktreePath,
+) -> Result<Snapshot, String> {
+    let mut candidate = Watched::open(target, tx)?;
+    let snapshot = candidate
+        .walk(cfg, home)
+        .map_err(|error| format!("{WALK_FAILED}: {}: {error:#}", target.as_path().display()))?;
+    // The old worktree goes here, and the drop of its watcher stops its events.
+    drop(watched.replace(candidate));
+    Ok(snapshot)
+}
+
+/// The worktrees that Down reads at each press: every worktree of the
+/// repository of the watched worktree, sorted by path, each with its label.
+///
+/// Every worktree of a repository shares one common directory, so the list is
+/// the same from each of them. gix reads the admin directories again at each
+/// call, so a worktree that `nwt` or `swt` added or removed since the last
+/// press is in the list or out of it. [`list_worktrees`] opens each linked
+/// worktree for its label, which costs more than the paths alone. Only Down
+/// shows the labels, so only Down pays for them. Left, Right, and a failed
+/// walk read [`listed_paths`].
+fn listed(watched: &RefCell<Watched>) -> Vec<WorktreeEntry> {
+    list_worktrees(watched.borrow().handle.repo())
+}
+
+/// The paths of the worktrees that [`listed`] gives, in the same order. They
+/// come from [`worktree_paths`], which reads no HEAD and opens no linked
+/// worktree.
+///
+/// Left and Right read it at each press, because they need the paths alone.
+/// A walk that fails reads it to learn whether the worktree on the screen
+/// still exists. The cooldown after that walk holds the cost of this read.
+fn listed_paths(watched: &RefCell<Watched>) -> Vec<WorktreePath> {
+    worktree_paths(watched.borrow().handle.repo())
 }
 
 /// Run the live watch loop: take over the alternate screen, seed the snapshot
@@ -1010,11 +1285,21 @@ pub(crate) fn walk(
 /// exit path.
 ///
 /// Takes the [`RepoHandle`] **by value**: watch mode owns the repository for
-/// the rest of the process, and each refresh mutates the handle in place by
-/// re-opening it. Borrowing instead would make the caller hold a mutable borrow
-/// across a call that never returns until the user quits, for no gain — nothing
-/// is left for it to do with the handle afterward.
-pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
+/// the rest of the process. The handle moves into the [`Watched`] of the home
+/// worktree, and each refresh re-opens it in place. Borrowing instead would
+/// make the caller hold a mutable borrow across a call that never returns until
+/// the user quits, for no gain — nothing is left for it to do with the handle
+/// afterward.
+///
+/// The hooks of the loop share one [`Watched`] through a [`RefCell`]. The
+/// `collect` hook walks it, the `worktrees` and `worktree_paths` hooks read
+/// the worktrees of its repository through [`listed`] and [`listed_paths`],
+/// and the `switch` hook replaces it through [`switch_watched`].
+pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
+    // Before the guard takes the screen, so a refusal prints on the screen the
+    // user started from, and not on the alternate screen that the guard
+    // clears when it goes.
+    let home = resolve_home(&handle)?;
     let _guard = TerminalGuard::enter()?;
 
     // Seed the cache with one git walk and paint the first frame at offset 0,
@@ -1024,13 +1309,20 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     // Deliberately NOT `walk`: the handle was opened microseconds ago in
     // `main`, so nothing can have changed the config since, and a re-open here
     // would only pay for a config parse to read back what we already hold. The
-    // ignore matcher is equally fresh — `LiveIgnore::new` below builds it from
-    // that same just-opened handle — so skipping `walk`'s rebuild costs nothing
-    // either. Every *subsequent* refresh goes through `walk`, which re-opens the
-    // handle and rebuilds the matcher.
+    // ignore matcher is equally fresh — `Watched::from_handle` below builds it
+    // from that same just-opened handle — so skipping `walk`'s rebuild costs
+    // nothing either. Every *subsequent* refresh goes through `walk`, which
+    // re-opens the handle and rebuilds the matcher.
     let dims = current_dimensions(cfg.width_offset);
     let collected_at = Instant::now();
-    let snapshot = collect_snapshot(handle.repo(), cfg)?;
+    // The badge goes on through the same helper as on every later walk, so the
+    // first frame names the worktree as every later frame does.
+    let snapshot = badged(
+        collect_snapshot(handle.repo(), cfg)?,
+        handle.repo(),
+        &home,
+        &home,
+    );
     // The seed walk pays into the duty-cycle budget like every walk after it,
     // so its cost is what the schedule's first timed walk is gated on. The seed
     // frame then counts down to that same schedule rather than to the raw
@@ -1060,11 +1352,9 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     let (tx, rx) = mpsc::channel();
     spawn_event_reader(tx.clone());
 
-    // A push runs `git` with the work tree as its cwd, so the path is captured
-    // before the handle is borrowed for the rest of watch mode. The push thread
-    // reports back on the loop's own channel, so its outcome re-enters the loop
-    // exactly like a filesystem event — applied between frames, never during one.
-    let workdir = handle.repo().workdir().map(Path::to_path_buf);
+    // The push thread reports back on the loop's own channel, so its outcome
+    // re-enters the loop exactly like a filesystem event — applied between
+    // frames, never during one.
     let push_tx = tx.clone();
 
     // The shell the issue key uses, resolved once. The probe asks it whether
@@ -1086,15 +1376,15 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     // read costs one `ps`.
     let session = crate::remote::Session::read();
 
-    // The one ignore matcher both threads share: the watcher callback reads it
-    // per event, and every `walk` below rebuilds it from disk so a `.gitignore`
-    // edited in another pane takes effect without a restart.
-    let ignore = LiveIgnore::new(handle.repo());
-
-    // The filesystem watcher must outlive the loop — dropping it stops watching.
-    // Started before the collect closure below takes its mutable borrow of the
-    // handle; the watcher clones everything it needs, so this borrow ends here.
-    let _watcher = spawn_fs_watcher(handle.repo(), ignore.clone(), tx)?;
+    // The worktree on the screen, as one value: its handle, the one ignore
+    // matcher that the watcher callback reads per event and that every walk
+    // rebuilds from disk, and the filesystem watcher. It starts on the home
+    // worktree, with the handle that `main` opened, so the start needs no
+    // second discovery. The hooks below share it, and its drop at the end of
+    // this function stops the watcher.
+    let switch_tx = tx.clone();
+    let watched =
+        RefCell::new(Watched::from_handle(handle, home.clone(), tx).map_err(anyhow::Error::msg)?);
 
     let result = event_loop(
         &rx,
@@ -1106,67 +1396,93 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             schedule,
             ui: PushUi::new(cfg.truecolor),
             session,
+            home: home.clone(),
         },
         LoopHooks {
-            collect: || walk(&mut handle, &ignore, cfg),
+            // The loop passes the worktree on the screen. The loop moves to a
+            // worktree only when `switch` gives `Ok`, and `switch_watched`
+            // replaces `watched` only when it gives `Ok`, so the two always
+            // name the same worktree. The assertion states that in the debug
+            // build, which the tests run.
+            collect: |current: &WorktreePath| {
+                let mut watched = watched.borrow_mut();
+                debug_assert_eq!(
+                    current, &watched.path,
+                    "the loop and the watch must be on the same worktree",
+                );
+                watched.walk(cfg, &home)
+            },
             render: |snap: &Snapshot, dims: Dimensions, timing: FrameTiming| {
                 render_frame(snap, cfg, dims, timing)
+            },
+            render_list: |snap: &Snapshot,
+                          dims: Dimensions,
+                          timing: FrameTiming,
+                          list: &WorktreeList| {
+                render_list_frame(snap, dims, timing, list)
             },
             dimensions: || current_dimensions(cfg.width_offset),
             paint: |output: &str| paint_output(output),
             clock: Instant::now,
             next_tick: |freshest: Option<Duration>| freshest.and_then(next_tick),
-            start_issue: |command: crate::issue::IssueCommand| {
-                // No work tree means no repository to ask about. The same
-                // `Option` the push honors, honored here.
-                if let Some(workdir) = workdir.clone() {
-                    let finish_tx = issue_tx.clone();
-                    let shell = shell.clone();
-                    thread::spawn(move || {
-                        let outcome = crate::issue::run(&shell, &command, &workdir);
-                        let _ = finish_tx.send(Event::IssueFinished(outcome));
+            start_issue: |command: crate::issue::IssueCommand,
+                          current: &WorktreePath,
+                          generation: Generation| {
+                // The run keeps the generation of its press and sends it back
+                // with the outcome, so the loop knows an outcome that arrives
+                // after a switch.
+                let workdir = current.as_path().to_path_buf();
+                let finish_tx = issue_tx.clone();
+                let shell = shell.clone();
+                thread::spawn(move || {
+                    let outcome = crate::issue::run(&shell, &command, &workdir);
+                    let _ = finish_tx.send(Event::IssueFinished {
+                        generation,
+                        outcome,
                     });
-                }
+                });
             },
-            start_push: |command: PushCommand| {
-                // No work tree means nothing to push from. `RepoHandle` rejects
-                // a bare repository at discovery, so watch mode never gets here
-                // without one — this is the type's `Option` being honored, not
-                // a case the user can reach.
-                if let Some(workdir) = workdir.clone() {
-                    // Two senders on the one channel, so a line and the
-                    // outcome re-enter the loop the same way every other event
-                    // does — applied between frames rather than during one.
-                    let line_tx = push_tx.clone();
-                    let finish_tx = push_tx.clone();
-                    crate::push::spawn(
-                        command,
-                        workdir,
-                        move |line| {
-                            let _ = line_tx.send(Event::PushOutput(line));
-                        },
-                        move |outcome| {
-                            let _ = finish_tx.send(Event::PushFinished(outcome));
-                        },
-                    );
-                }
+            start_push: |command: PushCommand, current: &WorktreePath| {
+                // Two senders on the one channel, so a line and the outcome
+                // re-enter the loop the same way every other event does —
+                // applied between frames rather than during one.
+                let line_tx = push_tx.clone();
+                let finish_tx = push_tx.clone();
+                crate::push::spawn(
+                    command,
+                    current.as_path().to_path_buf(),
+                    move |line| {
+                        let _ = line_tx.send(Event::PushOutput(line));
+                    },
+                    move |outcome| {
+                        let _ = finish_tx.send(Event::PushFinished(outcome));
+                    },
+                );
             },
-            start_conflicts: || {
-                // No work tree means no HEAD to measure. The same `Option` the
-                // push honors, honored here.
-                if let Some(workdir) = workdir.clone() {
-                    let started_tx = conflicts_tx.clone();
-                    let finish_tx = conflicts_tx.clone();
-                    conflicts.start(
-                        workdir,
-                        move |branch| {
-                            let _ = started_tx.send(Event::ConflictsStarted(branch));
-                        },
-                        move |outcome| {
-                            let _ = finish_tx.send(Event::ConflictsFinished(outcome));
-                        },
-                    );
-                }
+            start_conflicts: |current: &WorktreePath, generation: Generation| {
+                // Both events of the run carry the generation of its press, as
+                // the outcome of the issue key does.
+                let started_tx = conflicts_tx.clone();
+                let finish_tx = conflicts_tx.clone();
+                conflicts.start(
+                    current.as_path().to_path_buf(),
+                    move |branch| {
+                        let _ = started_tx.send(Event::ConflictsStarted { generation, branch });
+                    },
+                    move |outcome| {
+                        let _ = finish_tx.send(Event::ConflictsFinished {
+                            generation,
+                            outcome,
+                        });
+                    },
+                );
+            },
+            worktrees: || listed(&watched),
+            worktree_paths: || listed_paths(&watched),
+            // Each switch gives the new watcher a sender of its own on the one
+            // channel of the loop.
+            switch: |target: &WorktreePath| {
+                switch_watched(&watched, target, switch_tx.clone(), cfg, &home)
             },
         },
     );
@@ -1182,6 +1498,54 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     });
 
     result
+}
+
+/// Why watch mode does not start: no directory is at the root of the work tree
+/// that `main` opened. The directory went away between the open and the start
+/// of watch mode.
+const HOME_UNRESOLVED: &str = "gsw cannot resolve the work tree it started in";
+
+/// Why a switch refuses a worktree whose first walk fails. The line names the
+/// directory and then the error of the walk after this text.
+const WALK_FAILED: &str = "gsw cannot read the status of the worktree";
+
+/// Why gsw refuses to watch a directory that is not the root of a git work
+/// tree. The line names the directory after this text.
+const NOT_A_WORK_TREE: &str = "gsw cannot go to a directory that is not a git work tree";
+
+/// Why gsw refuses to go to a worktree whose directory no longer exists. The
+/// line names the directory after this text.
+const DIRECTORY_GONE: &str = "gsw cannot go to a worktree whose directory no longer exists";
+
+/// Why gsw refuses to watch a worktree when its filesystem watcher does not
+/// start. The line names the directory and then the error of the watcher after
+/// this text.
+const WATCHER_FAILED: &str = "gsw cannot watch the worktree for changes";
+
+/// What gsw says after it went back to the home worktree, after the path of
+/// the worktree that went away: `<path> no longer exists — back to the home
+/// worktree`. See [`LoopState::return_home_if_gone`].
+const WORKTREE_GONE: &str = "no longer exists — back to the home worktree";
+
+/// The home worktree: the root of the work tree that `handle` opened, in the
+/// one spelling that every comparison of the loop uses.
+///
+/// The loop compares the worktree on the screen with the paths of the list,
+/// and [`WorktreePath::resolve`] is what makes two spellings of one directory
+/// compare equal.
+///
+/// # Errors
+///
+/// Fails with [`HOME_UNRESOLVED`] and the path when no directory is at the root
+/// any more. It fails with [`HOME_UNRESOLVED`] alone for a repository with no
+/// work tree, which [`RepoHandle`] refuses at discovery, so watch mode never
+/// holds one.
+fn resolve_home(handle: &RepoHandle) -> Result<WorktreePath> {
+    let Some(root) = handle.repo().workdir() else {
+        anyhow::bail!(HOME_UNRESOLVED);
+    };
+    WorktreePath::resolve(root)
+        .ok_or_else(|| anyhow::anyhow!("{HOME_UNRESOLVED}: {}", root.display()))
 }
 
 /// Ask the shell, once, whether the issue command exists, and report the
@@ -1362,6 +1726,162 @@ struct LoopStart {
     /// Where the person who reads this screen sits, so the `G` key knows
     /// whether a browser opened here reaches anybody.
     session: crate::remote::Session,
+    /// The worktree where the user started gsw, in the one spelling that
+    /// every comparison of the loop uses. The loop starts on it, and Up goes
+    /// back to it.
+    home: WorktreePath,
+}
+
+/// Everything the loop changes while it runs.
+///
+/// One value, because the loop receives events at three points and routes each
+/// of them through the one function [`absorb`], and because a switch of the
+/// worktree changes most of this in one step: the cache takes the snapshot of
+/// the new worktree, the schedule starts the refresh clock again, the row under
+/// the frame empties, and the `G` key loses its arming. An argument for each
+/// part would give [`absorb`] more arguments than a reader can hold.
+struct LoopState {
+    /// The snapshot a re-render can use without walking git again.
+    cache: SnapshotCache,
+    /// The walk schedule, anchored to the last walk.
+    schedule: WalkSchedule,
+    /// Everything under the frame, and the input mode that goes with it.
+    ui: PushUi,
+    /// The state of the `G` key.
+    issue: IssueRun,
+    /// The state of the `m` key.
+    conflicts: ConflictsRun,
+    /// The worktree where the user started gsw.
+    home: WorktreePath,
+    /// The worktree that the frame shows. The walk, `p`, `G`, and `m` act on
+    /// it. It starts at [`LoopState::home`].
+    current: WorktreePath,
+    /// How many switches the loop has made. See [`Generation`].
+    generation: Generation,
+}
+
+impl LoopState {
+    /// Switch the loop to `target` for a key the user pressed: an arrow key,
+    /// or Enter in the list.
+    ///
+    /// The switch starts at a read of the clock, and [`LoopState::enter`]
+    /// does it. On `Err`, the loop stays on the worktree it shows, and the
+    /// reason takes the row on a line that fades, because it is gsw's report
+    /// about a key the user pressed.
+    ///
+    /// [`absorb`] calls it when it reads the key, and not at the next frame. So
+    /// a `p`, `G`, or `m` later in the same burst acts on the new worktree, as
+    /// a `y` after a `p` in one burst reads the new mode.
+    fn switch_to(
+        &mut self,
+        target: WorktreePath,
+        clock: &impl Fn() -> Instant,
+        open: &mut impl FnMut(&WorktreePath) -> Result<Snapshot, String>,
+    ) {
+        let now = clock();
+        // The answer goes unread: no state here stands on where the line
+        // landed.
+        if let Err(reason) = self.enter(target, now, clock, open) {
+            let _ = self.ui.post_notice(reason, now);
+        }
+    }
+
+    /// Open `target` and move the loop to it. Every switch goes through here:
+    /// the switch of a key, and the return to the home worktree.
+    ///
+    /// 1. Open `target` through `open`, and read the clock for the cost of the
+    ///    open, counted from `since`.
+    /// 2. On `Ok`, the snapshot of `target` goes into the cache, collected at
+    ///    `since`, and the schedule records the open as a walk that started
+    ///    at `since`, which starts the refresh clock again. The loop then
+    ///    watches `target`, and the generation moves on, so an outcome of a
+    ///    run that started before the switch is known as stale. Every message
+    ///    under the frame goes, and the list closes, because each one
+    ///    describes the worktree the frame showed before. The `G` key loses
+    ///    its arming with the message that armed it.
+    /// 3. On `Err`, nothing changes, and the reason comes back. The caller
+    ///    decides whether the reason goes on the row.
+    fn enter(
+        &mut self,
+        target: WorktreePath,
+        since: Instant,
+        clock: &impl Fn() -> Instant,
+        open: &mut impl FnMut(&WorktreePath) -> Result<Snapshot, String>,
+    ) -> Result<(), String> {
+        let opened = open(&target);
+        let cost = clock().saturating_duration_since(since);
+        let snapshot = opened?;
+        self.cache.snapshot = snapshot;
+        self.cache.collected_at = since;
+        self.schedule.record(since, cost);
+        self.current = target;
+        self.generation = self.generation.next();
+        self.ui.clear();
+        self.issue.disarm();
+        Ok(())
+    }
+
+    /// After a walk of the current worktree failed: go back to the home
+    /// worktree when the current worktree no longer exists, and say so on a
+    /// line that fades.
+    ///
+    /// The current worktree no longer exists when the list of the paths of
+    /// the worktrees no longer holds it: `git worktree remove` or `swt merge`
+    /// took it. The list holds the paths alone, because the check needs no
+    /// label. Three failed walks keep the rule of a failed walk, which is the
+    /// last good snapshot at its true age:
+    ///
+    /// - a walk of the home worktree, which has no home to go back to;
+    /// - a walk while a push runs, because the window under the frame belongs
+    ///   to the worktree that pushes. A later failed walk goes home, after the
+    ///   push;
+    /// - a walk of a worktree that the list still holds. Such a walk failed
+    ///   for a moment, as when `git gc` swaps the ref store under it.
+    ///
+    /// The switch counts from `now`, the instant of this wake. The frame of
+    /// home is then placed at `now` like every frame of the wake, so its
+    /// refresh clock shows the whole interval.
+    ///
+    /// The read of the paths and the open of home are git work of this wake,
+    /// as the failed walk is. The caller records the cost of the wake after
+    /// this call returns, so the duty cycle pays for all of that work on every
+    /// path through this call. A return that works records the open too, and
+    /// the record of the caller then replaces it, because both records start
+    /// at `now`.
+    ///
+    /// The switch clears the row, the question, and the list, and the line
+    /// goes on the row after that, so the line is on the frame that shows
+    /// home. A switch that fails changes nothing and posts nothing. Every
+    /// later failed walk tries again, and a line would come back on each one.
+    fn return_home_if_gone(
+        &mut self,
+        now: Instant,
+        clock: &impl Fn() -> Instant,
+        worktree_paths: &mut impl FnMut() -> Vec<WorktreePath>,
+        open: &mut impl FnMut(&WorktreePath) -> Result<Snapshot, String>,
+    ) {
+        if self.current == self.home || self.ui.mode() == InputMode::Pushing {
+            return;
+        }
+        if worktree_paths().contains(&self.current) {
+            return;
+        }
+        let gone = self.current.clone();
+        if self.enter(self.home.clone(), now, clock, open).is_ok() {
+            // The answer goes unread: no state here stands on where the line
+            // landed.
+            let _ = self
+                .ui
+                .post_notice(format!("{} {WORKTREE_GONE}", gone.as_path().display()), now);
+        }
+    }
+
+    /// Whether an event with `generation` comes from a run that started before
+    /// the last switch, and so describes a worktree that the frame no longer
+    /// shows.
+    fn is_stale(&self, generation: Generation) -> bool {
+        generation != self.generation
+    }
 }
 
 /// The side-effecting hooks the watch loop drives, bundled so the loop stays one
@@ -1369,12 +1889,30 @@ struct LoopStart {
 /// these to the real git collect, render, terminal-size query, painter, and
 /// clock; tests inject counters and a controllable clock to assert which hooks
 /// ran — and with what age offset — without a TTY or real time.
-struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIssue, StartConflicts>
-{
-    /// Walk the repo into a fresh [`Snapshot`] (the expensive git work).
+struct LoopHooks<
+    Collect,
+    RenderFn,
+    RenderList,
+    Dims,
+    Paint,
+    Clock,
+    Tick,
+    StartPush,
+    StartIssue,
+    StartConflicts,
+    Worktrees,
+    Paths,
+    Switch,
+> {
+    /// Walk the worktree that the loop passes, which is the worktree the frame
+    /// shows, into a fresh [`Snapshot`] (the expensive git work).
     collect: Collect,
     /// Render a snapshot at the given dimensions and timing.
     render: RenderFn,
+    /// Render the frame of the open list of the worktrees: the head of the
+    /// frame of the snapshot, and the rows of the list under it. The loop
+    /// calls it in place of `render` while the list is open.
+    render_list: RenderList,
     /// Query the current terminal dimensions (re-evaluated on resize).
     dimensions: Dims,
     /// Paint a finished frame.
@@ -1384,25 +1922,53 @@ struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIs
     /// Map the freshest displayed age to the decay-tick interval (`None` = off).
     next_tick: Tick,
     /// Start a confirmed push, given the [`PushCommand`] the confirmation
-    /// described — the `git` arguments and the branch they were written for.
-    /// Production spawns a thread that runs the push and sends the outcome back
-    /// as [`Event::PushFinished`]; tests record the command and decide for
-    /// themselves when — or whether — the outcome arrives.
+    /// described — the `git` arguments and the branch they were written for —
+    /// and the worktree to push from, which is the worktree on the screen at
+    /// the press. Production spawns a thread that runs the push and sends the
+    /// outcome back as [`Event::PushFinished`]; tests record the command and
+    /// decide for themselves when — or whether — the outcome arrives.
     start_push: StartPush,
-    /// Start a run of the issue command. Production spawns a thread that runs
-    /// it and sends the outcome back as [`Event::IssueFinished`]; tests record
-    /// the command and decide for themselves when the outcome arrives.
+    /// Start a run of the issue command in the worktree on the screen at the
+    /// press. Production spawns a thread that runs it and sends the outcome
+    /// back as [`Event::IssueFinished`], with the [`Generation`] it was given;
+    /// tests record the command and decide for themselves when the outcome
+    /// arrives.
     start_issue: StartIssue,
-    /// Start a measurement of a rebase and a merge against the default branch.
-    /// Production starts it on a thread of its own, which sends the branch
-    /// back as [`Event::ConflictsStarted`] and the outcome as
-    /// [`Event::ConflictsFinished`]. Tests count the runs and decide for
-    /// themselves when, or whether, those events arrive.
+    /// Start a measurement of a rebase and a merge against the default branch,
+    /// in the worktree on the screen at the press. Production starts it on a
+    /// thread of its own, which sends the branch back as
+    /// [`Event::ConflictsStarted`] and the outcome as
+    /// [`Event::ConflictsFinished`], each with the [`Generation`] it was
+    /// given. Tests count the runs and decide for themselves when, or whether,
+    /// those events arrive.
     ///
-    /// It takes no argument, because the thread finds the branch itself. The
+    /// It takes no branch, because the thread finds the branch itself. The
     /// loop never waits for the run, because a rebase replay of a long branch
     /// can take many seconds.
     start_conflicts: StartConflicts,
+    /// Read the worktrees of the repository again, sorted by path, each with
+    /// its label, as [`crate::worktrees::list_worktrees`] gives them.
+    ///
+    /// Down calls it at each press, because `nwt` and `swt` add and remove
+    /// worktrees while gsw runs, so a list read once at start is soon wrong.
+    /// Only Down shows the labels, and a label costs an open of its linked
+    /// worktree, so nothing else calls it.
+    worktrees: Worktrees,
+    /// Read the paths of the worktrees of the repository again, sorted by
+    /// path, as [`crate::worktrees::worktree_paths`] gives them. No HEAD is
+    /// read, and no linked worktree is opened.
+    ///
+    /// Left and Right call it at each press, for the same reason as Down
+    /// calls `worktrees`. After a walk that fails, the loop calls it too, to
+    /// learn whether the worktree on the screen still exists.
+    worktree_paths: Paths,
+    /// Open the worktree at the path, start its watcher, and walk it, as one
+    /// step.
+    ///
+    /// It commits only on `Ok`, and the snapshot it gives is the first frame
+    /// of that worktree. `Err` carries the reason for a fading line, and then
+    /// nothing changes: the loop stays on the worktree it shows.
+    switch: Switch,
 }
 
 /// The triggers one wake collected, before the render decides what to do with
@@ -1456,19 +2022,40 @@ enum Flow {
 /// when they pressed the key — the loop re-measures after this drain, not
 /// during it.
 ///
-/// `cache` comes whole, and not as its snapshot and its pane, because the two
-/// always come from the one cache. `issue` and `conflicts` are the state of the
-/// two keys that start work off this thread, one run of each at a time.
-fn absorb<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIssue, StartConflicts>(
+/// `state` is everything the loop changes, in one value. Its cache comes whole,
+/// and not as its snapshot and its pane, because the two always come from the
+/// one cache. Its `issue` and `conflicts` are the state of the two keys that
+/// start work off this thread, one run of each at a time. Its current worktree
+/// is where the push, the issue key, and `m` do their work.
+#[expect(
+    clippy::type_complexity,
+    reason = "the loop takes one generic for each of its thirteen hooks, so each hook stays \
+              a plain closure that a test replaces with a fake. A type alias spells the same \
+              thirteen generics, and the borrow of the whole value keeps every call of \
+              absorb the same"
+)]
+fn absorb<
+    Collect,
+    RenderFn,
+    RenderList,
+    Dims,
+    Paint,
+    Clock,
+    Tick,
+    StartPush,
+    StartIssue,
+    StartConflicts,
+    Worktrees,
+    Paths,
+    Switch,
+>(
     event: Event,
     pending: &mut Pending,
-    ui: &mut PushUi,
-    issue: &mut IssueRun,
-    conflicts: &mut ConflictsRun,
-    cache: &SnapshotCache,
+    state: &mut LoopState,
     hooks: &mut LoopHooks<
         Collect,
         RenderFn,
+        RenderList,
         Dims,
         Paint,
         Clock,
@@ -1476,13 +2063,19 @@ fn absorb<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIssue, St
         StartPush,
         StartIssue,
         StartConflicts,
+        Worktrees,
+        Paths,
+        Switch,
     >,
 ) -> Flow
 where
     Clock: Fn() -> Instant,
-    StartPush: FnMut(PushCommand),
-    StartIssue: FnMut(crate::issue::IssueCommand),
-    StartConflicts: FnMut(),
+    StartPush: FnMut(PushCommand, &WorktreePath),
+    StartIssue: FnMut(crate::issue::IssueCommand, &WorktreePath, Generation),
+    StartConflicts: FnMut(&WorktreePath, Generation),
+    Worktrees: FnMut() -> Vec<WorktreeEntry>,
+    Paths: FnMut() -> Vec<WorktreePath>,
+    Switch: FnMut(&WorktreePath) -> Result<Snapshot, String>,
 {
     let clock = &hooks.clock;
     match event {
@@ -1491,27 +2084,102 @@ where
         Event::Resize => pending.resize = true,
         Event::ForceRefresh => pending.force = true,
         Event::Key(key) => {
-            if let Some(action) = classify_input(key, ui.mode(), issue.key()) {
+            if let Some(action) = classify_input(key, state.ui.mode(), state.issue.key()) {
                 // Every key but `G` takes the arming away. The message that
                 // asks for the second press is the armed state, and this key
                 // is not that press.
                 if !matches!(action, Event::IssueRequested) {
-                    issue.disarm();
+                    state.issue.disarm();
                 }
-                return absorb(action, pending, ui, issue, conflicts, cache, hooks);
+                return absorb(action, pending, state, hooks);
             }
         }
-        Event::PushRequested => ui.request(&cache.snapshot, cache.dims, clock()),
+        Event::PushRequested => {
+            state
+                .ui
+                .request(&state.cache.snapshot, state.cache.dims, clock());
+        }
         // `confirm` yields the command only once, so a second `y` that raced
         // the mode change starts nothing.
         Event::PushConfirmed => {
-            if let Some(command) = ui.confirm(clock()) {
-                (hooks.start_push)(command);
+            if let Some(command) = state.ui.confirm(clock()) {
+                (hooks.start_push)(command, &state.current);
             }
         }
-        Event::PushOutput(line) => ui.output_line(line),
-        Event::PushCancelled => ui.cancel(),
-        Event::Dismiss => ui.dismiss(),
+        Event::PushOutput(line) => state.ui.output_line(line),
+        Event::PushCancelled => state.ui.cancel(),
+        Event::Dismiss => state.ui.dismiss(),
+        // Left and Right read the paths of the worktrees again at each press,
+        // because `nwt` and `swt` add and remove worktrees while gsw runs.
+        // They read no label, because they show none. Where no other worktree
+        // is, neither finds a target, and nothing happens.
+        Event::GoPrevious => {
+            let paths = (hooks.worktree_paths)();
+            if let Some(target) = crate::worktrees::previous(&paths, &state.current).cloned() {
+                state.switch_to(target, clock, &mut hooks.switch);
+            }
+        }
+        Event::GoNext => {
+            let paths = (hooks.worktree_paths)();
+            if let Some(target) = crate::worktrees::next(&paths, &state.current).cloned() {
+                state.switch_to(target, clock, &mut hooks.switch);
+            }
+        }
+        // Up on the home worktree does nothing: the frame shows it already.
+        Event::GoHome => {
+            if state.current != state.home {
+                let home = state.home.clone();
+                state.switch_to(home, clock, &mut hooks.switch);
+            }
+        }
+        // Down reads the list again at each press, as Left and Right read the
+        // paths, because `nwt` and `swt` add and remove worktrees while gsw
+        // runs. The list carries the label of each row. The cursor starts on
+        // the worktree that the frame shows.
+        //
+        // A pane with no row for the list opens none, so Enter never chooses
+        // a row that the user did not see, as `p` never asks a question that
+        // the pane cannot show. `cache.dims` is the pane that the user saw at
+        // the press. The check comes before the read, so such a pane pays for
+        // no read of the list.
+        Event::OpenList => {
+            if crate::list_rows(&state.cache.snapshot, state.cache.dims) == 0 {
+                return Flow::Continue;
+            }
+            let entries = (hooks.worktrees)();
+            if let Some(list) = WorktreeList::open(entries, &state.current, state.home.clone()) {
+                state.ui.open_list(list);
+            }
+        }
+        // The cursor moves, and nothing else does: no walk and no switch. gsw
+        // walks the new worktree only after Enter.
+        Event::ListUp => {
+            if let Some(list) = state.ui.list_mut() {
+                list.up();
+            }
+        }
+        Event::ListDown => {
+            if let Some(list) = state.ui.list_mut() {
+                list.down();
+            }
+        }
+        // Enter closes the list before the switch, so a switch that fails
+        // puts its reason on a free row. Enter on the worktree that the frame
+        // shows opens nothing, because the frame shows it already.
+        Event::ListGo => {
+            if let Some(list) = state.ui.close_list() {
+                let target = list.selected().path.clone();
+                if target != state.current {
+                    state.switch_to(target, clock, &mut hooks.switch);
+                }
+            }
+        }
+        // The watch stays on the worktree that the frame showed before the
+        // list opened. The row is free again, so the next frame posts the
+        // oldest message that waited for the list.
+        Event::ListClose => {
+            let _ = state.ui.close_list();
+        }
         Event::IssueRequested => {
             // One read of the clock, for both halves of one press. The arming
             // and the message it stands for must end at the same moment, and
@@ -1521,53 +2189,70 @@ where
             // it runs only where the message went straight onto the row, so
             // `now` is the instant the message got there.
             let now = clock();
-            match issue.press(now) {
-                IssuePress::Run(command) => (hooks.start_issue)(command),
+            match state.issue.press(now) {
+                IssuePress::Run(command) => {
+                    (hooks.start_issue)(command, &state.current, state.generation);
+                }
                 // The row arms the key, and not the press. A question or a
                 // push in flight owns the row, and a notice that arrives then
                 // waits in the queue — nobody has read it, so a second press
                 // against it would run the command with no warning ever seen.
                 IssuePress::Ask(message) => {
-                    if ui.post_notice(message, now) == crate::push::Posted::OnRow {
-                        issue.arm(now);
+                    if state.ui.post_notice(message, now) == crate::push::Posted::OnRow {
+                        state.issue.arm(now);
                     }
                 }
                 IssuePress::Nothing => {}
             }
         }
-        Event::IssueCommandFound(command) => issue.found(command),
+        Event::IssueCommandFound(command) => state.issue.found(command),
         // The check and the start are one step on the thread of the loop, so
         // a burst of presses starts one run. See [`ConflictsRun`].
-        Event::ConflictsRequested => match conflicts.press() {
-            ConflictsPress::Start => (hooks.start_conflicts)(),
+        Event::ConflictsRequested => match state.conflicts.press() {
+            ConflictsPress::Start => (hooks.start_conflicts)(&state.current, state.generation),
             ConflictsPress::Nothing => {}
         },
+        // A run continues after a switch, in the worktree where it started. An
+        // event of such a run describes a worktree that the frame no longer
+        // shows, and a line under the frame must describe the worktree in the
+        // frame. So it posts nothing. An outcome still frees its key, because
+        // one run at a time is a rule for the whole process, and that run has
+        // ended.
+        Event::ConflictsStarted { generation, .. } if state.is_stale(generation) => {}
+        Event::ConflictsFinished { generation, .. } if state.is_stale(generation) => {
+            state.conflicts.finished();
+        }
+        Event::IssueFinished { generation, .. } if state.is_stale(generation) => {
+            state.issue.finished();
+        }
         // A busy row drops the notice and does not hold it. A held notice
         // reaches the row after the outcome, and says that a run is in flight
         // when none is. See [`PushUi::post_progress`].
-        Event::ConflictsStarted(branch) => {
-            ui.post_progress(crate::conflicts::running_notice(&branch));
+        Event::ConflictsStarted { branch, .. } => {
+            state
+                .ui
+                .post_progress(crate::conflicts::running_notice(&branch));
         }
-        Event::ConflictsFinished(outcome) => {
-            conflicts.finished();
+        Event::ConflictsFinished { outcome, .. } => {
+            state.conflicts.finished();
             // The outcome is gsw's report about a key the user pressed, so it
             // fades. A busy row holds it until the row is free, as it holds
             // every report. The answer goes unread, because no state here
             // stands on where the line landed.
-            let _ = ui.post_notice(outcome.line(), clock());
+            let _ = state.ui.post_notice(outcome.line(), clock());
         }
-        Event::IssueFinished(outcome) => {
-            issue.finished();
+        Event::IssueFinished { outcome, .. } => {
+            state.issue.finished();
             // A run that worked says nothing: the browser is the answer. A run
             // that failed says why, in the words of another program, so it
             // waits for a key the way git's error text does.
             if let Some(message) = outcome.message() {
-                ui.post_error(message.to_string());
+                state.ui.post_error(message.to_string());
             }
         }
         Event::PushFinished(outcome) => {
             let succeeded = outcome.success;
-            ui.finished(outcome, clock());
+            state.ui.finished(outcome, clock());
             // A successful push moved the upstream, so the header's arrows and
             // tracking segment are stale the moment it lands — walk now rather
             // than leaving a wrong count on screen until the next refresh. A
@@ -1605,6 +2290,11 @@ where
 /// the rest of the loop because this is the only place that knows what is
 /// displayed (see [`Event::Key`] for why the reader thread must not).
 ///
+/// The loop watches one worktree at a time, the current worktree, and it starts
+/// on `start.home`. The walk, `p`, `G`, and `m` act on the current worktree. The
+/// arrow keys change it through [`LoopState::switch_to`], inside [`absorb`], so
+/// the next key of the same burst already acts on the new worktree.
+///
 /// `hooks` bundles the side effects (collect, render, terminal-size query, paint,
 /// clock, tick cadence) so the loop is one function testable without a TTY or
 /// real time: a test feeds a pre-loaded channel, a controllable clock, and
@@ -1621,6 +2311,12 @@ where
 ///   nothing (suppression);
 /// - a walk that *fails* does not end the loop: the last good snapshot is
 ///   re-rendered at its true age and the next event retries (see below);
+/// - a walk that fails because the worktree on the screen went away goes back
+///   to the home worktree, with a line that says so
+///   ([`LoopState::return_home_if_gone`]);
+/// - while the list of the worktrees is open, the frame is the frame of the
+///   list (`render_list` in `hooks`), and every other frame is the status
+///   frame (`render`);
 /// - [`Event::Quit`] ends the loop, as does every sender hanging up.
 ///
 /// A failed collect is absorbed rather than propagated because the failures are
@@ -1630,14 +2326,37 @@ where
 /// blank screen" guarantee: that fallback keeps a *handle* when the re-open
 /// fails, and this keeps a *frame* when the status walk on it fails. Either half
 /// alone leaves the monitor dying on a repository that is momentarily
-/// unreadable. The failed walk still arms the throttle from its measured cost —
-/// so a repo that fails every walk backs off on the same duty cycle instead of
+/// unreadable. The failed walk still arms the throttle from its measured cost,
+/// which also holds the check after it and any open of the home worktree — so
+/// a repo that fails every walk backs off on the same duty cycle instead of
 /// hot-looping — and deliberately does *not* advance `collected_at`, so the
 /// stale frame goes on aging honestly rather than resetting every displayed age
 /// to zero. The accepted cost: a repository deleted for good leaves a frozen
 /// (but visibly aging) frame until the user quits. That is the right failure for
-/// a monitor — a wrong-but-labeled-old screen beats no screen.
-fn event_loop<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIssue, StartConflicts>(
+/// a monitor — a wrong-but-labeled-old screen beats no screen. A worktree other
+/// than the home worktree that goes away for good is the one exception: the
+/// loop goes back to the home worktree ([`LoopState::return_home_if_gone`]).
+#[expect(
+    clippy::type_complexity,
+    reason = "the loop takes one generic for each of its thirteen hooks, so each hook stays \
+              a plain closure that a test replaces with a fake. A type alias spells the same \
+              thirteen generics, as the expectation on absorb says"
+)]
+fn event_loop<
+    Collect,
+    RenderFn,
+    RenderList,
+    Dims,
+    Paint,
+    Clock,
+    Tick,
+    StartPush,
+    StartIssue,
+    StartConflicts,
+    Worktrees,
+    Paths,
+    Switch,
+>(
     rx: &Receiver<Event>,
     debounce: Duration,
     displayed: &mut String,
@@ -1645,6 +2364,7 @@ fn event_loop<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIssue
     mut hooks: LoopHooks<
         Collect,
         RenderFn,
+        RenderList,
         Dims,
         Paint,
         Clock,
@@ -1652,32 +2372,49 @@ fn event_loop<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIssue
         StartPush,
         StartIssue,
         StartConflicts,
+        Worktrees,
+        Paths,
+        Switch,
     >,
 ) -> Result<()>
 where
-    Collect: FnMut() -> Result<Snapshot>,
+    Collect: FnMut(&WorktreePath) -> Result<Snapshot>,
     RenderFn: FnMut(&Snapshot, Dimensions, FrameTiming) -> Render,
+    RenderList: FnMut(&Snapshot, Dimensions, FrameTiming, &WorktreeList) -> Render,
     Dims: Fn() -> Dimensions,
     Paint: FnMut(&str) -> Result<()>,
     Clock: Fn() -> Instant,
     Tick: Fn(Option<Duration>) -> Option<Duration>,
-    StartPush: FnMut(PushCommand),
-    StartIssue: FnMut(crate::issue::IssueCommand),
-    StartConflicts: FnMut(),
+    StartPush: FnMut(PushCommand, &WorktreePath),
+    StartIssue: FnMut(crate::issue::IssueCommand, &WorktreePath, Generation),
+    StartConflicts: FnMut(&WorktreePath, Generation),
+    Worktrees: FnMut() -> Vec<WorktreeEntry>,
+    Paths: FnMut() -> Vec<WorktreePath>,
+    Switch: FnMut(&WorktreePath) -> Result<Snapshot, String>,
 {
     let LoopStart {
-        mut cache,
+        cache,
         mut freshest,
-        mut schedule,
-        mut ui,
+        schedule,
+        ui,
         session,
+        home,
     } = start;
-    // The probe answers on the loop's own channel, so the key is unbound until
-    // it does and the loop never waits for it.
-    let mut issue = IssueRun::new(session);
-    // The loop owns the state of `m`, and the thread that measures never
-    // touches it. So the one-run rule needs no lock.
-    let mut conflicts = ConflictsRun::new();
+    let mut state = LoopState {
+        cache,
+        schedule,
+        ui,
+        // The probe answers on the loop's own channel, so the key is unbound
+        // until it does and the loop never waits for it.
+        issue: IssueRun::new(session),
+        // The loop owns the state of `m`, and the thread that measures never
+        // touches it. So the one-run rule needs no lock.
+        conflicts: ConflictsRun::new(),
+        // The loop starts on the worktree where the user started gsw.
+        current: home.clone(),
+        home,
+        generation: Generation::default(),
+    };
     loop {
         // Wait for the first event, or — when the decay timer is enabled — wake
         // after `interval` of quiet for a tick.
@@ -1690,28 +2427,20 @@ where
         // and — while a countdown is on screen — the cadence that countdown
         // needs to keep moving. The clock is read only when a walk is actually
         // owed.
-        let walk_wait = schedule
+        let walk_wait = state
+            .schedule
             .next_walk_at()
             .map(|at| at.saturating_duration_since((hooks.clock)()));
         let wait = wait_window(&[
             (hooks.next_tick)(freshest),
             walk_wait,
-            schedule.interval.map(|_| CLOCK_CADENCE),
-            ui.next_tick(),
+            state.schedule.interval.map(|_| CLOCK_CADENCE),
+            state.ui.next_tick(),
         ]);
         let woke_for_timeout = match wait {
             Some(interval) => match rx.recv_timeout(interval) {
                 Ok(event) => {
-                    if absorb(
-                        event,
-                        &mut pending,
-                        &mut ui,
-                        &mut issue,
-                        &mut conflicts,
-                        &cache,
-                        &mut hooks,
-                    ) == Flow::Quit
-                    {
+                    if absorb(event, &mut pending, &mut state, &mut hooks) == Flow::Quit {
                         break;
                     }
                     false
@@ -1721,16 +2450,7 @@ where
             },
             None => match rx.recv() {
                 Ok(event) => {
-                    if absorb(
-                        event,
-                        &mut pending,
-                        &mut ui,
-                        &mut issue,
-                        &mut conflicts,
-                        &cache,
-                        &mut hooks,
-                    ) == Flow::Quit
-                    {
+                    if absorb(event, &mut pending, &mut state, &mut hooks) == Flow::Quit {
                         break;
                     }
                     false
@@ -1757,16 +2477,7 @@ where
                     Ok(event) => {
                         // Asked before `absorb`, which takes the event by value.
                         let streamed = matches!(event, Event::PushOutput(_));
-                        if absorb(
-                            event,
-                            &mut pending,
-                            &mut ui,
-                            &mut issue,
-                            &mut conflicts,
-                            &cache,
-                            &mut hooks,
-                        ) == Flow::Quit
-                        {
+                        if absorb(event, &mut pending, &mut state, &mut hooks) == Flow::Quit {
                             // Unlike the first wake, a quit that arrives inside
                             // the drain still paints: the events ahead of it in
                             // this burst have already been applied, and the
@@ -1810,17 +2521,17 @@ where
         let walk_now = if saw_force {
             // Manual refresh (`r`): lift the cooldown gate and walk now. The walk
             // branch re-measures cost and re-arms the throttle from it.
-            schedule.force();
+            state.schedule.force();
             true
         } else if saw_fs {
-            matches!(schedule.on_change(now), Walk::Now)
+            matches!(state.schedule.on_change(now), Walk::Now)
         } else if woke_for_timeout {
             // Only a walk the schedule OWES fires here — a deferred change's
             // coalesced walk, or a timed refresh — and only once it has actually
             // fallen due: a decay tick or a clock tick that fires ahead of it (a
             // shorter wait than the walk deadline) re-renders from cache without
             // walking, so Part A and Part B compose.
-            matches!(schedule.next_walk_at(), Some(due) if now >= due)
+            matches!(state.schedule.next_walk_at(), Some(due) if now >= due)
         } else {
             false
         };
@@ -1829,8 +2540,82 @@ where
         // before: a walk and a resize. Hoisted out of the branches so the frame
         // height below is computed from dimensions that are already current.
         if walk_now || saw_resize {
-            cache.dims = (hooks.dimensions)();
+            state.cache.dims = (hooks.dimensions)();
         }
+
+        // The walk comes before the division of the pane below. It needs no
+        // pane size, and what it finds can change what goes under the frame.
+        if walk_now {
+            let collected = (hooks.collect)(&state.current);
+            match collected {
+                Ok(snapshot) => {
+                    // Re-seed the collection time to the walk's start so a later
+                    // decay tick or resize advances ages from *this* walk, not
+                    // the previous one.
+                    state.cache.collected_at = now;
+                    state.cache.snapshot = snapshot;
+                }
+                Err(_) => {
+                    // A walk can fail for reasons that are none of the user's
+                    // business and usually transient: `git gc` swapping the ref
+                    // store, a worktree being pruned, `.git` renamed
+                    // mid-operation. Ending watch mode over that would make the
+                    // whole stale-configuration fallback in
+                    // [`RepoHandle::reopened`] pointless, so absorb it: keep the
+                    // last good snapshot and let the next event retry.
+                    // `collected_at` is pointedly NOT advanced — a collection
+                    // that never happened must not reset every displayed age to
+                    // "just now", or the monitor would claim freshness exactly
+                    // when it has none. The frame therefore keeps aging
+                    // truthfully while the repository is unreadable.
+                    //
+                    // One failure does not pass: the worktree on the screen
+                    // went away. Then gsw goes back to the home worktree.
+                    state.return_home_if_gone(
+                        now,
+                        &hooks.clock,
+                        &mut hooks.worktree_paths,
+                        &mut hooks.switch,
+                    );
+                }
+            }
+            // Measure the wall-clock cost of the git work of this wake and feed
+            // it to the throttle, which arms the next cooldown (= 100·cost)
+            // from it. Deliberately outside the match: a *failed* walk still
+            // paid for a status traversal, and a repo that is unreadable for a
+            // while fails every walk, so gating the retries on the same
+            // duty-cycle budget is what keeps a permanently-deleted repo from
+            // pinning a core. Deliberately after the match too: after a failed
+            // walk, the check for a worktree that is gone reads the paths of
+            // the worktrees, and it can open home. That is git work of this
+            // wake, so the cost holds it, whether the return works or not. A
+            // return that works records its open first, and this record then
+            // replaces that one, from the same start.
+            let cost = (hooks.clock)().saturating_duration_since(now);
+            state.schedule.record(now, cost);
+        }
+
+        // The open list takes the rows under the head of the frame. A pane
+        // that leaves it no row closes it, so Enter never chooses a row that
+        // the user did not see. The check comes after the walk, because the
+        // snapshot sets how tall the head is, and before the overlay, so a
+        // message that waited for the list reaches the row on the frame that
+        // closes it.
+        //
+        // A list that stays open stores the scroll of the window that this
+        // frame shows, so the next move of the cursor starts from the window
+        // that the user saw.
+        match crate::list_rows(&state.cache.snapshot, state.cache.dims) {
+            0 => {
+                let _ = state.ui.close_list();
+            }
+            rows => {
+                if let Some(list) = state.ui.list_mut() {
+                    list.settle(rows);
+                }
+            }
+        }
+
         // What the push overlay will paint under the frame, and how tall the
         // frame is left — one call, because they are one division of the pane
         // both have to share. The frame is rendered shorter by exactly what the
@@ -1846,77 +2631,36 @@ where
         // rather than left answerable by an Enter nobody was asked for. That is
         // the backstop only. A `p` pressed in a pane that was already too short
         // raises no question in the first place — `absorb` settles that with
-        // `cache.dims`, because no render runs between two keys of one burst —
-        // so what this catches is the pane that shrank under a question that
-        // did fit when it was asked. It runs after this wake's events have been
-        // absorbed and before the next wake reads one, so the key a user
+        // `state.cache.dims`, because no render runs between two keys of one
+        // burst — so what this catches is the pane that shrank under a question
+        // that did fit when it was asked. It runs after this wake's events have
+        // been absorbed and before the next wake reads one, so the key a user
         // presses in reaction to what this paints is classified against the
         // mode this pane actually showed them.
-        let overlay = ui.overlay(cache.dims, now);
+        let overlay = state.ui.overlay(state.cache.dims, now);
         let frame_dims = Dimensions {
             height: overlay.frame_rows(),
-            ..cache.dims
+            ..state.cache.dims
         };
 
-        let render = if walk_now {
-            let collected = (hooks.collect)();
-            // Measure the walk's wall-clock cost around collect and feed it to
-            // the throttle, which arms the next cooldown (= 100·cost) from it.
-            // Deliberately outside the match: a *failed* walk still paid for a
-            // status traversal, and a repo that is unreadable for a while fails
-            // every walk, so gating the retries on the same duty-cycle budget is
-            // what keeps a permanently-deleted repo from pinning a core.
-            let cost = (hooks.clock)().saturating_duration_since(now);
-            schedule.record(now, cost);
-            match collected {
-                Ok(snapshot) => {
-                    // Re-seed the collection time to the walk's start so a later
-                    // decay tick or resize advances ages from *this* walk, not
-                    // the previous one.
-                    cache.collected_at = now;
-                    cache.snapshot = snapshot;
-                    (hooks.render)(
-                        &cache.snapshot,
-                        frame_dims,
-                        timing(Duration::ZERO, &schedule, now),
-                    )
-                }
-                // A walk can fail for reasons that are none of the user's
-                // business and usually transient: `git gc` swapping the ref
-                // store, a worktree being pruned, `.git` renamed mid-operation.
-                // Ending watch mode over that would make the whole
-                // stale-configuration fallback in [`RepoHandle::reopened`]
-                // pointless, so absorb it: keep the last good snapshot and let
-                // the next event retry. `collected_at` is pointedly NOT advanced
-                // — a collection that never happened must not reset every
-                // displayed age to "just now", or the monitor would claim
-                // freshness exactly when it has none. The frame therefore keeps
-                // aging truthfully while the repository is unreadable.
-                Err(_) => {
-                    let age_offset = now.saturating_duration_since(cache.collected_at);
-                    (hooks.render)(
-                        &cache.snapshot,
-                        frame_dims,
-                        timing(age_offset, &schedule, now),
-                    )
-                }
+        // Every frame advances every displayed age by the time since the last
+        // walk that succeeded. A walk that succeeded on this wake moved the
+        // collection time to `now`, so its frame shows every age as it was
+        // collected. A walk that failed, a resize, a decay tick, and a change
+        // that the throttle deferred all leave the collection time where it
+        // was, so the cached snapshot goes on ageing truthfully.
+        let frame_timing = timing(
+            now.saturating_duration_since(state.cache.collected_at),
+            &state.schedule,
+            now,
+        );
+        // The open list of the worktrees takes the pane, so its frame replaces
+        // the status frame for as long as it is open.
+        let render = match state.ui.list() {
+            Some(list) => {
+                (hooks.render_list)(&state.cache.snapshot, frame_dims, frame_timing, list)
             }
-        } else if saw_resize {
-            let age_offset = now.saturating_duration_since(cache.collected_at);
-            (hooks.render)(
-                &cache.snapshot,
-                frame_dims,
-                timing(age_offset, &schedule, now),
-            )
-        } else {
-            // Decay tick, or an FS change the throttle deferred: re-render the
-            // cached snapshot, advancing every displayed age by the elapsed time.
-            let age_offset = now.saturating_duration_since(cache.collected_at);
-            (hooks.render)(
-                &cache.snapshot,
-                frame_dims,
-                timing(age_offset, &schedule, now),
-            )
+            None => (hooks.render)(&state.cache.snapshot, frame_dims, frame_timing),
         };
 
         // The painted screen is the frame with the push overlay under it. They
@@ -2012,20 +2756,30 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 ///   killed from another pane.
 /// - [`InputMode::Normal`]: `q` quits, `r` forces a refresh, `p` asks to push,
 ///   `G` asks for the issue of the branch, and `m` asks to measure a rebase and
-///   a merge against the default branch.
+///   a merge against the default branch. Up goes to the home worktree, Left to
+///   the previous worktree, Right to the next worktree, and Down opens the
+///   list of the worktrees.
 /// - [`InputMode::Confirm`]: `y` and Enter push, `n`, Esc, and `q` cancel.
 ///   Nothing else acts — with a question on screen, `q` is the answer "no",
-///   not "quit", and `r` is not a refresh. That is why the mode exists.
+///   not "quit", `r` is not a refresh, and an arrow key is no answer at all.
+///   That is why the mode exists.
 /// - [`InputMode::Pushing`]: `q` quits, `r` refreshes, `G` still asks for the
 ///   issue — a browser conflicts with nothing a push does — and `m` still asks
 ///   to measure, because a measurement is read-only for the repository. `p` is
-///   inert, so an impatient second press cannot start an overlapping push.
-/// - `M` is not bound. It gives [`Event::Dismiss`] as every unbound key does.
+///   inert, so an impatient second press cannot start an overlapping push. The
+///   arrow keys are inert too: the window under the frame belongs to the
+///   worktree that pushes, so the watch stays on that worktree.
+/// - [`InputMode::List`]: Up and Down move the cursor, Enter goes to the
+///   worktree under it, and Esc and `q` close the list. Every other key gives
+///   `None` and does nothing at all: `r` does not walk, `p` does not ask, `G`
+///   and `m` start nothing, and no line leaves the row. The list takes the
+///   pane, so the frame that such a key acts on is not on the screen.
+/// - `M` is not bound. It does what every unbound key does in the mode.
 /// - `G` acts only where `issue` says a command exists. Where it does not, the
-///   key gives [`Event::Dismiss`] like any other unbound key, which is the one
-///   silent case this feature has.
-/// - Every other press is [`Event::Dismiss`], which clears a status message and
-///   otherwise does nothing.
+///   key does what any other unbound key does, which is the one silent case
+///   this feature has.
+/// - Every other press in the three other modes is [`Event::Dismiss`], which
+///   clears a status message and otherwise does nothing.
 fn classify_input(key: KeyEvent, mode: InputMode, issue: IssueKey) -> Option<Event> {
     let KeyEvent {
         code,
@@ -2048,8 +2802,8 @@ fn classify_input(key: KeyEvent, mode: InputMode, issue: IssueKey) -> Option<Eve
         InputMode::Normal | InputMode::Pushing => match code {
             KeyCode::Char('q') => Event::Quit,
             KeyCode::Char('r') => Event::ForceRefresh,
-            // The one key the two modes disagree on: a push already running
-            // makes a second request meaningless rather than harmless.
+            // A push already running makes a second request meaningless
+            // rather than harmless.
             KeyCode::Char('p') if mode == InputMode::Normal => Event::PushRequested,
             // A browser opens beside the monitor, so a push in flight is no
             // reason to refuse. With no command behind it the key falls
@@ -2058,12 +2812,33 @@ fn classify_input(key: KeyEvent, mode: InputMode, issue: IssueKey) -> Option<Eve
             // A measurement is read-only for the repository of the user, so a
             // push in flight is no reason to refuse it either.
             KeyCode::Char('m') => Event::ConflictsRequested,
+            // The arrow keys move the watch to another worktree. The window
+            // of a running push belongs to the worktree that pushes, so they
+            // act in the normal mode only, as `p` does.
+            KeyCode::Up if mode == InputMode::Normal => Event::GoHome,
+            KeyCode::Left if mode == InputMode::Normal => Event::GoPrevious,
+            KeyCode::Right if mode == InputMode::Normal => Event::GoNext,
+            // Down opens the list of the worktrees. The list takes the pane,
+            // and the window of a running push belongs to the worktree that
+            // pushes, so it opens in the normal mode only.
+            KeyCode::Down if mode == InputMode::Normal => Event::OpenList,
             _ => Event::Dismiss,
         },
         InputMode::Confirm => match code {
             KeyCode::Char('y' | 'Y') | KeyCode::Enter => Event::PushConfirmed,
             KeyCode::Char('n' | 'N' | 'q') | KeyCode::Esc => Event::PushCancelled,
             _ => Event::Dismiss,
+        },
+        InputMode::List => match code {
+            KeyCode::Up => Event::ListUp,
+            KeyCode::Down => Event::ListDown,
+            KeyCode::Enter => Event::ListGo,
+            // `q` closes the list, as it answers "no" to the push question.
+            KeyCode::Esc | KeyCode::Char('q') => Event::ListClose,
+            // The list takes the pane. A key that it does not name acts on
+            // nothing, because the frame that the key acts on is not on the
+            // screen.
+            _ => return None,
         },
     };
     Some(event)
@@ -2154,7 +2929,7 @@ mod tests {
     /// A [`RenderConfig`] for the fixture-backed walk tests: no explicit base,
     /// no caps, no log rows, no color. Only the git work matters here — the
     /// rendering knobs are exercised by the render tests.
-    fn walk_config() -> RenderConfig {
+    pub(super) fn walk_config() -> RenderConfig {
         RenderConfig {
             base: None,
             max_files: None,
@@ -2164,6 +2939,30 @@ mod tests {
             width_offset: 0,
             refresh_interval: None,
         }
+    }
+
+    /// `resolve_home` gives the root of the work tree in the spelling of
+    /// [`WorktreePath::resolve`], so the loop compares the home worktree with
+    /// the paths of the list correctly. A root that went away after `main`
+    /// opened it is refused, before watch mode takes the screen.
+    #[test]
+    fn resolve_home_gives_the_resolved_root_and_refuses_a_root_that_went_away() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("repo");
+        testrepo::init_repo_at(&root);
+        let handle = RepoHandle::discover(&root).expect("the fixture is a work tree");
+
+        assert_eq!(
+            resolve_home(&handle).expect("the root is there"),
+            WorktreePath::resolve(&root).expect("the fixture made the root"),
+        );
+
+        std::fs::remove_dir_all(&root).expect("delete the work tree");
+        let refused = resolve_home(&handle).expect_err("no directory is at the root");
+        assert!(
+            refused.to_string().starts_with(HOME_UNRESOLVED),
+            "the refusal must say why, got {refused}",
+        );
     }
 
     #[test]
@@ -2975,7 +3774,25 @@ mod tests {
     const BOTH_AVAILABILITIES: [IssueKey; 2] = [IssueKey::Bound, IssueKey::Unbound];
 
     /// Every mode a key can arrive in.
-    const EVERY_MODE: [InputMode; 3] = [InputMode::Normal, InputMode::Confirm, InputMode::Pushing];
+    const EVERY_MODE: [InputMode; 4] = [
+        InputMode::Normal,
+        InputMode::Confirm,
+        InputMode::Pushing,
+        InputMode::List,
+    ];
+
+    /// What a key with no meaning gives in `mode`, as [`meaning`] names it.
+    ///
+    /// [`Event::Dismiss`] takes a status line off the row. While the list is
+    /// open, a key with no meaning gives nothing at all, because the list
+    /// takes the pane. The match is total, so a mode added later must say what
+    /// an unbound key does in it.
+    fn unbound(mode: InputMode) -> &'static str {
+        match mode {
+            InputMode::Normal | InputMode::Confirm | InputMode::Pushing => "Dismiss",
+            InputMode::List => "nothing",
+        }
+    }
 
     #[test]
     fn classify_input_maps_the_r_key_to_force_refresh() {
@@ -3096,11 +3913,13 @@ mod tests {
         // Silence belongs to this case only, and it is the silence of an
         // unbound key rather than a code path of its own.
         for mode in EVERY_MODE {
-            assert!(
-                matches!(
-                    classify_input(press(KeyCode::Char('G')), mode, IssueKey::Unbound),
-                    Some(Event::Dismiss),
-                ),
+            assert_eq!(
+                meaning(classify_input(
+                    press(KeyCode::Char('G')),
+                    mode,
+                    IssueKey::Unbound
+                )),
+                unbound(mode),
                 "`G` must do nothing in {mode:?} with no command behind it",
             );
         }
@@ -3112,11 +3931,9 @@ mod tests {
         // keys, and only one of them was asked for.
         for mode in EVERY_MODE {
             for issue in BOTH_AVAILABILITIES {
-                assert!(
-                    matches!(
-                        classify_input(press(KeyCode::Char('g')), mode, issue),
-                        Some(Event::Dismiss),
-                    ),
+                assert_eq!(
+                    meaning(classify_input(press(KeyCode::Char('g')), mode, issue)),
+                    unbound(mode),
                     "`g` must stay unbound in {mode:?} with {issue:?}",
                 );
             }
@@ -3163,15 +3980,19 @@ mod tests {
                         matches!(m, Some(Event::Dismiss)),
                         "`m` must not answer the push question with {issue:?}",
                     ),
+                    // The list takes the pane, so a measurement of the frame
+                    // under it is a key the user pressed at nothing.
+                    InputMode::List => assert!(
+                        m.is_none(),
+                        "`m` must do nothing while the list is open with {issue:?}",
+                    ),
                 }
 
                 // A shifted key and an unshifted one are two keys, and only
                 // one of them was asked for.
-                assert!(
-                    matches!(
-                        classify_input(press(KeyCode::Char('M')), mode, issue),
-                        Some(Event::Dismiss),
-                    ),
+                assert_eq!(
+                    meaning(classify_input(press(KeyCode::Char('M')), mode, issue)),
+                    unbound(mode),
                     "`M` must stay unbound in {mode:?} with {issue:?}",
                 );
 
@@ -3267,6 +4088,205 @@ mod tests {
                 classify_input(press(KeyCode::Char('r')), InputMode::Pushing, issue),
                 Some(Event::ForceRefresh),
             ));
+        }
+    }
+
+    /// The four arrow keys.
+    const ARROWS: [KeyCode; 4] = [KeyCode::Up, KeyCode::Down, KeyCode::Left, KeyCode::Right];
+
+    /// What [`classify_input`] gave, as a name that a failed assertion can
+    /// print. The arrow tests compare these names.
+    fn meaning(event: Option<Event>) -> &'static str {
+        match event {
+            Some(Event::GoHome) => "GoHome",
+            Some(Event::GoPrevious) => "GoPrevious",
+            Some(Event::GoNext) => "GoNext",
+            Some(Event::OpenList) => "OpenList",
+            Some(Event::ListUp) => "ListUp",
+            Some(Event::ListDown) => "ListDown",
+            Some(Event::ListGo) => "ListGo",
+            Some(Event::ListClose) => "ListClose",
+            Some(Event::Quit) => "Quit",
+            Some(Event::Dismiss) => "Dismiss",
+            Some(Event::PushConfirmed) => "PushConfirmed",
+            Some(Event::PushCancelled) => "PushCancelled",
+            Some(_) => "another event",
+            None => "nothing",
+        }
+    }
+
+    /// The keys of the table of the input modes: the four arrow keys, Enter,
+    /// and Esc, in that order.
+    const TABLE_KEYS: [KeyCode; 6] = [
+        KeyCode::Up,
+        KeyCode::Down,
+        KeyCode::Left,
+        KeyCode::Right,
+        KeyCode::Enter,
+        KeyCode::Esc,
+    ];
+
+    #[test]
+    fn each_arrow_key_enter_and_esc_mean_one_thing_in_each_input_mode() {
+        // The whole table, as the issue states it. In Normal, Up goes home,
+        // Left and Right go to the neighbours in path order, and Down opens
+        // the list. A question owns its answer, so an arrow key there answers
+        // nothing. A push in flight owns the window under the frame, so an
+        // arrow key there does nothing. In the list, Up and Down move the
+        // cursor, Enter goes, Esc closes, and Left and Right do nothing at
+        // all.
+        let table: [(InputMode, [&str; 6]); 4] = [
+            (
+                InputMode::Normal,
+                [
+                    "GoHome",
+                    "OpenList",
+                    "GoPrevious",
+                    "GoNext",
+                    "Dismiss",
+                    "Dismiss",
+                ],
+            ),
+            (
+                InputMode::Confirm,
+                [
+                    "Dismiss",
+                    "Dismiss",
+                    "Dismiss",
+                    "Dismiss",
+                    "PushConfirmed",
+                    "PushCancelled",
+                ],
+            ),
+            (InputMode::Pushing, ["Dismiss"; 6]),
+            (
+                InputMode::List,
+                [
+                    "ListUp",
+                    "ListDown",
+                    "nothing",
+                    "nothing",
+                    "ListGo",
+                    "ListClose",
+                ],
+            ),
+        ];
+        assert_eq!(
+            table.map(|(mode, _)| mode),
+            EVERY_MODE,
+            "the table must cover every input mode",
+        );
+        for issue in BOTH_AVAILABILITIES {
+            for (mode, meanings) in table {
+                for (code, expected) in TABLE_KEYS.into_iter().zip(meanings) {
+                    assert_eq!(
+                        meaning(classify_input(press(code), mode, issue)),
+                        expected,
+                        "{code:?} in {mode:?} with {issue:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn in_the_list_q_closes_it_and_every_other_key_does_nothing() {
+        // `q` closes the list, as `q` answers "no" to the push question. The
+        // list takes the pane, so every other key does nothing at all: `r`
+        // does not walk, `p` does not ask, `G` and `m` start nothing, and no
+        // key takes a line off the row. Ctrl-C still quits.
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        for issue in BOTH_AVAILABILITIES {
+            assert_eq!(
+                meaning(classify_input(
+                    press(KeyCode::Char('q')),
+                    InputMode::List,
+                    issue
+                )),
+                "ListClose",
+                "`q` must close the list with {issue:?}",
+            );
+            for code in [
+                KeyCode::Char('r'),
+                KeyCode::Char('p'),
+                KeyCode::Char('G'),
+                KeyCode::Char('m'),
+                KeyCode::Char('y'),
+                KeyCode::Char('n'),
+                KeyCode::Char('Q'),
+                KeyCode::Char('x'),
+                KeyCode::Tab,
+                KeyCode::Backspace,
+                KeyCode::PageDown,
+            ] {
+                assert_eq!(
+                    meaning(classify_input(press(code), InputMode::List, issue)),
+                    "nothing",
+                    "{code:?} must do nothing in the list with {issue:?}",
+                );
+            }
+            assert_eq!(
+                meaning(classify_input(ctrl_c, InputMode::List, issue)),
+                "Quit",
+                "Ctrl-C must quit from the list with {issue:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn the_arrow_keys_never_answer_the_push_question_and_do_nothing_while_a_push_runs() {
+        // A question on the screen owns its answer, so an arrow key there does
+        // what an unbound key does, and never pushes or cancels. A push in
+        // flight owns the window under the frame, and that window belongs to
+        // the worktree that pushes, so an arrow key does nothing then either.
+        // Enter and Esc keep their meaning at the question.
+        for issue in BOTH_AVAILABILITIES {
+            for mode in [InputMode::Confirm, InputMode::Pushing] {
+                for code in ARROWS {
+                    assert_eq!(
+                        meaning(classify_input(press(code), mode, issue)),
+                        "Dismiss",
+                        "{code:?} in {mode:?} with {issue:?}",
+                    );
+                }
+            }
+            assert_eq!(
+                meaning(classify_input(
+                    press(KeyCode::Enter),
+                    InputMode::Confirm,
+                    issue
+                )),
+                "PushConfirmed",
+                "Enter must still push with {issue:?}",
+            );
+            assert_eq!(
+                meaning(classify_input(
+                    press(KeyCode::Esc),
+                    InputMode::Confirm,
+                    issue
+                )),
+                "PushCancelled",
+                "Esc must still cancel with {issue:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_release_of_an_arrow_key_is_ignored_in_every_mode() {
+        // Only a press acts, and the arrow keys are no exception.
+        for mode in EVERY_MODE {
+            for issue in BOTH_AVAILABILITIES {
+                for code in ARROWS {
+                    let release = KeyEvent {
+                        kind: KeyEventKind::Release,
+                        ..press(code)
+                    };
+                    assert!(
+                        classify_input(release, mode, issue).is_none(),
+                        "a release of {code:?} must be ignored in {mode:?} with {issue:?}",
+                    );
+                }
+            }
         }
     }
 
@@ -3387,6 +4407,30 @@ mod tests {
         None
     }
 
+    /// The home worktree of the loop tests in this module. It is a fake path:
+    /// no hook of these tests touches the filesystem through it.
+    pub(super) fn loop_home() -> WorktreePath {
+        WorktreePath::fake("/code/home")
+    }
+
+    /// A `switch` hook that refuses every switch, and so changes nothing. No
+    /// loop test that uses it presses an arrow key, so the loop never calls it.
+    pub(super) fn no_switch(_target: &WorktreePath) -> Result<Snapshot, String> {
+        Err("this loop test watches one worktree".to_string())
+    }
+
+    /// A `render_list` hook for the loop tests that never open the list of the
+    /// worktrees. Their `worktrees` hook gives no worktree, so Down opens no
+    /// list, and the loop never calls it.
+    pub(super) fn no_list(
+        _snapshot: &Snapshot,
+        _dims: Dimensions,
+        _timing: FrameTiming,
+        _list: &WorktreeList,
+    ) -> Render {
+        frame("LIST")
+    }
+
     /// Build a [`Render`] with the given frame and no freshest age — enough for
     /// the event-driven loop tests, which don't exercise the cadence.
     pub(super) fn frame(output: &str) -> Render {
@@ -3409,6 +4453,7 @@ mod tests {
             upstream: None,
             operation: None,
             push_remote: None,
+            worktree: None,
         }
     }
 
@@ -3470,9 +4515,10 @@ mod tests {
                 schedule: WalkSchedule::new(Some(interval), base, Duration::ZERO),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -3489,9 +4535,15 @@ mod tests {
                 // A decay tick on the same cadence, so the loop always wakes:
                 // the test must fail when no walk is scheduled, not block.
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                worktree_paths: Vec::new,
+                switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -3526,9 +4578,10 @@ mod tests {
                 ),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || Ok(empty_snapshot()),
+                collect: |_current: &WorktreePath| Ok(empty_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, timing: FrameTiming| {
                     seen = Some(timing);
                     let _ = tx.send(Event::Quit);
@@ -3538,9 +4591,15 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: || clock_at,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                worktree_paths: Vec::new,
+                switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -3575,9 +4634,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -3590,9 +4650,15 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: stepping_clock(base, Duration::from_secs(60)),
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                worktree_paths: Vec::new,
+                switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -3630,9 +4696,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -3644,9 +4711,15 @@ mod tests {
                 },
                 clock: || now,
                 next_tick: timer_off,
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                worktree_paths: Vec::new,
+                switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -3678,9 +4751,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -3694,9 +4768,15 @@ mod tests {
                 },
                 clock: || now,
                 next_tick: timer_off,
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                worktree_paths: Vec::new,
+                switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -3727,9 +4807,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -3741,9 +4822,15 @@ mod tests {
                 },
                 clock: || now,
                 next_tick: timer_off,
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                worktree_paths: Vec::new,
+                switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -3772,9 +4859,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || Ok(empty_snapshot()),
+                collect: |_current: &WorktreePath| Ok(empty_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                     renders += 1;
                     // End the loop right after this first tick-driven render.
@@ -3790,9 +4878,15 @@ mod tests {
                 // Tiny interval so the tick fires fast; the cadence-vs-age
                 // mapping is covered by the next_tick tests.
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                worktree_paths: Vec::new,
+                switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -3824,9 +4918,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || Ok(empty_snapshot()),
+                collect: |_current: &WorktreePath| Ok(empty_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                     renders += 1;
                     let _ = tx.send(Event::Quit);
@@ -3839,9 +4934,15 @@ mod tests {
                 },
                 clock: || now,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                worktree_paths: Vec::new,
+                switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -3873,9 +4974,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -3889,9 +4991,15 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: || clock_at,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                worktree_paths: Vec::new,
+                switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -3931,9 +5039,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -3945,9 +5054,15 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: || now,
                 next_tick: timer_off,
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                worktree_paths: Vec::new,
+                switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -3989,9 +5104,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || Ok(empty_snapshot()),
+                collect: |_current: &WorktreePath| Ok(empty_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, timing: FrameTiming| {
                     offsets.push(timing.age_offset);
                     // First render is the FS walk (offset 0); the next wake is a
@@ -4009,9 +5125,15 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                worktree_paths: Vec::new,
+                switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -4070,9 +5192,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -4095,9 +5218,15 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: timer_off,
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                worktree_paths: Vec::new,
+                switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -4150,9 +5279,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -4185,9 +5315,15 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                worktree_paths: Vec::new,
+                switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -4227,9 +5363,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -4256,9 +5393,15 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: || base,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                worktree_paths: Vec::new,
+                switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -4305,9 +5448,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -4334,9 +5478,15 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: timer_off,
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                worktree_paths: Vec::new,
+                switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -4383,9 +5533,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -4411,9 +5562,15 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: timer_off,
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                worktree_paths: Vec::new,
+                switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -4450,9 +5607,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -4468,9 +5626,15 @@ mod tests {
                 },
                 clock: || base,
                 next_tick: timer_off,
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                worktree_paths: Vec::new,
+                switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -4520,9 +5684,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     // The exact shape `collect_snapshot` produces when the ref
                     // store has gone missing mid-walk.
@@ -4538,9 +5703,15 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: || clock_at,
                 next_tick: timer_off,
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                worktree_paths: Vec::new,
+                switch: no_switch,
+                render_list: no_list,
             },
         );
 
@@ -4607,9 +5778,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Err(anyhow::anyhow!("status platform: repository is gone"))
                 },
@@ -4632,9 +5804,15 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: timer_off,
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                worktree_paths: Vec::new,
+                switch: no_switch,
+                render_list: no_list,
             },
         );
 
@@ -4704,9 +5882,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     if collects == 1 {
                         // The repo is momentarily unreadable — mid-`gc`, say.
@@ -4750,9 +5929,15 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: timer_off,
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                worktree_paths: Vec::new,
+                switch: no_switch,
+                render_list: no_list,
             },
         );
 
@@ -4847,12 +6032,15 @@ mod tests {
 
 #[cfg(test)]
 mod push_loop_tests {
-    use super::tests::{frame, stepping_clock, timer_off, TEST_DEBOUNCE, TEST_DIMS};
+    use super::tests::{
+        frame, loop_home, no_list, no_switch, stepping_clock, timer_off, TEST_DEBOUNCE, TEST_DIMS,
+    };
     use super::*;
     use crate::conflicts::ConflictsOutcome;
     use crate::push::PushOutcome;
     use crossterm::event::{KeyCode, KeyModifiers};
     use std::cell::RefCell;
+    use std::collections::VecDeque;
     use testcolor::strip_ansi;
     use unicode_width::UnicodeWidthStr;
 
@@ -4869,6 +6057,7 @@ mod push_loop_tests {
             upstream: None,
             operation: None,
             push_remote: Some("origin".into()),
+            worktree: None,
         }
     }
 
@@ -4921,6 +6110,27 @@ mod push_loop_tests {
         issue_runs: Vec<crate::issue::IssueCommand>,
         /// How many measurements the loop started with `m`.
         conflict_runs: usize,
+        /// Every worktree the `switch` hook was asked to open, in order,
+        /// with the refused ones.
+        switches: Vec<WorktreePath>,
+        /// How many times the loop read the list of the worktrees with the
+        /// labels. Only Down reads it.
+        listings: usize,
+        /// How many times the loop read the paths of the worktrees: Left,
+        /// Right, and the check after a failed walk.
+        path_listings: usize,
+        /// The worktree each walk read, in order.
+        collected_from: Vec<WorktreePath>,
+        /// The worktree each push started in, in the order of
+        /// [`Seen::pushes`].
+        push_paths: Vec<WorktreePath>,
+        /// The worktree and the generation of each run of the issue command,
+        /// in the order of [`Seen::issue_runs`].
+        issue_paths: Vec<(WorktreePath, Generation)>,
+        /// The worktree and the generation of each run of `m`, in order.
+        conflict_paths: Vec<(WorktreePath, Generation)>,
+        /// The timing of each frame the loop rendered, in order.
+        timings: Vec<FrameTiming>,
     }
 
     /// Run the loop over a pre-loaded event queue and report what it did.
@@ -5013,46 +6223,392 @@ mod push_loop_tests {
         clock: Clock,
         session: crate::remote::Session,
     ) -> (String, Seen) {
+        drive(
+            events,
+            Setup {
+                dims,
+                measured: dims,
+                render: Box::new(move |_snapshot: &Snapshot, frame_dims: Dimensions| {
+                    render_frame(frame_dims)
+                }),
+                session,
+                schedule: no_timed_refresh_for_push(),
+                world: World::alone(),
+            },
+            clock,
+        )
+    }
+
+    /// The text that the render hook of a loop test paints for a snapshot, in
+    /// a frame of the given size.
+    type FrameText = Box<dyn Fn(&Snapshot, Dimensions) -> String>;
+
+    /// The text that the `render_list` hook of a loop test paints: `LIST`,
+    /// the branch of the snapshot, and the label of each row that a pane of
+    /// `dims` shows, with `>` before the cursor row and `⌂` after the home
+    /// row. For example `LIST bravo: alpha >bravo⌂ charlie`.
+    ///
+    /// The branch says which snapshot is under the list. The rows are the
+    /// window of [`crate::list_rows`] rows, as in the frame that production
+    /// draws.
+    fn list_frame_of(snapshot: &Snapshot, dims: Dimensions, list: &WorktreeList) -> String {
+        let rows: Vec<String> = list
+            .window(crate::list_rows(snapshot, dims))
+            .iter()
+            .map(|row| {
+                let cursor = if row.cursor { ">" } else { "" };
+                let home = if row.home { "⌂" } else { "" };
+                format!("{cursor}{}{home}", row.entry.label)
+            })
+            .collect();
+        format!("LIST {}: {}", snapshot.branch, rows.join(" "))
+    }
+
+    /// How one loop run is set up.
+    ///
+    /// [`run_loop_in_session`] fills it for the tests that predate the arrow
+    /// keys: one worktree, a frame that ignores its snapshot, and no timed
+    /// refresh. The worktree tests fill it with more worktrees and a frame
+    /// that names its snapshot.
+    struct Setup {
+        /// The pane the loop renders into.
+        dims: Dimensions,
+        /// The pane that the `dimensions` hook measures, which the loop reads
+        /// at each walk and each resize. It differs from `dims` only in a test
+        /// of a pane that changes size under the loop.
+        measured: Dimensions,
+        /// What the render hook paints for a snapshot, in a frame of the given
+        /// size.
+        render: FrameText,
+        /// Where the person who reads the screen sits.
+        session: crate::remote::Session,
+        /// The walk schedule the loop starts from.
+        schedule: WalkSchedule,
+        /// The worktrees, and how each switch comes out.
+        world: World,
+    }
+
+    /// The name of the one worktree of [`World::alone`]. Its snapshot is
+    /// [`pushable_snapshot`], because [`snapshot_of`] names the branch after
+    /// the worktree.
+    const ALONE: &str = "gsw-push";
+
+    /// The first of the three worktrees of [`World::three`], in path order.
+    const ALPHA: &str = "alpha";
+
+    /// The second of the three worktrees of [`World::three`], and its home.
+    const BRAVO: &str = "bravo";
+
+    /// The last of the three worktrees of [`World::three`], in path order.
+    const CHARLIE: &str = "charlie";
+
+    /// The worktree `/code/<name>`. No filesystem call touches it.
+    fn worktree(name: &str) -> WorktreePath {
+        WorktreePath::fake(format!("/code/{name}"))
+    }
+
+    /// The snapshot of the worktree at `path`: [`pushable_snapshot`], on a
+    /// branch named after the last component of the path. A frame then says
+    /// which worktree it shows, and a push says which branch it pushes.
+    fn snapshot_of(path: &WorktreePath) -> Snapshot {
+        let name = path
+            .as_path()
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .expect("a fake worktree path has a name");
+        Snapshot {
+            branch: name.to_string(),
+            ..pushable_snapshot()
+        }
+    }
+
+    /// The reason the fake `switch` hook gives for a worktree it refuses.
+    const REFUSED: &str = "no such worktree";
+
+    /// The reason the fake `collect` hook gives for a walk that fails.
+    const UNWALKABLE: &str = "the walk failed";
+
+    /// The worktrees a loop run can move between, and how each switch comes
+    /// out.
+    ///
+    /// The fake `worktrees` hook gives [`World::listed`], and the fake
+    /// `worktree_paths` hook gives the paths of those worktrees. Each read of
+    /// either hook moves the clock of the loop on by [`World::list_cost`].
+    /// The fake `switch` hook gives [`snapshot_of`] its target, or refuses a
+    /// target in [`World::refused`] with [`REFUSED`].
+    struct World {
+        /// The worktree where gsw started.
+        home: WorktreePath,
+        /// Every worktree, sorted by path, as the listing gives them. The
+        /// `worktrees` hook gives these entries at each press of Down, and the
+        /// `worktree_paths` hook gives their paths, in the same order.
+        listed: Vec<WorktreeEntry>,
+        /// The worktrees whose switch fails, as the switch to a worktree that
+        /// stopped existing fails.
+        refused: Vec<WorktreePath>,
+        /// The worktrees that go away as the loop switches to them, as `git
+        /// worktree remove` in another pane makes a worktree go. The switch
+        /// works. From then on, the list does not hold the worktree, and every
+        /// walk of it and every switch to it fails.
+        vanishing: Vec<WorktreePath>,
+        /// The worktrees that are gone from the start: the list does not hold
+        /// them, and every walk of them and every switch to them fails.
+        removed: Vec<WorktreePath>,
+        /// The worktrees whose walks fail while the list still holds them, as
+        /// a walk fails when `git gc` swaps the ref store under it.
+        unreadable: Vec<WorktreePath>,
+        /// How long each read of a list of the worktrees takes. Each read
+        /// moves the clock of the loop on by this cost, as a real read of the
+        /// list takes time. It is zero unless a test sets it.
+        list_cost: Duration,
+    }
+
+    impl World {
+        /// The worktrees `/code/<name>` for each of `names`, with the home
+        /// worktree at `home`. Nothing is refused.
+        ///
+        /// # Panics
+        ///
+        /// Panics when `names` is not sorted. The moves search by sort order,
+        /// so an unsorted list gives wrong answers with no panic of its own.
+        fn of(names: &[&str], home: &str) -> Self {
+            let listed: Vec<WorktreeEntry> = names
+                .iter()
+                .map(|name| WorktreeEntry {
+                    path: worktree(name),
+                    label: (*name).to_string(),
+                })
+                .collect();
+            assert!(
+                listed.iter().map(|entry| &entry.path).is_sorted(),
+                "the fake list must be sorted by path, as the listing gives it: {names:?}",
+            );
+            Self {
+                home: worktree(home),
+                listed,
+                refused: Vec::new(),
+                vanishing: Vec::new(),
+                removed: Vec::new(),
+                unreadable: Vec::new(),
+                list_cost: Duration::ZERO,
+            }
+        }
+
+        /// The one worktree that every test before the arrow keys watched.
+        fn alone() -> Self {
+            Self::of(&[ALONE], ALONE)
+        }
+
+        /// Three worktrees in path order, with the home worktree between the
+        /// two others.
+        fn three() -> Self {
+            Self::three_at(BRAVO)
+        }
+
+        /// The three worktrees of [`World::three`], with the home worktree at
+        /// `home`.
+        fn three_at(home: &str) -> Self {
+            Self::of(&[ALPHA, BRAVO, CHARLIE], home)
+        }
+
+        /// This world, where the switch to the worktree `name` fails with
+        /// [`REFUSED`].
+        fn refusing(mut self, name: &str) -> Self {
+            self.refused.push(worktree(name));
+            self
+        }
+
+        /// This world, where the worktree `name` goes away as the loop
+        /// switches to it. See [`World::vanishing`].
+        fn vanishing(mut self, name: &str) -> Self {
+            self.vanishing.push(worktree(name));
+            self
+        }
+
+        /// This world, where the worktree `name` is gone from the start. See
+        /// [`World::removed`].
+        fn removed(mut self, name: &str) -> Self {
+            self.removed.push(worktree(name));
+            self
+        }
+
+        /// This world, where every walk of the worktree `name` fails while
+        /// the list still holds it. See [`World::unreadable`].
+        fn unreadable(mut self, name: &str) -> Self {
+            self.unreadable.push(worktree(name));
+            self
+        }
+
+        /// This world, where each read of a list of the worktrees moves the
+        /// clock of the loop on by `cost`. See [`World::list_cost`].
+        fn slow_list(mut self, cost: Duration) -> Self {
+            self.list_cost = cost;
+            self
+        }
+    }
+
+    /// The shared body of every helper above: pre-load the queue, run the loop
+    /// as `setup` says, and report the last painted screen plus what the hooks
+    /// saw.
+    ///
+    /// `clock` is read once up front for the cache's collection time, so a
+    /// frozen clock lands on exactly the instant the loop reads later.
+    fn drive<Clock: Fn() -> Instant>(
+        events: Vec<Event>,
+        setup: Setup,
+        clock: Clock,
+    ) -> (String, Seen) {
+        drive_bursts(vec![events], setup, clock)
+    }
+
+    /// [`drive`] over several bursts of events, with one frame for each.
+    ///
+    /// The first burst is queued before the loop starts, as [`drive`] queues
+    /// its events. The frame of each burst queues the next burst, so the loop
+    /// takes each burst in one wake and draws one frame for it. A test then
+    /// reads in [`Seen::paints`] what each burst put on the screen. A burst
+    /// that changes nothing on the screen paints nothing. The last burst must
+    /// end with [`Event::Quit`], or the loop blocks.
+    fn drive_bursts<Clock: Fn() -> Instant>(
+        bursts: Vec<Vec<Event>>,
+        setup: Setup,
+        clock: Clock,
+    ) -> (String, Seen) {
+        let Setup {
+            dims,
+            measured,
+            render,
+            session,
+            schedule,
+            world,
+        } = setup;
         let (tx, rx) = mpsc::channel();
-        for event in events {
+        let mut bursts = VecDeque::from(bursts);
+        for event in bursts.pop_front().unwrap_or_default() {
             tx.send(event).expect("queue event");
         }
+        let later = RefCell::new(bursts);
+        // Each wake of the loop draws exactly one frame, through `render` or
+        // through `render_list`, so each of the two queues the next burst.
+        let queue_next_burst = || {
+            if let Some(burst) = later.borrow_mut().pop_front() {
+                for event in burst {
+                    tx.send(event).expect("queue event");
+                }
+            }
+        };
         let seen = RefCell::new(Seen::default());
+        // The worktrees that are gone: the removed ones from the start, and
+        // each vanishing one from the switch that reached it.
+        let removed = RefCell::new(world.removed.clone());
         let mut displayed = String::new();
-        let base = clock();
+        // Each read of a list of the worktrees moves the clock of the loop on
+        // by `world.list_cost`, and `skew` holds the sum. Each read of the
+        // loop clock reads `clock` exactly once, so a clock that counts its
+        // reads counts the same reads as before. The start of the harness
+        // goes through the loop clock too.
+        let skew = std::cell::Cell::new(Duration::ZERO);
+        let loop_clock = || clock() + skew.get();
+        let base = loop_clock();
 
         event_loop(
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
             LoopStart {
-                cache: cache_in(base, dims),
+                cache: SnapshotCache {
+                    snapshot: snapshot_of(&world.home),
+                    collected_at: base,
+                    dims,
+                },
                 freshest: None,
-                schedule: no_timed_refresh_for_push(),
+                schedule,
                 ui: PushUi::new(false),
                 session,
+                home: world.home.clone(),
             },
             LoopHooks {
-                collect: || {
-                    seen.borrow_mut().collects += 1;
-                    Ok(pushable_snapshot())
+                collect: |current: &WorktreePath| {
+                    let mut seen = seen.borrow_mut();
+                    seen.collects += 1;
+                    seen.collected_from.push(current.clone());
+                    if removed.borrow().contains(current) || world.unreadable.contains(current) {
+                        anyhow::bail!("{UNWALKABLE}: {}", current.as_path().display());
+                    }
+                    Ok(snapshot_of(current))
                 },
-                render: |_snap: &Snapshot, frame_dims: Dimensions, _timing: FrameTiming| {
-                    seen.borrow_mut().frame_heights.push(frame_dims.height);
-                    frame(&render_frame(frame_dims))
+                render: |snap: &Snapshot, frame_dims: Dimensions, timing: FrameTiming| {
+                    queue_next_burst();
+                    let mut seen = seen.borrow_mut();
+                    seen.frame_heights.push(frame_dims.height);
+                    seen.timings.push(timing);
+                    frame(&render(snap, frame_dims))
                 },
-                dimensions: move || dims,
+                render_list: |snap: &Snapshot,
+                              frame_dims: Dimensions,
+                              _timing: FrameTiming,
+                              list: &WorktreeList| {
+                    queue_next_burst();
+                    frame(&list_frame_of(snap, frame_dims, list))
+                },
+                dimensions: move || measured,
                 paint: |output: &str| {
                     seen.borrow_mut().paints.push(output.to_string());
                     Ok(())
                 },
-                clock,
+                clock: loop_clock,
                 next_tick: timer_off,
-                start_push: |command: PushCommand| seen.borrow_mut().pushes.push(command),
-                start_issue: |command: crate::issue::IssueCommand| {
-                    seen.borrow_mut().issue_runs.push(command);
+                start_push: |command: PushCommand, current: &WorktreePath| {
+                    let mut seen = seen.borrow_mut();
+                    seen.pushes.push(command);
+                    seen.push_paths.push(current.clone());
                 },
-                start_conflicts: || seen.borrow_mut().conflict_runs += 1,
+                start_issue: |command: crate::issue::IssueCommand,
+                              current: &WorktreePath,
+                              generation: Generation| {
+                    let mut seen = seen.borrow_mut();
+                    seen.issue_runs.push(command);
+                    seen.issue_paths.push((current.clone(), generation));
+                },
+                start_conflicts: |current: &WorktreePath, generation: Generation| {
+                    let mut seen = seen.borrow_mut();
+                    seen.conflict_runs += 1;
+                    seen.conflict_paths.push((current.clone(), generation));
+                },
+                worktrees: || {
+                    seen.borrow_mut().listings += 1;
+                    skew.set(skew.get() + world.list_cost);
+                    let removed = removed.borrow();
+                    world
+                        .listed
+                        .iter()
+                        .filter(|entry| !removed.contains(&entry.path))
+                        .cloned()
+                        .collect()
+                },
+                worktree_paths: || {
+                    seen.borrow_mut().path_listings += 1;
+                    skew.set(skew.get() + world.list_cost);
+                    let removed = removed.borrow();
+                    world
+                        .listed
+                        .iter()
+                        .filter(|entry| !removed.contains(&entry.path))
+                        .map(|entry| entry.path.clone())
+                        .collect()
+                },
+                switch: |target: &WorktreePath| {
+                    seen.borrow_mut().switches.push(target.clone());
+                    if world.refused.contains(target) || removed.borrow().contains(target) {
+                        return Err(format!("{REFUSED}: {}", target.as_path().display()));
+                    }
+                    // A vanishing worktree exists at the switch, and goes away
+                    // at once.
+                    if world.vanishing.contains(target) {
+                        removed.borrow_mut().push(target.clone());
+                    }
+                    Ok(snapshot_of(target))
+                },
             },
         )
         .expect("loop");
@@ -5420,12 +6976,10 @@ mod push_loop_tests {
         let (_screen, seen) = run_loop(vec![
             probe_answered(),
             press_g(),
-            Event::IssueFinished(crate::issue::IssueOutcome::new(
-                "ggs",
-                true,
-                &[],
-                "exit status: 0",
-            )),
+            Event::IssueFinished {
+                generation: Generation::default(),
+                outcome: crate::issue::IssueOutcome::new("ggs", true, &[], "exit status: 0"),
+            },
             press_g(),
             Event::Quit,
         ]);
@@ -5444,12 +6998,15 @@ mod push_loop_tests {
         let (screen, _seen) = run_loop(vec![
             probe_answered(),
             press_g(),
-            Event::IssueFinished(crate::issue::IssueOutcome::new(
-                "ggs",
-                false,
-                &["branch main names no issue".to_string()],
-                "exit status: 2",
-            )),
+            Event::IssueFinished {
+                generation: Generation::default(),
+                outcome: crate::issue::IssueOutcome::new(
+                    "ggs",
+                    false,
+                    &["branch main names no issue".to_string()],
+                    "exit status: 2",
+                ),
+            },
             Event::Quit,
         ]);
         assert!(
@@ -5464,12 +7021,10 @@ mod push_loop_tests {
         let (screen, _seen) = run_loop(vec![
             probe_answered(),
             press_g(),
-            Event::IssueFinished(crate::issue::IssueOutcome::new(
-                "ggs",
-                true,
-                &[],
-                "exit status: 0",
-            )),
+            Event::IssueFinished {
+                generation: Generation::default(),
+                outcome: crate::issue::IssueOutcome::new("ggs", true, &[], "exit status: 0"),
+            },
             Event::Quit,
         ]);
         assert_eq!(
@@ -5494,12 +7049,18 @@ mod push_loop_tests {
 
     /// The branch of a run against `main`, as the loop receives it.
     fn started_against_main() -> Event {
-        Event::ConflictsStarted("main".to_string())
+        Event::ConflictsStarted {
+            generation: Generation::default(),
+            branch: "main".to_string(),
+        }
     }
 
     /// The outcome of a run, as the loop receives it.
     fn finished(outcome: ConflictsOutcome) -> Event {
-        Event::ConflictsFinished(outcome)
+        Event::ConflictsFinished {
+            generation: Generation::default(),
+            outcome,
+        }
     }
 
     /// A run against `main` whose two replays both came back clean.
@@ -5785,9 +7346,10 @@ mod push_loop_tests {
                 schedule: no_timed_refresh_for_push(),
                 ui: pushed_ui(base),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || Ok(pushable_snapshot()),
+                collect: |_current: &WorktreePath| Ok(pushable_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| frame("FRAME"),
                 dimensions: || TEST_DIMS,
                 paint: |output: &str| {
@@ -5808,9 +7370,15 @@ mod push_loop_tests {
                     }
                 },
                 next_tick: timer_off,
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                worktree_paths: Vec::new,
+                switch: no_switch,
+                render_list: no_list,
             },
         )
         .expect("loop");
@@ -6203,9 +7771,10 @@ mod push_loop_tests {
                     schedule: no_timed_refresh_for_push(),
                     ui: PushUi::new(false),
                     session: crate::remote::Session::Local,
+                    home: loop_home(),
                 },
                 LoopHooks {
-                    collect: || Ok(pushable_snapshot()),
+                    collect: |_current: &WorktreePath| Ok(pushable_snapshot()),
                     render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                         frame("FRAME")
                     },
@@ -6213,11 +7782,21 @@ mod push_loop_tests {
                     paint: |_output: &str| Ok(()),
                     clock: move || base,
                     next_tick: timer_off,
-                    start_push: |command: PushCommand| seen.borrow_mut().pushes.push(command),
-                    start_issue: |command: crate::issue::IssueCommand| {
+                    start_push: |command: PushCommand, _current: &WorktreePath| {
+                        seen.borrow_mut().pushes.push(command)
+                    },
+                    start_issue: |command: crate::issue::IssueCommand,
+                                  _current: &WorktreePath,
+                                  _generation: Generation| {
                         seen.borrow_mut().issue_runs.push(command);
                     },
-                    start_conflicts: || seen.borrow_mut().conflict_runs += 1,
+                    start_conflicts: |_current: &WorktreePath, _generation: Generation| {
+                        seen.borrow_mut().conflict_runs += 1
+                    },
+                    worktrees: Vec::new,
+                    worktree_paths: Vec::new,
+                    switch: no_switch,
+                    render_list: no_list,
                 },
             )
             .expect("loop");
@@ -6229,5 +7808,2138 @@ mod push_loop_tests {
             .recv_timeout(Duration::from_secs(10))
             .expect("Ctrl-C must end the loop rather than leave it blocked");
         assert!(pushes.is_empty(), "ctrl-c must not push");
+    }
+
+    /// A frame that names the branch of its snapshot, so a test reads which
+    /// worktree the frame shows.
+    fn frame_of(snapshot: &Snapshot, _frame_dims: Dimensions) -> String {
+        format!("FRAME {}", snapshot.branch)
+    }
+
+    /// The setup of the worktree tests: `world`, a frame that names the branch
+    /// of its snapshot, a local shell, and no timed refresh.
+    fn in_world(world: World) -> Setup {
+        Setup {
+            dims: TEST_DIMS,
+            measured: TEST_DIMS,
+            render: Box::new(frame_of),
+            session: crate::remote::Session::Local,
+            schedule: no_timed_refresh_for_push(),
+            world,
+        }
+    }
+
+    /// Run the loop over `events` in `world`, set up as [`in_world`] says, on
+    /// a frozen clock.
+    fn run_in(world: World, events: Vec<Event>) -> (String, Seen) {
+        let base = Instant::now();
+        drive(events, in_world(world), move || base)
+    }
+
+    /// The outcome of a run of `m` that gitscratch refused, as the loop
+    /// receives it. Its line is a status line, which an unbound key takes
+    /// away.
+    fn refused_run() -> Event {
+        finished(ConflictsOutcome::Refused {
+            reason: "no default branch resolves here".to_string(),
+        })
+    }
+
+    /// The line that [`refused_run`] puts under the frame.
+    const REFUSED_RUN_LINE: &str = "grind and grime failed: no default branch resolves here";
+
+    #[test]
+    fn right_goes_to_the_next_worktree_in_path_order_and_wraps_from_the_last() {
+        // Right visits the worktrees in the order of `cwt -f`, and Right on
+        // the last worktree goes to the first, as `cwt -f` does.
+        let (_screen, seen) = run_in(World::three(), vec![key(KeyCode::Right), Event::Quit]);
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE)],
+            "Right from the middle"
+        );
+
+        let (_screen, seen) = run_in(
+            World::three_at(CHARLIE),
+            vec![key(KeyCode::Right), Event::Quit],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(ALPHA)],
+            "Right on the last worktree wraps to the first",
+        );
+    }
+
+    #[test]
+    fn left_goes_to_the_previous_worktree_in_path_order_and_wraps_from_the_first() {
+        // Left visits the worktrees in the order of `cwt -p`, and Left on the
+        // first worktree goes to the last, as `cwt -p` does.
+        let (_screen, seen) = run_in(World::three(), vec![key(KeyCode::Left), Event::Quit]);
+        assert_eq!(seen.switches, vec![worktree(ALPHA)], "Left from the middle");
+
+        let (_screen, seen) = run_in(
+            World::three_at(ALPHA),
+            vec![key(KeyCode::Left), Event::Quit],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE)],
+            "Left on the first worktree wraps to the last",
+        );
+    }
+
+    #[test]
+    fn left_and_right_read_the_list_of_worktrees_again_at_each_press() {
+        // `nwt` and `swt` add and remove worktrees while gsw runs, so a list
+        // read once at start is soon wrong.
+        let (_screen, seen) = run_in(
+            World::three(),
+            vec![
+                key(KeyCode::Right),
+                key(KeyCode::Left),
+                key(KeyCode::Right),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.path_listings, 3,
+            "each press of Left and Right must read the paths"
+        );
+    }
+
+    #[test]
+    fn up_on_the_home_worktree_does_nothing() {
+        // The frame shows the home worktree already. Nothing switches, and the
+        // line under the frame stays, because Up is not an unbound key.
+        let (screen, seen) = run_in(
+            World::three(),
+            vec![press_m(), refused_run(), key(KeyCode::Up), Event::Quit],
+        );
+        assert!(
+            seen.switches.is_empty(),
+            "Up on the home worktree must not switch, got {:?}",
+            seen.switches,
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {BRAVO}\n{REFUSED_RUN_LINE} (0s ago)"),
+            "Up on the home worktree must take nothing away",
+        );
+    }
+
+    #[test]
+    fn with_one_worktree_up_left_and_right_do_nothing() {
+        // No other worktree is there to go to: no switch, no message, and
+        // nothing taken away.
+        let (screen, seen) = run_in(
+            World::alone(),
+            vec![
+                press_m(),
+                refused_run(),
+                key(KeyCode::Up),
+                key(KeyCode::Left),
+                key(KeyCode::Right),
+                Event::Quit,
+            ],
+        );
+        assert!(
+            seen.switches.is_empty(),
+            "one worktree has no other to switch to, got {:?}",
+            seen.switches,
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {ALONE}\n{REFUSED_RUN_LINE} (0s ago)"),
+            "with one worktree an arrow key must take nothing away",
+        );
+    }
+
+    /// The worktrees of `runs`, in order, without their generations.
+    fn paths_only(runs: &[(WorktreePath, Generation)]) -> Vec<WorktreePath> {
+        runs.iter().map(|(path, _)| path.clone()).collect()
+    }
+
+    /// A clock that gives `early` for its first `reads` reads, and `late` for
+    /// every read after them.
+    fn clock_that_jumps(early: Instant, reads: usize, late: Instant) -> impl Fn() -> Instant {
+        let count = std::cell::Cell::new(0_usize);
+        move || {
+            let read = count.get();
+            count.set(read + 1);
+            if read < reads {
+                early
+            } else {
+                late
+            }
+        }
+    }
+
+    /// How often the timed walk of the refresh-clock test runs.
+    const REFRESH: Duration = Duration::from_secs(60);
+
+    #[test]
+    fn right_and_left_go_on_from_the_worktree_the_last_switch_reached() {
+        // Three presses go once round the list of three and end at home, so
+        // each press starts from the worktree that the press before reached.
+        let (_screen, seen) = run_in(
+            World::three(),
+            vec![
+                key(KeyCode::Right),
+                key(KeyCode::Right),
+                key(KeyCode::Right),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE), worktree(ALPHA), worktree(BRAVO)],
+            "Right three times goes once round the list",
+        );
+
+        let (_screen, seen) = run_in(
+            World::three(),
+            vec![
+                key(KeyCode::Left),
+                key(KeyCode::Left),
+                key(KeyCode::Left),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(ALPHA), worktree(CHARLIE), worktree(BRAVO)],
+            "Left three times goes once round the list the other way",
+        );
+    }
+
+    #[test]
+    fn up_goes_to_the_home_worktree_and_up_on_it_again_does_nothing() {
+        let (screen, seen) = run_in(
+            World::three(),
+            vec![
+                key(KeyCode::Right),
+                key(KeyCode::Up),
+                key(KeyCode::Up),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE), worktree(BRAVO)],
+            "Up must go home once, and the second Up finds the frame at home",
+        );
+        assert_eq!(strip_ansi(&screen), format!("FRAME {BRAVO}"));
+    }
+
+    #[test]
+    fn the_painted_frame_after_a_switch_is_the_snapshot_the_switch_gave() {
+        // The frame must never show the snapshot of one worktree under the
+        // name of another.
+        let (screen, _seen) = run_in(World::three(), vec![key(KeyCode::Right), Event::Quit]);
+        assert_eq!(strip_ansi(&screen), format!("FRAME {CHARLIE}"));
+    }
+
+    #[test]
+    fn after_a_switch_a_filesystem_event_walks_the_new_worktree() {
+        // The harness reads the clock once for the cache, and the switch reads
+        // it twice: before and after it opens the worktree. The filesystem
+        // event is read a minute later, past the cooldown that the walk of the
+        // switch armed, so it walks.
+        let base = Instant::now();
+        let (_screen, seen) = drive(
+            vec![key(KeyCode::Right), Event::FsChanged, Event::Quit],
+            in_world(World::three()),
+            clock_that_jumps(base, 3, base + Duration::from_secs(60)),
+        );
+        assert_eq!(
+            seen.collected_from,
+            vec![worktree(CHARLIE)],
+            "the walk must read the worktree on the screen",
+        );
+    }
+
+    #[test]
+    fn after_a_switch_p_g_and_m_act_on_the_new_worktree() {
+        // Each key acts on the worktree on the screen at the press.
+        let (_screen, seen) = run_in(
+            World::three(),
+            vec![
+                probe_answered(),
+                key(KeyCode::Right),
+                key(KeyCode::Char('p')),
+                key(KeyCode::Char('y')),
+                press_g(),
+                press_m(),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.push_paths,
+            vec![worktree(CHARLIE)],
+            "`p` pushes from it"
+        );
+        assert_eq!(
+            seen.pushes.first().map(PushCommand::branch),
+            Some(CHARLIE),
+            "the push must name the branch of the worktree on the screen",
+        );
+        assert_eq!(
+            paths_only(&seen.issue_paths),
+            vec![worktree(CHARLIE)],
+            "`G` runs in it",
+        );
+        assert_eq!(
+            paths_only(&seen.conflict_paths),
+            vec![worktree(CHARLIE)],
+            "`m` measures it",
+        );
+    }
+
+    #[test]
+    fn a_burst_of_right_p_y_pushes_from_the_new_worktree() {
+        // One burst, read with no frame between its keys. The switch happens
+        // when Right is read, so `p` plans the push of the new worktree, as a
+        // `y` after a `p` in one burst reads the new mode.
+        let (_screen, seen) = run_in(
+            World::three(),
+            vec![
+                key(KeyCode::Right),
+                key(KeyCode::Char('p')),
+                key(KeyCode::Char('y')),
+                Event::Quit,
+            ],
+        );
+        let [command] = seen.pushes.as_slice() else {
+            panic!("one push must start, got {:?}", seen.pushes);
+        };
+        assert_eq!(command.args(), ["push", "-u", "origin", CHARLIE]);
+        assert_eq!(seen.push_paths, vec![worktree(CHARLIE)]);
+    }
+
+    #[test]
+    fn a_switch_starts_the_refresh_clock_again() {
+        // The switch walks the new worktree, so the next timed walk is a whole
+        // interval from the switch. The clock stands 50 seconds after the last
+        // walk of the old worktree, so with no switch 10 seconds are left.
+        let base = Instant::now();
+        let later = base + Duration::from_secs(50);
+        let refresh_in = |events: Vec<Event>| {
+            let (_screen, seen) = drive(
+                events,
+                Setup {
+                    schedule: WalkSchedule::new(Some(REFRESH), base, Duration::ZERO),
+                    ..in_world(World::three())
+                },
+                move || later,
+            );
+            seen.timings
+                .last()
+                .and_then(|timing| timing.next_refresh_in)
+        };
+
+        assert_eq!(
+            refresh_in(vec![key(KeyCode::Char('x')), Event::Quit]),
+            Some(Duration::from_secs(10)),
+            "with no switch, the clock of the old worktree runs on",
+        );
+        assert_eq!(
+            refresh_in(vec![key(KeyCode::Right), Event::Quit]),
+            Some(REFRESH),
+            "a switch starts the clock again",
+        );
+    }
+
+    #[test]
+    fn the_arrow_keys_do_nothing_while_a_push_runs() {
+        // The window under the frame belongs to the worktree that pushes. The
+        // switch comes before the push, so Up has a home to go to, and it
+        // still must not go there.
+        let (screen, seen) = run_in(
+            World::three(),
+            vec![
+                key(KeyCode::Right),
+                key(KeyCode::Char('p')),
+                key(KeyCode::Char('y')),
+                key(KeyCode::Up),
+                key(KeyCode::Left),
+                key(KeyCode::Right),
+                key(KeyCode::Down),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE)],
+            "no arrow key may switch while a push runs",
+        );
+        let painted = strip_ansi(&screen);
+        assert!(
+            painted.contains("Pushing"),
+            "the push window must stay, got {painted:?}",
+        );
+    }
+
+    /// The last line that [`issue_failed_in`] reports.
+    const ISSUE_REFUSAL: &str = "branch main names no issue";
+
+    /// The outcome of a run of the issue command that failed, with the
+    /// generation `generation`, as the loop receives it. Its line waits for a
+    /// key.
+    fn issue_failed_in(generation: Generation) -> Event {
+        Event::IssueFinished {
+            generation,
+            outcome: crate::issue::IssueOutcome::new(
+                "ggs",
+                false,
+                &[ISSUE_REFUSAL.to_string()],
+                "exit status: 2",
+            ),
+        }
+    }
+
+    /// Run the loop over `events` in the three worktrees, set up as
+    /// [`in_world`] says, in `session`, on a frozen clock.
+    fn run_in_three(session: crate::remote::Session, events: Vec<Event>) -> (String, Seen) {
+        let base = Instant::now();
+        drive(
+            events,
+            Setup {
+                session,
+                ..in_world(World::three())
+            },
+            move || base,
+        )
+    }
+
+    #[test]
+    fn a_switch_removes_every_message_under_the_frame() {
+        // Each message describes the worktree the frame showed before the
+        // switch. After the switch the row is empty, and a message held for
+        // the row does not take it later.
+        let cases: [(&str, crate::remote::Session, Events); 6] = [
+            (
+                "a push result that fades",
+                crate::remote::Session::Local,
+                || {
+                    vec![
+                        key(KeyCode::Char('p')),
+                        key(KeyCode::Char('y')),
+                        Event::PushFinished(PushOutcome {
+                            success: true,
+                            output: String::new(),
+                        }),
+                        key(KeyCode::Right),
+                        Event::Quit,
+                    ]
+                },
+            ),
+            (
+                "the remote-shell offer of `G`",
+                crate::remote::Session::Remote,
+                || {
+                    vec![
+                        probe_answered(),
+                        press_g(),
+                        key(KeyCode::Right),
+                        Event::Quit,
+                    ]
+                },
+            ),
+            ("a `G` error", crate::remote::Session::Local, || {
+                vec![
+                    probe_answered(),
+                    press_g(),
+                    issue_failed_in(Generation::default()),
+                    key(KeyCode::Right),
+                    Event::Quit,
+                ]
+            }),
+            (
+                "the notice of an `m` run",
+                crate::remote::Session::Local,
+                || {
+                    vec![
+                        press_m(),
+                        started_against_main(),
+                        key(KeyCode::Right),
+                        Event::Quit,
+                    ]
+                },
+            ),
+            (
+                "the result of an `m` run",
+                crate::remote::Session::Local,
+                || {
+                    vec![
+                        press_m(),
+                        started_against_main(),
+                        finished(measured_clean()),
+                        key(KeyCode::Right),
+                        Event::Quit,
+                    ]
+                },
+            ),
+            (
+                "a `G` error held behind a push result",
+                crate::remote::Session::Local,
+                || {
+                    vec![
+                        probe_answered(),
+                        key(KeyCode::Char('p')),
+                        key(KeyCode::Char('y')),
+                        press_g(),
+                        issue_failed_in(Generation::default()),
+                        Event::PushFinished(PushOutcome {
+                            success: true,
+                            output: String::new(),
+                        }),
+                        key(KeyCode::Right),
+                        Event::Quit,
+                    ]
+                },
+            ),
+        ];
+
+        for (what, session, events) in cases {
+            let (screen, seen) = run_in_three(session, events());
+            assert_eq!(
+                seen.switches,
+                vec![worktree(CHARLIE)],
+                "{what}: Right must switch"
+            );
+            assert_eq!(
+                strip_ansi(&screen),
+                format!("FRAME {CHARLIE}"),
+                "{what}: the switch must leave nothing under the frame",
+            );
+        }
+    }
+
+    #[test]
+    fn a_g_after_a_switch_on_a_remote_shell_asks_again() {
+        // The message is the armed state, and the switch takes the message
+        // away. So a `G` after the switch is a first press again.
+        let (screen, seen) = run_in_three(
+            crate::remote::Session::Remote,
+            vec![
+                probe_answered(),
+                press_g(),
+                key(KeyCode::Right),
+                press_g(),
+                Event::Quit,
+            ],
+        );
+        assert!(
+            seen.issue_runs.is_empty(),
+            "a `G` after a switch must not run the command, got {:?}",
+            seen.issue_runs,
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {CHARLIE}\n{SECOND_PRESS_NOTICE} (0s ago)"),
+            "the `G` after the switch must ask again",
+        );
+    }
+
+    #[test]
+    fn a_switch_takes_the_arming_of_g_away_whatever_made_it() {
+        // Every key but `G` takes the arming away already, so no arrow key
+        // can show this. A switch that no key made must take the arming away
+        // too: the message is the armed state, and the switch takes the
+        // message off the row.
+        let now = Instant::now();
+        let mut issue = issue_run_in(crate::remote::Session::Remote);
+        issue.arm(now);
+        let mut state = LoopState {
+            cache: SnapshotCache {
+                snapshot: snapshot_of(&worktree(BRAVO)),
+                collected_at: now,
+                dims: TEST_DIMS,
+            },
+            schedule: no_timed_refresh_for_push(),
+            ui: PushUi::new(false),
+            issue,
+            conflicts: ConflictsRun::new(),
+            home: worktree(BRAVO),
+            current: worktree(BRAVO),
+            generation: Generation::default(),
+        };
+        assert!(state.issue.is_armed(now), "the fixture must start armed");
+
+        state.switch_to(worktree(CHARLIE), &|| now, &mut |target: &WorktreePath| {
+            Ok(snapshot_of(target))
+        });
+
+        assert_eq!(
+            state.current,
+            worktree(CHARLIE),
+            "the switch must reach charlie"
+        );
+        assert!(
+            !state.issue.is_armed(now),
+            "a switch must take the arming of `G` away",
+        );
+    }
+
+    /// The reason the fake `switch` hook gives when it refuses the worktree
+    /// `name`, as it reaches the row.
+    fn refusal_of(name: &str) -> String {
+        format!("{REFUSED}: {}", worktree(name).as_path().display())
+    }
+
+    #[test]
+    fn a_switch_that_fails_stays_and_shows_the_reason_on_a_fading_line() {
+        // The open fails: the chosen worktree stopped existing, or its
+        // directory is not a work tree. gsw stays on the worktree it shows,
+        // and the reason is gsw's report about a key, so it fades.
+        let (screen, seen) = run_in(
+            World::three().refusing(CHARLIE),
+            vec![key(KeyCode::Right), Event::Quit],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE)],
+            "Right must try the next worktree",
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {BRAVO}\n{} (0s ago)", refusal_of(CHARLIE)),
+            "the frame must stay on the worktree it showed, with the reason under it",
+        );
+    }
+
+    #[test]
+    fn after_a_switch_that_failed_p_g_and_m_act_on_the_old_worktree() {
+        // Nothing moves when a switch fails. Every key acts on the worktree
+        // the frame still shows, and the next Right tries the same worktree
+        // again.
+        let (_screen, seen) = run_in(
+            World::three().refusing(CHARLIE),
+            vec![
+                probe_answered(),
+                key(KeyCode::Right),
+                key(KeyCode::Right),
+                key(KeyCode::Char('p')),
+                key(KeyCode::Char('y')),
+                press_g(),
+                press_m(),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE), worktree(CHARLIE)],
+            "a failed switch leaves Right where it was",
+        );
+        assert_eq!(
+            seen.push_paths,
+            vec![worktree(BRAVO)],
+            "`p` pushes from bravo"
+        );
+        assert_eq!(
+            seen.pushes.first().map(PushCommand::branch),
+            Some(BRAVO),
+            "the push must name the branch of the worktree on the screen",
+        );
+        assert_eq!(
+            paths_only(&seen.issue_paths),
+            vec![worktree(BRAVO)],
+            "`G` runs in bravo",
+        );
+        assert_eq!(
+            paths_only(&seen.conflict_paths),
+            vec![worktree(BRAVO)],
+            "`m` measures bravo",
+        );
+    }
+
+    #[test]
+    fn a_switch_that_fails_leaves_the_refresh_clock_alone() {
+        // The frame still shows the old worktree, and a failed open walked
+        // nothing of it, so its clock runs on: 10 seconds are left, as with
+        // no switch at all.
+        let base = Instant::now();
+        let later = base + Duration::from_secs(50);
+        let (_screen, seen) = drive(
+            vec![key(KeyCode::Right), Event::Quit],
+            Setup {
+                schedule: WalkSchedule::new(Some(REFRESH), base, Duration::ZERO),
+                ..in_world(World::three().refusing(CHARLIE))
+            },
+            move || later,
+        );
+        assert_eq!(
+            seen.timings
+                .last()
+                .and_then(|timing| timing.next_refresh_in),
+            Some(Duration::from_secs(10)),
+        );
+    }
+
+    /// The generation of a run that started before the first switch.
+    fn before_the_switch() -> Generation {
+        Generation::default()
+    }
+
+    /// The generation of a run that started after one switch.
+    fn after_one_switch() -> Generation {
+        Generation::default().next()
+    }
+
+    /// A run of `m` with the generation `generation` knows it measures against
+    /// `main`, as the loop receives it.
+    fn started_in(generation: Generation) -> Event {
+        Event::ConflictsStarted {
+            generation,
+            branch: "main".to_string(),
+        }
+    }
+
+    /// A run of `m` with the generation `generation` ended with `outcome`, as
+    /// the loop receives it.
+    fn finished_in(generation: Generation, outcome: ConflictsOutcome) -> Event {
+        Event::ConflictsFinished {
+            generation,
+            outcome,
+        }
+    }
+
+    #[test]
+    fn an_m_outcome_from_before_a_switch_is_dropped_and_m_works_again() {
+        // The run continues in bravo, where it started, and its outcome
+        // arrives with the frame on charlie. A line under the frame must
+        // describe the worktree in the frame, so the outcome goes. The key is
+        // free again, and the next run carries the new generation.
+        let (screen, seen) = run_in(
+            World::three(),
+            vec![
+                press_m(),
+                started_in(before_the_switch()),
+                key(KeyCode::Right),
+                finished_in(before_the_switch(), measured_clean()),
+                press_m(),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {CHARLIE}"),
+            "the outcome of the run in bravo must not reach the row of charlie",
+        );
+        assert_eq!(
+            seen.conflict_paths,
+            vec![
+                (worktree(BRAVO), before_the_switch()),
+                (worktree(CHARLIE), after_one_switch()),
+            ],
+            "the outcome must free the key, and the next run must carry the new generation",
+        );
+    }
+
+    #[test]
+    fn a_g_outcome_from_before_a_switch_is_dropped_and_g_works_again() {
+        // The same rule for the issue key: its error describes the worktree
+        // where the run started.
+        let (screen, seen) = run_in(
+            World::three(),
+            vec![
+                probe_answered(),
+                press_g(),
+                key(KeyCode::Right),
+                issue_failed_in(before_the_switch()),
+                press_g(),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {CHARLIE}"),
+            "the error of the run in bravo must not reach the row of charlie",
+        );
+        assert_eq!(
+            seen.issue_paths,
+            vec![
+                (worktree(BRAVO), before_the_switch()),
+                (worktree(CHARLIE), after_one_switch()),
+            ],
+            "the outcome must free the key, and the next run must carry the new generation",
+        );
+    }
+
+    #[test]
+    fn a_stale_m_notice_puts_nothing_under_the_frame() {
+        // A run from before the switch says which branch it measures against
+        // only after the switch. The notice describes bravo, so it goes
+        // nowhere.
+        let (screen, _seen) = run_in(
+            World::three(),
+            vec![
+                press_m(),
+                key(KeyCode::Right),
+                started_in(before_the_switch()),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(strip_ansi(&screen), format!("FRAME {CHARLIE}"));
+    }
+
+    #[test]
+    fn the_one_run_rule_of_m_and_g_spans_a_switch() {
+        // A run continues after a switch, in the worktree where it started,
+        // and the rule of one run at a time holds for the whole process.
+        let (_screen, seen) = run_in(
+            World::three(),
+            vec![press_m(), key(KeyCode::Right), press_m(), Event::Quit],
+        );
+        assert_eq!(
+            seen.conflict_runs, 1,
+            "a run of `m` in flight must refuse a second run after a switch",
+        );
+
+        let (_screen, seen) = run_in(
+            World::three(),
+            vec![
+                probe_answered(),
+                press_g(),
+                key(KeyCode::Right),
+                press_g(),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.issue_runs.len(),
+            1,
+            "a run of `G` in flight must refuse a second run after a switch, got {:?}",
+            seen.issue_runs,
+        );
+    }
+
+    #[test]
+    fn the_outcome_of_a_run_that_started_after_the_switch_reaches_the_row() {
+        // Only an old generation is dropped. A run that started on charlie
+        // describes charlie, so its notice and its result reach the row.
+        let (screen, _seen) = run_in(
+            World::three(),
+            vec![
+                key(KeyCode::Right),
+                press_m(),
+                started_in(after_one_switch()),
+                finished_in(after_one_switch(), measured_clean()),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {CHARLIE}\n{MEASURED_CLEAN} (0s ago)"),
+        );
+    }
+
+    #[test]
+    fn down_opens_the_list_with_the_cursor_on_the_current_worktree() {
+        // The list opens on the worktree that the frame shows, and the screen
+        // is what the list hook drew, with nothing under it. Down reads the
+        // list once, and walks and switches nothing.
+        let (screen, seen) = run_in(World::three(), vec![key(KeyCode::Down), Event::Quit]);
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("LIST {BRAVO}: {ALPHA} >{BRAVO}⌂ {CHARLIE}"),
+        );
+        assert_eq!(seen.listings, 1, "Down must read the list once");
+        assert_eq!(seen.collects, 0, "Down must not walk");
+        assert!(seen.switches.is_empty(), "Down must not switch");
+
+        // After a switch, the cursor is on the worktree that the frame shows,
+        // and the home mark stays on the home worktree.
+        let (screen, _seen) = run_in(
+            World::three(),
+            vec![key(KeyCode::Right), key(KeyCode::Down), Event::Quit],
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("LIST {CHARLIE}: {ALPHA} {BRAVO}⌂ >{CHARLIE}"),
+        );
+    }
+
+    #[test]
+    fn with_one_worktree_down_opens_a_list_of_one_row() {
+        let (screen, _seen) = run_in(World::alone(), vec![key(KeyCode::Down), Event::Quit]);
+        assert_eq!(strip_ansi(&screen), format!("LIST {ALONE}: >{ALONE}⌂"));
+    }
+
+    #[test]
+    fn while_the_list_is_open_every_other_key_does_nothing() {
+        // The list takes the pane. `r` walks nothing, `p` and `y` push
+        // nothing, `G` and `m` start nothing, Left and Right switch nothing,
+        // and the list stays open with its cursor where it was.
+        let (screen, seen) = run_in(
+            World::three(),
+            vec![
+                probe_answered(),
+                key(KeyCode::Down),
+                key(KeyCode::Char('r')),
+                key(KeyCode::Char('p')),
+                key(KeyCode::Char('y')),
+                press_g(),
+                press_m(),
+                key(KeyCode::Left),
+                key(KeyCode::Right),
+                key(KeyCode::Char('x')),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("LIST {BRAVO}: {ALPHA} >{BRAVO}⌂ {CHARLIE}"),
+        );
+        assert_eq!(seen.collects, 0, "`r` must not walk");
+        assert!(seen.pushes.is_empty(), "`p` and `y` must not push");
+        assert!(seen.issue_runs.is_empty(), "`G` must not run");
+        assert_eq!(seen.conflict_runs, 0, "`m` must not measure");
+        assert!(
+            seen.switches.is_empty(),
+            "Left and Right must not switch, got {:?}",
+            seen.switches,
+        );
+    }
+
+    /// A pane with room for the header and the separator of a frame, and no
+    /// row under them.
+    const NO_ROW_FOR_THE_LIST: Dimensions = Dimensions {
+        width: 80,
+        height: 2,
+    };
+
+    /// A pane with room for the header, the separator, and one row under
+    /// them.
+    const ONE_ROW_FOR_THE_LIST: Dimensions = Dimensions {
+        width: 80,
+        height: 3,
+    };
+
+    /// Run the loop over `events` in the three worktrees, in a pane of `dims`,
+    /// on a frozen clock.
+    fn run_in_pane_of(dims: Dimensions, events: Vec<Event>) -> (String, Seen) {
+        let base = Instant::now();
+        drive(
+            events,
+            Setup {
+                dims,
+                measured: dims,
+                ..in_world(World::three())
+            },
+            move || base,
+        )
+    }
+
+    #[test]
+    fn a_pane_too_short_for_the_list_opens_nothing() {
+        // Enter must never choose a row that the user did not see, as `p`
+        // never asks a question that the pane cannot show. A pane with no row
+        // under the separator opens no list, and does not read the list
+        // either. A pane with one row there opens a list of that one row.
+        let (screen, seen) =
+            run_in_pane_of(NO_ROW_FOR_THE_LIST, vec![key(KeyCode::Down), Event::Quit]);
+        assert_eq!(strip_ansi(&screen), format!("FRAME {BRAVO}"));
+        assert_eq!(
+            seen.listings, 0,
+            "a pane that cannot show the list must not read it",
+        );
+
+        let (screen, _seen) =
+            run_in_pane_of(ONE_ROW_FOR_THE_LIST, vec![key(KeyCode::Down), Event::Quit]);
+        assert_eq!(strip_ansi(&screen), format!("LIST {BRAVO}: >{BRAVO}⌂"));
+    }
+
+    /// Run the loop over `bursts` in `world`, set up as [`in_world`] says, on
+    /// a frozen clock. Gives every screen the loop painted, as visible glyphs,
+    /// and what the hooks saw.
+    fn paints_in(world: World, bursts: Vec<Vec<Event>>) -> (Vec<String>, Seen) {
+        paints_of(in_world(world), bursts)
+    }
+
+    /// Run the loop over `bursts` as `setup` says, on a frozen clock. Gives
+    /// every screen the loop painted, as visible glyphs, and what the hooks
+    /// saw.
+    fn paints_of(setup: Setup, bursts: Vec<Vec<Event>>) -> (Vec<String>, Seen) {
+        let base = Instant::now();
+        let (_screen, seen) = drive_bursts(bursts, setup, move || base);
+        let paints = seen.paints.iter().map(|paint| strip_ansi(paint)).collect();
+        (paints, seen)
+    }
+
+    #[test]
+    fn esc_and_q_close_the_list_and_gsw_stays() {
+        // The cursor is on another worktree when the list closes, and gsw
+        // stays on the worktree that it showed before the list opened. `q`
+        // closes the list, as it answers "no" to the push question. A quit
+        // there would still paint the list, because a quit inside a burst
+        // paints the burst first.
+        for code in [KeyCode::Esc, KeyCode::Char('q')] {
+            let (screen, seen) = run_in(
+                World::three(),
+                vec![
+                    key(KeyCode::Down),
+                    key(KeyCode::Down),
+                    key(code),
+                    Event::Quit,
+                ],
+            );
+            assert_eq!(
+                strip_ansi(&screen),
+                format!("FRAME {BRAVO}"),
+                "{code:?} must close the list",
+            );
+            assert!(
+                seen.switches.is_empty(),
+                "{code:?} must not switch, got {:?}",
+                seen.switches,
+            );
+        }
+    }
+
+    #[test]
+    fn a_message_that_arrives_while_the_list_is_open_waits_for_the_frame_that_closes_it() {
+        // A message waits in the queue while the list is open, as it waits
+        // while a push owns the row. The frame that closes the list carries
+        // it, with its whole life ahead of it.
+        let (paints, _seen) = paints_in(
+            World::three(),
+            vec![
+                vec![press_m(), key(KeyCode::Down)],
+                vec![finished(measured_clean())],
+                vec![key(KeyCode::Esc), Event::Quit],
+            ],
+        );
+        assert_eq!(
+            paints,
+            [
+                format!("LIST {BRAVO}: {ALPHA} >{BRAVO}⌂ {CHARLIE}"),
+                format!("FRAME {BRAVO}\n{MEASURED_CLEAN} (0s ago)"),
+            ],
+            "the outcome must wait under the list, and reach the row on the frame that closes it",
+        );
+    }
+
+    #[test]
+    fn down_replaces_a_status_line_that_does_not_come_back() {
+        // The list opens over the line, as `p` asks its question over it. The
+        // line described the frame that the user stopped reading, so it does
+        // not come back when the list closes.
+        let (paints, _seen) = paints_in(
+            World::three(),
+            vec![
+                vec![press_m(), refused_run()],
+                vec![key(KeyCode::Down)],
+                vec![key(KeyCode::Esc), Event::Quit],
+            ],
+        );
+        assert_eq!(
+            paints,
+            [
+                format!("FRAME {BRAVO}\n{REFUSED_RUN_LINE} (0s ago)"),
+                format!("LIST {BRAVO}: {ALPHA} >{BRAVO}⌂ {CHARLIE}"),
+                format!("FRAME {BRAVO}"),
+            ],
+        );
+    }
+
+    #[test]
+    fn enter_goes_to_the_worktree_under_the_cursor_and_closes_the_list() {
+        // Enter takes the one switch that every key takes, so the frame shows
+        // the snapshot that the switch gave, and a run that starts after it
+        // carries the new generation.
+        let (screen, seen) = run_in(
+            World::three(),
+            vec![
+                key(KeyCode::Down),
+                key(KeyCode::Down),
+                key(KeyCode::Enter),
+                press_m(),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(seen.switches, vec![worktree(CHARLIE)], "Enter on charlie");
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {CHARLIE}"),
+            "the list must close on the frame of charlie",
+        );
+        assert_eq!(
+            seen.conflict_paths,
+            vec![(worktree(CHARLIE), after_one_switch())],
+            "`m` after Enter must measure charlie, in the new generation",
+        );
+
+        let (screen, seen) = run_in(
+            World::three(),
+            vec![
+                key(KeyCode::Down),
+                key(KeyCode::Up),
+                key(KeyCode::Enter),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(seen.switches, vec![worktree(ALPHA)], "Enter on alpha");
+        assert_eq!(strip_ansi(&screen), format!("FRAME {ALPHA}"));
+    }
+
+    #[test]
+    fn enter_on_the_current_worktree_closes_the_list_and_does_not_switch() {
+        // The frame shows that worktree already, so there is nothing to open
+        // and nothing to walk.
+        let (screen, seen) = run_in(
+            World::three(),
+            vec![key(KeyCode::Down), key(KeyCode::Enter), Event::Quit],
+        );
+        assert!(
+            seen.switches.is_empty(),
+            "Enter on the current worktree must not switch, got {:?}",
+            seen.switches,
+        );
+        assert_eq!(
+            seen.collects, 0,
+            "Enter on the current worktree must not walk"
+        );
+        assert_eq!(strip_ansi(&screen), format!("FRAME {BRAVO}"));
+    }
+
+    #[test]
+    fn enter_on_a_worktree_whose_open_fails_closes_the_list_and_shows_the_reason() {
+        // The chosen worktree stopped existing before Enter. The list closes,
+        // gsw stays on the worktree it showed, and the reason is gsw's report
+        // about a key, so it fades.
+        let (screen, seen) = run_in(
+            World::three().refusing(CHARLIE),
+            vec![
+                key(KeyCode::Down),
+                key(KeyCode::Down),
+                key(KeyCode::Enter),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE)],
+            "Enter tries charlie"
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {BRAVO}\n{} (0s ago)", refusal_of(CHARLIE)),
+            "the frame must stay on bravo, with the reason under it",
+        );
+    }
+
+    #[test]
+    fn a_pane_that_shrinks_under_the_list_closes_it_and_shows_the_held_message() {
+        // The list closes when the pane leaves no row for it, so Enter never
+        // chooses a row that the user did not see. A message that waited for
+        // the list reaches the row on the frame that closes it, and not one
+        // frame later.
+        let (paints, seen) = paints_of(
+            Setup {
+                measured: NO_ROW_FOR_THE_LIST,
+                ..in_world(World::three())
+            },
+            vec![
+                vec![press_m(), key(KeyCode::Down)],
+                vec![finished(measured_clean())],
+                vec![Event::Resize, Event::Quit],
+            ],
+        );
+        assert_eq!(
+            paints,
+            [
+                format!("LIST {BRAVO}: {ALPHA} >{BRAVO}⌂ {CHARLIE}"),
+                format!("FRAME {BRAVO}\n{MEASURED_CLEAN} (0s ago)"),
+            ],
+            "the frame that closes the list must carry the message that waited for it",
+        );
+        assert_eq!(
+            seen.frame_heights.last().copied(),
+            Some(NO_ROW_FOR_THE_LIST.height - 1),
+            "the message takes one row of the shrunken pane from the frame",
+        );
+    }
+
+    /// The line that the return to the home worktree puts under the frame,
+    /// after the worktree `name` went away.
+    ///
+    /// Written out here rather than taken from the code it pins, so a change
+    /// to the words is a change these tests report.
+    fn gone_line(name: &str) -> String {
+        format!(
+            "{} no longer exists — back to the home worktree",
+            worktree(name).as_path().display()
+        )
+    }
+
+    /// A clock that stands still at the start for the first `reads` reads,
+    /// and one minute later for every read after them.
+    fn a_minute_after(reads: usize) -> impl Fn() -> Instant {
+        let base = Instant::now();
+        clock_that_jumps(base, reads, base + Duration::from_secs(60))
+    }
+
+    #[test]
+    fn a_failed_walk_of_a_worktree_no_longer_listed_goes_back_home_and_says_so() {
+        // The worktree on the screen stopped existing (`git worktree remove`,
+        // `swt merge`). Its walk fails, and the list no longer holds it, so
+        // gsw goes back to the home worktree through the one switch, and says
+        // why on a line that fades. The frame is the fresh snapshot of home,
+        // and `m` after the return measures home.
+        let (paints, seen) = paints_in(
+            World::three().vanishing(CHARLIE),
+            vec![
+                vec![key(KeyCode::Right), Event::ForceRefresh],
+                vec![press_m(), Event::Quit],
+            ],
+        );
+        assert_eq!(
+            paints,
+            [format!("FRAME {BRAVO}\n{} (0s ago)", gone_line(CHARLIE))],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE), worktree(BRAVO)],
+            "Right goes to charlie, and the failed walk goes back home",
+        );
+        assert_eq!(
+            seen.collected_from,
+            vec![worktree(CHARLIE)],
+            "the walk that failed must be the walk of charlie",
+        );
+        assert_eq!(
+            seen.timings.last().map(|timing| timing.age_offset),
+            Some(Duration::ZERO),
+            "the frame of home must be fresh",
+        );
+        assert_eq!(
+            seen.conflict_paths,
+            vec![(worktree(BRAVO), after_one_switch().next())],
+            "`m` after the return must measure home, in the generation of the return",
+        );
+    }
+
+    #[test]
+    fn a_failed_walk_while_a_push_runs_stays_and_a_later_failed_walk_goes_home() {
+        // The window under the frame belongs to the worktree that pushes, so
+        // a walk that fails during the push does not go home. The first walk
+        // that fails after the push does.
+        let (paints, seen) = paints_in(
+            World::three().vanishing(CHARLIE),
+            vec![
+                vec![
+                    key(KeyCode::Right),
+                    key(KeyCode::Char('p')),
+                    key(KeyCode::Char('y')),
+                    Event::ForceRefresh,
+                ],
+                vec![
+                    Event::PushFinished(PushOutcome {
+                        success: false,
+                        output: "error: failed to push some refs\n".to_string(),
+                    }),
+                    Event::ForceRefresh,
+                    Event::Quit,
+                ],
+            ],
+        );
+        let during = paints.first().expect("the push paints a frame");
+        assert!(
+            during.starts_with(&format!("FRAME {CHARLIE}\nPushing")),
+            "a failed walk during the push must stay on charlie, got {during:?}",
+        );
+        assert_eq!(
+            paints.last(),
+            Some(&format!("FRAME {BRAVO}\n{} (0s ago)", gone_line(CHARLIE))),
+            "the failed walk after the push must go home",
+        );
+        assert_eq!(seen.switches, vec![worktree(CHARLIE), worktree(BRAVO)]);
+    }
+
+    #[test]
+    fn a_failed_return_home_keeps_the_last_good_frame_at_its_age_and_says_nothing() {
+        // The home worktree went away too, so the switch to it fails. gsw
+        // then does what it does today for a failed walk: it keeps the last
+        // good snapshot at its true age. It posts no line, because each later
+        // failed walk tries again, and a line would come back on each one.
+        //
+        // The harness reads the clock once, and the switch of Right reads it
+        // twice. The filesystem event comes a minute later.
+        let (screen, seen) = drive(
+            vec![key(KeyCode::Right), Event::FsChanged, Event::Quit],
+            in_world(World::three().vanishing(CHARLIE).removed(BRAVO)),
+            a_minute_after(3),
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE), worktree(BRAVO)],
+            "gsw must try to go home",
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {CHARLIE}"),
+            "the last good frame must stay, with no line under it",
+        );
+        assert_eq!(
+            seen.timings.last().map(|timing| timing.age_offset),
+            Some(Duration::from_secs(60)),
+            "the last good snapshot must show its true age",
+        );
+    }
+
+    #[test]
+    fn a_failed_walk_of_the_home_worktree_keeps_the_last_good_frame() {
+        // The home worktree stopped existing while gsw shows it. There is no
+        // home to go back to, so gsw keeps the last good snapshot at its true
+        // age, and reads neither the list nor the paths of the worktrees for a
+        // return that cannot happen.
+        //
+        // The harness reads the clock once, and the filesystem event comes a
+        // minute later.
+        let (screen, seen) = drive(
+            vec![Event::FsChanged, Event::Quit],
+            in_world(World::three().removed(BRAVO)),
+            a_minute_after(1),
+        );
+        assert!(
+            seen.switches.is_empty(),
+            "gsw must not switch, got {:?}",
+            seen.switches,
+        );
+        assert_eq!(seen.listings, 0, "gsw must not read the list");
+        assert_eq!(seen.path_listings, 0, "gsw must not read the paths");
+        assert_eq!(strip_ansi(&screen), format!("FRAME {BRAVO}"));
+        assert_eq!(
+            seen.timings.last().map(|timing| timing.age_offset),
+            Some(Duration::from_secs(60)),
+            "the last good snapshot must show its true age",
+        );
+    }
+
+    #[test]
+    fn a_failed_walk_of_a_worktree_still_listed_keeps_the_last_good_frame() {
+        // A walk can fail for a moment while the worktree still exists. The
+        // list still holds it, so gsw stays on it with the last good snapshot
+        // at its true age.
+        //
+        // The harness reads the clock once, and the switch of Right reads it
+        // twice. The filesystem event comes a minute later.
+        let (screen, seen) = drive(
+            vec![key(KeyCode::Right), Event::FsChanged, Event::Quit],
+            in_world(World::three().unreadable(CHARLIE)),
+            a_minute_after(3),
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE)],
+            "gsw must stay on charlie"
+        );
+        assert_eq!(strip_ansi(&screen), format!("FRAME {CHARLIE}"));
+        assert_eq!(
+            seen.timings.last().map(|timing| timing.age_offset),
+            Some(Duration::from_secs(60)),
+            "the last good snapshot must show its true age",
+        );
+    }
+
+    #[test]
+    fn the_return_home_closes_the_list_and_drops_the_question() {
+        // Both describe the worktree that went away. The list shows the
+        // worktrees as they stood when it opened, and the question asks to
+        // push the branch of a worktree that is gone.
+        let (screen, _seen) = run_in(
+            World::three().vanishing(CHARLIE),
+            vec![
+                key(KeyCode::Right),
+                key(KeyCode::Down),
+                Event::ForceRefresh,
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {BRAVO}\n{} (0s ago)", gone_line(CHARLIE)),
+            "the return must close the list",
+        );
+
+        let (paints, seen) = paints_in(
+            World::three().vanishing(CHARLIE),
+            vec![
+                vec![
+                    key(KeyCode::Right),
+                    key(KeyCode::Char('p')),
+                    Event::ForceRefresh,
+                ],
+                vec![key(KeyCode::Char('y')), Event::Quit],
+            ],
+        );
+        assert_eq!(
+            paints.first(),
+            Some(&format!("FRAME {BRAVO}\n{} (0s ago)", gone_line(CHARLIE))),
+            "the return must drop the question",
+        );
+        assert!(
+            seen.pushes.is_empty(),
+            "a `y` after the return must not push, got {:?}",
+            seen.pushes,
+        );
+    }
+
+    #[test]
+    fn a_removed_worktree_sends_gsw_back_to_the_home_worktree_with_a_fading_line() {
+        // The whole path, end to end. The user opens the list and goes to
+        // charlie with Enter, and another pane removes charlie. The
+        // filesystem event of the removal walks charlie, the walk fails, and
+        // gsw goes back to the home worktree and says why.
+        //
+        // The harness reads the clock once, and the switch of Enter reads it
+        // twice. The filesystem event comes a minute later, past the cooldown
+        // that the switch armed, so it walks.
+        let (screen, seen) = drive(
+            vec![
+                key(KeyCode::Down),
+                key(KeyCode::Down),
+                key(KeyCode::Enter),
+                Event::FsChanged,
+                Event::Quit,
+            ],
+            in_world(World::three().vanishing(CHARLIE)),
+            a_minute_after(3),
+        );
+        assert_eq!(seen.switches, vec![worktree(CHARLIE), worktree(BRAVO)]);
+        assert_eq!(seen.collected_from, vec![worktree(CHARLIE)]);
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {BRAVO}\n{} (0s ago)", gone_line(CHARLIE)),
+        );
+    }
+
+    #[test]
+    fn left_right_and_the_check_after_a_failed_walk_read_no_label() {
+        // Left and Right need the paths of the worktrees alone, and so does
+        // the check after a failed walk. A label costs an open of each linked
+        // worktree, so none of the three reads the list with the labels. Only
+        // Down shows the labels.
+        let (_screen, seen) = run_in(
+            World::three(),
+            vec![
+                key(KeyCode::Right),
+                key(KeyCode::Left),
+                key(KeyCode::Right),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE), worktree(BRAVO), worktree(CHARLIE)],
+        );
+        assert_eq!(
+            seen.listings, 0,
+            "Left and Right must not read the list with the labels",
+        );
+
+        // The walk of charlie fails while the list still holds charlie, so
+        // the check reads the paths and gsw stays. The harness reads the clock
+        // once, and the switch of Right reads it twice. The filesystem event
+        // comes a minute later.
+        let (_screen, seen) = drive(
+            vec![key(KeyCode::Right), Event::FsChanged, Event::Quit],
+            in_world(World::three().unreadable(CHARLIE)),
+            a_minute_after(3),
+        );
+        assert_eq!(
+            seen.collected_from,
+            vec![worktree(CHARLIE)],
+            "the walk of charlie must run and fail",
+        );
+        assert_eq!(
+            seen.listings, 0,
+            "Right and the check must not read the list with the labels",
+        );
+    }
+
+    /// Run the loop in `world`, where each read of a list of the worktrees
+    /// takes one second: Right, then a filesystem event in the same burst,
+    /// then one more filesystem event in the next burst. Gives what the hooks
+    /// saw.
+    ///
+    /// The harness reads the clock once, and the switch of Right reads it
+    /// twice. The first filesystem event comes a minute later, past the
+    /// cooldown that the switch armed, so it walks the worktree that Right
+    /// reached.
+    fn right_then_two_events_with_slow_lists(world: World) -> Seen {
+        let (_screen, seen) = drive_bursts(
+            vec![
+                vec![key(KeyCode::Right), Event::FsChanged],
+                vec![Event::FsChanged, Event::Quit],
+            ],
+            in_world(world.slow_list(Duration::from_secs(1))),
+            a_minute_after(3),
+        );
+        seen
+    }
+
+    #[test]
+    fn the_duty_cycle_pays_for_the_check_after_a_failed_walk() {
+        // After a failed walk, the check reads the paths of the worktrees,
+        // and gsw tries to open home when the worktree on the screen is gone.
+        // Both are git work of the wake, so the cooldown that the wake arms
+        // holds their cost, whether the return happens or not. Without that,
+        // a worktree that cannot come back costs a read of the list at each
+        // wake, and the duty cycle does not see it.
+        //
+        // The check takes one second here, so the wake of the failed walk
+        // costs one second and arms a cooldown of 100 seconds. The second
+        // event comes one second later, inside that cooldown, so it walks
+        // nothing.
+        //
+        // The walk of charlie fails for a moment, and the list still holds
+        // charlie.
+        let seen = right_then_two_events_with_slow_lists(World::three().unreadable(CHARLIE));
+        assert_eq!(
+            seen.collected_from,
+            vec![worktree(CHARLIE)],
+            "the check must pay into the cooldown, so the second event must not walk",
+        );
+
+        // Charlie is gone, and home is gone too, so the open of home fails.
+        // The cooldown holds the check and the open that failed.
+        let seen =
+            right_then_two_events_with_slow_lists(World::three().vanishing(CHARLIE).removed(BRAVO));
+        assert_eq!(
+            seen.collected_from,
+            vec![worktree(CHARLIE)],
+            "a return that fails must pay into the cooldown too",
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE), worktree(BRAVO)],
+            "gsw must try to go home once",
+        );
+    }
+
+    /// A pane with room for the head of a frame, two rows of the list, and
+    /// the hint.
+    const TWO_ROWS_FOR_THE_LIST: Dimensions = Dimensions {
+        width: 80,
+        height: 5,
+    };
+
+    #[test]
+    fn a_list_longer_than_the_pane_scrolls_only_as_far_as_the_cursor_needs() {
+        // Six worktrees in a pane of two list rows. The window follows the
+        // cursor down. When the cursor comes back up one row, the window that
+        // the user saw still holds it, so the window stays where it was. A
+        // window that moved then would put the cursor row where the user did
+        // not look for it.
+        let names = [ALPHA, BRAVO, CHARLIE, "delta", "echo", "foxtrot"];
+        let (paints, _seen) = paints_of(
+            Setup {
+                dims: TWO_ROWS_FOR_THE_LIST,
+                measured: TWO_ROWS_FOR_THE_LIST,
+                ..in_world(World::of(&names, ALPHA))
+            },
+            vec![
+                vec![key(KeyCode::Down)],
+                vec![key(KeyCode::Down)],
+                vec![key(KeyCode::Down)],
+                vec![key(KeyCode::Down)],
+                vec![key(KeyCode::Up), Event::Quit],
+            ],
+        );
+        assert_eq!(
+            paints,
+            [
+                format!("LIST {ALPHA}: >{ALPHA}⌂ {BRAVO}"),
+                format!("LIST {ALPHA}: {ALPHA}⌂ >{BRAVO}"),
+                format!("LIST {ALPHA}: {BRAVO} >{CHARLIE}"),
+                format!("LIST {ALPHA}: {CHARLIE} >delta"),
+                format!("LIST {ALPHA}: >{CHARLIE} delta"),
+            ],
+        );
+    }
+
+    #[test]
+    fn up_and_down_move_the_cursor_stop_at_the_ends_and_neither_walk_nor_switch() {
+        // The frame does not change while the cursor moves: gsw walks the new
+        // worktree only after Enter. Each burst below gets a frame. Down on
+        // the bottom row and Up on the top row change nothing, so the loop
+        // paints nothing for them.
+        let (paints, seen) = paints_in(
+            World::three(),
+            vec![
+                vec![key(KeyCode::Down)],
+                vec![key(KeyCode::Down)],
+                vec![key(KeyCode::Down)],
+                vec![key(KeyCode::Up)],
+                vec![key(KeyCode::Up)],
+                vec![key(KeyCode::Up), Event::Quit],
+            ],
+        );
+        assert_eq!(
+            paints,
+            [
+                format!("LIST {BRAVO}: {ALPHA} >{BRAVO}⌂ {CHARLIE}"),
+                format!("LIST {BRAVO}: {ALPHA} {BRAVO}⌂ >{CHARLIE}"),
+                format!("LIST {BRAVO}: {ALPHA} >{BRAVO}⌂ {CHARLIE}"),
+                format!("LIST {BRAVO}: >{ALPHA} {BRAVO}⌂ {CHARLIE}"),
+            ],
+        );
+        assert_eq!(seen.collects, 0, "a move of the cursor must not walk");
+        assert!(
+            seen.switches.is_empty(),
+            "a move of the cursor must not switch, got {:?}",
+            seen.switches,
+        );
+        assert_eq!(
+            seen.listings, 1,
+            "only the Down that opens the list reads it",
+        );
+    }
+}
+
+/// The tests of [`Watched`] and of the production switch, against real
+/// repositories and real filesystem watchers.
+///
+/// Every fixture is a repository of `crate::testrepo` in a [`tempfile::TempDir`]
+/// of its own, so the tests stay parallel-safe and never touch the repository
+/// that the suite runs in.
+#[cfg(test)]
+mod watched_tests {
+    use std::cell::RefCell;
+    use std::path::Path;
+    use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
+    use std::time::{Duration, Instant};
+
+    use tempfile::TempDir;
+
+    use super::tests::walk_config;
+    use super::{
+        listed, listed_paths, switch_watched, Event, Watched, DIRECTORY_GONE, NOT_A_WORK_TREE,
+    };
+    use crate::render::Snapshot;
+    use crate::repo::RepoHandle;
+    use crate::testrepo::{git, git_stdout, init_repo, init_repo_at, init_repo_with_worktree};
+    use crate::worktrees::{WorktreeBadge, WorktreeEntry, WorktreePath};
+
+    /// The main worktree of [`siblings`], on branch `main`. Its path sorts
+    /// last.
+    const MAIN: &str = "main";
+
+    /// The linked worktree of [`siblings`], on the branch of the same name. Its
+    /// path sorts between the two others.
+    const LINKED: &str = "linked";
+
+    /// The detached linked worktree of [`siblings`]. Its path sorts first.
+    const DETACHED: &str = "detached";
+
+    /// How many hex digits of the commit a detached HEAD shows: the length
+    /// that `cwt` shows. Stated here as the oracle, apart from the constant of
+    /// the code under test.
+    const CWT_SHORT_HASH: usize = 7;
+
+    /// A repository with three worktrees side by side in one [`TempDir`]:
+    ///
+    /// | Path       | Worktree                   |
+    /// | ---------- | -------------------------- |
+    /// | `detached` | linked, detached           |
+    /// | `linked`   | linked, on branch `linked` |
+    /// | `main`     | main, on branch `main`     |
+    ///
+    /// No worktree is inside another, so the recursive watch of one worktree
+    /// never covers another. The drop of the [`TempDir`] deletes all three.
+    fn siblings() -> TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join(MAIN);
+        init_repo_at(&main);
+        add_worktree(&main, &dir.path().join(LINKED), &["-b", LINKED]);
+        add_worktree(&main, &dir.path().join(DETACHED), &["--detach"]);
+        dir
+    }
+
+    /// Add a linked worktree of the repository at `main`, at `path`. `how`
+    /// holds the options of `git worktree add` that pick the HEAD: a new
+    /// branch (`-b <name>`) or `--detach`.
+    fn add_worktree(main: &Path, path: &Path, how: &[&str]) {
+        let mut args = vec!["worktree", "add", "-q"];
+        args.extend_from_slice(how);
+        args.push(path.to_str().expect("utf-8 tempdir path"));
+        git(main, &args);
+    }
+
+    /// The [`WorktreePath`] of a directory that the fixture made.
+    fn resolved(path: &Path) -> WorktreePath {
+        WorktreePath::resolve(path).expect("the fixture made this directory")
+    }
+
+    /// The label of the detached HEAD at `dir`, as `cwt` shows it: `HEAD@` and
+    /// the first [`CWT_SHORT_HASH`] hex digits of the id that git reports.
+    fn detached_label(dir: &Path) -> String {
+        let full = git_stdout(dir, &["rev-parse", "HEAD"]);
+        let short: String = full.chars().take(CWT_SHORT_HASH).collect();
+        format!("HEAD@{short}")
+    }
+
+    /// A [`Watched`] on the worktree at `path`, built as [`super::run`] builds
+    /// the first one: from a handle that is open on the worktree already. Its
+    /// watcher sends on `tx`.
+    fn seeded(path: &Path, tx: mpsc::Sender<Event>) -> Watched {
+        let handle = RepoHandle::discover(path).expect("the fixture is a work tree");
+        Watched::from_handle(handle, resolved(path), tx).expect("watch the fixture")
+    }
+
+    /// A walk puts the badge of its worktree on the snapshot: the position of
+    /// the worktree among the worktrees in path order, their count, whether it
+    /// is the home worktree, and its label. The label of a detached worktree is
+    /// `HEAD@` and the short hash, as `cwt` shows it, because a detached
+    /// worktree has no branch.
+    ///
+    /// The home worktree is the middle one, so a badge that marks the first or
+    /// the last worktree as home fails.
+    #[test]
+    fn a_walk_puts_the_badge_of_its_worktree_on_the_snapshot() {
+        let dir = siblings();
+        let home = resolved(&dir.path().join(LINKED));
+        let expected = [
+            (
+                DETACHED,
+                WorktreeBadge {
+                    position: 1,
+                    count: 3,
+                    home: false,
+                    label: detached_label(&dir.path().join(DETACHED)),
+                },
+            ),
+            (
+                LINKED,
+                WorktreeBadge {
+                    position: 2,
+                    count: 3,
+                    home: true,
+                    label: LINKED.to_string(),
+                },
+            ),
+            (
+                MAIN,
+                WorktreeBadge {
+                    position: 3,
+                    count: 3,
+                    home: false,
+                    label: MAIN.to_string(),
+                },
+            ),
+        ];
+        let (tx, _rx) = mpsc::channel();
+
+        for (name, badge) in expected {
+            let mut watched = seeded(&dir.path().join(name), tx.clone());
+            let snapshot = watched
+                .walk(&walk_config(), &home)
+                .expect("walk the fixture");
+            assert_eq!(
+                snapshot.worktree,
+                Some(badge),
+                "the walk of the worktree {name}"
+            );
+        }
+    }
+
+    /// A repository with one worktree gets no badge, so the header of its frame
+    /// stays as it was before gsw moved between worktrees.
+    #[test]
+    fn a_walk_of_a_repository_with_one_worktree_puts_no_badge_on_the_snapshot() {
+        let dir = init_repo();
+        let home = resolved(dir.path());
+        let (tx, _rx) = mpsc::channel();
+
+        let mut watched = seeded(dir.path(), tx);
+        let snapshot = watched
+            .walk(&walk_config(), &home)
+            .expect("walk the fixture");
+
+        assert_eq!(snapshot.worktree, None);
+    }
+
+    /// The name of the file that a test changes in a worktree, to learn which
+    /// worktree a walk read.
+    const CHANGED: &str = "changed.txt";
+
+    /// How long a test waits for a filesystem watcher: for the old watcher to
+    /// hang up, and for the new watcher to report a change. Generous, because a
+    /// loaded machine delays both. Each wait ends as soon as its answer
+    /// arrives.
+    const WATCHER_DEADLINE: Duration = Duration::from_secs(20);
+
+    /// How long the channel of the new watcher must stay quiet before the test
+    /// writes the file that must wake it. The events of the switch itself
+    /// arrive in this window, so the event that the test then waits for comes
+    /// from its own write.
+    const QUIET: Duration = Duration::from_millis(500);
+
+    /// The paths of the files that `snapshot` lists.
+    fn files_of(snapshot: &Snapshot) -> Vec<&str> {
+        snapshot
+            .files
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect()
+    }
+
+    /// Assert that the watch is still on the worktree at `dir`, on `branch`:
+    /// the path of `watched` is `dir`, and a walk reads a file that changes in
+    /// `dir`.
+    fn assert_still_on(watched: &RefCell<Watched>, dir: &Path, branch: &str, home: &WorktreePath) {
+        assert_eq!(
+            watched.borrow().path,
+            resolved(dir),
+            "the watch must stay on the old worktree",
+        );
+        std::fs::write(dir.join(CHANGED), "changed\n").expect("write in the old worktree");
+        let later = watched
+            .borrow_mut()
+            .walk(&walk_config(), home)
+            .expect("walk the old worktree");
+        assert_eq!(
+            later.branch, branch,
+            "a later walk must read the old worktree"
+        );
+        assert!(
+            files_of(&later).contains(&CHANGED),
+            "a later walk must read the old worktree, got {:?}",
+            files_of(&later),
+        );
+    }
+
+    /// Whether every sender of `rx` hangs up before `deadline` passes. An event
+    /// that arrives first is read and dropped, because it was sent before the
+    /// hang-up.
+    fn hangs_up(rx: &Receiver<Event>, deadline: Duration) -> bool {
+        let give_up_at = Instant::now() + deadline;
+        while let Some(left) = give_up_at.checked_duration_since(Instant::now()) {
+            match rx.recv_timeout(left) {
+                Ok(_) => {}
+                Err(RecvTimeoutError::Disconnected) => return true,
+                Err(RecvTimeoutError::Timeout) => return false,
+            }
+        }
+        false
+    }
+
+    /// Whether a filesystem event reaches `rx` before `deadline` passes.
+    fn wakes(rx: &Receiver<Event>, deadline: Duration) -> bool {
+        let give_up_at = Instant::now() + deadline;
+        while let Some(left) = give_up_at.checked_duration_since(Instant::now()) {
+            match rx.recv_timeout(left) {
+                Ok(Event::FsChanged) => return true,
+                Ok(_) => {}
+                Err(_) => return false,
+            }
+        }
+        false
+    }
+
+    /// Read and drop every event on `rx` until the channel stays quiet for
+    /// [`QUIET`], or until `deadline` passes.
+    fn drain(rx: &Receiver<Event>, deadline: Duration) {
+        let give_up_at = Instant::now() + deadline;
+        while Instant::now() < give_up_at {
+            if rx.recv_timeout(QUIET).is_err() {
+                return;
+            }
+        }
+    }
+
+    /// A switch that works moves every later walk to the new worktree. The
+    /// switch gives the first frame of the new worktree. A later walk reads a
+    /// file that changed in the new worktree, and its badge names the new
+    /// worktree.
+    #[test]
+    fn a_switch_that_works_makes_every_later_walk_read_the_new_worktree() {
+        let dir = siblings();
+        let main = dir.path().join(MAIN);
+        let linked = dir.path().join(LINKED);
+        let home = resolved(&main);
+        let cfg = walk_config();
+        let (tx, _rx) = mpsc::channel();
+        let watched = RefCell::new(seeded(&main, tx.clone()));
+
+        let first = switch_watched(&watched, &resolved(&linked), tx, &cfg, &home)
+            .unwrap_or_else(|reason| panic!("the switch to {LINKED} must work: {reason}"));
+        assert_eq!(
+            first.branch, LINKED,
+            "the switch gives the first frame of the new worktree",
+        );
+        assert_eq!(watched.borrow().path, resolved(&linked));
+
+        std::fs::write(linked.join(CHANGED), "changed\n").expect("write in the new worktree");
+        let later = watched
+            .borrow_mut()
+            .walk(&cfg, &home)
+            .expect("walk the new worktree");
+
+        assert_eq!(later.branch, LINKED);
+        assert!(
+            files_of(&later).contains(&CHANGED),
+            "a later walk must read the new worktree, got {:?}",
+            files_of(&later),
+        );
+        assert_eq!(
+            later.worktree,
+            Some(WorktreeBadge {
+                position: 2,
+                count: 3,
+                home: false,
+                label: LINKED.to_string(),
+            }),
+            "the badge must name the new worktree",
+        );
+    }
+
+    /// A switch to a worktree whose directory is gone fails. The reason names
+    /// the directory, and the watch stays on the old worktree.
+    #[test]
+    fn a_switch_to_a_directory_that_is_gone_leaves_the_old_worktree_and_gives_the_reason() {
+        let dir = siblings();
+        let main = dir.path().join(MAIN);
+        let linked = dir.path().join(LINKED);
+        let home = resolved(&main);
+        let target = resolved(&linked);
+        std::fs::remove_dir_all(&linked).expect("delete the directory of the linked worktree");
+        let (tx, _rx) = mpsc::channel();
+        let watched = RefCell::new(seeded(&main, tx.clone()));
+
+        let reason = switch_watched(&watched, &target, tx, &walk_config(), &home)
+            .expect_err("a directory that is gone must refuse the switch");
+
+        assert_still_on(&watched, &main, MAIN, &home);
+        assert!(
+            reason.contains(&target.as_path().display().to_string()),
+            "the reason must name the directory: {reason}",
+        );
+    }
+
+    /// An index that gix reads and refuses: bytes that are not an index, and
+    /// more of them than the checksum at the end of an index takes. gix checks
+    /// that checksum first, finds it wrong, and gives an error.
+    ///
+    /// A shorter file makes gix-index 0.51 panic on an overflow of a
+    /// subtraction (`src/file/init.rs:73`), where it must give an error. So a
+    /// walk of a worktree whose index is shorter than 20 bytes ends watch mode.
+    /// That is a defect of gix. This fixture stays clear of it, because the
+    /// test is about a walk that fails, and not about a walk that panics.
+    const SPOILED_INDEX: &[u8] = &[0xAB; 64];
+
+    /// A switch whose walk fails leaves the old worktree in place, as a switch
+    /// whose open fails does: the switch replaces the old worktree only when
+    /// both work. The new worktree opens, but its index is [`SPOILED_INDEX`],
+    /// so its status walk fails. The reason names the directory.
+    #[test]
+    fn a_switch_whose_walk_fails_leaves_the_old_worktree_and_gives_the_reason() {
+        let dir = siblings();
+        let main = dir.path().join(MAIN);
+        let linked = dir.path().join(LINKED);
+        let home = resolved(&main);
+        let target = resolved(&linked);
+        let index = git_stdout(
+            &linked,
+            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+        );
+        std::fs::write(&index, SPOILED_INDEX).expect("spoil the index of the linked worktree");
+        let (tx, _rx) = mpsc::channel();
+        let watched = RefCell::new(seeded(&main, tx.clone()));
+
+        let reason = switch_watched(&watched, &target, tx, &walk_config(), &home)
+            .expect_err("a worktree whose walk fails must refuse the switch");
+
+        assert_still_on(&watched, &main, MAIN, &home);
+        assert!(
+            reason.contains(&target.as_path().display().to_string()),
+            "the reason must name the directory: {reason}",
+        );
+    }
+
+    /// After a switch, a change to a file in the new worktree wakes the loop,
+    /// and a change in the old worktree does not.
+    ///
+    /// The watchers are real `notify` watchers, on sibling worktrees. A
+    /// worktree inside another is under the recursive watch of the other by
+    /// design, so a nested layout proves nothing about the switch.
+    ///
+    /// The first watcher sends on one channel, and the switch gives the new
+    /// watcher another channel. That makes the negative half exact, where a
+    /// quiet window only makes it likely: the old channel reports that every
+    /// sender hung up. The old watcher and its sender are then gone, so no
+    /// change in the old worktree can ever reach the loop through them, and a
+    /// write in the old worktree finds the channel hung up still. In production
+    /// both watchers send on the one channel of the loop, and the new watcher
+    /// does not watch the old worktree, because the two are siblings.
+    ///
+    /// The positive half first waits for the channel of the new watcher to go
+    /// quiet, so the event that it waits for comes from the write of the test.
+    /// Every wait has a deadline. The drop of `watched` at the end stops the
+    /// new watcher and joins its thread, so nothing of the test outlives it.
+    #[test]
+    fn after_a_switch_a_change_in_the_new_worktree_wakes_the_loop_and_one_in_the_old_does_not() {
+        let dir = siblings();
+        let main = dir.path().join(MAIN);
+        let linked = dir.path().join(LINKED);
+        let home = resolved(&main);
+        let (old_tx, old_rx) = mpsc::channel();
+        let watched = RefCell::new(seeded(&main, old_tx));
+        let (new_tx, new_rx) = mpsc::channel();
+
+        switch_watched(&watched, &resolved(&linked), new_tx, &walk_config(), &home)
+            .unwrap_or_else(|reason| panic!("the switch to {LINKED} must work: {reason}"));
+
+        assert!(
+            hangs_up(&old_rx, WATCHER_DEADLINE),
+            "the switch must stop the old watcher, and drop its sender, within {}s",
+            WATCHER_DEADLINE.as_secs(),
+        );
+        std::fs::write(main.join(CHANGED), "changed\n").expect("write in the old worktree");
+        assert!(
+            matches!(old_rx.try_recv(), Err(TryRecvError::Disconnected)),
+            "a change in the old worktree must not reach the loop",
+        );
+
+        drain(&new_rx, WATCHER_DEADLINE);
+        std::fs::write(linked.join(CHANGED), "changed\n").expect("write in the new worktree");
+        assert!(
+            wakes(&new_rx, WATCHER_DEADLINE),
+            "a change in the new worktree must wake the loop within {}s",
+            WATCHER_DEADLINE.as_secs(),
+        );
+    }
+
+    /// Down reads every worktree of the repository, sorted by path, whatever
+    /// worktree the watch is on: the main worktree, a linked worktree, or a
+    /// detached one. Each entry carries its label, and the label of the
+    /// detached worktree is `HEAD@` and the short hash. Left and Right read
+    /// the paths of the same worktrees, in the same order, with no label.
+    #[test]
+    fn the_list_holds_every_worktree_of_the_repository_from_each_worktree() {
+        let dir = siblings();
+        let expected = vec![
+            WorktreeEntry {
+                path: resolved(&dir.path().join(DETACHED)),
+                label: detached_label(&dir.path().join(DETACHED)),
+            },
+            WorktreeEntry {
+                path: resolved(&dir.path().join(LINKED)),
+                label: LINKED.to_string(),
+            },
+            WorktreeEntry {
+                path: resolved(&dir.path().join(MAIN)),
+                label: MAIN.to_string(),
+            },
+        ];
+        let paths: Vec<WorktreePath> = expected.iter().map(|entry| entry.path.clone()).collect();
+        let (tx, _rx) = mpsc::channel();
+
+        for name in [DETACHED, LINKED, MAIN] {
+            let watched = RefCell::new(seeded(&dir.path().join(name), tx.clone()));
+            assert_eq!(
+                listed(&watched),
+                expected,
+                "the list read from the worktree {name}",
+            );
+            assert_eq!(
+                listed_paths(&watched),
+                paths,
+                "the paths read from the worktree {name}",
+            );
+        }
+    }
+
+    /// Open the worktree at `path` through [`Watched::open`], as a switch opens
+    /// its target. The watcher of an open that works sends on a channel that
+    /// nobody reads, because these tests wait for no event.
+    fn opened(path: &WorktreePath) -> Result<Watched, String> {
+        let (tx, _rx) = mpsc::channel();
+        Watched::open(path, tx)
+    }
+
+    /// A linked worktree opens, on its own path, and its walk reads that
+    /// worktree.
+    #[test]
+    fn open_opens_a_linked_worktree() {
+        let dir = siblings();
+        let linked = resolved(&dir.path().join(LINKED));
+
+        let mut watched = opened(&linked)
+            .unwrap_or_else(|reason| panic!("the linked worktree must open: {reason}"));
+
+        assert_eq!(watched.path, linked);
+        let snapshot = watched
+            .walk(&walk_config(), &linked)
+            .expect("walk the linked worktree");
+        assert_eq!(snapshot.branch, LINKED);
+    }
+
+    /// A worktree whose directory no longer exists is refused with
+    /// [`DIRECTORY_GONE`], and the reason names the directory.
+    #[test]
+    fn open_refuses_a_directory_that_no_longer_exists() {
+        let dir = siblings();
+        let linked = resolved(&dir.path().join(LINKED));
+        std::fs::remove_dir_all(linked.as_path()).expect("delete the linked worktree");
+
+        let reason = opened(&linked)
+            .err()
+            .expect("a directory that is gone must not open");
+
+        assert_eq!(
+            reason,
+            format!("{DIRECTORY_GONE}: {}", linked.as_path().display()),
+        );
+    }
+
+    /// A plain directory is not a git work tree, so it is refused with
+    /// [`NOT_A_WORK_TREE`], and the reason names the directory.
+    #[test]
+    fn open_refuses_a_plain_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plain = resolved(dir.path());
+
+        let reason = opened(&plain)
+            .err()
+            .expect("a plain directory must not open");
+
+        assert_eq!(
+            reason,
+            format!("{NOT_A_WORK_TREE}: {}", plain.as_path().display()),
+        );
+    }
+
+    /// A linked worktree inside the main worktree that lost its `.git` file is
+    /// refused with [`NOT_A_WORK_TREE`].
+    ///
+    /// Discovery walks up from the directory, so it finds the main worktree
+    /// around it. An open that took that answer would watch the parent
+    /// repository under the name of the child, and the frame would show the
+    /// status of one worktree under the name of another. The test first
+    /// asserts that discovery really finds the parent, or the refusal proves
+    /// nothing.
+    #[test]
+    fn open_refuses_a_nested_worktree_that_lost_its_git_file_and_never_opens_the_parent() {
+        let (repo, nested) = init_repo_with_worktree();
+        std::fs::remove_file(nested.join(".git")).expect("remove the .git file of the worktree");
+        let target = resolved(&nested);
+        assert_eq!(
+            RepoHandle::discover(&nested)
+                .and_then(|handle| handle.repo().workdir().and_then(WorktreePath::resolve)),
+            Some(resolved(repo.path())),
+            "discovery must find the main worktree around the directory",
+        );
+
+        let reason = opened(&target)
+            .err()
+            .expect("a directory that lost its .git file must not open");
+
+        assert_eq!(
+            reason,
+            format!("{NOT_A_WORK_TREE}: {}", target.as_path().display()),
+        );
     }
 }
