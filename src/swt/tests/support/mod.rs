@@ -15,19 +15,25 @@
 //!   and where two concurrent runs of the same test collide on it.
 //!   [`TestRepo::siblings`] is that parent directory, and it is inside the
 //!   `TempDir`.
-//! - **The host is scrubbed out of every child the suite spawns.** git exports
-//!   `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` into a hook's environment,
-//!   and this repo's own pre-commit hook runs `cargo test`. If those leak
-//!   through, a fixture's `git init`/`add`/`commit` targets *this* repository
-//!   despite the working directory — which has happened here before. The host's
+//! - **The host is scrubbed out of every child the suite spawns.** Git exports
+//!   its own `GIT_` variables into the environment of a hook, and the
+//!   pre-commit hook of this repository runs `cargo test`. Git obeys those
+//!   variables before the working directory of a command. A leaked `GIT_DIR` or
+//!   `GIT_INDEX_FILE` thus aims a fixture's `git init`/`add`/`commit` at *this*
+//!   repository, and that has happened here before. A leaked
+//!   `GIT_OBJECT_DIRECTORY` sends the objects of a fixture into another store,
+//!   and a leaked `GIT_CONFIG_PARAMETERS` injects configuration into the child.
+//!   So [`sandboxed`] sheds the whole `GIT_` prefix through
+//!   [`gitscratch::shed_inherited_git_environment`]. It holds no list of names,
+//!   because a list misses every variable that git adds later. The host's
 //!   global and system gitconfig is a quieter version of the same problem: it
-//!   decides hooks paths, aliases and credential helpers for a suite that is
-//!   supposed to depend on nothing but its own fixture. [`sandboxed`] removes
-//!   both, at the one place [`git_command`] and [`swt_command`] share, and
-//!   [`TestRepo::new`] additionally refuses to build a fixture at all while the
-//!   git location variables are set, because the tests that call `swt`'s git
-//!   functions *in process* inherit this process's environment and cannot be
-//!   protected from the outside.
+//!   decides hooks paths, aliases and credential helpers for a suite that must
+//!   depend on its own fixture and nothing else. [`sandboxed`] points both at
+//!   an empty file. It applies both rules at the one place that [`git_command`]
+//!   and [`swt_command`] share. [`TestRepo::new`] also refuses to build a
+//!   fixture while the git location variables are set. The tests that call the
+//!   git functions of `swt` *in process* inherit the environment of this
+//!   process, and the harness cannot protect them from the outside.
 //! - **Every name is process-unique.** Two copies of this test binary run
 //!   concurrently in this repo — the pre-commit hook's `cargo test` racing a
 //!   manual one — so every worktree path and branch name is keyed on
@@ -130,23 +136,26 @@ pub fn assert_git_env_is_sandboxed() {
 /// The single place the rules live, so the two entrances that build children
 /// ([`git_command`] and [`swt_command`]) cannot drift apart — a rule applied at
 /// only one of them leaves half the suite reading the host's git configuration
-/// while the harness reads as sandboxed. Two rules:
+/// while the harness reads as sandboxed. Two rules, in this order:
 ///
+/// - **Every inherited `GIT_` variable is removed**, through
+///   [`gitscratch::shed_inherited_git_environment`]. The rule is the prefix,
+///   not a list of names. Git obeys `GIT_OBJECT_DIRECTORY` and
+///   `GIT_CONFIG_PARAMETERS` as it obeys `GIT_DIR`, and a list misses every
+///   variable that git adds later. The child then acts on its working
+///   directory and nothing else.
 /// - **The host's global and system config is replaced with an empty file.**
 ///   Otherwise `core.hooksPath`, `pull.rebase`, aliases, advice settings and
 ///   credential helpers from the developer's or CI machine's gitconfig decide
 ///   what the child does. A fixture pins [`FIXTURE_CONFIG`] locally, which
-///   covers those four keys and nothing else.
-/// - **Any git location the ambient environment exported is removed**, so the
-///   child acts on its working directory and nothing else.
+///   covers those four keys and nothing else. This rule comes after the sweep.
+///   The sweep removes both names when this process holds them, and a value
+///   set after the sweep wins.
 fn sandboxed(cmd: &mut Command) -> &mut Command {
+    gitscratch::shed_inherited_git_environment(cmd);
     cmd.stdin(Stdio::null())
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null");
-    for var in INHERITED_GIT_ENV {
-        cmd.env_remove(var);
-    }
-    cmd
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
 }
 
 /// A git invocation in `dir`, sandboxed from the host by [`sandboxed`] exactly
@@ -374,8 +383,8 @@ pub fn exiting_check(status: i32) -> String {
 ///
 /// The single, mandatory entrance for spawning `swt`. It is sandboxed by
 /// [`sandboxed`], so the binary under test gets the same treatment a fixture's
-/// own git gets: an empty global and system git config, no inherited git
-/// location, and a nulled stdin so an unexpected prompt cannot hang the suite.
+/// own git gets: an empty global and system git config, no inherited `GIT_`
+/// variable, and a nulled stdin so an unexpected prompt cannot hang the suite.
 pub fn swt_command(cwd: &Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_swt"));
     sandboxed(&mut cmd).current_dir(cwd);
