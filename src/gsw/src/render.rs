@@ -1570,6 +1570,178 @@ mod tests {
         }
     }
 
+    /// The badge of the worktree at `position` of `count`, with `label`.
+    fn worktree_badge(position: usize, count: usize, home: bool, label: &str) -> WorktreeBadge {
+        WorktreeBadge {
+            position,
+            count,
+            home,
+            label: label.to_string(),
+        }
+    }
+
+    /// The header of `snap` in a pane of `width` columns, as visible glyphs.
+    ///
+    /// The frame is painted with the escape codes forced on, and then the
+    /// codes are taken out, so the comparison covers the painted header.
+    fn painted_header(snap: &Snapshot, width: usize) -> String {
+        painted_headers(snap, &[width]).remove(0)
+    }
+
+    /// The header of `snap` at each of `widths`, as visible glyphs. One lock
+    /// on the override of `colored` covers every width.
+    fn painted_headers(snap: &Snapshot, widths: &[usize]) -> Vec<String> {
+        let frames = testcolor::with_forced_ansi(|| {
+            widths
+                .iter()
+                .map(|&width| {
+                    let mut o = opts();
+                    o.terminal_width = width;
+                    render(snap, &o)
+                })
+                .collect::<Vec<_>>()
+        });
+        frames
+            .iter()
+            .map(|frame| strip_ansi(frame.lines().next().unwrap_or_default()))
+            .collect()
+    }
+
+    #[test]
+    fn the_header_of_the_home_worktree_shows_the_home_mark_and_the_position() {
+        // The first line of the example in the issue. The header must say
+        // which worktree the frame shows, and whether it is the worktree
+        // where the user started gsw.
+        let mut snap = snap_with(vec![]);
+        snap.branch = "main".into();
+        snap.commits_ahead = 0;
+        snap.worktree = Some(worktree_badge(1, 4, true, "main"));
+
+        assert_eq!(
+            painted_header(&snap, 80),
+            "gsw ⌂ 1/4 • main • 0 commits ahead of main",
+        );
+    }
+
+    #[test]
+    fn the_header_of_a_worktree_that_is_not_home_shows_the_position_and_no_home_mark() {
+        // The second line of the example in the issue. The badge is part of
+        // the header, so the ladder sheds the name of the tracking ref at 60
+        // columns, as it does with no badge.
+        let mut snap = snap_with(vec![]);
+        snap.branch = "issue-475".into();
+        snap.commits_ahead = 2;
+        snap.upstream = Some(UpstreamStatus {
+            name: "origin/issue-475".into(),
+            ahead: 2,
+            behind: 0,
+        });
+        snap.worktree = Some(worktree_badge(3, 4, false, "issue-475"));
+
+        assert_eq!(
+            painted_headers(&snap, &[80, 60]),
+            [
+                "gsw 3/4 • issue-475 • 2 commits ahead of main • ↑2 ↓0 origin/issue-475",
+                "gsw 3/4 • issue-475 • 2 commits ahead of main • ↑2 ↓0",
+            ],
+        );
+    }
+
+    #[test]
+    fn the_header_shows_the_label_of_a_detached_worktree_in_place_of_the_branch() {
+        // A detached worktree has no branch: its branch name is `HEAD`,
+        // which names no worktree. The label names the commit.
+        let mut snap = snap_with(vec![]);
+        snap.branch = "HEAD".into();
+        snap.worktree = Some(worktree_badge(2, 3, false, "HEAD@9ba6951"));
+
+        assert_eq!(
+            painted_header(&snap, 80),
+            "gsw 2/3 • HEAD@9ba6951 • 3 commits ahead of main",
+        );
+    }
+
+    #[test]
+    fn the_header_shaves_the_badge_label_in_place_of_the_branch() {
+        // The label takes the place of the branch on every rung of the
+        // ladder, so a long label is shaved from the middle as a long branch
+        // is. The branch name must not come back on a squeezed rung.
+        let mut snap = snap_with(vec![]);
+        snap.branch = "short".into();
+        snap.worktree = Some(worktree_badge(2, 3, false, LONG_BRANCH));
+
+        let widths = [100, 80, 60, 45, 40];
+        for (width, header) in widths.iter().zip(painted_headers(&snap, &widths)) {
+            assert!(
+                header.contains("featu") && header.contains("ever") && !header.contains("short"),
+                "the header at {width} columns must show both ends of the label and not the \
+                 branch: {header:?}",
+            );
+            assert!(
+                UnicodeWidthStr::width(header.as_str()) <= *width,
+                "the header is {} columns, past the {width}-column pane: {header:?}",
+                UnicodeWidthStr::width(header.as_str()),
+            );
+        }
+    }
+
+    #[test]
+    fn the_header_with_a_badge_never_exceeds_the_width_and_keeps_the_badge_to_the_last() {
+        // The header never wraps. The hard cut takes text from the right, so
+        // the badge is the last text to go: every pane wider than the badge
+        // shows it whole.
+        let mut snap = snap_with_overlong_header();
+        snap.commits_behind = 87;
+        for (home, lead) in [(true, "gsw ⌂ 12/14"), (false, "gsw 12/14")] {
+            snap.worktree = Some(worktree_badge(12, 14, home, LONG_BRANCH));
+            let widths: Vec<usize> = (0..=120).collect();
+            for (width, header) in widths.iter().zip(painted_headers(&snap, &widths)) {
+                assert!(
+                    UnicodeWidthStr::width(header.as_str()) <= *width,
+                    "the header is {} columns, past the {width}-column pane: {header:?}",
+                    UnicodeWidthStr::width(header.as_str()),
+                );
+                if *width > UnicodeWidthStr::width(lead) {
+                    assert!(
+                        header.starts_with(lead),
+                        "the header at {width} columns must start with the whole badge \
+                         {lead:?}: {header:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_multibyte_badge_label_never_panics_and_never_exceeds_the_width() {
+        // Double-width glyphs cost two columns each, an emoji costs two, and
+        // an accent costs one. A cut that counts bytes panics, and a cut that
+        // counts characters overflows.
+        const LABEL: &str = "日本語-🎉-café/とても長い名前のブランチ";
+        let mut snap = snap_with(vec![]);
+        snap.upstream = Some(UpstreamStatus {
+            name: format!("origin/{LABEL}"),
+            ahead: 1,
+            behind: 2,
+        });
+        snap.worktree = Some(worktree_badge(2, 3, false, LABEL));
+
+        let widths: Vec<usize> = (0..=120).collect();
+        let headers = painted_headers(&snap, &widths);
+        for (width, header) in widths.iter().zip(&headers) {
+            assert!(
+                UnicodeWidthStr::width(header.as_str()) <= *width,
+                "the header is {} columns, past the {width}-column pane: {header:?}",
+                UnicodeWidthStr::width(header.as_str()),
+            );
+        }
+        assert!(
+            headers[120].starts_with(&format!("gsw 2/3 • {LABEL} • ")),
+            "a wide pane shows the whole label: {:?}",
+            headers[120],
+        );
+    }
+
     #[test]
     fn header_mentions_branch_and_commit_count() {
         let out = strip_ansi(&render(&snap_with(vec![]), &opts()));
