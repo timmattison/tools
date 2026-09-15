@@ -5360,6 +5360,11 @@ mod push_loop_tests {
         issue_runs: Vec<crate::issue::IssueCommand>,
         /// How many measurements the loop started with `m`.
         conflict_runs: usize,
+        /// Every worktree the `switch` hook was asked to open, in order,
+        /// with the refused ones.
+        switches: Vec<WorktreePath>,
+        /// How many times the loop read the list of worktrees.
+        listings: usize,
     }
 
     /// Run the loop over a pre-loaded event queue and report what it did.
@@ -5452,6 +5457,158 @@ mod push_loop_tests {
         clock: Clock,
         session: crate::remote::Session,
     ) -> (String, Seen) {
+        drive(
+            events,
+            Setup {
+                dims,
+                render: Box::new(move |_snapshot: &Snapshot, frame_dims: Dimensions| {
+                    render_frame(frame_dims)
+                }),
+                session,
+                schedule: no_timed_refresh_for_push(),
+                world: World::alone(),
+            },
+            clock,
+        )
+    }
+
+    /// How one loop run is set up.
+    ///
+    /// [`run_loop_in_session`] fills it for the tests that predate the arrow
+    /// keys: one worktree, a frame that ignores its snapshot, and no timed
+    /// refresh. The worktree tests fill it with more worktrees and a frame
+    /// that names its snapshot.
+    struct Setup {
+        /// The pane the loop renders into.
+        dims: Dimensions,
+        /// What the render hook paints for a snapshot, in a frame of the given
+        /// size.
+        render: Box<dyn Fn(&Snapshot, Dimensions) -> String>,
+        /// Where the person who reads the screen sits.
+        session: crate::remote::Session,
+        /// The walk schedule the loop starts from.
+        schedule: WalkSchedule,
+        /// The worktrees, and how each switch comes out.
+        world: World,
+    }
+
+    /// The name of the one worktree of [`World::alone`]. Its snapshot is
+    /// [`pushable_snapshot`], because [`snapshot_of`] names the branch after
+    /// the worktree.
+    const ALONE: &str = "gsw-push";
+
+    /// The first of the three worktrees of [`World::three`], in path order.
+    const ALPHA: &str = "alpha";
+
+    /// The second of the three worktrees of [`World::three`], and its home.
+    const BRAVO: &str = "bravo";
+
+    /// The last of the three worktrees of [`World::three`], in path order.
+    const CHARLIE: &str = "charlie";
+
+    /// The worktree `/code/<name>`. No filesystem call touches it.
+    fn worktree(name: &str) -> WorktreePath {
+        WorktreePath::fake(format!("/code/{name}"))
+    }
+
+    /// The snapshot of the worktree at `path`: [`pushable_snapshot`], on a
+    /// branch named after the last component of the path. A frame then says
+    /// which worktree it shows, and a push says which branch it pushes.
+    fn snapshot_of(path: &WorktreePath) -> Snapshot {
+        let name = path
+            .as_path()
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .expect("a fake worktree path has a name");
+        Snapshot {
+            branch: name.to_string(),
+            ..pushable_snapshot()
+        }
+    }
+
+    /// The reason the fake `switch` hook gives for a worktree it refuses.
+    const REFUSED: &str = "no such worktree";
+
+    /// The worktrees a loop run can move between, and how each switch comes
+    /// out.
+    ///
+    /// The fake `worktrees` hook gives [`World::listed`]. The fake `switch`
+    /// hook gives [`snapshot_of`] its target, or refuses a target in
+    /// [`World::refused`] with [`REFUSED`].
+    struct World {
+        /// The worktree where gsw started.
+        home: WorktreePath,
+        /// What the `worktrees` hook gives at each press: every worktree,
+        /// sorted by path, as the listing gives them.
+        listed: Vec<WorktreeEntry>,
+        /// The worktrees whose switch fails, as the switch to a worktree that
+        /// stopped existing fails.
+        refused: Vec<WorktreePath>,
+    }
+
+    impl World {
+        /// The worktrees `/code/<name>` for each of `names`, with the home
+        /// worktree at `home`. Nothing is refused.
+        ///
+        /// # Panics
+        ///
+        /// Panics when `names` is not sorted. The moves search by sort order,
+        /// so an unsorted list gives wrong answers with no panic of its own.
+        fn of(names: &[&str], home: &str) -> Self {
+            let listed: Vec<WorktreeEntry> = names
+                .iter()
+                .map(|name| WorktreeEntry {
+                    path: worktree(name),
+                    label: (*name).to_string(),
+                })
+                .collect();
+            assert!(
+                listed.iter().map(|entry| &entry.path).is_sorted(),
+                "the fake list must be sorted by path, as the listing gives it: {names:?}",
+            );
+            Self {
+                home: worktree(home),
+                listed,
+                refused: Vec::new(),
+            }
+        }
+
+        /// The one worktree that every test before the arrow keys watched.
+        fn alone() -> Self {
+            Self::of(&[ALONE], ALONE)
+        }
+
+        /// Three worktrees in path order, with the home worktree between the
+        /// two others.
+        fn three() -> Self {
+            Self::three_at(BRAVO)
+        }
+
+        /// The three worktrees of [`World::three`], with the home worktree at
+        /// `home`.
+        fn three_at(home: &str) -> Self {
+            Self::of(&[ALPHA, BRAVO, CHARLIE], home)
+        }
+    }
+
+    /// The shared body of every helper above: pre-load the queue, run the loop
+    /// as `setup` says, and report the last painted screen plus what the hooks
+    /// saw.
+    ///
+    /// `clock` is read once up front for the cache's collection time, so a
+    /// frozen clock lands on exactly the instant the loop reads later.
+    fn drive<Clock: Fn() -> Instant>(
+        events: Vec<Event>,
+        setup: Setup,
+        clock: Clock,
+    ) -> (String, Seen) {
+        let Setup {
+            dims,
+            render,
+            session,
+            schedule,
+            world,
+        } = setup;
         let (tx, rx) = mpsc::channel();
         for event in events {
             tx.send(event).expect("queue event");
@@ -5465,21 +5622,25 @@ mod push_loop_tests {
             TEST_DEBOUNCE,
             &mut displayed,
             LoopStart {
-                cache: cache_in(base, dims),
+                cache: SnapshotCache {
+                    snapshot: snapshot_of(&world.home),
+                    collected_at: base,
+                    dims,
+                },
                 freshest: None,
-                schedule: no_timed_refresh_for_push(),
+                schedule,
                 ui: PushUi::new(false),
                 session,
-                home: loop_home(),
+                home: world.home.clone(),
             },
             LoopHooks {
-                collect: |_current: &WorktreePath| {
+                collect: |current: &WorktreePath| {
                     seen.borrow_mut().collects += 1;
-                    Ok(pushable_snapshot())
+                    Ok(snapshot_of(current))
                 },
-                render: |_snap: &Snapshot, frame_dims: Dimensions, _timing: FrameTiming| {
+                render: |snap: &Snapshot, frame_dims: Dimensions, _timing: FrameTiming| {
                     seen.borrow_mut().frame_heights.push(frame_dims.height);
-                    frame(&render_frame(frame_dims))
+                    frame(&render(snap, frame_dims))
                 },
                 dimensions: move || dims,
                 paint: |output: &str| {
@@ -5489,7 +5650,7 @@ mod push_loop_tests {
                 clock,
                 next_tick: timer_off,
                 start_push: |command: PushCommand, _current: &WorktreePath| {
-                    seen.borrow_mut().pushes.push(command)
+                    seen.borrow_mut().pushes.push(command);
                 },
                 start_issue: |command: crate::issue::IssueCommand,
                               _current: &WorktreePath,
@@ -5497,10 +5658,20 @@ mod push_loop_tests {
                     seen.borrow_mut().issue_runs.push(command);
                 },
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {
-                    seen.borrow_mut().conflict_runs += 1
+                    seen.borrow_mut().conflict_runs += 1;
                 },
-                worktrees: Vec::new,
-                switch: no_switch,
+                worktrees: || {
+                    seen.borrow_mut().listings += 1;
+                    world.listed.clone()
+                },
+                switch: |target: &WorktreePath| {
+                    seen.borrow_mut().switches.push(target.clone());
+                    if world.refused.contains(target) {
+                        Err(format!("{REFUSED}: {}", target.as_path().display()))
+                    } else {
+                        Ok(snapshot_of(target))
+                    }
+                },
             },
         )
         .expect("loop");
@@ -6696,5 +6867,148 @@ mod push_loop_tests {
             .recv_timeout(Duration::from_secs(10))
             .expect("Ctrl-C must end the loop rather than leave it blocked");
         assert!(pushes.is_empty(), "ctrl-c must not push");
+    }
+
+    /// A frame that names the branch of its snapshot, so a test reads which
+    /// worktree the frame shows.
+    fn frame_of(snapshot: &Snapshot, _frame_dims: Dimensions) -> String {
+        format!("FRAME {}", snapshot.branch)
+    }
+
+    /// The setup of the worktree tests: `world`, a frame that names the branch
+    /// of its snapshot, a local shell, and no timed refresh.
+    fn in_world(world: World) -> Setup {
+        Setup {
+            dims: TEST_DIMS,
+            render: Box::new(frame_of),
+            session: crate::remote::Session::Local,
+            schedule: no_timed_refresh_for_push(),
+            world,
+        }
+    }
+
+    /// Run the loop over `events` in `world`, set up as [`in_world`] says, on
+    /// a frozen clock.
+    fn run_in(world: World, events: Vec<Event>) -> (String, Seen) {
+        let base = Instant::now();
+        drive(events, in_world(world), move || base)
+    }
+
+    /// The outcome of a run of `m` that gitscratch refused, as the loop
+    /// receives it. Its line is a status line, which an unbound key takes
+    /// away.
+    fn refused_run() -> Event {
+        finished(ConflictsOutcome::Refused {
+            reason: "no default branch resolves here".to_string(),
+        })
+    }
+
+    /// The line that [`refused_run`] puts under the frame.
+    const REFUSED_RUN_LINE: &str = "grind and grime failed: no default branch resolves here";
+
+    #[test]
+    fn right_goes_to_the_next_worktree_in_path_order_and_wraps_from_the_last() {
+        // Right visits the worktrees in the order of `cwt -f`, and Right on
+        // the last worktree goes to the first, as `cwt -f` does.
+        let (_screen, seen) = run_in(World::three(), vec![key(KeyCode::Right), Event::Quit]);
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE)],
+            "Right from the middle"
+        );
+
+        let (_screen, seen) = run_in(
+            World::three_at(CHARLIE),
+            vec![key(KeyCode::Right), Event::Quit],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(ALPHA)],
+            "Right on the last worktree wraps to the first",
+        );
+    }
+
+    #[test]
+    fn left_goes_to_the_previous_worktree_in_path_order_and_wraps_from_the_first() {
+        // Left visits the worktrees in the order of `cwt -p`, and Left on the
+        // first worktree goes to the last, as `cwt -p` does.
+        let (_screen, seen) = run_in(World::three(), vec![key(KeyCode::Left), Event::Quit]);
+        assert_eq!(seen.switches, vec![worktree(ALPHA)], "Left from the middle");
+
+        let (_screen, seen) = run_in(
+            World::three_at(ALPHA),
+            vec![key(KeyCode::Left), Event::Quit],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE)],
+            "Left on the first worktree wraps to the last",
+        );
+    }
+
+    #[test]
+    fn left_and_right_read_the_list_of_worktrees_again_at_each_press() {
+        // `nwt` and `swt` add and remove worktrees while gsw runs, so a list
+        // read once at start is soon wrong.
+        let (_screen, seen) = run_in(
+            World::three(),
+            vec![
+                key(KeyCode::Right),
+                key(KeyCode::Left),
+                key(KeyCode::Right),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.listings, 3,
+            "each press of Left and Right must read the list"
+        );
+    }
+
+    #[test]
+    fn up_on_the_home_worktree_does_nothing() {
+        // The frame shows the home worktree already. Nothing switches, and the
+        // line under the frame stays, because Up is not an unbound key.
+        let (screen, seen) = run_in(
+            World::three(),
+            vec![press_m(), refused_run(), key(KeyCode::Up), Event::Quit],
+        );
+        assert!(
+            seen.switches.is_empty(),
+            "Up on the home worktree must not switch, got {:?}",
+            seen.switches,
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {BRAVO}\n{REFUSED_RUN_LINE} (0s ago)"),
+            "Up on the home worktree must take nothing away",
+        );
+    }
+
+    #[test]
+    fn with_one_worktree_up_left_and_right_do_nothing() {
+        // No other worktree is there to go to: no switch, no message, and
+        // nothing taken away.
+        let (screen, seen) = run_in(
+            World::alone(),
+            vec![
+                press_m(),
+                refused_run(),
+                key(KeyCode::Up),
+                key(KeyCode::Left),
+                key(KeyCode::Right),
+                Event::Quit,
+            ],
+        );
+        assert!(
+            seen.switches.is_empty(),
+            "one worktree has no other to switch to, got {:?}",
+            seen.switches,
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {ALONE}\n{REFUSED_RUN_LINE} (0s ago)"),
+            "with one worktree an arrow key must take nothing away",
+        );
     }
 }
