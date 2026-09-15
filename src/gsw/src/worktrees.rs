@@ -75,7 +75,42 @@ pub(crate) fn head_label(_repo: &gix::Repository) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::WorktreePath;
+    use std::path::Path;
+
+    use super::{head_label, WorktreePath};
+    use crate::testrepo::{git, git_stdout, init_repo};
+
+    /// How many hex digits of the commit a detached HEAD shows: the length
+    /// that `cwt` shows (`SHORT_COMMIT_HASH_LENGTH` in
+    /// `src/cwt/src/worktree.rs`). Stated here as the oracle, apart from the
+    /// constant of the code under test.
+    const CWT_SHORT_HASH: usize = 7;
+
+    /// Open the repository at `path` through the discovery that
+    /// `RepoHandle::discover` makes, which is how gsw opens a worktree.
+    fn open(path: &Path) -> gix::Repository {
+        gix::discover(path).expect("the fixture is a repository")
+    }
+
+    /// The label that `cwt` shows for a detached HEAD at `dir`: `HEAD@` and
+    /// the first [`CWT_SHORT_HASH`] hex digits of the id that git reports.
+    fn detached_label(dir: &Path) -> String {
+        let full = git_stdout(dir, &["rev-parse", "HEAD"]);
+        let short: String = full.chars().take(CWT_SHORT_HASH).collect();
+        format!("HEAD@{short}")
+    }
+
+    /// `head_label` gives the branch of a worktree on a branch. For a detached
+    /// HEAD it gives `HEAD@` and the short hash, as `cwt` does, because a
+    /// detached worktree has no branch to show.
+    #[test]
+    fn head_label_gives_the_branch_or_the_short_hash_of_a_detached_head() {
+        let dir = init_repo();
+        assert_eq!(head_label(&open(dir.path())), "main");
+
+        git(dir.path(), &["checkout", "-q", "--detach"]);
+        assert_eq!(head_label(&open(dir.path())), detached_label(dir.path()));
+    }
 
     /// Two spellings of one directory resolve to one value.
     ///
