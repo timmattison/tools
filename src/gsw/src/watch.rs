@@ -2342,7 +2342,8 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 /// - [`InputMode::Normal`]: `q` quits, `r` forces a refresh, `p` asks to push,
 ///   `G` asks for the issue of the branch, and `m` asks to measure a rebase and
 ///   a merge against the default branch. Up goes to the home worktree, Left to
-///   the previous worktree, and Right to the next worktree.
+///   the previous worktree, Right to the next worktree, and Down opens the
+///   list of the worktrees.
 /// - [`InputMode::Confirm`]: `y` and Enter push, `n`, Esc, and `q` cancel.
 ///   Nothing else acts — with a question on screen, `q` is the answer "no",
 ///   not "quit", `r` is not a refresh, and an arrow key is no answer at all.
@@ -2353,14 +2354,17 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 ///   inert, so an impatient second press cannot start an overlapping push. The
 ///   arrow keys are inert too: the window under the frame belongs to the
 ///   worktree that pushes, so the watch stays on that worktree.
-/// - Down is not bound in any mode. It gives [`Event::Dismiss`] as every
-///   unbound key does.
-/// - `M` is not bound. It gives [`Event::Dismiss`] as every unbound key does.
+/// - [`InputMode::List`]: Up and Down move the cursor, Enter goes to the
+///   worktree under it, and Esc and `q` close the list. Every other key gives
+///   `None` and does nothing at all: `r` does not walk, `p` does not ask, `G`
+///   and `m` start nothing, and no line leaves the row. The list takes the
+///   pane, so the frame that such a key acts on is not on the screen.
+/// - `M` is not bound. It does what every unbound key does in the mode.
 /// - `G` acts only where `issue` says a command exists. Where it does not, the
-///   key gives [`Event::Dismiss`] like any other unbound key, which is the one
-///   silent case this feature has.
-/// - Every other press is [`Event::Dismiss`], which clears a status message and
-///   otherwise does nothing.
+///   key does what any other unbound key does, which is the one silent case
+///   this feature has.
+/// - Every other press in the three other modes is [`Event::Dismiss`], which
+///   clears a status message and otherwise does nothing.
 fn classify_input(key: KeyEvent, mode: InputMode, issue: IssueKey) -> Option<Event> {
     let KeyEvent {
         code,
@@ -2399,6 +2403,10 @@ fn classify_input(key: KeyEvent, mode: InputMode, issue: IssueKey) -> Option<Eve
             KeyCode::Up if mode == InputMode::Normal => Event::GoHome,
             KeyCode::Left if mode == InputMode::Normal => Event::GoPrevious,
             KeyCode::Right if mode == InputMode::Normal => Event::GoNext,
+            // Down opens the list of the worktrees. The list takes the pane,
+            // and the window of a running push belongs to the worktree that
+            // pushes, so it opens in the normal mode only.
+            KeyCode::Down if mode == InputMode::Normal => Event::OpenList,
             _ => Event::Dismiss,
         },
         InputMode::Confirm => match code {
@@ -2406,7 +2414,17 @@ fn classify_input(key: KeyEvent, mode: InputMode, issue: IssueKey) -> Option<Eve
             KeyCode::Char('n' | 'N' | 'q') | KeyCode::Esc => Event::PushCancelled,
             _ => Event::Dismiss,
         },
-        InputMode::List => return None,
+        InputMode::List => match code {
+            KeyCode::Up => Event::ListUp,
+            KeyCode::Down => Event::ListDown,
+            KeyCode::Enter => Event::ListGo,
+            // `q` closes the list, as it answers "no" to the push question.
+            KeyCode::Esc | KeyCode::Char('q') => Event::ListClose,
+            // The list takes the pane. A key that it does not name acts on
+            // nothing, because the frame that the key acts on is not on the
+            // screen.
+            _ => return None,
+        },
     };
     Some(event)
 }
