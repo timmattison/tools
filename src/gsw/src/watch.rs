@@ -7322,4 +7322,206 @@ mod push_loop_tests {
             "the push window must stay, got {painted:?}",
         );
     }
+
+    /// The last line that [`issue_failed_in`] reports.
+    const ISSUE_REFUSAL: &str = "branch main names no issue";
+
+    /// The outcome of a run of the issue command that failed, with the
+    /// generation `generation`, as the loop receives it. Its line waits for a
+    /// key.
+    fn issue_failed_in(generation: Generation) -> Event {
+        Event::IssueFinished {
+            generation,
+            outcome: crate::issue::IssueOutcome::new(
+                "ggs",
+                false,
+                &[ISSUE_REFUSAL.to_string()],
+                "exit status: 2",
+            ),
+        }
+    }
+
+    /// Run the loop over `events` in the three worktrees, set up as
+    /// [`in_world`] says, in `session`, on a frozen clock.
+    fn run_in_three(session: crate::remote::Session, events: Vec<Event>) -> (String, Seen) {
+        let base = Instant::now();
+        drive(
+            events,
+            Setup {
+                session,
+                ..in_world(World::three())
+            },
+            move || base,
+        )
+    }
+
+    #[test]
+    fn a_switch_removes_every_message_under_the_frame() {
+        // Each message describes the worktree the frame showed before the
+        // switch. After the switch the row is empty, and a message held for
+        // the row does not take it later.
+        let cases: [(&str, crate::remote::Session, Events); 6] = [
+            (
+                "a push result that fades",
+                crate::remote::Session::Local,
+                || {
+                    vec![
+                        key(KeyCode::Char('p')),
+                        key(KeyCode::Char('y')),
+                        Event::PushFinished(PushOutcome {
+                            success: true,
+                            output: String::new(),
+                        }),
+                        key(KeyCode::Right),
+                        Event::Quit,
+                    ]
+                },
+            ),
+            (
+                "the remote-shell offer of `G`",
+                crate::remote::Session::Remote,
+                || {
+                    vec![
+                        probe_answered(),
+                        press_g(),
+                        key(KeyCode::Right),
+                        Event::Quit,
+                    ]
+                },
+            ),
+            ("a `G` error", crate::remote::Session::Local, || {
+                vec![
+                    probe_answered(),
+                    press_g(),
+                    issue_failed_in(Generation::default()),
+                    key(KeyCode::Right),
+                    Event::Quit,
+                ]
+            }),
+            (
+                "the notice of an `m` run",
+                crate::remote::Session::Local,
+                || {
+                    vec![
+                        press_m(),
+                        started_against_main(),
+                        key(KeyCode::Right),
+                        Event::Quit,
+                    ]
+                },
+            ),
+            (
+                "the result of an `m` run",
+                crate::remote::Session::Local,
+                || {
+                    vec![
+                        press_m(),
+                        started_against_main(),
+                        finished(measured_clean()),
+                        key(KeyCode::Right),
+                        Event::Quit,
+                    ]
+                },
+            ),
+            (
+                "a `G` error held behind a push result",
+                crate::remote::Session::Local,
+                || {
+                    vec![
+                        probe_answered(),
+                        key(KeyCode::Char('p')),
+                        key(KeyCode::Char('y')),
+                        press_g(),
+                        issue_failed_in(Generation::default()),
+                        Event::PushFinished(PushOutcome {
+                            success: true,
+                            output: String::new(),
+                        }),
+                        key(KeyCode::Right),
+                        Event::Quit,
+                    ]
+                },
+            ),
+        ];
+
+        for (what, session, events) in cases {
+            let (screen, seen) = run_in_three(session, events());
+            assert_eq!(
+                seen.switches,
+                vec![worktree(CHARLIE)],
+                "{what}: Right must switch"
+            );
+            assert_eq!(
+                strip_ansi(&screen),
+                format!("FRAME {CHARLIE}"),
+                "{what}: the switch must leave nothing under the frame",
+            );
+        }
+    }
+
+    #[test]
+    fn a_g_after_a_switch_on_a_remote_shell_asks_again() {
+        // The message is the armed state, and the switch takes the message
+        // away. So a `G` after the switch is a first press again.
+        let (screen, seen) = run_in_three(
+            crate::remote::Session::Remote,
+            vec![
+                probe_answered(),
+                press_g(),
+                key(KeyCode::Right),
+                press_g(),
+                Event::Quit,
+            ],
+        );
+        assert!(
+            seen.issue_runs.is_empty(),
+            "a `G` after a switch must not run the command, got {:?}",
+            seen.issue_runs,
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {CHARLIE}\n{SECOND_PRESS_NOTICE} (0s ago)"),
+            "the `G` after the switch must ask again",
+        );
+    }
+
+    #[test]
+    fn a_switch_takes_the_arming_of_g_away_whatever_made_it() {
+        // Every key but `G` takes the arming away already, so no arrow key
+        // can show this. A switch that no key made must take the arming away
+        // too: the message is the armed state, and the switch takes the
+        // message off the row.
+        let now = Instant::now();
+        let mut issue = issue_run_in(crate::remote::Session::Remote);
+        issue.arm(now);
+        let mut state = LoopState {
+            cache: SnapshotCache {
+                snapshot: snapshot_of(&worktree(BRAVO)),
+                collected_at: now,
+                dims: TEST_DIMS,
+            },
+            schedule: no_timed_refresh_for_push(),
+            ui: PushUi::new(false),
+            issue,
+            conflicts: ConflictsRun::new(),
+            home: worktree(BRAVO),
+            current: worktree(BRAVO),
+            generation: Generation::default(),
+        };
+        assert!(state.issue.is_armed(now), "the fixture must start armed");
+
+        state.switch_to(worktree(CHARLIE), &|| now, &mut |target: &WorktreePath| {
+            Ok(snapshot_of(target))
+        });
+
+        assert_eq!(
+            state.current,
+            worktree(CHARLIE),
+            "the switch must reach charlie"
+        );
+        assert!(
+            !state.issue.is_armed(now),
+            "a switch must take the arming of `G` away",
+        );
+    }
 }
