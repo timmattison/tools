@@ -2631,10 +2631,10 @@ where
         // rather than left answerable by an Enter nobody was asked for. That is
         // the backstop only. A `p` pressed in a pane that was already too short
         // raises no question in the first place — `absorb` settles that with
-        // `state.cache.dims`, because no render runs between two keys of one burst —
-        // so what this catches is the pane that shrank under a question that
-        // did fit when it was asked. It runs after this wake's events have been
-        // absorbed and before the next wake reads one, so the key a user
+        // `state.cache.dims`, because no render runs between two keys of one
+        // burst — so what this catches is the pane that shrank under a question
+        // that did fit when it was asked. It runs after this wake's events have
+        // been absorbed and before the next wake reads one, so the key a user
         // presses in reaction to what this paints is classified against the
         // mode this pane actually showed them.
         let overlay = state.ui.overlay(state.cache.dims, now);

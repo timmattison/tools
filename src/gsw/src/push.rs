@@ -1097,11 +1097,11 @@ impl PushUi {
     /// Put gsw's own words under the frame, to be taken off again by the clock.
     ///
     /// The second door into the row, beside [`PushUi::post_error`]. The two
-    /// agree about who owns the row: a question, a push in flight, and the
-    /// open list are never painted over, so a message that arrives while one
-    /// of them is up joins the back of [`PushUi::held`] and waits for the
-    /// frame that finds the row free. A full queue drops the message that arrives, here exactly as
-    /// there — see [`MAX_HELD_MESSAGES`].
+    /// agree about who owns the row: a question, a push in flight, and the open
+    /// list are never painted over, so a message that arrives while one of them
+    /// is up joins the back of [`PushUi::held`] and waits for the frame that
+    /// finds the row free. A full queue drops the message that arrives, here
+    /// exactly as there — see [`MAX_HELD_MESSAGES`].
     ///
     /// They differ in one thing, and [`Life`] already says why.
     /// [`PushUi::post_error`] carries another program's words, which are a
@@ -1136,10 +1136,9 @@ impl PushUi {
     ///
     /// A question, a push in flight, and the open list own the row here, as at
     /// the other two doors. The difference is what happens to the words then:
-    /// they go
-    /// nowhere, and they never wait in [`PushUi::held`]. A held notice reaches
-    /// the row after the run it describes has ended, and it then says that a
-    /// run is in flight when none is.
+    /// they go nowhere, and they never wait in [`PushUi::held`]. A held notice
+    /// reaches the row after the run it describes has ended, and it then says
+    /// that a run is in flight when none is.
     pub(crate) fn post_progress(&mut self, line: String) {
         // The answer goes unread. A notice that did not reach the row went
         // nowhere, and the caller keeps no state that stands on it.
@@ -1151,9 +1150,9 @@ impl PushUi {
     /// The body the three doors share, so the rule about who owns the row is
     /// written once. A question, a push in flight, and the open list are never
     /// painted over, and a message that arrives while one of them is up joins
-    /// the back of [`PushUi::held`]. Two messages go instead: a life with no [`HeldLife`],
-    /// which is a progress notice, and a message that finds the queue at
-    /// [`MAX_HELD_MESSAGES`].
+    /// the back of [`PushUi::held`]. Two messages go instead: a life with no
+    /// [`HeldLife`], which is a progress notice, and a message that finds the
+    /// queue at [`MAX_HELD_MESSAGES`].
     ///
     /// A held message keeps the kind of its life and loses the instant. The
     /// instant in `life` is the instant the message arrived, and a held
