@@ -5623,6 +5623,7 @@ mod push_loop_tests {
     use crate::push::PushOutcome;
     use crossterm::event::{KeyCode, KeyModifiers};
     use std::cell::RefCell;
+    use std::collections::VecDeque;
     use testcolor::strip_ansi;
     use unicode_width::UnicodeWidthStr;
 
@@ -5978,6 +5979,22 @@ mod push_loop_tests {
         setup: Setup,
         clock: Clock,
     ) -> (String, Seen) {
+        drive_bursts(vec![events], setup, clock)
+    }
+
+    /// [`drive`] over several bursts of events, with one frame for each.
+    ///
+    /// The first burst is queued before the loop starts, as [`drive`] queues
+    /// its events. The frame of each burst queues the next burst, so the loop
+    /// takes each burst in one wake and draws one frame for it. A test then
+    /// reads in [`Seen::paints`] what each burst put on the screen. A burst
+    /// that changes nothing on the screen paints nothing. The last burst must
+    /// end with [`Event::Quit`], or the loop blocks.
+    fn drive_bursts<Clock: Fn() -> Instant>(
+        bursts: Vec<Vec<Event>>,
+        setup: Setup,
+        clock: Clock,
+    ) -> (String, Seen) {
         let Setup {
             dims,
             render,
@@ -5986,9 +6003,20 @@ mod push_loop_tests {
             world,
         } = setup;
         let (tx, rx) = mpsc::channel();
-        for event in events {
+        let mut bursts = VecDeque::from(bursts);
+        for event in bursts.pop_front().unwrap_or_default() {
             tx.send(event).expect("queue event");
         }
+        let later = RefCell::new(bursts);
+        // Each wake of the loop draws exactly one frame, through `render` or
+        // through `render_list`, so each of the two queues the next burst.
+        let queue_next_burst = || {
+            if let Some(burst) = later.borrow_mut().pop_front() {
+                for event in burst {
+                    tx.send(event).expect("queue event");
+                }
+            }
+        };
         let seen = RefCell::new(Seen::default());
         let mut displayed = String::new();
         let base = clock();
@@ -6017,6 +6045,7 @@ mod push_loop_tests {
                     Ok(snapshot_of(current))
                 },
                 render: |snap: &Snapshot, frame_dims: Dimensions, timing: FrameTiming| {
+                    queue_next_burst();
                     let mut seen = seen.borrow_mut();
                     seen.frame_heights.push(frame_dims.height);
                     seen.timings.push(timing);
@@ -6026,6 +6055,7 @@ mod push_loop_tests {
                               frame_dims: Dimensions,
                               _timing: FrameTiming,
                               list: &WorktreeList| {
+                    queue_next_burst();
                     frame(&list_frame_of(snap, frame_dims, list))
                 },
                 dimensions: move || dims,
@@ -8199,5 +8229,53 @@ mod push_loop_tests {
         let (screen, _seen) =
             run_in_pane_of(ONE_ROW_FOR_THE_LIST, vec![key(KeyCode::Down), Event::Quit]);
         assert_eq!(strip_ansi(&screen), format!("LIST {BRAVO}: >{BRAVO}⌂"));
+    }
+
+    /// Run the loop over `bursts` in `world`, set up as [`in_world`] says, on
+    /// a frozen clock. Gives every screen the loop painted, as visible glyphs,
+    /// and what the hooks saw.
+    fn paints_in(world: World, bursts: Vec<Vec<Event>>) -> (Vec<String>, Seen) {
+        let base = Instant::now();
+        let (_screen, seen) = drive_bursts(bursts, in_world(world), move || base);
+        let paints = seen.paints.iter().map(|paint| strip_ansi(paint)).collect();
+        (paints, seen)
+    }
+
+    #[test]
+    fn up_and_down_move_the_cursor_stop_at_the_ends_and_neither_walk_nor_switch() {
+        // The frame does not change while the cursor moves: gsw walks the new
+        // worktree only after Enter. Each burst below gets a frame. Down on
+        // the bottom row and Up on the top row change nothing, so the loop
+        // paints nothing for them.
+        let (paints, seen) = paints_in(
+            World::three(),
+            vec![
+                vec![key(KeyCode::Down)],
+                vec![key(KeyCode::Down)],
+                vec![key(KeyCode::Down)],
+                vec![key(KeyCode::Up)],
+                vec![key(KeyCode::Up)],
+                vec![key(KeyCode::Up), Event::Quit],
+            ],
+        );
+        assert_eq!(
+            paints,
+            [
+                format!("LIST {BRAVO}: {ALPHA} >{BRAVO}⌂ {CHARLIE}"),
+                format!("LIST {BRAVO}: {ALPHA} {BRAVO}⌂ >{CHARLIE}"),
+                format!("LIST {BRAVO}: {ALPHA} >{BRAVO}⌂ {CHARLIE}"),
+                format!("LIST {BRAVO}: >{ALPHA} {BRAVO}⌂ {CHARLIE}"),
+            ],
+        );
+        assert_eq!(seen.collects, 0, "a move of the cursor must not walk");
+        assert!(
+            seen.switches.is_empty(),
+            "a move of the cursor must not switch, got {:?}",
+            seen.switches,
+        );
+        assert_eq!(
+            seen.listings, 1,
+            "only the Down that opens the list reads it",
+        );
     }
 }
