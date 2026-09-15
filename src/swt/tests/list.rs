@@ -12,11 +12,13 @@
 
 mod support;
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use support::{
-    exiting_check, git, git_allowing_failure, run_swt, unique, write_swt_check, TestRepo, SWT_CHECK,
+    exiting_check, git, git_allowing_failure, run_swt, shell_command, unique, write_swt_check,
+    TestRepo, SWT_CHECK,
 };
 
 /// The namespace of the local branches. A test removes it from the full ref,
@@ -49,6 +51,22 @@ const PRUNABLE_FIELD: &str = "prunable";
 /// What the refusal on a detached HEAD must say: the fact, and what the user
 /// must do about it.
 const DETACHED_REFUSAL_PHRASES: [&str; 2] = ["HEAD is detached", "Check out a branch"];
+
+/// Separates the fields of a line that `swt list` prints.
+const FIELD_SEPARATOR: char = '\t';
+
+/// The plain-git command that prints the child branches of the branch that is
+/// checked out where it runs. `README.md` quotes it byte for byte, and the
+/// dotfiles document `SWT.md` quotes the same bytes.
+///
+/// Two choices make it correct. `git branch --show-current` prints the branch
+/// even when a tag has the same name. In `git for-each-ref`, a `*` does not
+/// match a `/`, so the pattern leaves out the children of a longer branch.
+const PLAIN_GIT_CHILD_BRANCHES: &str = r#"git for-each-ref --format='%(refname:short)' "refs/heads/swt/$(git branch --show-current)/*""#;
+
+/// The path of `README.md` at the root of the repository, from the manifest
+/// directory of this crate.
+const README_FROM_MANIFEST: &str = "../../README.md";
 
 /// A worktree that the real `swt create` made, as a test reads it back.
 struct Child {
@@ -151,6 +169,45 @@ fn listing(children: &[&Child]) -> String {
     sorted.into_iter().map(line).collect()
 }
 
+/// Makes a child of [`NESTED_PARENT_BRANCH`] with the real `swt create`, then
+/// removes the parent worktree and deletes that branch. Returns the child.
+///
+/// Git refuses [`FLAT_PARENT_BRANCH`] and [`NESTED_PARENT_BRANCH`] in one
+/// repository at the same time. A test that needs a child of each calls this
+/// function first, and then makes [`FLAT_PARENT_BRANCH`]. The child stays after
+/// its parent branch is gone, which is also the real case.
+///
+/// Panics when the fixture does not set its trap: the child must stay a
+/// registered worktree, on a branch whose text starts as the branch of a child
+/// of [`FLAT_PARENT_BRANCH`] starts.
+fn child_of_a_deleted_nested_parent(repo: &TestRepo) -> Child {
+    let nested_parent = repo.add_worktree_on("parent-nested", NESTED_PARENT_BRANCH);
+    let nested_child = create_child(&nested_parent.path, "nested");
+    // The override is untracked, so it goes first. The removal of the parent
+    // then needs no force, and the safe delete proves that the branch held no
+    // work.
+    fs::remove_file(nested_parent.path.join(SWT_CHECK))
+        .expect("the override of the nested parent should be removable");
+    repo.git(&["worktree", "remove", path_arg(&nested_parent.path)]);
+    repo.git(&["branch", "--delete", NESTED_PARENT_BRANCH]);
+    // Mutation guard. It proves that the fixture sets the trap: the child of
+    // `feat/foo` is still a registered worktree, and its branch starts with the
+    // text that a child of `feat` starts with.
+    let nested_prefix = format!("{SWT_BRANCH_NAMESPACE}/{NESTED_PARENT_BRANCH}/");
+    assert!(
+        nested_child.branch.starts_with(&nested_prefix),
+        "fixture precondition: the child of {NESTED_PARENT_BRANCH} must be on a branch under \
+         {nested_prefix}, got {}",
+        nested_child.branch
+    );
+    assert_registered(
+        repo,
+        &[&nested_child.path],
+        "the child of a parent branch that is gone",
+    );
+    nested_child
+}
+
 // Issue #500. A parent sees exactly its own children, one line each. The path
 // comes first and is the path that `swt create` printed, so a caller can give
 // it directly to `swt merge`. Two worktrees that are not children of the parent
@@ -187,39 +244,14 @@ fn a_parent_lists_exactly_its_children_as_a_path_a_tab_and_a_branch() {
 }
 
 // Issue #500. A prefix is not sufficient: the children of `feat/foo` are not
-// children of `feat`. Git refuses `feat` and `feat/foo` in one repository at
-// the same time, so the fixture makes them one after the other. The child of
-// `feat/foo` stays after its parent branch is gone, which is also the real
-// case.
+// children of `feat`. The child of `feat/foo` comes first, because git refuses
+// the two branches in one repository at the same time.
 #[test]
 fn a_child_of_a_longer_branch_is_not_a_child_of_its_prefix() {
     let repo = TestRepo::new();
-    let nested_parent = repo.add_worktree_on("parent-nested", NESTED_PARENT_BRANCH);
-    let nested_child = create_child(&nested_parent.path, "nested");
-    // The override is untracked, so it goes first. The removal of the parent
-    // then needs no force, and the safe delete proves that the branch held no
-    // work.
-    fs::remove_file(nested_parent.path.join(SWT_CHECK))
-        .expect("the override of the nested parent should be removable");
-    repo.git(&["worktree", "remove", path_arg(&nested_parent.path)]);
-    repo.git(&["branch", "--delete", NESTED_PARENT_BRANCH]);
+    child_of_a_deleted_nested_parent(&repo);
     let flat_parent = repo.add_worktree_on("parent-flat", FLAT_PARENT_BRANCH);
     let flat_child = create_child(&flat_parent.path, "flat");
-    // Mutation guard. It proves that the fixture sets the trap: the child of
-    // `feat/foo` is still a registered worktree, and its branch starts with the
-    // text that a child of `feat` starts with.
-    let nested_prefix = format!("{SWT_BRANCH_NAMESPACE}/{NESTED_PARENT_BRANCH}/");
-    assert!(
-        nested_child.branch.starts_with(&nested_prefix),
-        "fixture precondition: the child of {NESTED_PARENT_BRANCH} must be on a branch under \
-         {nested_prefix}, got {}",
-        nested_child.branch
-    );
-    assert_registered(
-        &repo,
-        &[&nested_child.path],
-        "the child of a parent branch that is gone",
-    );
 
     let output = run_swt(&flat_parent.path, &["list"]);
     let stderr = support::stderr(&output);
@@ -392,5 +424,86 @@ fn list_outside_a_repository_fails_with_gits_own_complaint() {
     assert!(
         stderr.contains("not a git repository"),
         "the explanation of git must reach the user: {stderr}"
+    );
+}
+
+// Issue #500. A hook or a skill finds the child branches of a branch with plain
+// git, without `swt`. `README.md` quotes the command, and this test keeps the
+// quote true. The fixture sets a trap for each spelling that the README warns
+// against: a child of `feat/foo` beside the child of `feat`, and a tag `feat`
+// beside the branch `feat`.
+#[test]
+fn the_documented_plain_git_command_finds_the_branches_that_swt_list_shows() {
+    let repo = TestRepo::new();
+    let nested_child = child_of_a_deleted_nested_parent(&repo);
+    let flat_parent = repo.add_worktree_on("parent-flat", FLAT_PARENT_BRANCH);
+    // A lightweight tag with the name of the branch. It comes before the child,
+    // so `swt create` also reads the parent branch past the tag.
+    git(&flat_parent.path, &["tag", FLAT_PARENT_BRANCH]);
+    let flat_child = create_child(&flat_parent.path, "flat");
+    // Mutation guard. It proves that the tag makes the short name of the branch
+    // ambiguous, so a command that builds its pattern from that name finds
+    // nothing.
+    assert_eq!(
+        git(&flat_parent.path, &["symbolic-ref", "--short", "HEAD"]),
+        format!("heads/{FLAT_PARENT_BRANCH}"),
+        "fixture precondition: the tag {FLAT_PARENT_BRANCH} must make the short name of the \
+         branch ambiguous"
+    );
+
+    let plain = shell_command(&flat_parent.path, PLAIN_GIT_CHILD_BRANCHES)
+        .output()
+        .expect("failed to run the plain-git command through the shell");
+    let listed = run_swt(&flat_parent.path, &["list"]);
+
+    assert!(
+        plain.status.success(),
+        "the plain-git command must succeed: {}",
+        support::stderr(&plain)
+    );
+    assert_eq!(
+        listed.status.code(),
+        Some(0),
+        "swt list in {FLAT_PARENT_BRANCH} must succeed: {}",
+        support::stderr(&listed)
+    );
+    let found: BTreeSet<String> = support::stdout(&plain)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let shown: BTreeSet<String> = support::stdout(&listed)
+        .lines()
+        .map(|line| {
+            line.split(FIELD_SEPARATOR)
+                .nth(1)
+                .unwrap_or_else(|| panic!("each line of swt list must hold a branch, got {line:?}"))
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        found, shown,
+        "the plain-git command must find exactly the branches that swt list shows"
+    );
+    assert_eq!(
+        found,
+        BTreeSet::from([flat_child.branch]),
+        "the plain-git command must find exactly the one child of {FLAT_PARENT_BRANCH}"
+    );
+    // The README warns against `git branch --list`. There a `*` also matches a
+    // `/`, so the same pattern also finds the child of `feat/foo`.
+    let by_branch_list = repo.branches(&format!("{SWT_BRANCH_NAMESPACE}/{FLAT_PARENT_BRANCH}/*"));
+    assert!(
+        by_branch_list.contains(&nested_child.branch),
+        "the warning in the README must stay true: git branch --list must also find {}, got \
+         {by_branch_list:?}",
+        nested_child.branch
+    );
+
+    let readme_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(README_FROM_MANIFEST);
+    let readme = fs::read_to_string(&readme_path)
+        .unwrap_or_else(|err| panic!("{} must be readable: {err}", readme_path.display()));
+    assert!(
+        readme.contains(PLAIN_GIT_CHILD_BRANCHES),
+        "README.md must quote the plain-git command byte for byte: {PLAIN_GIT_CHILD_BRANCHES}"
     );
 }

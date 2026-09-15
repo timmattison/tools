@@ -30,11 +30,12 @@
 //!   global and system gitconfig is a quieter version of the same problem: it
 //!   decides hooks paths, aliases and credential helpers for a suite that must
 //!   depend on its own fixture and nothing else. [`sandboxed`] points both at
-//!   an empty file. It applies both rules at the one place that [`git_command`]
-//!   and [`swt_command`] share. [`TestRepo::new`] also refuses to build a
-//!   fixture while the git location variables are set. The tests that call the
-//!   git functions of `swt` *in process* inherit the environment of this
-//!   process, and the harness cannot protect them from the outside.
+//!   an empty file. It applies both rules at the one place that [`git_command`],
+//!   [`swt_command`] and [`shell_command`] share. [`TestRepo::new`] also
+//!   refuses to build a fixture while the git location variables are set. The
+//!   tests that call the git functions of `swt` *in process* inherit the
+//!   environment of this process, and the harness cannot protect them from the
+//!   outside.
 //! - **Every name is process-unique.** Two copies of this test binary run
 //!   concurrently in this repo — the pre-commit hook's `cargo test` racing a
 //!   manual one — so every worktree path and branch name is keyed on
@@ -136,12 +137,14 @@ pub fn assert_git_env_is_sandboxed() {
 }
 
 /// Applies the isolation rules to a child the suite is about to spawn, whether
-/// that child is a fixture's git or the real `swt` binary.
+/// that child is a fixture's git, the real `swt` binary, or a shell that runs
+/// git.
 ///
-/// The single place the rules live, so the two entrances that build children
-/// ([`git_command`] and [`swt_command`]) cannot drift apart — a rule applied at
-/// only one of them leaves half the suite reading the host's git configuration
-/// while the harness reads as sandboxed. Two rules, in this order:
+/// The single place the rules live, so the three entrances that build children
+/// ([`git_command`], [`swt_command`] and [`shell_command`]) cannot drift apart —
+/// a rule applied at only some of them leaves part of the suite reading the
+/// host's git configuration while the harness reads as sandboxed. Two rules, in
+/// this order:
 ///
 /// - **Every inherited `GIT_` variable is removed**, through
 ///   [`gitscratch::shed_inherited_git_environment`]. The rule is the prefix,
@@ -168,6 +171,23 @@ fn sandboxed(cmd: &mut Command) -> &mut Command {
 pub fn git_command(dir: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new("git");
     sandboxed(&mut cmd).args(args).current_dir(dir);
+    cmd
+}
+
+/// The shell that [`shell_command`] runs, by its absolute path. Every POSIX
+/// system has a shell there.
+const SHELL: &str = "/bin/sh";
+
+/// A shell in `dir` that runs `script`, sandboxed from the host by
+/// [`sandboxed`] exactly as every other spawn of the suite is.
+///
+/// A test uses it to run a command line as a person or a hook types it, with
+/// quotes and command substitutions. `script` goes to the shell as the one
+/// argument after `-c`. Every git that the script runs inherits the
+/// environment of the shell, so the one sweep covers each of them too.
+pub fn shell_command(dir: &Path, script: &str) -> Command {
+    let mut cmd = Command::new(SHELL);
+    sandboxed(&mut cmd).arg("-c").arg(script).current_dir(dir);
     cmd
 }
 
