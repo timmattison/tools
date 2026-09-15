@@ -1806,7 +1806,16 @@ where
                 state.switch_to(home, clock, &mut hooks.switch);
             }
         }
-        Event::OpenList | Event::ListUp | Event::ListDown | Event::ListGo | Event::ListClose => {}
+        // Down reads the list again at each press, as Left and Right do,
+        // because `nwt` and `swt` add and remove worktrees while gsw runs.
+        // The cursor starts on the worktree that the frame shows.
+        Event::OpenList => {
+            let entries = (hooks.worktrees)();
+            if let Some(list) = WorktreeList::open(entries, &state.current, state.home.clone()) {
+                state.ui.open_list(list);
+            }
+        }
+        Event::ListUp | Event::ListDown | Event::ListGo | Event::ListClose => {}
         Event::IssueRequested => {
             // One read of the clock, for both halves of one press. The arming
             // and the message it stands for must end at the same moment, and
