@@ -1934,6 +1934,7 @@ mod tests {
 mod ui_tests {
     use super::*;
     use crate::render::Snapshot;
+    use crate::worktrees::{WorktreeEntry, WorktreePath};
     use testcolor::{max_red_channel, TRUECOLOR_FG};
 
     /// A snapshot on `gsw-push` with `origin` available and the given tracking
@@ -2518,6 +2519,162 @@ mod ui_tests {
         ui.dismiss();
         let text = painted(&mut ui, tall_pane(80), now);
         assert_eq!(text, "", "no held message may reach the row, got {text:?}");
+    }
+
+    /// A list of three worktrees, sorted by path, with the cursor and the
+    /// home worktree on the middle row, `bravo`.
+    fn three_worktrees() -> WorktreeList {
+        let entries: Vec<WorktreeEntry> = ["alpha", "bravo", "charlie"]
+            .into_iter()
+            .map(|name| WorktreeEntry {
+                path: WorktreePath::fake(format!("/code/{name}")),
+                label: name.to_string(),
+            })
+            .collect();
+        let middle = entries[1].path.clone();
+        WorktreeList::open(entries, &middle, middle.clone()).expect("a list with rows opens")
+    }
+
+    /// The label of the row under the cursor of the open list of `ui`, or
+    /// `None` when no list is open.
+    fn cursor_of(ui: &PushUi) -> Option<&str> {
+        ui.list().map(|list| list.selected().label.as_str())
+    }
+
+    #[test]
+    fn an_open_list_takes_the_keys_and_paints_nothing_under_the_frame() {
+        // The list takes the pane, so the keys mean what they mean in the
+        // list, and the row under the frame carries nothing. Nothing on the
+        // list ages, so the loop has no reason to wake for it. A key with no
+        // meaning leaves the list open, as it leaves a question on the row.
+        let now = t0();
+        let pane = tall_pane(80);
+        let mut ui = PushUi::new(false);
+        ui.open_list(three_worktrees());
+
+        assert_eq!(ui.mode(), InputMode::List, "the list takes the keys");
+        assert_eq!(cursor_of(&ui), Some("bravo"), "the cursor starts on bravo");
+        let overlay = ui.overlay(pane, now);
+        assert_eq!(
+            overlay.text(),
+            "",
+            "the list paints nothing under the frame"
+        );
+        assert_eq!(
+            overlay.frame_rows(),
+            pane.height,
+            "the frame of the list takes the whole pane",
+        );
+        assert_eq!(ui.next_tick(), None, "nothing on the list ages");
+
+        ui.dismiss();
+        assert_eq!(
+            ui.mode(),
+            InputMode::List,
+            "a key with no meaning leaves the list open",
+        );
+
+        ui.list_mut().expect("the list is open").down();
+        assert_eq!(cursor_of(&ui), Some("charlie"), "the cursor moves");
+
+        let closed = ui.close_list().expect("a close gives the open list back");
+        assert_eq!(
+            closed.selected().label,
+            "charlie",
+            "the list comes back with its cursor",
+        );
+        assert_eq!(ui.mode(), InputMode::Normal, "the keys go back to normal");
+        assert_eq!(cursor_of(&ui), None, "no list stays open");
+        assert!(ui.close_list().is_none(), "a second close finds no list");
+    }
+
+    #[test]
+    fn a_message_posted_while_the_list_is_open_waits_for_the_list_to_close() {
+        // The list owns the row, as a question does. A message that arrives
+        // through either door waits in the queue, and each one reaches the
+        // row in turn once the list closes. A progress notice goes nowhere:
+        // its words are true only while its work is in flight, and the work
+        // can end while the list is open.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        ui.open_list(three_worktrees());
+        ui.post_error("the first message".to_string());
+        let notice = ui.post_notice("the second message".to_string(), now);
+        ui.post_progress("work in flight".to_string());
+
+        assert_eq!(
+            notice,
+            Posted::Held,
+            "a notice that finds the list open waits"
+        );
+        assert_eq!(ui.mode(), InputMode::List, "no message closes the list");
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now),
+            "",
+            "no message reaches the row under the list",
+        );
+
+        let _ = ui.close_list();
+        assert_eq!(
+            drained(&mut ui, now),
+            ["the first message", "the second message (0s ago)"],
+            "each held message reaches the row in turn, and the progress notice never does",
+        );
+    }
+
+    #[test]
+    fn opening_the_list_replaces_a_status_line() {
+        // Down opens the list over the line on the row, as `p` asks its
+        // question over it. The line describes the frame that the user
+        // stopped reading, so it does not come back when the list closes.
+        let now = t0();
+        let mut notice = PushUi::new(false);
+        let _ = notice.post_notice("a notice that fades".to_string(), now);
+        let mut error = PushUi::new(false);
+        error.post_error("an error that waits for a key".to_string());
+        let mut progress = PushUi::new(false);
+        progress.post_progress("a progress notice".to_string());
+
+        for (what, mut ui) in [
+            ("a notice that fades", notice),
+            ("an error that waits for a key", error),
+            ("a progress notice", progress),
+        ] {
+            ui.open_list(three_worktrees());
+            assert_eq!(ui.mode(), InputMode::List, "{what}: the list must open");
+            let _ = ui.close_list();
+            assert_eq!(
+                painted(&mut ui, tall_pane(80), now),
+                "",
+                "{what}: the line must not come back when the list closes",
+            );
+        }
+    }
+
+    #[test]
+    fn clear_closes_the_list_and_empties_the_queue() {
+        // The return to the home worktree calls `clear` with the list open.
+        // The list shows the worktrees as the frame of the old worktree saw
+        // them, so it closes, and no message held behind it takes the row.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        ui.open_list(three_worktrees());
+        ui.post_error("held behind the list".to_string());
+        assert_eq!(
+            ui.mode(),
+            InputMode::List,
+            "the fixture must start with the list open"
+        );
+
+        ui.clear();
+
+        assert_eq!(ui.mode(), InputMode::Normal, "the list must close");
+        assert_eq!(cursor_of(&ui), None, "no list stays open");
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now),
+            "",
+            "no held message may reach the row",
+        );
     }
 
     #[test]
@@ -3140,6 +3297,11 @@ mod ui_tests {
             ui.confirm(t0());
             ui
         };
+        let listing = {
+            let mut ui = PushUi::new(false);
+            ui.open_list(three_worktrees());
+            ui
+        };
         vec![
             ("idle", PushUi::new(false)),
             ("asking to create a remote branch", asking()),
@@ -3162,6 +3324,7 @@ mod ui_tests {
             ("refusing a branch with nothing to push", refusing),
             ("a cancelled question", cancelled),
             ("a dismissed status", dismissed),
+            ("an open list of the worktrees", listing),
         ]
     }
 
