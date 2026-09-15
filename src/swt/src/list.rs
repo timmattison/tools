@@ -7,11 +7,15 @@
 //!
 //! ```text
 //! <path>\t<branch>
+//! <path>\t<branch>\tprunable
 //! ```
 //!
 //! Each child gets one line, and the lines are sorted by path. The path is the
 //! one that `swt create` printed, so it can go directly to `swt merge`. The
-//! branch is the local branch without `refs/heads/`.
+//! branch is the local branch without `refs/heads/`. Git marks a child
+//! `prunable` when its directory is gone, for example after a person deletes it
+//! by hand. Its line then gets the third field `prunable`, and the user can
+//! remove the entry with `git worktree prune`.
 //!
 //! When the branch has no children, stdout stays empty and a one-line note that
 //! names the branch goes to stderr. The status is still 0, because no children
@@ -63,10 +67,20 @@ const BRANCH_LABEL: &str = "branch";
 /// nowhere else.
 const NO_CHILDREN_NOTE: &str = "No child worktrees of the branch";
 
+/// The label that git gives a worktree whose directory is gone, with or without
+/// a reason after it. `list` prints the same word as the third field of the
+/// line of such a child, so the user reads the word that git uses.
+const PRUNABLE: &str = "prunable";
+
+/// Separates the fields of a line that `list` prints. A branch name cannot hold
+/// a tab.
+const OUTPUT_FIELD_SEPARATOR: char = '\t';
+
 /// One entry of the worktree registry, with the fields that `list` reads.
 ///
 /// Git writes more fields than these: `HEAD`, `detached`, `bare` and `locked`.
-/// `list` ignores them, because a child is known by its branch alone.
+/// `list` ignores them. A child is known by its branch alone, and `prunable`
+/// only adds a field to its line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RegisteredWorktree {
     /// The directory of the worktree, as git recorded it.
@@ -74,6 +88,8 @@ struct RegisteredWorktree {
     /// The local branch that the worktree has checked out. `None` for a
     /// detached HEAD, for a bare entry, and for a ref outside `refs/heads/`.
     branch: Option<BranchName>,
+    /// Whether git marks the worktree prunable, because its directory is gone.
+    prunable: bool,
 }
 
 impl RegisteredWorktree {
@@ -82,15 +98,19 @@ impl RegisteredWorktree {
         Self {
             path: PathBuf::from(path),
             branch: None,
+            prunable: false,
         }
     }
 
     /// Records one field of this entry. `label` names the field and `value` is
     /// the text after the label, empty when the field has none. A label that
-    /// `list` does not read changes nothing.
+    /// `list` does not read changes nothing. A `prunable` field marks the entry
+    /// whatever its reason says.
     fn read(&mut self, label: &str, value: &str) {
-        if label == BRANCH_LABEL {
-            self.branch = local_branch(value);
+        match label {
+            BRANCH_LABEL => self.branch = local_branch(value),
+            PRUNABLE => self.prunable = true,
+            _ => {}
         }
     }
 }
@@ -135,13 +155,26 @@ struct Child {
     path: PathBuf,
     /// The branch that the child has checked out.
     branch: BranchName,
+    /// Whether git marks the child prunable, because its directory is gone.
+    prunable: bool,
 }
 
 impl Child {
     /// The line that `list` prints for this child: the path, a tab, and the
-    /// branch, with a newline at the end.
+    /// branch. A prunable child gets a tab and [`PRUNABLE`] after the branch.
+    /// A newline ends the line.
     fn line(&self) -> String {
-        format!("{}\t{}\n", self.path.display(), self.branch)
+        let mut line = format!(
+            "{}{OUTPUT_FIELD_SEPARATOR}{}",
+            self.path.display(),
+            self.branch
+        );
+        if self.prunable {
+            line.push(OUTPUT_FIELD_SEPARATOR);
+            line.push_str(PRUNABLE);
+        }
+        line.push('\n');
+        line
     }
 }
 
@@ -162,6 +195,7 @@ fn children_of(registry: Vec<RegisteredWorktree>, parent: &BranchName) -> Vec<Ch
             (parent_branch_of(branch.as_str()) == Some(parent.as_str())).then_some(Child {
                 path: entry.path,
                 branch,
+                prunable: entry.prunable,
             })
         })
         .collect();
@@ -222,7 +256,7 @@ mod tests {
     use std::path::PathBuf;
 
     /// The entry that a test expects for the worktree at `path`, on the local
-    /// branch `branch` or on no branch.
+    /// branch `branch` or on no branch. Git does not mark it prunable.
     fn entry(path: &str, branch: Option<&str>) -> RegisteredWorktree {
         RegisteredWorktree {
             path: PathBuf::from(path),
@@ -230,6 +264,15 @@ mod tests {
                 local_branch(&format!("refs/heads/{name}"))
                     .unwrap_or_else(|| panic!("fixture branch {name:?} must be a local branch"))
             }),
+            prunable: false,
+        }
+    }
+
+    /// The entry that a test expects for a worktree that git marks prunable.
+    fn prunable_entry(path: &str, branch: Option<&str>) -> RegisteredWorktree {
+        RegisteredWorktree {
+            prunable: true,
+            ..entry(path, branch)
         }
     }
 
@@ -281,12 +324,13 @@ mod tests {
     }
 
     // `locked` comes with a reason or without one. Neither form changes the
-    // path or the branch, and a reason is not a label.
+    // path, the branch or the mark. A reason is not a label, even when it
+    // starts with the word of another label.
     #[test]
     fn a_locked_record_keeps_its_path_and_its_branch() {
         let listing = "worktree /repos/locked\0HEAD 0123abcd\0branch refs/heads/a\0locked\0\0\
                        worktree /repos/held\0HEAD 0123abcd\0branch refs/heads/b\0\
-                       locked branch refs/heads/decoy\0\0";
+                       locked prunable branch refs/heads/decoy\0\0";
         assert_eq!(
             parse_registry(listing),
             vec![
@@ -296,15 +340,22 @@ mod tests {
         );
     }
 
-    // Git marks a worktree whose directory is gone `prunable`, with a reason.
-    // The registry still knows its branch.
+    // Git marks a worktree whose directory is gone `prunable`, with a reason or
+    // without one. The registry still knows its branch, and the mark stays on
+    // the entry that carries it.
     #[test]
-    fn a_prunable_record_keeps_its_path_and_its_branch() {
+    fn a_prunable_record_keeps_its_branch_and_carries_the_mark() {
         let listing = "worktree /repos/gone\0HEAD 0123abcd\0branch refs/heads/swt/main/gone-abc\0\
-                       prunable gitdir file points to non-existent location\0\0";
+                       prunable gitdir file points to non-existent location\0\0\
+                       worktree /repos/no-reason\0HEAD 0123abcd\0branch refs/heads/b\0prunable\0\0\
+                       worktree /repos/kept\0HEAD 0123abcd\0branch refs/heads/c\0\0";
         assert_eq!(
             parse_registry(listing),
-            vec![entry("/repos/gone", Some("swt/main/gone-abc"))]
+            vec![
+                prunable_entry("/repos/gone", Some("swt/main/gone-abc")),
+                prunable_entry("/repos/no-reason", Some("b")),
+                entry("/repos/kept", Some("c")),
+            ]
         );
     }
 
