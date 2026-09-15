@@ -9177,11 +9177,11 @@ mod watched_tests {
     use tempfile::TempDir;
 
     use super::tests::walk_config;
-    use super::{switch_watched, Event, Watched};
+    use super::{listed, switch_watched, Event, Watched};
     use crate::render::Snapshot;
     use crate::repo::RepoHandle;
     use crate::testrepo::{git, git_stdout, init_repo, init_repo_at};
-    use crate::worktrees::{WorktreeBadge, WorktreePath};
+    use crate::worktrees::{WorktreeBadge, WorktreeEntry, WorktreePath};
 
     /// The main worktree of [`siblings`], on branch `main`. Its path sorts
     /// last.
@@ -9570,5 +9570,38 @@ mod watched_tests {
             "a change in the new worktree must wake the loop within {}s",
             WATCHER_DEADLINE.as_secs(),
         );
+    }
+
+    /// Left, Right, and Down read every worktree of the repository, sorted by
+    /// path, whatever worktree the watch is on: the main worktree, a linked
+    /// worktree, or a detached one. Each entry carries its label, and the label
+    /// of the detached worktree is `HEAD@` and the short hash.
+    #[test]
+    fn the_list_holds_every_worktree_of_the_repository_from_each_worktree() {
+        let dir = siblings();
+        let expected = vec![
+            WorktreeEntry {
+                path: resolved(&dir.path().join(DETACHED)),
+                label: detached_label(&dir.path().join(DETACHED)),
+            },
+            WorktreeEntry {
+                path: resolved(&dir.path().join(LINKED)),
+                label: LINKED.to_string(),
+            },
+            WorktreeEntry {
+                path: resolved(&dir.path().join(MAIN)),
+                label: MAIN.to_string(),
+            },
+        ];
+        let (tx, _rx) = mpsc::channel();
+
+        for name in [DETACHED, LINKED, MAIN] {
+            let watched = RefCell::new(seeded(&dir.path().join(name), tx.clone()));
+            assert_eq!(
+                listed(&watched),
+                expected,
+                "the list read from the worktree {name}",
+            );
+        }
     }
 }
