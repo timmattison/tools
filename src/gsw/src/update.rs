@@ -195,7 +195,7 @@ impl BaseUpdateCommand {
     /// as several words, and a semicolon would leave it as several commands.
     /// [`shell_quote`] makes it one word whatever is in it.
     pub(crate) fn script(&self) -> String {
-        self.command.name().to_string()
+        format!("{} {}", self.command.name(), shell_quote(&self.base))
     }
 }
 
