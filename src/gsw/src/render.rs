@@ -48,11 +48,6 @@ pub struct Snapshot {
     /// Only watch mode sets it, because only watch mode moves between the
     /// worktrees. It is `None` in one-shot mode, and `None` for a repository
     /// with one worktree, so the header of such a frame stays as it was.
-    #[expect(
-        dead_code,
-        reason = "the header does not read the badge yet. The expectation fails the build when \
-                  it does, so this attribute cannot stay after that"
-    )]
     pub worktree: Option<WorktreeBadge>,
 }
 
@@ -415,41 +410,83 @@ const HEADER_NAME_FLOOR: usize = 10;
 /// The header carries no age. Every age on the frame belongs to a row that
 /// names what it is aging — a file or a commit — and the newest commit's age
 /// sits on the first log row, directly beneath this line.
+///
+/// A snapshot with a worktree badge starts the header with the badge, and the
+/// label of the badge takes the place of the branch (see [`header_lead`] and
+/// [`header_name`]). The badge is part of the prefix, so each rung shrinks the
+/// line with the badge in it, and the shaving rung shaves the label where it
+/// shaves the branch. The hard cut takes text from the right, so the badge is
+/// the last text to go.
 fn header_segments(snap: &Snapshot, width: usize) -> HeaderSegments {
-    let compose = |branch: &str, base: &str, detail: UpstreamDetail| {
-        compose_header(snap, branch, base, detail)
-    };
+    let name = header_name(snap);
+    let compose =
+        |name: &str, base: &str, detail: UpstreamDetail| compose_header(snap, name, base, detail);
 
-    let full = compose(&snap.branch, &snap.base, UpstreamDetail::Full);
+    let full = compose(name, &snap.base, UpstreamDetail::Full);
     if full.width() <= width {
         return full;
     }
-    let counts_only = compose(&snap.branch, &snap.base, UpstreamDetail::CountsOnly);
+    let counts_only = compose(name, &snap.base, UpstreamDetail::CountsOnly);
     if counts_only.width() <= width {
         return counts_only;
     }
 
-    let (branch, base) = shave_names(
-        &snap.branch,
-        &snap.base,
-        counts_only.width().saturating_sub(width),
-    );
-    let shaved = compose(&branch, &base, UpstreamDetail::CountsOnly);
+    let (name, base) = shave_names(name, &snap.base, counts_only.width().saturating_sub(width));
+    let shaved = compose(&name, &base, UpstreamDetail::CountsOnly);
     if shaved.width() <= width {
         return shaved;
     }
-    let bare = compose(&branch, &base, UpstreamDetail::Omitted);
+    let bare = compose(&name, &base, UpstreamDetail::Omitted);
     if bare.width() <= width {
         return bare;
     }
     bare.clamp(width)
 }
 
-/// Build the header segments from an already-sized branch name, base name and
-/// upstream detail level.
+/// The name of the tool, where every header starts.
+const HEADER_TOOL: &str = "gsw";
+
+/// The mark of the home worktree, the worktree where the user started gsw:
+/// U+2302 HOUSE, one column wide. The header puts it before the position of
+/// the home worktree, and the list of the worktrees puts it after the row of
+/// the home worktree.
+const HOME_MARK: char = '⌂';
+
+/// The name that the header shows for HEAD: the label of the worktree badge,
+/// or the branch when the snapshot has no badge.
+///
+/// The label of a detached worktree is `HEAD@<short hash>`. The branch of such
+/// a worktree is `HEAD`, which names neither the worktree nor the commit.
+fn header_name(snap: &Snapshot) -> &str {
+    snap.worktree
+        .as_ref()
+        .map_or(snap.branch.as_str(), |badge| badge.label.as_str())
+}
+
+/// The text before the first `•` of the header.
+///
+/// With no badge it is `gsw` alone, so the header of one-shot mode and the
+/// header of a repository with one worktree stay as they were. With a badge,
+/// the position of the worktree follows: `gsw ⌂ 1/4` for the home worktree,
+/// and `gsw 3/4` for another worktree.
+fn header_lead(badge: Option<&WorktreeBadge>) -> String {
+    let Some(badge) = badge else {
+        return HEADER_TOOL.to_string();
+    };
+    let home = if badge.home {
+        format!(" {HOME_MARK}")
+    } else {
+        String::new()
+    };
+    format!("{HEADER_TOOL}{home} {}/{}", badge.position, badge.count)
+}
+
+/// Build the header segments from an already-sized name, base name and
+/// upstream detail level. `name` is the name of HEAD that [`header_name`]
+/// gives, shaved or whole.
 fn compose_header(
     snap: &Snapshot,
-    branch: &str,
+    name: &str,
     base: &str,
     detail: UpstreamDetail,
 ) -> HeaderSegments {
@@ -468,7 +505,8 @@ fn compose_header(
         })
         .unwrap_or_default();
     let prefix = format!(
-        "gsw • {branch} • {n} {word} ahead of {base}",
+        "{lead} • {name} • {n} {word} ahead of {base}",
+        lead = header_lead(snap.worktree.as_ref()),
         n = snap.commits_ahead,
         word = commit_word,
     );
@@ -486,6 +524,9 @@ fn compose_header(
 /// on a similar length instead of one being cut to the bone while the other
 /// keeps every character. Neither drops below [`HEADER_NAME_FLOOR`]; when
 /// that leaves `over` unmet, the next rung of the caller's ladder covers it.
+///
+/// `branch` is the name of HEAD that the header shows: the branch, or the
+/// label of the worktree badge (see [`header_name`]).
 fn shave_names(branch: &str, base: &str, over: usize) -> (String, String) {
     let mut branch_width = UnicodeWidthStr::width(branch);
     let mut base_width = UnicodeWidthStr::width(base);
