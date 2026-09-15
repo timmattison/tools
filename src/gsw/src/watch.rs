@@ -8254,6 +8254,82 @@ mod push_loop_tests {
     }
 
     #[test]
+    fn esc_and_q_close_the_list_and_gsw_stays() {
+        // The cursor is on another worktree when the list closes, and gsw
+        // stays on the worktree that it showed before the list opened. `q`
+        // closes the list, as it answers "no" to the push question. A quit
+        // there would still paint the list, because a quit inside a burst
+        // paints the burst first.
+        for code in [KeyCode::Esc, KeyCode::Char('q')] {
+            let (screen, seen) = run_in(
+                World::three(),
+                vec![
+                    key(KeyCode::Down),
+                    key(KeyCode::Down),
+                    key(code),
+                    Event::Quit,
+                ],
+            );
+            assert_eq!(
+                strip_ansi(&screen),
+                format!("FRAME {BRAVO}"),
+                "{code:?} must close the list",
+            );
+            assert!(
+                seen.switches.is_empty(),
+                "{code:?} must not switch, got {:?}",
+                seen.switches,
+            );
+        }
+    }
+
+    #[test]
+    fn a_message_that_arrives_while_the_list_is_open_waits_for_the_frame_that_closes_it() {
+        // A message waits in the queue while the list is open, as it waits
+        // while a push owns the row. The frame that closes the list carries
+        // it, with its whole life ahead of it.
+        let (paints, _seen) = paints_in(
+            World::three(),
+            vec![
+                vec![press_m(), key(KeyCode::Down)],
+                vec![finished(measured_clean())],
+                vec![key(KeyCode::Esc), Event::Quit],
+            ],
+        );
+        assert_eq!(
+            paints,
+            [
+                format!("LIST {BRAVO}: {ALPHA} >{BRAVO}⌂ {CHARLIE}"),
+                format!("FRAME {BRAVO}\n{MEASURED_CLEAN} (0s ago)"),
+            ],
+            "the outcome must wait under the list, and reach the row on the frame that closes it",
+        );
+    }
+
+    #[test]
+    fn down_replaces_a_status_line_that_does_not_come_back() {
+        // The list opens over the line, as `p` asks its question over it. The
+        // line described the frame that the user stopped reading, so it does
+        // not come back when the list closes.
+        let (paints, _seen) = paints_in(
+            World::three(),
+            vec![
+                vec![press_m(), refused_run()],
+                vec![key(KeyCode::Down)],
+                vec![key(KeyCode::Esc), Event::Quit],
+            ],
+        );
+        assert_eq!(
+            paints,
+            [
+                format!("FRAME {BRAVO}\n{REFUSED_RUN_LINE} (0s ago)"),
+                format!("LIST {BRAVO}: {ALPHA} >{BRAVO}⌂ {CHARLIE}"),
+                format!("FRAME {BRAVO}"),
+            ],
+        );
+    }
+
+    #[test]
     fn up_and_down_move_the_cursor_stop_at_the_ends_and_neither_walk_nor_switch() {
         // The frame does not change while the cursor moves: gsw walks the new
         // worktree only after Enter. Each burst below gets a frame. Down on
