@@ -2743,6 +2743,34 @@ mod ui_tests {
     }
 
     #[test]
+    fn the_list_does_not_open_while_a_question_or_a_push_owns_the_row() {
+        // The key table never asks for the list then, but the door must not
+        // break what owns the row. A question keeps the keys that answer it,
+        // and a push keeps its window until its outcome arrives.
+        let now = t0();
+        let mut ui = asking();
+        ui.open_list(three_worktrees());
+        assert_eq!(
+            ui.mode(),
+            InputMode::Confirm,
+            "the question must keep the keys"
+        );
+        assert_eq!(cursor_of(&ui), None, "no list may open over the question");
+        assert!(ui.confirm(now).is_some(), "the question must still answer");
+
+        let mut ui = pushing(now);
+        ui.output_line("Compiling gsw v0.1.0".to_string());
+        ui.open_list(three_worktrees());
+        assert_eq!(ui.mode(), InputMode::Pushing, "the push must keep the row");
+        assert_eq!(cursor_of(&ui), None, "no list may open over the push");
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert!(
+            text.contains(RUNNING_NOTICE) && text.contains("Compiling gsw v0.1.0"),
+            "the push must keep its notice and its window, got {text:?}",
+        );
+    }
+
+    #[test]
     fn a_line_reported_while_pushing_appears_under_the_notice() {
         // The whole feature: a long pre-push hook leaves the user watching a
         // frozen "Pushing…" with no way to tell work from a hang.
