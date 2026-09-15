@@ -596,6 +596,25 @@ pub(crate) fn render_frame(
     }
 }
 
+/// How many rows of the worktree list the pane shows under the separator.
+///
+/// The rows under the separator are what the pane leaves under the header
+/// chrome ([`header_chrome`]). With two rows or more, the bottom row holds the
+/// hint and the list takes the rest. With one row, the list takes it and no
+/// hint shows. With no row, the answer is 0: the list cannot open, and an open
+/// list closes, so Enter never chooses a row that the user did not see.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the loop of watch mode calls it from slice 5 of #499 on. The expectation then \
+                  fails the build, so slice 5 deletes this attribute"
+    )
+)]
+pub(crate) fn list_rows(_snapshot: &Snapshot, _dims: watch::Dimensions) -> usize {
+    0
+}
+
 /// Fetch the `n` most recent commits as [`LogEntry`] records via gix.
 ///
 /// Returns an empty list when `n == 0` or the repo has no commits.
