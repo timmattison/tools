@@ -4,6 +4,14 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
+/// The name of the gluetun container that the tunnel of `container_prefix` runs.
+///
+/// The generated `docker-compose.yml` pins this name with `container_name`, so
+/// docker refuses to run two containers of one name.
+pub fn gluetun_container_name(container_prefix: &str) -> String {
+    format!("{container_prefix}-gluetun")
+}
+
 /// Generate docker-compose.yml, .env, and helper scripts in the output directory.
 ///
 /// # Errors
@@ -239,5 +247,23 @@ mod tests {
 
         let perms = fs::metadata(&env_path).unwrap().permissions();
         assert_eq!(perms.mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn the_gluetun_container_name_carries_the_prefix() {
+        assert_eq!(gluetun_container_name("vpn"), "vpn-gluetun");
+    }
+
+    #[test]
+    fn the_compose_file_pins_the_name_that_credential_selection_compares() {
+        // Credential selection keeps a named credential when only a tunnel of
+        // this name holds its key. That is sound only while docker gives the
+        // container this exact name.
+        let dir = tempfile::tempdir().unwrap();
+        generate(dir.path(), None, "b", "v3.40", "key", "credential", &[]).unwrap();
+
+        let compose = fs::read_to_string(dir.path().join("docker-compose.yml")).unwrap();
+        let pinned = format!("\n    container_name: {}\n", gluetun_container_name("b"));
+        assert!(compose.contains(&pinned), "{compose}");
     }
 }
