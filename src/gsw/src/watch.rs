@@ -5953,6 +5953,9 @@ mod push_loop_tests {
     /// The reason the fake `switch` hook gives for a worktree it refuses.
     const REFUSED: &str = "no such worktree";
 
+    /// The reason the fake `collect` hook gives for a walk that fails.
+    const UNWALKABLE: &str = "the walk failed";
+
     /// The worktrees a loop run can move between, and how each switch comes
     /// out.
     ///
@@ -5968,6 +5971,17 @@ mod push_loop_tests {
         /// The worktrees whose switch fails, as the switch to a worktree that
         /// stopped existing fails.
         refused: Vec<WorktreePath>,
+        /// The worktrees that go away as the loop switches to them, as `git
+        /// worktree remove` in another pane makes a worktree go. The switch
+        /// works. From then on, the list does not hold the worktree, and every
+        /// walk of it and every switch to it fails.
+        vanishing: Vec<WorktreePath>,
+        /// The worktrees that are gone from the start: the list does not hold
+        /// them, and every walk of them and every switch to them fails.
+        removed: Vec<WorktreePath>,
+        /// The worktrees whose walks fail while the list still holds them, as
+        /// a walk fails when `git gc` swaps the ref store under it.
+        unreadable: Vec<WorktreePath>,
     }
 
     impl World {
@@ -5994,6 +6008,9 @@ mod push_loop_tests {
                 home: worktree(home),
                 listed,
                 refused: Vec::new(),
+                vanishing: Vec::new(),
+                removed: Vec::new(),
+                unreadable: Vec::new(),
             }
         }
 
@@ -6018,6 +6035,27 @@ mod push_loop_tests {
         /// [`REFUSED`].
         fn refusing(mut self, name: &str) -> Self {
             self.refused.push(worktree(name));
+            self
+        }
+
+        /// This world, where the worktree `name` goes away as the loop
+        /// switches to it. See [`World::vanishing`].
+        fn vanishing(mut self, name: &str) -> Self {
+            self.vanishing.push(worktree(name));
+            self
+        }
+
+        /// This world, where the worktree `name` is gone from the start. See
+        /// [`World::removed`].
+        fn removed(mut self, name: &str) -> Self {
+            self.removed.push(worktree(name));
+            self
+        }
+
+        /// This world, where every walk of the worktree `name` fails while
+        /// the list still holds it. See [`World::unreadable`].
+        fn unreadable(mut self, name: &str) -> Self {
+            self.unreadable.push(worktree(name));
             self
         }
     }
@@ -6073,6 +6111,9 @@ mod push_loop_tests {
             }
         };
         let seen = RefCell::new(Seen::default());
+        // The worktrees that are gone: the removed ones from the start, and
+        // each vanishing one from the switch that reached it.
+        let removed = RefCell::new(world.removed.clone());
         let mut displayed = String::new();
         let base = clock();
 
@@ -6097,6 +6138,9 @@ mod push_loop_tests {
                     let mut seen = seen.borrow_mut();
                     seen.collects += 1;
                     seen.collected_from.push(current.clone());
+                    if removed.borrow().contains(current) || world.unreadable.contains(current) {
+                        anyhow::bail!("{UNWALKABLE}: {}", current.as_path().display());
+                    }
                     Ok(snapshot_of(current))
                 },
                 render: |snap: &Snapshot, frame_dims: Dimensions, timing: FrameTiming| {
@@ -6139,15 +6183,25 @@ mod push_loop_tests {
                 },
                 worktrees: || {
                     seen.borrow_mut().listings += 1;
-                    world.listed.clone()
+                    let removed = removed.borrow();
+                    world
+                        .listed
+                        .iter()
+                        .filter(|entry| !removed.contains(&entry.path))
+                        .cloned()
+                        .collect()
                 },
                 switch: |target: &WorktreePath| {
                     seen.borrow_mut().switches.push(target.clone());
-                    if world.refused.contains(target) {
-                        Err(format!("{REFUSED}: {}", target.as_path().display()))
-                    } else {
-                        Ok(snapshot_of(target))
+                    if world.refused.contains(target) || removed.borrow().contains(target) {
+                        return Err(format!("{REFUSED}: {}", target.as_path().display()));
                     }
+                    // A vanishing worktree exists at the switch, and goes away
+                    // at once.
+                    if world.vanishing.contains(target) {
+                        removed.borrow_mut().push(target.clone());
+                    }
+                    Ok(snapshot_of(target))
                 },
             },
         )
@@ -8496,6 +8550,258 @@ mod push_loop_tests {
             seen.frame_heights.last().copied(),
             Some(NO_ROW_FOR_THE_LIST.height - 1),
             "the message takes one row of the shrunken pane from the frame",
+        );
+    }
+
+    /// The line that the return to the home worktree puts under the frame,
+    /// after the worktree `name` went away.
+    ///
+    /// Written out here rather than taken from the code it pins, so a change
+    /// to the words is a change these tests report.
+    fn gone_line(name: &str) -> String {
+        format!(
+            "{} no longer exists — back to the home worktree",
+            worktree(name).as_path().display()
+        )
+    }
+
+    /// A clock that stands still at the start for the first `reads` reads,
+    /// and one minute later for every read after them.
+    fn a_minute_after(reads: usize) -> impl Fn() -> Instant {
+        let base = Instant::now();
+        clock_that_jumps(base, reads, base + Duration::from_secs(60))
+    }
+
+    #[test]
+    fn a_failed_walk_of_a_worktree_no_longer_listed_goes_back_home_and_says_so() {
+        // The worktree on the screen stopped existing (`git worktree remove`,
+        // `swt merge`). Its walk fails, and the list no longer holds it, so
+        // gsw goes back to the home worktree through the one switch, and says
+        // why on a line that fades. The frame is the fresh snapshot of home,
+        // and `m` after the return measures home.
+        let (paints, seen) = paints_in(
+            World::three().vanishing(CHARLIE),
+            vec![
+                vec![key(KeyCode::Right), Event::ForceRefresh],
+                vec![press_m(), Event::Quit],
+            ],
+        );
+        assert_eq!(
+            paints,
+            [format!("FRAME {BRAVO}\n{} (0s ago)", gone_line(CHARLIE))],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE), worktree(BRAVO)],
+            "Right goes to charlie, and the failed walk goes back home",
+        );
+        assert_eq!(
+            seen.collected_from,
+            vec![worktree(CHARLIE)],
+            "the walk that failed must be the walk of charlie",
+        );
+        assert_eq!(
+            seen.timings.last().map(|timing| timing.age_offset),
+            Some(Duration::ZERO),
+            "the frame of home must be fresh",
+        );
+        assert_eq!(
+            seen.conflict_paths,
+            vec![(worktree(BRAVO), after_one_switch().next())],
+            "`m` after the return must measure home, in the generation of the return",
+        );
+    }
+
+    #[test]
+    fn a_failed_walk_while_a_push_runs_stays_and_a_later_failed_walk_goes_home() {
+        // The window under the frame belongs to the worktree that pushes, so
+        // a walk that fails during the push does not go home. The first walk
+        // that fails after the push does.
+        let (paints, seen) = paints_in(
+            World::three().vanishing(CHARLIE),
+            vec![
+                vec![
+                    key(KeyCode::Right),
+                    key(KeyCode::Char('p')),
+                    key(KeyCode::Char('y')),
+                    Event::ForceRefresh,
+                ],
+                vec![
+                    Event::PushFinished(PushOutcome {
+                        success: false,
+                        output: "error: failed to push some refs\n".to_string(),
+                    }),
+                    Event::ForceRefresh,
+                    Event::Quit,
+                ],
+            ],
+        );
+        let during = paints.first().expect("the push paints a frame");
+        assert!(
+            during.starts_with(&format!("FRAME {CHARLIE}\nPushing")),
+            "a failed walk during the push must stay on charlie, got {during:?}",
+        );
+        assert_eq!(
+            paints.last(),
+            Some(&format!("FRAME {BRAVO}\n{} (0s ago)", gone_line(CHARLIE))),
+            "the failed walk after the push must go home",
+        );
+        assert_eq!(seen.switches, vec![worktree(CHARLIE), worktree(BRAVO)]);
+    }
+
+    #[test]
+    fn a_failed_return_home_keeps_the_last_good_frame_at_its_age_and_says_nothing() {
+        // The home worktree went away too, so the switch to it fails. gsw
+        // then does what it does today for a failed walk: it keeps the last
+        // good snapshot at its true age. It posts no line, because each later
+        // failed walk tries again, and a line would come back on each one.
+        //
+        // The harness reads the clock once, and the switch of Right reads it
+        // twice. The filesystem event comes a minute later.
+        let (screen, seen) = drive(
+            vec![key(KeyCode::Right), Event::FsChanged, Event::Quit],
+            in_world(World::three().vanishing(CHARLIE).removed(BRAVO)),
+            a_minute_after(3),
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE), worktree(BRAVO)],
+            "gsw must try to go home",
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {CHARLIE}"),
+            "the last good frame must stay, with no line under it",
+        );
+        assert_eq!(
+            seen.timings.last().map(|timing| timing.age_offset),
+            Some(Duration::from_secs(60)),
+            "the last good snapshot must show its true age",
+        );
+    }
+
+    #[test]
+    fn a_failed_walk_of_the_home_worktree_keeps_the_last_good_frame() {
+        // The home worktree stopped existing while gsw shows it. There is no
+        // home to go back to, so gsw keeps the last good snapshot at its true
+        // age, and does not read the list for a return that cannot happen.
+        //
+        // The harness reads the clock once, and the filesystem event comes a
+        // minute later.
+        let (screen, seen) = drive(
+            vec![Event::FsChanged, Event::Quit],
+            in_world(World::three().removed(BRAVO)),
+            a_minute_after(1),
+        );
+        assert!(
+            seen.switches.is_empty(),
+            "gsw must not switch, got {:?}",
+            seen.switches,
+        );
+        assert_eq!(seen.listings, 0, "gsw must not read the list");
+        assert_eq!(strip_ansi(&screen), format!("FRAME {BRAVO}"));
+        assert_eq!(
+            seen.timings.last().map(|timing| timing.age_offset),
+            Some(Duration::from_secs(60)),
+            "the last good snapshot must show its true age",
+        );
+    }
+
+    #[test]
+    fn a_failed_walk_of_a_worktree_still_listed_keeps_the_last_good_frame() {
+        // A walk can fail for a moment while the worktree still exists. The
+        // list still holds it, so gsw stays on it with the last good snapshot
+        // at its true age.
+        //
+        // The harness reads the clock once, and the switch of Right reads it
+        // twice. The filesystem event comes a minute later.
+        let (screen, seen) = drive(
+            vec![key(KeyCode::Right), Event::FsChanged, Event::Quit],
+            in_world(World::three().unreadable(CHARLIE)),
+            a_minute_after(3),
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE)],
+            "gsw must stay on charlie"
+        );
+        assert_eq!(strip_ansi(&screen), format!("FRAME {CHARLIE}"));
+        assert_eq!(
+            seen.timings.last().map(|timing| timing.age_offset),
+            Some(Duration::from_secs(60)),
+            "the last good snapshot must show its true age",
+        );
+    }
+
+    #[test]
+    fn the_return_home_closes_the_list_and_drops_the_question() {
+        // Both describe the worktree that went away. The list shows the
+        // worktrees as they stood when it opened, and the question asks to
+        // push the branch of a worktree that is gone.
+        let (screen, _seen) = run_in(
+            World::three().vanishing(CHARLIE),
+            vec![
+                key(KeyCode::Right),
+                key(KeyCode::Down),
+                Event::ForceRefresh,
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {BRAVO}\n{} (0s ago)", gone_line(CHARLIE)),
+            "the return must close the list",
+        );
+
+        let (paints, seen) = paints_in(
+            World::three().vanishing(CHARLIE),
+            vec![
+                vec![
+                    key(KeyCode::Right),
+                    key(KeyCode::Char('p')),
+                    Event::ForceRefresh,
+                ],
+                vec![key(KeyCode::Char('y')), Event::Quit],
+            ],
+        );
+        assert_eq!(
+            paints.first(),
+            Some(&format!("FRAME {BRAVO}\n{} (0s ago)", gone_line(CHARLIE))),
+            "the return must drop the question",
+        );
+        assert!(
+            seen.pushes.is_empty(),
+            "a `y` after the return must not push, got {:?}",
+            seen.pushes,
+        );
+    }
+
+    #[test]
+    fn a_removed_worktree_sends_gsw_back_to_the_home_worktree_with_a_fading_line() {
+        // The whole path, end to end. The user opens the list and goes to
+        // charlie with Enter, and another pane removes charlie. The
+        // filesystem event of the removal walks charlie, the walk fails, and
+        // gsw goes back to the home worktree and says why.
+        //
+        // The harness reads the clock once, and the switch of Enter reads it
+        // twice. The filesystem event comes a minute later, past the cooldown
+        // that the switch armed, so it walks.
+        let (screen, seen) = drive(
+            vec![
+                key(KeyCode::Down),
+                key(KeyCode::Down),
+                key(KeyCode::Enter),
+                Event::FsChanged,
+                Event::Quit,
+            ],
+            in_world(World::three().vanishing(CHARLIE)),
+            a_minute_after(3),
+        );
+        assert_eq!(seen.switches, vec![worktree(CHARLIE), worktree(BRAVO)]);
+        assert_eq!(seen.collected_from, vec![worktree(CHARLIE)]);
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {BRAVO}\n{} (0s ago)", gone_line(CHARLIE)),
         );
     }
 
