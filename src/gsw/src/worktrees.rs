@@ -5,10 +5,12 @@
 //! order of `cwt`. Right and Left then visit the worktrees in the same order as
 //! `cwt -f` and `cwt -p`.
 //!
-//! The model of the navigation over that list is pure. [`next`], [`previous`],
-//! [`badge`], and [`WorktreeList`] read no git and no filesystem, so the loop
-//! decides each key from the paths alone, and the tests build their paths with
-//! `WorktreePath::fake`.
+//! The model of the navigation over that list is pure.
+//! [`next`](crate::worktrees::next), [`previous`](crate::worktrees::previous),
+//! [`badge`](crate::worktrees::badge), and
+//! [`WorktreeList`](crate::worktrees::WorktreeList) read no git and no
+//! filesystem, so the loop decides each key from the paths alone, and the
+//! tests build their paths with `WorktreePath::fake`.
 
 use std::path::{Path, PathBuf};
 

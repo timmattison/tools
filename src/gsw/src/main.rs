@@ -56,7 +56,8 @@ mod worktrees;
                   Watch-mode keys: q or Ctrl-C quits, r refreshes now, p pushes the current \
                   branch after a confirmation that names what it will do — a branch not yet on \
                   the remote is confirmed as creating one — G opens the issue the branch \
-                  names, and m measures a rebase and a merge against the default branch. \
+                  names, m measures a rebase and a merge against the default branch, and the \
+                  arrow keys move the watch between the worktrees of the repository. \
                   A push whose branch stopped being \
                   checked out between the question and the answer is refused, not redirected. \
                   p never force-pushes.\n\n\
@@ -81,6 +82,16 @@ mod worktrees;
                   file` takes its place and fades off after a minute. One run at a time: m \
                   does nothing while a run is in flight. A quit during a run waits for the \
                   replay in flight, so no scratch worktree stays behind.\n\n\
+                  Up goes to the home worktree, where gsw started. Left and Right go to the \
+                  previous and the next worktree in path order, which is the order of cwt, and \
+                  they wrap. Down opens a list of the worktrees: Up and Down move the cursor, \
+                  Enter goes to the worktree under it, and Esc or q closes the list. While the \
+                  repository has more than one worktree, the header shows the position of the \
+                  worktree and marks the home worktree with ⌂. A switch walks the new worktree \
+                  at once and removes every line under the frame. The arrow keys do nothing \
+                  while a push runs or while the push question is up. When the worktree on the \
+                  screen is removed, gsw goes back to the home worktree. gsw does not change the \
+                  directory of the shell that started it.\n\n\
                   While a push runs, a notice reports how long it has taken, and up to six rows \
                   under it carry the newest output from git and from any pre-push hook. Each row \
                   arrives as the hook writes it, so a hook that builds and tests a workspace \

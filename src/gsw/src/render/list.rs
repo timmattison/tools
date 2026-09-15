@@ -1,8 +1,9 @@
 //! The rows of the worktree list, and the hint under them.
 //!
-//! [`rows`] draws the rows of the window that the list shows, and [`hint`]
-//! draws the keys of the list. The frame of the list (`render_list_frame` in
-//! `main.rs`) puts them under the head of the status frame.
+//! [`rows`](crate::render::list::rows) draws the rows of the window that the
+//! list shows, and [`hint`](crate::render::list::hint) draws the keys of the
+//! list. The frame of the list (`render_list_frame` in `main.rs`) puts them
+//! under the head of the status frame.
 //!
 //! No row is wider than the pane, because a row that wraps pushes every row
 //! under it down one line. Each function measures display width, never bytes,
