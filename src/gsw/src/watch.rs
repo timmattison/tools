@@ -3478,6 +3478,103 @@ mod tests {
         }
     }
 
+    /// The four arrow keys.
+    const ARROWS: [KeyCode; 4] = [KeyCode::Up, KeyCode::Down, KeyCode::Left, KeyCode::Right];
+
+    /// What [`classify_input`] gave, as a name that a failed assertion can
+    /// print. The arrow tests compare these names.
+    fn meaning(event: Option<Event>) -> &'static str {
+        match event {
+            Some(Event::GoHome) => "GoHome",
+            Some(Event::GoPrevious) => "GoPrevious",
+            Some(Event::GoNext) => "GoNext",
+            Some(Event::Dismiss) => "Dismiss",
+            Some(Event::PushConfirmed) => "PushConfirmed",
+            Some(Event::PushCancelled) => "PushCancelled",
+            Some(_) => "another event",
+            None => "nothing",
+        }
+    }
+
+    #[test]
+    fn up_left_and_right_move_the_watch_in_normal_mode_and_down_stays_unbound() {
+        // Up goes to the home worktree, and Left and Right go to the
+        // neighbours in path order. Down opens nothing yet, so it gives what
+        // every unbound key gives.
+        let table = [
+            (KeyCode::Up, "GoHome"),
+            (KeyCode::Left, "GoPrevious"),
+            (KeyCode::Right, "GoNext"),
+            (KeyCode::Down, "Dismiss"),
+        ];
+        for issue in BOTH_AVAILABILITIES {
+            for (code, expected) in table {
+                assert_eq!(
+                    meaning(classify_input(press(code), InputMode::Normal, issue)),
+                    expected,
+                    "{code:?} in Normal with {issue:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_arrow_keys_never_answer_the_push_question_and_do_nothing_while_a_push_runs() {
+        // A question on the screen owns its answer, so an arrow key there does
+        // what an unbound key does, and never pushes or cancels. A push in
+        // flight owns the window under the frame, and that window belongs to
+        // the worktree that pushes, so an arrow key does nothing then either.
+        // Enter and Esc keep their meaning at the question.
+        for issue in BOTH_AVAILABILITIES {
+            for mode in [InputMode::Confirm, InputMode::Pushing] {
+                for code in ARROWS {
+                    assert_eq!(
+                        meaning(classify_input(press(code), mode, issue)),
+                        "Dismiss",
+                        "{code:?} in {mode:?} with {issue:?}",
+                    );
+                }
+            }
+            assert_eq!(
+                meaning(classify_input(
+                    press(KeyCode::Enter),
+                    InputMode::Confirm,
+                    issue
+                )),
+                "PushConfirmed",
+                "Enter must still push with {issue:?}",
+            );
+            assert_eq!(
+                meaning(classify_input(
+                    press(KeyCode::Esc),
+                    InputMode::Confirm,
+                    issue
+                )),
+                "PushCancelled",
+                "Esc must still cancel with {issue:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_release_of_an_arrow_key_is_ignored_in_every_mode() {
+        // Only a press acts, and the arrow keys are no exception.
+        for mode in EVERY_MODE {
+            for issue in BOTH_AVAILABILITIES {
+                for code in ARROWS {
+                    let release = KeyEvent {
+                        kind: KeyEventKind::Release,
+                        ..press(code)
+                    };
+                    assert!(
+                        classify_input(release, mode, issue).is_none(),
+                        "a release of {code:?} must be ignored in {mode:?} with {issue:?}",
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn should_react_accepts_a_tracked_or_untracked_non_ignored_worktree_path() {
         // An edit to a normal source file under the worktree must wake the
