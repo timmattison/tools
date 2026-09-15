@@ -881,8 +881,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - To install: `cargo install --git https://github.com/timmattison/tools beta`
 - vpn-tunnel
   - Generates Docker-based VPN tunnels using gluetun + ProtonVPN + WireGuard. Produces a ready-to-run
-    `docker-compose.yml` plus helper scripts; pulls the WireGuard credential from 1Password via
-    op-cache. Supports per-city pinning or US-wide IP diversity and configurable container prefixes.
+    `docker-compose.yml` plus helper scripts. Reads the `credential*` fields of a 1Password item
+    through op-cache and picks the first WireGuard credential that no running tunnel holds. A
+    regenerated directory keeps the credential that its `.env` names, unless a tunnel of another
+    container name holds it. `generate` stops when docker cannot report the running tunnels.
+    Supports per-city pinning or US-wide IP diversity and configurable container prefixes.
   - To install: `cargo install --git https://github.com/timmattison/tools vpn-tunnel`
 - op-cache
   - 1Password credential cache with retry logic, atomic writes, and worktree support. Wraps `op read`
