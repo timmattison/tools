@@ -34,7 +34,8 @@
 //! thus exactly the text between `swt/` and the last `/`. The directory stays
 //! beside the parent, so `ls` shows each child next to its parent. The
 //! directory name is for people, and no code parses it. A parent on a detached
-//! HEAD has no branch, so `create` refuses it before it makes anything.
+//! HEAD has no branch, so `create` refuses it before it makes anything, and
+//! says why.
 //!
 //! What survives a failed check is reported, never assumed. Teardown is
 //! best-effort — git refuses to remove a working tree whose `.git` link has gone
@@ -66,6 +67,13 @@ const WORKTREE_SUFFIX: &str = ".swt";
 /// directory name. The directory name is for people, and no code parses it.
 /// Two hyphens stand out beside the single hyphens in names and tokens.
 const PARENT_SEPARATOR: &str = "--";
+
+/// What `create` writes to stderr when the parent is on a detached HEAD. It
+/// states the fact, why the fact stops the command, and what the user must do.
+/// The wording lives here and nowhere else.
+const DETACHED_HEAD_REFUSAL: &str =
+    "HEAD is detached. A detached HEAD has no branch to relate the \
+     new worktree to. Check out a branch, then run swt create again.";
 
 /// Namespace every branch `swt` creates lives under.
 const BRANCH_PREFIX: &str = "swt";
@@ -257,8 +265,9 @@ impl WorktreeNaming {
 ///
 /// The branch of the parent worktree is read next, also before anything
 /// exists, because both names carry it. A parent on a detached HEAD has no
-/// branch, so the command fails there. When git fails in that read, its own
-/// output goes to stderr, and the command fails.
+/// branch, so the command refuses it there. It writes [`DETACHED_HEAD_REFUSAL`]
+/// to stderr, prints nothing on stdout, and fails. When git fails in that read,
+/// its own output goes to stderr, and the command fails.
 ///
 /// On success the worktree's path — and nothing else — goes to stdout, so a
 /// caller can capture it cleanly. On a red check the worktree and its branch are
@@ -274,8 +283,12 @@ pub fn create(raw_name: &str) -> ExitCode {
     // Read before anything exists, because both names carry the parent branch.
     let parent_branch = match head_branch(Some(&root)) {
         Ok(HeadBranch::Branch(branch)) => branch,
-        // A detached HEAD has no branch to name the child after.
-        Ok(HeadBranch::Detached) => return ExitCode::FAILURE,
+        // A detached HEAD has no branch to name the child after. Nothing
+        // exists yet, so the refusal leaves nothing behind.
+        Ok(HeadBranch::Detached) => {
+            eprintln!("{DETACHED_HEAD_REFUSAL}");
+            return ExitCode::FAILURE;
+        }
         // The account of git itself, which already ends in a newline.
         Err(failure) => {
             eprint!("{failure}");
