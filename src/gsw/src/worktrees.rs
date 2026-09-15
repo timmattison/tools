@@ -305,8 +305,9 @@ pub(crate) struct WorktreeList {
     /// The row of the cursor. Always a row of `entries`.
     cursor: usize,
     /// The first row of the window at the last [`settle`](Self::settle).
+    /// Always a row of `entries`.
     top: usize,
-    /// The worktree where the user started gsw.
+    /// The worktree where the user started gsw. The list marks its row.
     home: WorktreePath,
 }
 
@@ -363,17 +364,63 @@ impl WorktreeList {
         &self.entries[self.cursor]
     }
 
-    /// The rows a pane of `rows` list rows shows, top to bottom. The cursor
-    /// row is always one of them. Pure: it clamps the stored scroll offset.
-    pub(crate) fn window(&self, _rows: usize) -> Vec<ListRow<'_>> {
-        Vec::new()
+    /// The rows that a pane of `rows` list rows shows, top to bottom.
+    ///
+    /// The cursor row is always one of them. The row of the home worktree is
+    /// marked, and a home worktree that is not in the list marks no row. A
+    /// pane of no rows shows no row. Pure: it clamps the stored scroll offset
+    /// through [`offset`](Self::offset) and stores nothing, so two calls give
+    /// the same rows. [`settle`](Self::settle) stores the offset.
+    pub(crate) fn window(&self, rows: usize) -> Vec<ListRow<'_>> {
+        self.entries
+            .iter()
+            .enumerate()
+            .skip(self.offset(rows))
+            .take(rows)
+            .map(|(row, entry)| ListRow {
+                entry,
+                cursor: row == self.cursor,
+                home: entry.path == self.home,
+            })
+            .collect()
     }
 
-    /// Store the scroll offset that `window(rows)` used, so the next move
-    /// starts from the window that the user saw. Minimal movement: the window
-    /// moves only when the cursor leaves it. It never leaves empty rows at the
+    /// Store the scroll offset that `window(rows)` uses, so the next move
+    /// starts from the window that the user saw. The loop calls it before
+    /// each frame of the list.
+    ///
+    /// Minimal movement: the window moves only when the cursor leaves it, and
+    /// then only as far as the cursor went. It never leaves empty rows at the
     /// bottom when the list is longer than the pane.
-    pub(crate) fn settle(&mut self, _rows: usize) {}
+    pub(crate) fn settle(&mut self, rows: usize) {
+        self.top = self.offset(rows);
+    }
+
+    /// The first row of the window for a pane of `rows` rows: the stored
+    /// offset, clamped. [`window`](Self::window) and
+    /// [`settle`](Self::settle) both take the offset from here, so the offset
+    /// that `settle` stores is the offset of the window that the user saw.
+    ///
+    /// 1. A cursor above the window pulls the window up, so the cursor row is
+    ///    its first row.
+    /// 2. A cursor below the window pulls the window down, so the cursor row
+    ///    is its last row.
+    /// 3. The window never goes past the last row of the list. So a pane that
+    ///    grows at the end of the list shows more rows above.
+    ///
+    /// A pane of no rows holds no cursor row. The offset then stays where it
+    /// is, which keeps it on a row of the list.
+    fn offset(&self, rows: usize) -> usize {
+        // The distance from the first row of the pane to its last row.
+        let Some(depth) = rows.checked_sub(1) else {
+            return self.top;
+        };
+        let top = self
+            .top
+            .min(self.cursor)
+            .max(self.cursor.saturating_sub(depth));
+        top.min(self.entries.len().saturating_sub(rows))
+    }
 }
 
 #[cfg(test)]
