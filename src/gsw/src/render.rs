@@ -14,6 +14,7 @@ use crate::age::{
 };
 use crate::bar::render_bar;
 use crate::git::FileStatus;
+use crate::worktrees::WorktreeBadge;
 
 /// Everything render() needs to draw one frame.
 #[derive(Debug, Clone)]
@@ -42,6 +43,17 @@ pub struct Snapshot {
     pub push_remote: Option<String>,
     /// In-progress git operation (merge/rebase), or `None` for a clean tree.
     pub operation: Option<Operation>,
+    /// Which worktree of the repository the frame shows, for the header.
+    ///
+    /// Only watch mode sets it, because only watch mode moves between the
+    /// worktrees. It is `None` in one-shot mode, and `None` for a repository
+    /// with one worktree, so the header of such a frame stays as it was.
+    #[expect(
+        dead_code,
+        reason = "the header does not read the badge yet. The expectation fails the build when \
+                  it does, so this attribute cannot stay after that"
+    )]
+    pub worktree: Option<WorktreeBadge>,
 }
 
 /// State of the local branch relative to its upstream tracking ref.
@@ -1083,6 +1095,7 @@ mod tests {
             upstream: None,
             operation: None,
             push_remote: None,
+            worktree: None,
         }
     }
 

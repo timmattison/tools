@@ -3409,6 +3409,7 @@ mod tests {
             upstream: None,
             operation: None,
             push_remote: None,
+            worktree: None,
         }
     }
 
@@ -4869,6 +4870,7 @@ mod push_loop_tests {
             upstream: None,
             operation: None,
             push_remote: Some("origin".into()),
+            worktree: None,
         }
     }
 

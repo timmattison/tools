@@ -1909,6 +1909,7 @@ mod ui_tests {
             upstream,
             operation: None,
             push_remote: Some("origin".to_string()),
+            worktree: None,
         }
     }
 
