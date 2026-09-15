@@ -711,6 +711,7 @@ mod tests {
     use crate::git::FileStatus;
     use crate::render::Operation;
     use crate::render::RenderEntry;
+    use crate::worktrees::{WorktreeBadge, WorktreeEntry, WorktreeList, WorktreePath};
 
     #[test]
     fn the_frame_a_walk_paints_counts_down_a_whole_interval() {
@@ -928,6 +929,335 @@ mod tests {
                 "{operation:?}: no row under the separator",
             );
         }
+    }
+
+    /// The worktrees of the example in the issue, sorted by path: the main
+    /// worktree, two worktrees on branches, and a detached worktree.
+    fn issue_worktrees() -> Vec<WorktreeEntry> {
+        [
+            ("/code/tools", "main"),
+            ("/code/tools-worktrees/issue-475", "issue-475"),
+            ("/code/tools-worktrees/issue-498", "issue-498"),
+            ("/code/tools-worktrees/sweep", "HEAD@9ba6951"),
+        ]
+        .into_iter()
+        .map(|(path, label)| WorktreeEntry {
+            path: WorktreePath::fake(path),
+            label: label.to_string(),
+        })
+        .collect()
+    }
+
+    /// Open the list of `entries` with the cursor on row `cursor` and the
+    /// home worktree on row `home`.
+    fn list_at(entries: &[WorktreeEntry], cursor: usize, home: usize) -> WorktreeList {
+        WorktreeList::open(
+            entries.to_vec(),
+            &entries[cursor].path,
+            entries[home].path.clone(),
+        )
+        .expect("a list with rows opens")
+    }
+
+    /// The snapshot of the example in the issue: the home worktree, the first
+    /// of four, on `main`.
+    fn issue_snapshot() -> Snapshot {
+        let mut snap = snapshot_with(None, &[]);
+        snap.branch = "main".into();
+        snap.commits_ahead = 0;
+        snap.worktree = Some(WorktreeBadge {
+            position: 1,
+            count: 4,
+            home: true,
+            label: "main".into(),
+        });
+        snap
+    }
+
+    /// The timing of the example in the issue: the last walk was 12 seconds
+    /// ago, and the next walk is 48 seconds away.
+    fn issue_timing() -> FrameTiming {
+        FrameTiming {
+            age_offset: Duration::from_secs(12),
+            next_refresh_in: Some(Duration::from_secs(48)),
+        }
+    }
+
+    /// A render config for the status frame of these tests. The list frame
+    /// takes none.
+    fn render_config() -> RenderConfig {
+        RenderConfig {
+            base: None,
+            max_files: None,
+            bar_width: 6,
+            log_lines: 0,
+            truecolor: false,
+            refresh_interval: None,
+            width_offset: 0,
+        }
+    }
+
+    /// The rows of the list frame, as visible glyphs.
+    ///
+    /// The frame is painted with the escape codes forced on, and then the
+    /// codes are taken out, so the comparison covers the painted rows. The
+    /// split is on each line break, so a blank row at the bottom counts.
+    fn list_frame_rows(
+        snapshot: &Snapshot,
+        dims: watch::Dimensions,
+        list: &WorktreeList,
+    ) -> Vec<String> {
+        let painted = testcolor::with_forced_ansi(|| {
+            render_list_frame(snapshot, dims, issue_timing(), list).output
+        });
+        testcolor::strip_ansi(&painted)
+            .split('\n')
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The hint under the list, as the issue states it. Stated here as the
+    /// oracle, apart from the constant of the code under test.
+    const ISSUE_HINT: &str = "↑↓ move · Enter go · Esc back";
+
+    #[test]
+    fn the_list_frame_draws_the_example_of_the_issue() {
+        // The user started gsw in /code/tools, pressed Down to open the
+        // list, and pressed Down again. The widest visible path is 31
+        // columns, so every label starts in the same column. The list leaves
+        // one row blank, and the hint takes the bottom row of the pane.
+        let entries = issue_worktrees();
+        let mut list = list_at(&entries, 0, 0);
+        list.down();
+        let dims = watch::Dimensions {
+            width: 60,
+            height: 8,
+        };
+
+        assert_eq!(
+            list_frame_rows(&issue_snapshot(), dims, &list),
+            [
+                "gsw ⌂ 1/4 • main • 0 commits ahead of main".to_string(),
+                format!(
+                    "{} last refresh: 12s ago, next refresh: 48s {}",
+                    "─".repeat(13),
+                    "─".repeat(5),
+                ),
+                format!("    {:<31}  [main]  ⌂", "/code/tools"),
+                format!("  > {:<31}  [issue-475]", "/code/tools-worktrees/issue-475"),
+                format!("    {:<31}  [issue-498]", "/code/tools-worktrees/issue-498"),
+                format!("    {:<31}  [HEAD@9ba6951]", "/code/tools-worktrees/sweep"),
+                String::new(),
+                ISSUE_HINT.to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn the_list_frame_draws_the_head_of_the_status_frame_byte_for_byte() {
+        // The header, the line of a merge or a rebase, and the separator with
+        // its refresh clock come from one function, so the list frame paints
+        // them exactly as the status frame paints them. The frame is as tall
+        // as the pane with or without the line of an operation, and nothing on
+        // it ages.
+        let entries = issue_worktrees();
+        let list = list_at(&entries, 1, 0);
+        let dims = watch::Dimensions {
+            width: 60,
+            height: 12,
+        };
+        for (operation, head) in [(None, 2), (Some(Operation::Merge { conflicts: 2 }), 3)] {
+            let mut snap = issue_snapshot();
+            snap.operation = operation;
+            let (list_frame, status_frame) = testcolor::with_forced_ansi(|| {
+                (
+                    render_list_frame(&snap, dims, issue_timing(), &list),
+                    render_frame(&snap, &render_config(), dims, issue_timing()),
+                )
+            });
+            let list_painted: Vec<&str> = list_frame.output.split('\n').collect();
+            let status_painted: Vec<&str> = status_frame.output.split('\n').collect();
+
+            assert_eq!(
+                list_painted.get(..head),
+                status_painted.get(..head),
+                "the head of the list frame with the operation {:?}",
+                snap.operation,
+            );
+            assert!(
+                testcolor::strip_ansi(status_painted[head - 1])
+                    .contains("last refresh: 12s ago, next refresh: 48s"),
+                "the separator of both frames carries the refresh clock: {:?}",
+                status_painted[head - 1],
+            );
+            assert_eq!(
+                list_painted.len(),
+                dims.height,
+                "the list frame is as tall as the pane with the operation {:?}",
+                snap.operation,
+            );
+            assert_eq!(list_frame.freshest_age, None, "nothing on the list ages");
+        }
+    }
+
+    #[test]
+    fn the_list_frame_marks_the_cursor_row_and_the_home_row_only() {
+        let entries = issue_worktrees();
+        let dims = watch::Dimensions {
+            width: 60,
+            height: 8,
+        };
+        let rows_with = |marker: &str, rows: &[String]| -> Vec<usize> {
+            rows.iter()
+                .enumerate()
+                .filter(|(_, row)| {
+                    if marker == "⌂" {
+                        row.ends_with("  ⌂")
+                    } else {
+                        row.starts_with(marker)
+                    }
+                })
+                .map(|(index, _)| index)
+                .collect()
+        };
+
+        // The cursor on the home row: the one row carries both marks.
+        let rows = list_frame_rows(&issue_snapshot(), dims, &list_at(&entries, 0, 0));
+        assert_eq!(
+            rows.get(2),
+            Some(&format!("  > {:<31}  [main]  ⌂", "/code/tools")),
+            "{rows:#?}",
+        );
+        assert_eq!(rows_with("  > ", &rows), [2]);
+        assert_eq!(rows_with("⌂", &rows), [2]);
+
+        // The cursor and the home worktree on two other rows.
+        let rows = list_frame_rows(&issue_snapshot(), dims, &list_at(&entries, 3, 2));
+        assert_eq!(rows_with("  > ", &rows), [5], "{rows:#?}");
+        assert_eq!(rows_with("⌂", &rows), [4], "{rows:#?}");
+
+        // A home worktree that is not in the list marks no row.
+        let away = WorktreeList::open(
+            entries.clone(),
+            &entries[1].path,
+            WorktreePath::fake("/elsewhere"),
+        )
+        .expect("a list with rows opens");
+        let rows = list_frame_rows(&issue_snapshot(), dims, &away);
+        assert_eq!(rows_with("⌂", &rows), Vec::<usize>::new(), "{rows:#?}");
+        assert_eq!(rows_with("  > ", &rows), [3], "{rows:#?}");
+    }
+
+    #[test]
+    fn the_list_frame_paints_the_cursor_row_bold_and_the_hint_dim() {
+        const BOLD: &str = "\x1b[1m";
+        const DIM: &str = "\x1b[2m";
+        let entries = issue_worktrees();
+        let list = list_at(&entries, 1, 0);
+        let dims = watch::Dimensions {
+            width: 60,
+            height: 8,
+        };
+        let painted = testcolor::with_forced_ansi(|| {
+            render_list_frame(&issue_snapshot(), dims, issue_timing(), &list).output
+        });
+        let rows: Vec<&str> = painted.split('\n').collect();
+
+        assert!(
+            rows.get(3).is_some_and(|row| row.starts_with(BOLD)),
+            "the cursor row is bold: {rows:#?}",
+        );
+        for row in [2, 4, 5] {
+            assert!(
+                rows.get(row).is_some_and(|row| !row.contains('\x1b')),
+                "row {row} has no cursor and no paint: {rows:#?}",
+            );
+        }
+        assert!(
+            rows.get(7).is_some_and(|row| row.starts_with(DIM)),
+            "the hint is dim: {rows:#?}",
+        );
+    }
+
+    #[test]
+    fn the_list_frame_shows_the_window_of_a_long_list_that_holds_the_cursor() {
+        // Ten worktrees in a pane with three rows for the list. The window
+        // holds the cursor row, and it moves only when the cursor leaves it.
+        let entries: Vec<WorktreeEntry> = (0..10)
+            .map(|n| WorktreeEntry {
+                path: WorktreePath::fake(format!("/code/wt-{n}")),
+                label: format!("b{n}"),
+            })
+            .collect();
+        let snap = issue_snapshot();
+        let dims = watch::Dimensions {
+            width: 40,
+            height: 6,
+        };
+        let mut list = list_at(&entries, 7, 0);
+
+        let rows = list_frame_rows(&snap, dims, &list);
+        assert_eq!(
+            rows.get(2..).unwrap_or_default(),
+            [
+                "    /code/wt-5  [b5]",
+                "    /code/wt-6  [b6]",
+                "  > /code/wt-7  [b7]",
+                ISSUE_HINT,
+            ],
+            "the window that holds the cursor on row 7: {rows:#?}",
+        );
+
+        list.settle(list_rows(&snap, dims));
+        for _ in 0..3 {
+            list.up();
+        }
+        let rows = list_frame_rows(&snap, dims, &list);
+        assert_eq!(
+            rows.get(2..).unwrap_or_default(),
+            [
+                "  > /code/wt-4  [b4]",
+                "    /code/wt-5  [b5]",
+                "    /code/wt-6  [b6]",
+                ISSUE_HINT,
+            ],
+            "the window moves up only as far as the cursor went: {rows:#?}",
+        );
+    }
+
+    #[test]
+    fn the_list_frame_with_one_row_under_the_separator_shows_the_cursor_row_alone() {
+        let entries = issue_worktrees();
+        let list = list_at(&entries, 2, 0);
+        let dims = watch::Dimensions {
+            width: 60,
+            height: 3,
+        };
+
+        let rows = list_frame_rows(&issue_snapshot(), dims, &list);
+        assert_eq!(rows.len(), 3, "{rows:#?}");
+        assert_eq!(
+            rows[2],
+            format!("  > {:<31}  [issue-498]", "/code/tools-worktrees/issue-498"),
+        );
+    }
+
+    #[test]
+    fn the_list_frame_of_a_pane_with_no_row_under_the_separator_draws_the_head_alone() {
+        // The loop closes the list before it asks for such a frame. A frame
+        // that is asked for all the same shows no row of the list and no
+        // hint.
+        let entries = issue_worktrees();
+        let list = list_at(&entries, 1, 0);
+        let dims = watch::Dimensions {
+            width: 60,
+            height: 2,
+        };
+
+        let rows = list_frame_rows(&issue_snapshot(), dims, &list);
+        assert_eq!(rows.len(), 2, "{rows:#?}");
+        assert_eq!(rows[0], "gsw ⌂ 1/4 • main • 0 commits ahead of main");
+        assert!(rows[1].contains("last refresh:"), "{rows:#?}");
     }
 
     /// Build a minimal [`Snapshot`] with the given HEAD-commit age and a file
