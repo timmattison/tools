@@ -2787,7 +2787,7 @@ mod tests {
     /// A [`RenderConfig`] for the fixture-backed walk tests: no explicit base,
     /// no caps, no log rows, no color. Only the git work matters here — the
     /// rendering knobs are exercised by the render tests.
-    fn walk_config() -> RenderConfig {
+    pub(super) fn walk_config() -> RenderConfig {
         RenderConfig {
             base: None,
             max_files: None,
@@ -9088,5 +9088,163 @@ mod push_loop_tests {
             seen.listings, 1,
             "only the Down that opens the list reads it",
         );
+    }
+}
+
+/// The tests of [`Watched`] and of the production switch, against real
+/// repositories and real filesystem watchers.
+///
+/// Every fixture is a repository of `crate::testrepo` in a [`tempfile::TempDir`]
+/// of its own, so the tests stay parallel-safe and never touch the repository
+/// that the suite runs in.
+#[cfg(test)]
+mod watched_tests {
+    use std::path::Path;
+    use std::sync::mpsc;
+
+    use tempfile::TempDir;
+
+    use super::tests::walk_config;
+    use super::{Event, Watched};
+    use crate::repo::RepoHandle;
+    use crate::testrepo::{git, git_stdout, init_repo, init_repo_at};
+    use crate::worktrees::{WorktreeBadge, WorktreePath};
+
+    /// The main worktree of [`siblings`], on branch `main`. Its path sorts
+    /// last.
+    const MAIN: &str = "main";
+
+    /// The linked worktree of [`siblings`], on the branch of the same name. Its
+    /// path sorts between the two others.
+    const LINKED: &str = "linked";
+
+    /// The detached linked worktree of [`siblings`]. Its path sorts first.
+    const DETACHED: &str = "detached";
+
+    /// How many hex digits of the commit a detached HEAD shows: the length
+    /// that `cwt` shows. Stated here as the oracle, apart from the constant of
+    /// the code under test.
+    const CWT_SHORT_HASH: usize = 7;
+
+    /// A repository with three worktrees side by side in one [`TempDir`]:
+    ///
+    /// | Path       | Worktree                   |
+    /// | ---------- | -------------------------- |
+    /// | `detached` | linked, detached           |
+    /// | `linked`   | linked, on branch `linked` |
+    /// | `main`     | main, on branch `main`     |
+    ///
+    /// No worktree is inside another, so the recursive watch of one worktree
+    /// never covers another. The drop of the [`TempDir`] deletes all three.
+    fn siblings() -> TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join(MAIN);
+        init_repo_at(&main);
+        add_worktree(&main, &dir.path().join(LINKED), &["-b", LINKED]);
+        add_worktree(&main, &dir.path().join(DETACHED), &["--detach"]);
+        dir
+    }
+
+    /// Add a linked worktree of the repository at `main`, at `path`. `how`
+    /// holds the options of `git worktree add` that pick the HEAD: a new
+    /// branch (`-b <name>`) or `--detach`.
+    fn add_worktree(main: &Path, path: &Path, how: &[&str]) {
+        let mut args = vec!["worktree", "add", "-q"];
+        args.extend_from_slice(how);
+        args.push(path.to_str().expect("utf-8 tempdir path"));
+        git(main, &args);
+    }
+
+    /// The [`WorktreePath`] of a directory that the fixture made.
+    fn resolved(path: &Path) -> WorktreePath {
+        WorktreePath::resolve(path).expect("the fixture made this directory")
+    }
+
+    /// The label of the detached HEAD at `dir`, as `cwt` shows it: `HEAD@` and
+    /// the first [`CWT_SHORT_HASH`] hex digits of the id that git reports.
+    fn detached_label(dir: &Path) -> String {
+        let full = git_stdout(dir, &["rev-parse", "HEAD"]);
+        let short: String = full.chars().take(CWT_SHORT_HASH).collect();
+        format!("HEAD@{short}")
+    }
+
+    /// A [`Watched`] on the worktree at `path`, built as [`super::run`] builds
+    /// the first one: from a handle that is open on the worktree already. Its
+    /// watcher sends on `tx`.
+    fn seeded(path: &Path, tx: mpsc::Sender<Event>) -> Watched {
+        let handle = RepoHandle::discover(path).expect("the fixture is a work tree");
+        Watched::from_handle(handle, resolved(path), tx).expect("watch the fixture")
+    }
+
+    /// A walk puts the badge of its worktree on the snapshot: the position of
+    /// the worktree among the worktrees in path order, their count, whether it
+    /// is the home worktree, and its label. The label of a detached worktree is
+    /// `HEAD@` and the short hash, as `cwt` shows it, because a detached
+    /// worktree has no branch.
+    ///
+    /// The home worktree is the middle one, so a badge that marks the first or
+    /// the last worktree as home fails.
+    #[test]
+    fn a_walk_puts_the_badge_of_its_worktree_on_the_snapshot() {
+        let dir = siblings();
+        let home = resolved(&dir.path().join(LINKED));
+        let expected = [
+            (
+                DETACHED,
+                WorktreeBadge {
+                    position: 1,
+                    count: 3,
+                    home: false,
+                    label: detached_label(&dir.path().join(DETACHED)),
+                },
+            ),
+            (
+                LINKED,
+                WorktreeBadge {
+                    position: 2,
+                    count: 3,
+                    home: true,
+                    label: LINKED.to_string(),
+                },
+            ),
+            (
+                MAIN,
+                WorktreeBadge {
+                    position: 3,
+                    count: 3,
+                    home: false,
+                    label: MAIN.to_string(),
+                },
+            ),
+        ];
+        let (tx, _rx) = mpsc::channel();
+
+        for (name, badge) in expected {
+            let mut watched = seeded(&dir.path().join(name), tx.clone());
+            let snapshot = watched
+                .walk(&walk_config(), &home)
+                .expect("walk the fixture");
+            assert_eq!(
+                snapshot.worktree,
+                Some(badge),
+                "the walk of the worktree {name}"
+            );
+        }
+    }
+
+    /// A repository with one worktree gets no badge, so the header of its frame
+    /// stays as it was before gsw moved between worktrees.
+    #[test]
+    fn a_walk_of_a_repository_with_one_worktree_puts_no_badge_on_the_snapshot() {
+        let dir = init_repo();
+        let home = resolved(dir.path());
+        let (tx, _rx) = mpsc::channel();
+
+        let mut watched = seeded(dir.path(), tx);
+        let snapshot = watched
+            .walk(&walk_config(), &home)
+            .expect("walk the fixture");
+
+        assert_eq!(snapshot.worktree, None);
     }
 }
