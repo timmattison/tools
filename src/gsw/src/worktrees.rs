@@ -611,13 +611,16 @@ mod tests {
         );
     }
 
-    /// A worktree whose admin dir gix cannot open is in neither list. Its
+    /// A worktree whose admin dir gix cannot open stays in both lists. Its
     /// directory exists and its `gitdir` file reads, so only the open fails.
-    /// The list cannot read its label, and a list of paths that kept it would
-    /// disagree with the list that Down shows.
+    /// gsw cannot read its HEAD, so its label is [`UNREADABLE_LABEL`]. The
+    /// header counts the paths and Down shows the list, so the two lists must
+    /// hold the same worktrees.
+    ///
+    /// [`UNREADABLE_LABEL`]: super::UNREADABLE_LABEL
     #[cfg(unix)]
     #[test]
-    fn a_worktree_whose_admin_dir_gix_cannot_open_is_in_neither_list() {
+    fn a_worktree_whose_admin_dir_gix_cannot_open_stays_in_both_lists_with_an_unknown_label() {
         let dir = tempfile::tempdir().expect("tempdir");
         let main = dir.path().join("repo");
         init_repo_at(&main);
@@ -630,23 +633,44 @@ mod tests {
         let _commondir = Unreadable::new(admin.join("commondir"));
 
         let repo = open(&main);
-        let readable_bases = repo
+        let proxy = repo
             .worktrees()
             .expect("read the admin dirs")
-            .iter()
-            .filter(|proxy| proxy.base().is_ok())
-            .count();
-        assert_eq!(
-            readable_bases, 1,
+            .into_iter()
+            .next()
+            .expect("git keeps the admin dir of the worktree");
+        assert!(
+            proxy.base().is_ok(),
             "the gitdir file of the worktree must still read, so that only the open fails",
         );
         assert!(
             broken.is_dir(),
             "the directory of the worktree must exist, so that only the open fails",
         );
+        assert!(
+            proxy
+                .into_repo_with_possibly_inaccessible_worktree()
+                .is_err(),
+            "gix must fail to open the admin dir, or the test proves nothing",
+        );
 
-        assert_eq!(worktree_paths(&repo), vec![resolved(&main)]);
-        assert_eq!(paths_of(&list_worktrees(&repo)), vec![resolved(&main)]);
+        assert_eq!(
+            worktree_paths(&repo),
+            vec![resolved(&broken), resolved(&main)],
+        );
+        assert_eq!(
+            list_worktrees(&repo),
+            vec![
+                WorktreeEntry {
+                    path: resolved(&broken),
+                    label: super::UNREADABLE_LABEL.to_string(),
+                },
+                WorktreeEntry {
+                    path: resolved(&main),
+                    label: "main".to_string(),
+                },
+            ],
+        );
     }
 
     /// Two spellings of one directory resolve to one value.
