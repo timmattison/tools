@@ -5670,6 +5670,13 @@ mod push_loop_tests {
         fn three_at(home: &str) -> Self {
             Self::of(&[ALPHA, BRAVO, CHARLIE], home)
         }
+
+        /// This world, where the switch to the worktree `name` fails with
+        /// [`REFUSED`].
+        fn refusing(mut self, name: &str) -> Self {
+            self.refused.push(worktree(name));
+            self
+        }
     }
 
     /// The shared body of every helper above: pre-load the queue, run the loop
@@ -7527,6 +7534,101 @@ mod push_loop_tests {
         assert!(
             !state.issue.is_armed(now),
             "a switch must take the arming of `G` away",
+        );
+    }
+
+    /// The reason the fake `switch` hook gives when it refuses the worktree
+    /// `name`, as it reaches the row.
+    fn refusal_of(name: &str) -> String {
+        format!("{REFUSED}: {}", worktree(name).as_path().display())
+    }
+
+    #[test]
+    fn a_switch_that_fails_stays_and_shows_the_reason_on_a_fading_line() {
+        // The open fails: the chosen worktree stopped existing, or its
+        // directory is not a work tree. gsw stays on the worktree it shows,
+        // and the reason is gsw's report about a key, so it fades.
+        let (screen, seen) = run_in(
+            World::three().refusing(CHARLIE),
+            vec![key(KeyCode::Right), Event::Quit],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE)],
+            "Right must try the next worktree",
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {BRAVO}\n{} (0s ago)", refusal_of(CHARLIE)),
+            "the frame must stay on the worktree it showed, with the reason under it",
+        );
+    }
+
+    #[test]
+    fn after_a_switch_that_failed_p_g_and_m_act_on_the_old_worktree() {
+        // Nothing moves when a switch fails. Every key acts on the worktree
+        // the frame still shows, and the next Right tries the same worktree
+        // again.
+        let (_screen, seen) = run_in(
+            World::three().refusing(CHARLIE),
+            vec![
+                probe_answered(),
+                key(KeyCode::Right),
+                key(KeyCode::Right),
+                key(KeyCode::Char('p')),
+                key(KeyCode::Char('y')),
+                press_g(),
+                press_m(),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE), worktree(CHARLIE)],
+            "a failed switch leaves Right where it was",
+        );
+        assert_eq!(
+            seen.push_paths,
+            vec![worktree(BRAVO)],
+            "`p` pushes from bravo"
+        );
+        assert_eq!(
+            seen.pushes.first().map(PushCommand::branch),
+            Some(BRAVO),
+            "the push must name the branch of the worktree on the screen",
+        );
+        assert_eq!(
+            paths_only(&seen.issue_paths),
+            vec![worktree(BRAVO)],
+            "`G` runs in bravo",
+        );
+        assert_eq!(
+            paths_only(&seen.conflict_paths),
+            vec![worktree(BRAVO)],
+            "`m` measures bravo",
+        );
+    }
+
+    #[test]
+    fn a_switch_that_fails_leaves_the_refresh_clock_alone() {
+        // The frame still shows the old worktree, and a failed open walked
+        // nothing of it, so its clock runs on: 10 seconds are left, as with
+        // no switch at all.
+        let base = Instant::now();
+        let later = base + Duration::from_secs(50);
+        let (_screen, seen) = drive(
+            vec![key(KeyCode::Right), Event::Quit],
+            Setup {
+                schedule: WalkSchedule::new(Some(REFRESH), base, Duration::ZERO),
+                ..in_world(World::three().refusing(CHARLIE))
+            },
+            move || later,
+        );
+        assert_eq!(
+            seen.timings
+                .last()
+                .and_then(|timing| timing.next_refresh_in),
+            Some(Duration::from_secs(10)),
         );
     }
 }
