@@ -31,7 +31,7 @@ use crate::conflicts::ConflictsWorker;
 use crate::push::{PushCommand, PushUi};
 use crate::render::Snapshot;
 use crate::repo::RepoHandle;
-use crate::worktrees::{WorktreeEntry, WorktreeList, WorktreePath};
+use crate::worktrees::{head_label, worktree_paths, WorktreeEntry, WorktreeList, WorktreePath};
 use crate::{collect_snapshot, render_frame, render_list_frame, FrameTiming, Render, RenderConfig};
 use termwindow::{
     effective_terminal_height, effective_terminal_width, DEFAULT_TERMINAL_HEIGHT,
@@ -1136,15 +1136,42 @@ impl Watched {
         }
     }
 
-    /// Walk the worktree: [`walk`] re-opens the repository, rebuilds the
-    /// ignore matcher, and collects the snapshot.
+    /// Walk the worktree, and put its badge on the snapshot. [`walk`] re-opens
+    /// the repository, rebuilds the ignore matcher, and collects the snapshot.
+    /// [`badged`] then reads the badge from the repository that the walk
+    /// re-opened. `home` is the worktree where the user started gsw.
     ///
     /// # Errors
     ///
     /// Gives the error of [`walk`], which is the error of the status walk.
-    fn walk(&mut self, cfg: &RenderConfig, _home: &WorktreePath) -> Result<Snapshot> {
-        walk(&mut self.handle, &self.ignore, cfg)
+    fn walk(&mut self, cfg: &RenderConfig, home: &WorktreePath) -> Result<Snapshot> {
+        let snapshot = walk(&mut self.handle, &self.ignore, cfg)?;
+        Ok(badged(snapshot, self.handle.repo(), &self.path, home))
     }
+}
+
+/// Put the badge of the worktree at `path` on `snapshot`, which a walk of
+/// `repo` collected. `home` is the worktree where the user started gsw.
+///
+/// The seed walk of [`run`] and every walk of a [`Watched`] go through here, so
+/// the first frame and every later frame name the worktree in the same way.
+///
+/// The paths come from [`worktree_paths`], which reads no HEAD and opens no
+/// linked worktree. Every walk pays for this call, and the cooldown after a
+/// walk is 100 times its cost, so the expensive [`list_worktrees`] is wrong
+/// here. The label comes from [`head_label`] of `repo`, which is the
+/// repository that the walk read, so the label and the snapshot agree.
+///
+/// [`list_worktrees`]: crate::worktrees::list_worktrees
+fn badged(
+    mut snapshot: Snapshot,
+    repo: &gix::Repository,
+    path: &WorktreePath,
+    home: &WorktreePath,
+) -> Snapshot {
+    snapshot.worktree =
+        crate::worktrees::badge(&worktree_paths(repo), path, home, head_label(repo));
+    snapshot
 }
 
 /// Switch the watch to the worktree at `target`. The watcher of the new
@@ -1211,7 +1238,14 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     // re-opens the handle and rebuilds the matcher.
     let dims = current_dimensions(cfg.width_offset);
     let collected_at = Instant::now();
-    let snapshot = collect_snapshot(handle.repo(), cfg)?;
+    // The badge goes on through the same helper as on every later walk, so the
+    // first frame names the worktree as every later frame does.
+    let snapshot = badged(
+        collect_snapshot(handle.repo(), cfg)?,
+        handle.repo(),
+        &home,
+        &home,
+    );
     // The seed walk pays into the duty-cycle budget like every walk after it,
     // so its cost is what the schedule's first timed walk is gated on. The seed
     // frame then counts down to that same schedule rather than to the raw
