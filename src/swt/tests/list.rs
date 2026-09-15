@@ -20,6 +20,7 @@ use support::{
     exiting_check, git, git_allowing_failure, run_swt, shell_command, unique, write_swt_check,
     TestRepo, SWT_CHECK,
 };
+use tempfile::TempDir;
 
 /// The namespace of the local branches. A test removes it from the full ref,
 /// so it compares the branch as a person spells it.
@@ -67,6 +68,59 @@ const PLAIN_GIT_CHILD_BRANCHES: &str = r#"git for-each-ref --format='%(refname:s
 /// The path of `README.md` at the root of the repository, from the manifest
 /// directory of this crate.
 const README_FROM_MANIFEST: &str = "../../README.md";
+
+/// The text that every statement of the check of `swt list` holds: the command
+/// substitution that reads what `swt list` prints.
+const SWT_LIST_SUBSTITUTION: &str = "$(swt list)";
+
+/// The source of the module `list`. Its module doc states the check of
+/// `README.md` a second time.
+const LIST_MODULE_SOURCE: &str = include_str!("../src/list.rs");
+
+/// The status of the documented check when the branch has children.
+const CHECK_STATUS_CHILDREN: i32 = 0;
+
+/// The status of the documented check when the branch has no children.
+const CHECK_STATUS_NO_CHILDREN: i32 = 1;
+
+/// What a caller reads from the status of the documented check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Answer {
+    /// The branch has children.
+    Children,
+    /// The branch has no children.
+    NoChildren,
+    /// `swt list` failed, so the check knows nothing about the children.
+    Failure,
+}
+
+impl Answer {
+    /// The answer that `status` gives. Every status other than the two answers
+    /// is a failure, a kill by a signal included.
+    fn of(status: Option<i32>) -> Self {
+        match status {
+            Some(CHECK_STATUS_CHILDREN) => Self::Children,
+            Some(CHECK_STATUS_NO_CHILDREN) => Self::NoChildren,
+            _ => Self::Failure,
+        }
+    }
+}
+
+/// The text of `README.md` at the root of the repository.
+fn readme() -> String {
+    let readme_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(README_FROM_MANIFEST);
+    fs::read_to_string(&readme_path)
+        .unwrap_or_else(|err| panic!("{} must be readable: {err}", readme_path.display()))
+}
+
+/// Every inline code span of `text` that holds [`SWT_LIST_SUBSTITUTION`]. A
+/// span is the text between a pair of backticks on one line.
+fn swt_list_spans(text: &str) -> Vec<&str> {
+    text.lines()
+        .flat_map(|line| line.split('`').skip(1).step_by(2))
+        .filter(|span| span.contains(SWT_LIST_SUBSTITUTION))
+        .collect()
+}
 
 /// A worktree that the real `swt create` made, as a test reads it back.
 struct Child {
@@ -499,11 +553,114 @@ fn the_documented_plain_git_command_finds_the_branches_that_swt_list_shows() {
         nested_child.branch
     );
 
-    let readme_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(README_FROM_MANIFEST);
-    let readme = fs::read_to_string(&readme_path)
-        .unwrap_or_else(|err| panic!("{} must be readable: {err}", readme_path.display()));
     assert!(
-        readme.contains(PLAIN_GIT_CHILD_BRANCHES),
+        readme().contains(PLAIN_GIT_CHILD_BRANCHES),
         "README.md must quote the plain-git command byte for byte: {PLAIN_GIT_CHILD_BRANCHES}"
+    );
+}
+
+// Issue #500. A hook runs the check that `README.md` states, and its answer
+// decides whether a merge or a deletion goes ahead. A failed `swt list` also
+// leaves stdout empty, so a check that reads only stdout reports a failure as
+// no children. The test runs the check from the README itself, not a copy. The
+// module doc of `list` must state the same bytes, and the dotfiles document
+// `SWT.md` quotes them too. Children, no children and a failure must each give
+// a different status.
+#[test]
+fn the_documented_check_tells_children_no_children_and_a_failure_apart() {
+    let readme = readme();
+    let spans = swt_list_spans(&readme);
+    assert_eq!(
+        spans.len(),
+        1,
+        "README.md must state exactly one check of swt list, got {spans:?}"
+    );
+    let check = spans[0];
+    assert!(
+        LIST_MODULE_SOURCE.contains(check),
+        "the module doc of src/swt/src/list.rs must state the check of README.md byte for \
+         byte: {check}"
+    );
+
+    let repo = TestRepo::new();
+    let with_child = repo.add_worktree_on("parent-with-child", "with-child");
+    create_child(&with_child.path, "child");
+    let without_children = repo.add_worktree_on("parent-without-children", "without-children");
+    let detached = repo.add_worktree_on("parent-to-detach", "to-detach");
+    let detached_child = create_child(&detached.path, "before-detach");
+    git(&detached.path, &["switch", "--quiet", "--detach"]);
+    let (on_a_branch, _) =
+        git_allowing_failure(&detached.path, &["symbolic-ref", "--quiet", "HEAD"]);
+    assert!(
+        !on_a_branch,
+        "fixture precondition: HEAD of the detached parent must be detached"
+    );
+    assert_registered(
+        &repo,
+        &[&detached_child.path],
+        "a child of the branch that the parent held before it detached",
+    );
+
+    // The directory of the binary under test comes first on `PATH`, so an
+    // installed `swt` cannot answer in its place. The empty directory holds no
+    // `swt` at all. `[` and `exit` are builtins, so the check still runs there.
+    let binary_dir = Path::new(env!("CARGO_BIN_EXE_swt"))
+        .parent()
+        .expect("the binary under test must sit in a directory");
+    let inherited = std::env::var_os("PATH").expect("the test must run with PATH set");
+    let with_swt = std::env::join_paths(
+        std::iter::once(binary_dir.to_path_buf()).chain(std::env::split_paths(&inherited)),
+    )
+    .expect("the directory of the binary under test must fit in PATH");
+    let empty = TempDir::new().expect("an empty directory for a PATH with no swt");
+    let cases = [
+        (
+            "a parent with a child",
+            &with_child.path,
+            with_swt.as_os_str(),
+            Answer::Children,
+        ),
+        (
+            "a parent with no children",
+            &without_children.path,
+            with_swt.as_os_str(),
+            Answer::NoChildren,
+        ),
+        (
+            "a detached HEAD",
+            &detached.path,
+            with_swt.as_os_str(),
+            Answer::Failure,
+        ),
+        (
+            "a parent with a child and no swt on PATH",
+            &with_child.path,
+            empty.path().as_os_str(),
+            Answer::Failure,
+        ),
+    ];
+
+    let runs: Vec<(&str, Option<i32>, String)> = cases
+        .iter()
+        .map(|&(state, dir, path, _)| {
+            let output = shell_command(dir, check)
+                .env("PATH", path)
+                .output()
+                .expect("failed to run the documented check through the shell");
+            (state, output.status.code(), support::stderr(&output))
+        })
+        .collect();
+    let observed: Vec<(&str, Answer)> = runs
+        .iter()
+        .map(|&(state, status, _)| (state, Answer::of(status)))
+        .collect();
+    let expected: Vec<(&str, Answer)> = cases
+        .iter()
+        .map(|&(state, _, _, answer)| (state, answer))
+        .collect();
+    assert_eq!(
+        observed, expected,
+        "the check {check} must give 0 for children, 1 for no children, and another status \
+         for a failure: {runs:#?}"
     );
 }
