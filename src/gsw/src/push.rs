@@ -21,6 +21,7 @@ use crate::lines::LineSplitter;
 use crate::render::{Snapshot, UpstreamStatus};
 use crate::repo::DETACHED_HEAD;
 use crate::watch::{Dimensions, InputMode};
+use crate::worktrees::WorktreeList;
 use textfit::truncate_right;
 
 /// Most rows a status message is allowed to occupy under the frame.
@@ -1206,6 +1207,24 @@ impl PushUi {
         if !matches!(self.state, State::Running { .. }) {
             self.state = State::Idle;
         }
+    }
+
+    /// Open the list of the worktrees.
+    pub(crate) fn open_list(&mut self, _list: WorktreeList) {}
+
+    /// The open list, or `None` when no list is open.
+    pub(crate) fn list(&self) -> Option<&WorktreeList> {
+        None
+    }
+
+    /// The open list, to move its cursor, or `None` when no list is open.
+    pub(crate) fn list_mut(&mut self) -> Option<&mut WorktreeList> {
+        None
+    }
+
+    /// Close the list, and give it back. `None` when no list is open.
+    pub(crate) fn close_list(&mut self) -> Option<WorktreeList> {
+        None
     }
 
     /// What the push feature shows in a pane of `dims`: the lines that fit

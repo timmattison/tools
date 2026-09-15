@@ -670,6 +670,21 @@ enum Event {
     GoPrevious,
     /// The user asked to go to the next worktree in path order (Right).
     GoNext,
+    /// The user asked for the list of the worktrees (Down).
+    ///
+    /// The loop reads the list again at each press, and opens it only in a
+    /// pane that has a row for it, so Enter never chooses a row that the user
+    /// did not see.
+    OpenList,
+    /// The user moved the cursor of the open list one row up (Up).
+    ListUp,
+    /// The user moved the cursor of the open list one row down (Down).
+    ListDown,
+    /// The user chose the worktree under the cursor of the open list (Enter).
+    ListGo,
+    /// The user closed the open list (Esc or `q`). The watch stays on the
+    /// worktree that it showed before the list opened.
+    ListClose,
     /// The user asked for the issue of the branch (`G`).
     ///
     /// Only [`classify_input`] makes one, and it makes one only where the
@@ -730,8 +745,9 @@ enum Event {
 /// silently inherit another's bindings.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum InputMode {
-    /// Nothing is being asked. The monitor's ordinary keys apply, and Up,
-    /// Left, and Right move the watch between the worktrees.
+    /// Nothing is being asked. The monitor's ordinary keys apply. Up, Left,
+    /// and Right move the watch between the worktrees, and Down opens the list
+    /// of the worktrees.
     Normal,
     /// A push confirmation is on screen and is waiting for an answer. The
     /// arrow keys never answer it.
@@ -741,6 +757,11 @@ pub(crate) enum InputMode {
     /// the worktree that pushes, and a push that succeeds walks that worktree
     /// again.
     Pushing,
+    /// The list of the worktrees is open. Up and Down move its cursor, Enter
+    /// goes to the worktree under the cursor, and Esc and `q` close it. Every
+    /// other key does nothing at all, because the list takes the pane, and a
+    /// key that acts on the frame acts on a frame that the user cannot see.
+    List,
 }
 
 /// Whether the `G` key has a command behind it.
@@ -1772,6 +1793,11 @@ where
                 state.switch_to(home, clock, &mut hooks.switch);
             }
         }
+        Event::OpenList
+        | Event::ListUp
+        | Event::ListDown
+        | Event::ListGo
+        | Event::ListClose => {}
         Event::IssueRequested => {
             // One read of the clock, for both halves of one press. The arming
             // and the message it stands for must end at the same moment, and
@@ -2368,6 +2394,7 @@ fn classify_input(key: KeyEvent, mode: InputMode, issue: IssueKey) -> Option<Eve
             KeyCode::Char('n' | 'N' | 'q') | KeyCode::Esc => Event::PushCancelled,
             _ => Event::Dismiss,
         },
+        InputMode::List => return None,
     };
     Some(event)
 }
@@ -3302,7 +3329,25 @@ mod tests {
     const BOTH_AVAILABILITIES: [IssueKey; 2] = [IssueKey::Bound, IssueKey::Unbound];
 
     /// Every mode a key can arrive in.
-    const EVERY_MODE: [InputMode; 3] = [InputMode::Normal, InputMode::Confirm, InputMode::Pushing];
+    const EVERY_MODE: [InputMode; 4] = [
+        InputMode::Normal,
+        InputMode::Confirm,
+        InputMode::Pushing,
+        InputMode::List,
+    ];
+
+    /// What a key with no meaning gives in `mode`, as [`meaning`] names it.
+    ///
+    /// [`Event::Dismiss`] takes a status line off the row. While the list is
+    /// open, a key with no meaning gives nothing at all, because the list
+    /// takes the pane. The match is total, so a mode added later must say what
+    /// an unbound key does in it.
+    fn unbound(mode: InputMode) -> &'static str {
+        match mode {
+            InputMode::Normal | InputMode::Confirm | InputMode::Pushing => "Dismiss",
+            InputMode::List => "nothing",
+        }
+    }
 
     #[test]
     fn classify_input_maps_the_r_key_to_force_refresh() {
@@ -3423,11 +3468,13 @@ mod tests {
         // Silence belongs to this case only, and it is the silence of an
         // unbound key rather than a code path of its own.
         for mode in EVERY_MODE {
-            assert!(
-                matches!(
-                    classify_input(press(KeyCode::Char('G')), mode, IssueKey::Unbound),
-                    Some(Event::Dismiss),
-                ),
+            assert_eq!(
+                meaning(classify_input(
+                    press(KeyCode::Char('G')),
+                    mode,
+                    IssueKey::Unbound
+                )),
+                unbound(mode),
                 "`G` must do nothing in {mode:?} with no command behind it",
             );
         }
@@ -3439,11 +3486,9 @@ mod tests {
         // keys, and only one of them was asked for.
         for mode in EVERY_MODE {
             for issue in BOTH_AVAILABILITIES {
-                assert!(
-                    matches!(
-                        classify_input(press(KeyCode::Char('g')), mode, issue),
-                        Some(Event::Dismiss),
-                    ),
+                assert_eq!(
+                    meaning(classify_input(press(KeyCode::Char('g')), mode, issue)),
+                    unbound(mode),
                     "`g` must stay unbound in {mode:?} with {issue:?}",
                 );
             }
@@ -3490,15 +3535,19 @@ mod tests {
                         matches!(m, Some(Event::Dismiss)),
                         "`m` must not answer the push question with {issue:?}",
                     ),
+                    // The list takes the pane, so a measurement of the frame
+                    // under it is a key the user pressed at nothing.
+                    InputMode::List => assert!(
+                        m.is_none(),
+                        "`m` must do nothing while the list is open with {issue:?}",
+                    ),
                 }
 
                 // A shifted key and an unshifted one are two keys, and only
                 // one of them was asked for.
-                assert!(
-                    matches!(
-                        classify_input(press(KeyCode::Char('M')), mode, issue),
-                        Some(Event::Dismiss),
-                    ),
+                assert_eq!(
+                    meaning(classify_input(press(KeyCode::Char('M')), mode, issue)),
+                    unbound(mode),
                     "`M` must stay unbound in {mode:?} with {issue:?}",
                 );
 
