@@ -1,5 +1,7 @@
 # vpn-tunnel: Auto-Select Unused WireGuard Credential — Implementation Plan
 
+> **Status:** This plan records the steps as they stood on 2026-03-29, before the work started. Review rounds then changed the signature and the rules of `select_credential`, the docker detection, and the error and output text. Later edits updated only some passages here, so do not read its code blocks as the current code. For the current design, read the [spec](../specs/2026-03-29-vpn-tunnel-auto-select-credential-design.md) and the code in `src/vpn-tunnel/src/`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Automatically pick an unused WireGuard credential from 1Password when generating a VPN tunnel, preventing concurrent tunnels from knocking each other offline.
