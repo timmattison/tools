@@ -1199,7 +1199,14 @@ impl PushUi {
     /// because the window under the frame belongs to the worktree that
     /// pushes. If it is called then, the running push stays with its window,
     /// and its outcome still arrives. The held messages go all the same.
-    pub(crate) fn clear(&mut self) {}
+    pub(crate) fn clear(&mut self) {
+        self.held.clear();
+        // A running push is work in flight, and not a message. It keeps the
+        // row, and its outcome takes the row when it arrives.
+        if !matches!(self.state, State::Running { .. }) {
+            self.state = State::Idle;
+        }
+    }
 
     /// What the push feature shows in a pane of `dims`: the lines that fit
     /// there, how many rows the frame must give up to make room for them
