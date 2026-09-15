@@ -1781,6 +1781,13 @@ enum Flow {
 /// one cache. Its `issue` and `conflicts` are the state of the two keys that
 /// start work off this thread, one run of each at a time. Its current worktree
 /// is where the push, the issue key, and `m` do their work.
+#[expect(
+    clippy::type_complexity,
+    reason = "the loop takes one generic for each of its twelve hooks, so each hook stays a \
+              plain closure that a test replaces with a fake. A type alias spells the same \
+              twelve generics, and the borrow of the whole value keeps every call of absorb \
+              the same"
+)]
 fn absorb<
     Collect,
     RenderFn,
