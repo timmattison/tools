@@ -6267,8 +6267,9 @@ mod push_loop_tests {
     /// The worktrees a loop run can move between, and how each switch comes
     /// out.
     ///
-    /// The fake `worktrees` hook gives [`World::listed`]. The fake `switch`
-    /// hook gives [`snapshot_of`] its target, or refuses a target in
+    /// The fake `worktrees` hook gives [`World::listed`], and each read of it
+    /// moves the clock of the loop on by [`World::list_cost`]. The fake
+    /// `switch` hook gives [`snapshot_of`] its target, or refuses a target in
     /// [`World::refused`] with [`REFUSED`].
     struct World {
         /// The worktree where gsw started.
@@ -6290,6 +6291,10 @@ mod push_loop_tests {
         /// The worktrees whose walks fail while the list still holds them, as
         /// a walk fails when `git gc` swaps the ref store under it.
         unreadable: Vec<WorktreePath>,
+        /// How long each read of a list of the worktrees takes. Each read
+        /// moves the clock of the loop on by this cost, as a real read of the
+        /// list takes time. It is zero unless a test sets it.
+        list_cost: Duration,
     }
 
     impl World {
@@ -6319,6 +6324,7 @@ mod push_loop_tests {
                 vanishing: Vec::new(),
                 removed: Vec::new(),
                 unreadable: Vec::new(),
+                list_cost: Duration::ZERO,
             }
         }
 
@@ -6364,6 +6370,13 @@ mod push_loop_tests {
         /// the list still holds it. See [`World::unreadable`].
         fn unreadable(mut self, name: &str) -> Self {
             self.unreadable.push(worktree(name));
+            self
+        }
+
+        /// This world, where each read of a list of the worktrees moves the
+        /// clock of the loop on by `cost`. See [`World::list_cost`].
+        fn slow_list(mut self, cost: Duration) -> Self {
+            self.list_cost = cost;
             self
         }
     }
@@ -6423,7 +6436,14 @@ mod push_loop_tests {
         // each vanishing one from the switch that reached it.
         let removed = RefCell::new(world.removed.clone());
         let mut displayed = String::new();
-        let base = clock();
+        // Each read of a list of the worktrees moves the clock of the loop on
+        // by `world.list_cost`, and `skew` holds the sum. Each read of the
+        // loop clock reads `clock` exactly once, so a clock that counts its
+        // reads counts the same reads as before. The start of the harness
+        // goes through the loop clock too.
+        let skew = std::cell::Cell::new(Duration::ZERO);
+        let loop_clock = || clock() + skew.get();
+        let base = loop_clock();
 
         event_loop(
             &rx,
@@ -6470,7 +6490,7 @@ mod push_loop_tests {
                     seen.borrow_mut().paints.push(output.to_string());
                     Ok(())
                 },
-                clock,
+                clock: loop_clock,
                 next_tick: timer_off,
                 start_push: |command: PushCommand, current: &WorktreePath| {
                     let mut seen = seen.borrow_mut();
@@ -6491,6 +6511,7 @@ mod push_loop_tests {
                 },
                 worktrees: || {
                     seen.borrow_mut().listings += 1;
+                    skew.set(skew.get() + world.list_cost);
                     let removed = removed.borrow();
                     world
                         .listed
@@ -9110,6 +9131,110 @@ mod push_loop_tests {
         assert_eq!(
             strip_ansi(&screen),
             format!("FRAME {BRAVO}\n{} (0s ago)", gone_line(CHARLIE)),
+        );
+    }
+
+    #[test]
+    fn left_right_and_the_check_after_a_failed_walk_read_no_label() {
+        // Left and Right need the paths of the worktrees alone, and so does
+        // the check after a failed walk. A label costs an open of each linked
+        // worktree, so none of the three reads the list with the labels. Only
+        // Down shows the labels.
+        let (_screen, seen) = run_in(
+            World::three(),
+            vec![
+                key(KeyCode::Right),
+                key(KeyCode::Left),
+                key(KeyCode::Right),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE), worktree(BRAVO), worktree(CHARLIE)],
+        );
+        assert_eq!(
+            seen.listings, 0,
+            "Left and Right must not read the list with the labels",
+        );
+
+        // The walk of charlie fails while the list still holds charlie, so
+        // the check reads the paths and gsw stays. The harness reads the clock
+        // once, and the switch of Right reads it twice. The filesystem event
+        // comes a minute later.
+        let (_screen, seen) = drive(
+            vec![key(KeyCode::Right), Event::FsChanged, Event::Quit],
+            in_world(World::three().unreadable(CHARLIE)),
+            a_minute_after(3),
+        );
+        assert_eq!(
+            seen.collected_from,
+            vec![worktree(CHARLIE)],
+            "the walk of charlie must run and fail",
+        );
+        assert_eq!(
+            seen.listings, 0,
+            "Right and the check must not read the list with the labels",
+        );
+    }
+
+    /// Run the loop in `world`, where each read of a list of the worktrees
+    /// takes one second: Right, then a filesystem event in the same burst,
+    /// then one more filesystem event in the next burst. Gives what the hooks
+    /// saw.
+    ///
+    /// The harness reads the clock once, and the switch of Right reads it
+    /// twice. The first filesystem event comes a minute later, past the
+    /// cooldown that the switch armed, so it walks the worktree that Right
+    /// reached.
+    fn right_then_two_events_with_slow_lists(world: World) -> Seen {
+        let (_screen, seen) = drive_bursts(
+            vec![
+                vec![key(KeyCode::Right), Event::FsChanged],
+                vec![Event::FsChanged, Event::Quit],
+            ],
+            in_world(world.slow_list(Duration::from_secs(1))),
+            a_minute_after(3),
+        );
+        seen
+    }
+
+    #[test]
+    fn the_duty_cycle_pays_for_the_check_after_a_failed_walk() {
+        // After a failed walk, the check reads the paths of the worktrees,
+        // and gsw tries to open home when the worktree on the screen is gone.
+        // Both are git work of the wake, so the cooldown that the wake arms
+        // holds their cost, whether the return happens or not. Without that,
+        // a worktree that cannot come back costs a read of the list at each
+        // wake, and the duty cycle does not see it.
+        //
+        // The check takes one second here, so the wake of the failed walk
+        // costs one second and arms a cooldown of 100 seconds. The second
+        // event comes one second later, inside that cooldown, so it walks
+        // nothing.
+        //
+        // The walk of charlie fails for a moment, and the list still holds
+        // charlie.
+        let seen = right_then_two_events_with_slow_lists(World::three().unreadable(CHARLIE));
+        assert_eq!(
+            seen.collected_from,
+            vec![worktree(CHARLIE)],
+            "the check must pay into the cooldown, so the second event must not walk",
+        );
+
+        // Charlie is gone, and home is gone too, so the open of home fails.
+        // The cooldown holds the check and the open that failed.
+        let seen =
+            right_then_two_events_with_slow_lists(World::three().vanishing(CHARLIE).removed(BRAVO));
+        assert_eq!(
+            seen.collected_from,
+            vec![worktree(CHARLIE)],
+            "a return that fails must pay into the cooldown too",
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE), worktree(BRAVO)],
+            "gsw must try to go home once",
         );
     }
 
