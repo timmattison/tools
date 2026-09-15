@@ -621,6 +621,38 @@ pub(crate) fn list_rows(snapshot: &Snapshot, dims: watch::Dimensions) -> usize {
     }
 }
 
+/// Render the frame of the worktree list for `dims`: the head of the status
+/// frame, the rows of `list`, and the hint on the bottom row.
+///
+/// The header, the line of a merge or a rebase, and the separator with its
+/// refresh clock come from [`render::render_head`], as on the status frame.
+/// Under them, [`list_rows`] rows show the window of `list` that holds the
+/// cursor, and blank rows fill what the list leaves. The hint takes the bottom
+/// row of the pane when [`list_rows`] left a row for it. The frame is as tall
+/// as the pane, and no row of it is wider than the pane.
+///
+/// Nothing on the frame ages, so [`Render::freshest_age`] is `None`. Nothing
+/// on the frame reads the [`RenderConfig`] either, so the call takes none.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the loop of watch mode draws the list from slice 5 of #499 on. The expectation \
+                  then fails the build, so slice 5 deletes this attribute"
+    )
+)]
+pub(crate) fn render_list_frame(
+    _snapshot: &Snapshot,
+    _dims: watch::Dimensions,
+    _timing: FrameTiming,
+    _list: &worktrees::WorktreeList,
+) -> Render {
+    Render {
+        output: String::new(),
+        freshest_age: None,
+    }
+}
+
 /// Fetch the `n` most recent commits as [`LogEntry`] records via gix.
 ///
 /// Returns an empty list when `n == 0` or the repo has no commits.
