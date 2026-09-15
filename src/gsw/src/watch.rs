@@ -698,7 +698,7 @@ enum Event {
     /// Sent only where the command exists. A shell that says no, a shell that
     /// cannot be started, and a shell that never answers all send nothing, so
     /// the key stays unbound and silent.
-    IssueCommandFound(crate::issue::IssueCommand),
+    IssueCommandFound(crate::shell::ShellCommand),
     /// A run of the issue command has finished, either way.
     IssueFinished {
         /// The generation that [`LoopHooks::start_issue`] was given for this
@@ -790,7 +790,7 @@ pub(crate) enum IssueKey {
 #[derive(Debug, PartialEq, Eq)]
 enum IssuePress {
     /// Run this command.
-    Run(crate::issue::IssueCommand),
+    Run(crate::shell::ShellCommand),
     /// Put this under the frame, and wait for a second press.
     Ask(String),
     /// Nothing at all.
@@ -807,7 +807,7 @@ enum IssuePress {
 struct IssueRun {
     /// The command the probe found. `None` until the probe answers, and
     /// forever where it found none or where the feature is off.
-    command: Option<crate::issue::IssueCommand>,
+    command: Option<crate::shell::ShellCommand>,
     /// Whether a run is in flight. One run at a time: a browser opening twice
     /// is two tabs nobody asked for.
     running: bool,
@@ -852,7 +852,7 @@ impl IssueRun {
     }
 
     /// Keep the command the probe found.
-    fn found(&mut self, command: crate::issue::IssueCommand) {
+    fn found(&mut self, command: crate::shell::ShellCommand) {
         self.command = Some(command);
     }
 
@@ -1360,7 +1360,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     // The shell the issue key uses, resolved once. The probe asks it whether
     // the command exists and a run asks it to run the command, and both must
     // ask the same shell.
-    let shell = crate::issue::user_shell();
+    let shell = crate::shell::user_shell();
     let issue_tx = tx.clone();
     spawn_issue_probe(shell.clone(), tx.clone());
 
@@ -1425,7 +1425,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             paint: |output: &str| paint_output(output),
             clock: Instant::now,
             next_tick: |freshest: Option<Duration>| freshest.and_then(next_tick),
-            start_issue: |command: crate::issue::IssueCommand,
+            start_issue: |command: crate::shell::ShellCommand,
                           current: &WorktreePath,
                           generation: Generation| {
                 // The run keeps the generation of its press and sends it back
@@ -1566,7 +1566,11 @@ fn spawn_issue_probe(shell: OsString, tx: Sender<Event>) {
     let named = std::env::var_os(crate::issue::ISSUE_COMMAND_ENV)
         .map(|value| value.to_string_lossy().into_owned());
     thread::spawn(move || {
-        if let Some(command) = crate::issue::resolve(named.as_deref(), &shell) {
+        if let Some(command) = crate::shell::resolve(
+            named.as_deref(),
+            crate::issue::DEFAULT_ISSUE_COMMAND,
+            &shell,
+        ) {
             let _ = tx.send(Event::IssueCommandFound(command));
         }
     });
@@ -2071,7 +2075,7 @@ fn absorb<
 where
     Clock: Fn() -> Instant,
     StartPush: FnMut(PushCommand, &WorktreePath),
-    StartIssue: FnMut(crate::issue::IssueCommand, &WorktreePath, Generation),
+    StartIssue: FnMut(crate::shell::ShellCommand, &WorktreePath, Generation),
     StartConflicts: FnMut(&WorktreePath, Generation),
     Worktrees: FnMut() -> Vec<WorktreeEntry>,
     Paths: FnMut() -> Vec<WorktreePath>,
@@ -2386,7 +2390,7 @@ where
     Clock: Fn() -> Instant,
     Tick: Fn(Option<Duration>) -> Option<Duration>,
     StartPush: FnMut(PushCommand, &WorktreePath),
-    StartIssue: FnMut(crate::issue::IssueCommand, &WorktreePath, Generation),
+    StartIssue: FnMut(crate::shell::ShellCommand, &WorktreePath, Generation),
     StartConflicts: FnMut(&WorktreePath, Generation),
     Worktrees: FnMut() -> Vec<WorktreeEntry>,
     Paths: FnMut() -> Vec<WorktreePath>,
@@ -4536,7 +4540,7 @@ mod tests {
                 // the test must fail when no walk is scheduled, not block.
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -4592,7 +4596,7 @@ mod tests {
                 clock: || clock_at,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -4651,7 +4655,7 @@ mod tests {
                 clock: stepping_clock(base, Duration::from_secs(60)),
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -4712,7 +4716,7 @@ mod tests {
                 clock: || now,
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -4769,7 +4773,7 @@ mod tests {
                 clock: || now,
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -4823,7 +4827,7 @@ mod tests {
                 clock: || now,
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -4879,7 +4883,7 @@ mod tests {
                 // mapping is covered by the next_tick tests.
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -4935,7 +4939,7 @@ mod tests {
                 clock: || now,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -4992,7 +4996,7 @@ mod tests {
                 clock: || clock_at,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5055,7 +5059,7 @@ mod tests {
                 clock: || now,
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5126,7 +5130,7 @@ mod tests {
                 },
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5219,7 +5223,7 @@ mod tests {
                 },
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5316,7 +5320,7 @@ mod tests {
                 },
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5394,7 +5398,7 @@ mod tests {
                 clock: || base,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5479,7 +5483,7 @@ mod tests {
                 },
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5563,7 +5567,7 @@ mod tests {
                 },
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5627,7 +5631,7 @@ mod tests {
                 clock: || base,
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5704,7 +5708,7 @@ mod tests {
                 clock: || clock_at,
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5805,7 +5809,7 @@ mod tests {
                 },
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5930,7 +5934,7 @@ mod tests {
                 },
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -6107,7 +6111,7 @@ mod push_loop_tests {
         /// leave the same final screen behind.
         paints: Vec<String>,
         /// Every issue command the loop started a run of, in order.
-        issue_runs: Vec<crate::issue::IssueCommand>,
+        issue_runs: Vec<crate::shell::ShellCommand>,
         /// How many measurements the loop started with `m`.
         conflict_runs: usize,
         /// Every worktree the `switch` hook was asked to open, in order,
@@ -6563,7 +6567,7 @@ mod push_loop_tests {
                     seen.pushes.push(command);
                     seen.push_paths.push(current.clone());
                 },
-                start_issue: |command: crate::issue::IssueCommand,
+                start_issue: |command: crate::shell::ShellCommand,
                               current: &WorktreePath,
                               generation: Generation| {
                     let mut seen = seen.borrow_mut();
@@ -6635,8 +6639,9 @@ mod push_loop_tests {
     const RESCUE_AFTER: Duration = Duration::from_secs(3);
 
     /// The command the probe found, which is what binds the `G` key.
-    fn found_command() -> crate::issue::IssueCommand {
-        crate::issue::IssueCommand::new(None).expect("the default names a command")
+    fn found_command() -> crate::shell::ShellCommand {
+        crate::shell::ShellCommand::new(None, crate::issue::DEFAULT_ISSUE_COMMAND)
+            .expect("the default names a command")
     }
 
     /// The probe's answer, as the loop receives it.
@@ -7371,7 +7376,7 @@ mod push_loop_tests {
                 },
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -7785,7 +7790,7 @@ mod push_loop_tests {
                     start_push: |command: PushCommand, _current: &WorktreePath| {
                         seen.borrow_mut().pushes.push(command)
                     },
-                    start_issue: |command: crate::issue::IssueCommand,
+                    start_issue: |command: crate::shell::ShellCommand,
                                   _current: &WorktreePath,
                                   _generation: Generation| {
                         seen.borrow_mut().issue_runs.push(command);

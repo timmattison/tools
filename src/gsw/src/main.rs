@@ -31,6 +31,8 @@ mod push;
 mod remote;
 mod render;
 mod repo;
+/// The shell that runs a command the user supplies, for every key that runs one.
+mod shell;
 mod snapshot;
 /// Shared git fixtures for the unit tests. Test-only: it shells out to `git` to
 /// build throwaway repositories, which the shipped binary never does.
