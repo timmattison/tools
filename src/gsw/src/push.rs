@@ -596,10 +596,17 @@ pub(crate) struct PushOutcome {
 /// in, and what does the pane show. It never learns whether a prompt or an
 /// error is up, so the states below can grow without the render loop growing a
 /// branch for each one.
+///
+/// The list of the worktrees lives here too, and it is not the push's either.
+/// It takes the pane, so it owns the row as a question does, and
+/// [`PushUi::mode`] stays the one source of what the keys mean. The loop asks
+/// one more question for it, [`PushUi::list`], because the open list replaces
+/// the frame and does not go under it.
 pub(crate) struct PushUi {
     state: State,
-    /// Messages from another feature that arrived while the push or a question
-    /// owned the row, oldest first, each one waiting for the row to be free.
+    /// Messages from another feature that arrived while the push, a question,
+    /// or the open list owned the row, oldest first, each one waiting for the
+    /// row to be free.
     ///
     /// A push is the one thing here that takes minutes, and its own outcome is
     /// what the user is waiting to read. So a message that arrives mid-push is
@@ -668,6 +675,17 @@ enum State {
         /// `Vec` would pay for a shift of the whole buffer per line of a hook
         /// that prints thousands.
         recent: VecDeque<String>,
+    },
+    /// The list of the worktrees is open, and takes the pane. It owns the row
+    /// as a question does: nothing is painted under the frame, and a message
+    /// that arrives waits until the list closes.
+    ///
+    /// It is a state here, beside the states of the push, so that
+    /// [`PushUi::mode`] stays the one source of what the keys mean. A second
+    /// source could disagree with the first about one key.
+    Listing {
+        /// The open list, with its cursor and its scroll.
+        list: WorktreeList,
     },
 }
 
@@ -799,9 +817,9 @@ impl HeldLife {
 pub(crate) enum Posted {
     /// The message is under the frame now.
     OnRow,
-    /// A question or a push in flight owns the row, so the message waits in
-    /// [`PushUi::held`] — or, on a full queue or for a progress notice, went
-    /// nowhere at all.
+    /// A question, a push in flight, or the open list owns the row, so the
+    /// message waits in [`PushUi::held`] — or, on a full queue or for a
+    /// progress notice, went nowhere at all.
     Held,
 }
 
@@ -827,9 +845,9 @@ impl PushUi {
     /// the channel indefinitely, and a message that expires only when something
     /// else happens does not expire.
     ///
-    /// A question, a push in flight, and an error that never expires all say
-    /// `None`: none of them changes with the clock, and a wake-up costs a
-    /// repaint of the whole pane.
+    /// A question, a push in flight, an error that never expires, and the open
+    /// list all say `None`: none of them changes with the clock, and a wake-up
+    /// costs a repaint of the whole pane.
     pub(crate) fn next_tick(&self) -> Option<Duration> {
         match &self.state {
             // A running push ages the same way a fading message does, and for
@@ -842,7 +860,9 @@ impl PushUi {
                 ..
             }
             | State::Running { .. } => Some(STATUS_CADENCE),
-            State::Idle | State::Status { .. } | State::Asking { .. } => None,
+            State::Idle | State::Status { .. } | State::Asking { .. } | State::Listing { .. } => {
+                None
+            }
         }
     }
 
@@ -857,6 +877,7 @@ impl PushUi {
         match self.state {
             State::Asking { .. } => InputMode::Confirm,
             State::Running { .. } => InputMode::Pushing,
+            State::Listing { .. } => InputMode::List,
             State::Idle | State::Status { .. } => InputMode::Normal,
         }
     }
@@ -1050,10 +1071,11 @@ impl PushUi {
     /// The text is another program's words, so it waits for a key the way
     /// git's error text does.
     ///
-    /// A question and a push in flight both own the row, and neither may be
-    /// painted over: the question goes with the keys that answer it, and the
-    /// notice goes with the outcome the push is about to report. A message
-    /// that arrives then joins the back of [`PushUi::held`], and
+    /// A question, a push in flight, and the open list each own the row, and
+    /// none may be painted over: the question goes with the keys that answer
+    /// it, the notice goes with the outcome the push is about to report, and
+    /// the list goes with the keys that move its cursor. A message that
+    /// arrives then joins the back of [`PushUi::held`], and
     /// [`PushUi::overlay`] posts the front of that queue on each frame that
     /// finds the row free.
     ///
@@ -1075,10 +1097,10 @@ impl PushUi {
     /// Put gsw's own words under the frame, to be taken off again by the clock.
     ///
     /// The second door into the row, beside [`PushUi::post_error`]. The two
-    /// agree about who owns the row: a question and a push in flight are never
-    /// painted over, so a message that arrives while one of them is up joins
-    /// the back of [`PushUi::held`] and waits for the frame that finds the row
-    /// free. A full queue drops the message that arrives, here exactly as
+    /// agree about who owns the row: a question, a push in flight, and the
+    /// open list are never painted over, so a message that arrives while one
+    /// of them is up joins the back of [`PushUi::held`] and waits for the
+    /// frame that finds the row free. A full queue drops the message that arrives, here exactly as
     /// there — see [`MAX_HELD_MESSAGES`].
     ///
     /// They differ in one thing, and [`Life`] already says why.
@@ -1112,8 +1134,9 @@ impl PushUi {
     /// message that reports the end of the run replaces it, as does any other
     /// message.
     ///
-    /// A question and a push in flight own the row here, as at the other two
-    /// doors. The difference is what happens to the words then: they go
+    /// A question, a push in flight, and the open list own the row here, as at
+    /// the other two doors. The difference is what happens to the words then:
+    /// they go
     /// nowhere, and they never wait in [`PushUi::held`]. A held notice reaches
     /// the row after the run it describes has ended, and it then says that a
     /// run is in flight when none is.
@@ -1126,9 +1149,9 @@ impl PushUi {
     /// Put `line` on the row with `life`, or hold it until the row is free.
     ///
     /// The body the three doors share, so the rule about who owns the row is
-    /// written once. A question and a push in flight are never painted over,
-    /// and a message that arrives while one of them is up joins the back of
-    /// [`PushUi::held`]. Two messages go instead: a life with no [`HeldLife`],
+    /// written once. A question, a push in flight, and the open list are never
+    /// painted over, and a message that arrives while one of them is up joins
+    /// the back of [`PushUi::held`]. Two messages go instead: a life with no [`HeldLife`],
     /// which is a progress notice, and a message that finds the queue at
     /// [`MAX_HELD_MESSAGES`].
     ///
@@ -1145,7 +1168,7 @@ impl PushUi {
     /// whether it took the row and it did not.
     fn post(&mut self, line: String, life: Life) -> Posted {
         match self.state {
-            State::Asking { .. } | State::Running { .. } => {
+            State::Asking { .. } | State::Running { .. } | State::Listing { .. } => {
                 // A life with no kind to hold is dropped here, as a message
                 // that finds the queue full is. See [`Life::kind`].
                 match life.kind() {
@@ -1167,8 +1190,8 @@ impl PushUi {
     }
 
     /// Handle a key with no other meaning: clear a status message if one is up.
-    /// Leaves a question or a running push alone — neither is the user's to
-    /// dismiss by pressing an unrelated key.
+    /// Leaves a question, a running push, and the open list alone — none of
+    /// them is the user's to dismiss by pressing an unrelated key.
     ///
     /// A progress notice stays too. Its words are true until its work ends,
     /// and a key does not end that work. See [`Life::UntilReplaced`].
@@ -1184,17 +1207,21 @@ impl PushUi {
             }
             | State::Idle
             | State::Asking { .. }
-            | State::Running { .. } => {}
+            | State::Running { .. }
+            | State::Listing { .. } => {}
         }
     }
 
     /// Take every message off the row and out of the queue: a status line of
-    /// any [`Life`], the question, and every message held for the row.
+    /// any [`Life`], the question, the open list, and every message held for
+    /// the row.
     ///
     /// A switch of the worktree calls it, because each of those messages
     /// describes the worktree that the frame showed before the switch. That
     /// includes a progress notice, which no key removes, and an error that
-    /// waits for a key. Neither describes the new worktree.
+    /// waits for a key. Neither describes the new worktree. The list closes
+    /// too. No key switches while it is open, but the return to the home
+    /// worktree can find it open, and the frame of home needs the pane.
     ///
     /// It is never called while a push runs. The loop does not switch then,
     /// because the window under the frame belongs to the worktree that
@@ -1209,22 +1236,58 @@ impl PushUi {
         }
     }
 
-    /// Open the list of the worktrees.
-    pub(crate) fn open_list(&mut self, _list: WorktreeList) {}
+    /// Open the list of the worktrees that Down asked for.
+    ///
+    /// The list takes the pane, so it owns the row as a question does:
+    /// [`PushUi::mode`] gives [`InputMode::List`], [`PushUi::overlay`] paints
+    /// nothing under the frame, and a message that arrives waits in
+    /// [`PushUi::held`] until the list closes.
+    ///
+    /// It replaces a status line, as [`PushUi::request`] does. The line
+    /// describes the frame that the user stopped reading, so it does not come
+    /// back when the list closes.
+    pub(crate) fn open_list(&mut self, list: WorktreeList) {
+        self.state = State::Listing { list };
+    }
 
-    /// The open list, or `None` when no list is open.
+    /// The open list, to draw it, or `None` when no list is open.
     pub(crate) fn list(&self) -> Option<&WorktreeList> {
-        None
+        match &self.state {
+            State::Listing { list } => Some(list),
+            State::Idle | State::Status { .. } | State::Asking { .. } | State::Running { .. } => {
+                None
+            }
+        }
     }
 
-    /// The open list, to move its cursor, or `None` when no list is open.
+    /// The open list, to move its cursor or to settle its scroll, or `None`
+    /// when no list is open.
     pub(crate) fn list_mut(&mut self) -> Option<&mut WorktreeList> {
-        None
+        match &mut self.state {
+            State::Listing { list } => Some(list),
+            State::Idle | State::Status { .. } | State::Asking { .. } | State::Running { .. } => {
+                None
+            }
+        }
     }
 
-    /// Close the list, and give it back. `None` when no list is open.
+    /// Close the list and give it back with its cursor, so the caller reads
+    /// the worktree that Enter chose. `None`, and no change, when no list is
+    /// open.
+    ///
+    /// The row is free after the close. So the frame that shows the close
+    /// also posts the oldest message that waited for the list, because
+    /// [`PushUi::overlay`] posts a held message on each frame that finds the
+    /// row free.
     pub(crate) fn close_list(&mut self) -> Option<WorktreeList> {
-        None
+        match std::mem::replace(&mut self.state, State::Idle) {
+            State::Listing { list } => Some(list),
+            // No list is open, so nothing closes.
+            other => {
+                self.state = other;
+                None
+            }
+        }
     }
 
     /// What the push feature shows in a pane of `dims`: the lines that fit
@@ -1288,7 +1351,9 @@ impl PushUi {
         self.post_held(now);
         let width = dims.width;
         let lines: Vec<String> = match &self.state {
-            State::Idle => Vec::new(),
+            // The open list takes the pane, and its frame draws it. Nothing
+            // goes under that frame.
+            State::Idle | State::Listing { .. } => Vec::new(),
             State::Asking {
                 question,
                 creates_remote_branch,
