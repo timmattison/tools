@@ -1482,10 +1482,13 @@ const NOT_A_WORK_TREE: &str = "gsw cannot go to a directory that is not a git wo
 
 /// Why gsw refuses to go to a worktree whose directory no longer exists. The
 /// line names the directory after this text.
-#[expect(
-    dead_code,
-    reason = "Watched::open refuses with it after a test states that refusal. The expectation \
-              fails the build when it does, so this attribute cannot stay after that"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Watched::open refuses with it after a test states that refusal. The expectation \
+                  fails the build when it does, so this attribute cannot stay after that"
+    )
 )]
 const DIRECTORY_GONE: &str = "gsw cannot go to a worktree whose directory no longer exists";
 
@@ -9194,10 +9197,10 @@ mod watched_tests {
     use tempfile::TempDir;
 
     use super::tests::walk_config;
-    use super::{listed, switch_watched, Event, Watched};
+    use super::{listed, switch_watched, Event, Watched, DIRECTORY_GONE, NOT_A_WORK_TREE};
     use crate::render::Snapshot;
     use crate::repo::RepoHandle;
-    use crate::testrepo::{git, git_stdout, init_repo, init_repo_at};
+    use crate::testrepo::{git, git_stdout, init_repo, init_repo_at, init_repo_with_worktree};
     use crate::worktrees::{WorktreeBadge, WorktreeEntry, WorktreePath};
 
     /// The main worktree of [`siblings`], on branch `main`. Its path sorts
@@ -9620,5 +9623,96 @@ mod watched_tests {
                 "the list read from the worktree {name}",
             );
         }
+    }
+
+    /// Open the worktree at `path` through [`Watched::open`], as a switch opens
+    /// its target. The watcher of an open that works sends on a channel that
+    /// nobody reads, because these tests wait for no event.
+    fn opened(path: &WorktreePath) -> Result<Watched, String> {
+        let (tx, _rx) = mpsc::channel();
+        Watched::open(path, tx)
+    }
+
+    /// A linked worktree opens, on its own path, and its walk reads that
+    /// worktree.
+    #[test]
+    fn open_opens_a_linked_worktree() {
+        let dir = siblings();
+        let linked = resolved(&dir.path().join(LINKED));
+
+        let mut watched = opened(&linked)
+            .unwrap_or_else(|reason| panic!("the linked worktree must open: {reason}"));
+
+        assert_eq!(watched.path, linked);
+        let snapshot = watched
+            .walk(&walk_config(), &linked)
+            .expect("walk the linked worktree");
+        assert_eq!(snapshot.branch, LINKED);
+    }
+
+    /// A worktree whose directory no longer exists is refused with
+    /// [`DIRECTORY_GONE`], and the reason names the directory.
+    #[test]
+    fn open_refuses_a_directory_that_no_longer_exists() {
+        let dir = siblings();
+        let linked = resolved(&dir.path().join(LINKED));
+        std::fs::remove_dir_all(linked.as_path()).expect("delete the linked worktree");
+
+        let reason = opened(&linked)
+            .err()
+            .expect("a directory that is gone must not open");
+
+        assert_eq!(
+            reason,
+            format!("{DIRECTORY_GONE}: {}", linked.as_path().display()),
+        );
+    }
+
+    /// A plain directory is not a git work tree, so it is refused with
+    /// [`NOT_A_WORK_TREE`], and the reason names the directory.
+    #[test]
+    fn open_refuses_a_plain_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plain = resolved(dir.path());
+
+        let reason = opened(&plain)
+            .err()
+            .expect("a plain directory must not open");
+
+        assert_eq!(
+            reason,
+            format!("{NOT_A_WORK_TREE}: {}", plain.as_path().display()),
+        );
+    }
+
+    /// A linked worktree inside the main worktree that lost its `.git` file is
+    /// refused with [`NOT_A_WORK_TREE`].
+    ///
+    /// Discovery walks up from the directory, so it finds the main worktree
+    /// around it. An open that took that answer would watch the parent
+    /// repository under the name of the child, and the frame would show the
+    /// status of one worktree under the name of another. The test first
+    /// asserts that discovery really finds the parent, or the refusal proves
+    /// nothing.
+    #[test]
+    fn open_refuses_a_nested_worktree_that_lost_its_git_file_and_never_opens_the_parent() {
+        let (repo, nested) = init_repo_with_worktree();
+        std::fs::remove_file(nested.join(".git")).expect("remove the .git file of the worktree");
+        let target = resolved(&nested);
+        assert_eq!(
+            RepoHandle::discover(&nested)
+                .and_then(|handle| handle.repo().workdir().and_then(WorktreePath::resolve)),
+            Some(resolved(repo.path())),
+            "discovery must find the main worktree around the directory",
+        );
+
+        let reason = opened(&target)
+            .err()
+            .expect("a directory that lost its .git file must not open");
+
+        assert_eq!(
+            reason,
+            format!("{NOT_A_WORK_TREE}: {}", target.as_path().display()),
+        );
     }
 }
