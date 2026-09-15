@@ -353,7 +353,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        head_label, list_worktrees, next, previous, worktree_paths, WorktreeEntry, WorktreePath,
+        badge, head_label, list_worktrees, next, previous, worktree_paths, WorktreeBadge,
+        WorktreeEntry, WorktreePath,
     };
     use crate::testrepo::{git, git_stdout, init_repo, init_repo_at};
 
@@ -1057,5 +1058,59 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The badge gives the 1-based position of the current worktree, the
+    /// count, and the label. It says whether the current worktree is the home
+    /// worktree, which Up goes to. The home worktree is not the first path
+    /// here, so a badge that marks the first path fails.
+    #[test]
+    fn the_badge_gives_the_position_the_count_and_the_label_and_marks_home() {
+        let paths = sorted_paths(&["a", "b", "c", "d"]);
+        let home = &paths[2];
+
+        assert_eq!(
+            badge(&paths, &paths[0], home, "main".to_string()),
+            Some(WorktreeBadge {
+                position: 1,
+                count: 4,
+                home: false,
+                label: "main".to_string(),
+            }),
+        );
+        assert_eq!(
+            badge(&paths, home, home, "issue-475".to_string()),
+            Some(WorktreeBadge {
+                position: 3,
+                count: 4,
+                home: true,
+                label: "issue-475".to_string(),
+            }),
+            "the badge marks the home worktree",
+        );
+        assert_eq!(
+            badge(&paths, &paths[3], home, MULTIBYTE.to_string()),
+            Some(WorktreeBadge {
+                position: 4,
+                count: 4,
+                home: false,
+                label: MULTIBYTE.to_string(),
+            }),
+            "a multi-byte label comes through unchanged",
+        );
+    }
+
+    /// A repository with one worktree gets no badge, so its header stays as it
+    /// was. A current worktree that is not in the list gets no badge either,
+    /// because no position is true for it.
+    #[test]
+    fn there_is_no_badge_for_one_worktree_or_for_a_current_worktree_not_in_the_list() {
+        let one = sorted_paths(&["a"]);
+        assert_eq!(badge(&one, &one[0], &one[0], "main".to_string()), None);
+
+        let paths = sorted_paths(&["a", "c"]);
+        let gone = fake_path("b");
+        assert_eq!(badge(&paths, &gone, &paths[0], "gone".to_string()), None);
+        assert_eq!(badge(&[], &gone, &gone, "gone".to_string()), None);
     }
 }
