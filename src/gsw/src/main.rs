@@ -810,6 +810,88 @@ mod tests {
         );
     }
 
+    /// A pane of `height` rows and 80 columns. The width does not change how
+    /// many rows the list takes.
+    fn pane_of(height: usize) -> watch::Dimensions {
+        watch::Dimensions { width: 80, height }
+    }
+
+    #[test]
+    fn list_rows_leaves_the_bottom_row_for_the_hint() {
+        // The header and the separator take two rows. The list takes every
+        // other row but the bottom row, which holds the hint.
+        let snap = snapshot_with(None, &[]);
+        assert_eq!(list_rows(&snap, pane_of(24)), 21);
+        assert_eq!(
+            list_rows(&snap, pane_of(8)),
+            5,
+            "the pane of the example in the issue: four worktrees, one blank row, and the hint",
+        );
+        assert_eq!(
+            list_rows(&snap, pane_of(4)),
+            1,
+            "two rows under the separator: one row of the list and the hint",
+        );
+    }
+
+    #[test]
+    fn list_rows_gives_one_row_and_no_hint_to_a_pane_with_one_row_under_the_separator() {
+        // The one row goes to the list and not to the hint. A hint with no
+        // row of the list names the keys of a list that the user cannot see.
+        // A pane with no row under the separator shows no list: the list
+        // cannot open, and an open list closes, so Enter never chooses a row
+        // that the user did not see.
+        let snap = snapshot_with(None, &[]);
+        assert_eq!(
+            list_rows(&snap, pane_of(3)),
+            1,
+            "one row under the separator"
+        );
+        for height in [2, 1, 0] {
+            assert_eq!(
+                list_rows(&snap, pane_of(height)),
+                0,
+                "a pane of {height} rows has no row under the separator",
+            );
+        }
+    }
+
+    #[test]
+    fn list_rows_gives_a_row_to_the_line_of_a_merge_or_a_rebase() {
+        // The line of an operation in progress sits between the header and
+        // the separator, so the list has one row less.
+        for operation in [
+            Operation::Merge { conflicts: 1 },
+            Operation::Rebase {
+                step: None,
+                conflicts: 0,
+            },
+        ] {
+            let mut snap = snapshot_with(None, &[]);
+            snap.operation = Some(operation.clone());
+            assert_eq!(
+                list_rows(&snap, pane_of(24)),
+                20,
+                "{operation:?} in a pane of 24 rows",
+            );
+            assert_eq!(
+                list_rows(&snap, pane_of(5)),
+                1,
+                "{operation:?}: one row of the list and the hint",
+            );
+            assert_eq!(
+                list_rows(&snap, pane_of(4)),
+                1,
+                "{operation:?}: one row of the list and no hint",
+            );
+            assert_eq!(
+                list_rows(&snap, pane_of(3)),
+                0,
+                "{operation:?}: no row under the separator",
+            );
+        }
+    }
+
     /// Build a minimal [`Snapshot`] with the given HEAD-commit age and a file
     /// row per supplied mtime age, so the freshest-age tests can exercise the
     /// commit-vs-change comparison without walking a real repo.
