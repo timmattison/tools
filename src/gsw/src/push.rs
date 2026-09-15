@@ -1246,8 +1246,18 @@ impl PushUi {
     /// It replaces a status line, as [`PushUi::request`] does. The line
     /// describes the frame that the user stopped reading, so it does not come
     /// back when the list closes.
+    ///
+    /// It does not open while a question or a push owns the row. The key
+    /// table never asks for the list then, and this door keeps the rule if a
+    /// caller does: a question keeps the keys that answer it, and a push keeps
+    /// its window until its outcome arrives.
     pub(crate) fn open_list(&mut self, list: WorktreeList) {
-        self.state = State::Listing { list };
+        match self.state {
+            State::Asking { .. } | State::Running { .. } => {}
+            State::Idle | State::Status { .. } | State::Listing { .. } => {
+                self.state = State::Listing { list };
+            }
+        }
     }
 
     /// The open list, to draw it, or `None` when no list is open.
