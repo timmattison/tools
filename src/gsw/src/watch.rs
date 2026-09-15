@@ -1480,6 +1480,15 @@ const WALK_FAILED: &str = "gsw cannot read the status of the worktree";
 /// tree. The line names the directory after this text.
 const NOT_A_WORK_TREE: &str = "gsw cannot go to a directory that is not a git work tree";
 
+/// Why gsw refuses to go to a worktree whose directory no longer exists. The
+/// line names the directory after this text.
+#[expect(
+    dead_code,
+    reason = "Watched::open refuses with it after a test states that refusal. The expectation \
+              fails the build when it does, so this attribute cannot stay after that"
+)]
+const DIRECTORY_GONE: &str = "gsw cannot go to a worktree whose directory no longer exists";
+
 /// Why gsw refuses to watch a worktree when its filesystem watcher does not
 /// start. The line names the directory and then the error of the watcher after
 /// this text.
