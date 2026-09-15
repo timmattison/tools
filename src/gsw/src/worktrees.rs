@@ -294,11 +294,15 @@ pub(crate) fn badge(
 }
 
 /// The list that Down opens: the entries, the cursor, and the scroll.
+///
+/// The cursor stops at the top row and at the bottom row, because the list
+/// does not wrap. A pane shorter than the list shows a window of it, and the
+/// window always holds the cursor row.
 #[derive(Debug)]
 pub(crate) struct WorktreeList {
-    /// Every worktree, sorted by path.
+    /// Every worktree, sorted by path. Never empty.
     entries: Vec<WorktreeEntry>,
-    /// The row of the cursor.
+    /// The row of the cursor. Always a row of `entries`.
     cursor: usize,
     /// The first row of the window at the last [`settle`](Self::settle).
     top: usize,
@@ -318,27 +322,41 @@ pub(crate) struct ListRow<'a> {
 }
 
 impl WorktreeList {
-    /// `None` when `entries` is empty. The cursor starts on `current`, or, for
-    /// a `current` not in the list, on the row where it would sort (clamped
-    /// to the last row).
+    /// Open the list of `entries`, which is sorted by path, as
+    /// [`list_worktrees`] gives it. `home` is the worktree where the user
+    /// started gsw.
+    ///
+    /// The cursor starts on `current`. A `current` that is not in the list
+    /// puts the cursor on the row where it would sort, clamped to the last
+    /// row. `None` when `entries` is empty, because a list with no row has no
+    /// row for the cursor.
     pub(crate) fn open(
         entries: Vec<WorktreeEntry>,
-        _current: &WorktreePath,
+        current: &WorktreePath,
         home: WorktreePath,
     ) -> Option<Self> {
+        let last = entries.len().checked_sub(1)?;
+        let cursor = entries
+            .partition_point(|entry| &entry.path < current)
+            .min(last);
         Some(Self {
             entries,
-            cursor: 0,
+            cursor,
             top: 0,
             home,
         })
     }
 
-    /// Up on the top row does nothing. The list does not wrap.
-    pub(crate) fn up(&mut self) {}
+    /// Move the cursor up one row. Up on the top row does nothing, because
+    /// the list does not wrap.
+    pub(crate) fn up(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
 
-    /// Down on the bottom row does nothing.
-    pub(crate) fn down(&mut self) {}
+    /// Move the cursor down one row. Down on the bottom row does nothing.
+    pub(crate) fn down(&mut self) {
+        self.cursor = (self.cursor + 1).min(self.entries.len() - 1);
+    }
 
     /// The worktree under the cursor: the worktree that Enter goes to.
     pub(crate) fn selected(&self) -> &WorktreeEntry {
