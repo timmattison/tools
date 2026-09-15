@@ -1272,6 +1272,126 @@ mod tests {
         assert!(rows[1].contains("last refresh:"), "{rows:#?}");
     }
 
+    /// The display width of `text`: the columns that a terminal gives it.
+    fn columns(text: &str) -> usize {
+        unicode_width::UnicodeWidthStr::width(text)
+    }
+
+    /// A directory name and a branch name with multi-byte characters: three
+    /// bytes and two columns, four bytes and two columns, and an accent.
+    const MULTIBYTE: &str = "日本語-🎉-café";
+
+    /// The worktrees of the issue, and one more whose path and label hold
+    /// [`MULTIBYTE`]. Its path sorts last, because every byte of `日` is
+    /// higher than the first byte of each other name.
+    fn multibyte_worktrees() -> Vec<WorktreeEntry> {
+        let mut entries = issue_worktrees();
+        entries.push(WorktreeEntry {
+            path: WorktreePath::fake(format!("/code/tools-worktrees/{MULTIBYTE}")),
+            label: MULTIBYTE.to_string(),
+        });
+        assert!(
+            entries.is_sorted_by(|left, right| left.path < right.path),
+            "the list takes worktrees sorted by path",
+        );
+        entries
+    }
+
+    #[test]
+    fn every_row_of_the_list_frame_fits_a_narrow_pane_and_the_labels_stay_aligned() {
+        // A row never wraps. The path column loses columns first, and for all
+        // rows alike, so the labels stay in one column while they fit. The
+        // widest label, `  [日本語-🎉-café]`, takes 18 columns and the marker
+        // takes 4, so from 22 columns on every label is whole. From 27
+        // columns on, the path column holds `…café`. A multi-byte path loses
+        // whole characters, by columns, and never panics.
+        let entries = multibyte_worktrees();
+        let list = list_at(&entries, 4, 0);
+        let snap = issue_snapshot();
+        for width in 0..=80 {
+            let dims = watch::Dimensions { width, height: 10 };
+            let rows = list_frame_rows(&snap, dims, &list);
+            for row in &rows {
+                assert!(
+                    columns(row) <= width,
+                    "a row of {} columns in a pane of {width}: {row:?}",
+                    columns(row),
+                );
+            }
+
+            let shown = rows.get(2..7).unwrap_or_default();
+            if width >= 22 {
+                let label_columns: Vec<usize> = shown
+                    .iter()
+                    .map(|row| row.split_once('[').map_or(0, |(before, _)| columns(before)))
+                    .collect();
+                assert!(
+                    label_columns.windows(2).all(|pair| pair[0] == pair[1]),
+                    "the labels line up at {width} columns: {shown:#?}",
+                );
+            }
+            if width >= 27 {
+                assert!(
+                    shown
+                        .get(4)
+                        .is_some_and(|row| row.ends_with(&format!("café  [{MULTIBYTE}]"))),
+                    "the multi-byte row keeps the end of its path at {width} columns: {shown:#?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_row_too_wide_for_the_pane_loses_columns_from_the_left_of_the_path() {
+        // The widest end of a row, `  [HEAD@9ba6951]`, takes 16 columns and
+        // the marker takes 4, so a pane of 40 columns leaves 20 for the path
+        // column. Each path keeps its end, which names the worktree, and the
+        // labels stay whole and in one column.
+        let entries = issue_worktrees();
+        let list = list_at(&entries, 1, 0);
+        let dims = watch::Dimensions {
+            width: 40,
+            height: 8,
+        };
+
+        let rows = list_frame_rows(&issue_snapshot(), dims, &list);
+        assert_eq!(
+            rows.get(2..6).unwrap_or_default(),
+            [
+                format!("    {:<20}  [main]  ⌂", "/code/tools"),
+                "  > …worktrees/issue-475  [issue-475]".to_string(),
+                "    …worktrees/issue-498  [issue-498]".to_string(),
+                "    …ols-worktrees/sweep  [HEAD@9ba6951]".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_pane_too_narrow_for_the_labels_cuts_each_row_and_the_hint_from_the_right() {
+        // At 16 columns the marker and the widest label leave no column for
+        // the path. A row that still does not fit loses columns from the
+        // right, as the hint does, so no row wraps.
+        let entries = issue_worktrees();
+        let list = list_at(&entries, 1, 0);
+        let dims = watch::Dimensions {
+            width: 16,
+            height: 8,
+        };
+
+        let rows = list_frame_rows(&issue_snapshot(), dims, &list);
+        assert_eq!(
+            rows.get(2..).unwrap_or_default(),
+            [
+                "      [main]  ⌂",
+                "  >   [issue-47…",
+                "      [issue-49…",
+                "      [HEAD@9ba…",
+                "",
+                "↑↓ move · Enter…",
+            ],
+        );
+    }
+
     /// Build a minimal [`Snapshot`] with the given HEAD-commit age and a file
     /// row per supplied mtime age, so the freshest-age tests can exercise the
     /// commit-vs-change comparison without walking a real repo.
