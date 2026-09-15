@@ -97,10 +97,13 @@ pub(crate) fn head_label(repo: &gix::Repository) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
 
-    use super::{head_label, WorktreePath};
-    use crate::testrepo::{git, git_stdout, init_repo};
+    use tempfile::TempDir;
+
+    use super::{head_label, worktree_paths, WorktreePath};
+    use crate::testrepo::{git, git_stdout, init_repo, init_repo_at};
 
     /// How many hex digits of the commit a detached HEAD shows: the length
     /// that `cwt` shows (`SHORT_COMMIT_HASH_LENGTH` in
@@ -132,6 +135,287 @@ mod tests {
 
         git(dir.path(), &["checkout", "-q", "--detach"]);
         assert_eq!(head_label(&open(dir.path())), detached_label(dir.path()));
+    }
+
+    /// Add a linked worktree of the repository at `main`, at `path`. `how`
+    /// holds the options of `git worktree add` that pick the HEAD: a new
+    /// branch (`-b <name>`) or `--detach`.
+    fn add_worktree(main: &Path, path: &Path, how: &[&str]) {
+        let parent = path.parent().expect("a worktree path has a parent");
+        std::fs::create_dir_all(parent).expect("make the parent directory");
+        let mut args = vec!["worktree", "add", "-q"];
+        args.extend_from_slice(how);
+        args.push(path.to_str().expect("utf-8 tempdir path"));
+        git(main, &args);
+    }
+
+    /// The [`WorktreePath`] of a directory that the fixture made.
+    fn resolved(path: &Path) -> WorktreePath {
+        WorktreePath::resolve(path).expect("the fixture made this directory")
+    }
+
+    /// A repository whose worktrees gix gives in an order that is not the
+    /// order of their paths. One [`TempDir`] holds every checkout:
+    ///
+    /// | Path      | Worktree                    | Admin dir         |
+    /// | --------- | --------------------------- | ----------------- |
+    /// | `a/zulu`  | linked, on branch `zulu`    | `worktrees/zulu`  |
+    /// | `b/mike`  | linked, detached            | `worktrees/mike`  |
+    /// | `bb/gone` | linked, directory deleted   | `worktrees/gone`  |
+    /// | `c/repo`  | main, on branch `main`      | `.git`            |
+    /// | `d/alpha` | linked, on branch `alpha`   | `worktrees/alpha` |
+    ///
+    /// gix gives the linked worktrees sorted by admin dir: `alpha`, `gone`,
+    /// `mike`, `zulu`. That is the reverse of their path order. The main
+    /// worktree sorts third, so a list that puts it first is wrong too. The
+    /// fixture makes the worktrees in a third order (`alpha`, `gone`, `zulu`,
+    /// `mike`), so the order of creation cannot give the right answer by
+    /// chance.
+    struct Layout {
+        /// Holds every checkout. The drop deletes the fixture.
+        dir: TempDir,
+    }
+
+    impl Layout {
+        /// Make the repository, its worktrees, and the deletion.
+        fn new() -> Self {
+            let layout = Self {
+                dir: tempfile::tempdir().expect("tempdir"),
+            };
+            let main = layout.main();
+            init_repo_at(&main);
+            add_worktree(&main, &layout.alpha(), &["-b", "alpha"]);
+            add_worktree(&main, &layout.gone(), &["-b", "gone"]);
+            add_worktree(&main, &layout.zulu(), &["-b", "zulu"]);
+            add_worktree(&main, &layout.mike(), &["--detach"]);
+            std::fs::remove_dir_all(layout.gone()).expect("delete the directory of `gone`");
+            layout
+        }
+
+        /// The checkout `name` in the directory `parent` of the fixture.
+        fn at(&self, parent: &str, name: &str) -> PathBuf {
+            self.dir.path().join(parent).join(name)
+        }
+
+        /// The main worktree.
+        fn main(&self) -> PathBuf {
+            self.at("c", "repo")
+        }
+
+        /// The linked worktree on branch `zulu`. Its path sorts first.
+        fn zulu(&self) -> PathBuf {
+            self.at("a", "zulu")
+        }
+
+        /// The detached linked worktree.
+        fn mike(&self) -> PathBuf {
+            self.at("b", "mike")
+        }
+
+        /// The linked worktree whose directory the fixture deleted.
+        fn gone(&self) -> PathBuf {
+            self.at("bb", "gone")
+        }
+
+        /// The linked worktree on branch `alpha`. Its path sorts last.
+        fn alpha(&self) -> PathBuf {
+            self.at("d", "alpha")
+        }
+
+        /// Every worktree whose directory exists, in path order.
+        fn sorted(&self) -> Vec<WorktreePath> {
+            [self.zulu(), self.mike(), self.main(), self.alpha()]
+                .iter()
+                .map(|path| resolved(path))
+                .collect()
+        }
+    }
+
+    /// The paths are sorted by path. The main worktree is among them and is
+    /// not first. A detached worktree is in the list, and a worktree whose
+    /// directory was deleted is not.
+    #[test]
+    fn the_paths_are_sorted_by_path_with_the_main_worktree_among_them() {
+        let layout = Layout::new();
+        let repo = open(&layout.main());
+
+        // The fixture proves the sort and the skip only if gix gives the
+        // linked worktrees out of path order and still knows the deleted one.
+        let admin_order: Vec<PathBuf> = repo
+            .worktrees()
+            .expect("read the admin dirs")
+            .iter()
+            .map(|proxy| proxy.base().expect("read the gitdir file"))
+            .collect();
+        assert_eq!(
+            admin_order.len(),
+            4,
+            "git must still hold the admin dir of the deleted worktree: {admin_order:?}",
+        );
+        assert!(
+            !admin_order.windows(2).all(|pair| pair[0] <= pair[1]),
+            "gix must give the linked worktrees out of path order: {admin_order:?}",
+        );
+        assert_eq!(
+            git_stdout(&layout.mike(), &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "HEAD",
+            "one worktree of the fixture must be detached",
+        );
+
+        assert_eq!(worktree_paths(&repo), layout.sorted());
+    }
+
+    /// The paths are the same whether the loop asks from the main worktree or
+    /// from a linked worktree, because the user can start gsw in either.
+    #[test]
+    fn the_paths_are_the_same_from_the_main_worktree_and_from_a_linked_worktree() {
+        let layout = Layout::new();
+        let from_main = worktree_paths(&open(&layout.main()));
+        assert_eq!(from_main, layout.sorted());
+
+        for linked in [layout.zulu(), layout.mike(), layout.alpha()] {
+            assert_eq!(
+                worktree_paths(&open(&linked)),
+                from_main,
+                "asked from {}",
+                linked.display(),
+            );
+        }
+    }
+
+    /// A bare main repository has no checkout to show, so the list skips it.
+    /// Its linked worktree is in the list.
+    #[test]
+    fn a_bare_main_repository_is_skipped_and_its_linked_worktree_is_listed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let origin = dir.path().join("origin");
+        init_repo_at(&origin);
+        let bare = dir.path().join("bare.git");
+        git(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                origin.to_str().expect("utf-8 tempdir path"),
+                bare.to_str().expect("utf-8 tempdir path"),
+            ],
+        );
+        let linked = dir.path().join("linked");
+        add_worktree(&bare, &linked, &["-b", "linked"]);
+
+        let repo = open(&linked);
+        assert!(
+            repo.main_repo().expect("open the main repository").is_bare(),
+            "the main repository of the fixture must be bare",
+        );
+
+        assert_eq!(worktree_paths(&repo), vec![resolved(&linked)]);
+    }
+
+    /// A worktree directory whose name holds multi-byte characters is in the
+    /// list, and its path keeps every character.
+    #[test]
+    fn a_multibyte_path_is_listed_and_round_trips() {
+        const NAME: &str = "日本語-🎉-café";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("repo");
+        init_repo_at(&main);
+        let linked = dir.path().join(NAME);
+        add_worktree(&main, &linked, &["-b", NAME]);
+
+        let paths = worktree_paths(&open(&main));
+
+        // `repo` sorts before `日本語…`: `r` is one byte, and every byte of
+        // `日` is higher.
+        assert_eq!(paths, vec![resolved(&main), resolved(&linked)]);
+        assert_eq!(
+            paths[1].as_path().file_name(),
+            Some(OsStr::new(NAME)),
+            "the path must keep every character of the directory name",
+        );
+    }
+
+    /// Takes every permission away from a path, and gives the permissions
+    /// back at the drop, so that the [`TempDir`] can delete the fixture.
+    #[cfg(unix)]
+    struct Unreadable {
+        /// The path that has no permissions.
+        path: PathBuf,
+        /// The permissions that the drop gives back.
+        before: std::fs::Permissions,
+    }
+
+    #[cfg(unix)]
+    impl Unreadable {
+        /// Take every permission away from `path`.
+        ///
+        /// # Panics
+        ///
+        /// Panics when the path stays readable, for example for root. A test
+        /// that reads it then proves nothing about a read that fails.
+        fn new(path: PathBuf) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+
+            let before = std::fs::metadata(&path)
+                .expect("read the permissions")
+                .permissions();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
+                .expect("take the permissions away");
+            assert!(
+                std::fs::File::open(&path).is_err(),
+                "{} must be unreadable, or the test proves nothing",
+                path.display(),
+            );
+            Self { path, before }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for Unreadable {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.path, self.before.clone());
+        }
+    }
+
+    /// A worktree whose admin files gix cannot read is skipped. The read does
+    /// not panic and does not fail the list: the other worktrees are in it.
+    /// One worktree has a `gitdir` file that cannot be read, and one has an
+    /// admin dir that cannot be read.
+    #[cfg(unix)]
+    #[test]
+    fn a_worktree_whose_admin_files_cannot_be_read_is_skipped_and_the_rest_are_listed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("repo");
+        init_repo_at(&main);
+        let kept = dir.path().join("kept");
+        add_worktree(&main, &kept, &["-b", "kept"]);
+        add_worktree(&main, &dir.path().join("no-gitdir"), &["-b", "no-gitdir"]);
+        add_worktree(&main, &dir.path().join("no-admin"), &["-b", "no-admin"]);
+
+        let admin = main.join(".git").join("worktrees");
+        let _gitdir_file = Unreadable::new(admin.join("no-gitdir").join("gitdir"));
+        let _admin_dir = Unreadable::new(admin.join("no-admin"));
+
+        assert_eq!(
+            worktree_paths(&open(&main)),
+            vec![resolved(&kept), resolved(&main)],
+        );
+    }
+
+    /// A `worktrees` directory that cannot be read hides every linked
+    /// worktree, and the list still holds the main worktree.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_worktrees_directory_still_lists_the_main_worktree() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("repo");
+        init_repo_at(&main);
+        add_worktree(&main, &dir.path().join("linked"), &["-b", "linked"]);
+
+        let _worktrees = Unreadable::new(main.join(".git").join("worktrees"));
+
+        assert_eq!(worktree_paths(&open(&main)), vec![resolved(&main)]);
     }
 
     /// Two spellings of one directory resolve to one value.
