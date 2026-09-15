@@ -22,6 +22,11 @@
 //! is an answer and not a failure. `[ -n "$(swt list)" ]` is thus a complete
 //! check.
 //!
+//! A detached HEAD has no branch, so it has no children to ask about. `list`
+//! then prints nothing on stdout, says why on stderr, and exits 1. It reads
+//! HEAD through [`head_branch`]. `create` uses the same read, and refuses a
+//! detached HEAD for the same reason.
+//!
 //! The source is the worktree registry of git, `git worktree list --porcelain
 //! -z`. `list` does not scan directories. A directory beside the parent is not
 //! a worktree until git says so, and the directory name is for people. In the
@@ -66,6 +71,13 @@ const BRANCH_LABEL: &str = "branch";
 /// children. A person reads this note and knows why. The wording lives here and
 /// nowhere else.
 const NO_CHILDREN_NOTE: &str = "No child worktrees of the branch";
+
+/// What `list` writes to stderr when HEAD is detached. It states the fact, why
+/// the fact stops the command, and what the user must do. The wording lives
+/// here and nowhere else.
+const DETACHED_HEAD_REFUSAL: &str =
+    "HEAD is detached. A detached HEAD has no branch, so it has no children \
+     to list. Check out a branch, then run swt list again.";
 
 /// The label that git gives a worktree whose directory is gone, with or without
 /// a reason after it. `list` prints the same word as the third field of the
@@ -210,7 +222,8 @@ fn children_of(registry: Vec<RegisteredWorktree>, parent: &BranchName) -> Vec<Ch
 /// uses to name the parent of a child. The children come from the worktree
 /// registry of git. When git fails in either read, its own output goes to
 /// stderr and the command fails. A detached HEAD has no branch, so the command
-/// fails there too.
+/// writes [`DETACHED_HEAD_REFUSAL`] to stderr, prints nothing on stdout, and
+/// fails.
 ///
 /// When the branch has no children, nothing goes to stdout.
 /// [`NO_CHILDREN_NOTE`] and the branch go to stderr, and the command succeeds.
@@ -219,8 +232,12 @@ fn children_of(registry: Vec<RegisteredWorktree>, parent: &BranchName) -> Vec<Ch
 pub fn list() -> ExitCode {
     let current = match head_branch(None) {
         Ok(HeadBranch::Branch(branch)) => branch,
-        // A detached HEAD has no branch, so it has no children to show.
-        Ok(HeadBranch::Detached) => return ExitCode::FAILURE,
+        // A detached HEAD has no branch, so it has no children to show. Stdout
+        // stays empty, so a caller cannot take the refusal for a child.
+        Ok(HeadBranch::Detached) => {
+            eprintln!("{DETACHED_HEAD_REFUSAL}");
+            return ExitCode::FAILURE;
+        }
         // The account of git itself, which already ends in a newline.
         Err(failure) => {
             eprint!("{failure}");
