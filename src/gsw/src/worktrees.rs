@@ -60,7 +60,8 @@ pub(crate) struct WorktreeEntry {
 
 /// Every worktree of the repository that holds `repo`, sorted by path.
 /// Paths only: no HEAD is read, and no linked worktree is opened. The loop
-/// calls this on every walk, so it must stay cheap.
+/// calls this on every walk, at each press of Left and Right, and after a
+/// failed walk, so it must stay cheap.
 ///
 /// [`enumerate`] says which worktrees are in the list, for this function and
 /// for [`list_worktrees`] alike.

@@ -1248,18 +1248,29 @@ fn switch_watched(
     Ok(snapshot)
 }
 
-/// The worktrees that Left, Right, and Down read at each press: every worktree
-/// of the repository of the watched worktree, sorted by path, each with its
-/// label.
+/// The worktrees that Down reads at each press: every worktree of the
+/// repository of the watched worktree, sorted by path, each with its label.
 ///
 /// Every worktree of a repository shares one common directory, so the list is
 /// the same from each of them. gix reads the admin directories again at each
 /// call, so a worktree that `nwt` or `swt` added or removed since the last
 /// press is in the list or out of it. [`list_worktrees`] opens each linked
-/// worktree for its label, which costs more than the paths alone. A key press
-/// pays for that, and a walk never does.
+/// worktree for its label, which costs more than the paths alone. Only Down
+/// shows the labels, so only Down pays for them. Left, Right, and a failed
+/// walk read [`listed_paths`].
 fn listed(watched: &RefCell<Watched>) -> Vec<WorktreeEntry> {
     list_worktrees(watched.borrow().handle.repo())
+}
+
+/// The paths of the worktrees that [`listed`] gives, in the same order. They
+/// come from [`worktree_paths`], which reads no HEAD and opens no linked
+/// worktree.
+///
+/// Left and Right read it at each press, because they need the paths alone.
+/// A walk that fails reads it to learn whether the worktree on the screen
+/// still exists. The cooldown after that walk holds the cost of this read.
+fn listed_paths(watched: &RefCell<Watched>) -> Vec<WorktreePath> {
+    worktree_paths(watched.borrow().handle.repo())
 }
 
 /// Run the live watch loop: take over the alternate screen, seed the snapshot
@@ -1281,8 +1292,9 @@ fn listed(watched: &RefCell<Watched>) -> Vec<WorktreeEntry> {
 /// afterward.
 ///
 /// The hooks of the loop share one [`Watched`] through a [`RefCell`]. The
-/// `collect` hook walks it, the `worktrees` hook reads the list of its
-/// repository, and the `switch` hook replaces it through [`switch_watched`].
+/// `collect` hook walks it, the `worktrees` and `worktree_paths` hooks read
+/// the worktrees of its repository through [`listed`] and [`listed_paths`],
+/// and the `switch` hook replaces it through [`switch_watched`].
 pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     // Before the guard takes the screen, so a refusal prints on the screen the
     // user started from, and not on the alternate screen that the guard
@@ -1466,6 +1478,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                 );
             },
             worktrees: || listed(&watched),
+            worktree_paths: || listed_paths(&watched),
             // Each switch gives the new watcher a sender of its own on the one
             // channel of the loop.
             switch: |target: &WorktreePath| {
@@ -1812,10 +1825,11 @@ impl LoopState {
     /// worktree when the current worktree no longer exists, and say so on a
     /// line that fades.
     ///
-    /// The current worktree no longer exists when the list of the worktrees
-    /// no longer holds it: `git worktree remove` or `swt merge` took it. Three
-    /// failed walks keep the rule of a failed walk, which is the last good
-    /// snapshot at its true age:
+    /// The current worktree no longer exists when the list of the paths of
+    /// the worktrees no longer holds it: `git worktree remove` or `swt merge`
+    /// took it. The list holds the paths alone, because the check needs no
+    /// label. Three failed walks keep the rule of a failed walk, which is the
+    /// last good snapshot at its true age:
     ///
     /// - a walk of the home worktree, which has no home to go back to;
     /// - a walk while a push runs, because the window under the frame belongs
@@ -1824,11 +1838,16 @@ impl LoopState {
     /// - a walk of a worktree that the list still holds. Such a walk failed
     ///   for a moment, as when `git gc` swaps the ref store under it.
     ///
-    /// The switch counts from `now`, the instant of this wake, so its cost
-    /// holds the failed walk and the open of home. Both are git work of this
-    /// wake, and the duty cycle pays for both. The frame of home is then
-    /// placed at `now` like every frame of the wake, so its refresh clock
-    /// shows the whole interval.
+    /// The switch counts from `now`, the instant of this wake. The frame of
+    /// home is then placed at `now` like every frame of the wake, so its
+    /// refresh clock shows the whole interval.
+    ///
+    /// The read of the paths and the open of home are git work of this wake,
+    /// as the failed walk is. The caller records the cost of the wake after
+    /// this call returns, so the duty cycle pays for all of that work on every
+    /// path through this call. A return that works records the open too, and
+    /// the record of the caller then replaces it, because both records start
+    /// at `now`.
     ///
     /// The switch clears the row, the question, and the list, and the line
     /// goes on the row after that, so the line is on the frame that shows
@@ -1838,13 +1857,13 @@ impl LoopState {
         &mut self,
         now: Instant,
         clock: &impl Fn() -> Instant,
-        worktrees: &mut impl FnMut() -> Vec<WorktreeEntry>,
+        worktree_paths: &mut impl FnMut() -> Vec<WorktreePath>,
         open: &mut impl FnMut(&WorktreePath) -> Result<Snapshot, String>,
     ) {
         if self.current == self.home || self.ui.mode() == InputMode::Pushing {
             return;
         }
-        if worktrees().iter().any(|entry| entry.path == self.current) {
+        if worktree_paths().contains(&self.current) {
             return;
         }
         let gone = self.current.clone();
@@ -1882,6 +1901,7 @@ struct LoopHooks<
     StartIssue,
     StartConflicts,
     Worktrees,
+    Paths,
     Switch,
 > {
     /// Walk the worktree that the loop passes, which is the worktree the frame
@@ -1926,14 +1946,22 @@ struct LoopHooks<
     /// loop never waits for the run, because a rebase replay of a long branch
     /// can take many seconds.
     start_conflicts: StartConflicts,
-    /// Read the worktrees of the repository again, sorted by path, as
-    /// [`crate::worktrees::list_worktrees`] gives them.
+    /// Read the worktrees of the repository again, sorted by path, each with
+    /// its label, as [`crate::worktrees::list_worktrees`] gives them.
     ///
-    /// Left, Right, and Down call it at each press, because `nwt` and `swt`
-    /// add and remove worktrees while gsw runs, so a list read once at start
-    /// is soon wrong. A walk that fails calls it too, to learn whether the
-    /// worktree on the screen still exists.
+    /// Down calls it at each press, because `nwt` and `swt` add and remove
+    /// worktrees while gsw runs, so a list read once at start is soon wrong.
+    /// Only Down shows the labels, and a label costs an open of its linked
+    /// worktree, so nothing else calls it.
     worktrees: Worktrees,
+    /// Read the paths of the worktrees of the repository again, sorted by
+    /// path, as [`crate::worktrees::worktree_paths`] gives them. No HEAD is
+    /// read, and no linked worktree is opened.
+    ///
+    /// Left and Right call it at each press, for the same reason as Down
+    /// calls `worktrees`. After a walk that fails, the loop calls it too, to
+    /// learn whether the worktree on the screen still exists.
+    worktree_paths: Paths,
     /// Open the worktree at the path, start its watcher, and walk it, as one
     /// step.
     ///
@@ -2001,10 +2029,10 @@ enum Flow {
 /// is where the push, the issue key, and `m` do their work.
 #[expect(
     clippy::type_complexity,
-    reason = "the loop takes one generic for each of its twelve hooks, so each hook stays a \
-              plain closure that a test replaces with a fake. A type alias spells the same \
-              twelve generics, and the borrow of the whole value keeps every call of absorb \
-              the same"
+    reason = "the loop takes one generic for each of its thirteen hooks, so each hook stays \
+              a plain closure that a test replaces with a fake. A type alias spells the same \
+              thirteen generics, and the borrow of the whole value keeps every call of \
+              absorb the same"
 )]
 fn absorb<
     Collect,
@@ -2018,6 +2046,7 @@ fn absorb<
     StartIssue,
     StartConflicts,
     Worktrees,
+    Paths,
     Switch,
 >(
     event: Event,
@@ -2035,6 +2064,7 @@ fn absorb<
         StartIssue,
         StartConflicts,
         Worktrees,
+        Paths,
         Switch,
     >,
 ) -> Flow
@@ -2044,6 +2074,7 @@ where
     StartIssue: FnMut(crate::issue::IssueCommand, &WorktreePath, Generation),
     StartConflicts: FnMut(&WorktreePath, Generation),
     Worktrees: FnMut() -> Vec<WorktreeEntry>,
+    Paths: FnMut() -> Vec<WorktreePath>,
     Switch: FnMut(&WorktreePath) -> Result<Snapshot, String>,
 {
     let clock = &hooks.clock;
@@ -2078,17 +2109,18 @@ where
         Event::PushOutput(line) => state.ui.output_line(line),
         Event::PushCancelled => state.ui.cancel(),
         Event::Dismiss => state.ui.dismiss(),
-        // Left and Right read the list again at each press, because `nwt` and
-        // `swt` add and remove worktrees while gsw runs. Where no other
-        // worktree is, neither finds a target, and nothing happens.
+        // Left and Right read the paths of the worktrees again at each press,
+        // because `nwt` and `swt` add and remove worktrees while gsw runs.
+        // They read no label, because they show none. Where no other worktree
+        // is, neither finds a target, and nothing happens.
         Event::GoPrevious => {
-            let paths = paths_of((hooks.worktrees)());
+            let paths = (hooks.worktree_paths)();
             if let Some(target) = crate::worktrees::previous(&paths, &state.current).cloned() {
                 state.switch_to(target, clock, &mut hooks.switch);
             }
         }
         Event::GoNext => {
-            let paths = paths_of((hooks.worktrees)());
+            let paths = (hooks.worktree_paths)();
             if let Some(target) = crate::worktrees::next(&paths, &state.current).cloned() {
                 state.switch_to(target, clock, &mut hooks.switch);
             }
@@ -2100,9 +2132,10 @@ where
                 state.switch_to(home, clock, &mut hooks.switch);
             }
         }
-        // Down reads the list again at each press, as Left and Right do,
-        // because `nwt` and `swt` add and remove worktrees while gsw runs.
-        // The cursor starts on the worktree that the frame shows.
+        // Down reads the list again at each press, as Left and Right read the
+        // paths, because `nwt` and `swt` add and remove worktrees while gsw
+        // runs. The list carries the label of each row. The cursor starts on
+        // the worktree that the frame shows.
         //
         // A pane with no row for the list opens none, so Enter never chooses
         // a row that the user did not see, as `p` never asks a question that
@@ -2233,15 +2266,6 @@ where
     Flow::Continue
 }
 
-/// The paths of `entries`, in their order.
-///
-/// Left and Right need the paths alone, and [`crate::worktrees::next`] and
-/// [`crate::worktrees::previous`] search them by sort order, which is the order
-/// the `worktrees` hook gives.
-fn paths_of(entries: Vec<WorktreeEntry>) -> Vec<WorktreePath> {
-    entries.into_iter().map(|entry| entry.path).collect()
-}
-
 /// The render loop's terminal-free core: wait for a filesystem event, a resize,
 /// or a timeout, then update the screen. A filesystem change walks git, and so
 /// does a timeout at which [`WalkSchedule`] owes a walk — a timed refresh, or a
@@ -2302,8 +2326,9 @@ fn paths_of(entries: Vec<WorktreeEntry>) -> Vec<WorktreePath> {
 /// blank screen" guarantee: that fallback keeps a *handle* when the re-open
 /// fails, and this keeps a *frame* when the status walk on it fails. Either half
 /// alone leaves the monitor dying on a repository that is momentarily
-/// unreadable. The failed walk still arms the throttle from its measured cost —
-/// so a repo that fails every walk backs off on the same duty cycle instead of
+/// unreadable. The failed walk still arms the throttle from its measured cost,
+/// which also holds the check after it and any open of the home worktree — so
+/// a repo that fails every walk backs off on the same duty cycle instead of
 /// hot-looping — and deliberately does *not* advance `collected_at`, so the
 /// stale frame goes on aging honestly rather than resetting every displayed age
 /// to zero. The accepted cost: a repository deleted for good leaves a frozen
@@ -2311,6 +2336,12 @@ fn paths_of(entries: Vec<WorktreeEntry>) -> Vec<WorktreePath> {
 /// a monitor — a wrong-but-labeled-old screen beats no screen. A worktree other
 /// than the home worktree that goes away for good is the one exception: the
 /// loop goes back to the home worktree ([`LoopState::return_home_if_gone`]).
+#[expect(
+    clippy::type_complexity,
+    reason = "the loop takes one generic for each of its thirteen hooks, so each hook stays \
+              a plain closure that a test replaces with a fake. A type alias spells the same \
+              thirteen generics, as the expectation on absorb says"
+)]
 fn event_loop<
     Collect,
     RenderFn,
@@ -2323,6 +2354,7 @@ fn event_loop<
     StartIssue,
     StartConflicts,
     Worktrees,
+    Paths,
     Switch,
 >(
     rx: &Receiver<Event>,
@@ -2341,6 +2373,7 @@ fn event_loop<
         StartIssue,
         StartConflicts,
         Worktrees,
+        Paths,
         Switch,
     >,
 ) -> Result<()>
@@ -2356,6 +2389,7 @@ where
     StartIssue: FnMut(crate::issue::IssueCommand, &WorktreePath, Generation),
     StartConflicts: FnMut(&WorktreePath, Generation),
     Worktrees: FnMut() -> Vec<WorktreeEntry>,
+    Paths: FnMut() -> Vec<WorktreePath>,
     Switch: FnMut(&WorktreePath) -> Result<Snapshot, String>,
 {
     let LoopStart {
@@ -2513,14 +2547,6 @@ where
         // pane size, and what it finds can change what goes under the frame.
         if walk_now {
             let collected = (hooks.collect)(&state.current);
-            // Measure the walk's wall-clock cost around collect and feed it to
-            // the throttle, which arms the next cooldown (= 100·cost) from it.
-            // Deliberately outside the match: a *failed* walk still paid for a
-            // status traversal, and a repo that is unreadable for a while fails
-            // every walk, so gating the retries on the same duty-cycle budget is
-            // what keeps a permanently-deleted repo from pinning a core.
-            let cost = (hooks.clock)().saturating_duration_since(now);
-            state.schedule.record(now, cost);
             match collected {
                 Ok(snapshot) => {
                     // Re-seed the collection time to the walk's start so a later
@@ -2548,11 +2574,25 @@ where
                     state.return_home_if_gone(
                         now,
                         &hooks.clock,
-                        &mut hooks.worktrees,
+                        &mut hooks.worktree_paths,
                         &mut hooks.switch,
                     );
                 }
             }
+            // Measure the wall-clock cost of the git work of this wake and feed
+            // it to the throttle, which arms the next cooldown (= 100·cost)
+            // from it. Deliberately outside the match: a *failed* walk still
+            // paid for a status traversal, and a repo that is unreadable for a
+            // while fails every walk, so gating the retries on the same
+            // duty-cycle budget is what keeps a permanently-deleted repo from
+            // pinning a core. Deliberately after the match too: after a failed
+            // walk, the check for a worktree that is gone reads the paths of
+            // the worktrees, and it can open home. That is git work of this
+            // wake, so the cost holds it, whether the return works or not. A
+            // return that works records its open first, and this record then
+            // replaces that one, from the same start.
+            let cost = (hooks.clock)().saturating_duration_since(now);
+            state.schedule.record(now, cost);
         }
 
         // The open list takes the rows under the head of the frame. A pane
@@ -4501,6 +4541,7 @@ mod tests {
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
+                worktree_paths: Vec::new,
                 switch: no_switch,
                 render_list: no_list,
             },
@@ -4556,6 +4597,7 @@ mod tests {
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
+                worktree_paths: Vec::new,
                 switch: no_switch,
                 render_list: no_list,
             },
@@ -4614,6 +4656,7 @@ mod tests {
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
+                worktree_paths: Vec::new,
                 switch: no_switch,
                 render_list: no_list,
             },
@@ -4674,6 +4717,7 @@ mod tests {
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
+                worktree_paths: Vec::new,
                 switch: no_switch,
                 render_list: no_list,
             },
@@ -4730,6 +4774,7 @@ mod tests {
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
+                worktree_paths: Vec::new,
                 switch: no_switch,
                 render_list: no_list,
             },
@@ -4783,6 +4828,7 @@ mod tests {
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
+                worktree_paths: Vec::new,
                 switch: no_switch,
                 render_list: no_list,
             },
@@ -4838,6 +4884,7 @@ mod tests {
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
+                worktree_paths: Vec::new,
                 switch: no_switch,
                 render_list: no_list,
             },
@@ -4893,6 +4940,7 @@ mod tests {
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
+                worktree_paths: Vec::new,
                 switch: no_switch,
                 render_list: no_list,
             },
@@ -4949,6 +4997,7 @@ mod tests {
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
+                worktree_paths: Vec::new,
                 switch: no_switch,
                 render_list: no_list,
             },
@@ -5011,6 +5060,7 @@ mod tests {
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
+                worktree_paths: Vec::new,
                 switch: no_switch,
                 render_list: no_list,
             },
@@ -5081,6 +5131,7 @@ mod tests {
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
+                worktree_paths: Vec::new,
                 switch: no_switch,
                 render_list: no_list,
             },
@@ -5173,6 +5224,7 @@ mod tests {
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
+                worktree_paths: Vec::new,
                 switch: no_switch,
                 render_list: no_list,
             },
@@ -5269,6 +5321,7 @@ mod tests {
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
+                worktree_paths: Vec::new,
                 switch: no_switch,
                 render_list: no_list,
             },
@@ -5346,6 +5399,7 @@ mod tests {
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
+                worktree_paths: Vec::new,
                 switch: no_switch,
                 render_list: no_list,
             },
@@ -5430,6 +5484,7 @@ mod tests {
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
+                worktree_paths: Vec::new,
                 switch: no_switch,
                 render_list: no_list,
             },
@@ -5513,6 +5568,7 @@ mod tests {
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
+                worktree_paths: Vec::new,
                 switch: no_switch,
                 render_list: no_list,
             },
@@ -5576,6 +5632,7 @@ mod tests {
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
+                worktree_paths: Vec::new,
                 switch: no_switch,
                 render_list: no_list,
             },
@@ -5652,6 +5709,7 @@ mod tests {
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
+                worktree_paths: Vec::new,
                 switch: no_switch,
                 render_list: no_list,
             },
@@ -5752,6 +5810,7 @@ mod tests {
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
+                worktree_paths: Vec::new,
                 switch: no_switch,
                 render_list: no_list,
             },
@@ -5876,6 +5935,7 @@ mod tests {
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
+                worktree_paths: Vec::new,
                 switch: no_switch,
                 render_list: no_list,
             },
@@ -6053,8 +6113,12 @@ mod push_loop_tests {
         /// Every worktree the `switch` hook was asked to open, in order,
         /// with the refused ones.
         switches: Vec<WorktreePath>,
-        /// How many times the loop read the list of worktrees.
+        /// How many times the loop read the list of the worktrees with the
+        /// labels. Only Down reads it.
         listings: usize,
+        /// How many times the loop read the paths of the worktrees: Left,
+        /// Right, and the check after a failed walk.
+        path_listings: usize,
         /// The worktree each walk read, in order.
         collected_from: Vec<WorktreePath>,
         /// The worktree each push started in, in the order of
@@ -6267,15 +6331,17 @@ mod push_loop_tests {
     /// The worktrees a loop run can move between, and how each switch comes
     /// out.
     ///
-    /// The fake `worktrees` hook gives [`World::listed`], and each read of it
-    /// moves the clock of the loop on by [`World::list_cost`]. The fake
-    /// `switch` hook gives [`snapshot_of`] its target, or refuses a target in
-    /// [`World::refused`] with [`REFUSED`].
+    /// The fake `worktrees` hook gives [`World::listed`], and the fake
+    /// `worktree_paths` hook gives the paths of those worktrees. Each read of
+    /// either hook moves the clock of the loop on by [`World::list_cost`].
+    /// The fake `switch` hook gives [`snapshot_of`] its target, or refuses a
+    /// target in [`World::refused`] with [`REFUSED`].
     struct World {
         /// The worktree where gsw started.
         home: WorktreePath,
-        /// What the `worktrees` hook gives at each press: every worktree,
-        /// sorted by path, as the listing gives them.
+        /// Every worktree, sorted by path, as the listing gives them. The
+        /// `worktrees` hook gives these entries at each press of Down, and the
+        /// `worktree_paths` hook gives their paths, in the same order.
         listed: Vec<WorktreeEntry>,
         /// The worktrees whose switch fails, as the switch to a worktree that
         /// stopped existing fails.
@@ -6518,6 +6584,17 @@ mod push_loop_tests {
                         .iter()
                         .filter(|entry| !removed.contains(&entry.path))
                         .cloned()
+                        .collect()
+                },
+                worktree_paths: || {
+                    seen.borrow_mut().path_listings += 1;
+                    skew.set(skew.get() + world.list_cost);
+                    let removed = removed.borrow();
+                    world
+                        .listed
+                        .iter()
+                        .filter(|entry| !removed.contains(&entry.path))
+                        .map(|entry| entry.path.clone())
                         .collect()
                 },
                 switch: |target: &WorktreePath| {
@@ -7299,6 +7376,7 @@ mod push_loop_tests {
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
                 worktrees: Vec::new,
+                worktree_paths: Vec::new,
                 switch: no_switch,
                 render_list: no_list,
             },
@@ -7716,6 +7794,7 @@ mod push_loop_tests {
                         seen.borrow_mut().conflict_runs += 1
                     },
                     worktrees: Vec::new,
+                    worktree_paths: Vec::new,
                     switch: no_switch,
                     render_list: no_list,
                 },
@@ -7823,8 +7902,8 @@ mod push_loop_tests {
             ],
         );
         assert_eq!(
-            seen.listings, 3,
-            "each press of Left and Right must read the list"
+            seen.path_listings, 3,
+            "each press of Left and Right must read the paths"
         );
     }
 
@@ -9013,7 +9092,8 @@ mod push_loop_tests {
     fn a_failed_walk_of_the_home_worktree_keeps_the_last_good_frame() {
         // The home worktree stopped existing while gsw shows it. There is no
         // home to go back to, so gsw keeps the last good snapshot at its true
-        // age, and does not read the list for a return that cannot happen.
+        // age, and reads neither the list nor the paths of the worktrees for a
+        // return that cannot happen.
         //
         // The harness reads the clock once, and the filesystem event comes a
         // minute later.
@@ -9028,6 +9108,7 @@ mod push_loop_tests {
             seen.switches,
         );
         assert_eq!(seen.listings, 0, "gsw must not read the list");
+        assert_eq!(seen.path_listings, 0, "gsw must not read the paths");
         assert_eq!(strip_ansi(&screen), format!("FRAME {BRAVO}"));
         assert_eq!(
             seen.timings.last().map(|timing| timing.age_offset),
@@ -9334,7 +9415,9 @@ mod watched_tests {
     use tempfile::TempDir;
 
     use super::tests::walk_config;
-    use super::{listed, switch_watched, Event, Watched, DIRECTORY_GONE, NOT_A_WORK_TREE};
+    use super::{
+        listed, listed_paths, switch_watched, Event, Watched, DIRECTORY_GONE, NOT_A_WORK_TREE,
+    };
     use crate::render::Snapshot;
     use crate::repo::RepoHandle;
     use crate::testrepo::{git, git_stdout, init_repo, init_repo_at, init_repo_with_worktree};
@@ -9729,10 +9812,11 @@ mod watched_tests {
         );
     }
 
-    /// Left, Right, and Down read every worktree of the repository, sorted by
-    /// path, whatever worktree the watch is on: the main worktree, a linked
-    /// worktree, or a detached one. Each entry carries its label, and the label
-    /// of the detached worktree is `HEAD@` and the short hash.
+    /// Down reads every worktree of the repository, sorted by path, whatever
+    /// worktree the watch is on: the main worktree, a linked worktree, or a
+    /// detached one. Each entry carries its label, and the label of the
+    /// detached worktree is `HEAD@` and the short hash. Left and Right read
+    /// the paths of the same worktrees, in the same order, with no label.
     #[test]
     fn the_list_holds_every_worktree_of_the_repository_from_each_worktree() {
         let dir = siblings();
@@ -9750,6 +9834,7 @@ mod watched_tests {
                 label: MAIN.to_string(),
             },
         ];
+        let paths: Vec<WorktreePath> = expected.iter().map(|entry| entry.path.clone()).collect();
         let (tx, _rx) = mpsc::channel();
 
         for name in [DETACHED, LINKED, MAIN] {
@@ -9758,6 +9843,11 @@ mod watched_tests {
                 listed(&watched),
                 expected,
                 "the list read from the worktree {name}",
+            );
+            assert_eq!(
+                listed_paths(&watched),
+                paths,
+                "the paths read from the worktree {name}",
             );
         }
     }
