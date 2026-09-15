@@ -60,7 +60,8 @@ pub(crate) struct WorktreeEntry {
 }
 
 /// Every worktree of the repository that holds `repo`, sorted by path.
-/// Paths only: no HEAD is read. The loop calls this on every walk.
+/// Paths only: no HEAD is read, and no linked worktree is opened. The loop
+/// calls this on every walk, so it must stay cheap.
 ///
 /// [`enumerate`] says which worktrees are in the list, for this function and
 /// for [`list_worktrees`] alike.
@@ -73,14 +74,17 @@ pub(crate) fn worktree_paths(repo: &gix::Repository) -> Vec<WorktreePath> {
 
 /// The same worktrees in the same order, each with its label.
 ///
-/// [`enumerate`] says which worktrees are in the list, and [`head_label`]
-/// reads each label from the repository of its own worktree.
+/// [`enumerate`] says which worktrees are in the list. Then each linked
+/// worktree opens, only to read its label, and [`head_label`] reads the label
+/// from the repository of that worktree. A linked worktree that gix cannot
+/// open stays in the list with the label [`UNREADABLE_LABEL`], so this list
+/// and [`worktree_paths`] always hold the same paths in the same order.
 pub(crate) fn list_worktrees(repo: &gix::Repository) -> Vec<WorktreeEntry> {
     enumerate(repo)
         .into_iter()
         .map(|found| WorktreeEntry {
             path: found.path,
-            label: head_label(&found.repo),
+            label: found.head.label(),
         })
         .collect()
 }
@@ -92,17 +96,38 @@ pub(crate) fn list_worktrees(repo: &gix::Repository) -> Vec<WorktreeEntry> {
 /// so the list and [`worktree_paths`] always hold the same worktrees.
 const UNREADABLE_LABEL: &str = "?";
 
-/// One worktree that [`enumerate`] found: its root, and its repository, open.
-///
-/// The open is part of the one enumeration, so a worktree whose admin dir gix
-/// cannot open leaves [`worktree_paths`] and [`list_worktrees`] alike. An open
-/// in [`list_worktrees`] alone lets the header count a worktree that the list
-/// does not show.
-struct Found {
+/// One worktree that [`enumerate`] found: its root, and where its HEAD is.
+struct Found<'repo> {
     /// The root of the worktree.
     path: WorktreePath,
-    /// The repository of the worktree. Its HEAD gives the label.
-    repo: gix::Repository,
+    /// Where [`list_worktrees`] reads the label. [`worktree_paths`] never
+    /// reads it.
+    head: Head<'repo>,
+}
+
+/// Where the HEAD of one worktree is, before anything reads it.
+enum Head<'repo> {
+    /// The main repository. [`enumerate`] opens it anyway, to learn where the
+    /// main worktree is and whether the main repository is bare, so the label
+    /// needs no second open. It is in a box because a repository is much
+    /// larger than a proxy.
+    Main(Box<gix::Repository>),
+    /// The admin dir of a linked worktree, not open yet. Only a label opens
+    /// it, so [`worktree_paths`] pays for no open.
+    Linked(gix::worktree::Proxy<'repo>),
+}
+
+impl Head<'_> {
+    /// The label of this HEAD: [`head_label`] of its repository, or
+    /// [`UNREADABLE_LABEL`] when gix cannot open the linked worktree.
+    fn label(self) -> String {
+        match self {
+            Self::Main(repo) => head_label(&repo),
+            Self::Linked(proxy) => proxy
+                .into_repo_with_possibly_inaccessible_worktree()
+                .map_or_else(|_| UNREADABLE_LABEL.to_string(), |repo| head_label(&repo)),
+        }
+    }
 }
 
 /// Every worktree of the repository that holds `repo`, sorted by path.
@@ -112,19 +137,18 @@ struct Found {
 /// - Every linked worktree, from [`gix::Repository::worktrees`].
 ///
 /// A worktree whose directory does not exist is skipped (git calls it
-/// prunable). So is a worktree whose `gitdir` file gix cannot read, and a
-/// worktree whose admin dir gix cannot open. A `worktrees` directory that
-/// cannot be read hides every linked worktree, and the main worktree stays in
-/// the list. No read fails the whole list.
+/// prunable). So is a worktree whose `gitdir` file gix cannot read. A
+/// `worktrees` directory that cannot be read hides every linked worktree, and
+/// the main worktree stays in the list. No read fails the whole list.
 ///
 /// gix gives the linked worktrees sorted by their admin dir
 /// (`.git/worktrees/<id>`), which is not the order of their paths. The sort
 /// here is by [`WorktreePath`], component by component, as `cwt` sorts by
 /// `PathBuf`.
 ///
-/// Each worktree costs one open of its repository. No HEAD is read here.
-fn enumerate(repo: &gix::Repository) -> Vec<Found> {
-    let mut found: Vec<Found> = main_worktree(repo).into_iter().collect();
+/// It opens the main repository and no linked worktree, and it reads no HEAD.
+fn enumerate(repo: &gix::Repository) -> Vec<Found<'_>> {
+    let mut found: Vec<Found<'_>> = main_worktree(repo).into_iter().collect();
     found.extend(
         repo.worktrees()
             .unwrap_or_default()
@@ -138,25 +162,30 @@ fn enumerate(repo: &gix::Repository) -> Vec<Found> {
 /// The main worktree of the repository that holds `repo`. `None` when the
 /// main repository is bare, when gix cannot open it, or when its directory
 /// does not exist.
-fn main_worktree(repo: &gix::Repository) -> Option<Found> {
+fn main_worktree(repo: &gix::Repository) -> Option<Found<'_>> {
     let main = repo.main_repo().ok().filter(|main| !main.is_bare())?;
     let path = WorktreePath::resolve(main.workdir()?)?;
-    Some(Found { path, repo: main })
+    Some(Found {
+        path,
+        head: Head::Main(Box::new(main)),
+    })
 }
 
 /// The linked worktree that `proxy` names. `None` when gix cannot read its
-/// `gitdir` file, when its directory does not exist, or when gix cannot open
-/// its admin dir.
+/// `gitdir` file, or when its directory does not exist. Its admin dir stays
+/// closed until a label asks for it.
 ///
 /// git writes the `gitdir` file as an absolute path, or, with
 /// `--relative-paths`, as a path relative to the admin dir. gix gives the path
 /// back as it is. The join with the admin dir resolves the relative form. An
 /// absolute path replaces the admin dir in the join, so the absolute form
 /// stays as it is.
-fn linked_worktree(proxy: gix::worktree::Proxy<'_>) -> Option<Found> {
+fn linked_worktree(proxy: gix::worktree::Proxy<'_>) -> Option<Found<'_>> {
     let path = WorktreePath::resolve(&proxy.git_dir().join(proxy.base().ok()?))?;
-    let repo = proxy.into_repo_with_possibly_inaccessible_worktree().ok()?;
-    Some(Found { path, repo })
+    Some(Found {
+        path,
+        head: Head::Linked(proxy),
+    })
 }
 
 /// How many hex digits of the commit the label of a detached HEAD shows.
