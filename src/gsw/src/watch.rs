@@ -1824,7 +1824,19 @@ where
                 state.ui.open_list(list);
             }
         }
-        Event::ListUp | Event::ListDown | Event::ListGo | Event::ListClose => {}
+        // The cursor moves, and nothing else does: no walk and no switch. gsw
+        // walks the new worktree only after Enter.
+        Event::ListUp => {
+            if let Some(list) = state.ui.list_mut() {
+                list.up();
+            }
+        }
+        Event::ListDown => {
+            if let Some(list) = state.ui.list_mut() {
+                list.down();
+            }
+        }
+        Event::ListGo | Event::ListClose => {}
         Event::IssueRequested => {
             // One read of the clock, for both halves of one press. The arming
             // and the message it stands for must end at the same moment, and
