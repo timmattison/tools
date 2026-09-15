@@ -11,8 +11,12 @@
 //! names each command, the name each key falls back on, the line the shell
 //! runs, and the run itself.
 
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
+
 use shellquote::shell_quote;
 
+use crate::push::PushOutcome;
 use crate::shell::ShellCommand;
 
 /// The variable that holds the command `R` runs.
@@ -199,6 +203,56 @@ impl BaseUpdateCommand {
     }
 }
 
+/// Run `command` on a thread of its own and hand the outcome to `on_finish`.
+///
+/// Off the render thread on purpose, as a push is. A rebase runs a pre-push
+/// hook and then a push, which takes minutes, and the watch loop is what keeps
+/// the refresh countdown moving, the ages advancing, and a resize repainting.
+/// To block it for those minutes is to freeze the monitor at the moment the
+/// user is watching it.
+///
+/// Both callbacks run on that thread. The one production caller sends each
+/// line and the outcome down the loop's own channel, so they re-enter the loop
+/// the way every other event does — applied between frames rather than during
+/// one.
+///
+/// Takes the whole [`BaseUpdateCommand`] by value, so the branch the question
+/// named crosses onto the thread with the script and [`run`] can still refuse a
+/// repository that moved on in the meantime.
+pub(crate) fn spawn<L, F>(
+    shell: OsString,
+    command: BaseUpdateCommand,
+    workdir: PathBuf,
+    on_line: L,
+    on_finish: F,
+) where
+    L: Fn(String) + Send + 'static,
+    F: FnOnce(PushOutcome) + Send + 'static,
+{
+    std::thread::spawn(move || on_finish(run(&shell, &command, &workdir, &on_line)));
+}
+
+/// Run `command` in `workdir` to its end, reporting each line as it lands.
+///
+/// The blocking half of [`spawn`], separated so it can be tested against a stub
+/// shell without a thread or a channel in the way.
+///
+/// The outcome is a [`PushOutcome`], which is what lets the row report a rebase
+/// the way it reports a push: both are a command that either worked or wrote a
+/// reason.
+fn run(
+    shell: &OsStr,
+    command: &BaseUpdateCommand,
+    workdir: &Path,
+    on_line: &dyn Fn(String),
+) -> PushOutcome {
+    let _ = (shell, workdir, on_line);
+    PushOutcome {
+        success: true,
+        output: String::new(),
+    }
+}
+
 #[cfg(test)]
 mod script_tests {
     use super::*;
@@ -246,6 +300,119 @@ mod script_tests {
         assert_eq!(
             confirmed(BaseUpdate::Rebase, "grp", "main;touch pwned").script(),
             "grp 'main;touch pwned'",
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod run_tests {
+    use super::*;
+    use crate::shell::stub_shell::StubShell;
+
+    /// The base every fixture here names, which is also the name `grp` and
+    /// `gmp` fall back on.
+    const BASE: &str = "main";
+
+    /// The branch every fixture here was confirmed on.
+    const BRANCH: &str = "issue-12";
+
+    /// A confirmed rebase of [`BRANCH`] onto [`BASE`], running `value`.
+    fn confirmed(value: &str) -> BaseUpdateCommand {
+        BaseUpdateCommand::new(
+            BaseUpdate::Rebase,
+            BRANCH,
+            BASE,
+            ShellCommand::new(Some(value), DEFAULT_REBASE_COMMAND).expect("a name"),
+        )
+    }
+
+    /// A confirmed rebase running the default command.
+    fn default_command() -> BaseUpdateCommand {
+        confirmed(DEFAULT_REBASE_COMMAND)
+    }
+
+    /// [`run`] for a test that does not read what arrived while it ran, which
+    /// is every test here but the ones about the live output.
+    fn run_quiet(shell: &OsStr, command: &BaseUpdateCommand, workdir: &Path) -> PushOutcome {
+        run(shell, command, workdir, &|_| {})
+    }
+
+    /// `path` with every symbolic link in it resolved.
+    ///
+    /// macOS reaches a temporary directory through a symbolic link, so the path
+    /// the shell prints is not the path this test asked for. Both sides are
+    /// resolved before they are compared.
+    fn resolved(path: &Path) -> PathBuf {
+        std::fs::canonicalize(path).expect("resolve the path")
+    }
+
+    #[test]
+    fn the_run_hands_the_whole_script_to_an_interactive_shell() {
+        // The command is a shell function, so only a shell that read the rc
+        // file can find it. The script is the whole line the question
+        // described, base and all.
+        let stub = StubShell::answering(0);
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let _ = run_quiet(
+            stub.as_shell(),
+            &confirmed("grp --fork-point"),
+            workdir.path(),
+        );
+        let runs = stub.runs();
+        assert!(
+            runs.lines().any(|line| line == "-ic"),
+            "the shell must be interactive, or it has no functions: {runs:?}",
+        );
+        assert!(
+            runs.lines().any(|line| line == "grp --fork-point 'main'"),
+            "the shell must be given the script of the confirmation: {runs:?}",
+        );
+    }
+
+    #[test]
+    fn the_run_happens_in_the_work_tree() {
+        // `grp` rebases the repository of the directory it runs in, and watch
+        // mode moves between worktrees of one repository.
+        let stub = StubShell::answering(0);
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let _ = run_quiet(stub.as_shell(), &default_command(), workdir.path());
+        assert_eq!(resolved(&stub.cwd()), resolved(workdir.path()));
+    }
+
+    #[test]
+    fn the_exit_status_of_the_shell_decides_the_outcome() {
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let worked = StubShell::answering(0);
+        assert!(
+            run_quiet(worked.as_shell(), &default_command(), workdir.path()).success,
+            "a command that exits 0 rebased and pushed",
+        );
+        let failed = StubShell::answering(1);
+        assert!(
+            !run_quiet(failed.as_shell(), &default_command(), workdir.path()).success,
+            "a command that exits 1 did not, and the row must say so",
+        );
+    }
+
+    #[test]
+    fn what_the_command_said_reaches_the_outcome() {
+        // `grp` reports a skipped push in its last line, and a rebase that
+        // stops on a conflict says why. Both are the whole reason the user
+        // needs the row.
+        let stub = StubShell::new(
+            "echo 'rebased onto main'\necho 'no upstream - skipping push' >&2\nexit 1",
+        );
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let outcome = run_quiet(stub.as_shell(), &default_command(), workdir.path());
+        assert!(
+            outcome.output.contains("rebased onto main"),
+            "what the command said must reach the outcome: {:?}",
+            outcome.output,
+        );
+        assert!(
+            outcome.output.contains("no upstream - skipping push"),
+            "why it stopped must reach the outcome too: {:?}",
+            outcome.output,
         );
     }
 }
