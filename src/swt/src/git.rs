@@ -359,6 +359,16 @@ mod tests {
         ("a\\b", "a backslash is a path separator on Windows"),
         ("..", "escapes the worktree parent directory"),
         (".", "resolves to the parent directory itself"),
+        (
+            ".hidden",
+            "check-ref-format rule 1: a ref component must not start with '.'",
+        ),
+        ("v1..2", "check-ref-format rule 3: a ref must not contain '..'"),
+        ("a..", "check-ref-format rule 3: a ref must not contain '..'"),
+        (
+            "...x",
+            "check-ref-format rules 1 and 3: a leading '.', and a '..'",
+        ),
         ("../evil", "path traversal"),
         ("-b", "a leading dash is read as a git option"),
         ("-rf", "a leading dash is read as a git option"),

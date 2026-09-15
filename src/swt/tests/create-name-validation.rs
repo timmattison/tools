@@ -24,7 +24,17 @@ const TRAVERSING_NAME: &str = "../evil";
 
 /// The rule quoted back to the user, verbatim, when a name is refused.
 const WORKTREE_NAME_RULE: &str =
-    "allowed: letters, digits, '.', '_' and '-'; must not start with '-', and must not be '.' or '..'";
+    "allowed: letters, digits, '.', '_' and '-'; must not start with '-' or '.', and must not contain '..'";
+
+/// Names built only from allowed characters that git refuses in a branch
+/// (issue #502). A leading `.` breaks rule 1 of `git help check-ref-format`,
+/// and a `..` anywhere breaks rule 3.
+const NAMES_GIT_REFUSES_IN_A_BRANCH: [&str; 4] = [".hidden", "v1..2", "a..", "...x"];
+
+/// The complete stderr of a run that refused `name` for breaking the rule.
+fn refusal(name: &str) -> String {
+    format!("Invalid worktree name {name:?} — {WORKTREE_NAME_RULE}.\n")
+}
 
 /// A name that would escape the worktree parent directory is refused outright,
 /// naming both the offending input and the rule it broke.
@@ -40,9 +50,31 @@ fn create_rejects_a_traversing_name_before_touching_git() {
     );
     assert_eq!(
         stderr,
-        format!("Invalid worktree name {TRAVERSING_NAME:?} — {WORKTREE_NAME_RULE}.\n"),
+        refusal(TRAVERSING_NAME),
         "the rejection should name the input and quote the rule verbatim"
     );
+}
+
+/// A name that git refuses in a branch is refused by swt first, with swt's own
+/// message and the rule that the name broke. Before issue #502, such a name got
+/// to `git worktree add`, and git refused a branch that the user did not type.
+#[test]
+fn create_rejects_names_that_git_refuses_in_a_branch_with_its_own_message() {
+    for name in NAMES_GIT_REFUSES_IN_A_BRANCH {
+        let output = run_swt_outside_a_repository(&["create", name]);
+        let stderr = support::stderr(&output);
+
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "`swt create {name}` should exit 1, stderr was: {stderr}"
+        );
+        assert_eq!(
+            stderr,
+            refusal(name),
+            "`swt create {name}` should be refused by swt's own name check, before any git runs"
+        );
+    }
 }
 
 /// A name that starts with a hyphen is still a name. It is refused for breaking
@@ -61,7 +93,7 @@ fn create_rejects_option_looking_names_with_its_own_message() {
         );
         assert_eq!(
             stderr,
-            format!("Invalid worktree name {name:?} — {WORKTREE_NAME_RULE}.\n"),
+            refusal(name),
             "`swt create {name}` should be refused by swt's own name check"
         );
     }

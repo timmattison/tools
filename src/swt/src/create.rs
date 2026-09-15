@@ -306,10 +306,62 @@ fn report_teardown(path: &Path, branch: &str) {
 mod tests {
     use super::{base36, UniqueToken, WorktreeNaming};
     use crate::git::validate_worktree_name;
+    use std::collections::BTreeSet;
     use std::path::Path;
+    use std::process::Command;
+    use tempfile::TempDir;
 
     /// A repository root for the naming tests.
     const ROOT: &str = "/repos/tools";
+
+    /// One member of each character class that the worktree name rule allows:
+    /// a letter, a digit, and the three punctuation marks.
+    const NAME_ALPHABET: [char; 5] = ['a', '0', '.', '_', '-'];
+
+    /// The length of the longest name in the corpus of the differential test.
+    /// With three characters, each member of [`NAME_ALPHABET`] occurs first,
+    /// last, and between two others, and a ref-format rule can apply at each
+    /// of those positions.
+    const LONGEST_CORPUS_NAME: usize = 3;
+
+    /// The count of names in that corpus: 5 + 25 + 125.
+    const CORPUS_SIZE: usize = 155;
+
+    /// Every name of one to [`LONGEST_CORPUS_NAME`] characters from
+    /// [`NAME_ALPHABET`], the shortest names first.
+    fn name_corpus() -> Vec<String> {
+        let mut corpus = Vec::new();
+        let mut shorter = vec![String::new()];
+        for _ in 0..LONGEST_CORPUS_NAME {
+            let longer: Vec<String> = shorter
+                .iter()
+                .flat_map(|prefix| NAME_ALPHABET.iter().map(move |c| format!("{prefix}{c}")))
+                .collect();
+            corpus.extend(longer.iter().cloned());
+            shorter = longer;
+        }
+        corpus
+    }
+
+    /// Asks git whether it accepts `branch` as the name of a new branch.
+    ///
+    /// `git check-ref-format --branch` and `git worktree add -b` agree on
+    /// every branch that the differential test builds, so git, and not the
+    /// worktree name rule, gives the answer. `dir` is the directory that git
+    /// runs in. The child sheds the inherited git environment, because a
+    /// pre-commit hook exports `GIT_DIR` and `GIT_INDEX_FILE` into the tests
+    /// that it runs.
+    fn git_accepts_branch(dir: &Path, branch: &str) -> bool {
+        let mut command = Command::new("git");
+        gitscratch::shed_inherited_git_environment(&mut command);
+        command
+            .args(["check-ref-format", "--branch", branch])
+            .current_dir(dir)
+            .output()
+            .unwrap_or_else(|err| panic!("could not run git check-ref-format: {err}"))
+            .status
+            .success()
+    }
 
     /// A stand-in token, so the naming tests read as the pure functions of
     /// `(root, name, token)` that they are.
@@ -409,6 +461,48 @@ mod tests {
             "the directory and the branch of one run must be keyed on one token"
         );
         assert_eq!(path_token, TOKEN, "and it must be the token supplied");
+    }
+
+    // Issue #502. The worktree name opens a component of the branch, so every
+    // rule that git applies to a ref component applies to the name. Git is the
+    // oracle here: a test that asks the worktree name rule about itself cannot
+    // find a gap in that rule. The branch comes from `WorktreeNaming::mint`,
+    // the call that `create` makes, so the test stays correct when the format
+    // of the branch changes.
+    #[test]
+    fn git_accepts_the_branch_of_every_name_that_the_rule_accepts() {
+        let corpus = name_corpus();
+        let distinct: BTreeSet<&str> = corpus.iter().map(String::as_str).collect();
+        assert_eq!(
+            distinct.len(),
+            CORPUS_SIZE,
+            "the corpus must hold each name one time"
+        );
+
+        let accepted: Vec<(&String, WorktreeNaming)> = corpus
+            .iter()
+            .filter_map(|raw| {
+                let name = validate_worktree_name(raw)?;
+                Some((raw, WorktreeNaming::mint(Path::new(ROOT), &name)))
+            })
+            .collect();
+        assert!(
+            !accepted.is_empty(),
+            "the rule must accept some names of the corpus, or this test proves nothing"
+        );
+
+        let scratch = TempDir::new().expect("scratch directory for git");
+        let refused: Vec<String> = accepted
+            .iter()
+            .filter(|(_, naming)| !git_accepts_branch(scratch.path(), naming.branch()))
+            .map(|(raw, naming)| format!("{raw:?} gives {:?}", naming.branch()))
+            .collect();
+        assert!(
+            refused.is_empty(),
+            "the worktree name rule accepts {} names whose branch git refuses:\n{}",
+            refused.len(),
+            refused.join("\n")
+        );
     }
 
     // Two `swt create <same-name>` runs differ only in their token, so the token
