@@ -150,12 +150,6 @@ fn spawn_create(repo: &TestRepo, name: &str) -> Child {
         .expect("failed to spawn swt create")
 }
 
-/// Sorted names of everything sitting beside the repository, so an orphaned
-/// worktree cannot hide by being merely un-asserted-about.
-fn beside_the_repo(repo: &TestRepo) -> Vec<String> {
-    entry_names(repo.siblings())
-}
-
 // The whole point of the command: a worktree branched from a verified HEAD, and
 // its path on stdout with nothing else beside it — callers capture stdout, so
 // anything chatty there is a bug, not noise.
@@ -376,7 +370,7 @@ fn a_parent_on_a_detached_head_is_refused_before_anything_exists() {
         "a refused create prints no path for a caller to capture"
     );
     assert_eq!(
-        beside_the_repo(&repo),
+        repo.entries_beside(),
         vec!["repo".to_string()],
         "a refused create must make no directory: {stderr}"
     );
@@ -573,7 +567,7 @@ fn a_red_check_tears_the_worktree_and_the_branch_down_and_says_so() {
         "a cleanup that happened should be reported: {stderr}"
     );
     assert_eq!(
-        beside_the_repo(&repo),
+        repo.entries_beside(),
         vec!["repo".to_string()],
         "nothing at all may be left beside the repository: {stderr}"
     );

@@ -342,6 +342,13 @@ impl TestRepo {
         &self.siblings
     }
 
+    /// The sorted names of every entry beside the repository. A test compares
+    /// the whole list, so an orphaned worktree cannot hide because no assertion
+    /// names it.
+    pub fn entries_beside(&self) -> Vec<String> {
+        entry_names(&self.siblings)
+    }
+
     /// Names a process-unique path beside the repository. Nothing is created.
     pub fn sibling(&self, label: &str) -> PathBuf {
         self.siblings.join(unique(label))

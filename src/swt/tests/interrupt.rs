@@ -101,23 +101,6 @@ fn scratch() -> TempDir {
         .expect("scratch temp dir")
 }
 
-/// Sorted names of everything sitting beside a fixture repository, so an
-/// orphaned worktree cannot hide by being merely un-asserted-about.
-fn beside_the_repo(repo: &TestRepo) -> Vec<String> {
-    let mut entries: Vec<String> = fs::read_dir(repo.siblings())
-        .expect("the fixture's sibling directory should be readable")
-        .map(|entry| {
-            entry
-                .expect("sibling directory entry")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect();
-    entries.sort();
-    entries
-}
-
 /// A PATH-shadowing `git` that announces `swt`'s teardown and then holds its
 /// first command open.
 ///
@@ -351,7 +334,7 @@ fn interrupted_create_leaves_nothing_behind(signal: c_int, expected_status: i32)
         "signal {signal} left an orphaned branch:\n{stderr}"
     );
     assert_eq!(
-        beside_the_repo(&repo),
+        repo.entries_beside(),
         vec!["repo".to_string()],
         "signal {signal} left something beside the repository:\n{stderr}"
     );
