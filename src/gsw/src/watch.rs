@@ -30,6 +30,7 @@ use crate::conflicts::ConflictsWorker;
 use crate::push::{PushCommand, PushUi};
 use crate::render::Snapshot;
 use crate::repo::RepoHandle;
+use crate::worktrees::{WorktreeEntry, WorktreePath};
 use crate::{collect_snapshot, render_frame, FrameTiming, Render, RenderConfig};
 use termwindow::{
     effective_terminal_height, effective_terminal_width, DEFAULT_TERMINAL_HEIGHT,
@@ -662,6 +663,13 @@ enum Event {
     /// screen and does nothing otherwise, which is what keeps a push error up
     /// until the user has actually looked at the screen.
     Dismiss,
+    /// The user asked to go to the home worktree (Up): the worktree where gsw
+    /// started.
+    GoHome,
+    /// The user asked to go to the previous worktree in path order (Left).
+    GoPrevious,
+    /// The user asked to go to the next worktree in path order (Right).
+    GoNext,
     /// The user asked for the issue of the branch (`G`).
     ///
     /// Only [`classify_input`] makes one, and it makes one only where the
@@ -674,7 +682,13 @@ enum Event {
     /// the key stays unbound and silent.
     IssueCommandFound(crate::issue::IssueCommand),
     /// A run of the issue command has finished, either way.
-    IssueFinished(crate::issue::IssueOutcome),
+    IssueFinished {
+        /// The generation that [`LoopHooks::start_issue`] was given for this
+        /// run: the generation of the worktree where the run started.
+        generation: Generation,
+        /// What the run did.
+        outcome: crate::issue::IssueOutcome,
+    },
     /// The user asked to measure a rebase and a merge against the default
     /// branch (`m`).
     ///
@@ -687,13 +701,25 @@ enum Event {
     /// Sent before the first replay starts. A run that is refused, or that
     /// finds HEAD on the default branch, starts no replay and sends none of
     /// these, because its outcome follows at once.
-    ConflictsStarted(String),
+    ConflictsStarted {
+        /// The generation that [`LoopHooks::start_conflicts`] was given for
+        /// this run: the generation of the worktree where the run started.
+        generation: Generation,
+        /// The branch the run measures against.
+        branch: String,
+    },
     /// A run of `m` has ended, and this is what it found.
     ///
     /// Always arrives after the [`Event::ConflictsStarted`] of the same run,
     /// because one thread sends both on this one channel. A run that a quit
     /// abandoned sends none, because nobody reads it.
-    ConflictsFinished(crate::conflicts::ConflictsOutcome),
+    ConflictsFinished {
+        /// The generation that [`LoopHooks::start_conflicts`] was given for
+        /// this run: the generation of the worktree where the run started.
+        generation: Generation,
+        /// What the run found.
+        outcome: crate::conflicts::ConflictsOutcome,
+    },
 }
 
 /// What keys mean right now.
@@ -941,6 +967,30 @@ impl ConflictsRun {
     }
 }
 
+/// How many times the loop has switched the worktree it watches: a stamp on
+/// the work that the loop starts.
+///
+/// A run of `G` or `m` continues after a switch, in the worktree where it
+/// started, so its outcome can arrive when the frame shows another worktree.
+/// A line under the frame must describe the worktree in the frame. So each run
+/// keeps the generation of its press, its events carry that generation back,
+/// and the loop compares it with its own. An outcome with an old generation
+/// frees its key and posts nothing.
+///
+/// A push carries no generation, because no switch happens while a push runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Generation(u64);
+
+impl Generation {
+    /// The generation after one more switch.
+    ///
+    /// A plain addition. A `u64` does not overflow in the life of a process:
+    /// at one switch per microsecond, that takes more than 500 000 years.
+    fn next(self) -> Self {
+        Self(self.0 + 1)
+    }
+}
+
 /// The git work one watch-mode refresh performs: re-open the repository so
 /// configuration written since the last refresh takes effect, rebuild the
 /// watcher's ignore matcher from that fresh handle, then collect the snapshot.
@@ -1015,6 +1065,10 @@ pub(crate) fn walk(
 /// across a call that never returns until the user quits, for no gain — nothing
 /// is left for it to do with the handle afterward.
 pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
+    // Before the guard takes the screen, so a refusal prints on the screen the
+    // user started from, and not on the alternate screen that the guard
+    // clears when it goes.
+    let home = resolve_home(&handle)?;
     let _guard = TerminalGuard::enter()?;
 
     // Seed the cache with one git walk and paint the first frame at offset 0,
@@ -1060,11 +1114,9 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     let (tx, rx) = mpsc::channel();
     spawn_event_reader(tx.clone());
 
-    // A push runs `git` with the work tree as its cwd, so the path is captured
-    // before the handle is borrowed for the rest of watch mode. The push thread
-    // reports back on the loop's own channel, so its outcome re-enters the loop
-    // exactly like a filesystem event — applied between frames, never during one.
-    let workdir = handle.repo().workdir().map(Path::to_path_buf);
+    // The push thread reports back on the loop's own channel, so its outcome
+    // re-enters the loop exactly like a filesystem event — applied between
+    // frames, never during one.
     let push_tx = tx.clone();
 
     // The shell the issue key uses, resolved once. The probe asks it whether
@@ -1106,9 +1158,13 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             schedule,
             ui: PushUi::new(cfg.truecolor),
             session,
+            home,
         },
         LoopHooks {
-            collect: || walk(&mut handle, &ignore, cfg),
+            // The loop passes the worktree on the screen. The `switch` below
+            // refuses every switch, so that is always the home worktree, and
+            // the walk reads it through the handle that `main` opened on it.
+            collect: |_current: &WorktreePath| walk(&mut handle, &ignore, cfg),
             render: |snap: &Snapshot, dims: Dimensions, timing: FrameTiming| {
                 render_frame(snap, cfg, dims, timing)
             },
@@ -1116,58 +1172,67 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             paint: |output: &str| paint_output(output),
             clock: Instant::now,
             next_tick: |freshest: Option<Duration>| freshest.and_then(next_tick),
-            start_issue: |command: crate::issue::IssueCommand| {
-                // No work tree means no repository to ask about. The same
-                // `Option` the push honors, honored here.
-                if let Some(workdir) = workdir.clone() {
-                    let finish_tx = issue_tx.clone();
-                    let shell = shell.clone();
-                    thread::spawn(move || {
-                        let outcome = crate::issue::run(&shell, &command, &workdir);
-                        let _ = finish_tx.send(Event::IssueFinished(outcome));
+            start_issue: |command: crate::issue::IssueCommand,
+                          current: &WorktreePath,
+                          generation: Generation| {
+                // The run keeps the generation of its press and sends it back
+                // with the outcome, so the loop knows an outcome that arrives
+                // after a switch.
+                let workdir = current.as_path().to_path_buf();
+                let finish_tx = issue_tx.clone();
+                let shell = shell.clone();
+                thread::spawn(move || {
+                    let outcome = crate::issue::run(&shell, &command, &workdir);
+                    let _ = finish_tx.send(Event::IssueFinished {
+                        generation,
+                        outcome,
                     });
-                }
+                });
             },
-            start_push: |command: PushCommand| {
-                // No work tree means nothing to push from. `RepoHandle` rejects
-                // a bare repository at discovery, so watch mode never gets here
-                // without one — this is the type's `Option` being honored, not
-                // a case the user can reach.
-                if let Some(workdir) = workdir.clone() {
-                    // Two senders on the one channel, so a line and the
-                    // outcome re-enter the loop the same way every other event
-                    // does — applied between frames rather than during one.
-                    let line_tx = push_tx.clone();
-                    let finish_tx = push_tx.clone();
-                    crate::push::spawn(
-                        command,
-                        workdir,
-                        move |line| {
-                            let _ = line_tx.send(Event::PushOutput(line));
-                        },
-                        move |outcome| {
-                            let _ = finish_tx.send(Event::PushFinished(outcome));
-                        },
-                    );
-                }
+            start_push: |command: PushCommand, current: &WorktreePath| {
+                // Two senders on the one channel, so a line and the outcome
+                // re-enter the loop the same way every other event does —
+                // applied between frames rather than during one.
+                let line_tx = push_tx.clone();
+                let finish_tx = push_tx.clone();
+                crate::push::spawn(
+                    command,
+                    current.as_path().to_path_buf(),
+                    move |line| {
+                        let _ = line_tx.send(Event::PushOutput(line));
+                    },
+                    move |outcome| {
+                        let _ = finish_tx.send(Event::PushFinished(outcome));
+                    },
+                );
             },
-            start_conflicts: || {
-                // No work tree means no HEAD to measure. The same `Option` the
-                // push honors, honored here.
-                if let Some(workdir) = workdir.clone() {
-                    let started_tx = conflicts_tx.clone();
-                    let finish_tx = conflicts_tx.clone();
-                    conflicts.start(
-                        workdir,
-                        move |branch| {
-                            let _ = started_tx.send(Event::ConflictsStarted(branch));
-                        },
-                        move |outcome| {
-                            let _ = finish_tx.send(Event::ConflictsFinished(outcome));
-                        },
-                    );
-                }
+            start_conflicts: |current: &WorktreePath, generation: Generation| {
+                // Both events of the run carry the generation of its press, as
+                // the outcome of the issue key does.
+                let started_tx = conflicts_tx.clone();
+                let finish_tx = conflicts_tx.clone();
+                conflicts.start(
+                    current.as_path().to_path_buf(),
+                    move |branch| {
+                        let _ = started_tx.send(Event::ConflictsStarted { generation, branch });
+                    },
+                    move |outcome| {
+                        let _ = finish_tx.send(Event::ConflictsFinished {
+                            generation,
+                            outcome,
+                        });
+                    },
+                );
             },
+            // No worktree to go to. This loop keeps one repository handle and
+            // one filesystem watcher, and both are on the home worktree. So
+            // Left and Right find no target in this empty list, and do
+            // nothing.
+            worktrees: Vec::new,
+            // Refuses with a reason, and nothing changes. No key reaches it:
+            // Up on the home worktree does nothing, and Left and Right find no
+            // target in the empty list above.
+            switch: |_target: &WorktreePath| Err(ONE_WORKTREE.to_string()),
         },
     );
 
@@ -1182,6 +1247,37 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     });
 
     result
+}
+
+/// Why watch mode does not start: no directory is at the root of the work tree
+/// that `main` opened. The directory went away between the open and the start
+/// of watch mode.
+const HOME_UNRESOLVED: &str = "gsw cannot resolve the work tree it started in";
+
+/// Why watch mode refuses to switch the worktree it watches: it keeps one
+/// repository handle and one filesystem watcher, and both are on the home
+/// worktree.
+const ONE_WORKTREE: &str = "gsw watches the worktree it started in, and no other";
+
+/// The home worktree: the root of the work tree that `handle` opened, in the
+/// one spelling that every comparison of the loop uses.
+///
+/// The loop compares the worktree on the screen with the paths of the list,
+/// and [`WorktreePath::resolve`] is what makes two spellings of one directory
+/// compare equal.
+///
+/// # Errors
+///
+/// Fails with [`HOME_UNRESOLVED`] and the path when no directory is at the root
+/// any more. It fails with [`HOME_UNRESOLVED`] alone for a repository with no
+/// work tree, which [`RepoHandle`] refuses at discovery, so watch mode never
+/// holds one.
+fn resolve_home(handle: &RepoHandle) -> Result<WorktreePath> {
+    let Some(root) = handle.repo().workdir() else {
+        anyhow::bail!(HOME_UNRESOLVED);
+    };
+    WorktreePath::resolve(root)
+        .ok_or_else(|| anyhow::anyhow!("{HOME_UNRESOLVED}: {}", root.display()))
 }
 
 /// Ask the shell, once, whether the issue command exists, and report the
@@ -1362,6 +1458,38 @@ struct LoopStart {
     /// Where the person who reads this screen sits, so the `G` key knows
     /// whether a browser opened here reaches anybody.
     session: crate::remote::Session,
+    /// The worktree where the user started gsw, in the one spelling that
+    /// every comparison of the loop uses. The loop starts on it, and Up goes
+    /// back to it.
+    home: WorktreePath,
+}
+
+/// Everything the loop changes while it runs.
+///
+/// One value, because the loop receives events at three points and routes each
+/// of them through the one function [`absorb`], and because a switch of the
+/// worktree changes most of this in one step: the cache takes the snapshot of
+/// the new worktree, the schedule starts the refresh clock again, the row under
+/// the frame empties, and the `G` key loses its arming. An argument for each
+/// part would give [`absorb`] more arguments than a reader can hold.
+struct LoopState {
+    /// The snapshot a re-render can use without walking git again.
+    cache: SnapshotCache,
+    /// The walk schedule, anchored to the last walk.
+    schedule: WalkSchedule,
+    /// Everything under the frame, and the input mode that goes with it.
+    ui: PushUi,
+    /// The state of the `G` key.
+    issue: IssueRun,
+    /// The state of the `m` key.
+    conflicts: ConflictsRun,
+    /// The worktree where the user started gsw.
+    home: WorktreePath,
+    /// The worktree that the frame shows. The walk, `p`, `G`, and `m` act on
+    /// it. It starts at [`LoopState::home`].
+    current: WorktreePath,
+    /// How many switches the loop has made. See [`Generation`].
+    generation: Generation,
 }
 
 /// The side-effecting hooks the watch loop drives, bundled so the loop stays one
@@ -1369,9 +1497,21 @@ struct LoopStart {
 /// these to the real git collect, render, terminal-size query, painter, and
 /// clock; tests inject counters and a controllable clock to assert which hooks
 /// ran — and with what age offset — without a TTY or real time.
-struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIssue, StartConflicts>
-{
-    /// Walk the repo into a fresh [`Snapshot`] (the expensive git work).
+struct LoopHooks<
+    Collect,
+    RenderFn,
+    Dims,
+    Paint,
+    Clock,
+    Tick,
+    StartPush,
+    StartIssue,
+    StartConflicts,
+    Worktrees,
+    Switch,
+> {
+    /// Walk the worktree that the loop passes, which is the worktree the frame
+    /// shows, into a fresh [`Snapshot`] (the expensive git work).
     collect: Collect,
     /// Render a snapshot at the given dimensions and timing.
     render: RenderFn,
@@ -1384,25 +1524,44 @@ struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIs
     /// Map the freshest displayed age to the decay-tick interval (`None` = off).
     next_tick: Tick,
     /// Start a confirmed push, given the [`PushCommand`] the confirmation
-    /// described — the `git` arguments and the branch they were written for.
-    /// Production spawns a thread that runs the push and sends the outcome back
-    /// as [`Event::PushFinished`]; tests record the command and decide for
-    /// themselves when — or whether — the outcome arrives.
+    /// described — the `git` arguments and the branch they were written for —
+    /// and the worktree to push from, which is the worktree on the screen at
+    /// the press. Production spawns a thread that runs the push and sends the
+    /// outcome back as [`Event::PushFinished`]; tests record the command and
+    /// decide for themselves when — or whether — the outcome arrives.
     start_push: StartPush,
-    /// Start a run of the issue command. Production spawns a thread that runs
-    /// it and sends the outcome back as [`Event::IssueFinished`]; tests record
-    /// the command and decide for themselves when the outcome arrives.
+    /// Start a run of the issue command in the worktree on the screen at the
+    /// press. Production spawns a thread that runs it and sends the outcome
+    /// back as [`Event::IssueFinished`], with the [`Generation`] it was given;
+    /// tests record the command and decide for themselves when the outcome
+    /// arrives.
     start_issue: StartIssue,
-    /// Start a measurement of a rebase and a merge against the default branch.
-    /// Production starts it on a thread of its own, which sends the branch
-    /// back as [`Event::ConflictsStarted`] and the outcome as
-    /// [`Event::ConflictsFinished`]. Tests count the runs and decide for
-    /// themselves when, or whether, those events arrive.
+    /// Start a measurement of a rebase and a merge against the default branch,
+    /// in the worktree on the screen at the press. Production starts it on a
+    /// thread of its own, which sends the branch back as
+    /// [`Event::ConflictsStarted`] and the outcome as
+    /// [`Event::ConflictsFinished`], each with the [`Generation`] it was
+    /// given. Tests count the runs and decide for themselves when, or whether,
+    /// those events arrive.
     ///
-    /// It takes no argument, because the thread finds the branch itself. The
+    /// It takes no branch, because the thread finds the branch itself. The
     /// loop never waits for the run, because a rebase replay of a long branch
     /// can take many seconds.
     start_conflicts: StartConflicts,
+    /// Read the worktrees of the repository again, sorted by path, as
+    /// [`crate::worktrees::list_worktrees`] gives them.
+    ///
+    /// Left and Right call it at each press, because `nwt` and `swt` add and
+    /// remove worktrees while gsw runs, so a list read once at start is soon
+    /// wrong.
+    worktrees: Worktrees,
+    /// Open the worktree at the path, start its watcher, and walk it, as one
+    /// step.
+    ///
+    /// It commits only on `Ok`, and the snapshot it gives is the first frame
+    /// of that worktree. `Err` carries the reason for a fading line, and then
+    /// nothing changes: the loop stays on the worktree it shows.
+    switch: Switch,
 }
 
 /// The triggers one wake collected, before the render decides what to do with
@@ -1456,16 +1615,27 @@ enum Flow {
 /// when they pressed the key — the loop re-measures after this drain, not
 /// during it.
 ///
-/// `cache` comes whole, and not as its snapshot and its pane, because the two
-/// always come from the one cache. `issue` and `conflicts` are the state of the
-/// two keys that start work off this thread, one run of each at a time.
-fn absorb<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIssue, StartConflicts>(
+/// `state` is everything the loop changes, in one value. Its cache comes whole,
+/// and not as its snapshot and its pane, because the two always come from the
+/// one cache. Its `issue` and `conflicts` are the state of the two keys that
+/// start work off this thread, one run of each at a time. Its current worktree
+/// is where the push, the issue key, and `m` do their work.
+fn absorb<
+    Collect,
+    RenderFn,
+    Dims,
+    Paint,
+    Clock,
+    Tick,
+    StartPush,
+    StartIssue,
+    StartConflicts,
+    Worktrees,
+    Switch,
+>(
     event: Event,
     pending: &mut Pending,
-    ui: &mut PushUi,
-    issue: &mut IssueRun,
-    conflicts: &mut ConflictsRun,
-    cache: &SnapshotCache,
+    state: &mut LoopState,
     hooks: &mut LoopHooks<
         Collect,
         RenderFn,
@@ -1476,13 +1646,17 @@ fn absorb<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIssue, St
         StartPush,
         StartIssue,
         StartConflicts,
+        Worktrees,
+        Switch,
     >,
 ) -> Flow
 where
     Clock: Fn() -> Instant,
-    StartPush: FnMut(PushCommand),
-    StartIssue: FnMut(crate::issue::IssueCommand),
-    StartConflicts: FnMut(),
+    StartPush: FnMut(PushCommand, &WorktreePath),
+    StartIssue: FnMut(crate::issue::IssueCommand, &WorktreePath, Generation),
+    StartConflicts: FnMut(&WorktreePath, Generation),
+    Worktrees: FnMut() -> Vec<WorktreeEntry>,
+    Switch: FnMut(&WorktreePath) -> Result<Snapshot, String>,
 {
     let clock = &hooks.clock;
     match event {
@@ -1491,27 +1665,33 @@ where
         Event::Resize => pending.resize = true,
         Event::ForceRefresh => pending.force = true,
         Event::Key(key) => {
-            if let Some(action) = classify_input(key, ui.mode(), issue.key()) {
+            if let Some(action) = classify_input(key, state.ui.mode(), state.issue.key()) {
                 // Every key but `G` takes the arming away. The message that
                 // asks for the second press is the armed state, and this key
                 // is not that press.
                 if !matches!(action, Event::IssueRequested) {
-                    issue.disarm();
+                    state.issue.disarm();
                 }
-                return absorb(action, pending, ui, issue, conflicts, cache, hooks);
+                return absorb(action, pending, state, hooks);
             }
         }
-        Event::PushRequested => ui.request(&cache.snapshot, cache.dims, clock()),
+        Event::PushRequested => {
+            state
+                .ui
+                .request(&state.cache.snapshot, state.cache.dims, clock());
+        }
         // `confirm` yields the command only once, so a second `y` that raced
         // the mode change starts nothing.
         Event::PushConfirmed => {
-            if let Some(command) = ui.confirm(clock()) {
-                (hooks.start_push)(command);
+            if let Some(command) = state.ui.confirm(clock()) {
+                (hooks.start_push)(command, &state.current);
             }
         }
-        Event::PushOutput(line) => ui.output_line(line),
-        Event::PushCancelled => ui.cancel(),
-        Event::Dismiss => ui.dismiss(),
+        Event::PushOutput(line) => state.ui.output_line(line),
+        Event::PushCancelled => state.ui.cancel(),
+        Event::Dismiss => state.ui.dismiss(),
+        // No key in the key table gives these yet.
+        Event::GoHome | Event::GoPrevious | Event::GoNext => {}
         Event::IssueRequested => {
             // One read of the clock, for both halves of one press. The arming
             // and the message it stands for must end at the same moment, and
@@ -1521,53 +1701,57 @@ where
             // it runs only where the message went straight onto the row, so
             // `now` is the instant the message got there.
             let now = clock();
-            match issue.press(now) {
-                IssuePress::Run(command) => (hooks.start_issue)(command),
+            match state.issue.press(now) {
+                IssuePress::Run(command) => {
+                    (hooks.start_issue)(command, &state.current, state.generation);
+                }
                 // The row arms the key, and not the press. A question or a
                 // push in flight owns the row, and a notice that arrives then
                 // waits in the queue — nobody has read it, so a second press
                 // against it would run the command with no warning ever seen.
                 IssuePress::Ask(message) => {
-                    if ui.post_notice(message, now) == crate::push::Posted::OnRow {
-                        issue.arm(now);
+                    if state.ui.post_notice(message, now) == crate::push::Posted::OnRow {
+                        state.issue.arm(now);
                     }
                 }
                 IssuePress::Nothing => {}
             }
         }
-        Event::IssueCommandFound(command) => issue.found(command),
+        Event::IssueCommandFound(command) => state.issue.found(command),
         // The check and the start are one step on the thread of the loop, so
         // a burst of presses starts one run. See [`ConflictsRun`].
-        Event::ConflictsRequested => match conflicts.press() {
-            ConflictsPress::Start => (hooks.start_conflicts)(),
+        Event::ConflictsRequested => match state.conflicts.press() {
+            ConflictsPress::Start => (hooks.start_conflicts)(&state.current, state.generation),
             ConflictsPress::Nothing => {}
         },
         // A busy row drops the notice and does not hold it. A held notice
         // reaches the row after the outcome, and says that a run is in flight
         // when none is. See [`PushUi::post_progress`].
-        Event::ConflictsStarted(branch) => {
-            ui.post_progress(crate::conflicts::running_notice(&branch));
+        Event::ConflictsStarted { branch, .. } => {
+            state
+                .ui
+                .post_progress(crate::conflicts::running_notice(&branch));
         }
-        Event::ConflictsFinished(outcome) => {
-            conflicts.finished();
+        Event::ConflictsFinished { outcome, .. } => {
+            state.conflicts.finished();
             // The outcome is gsw's report about a key the user pressed, so it
             // fades. A busy row holds it until the row is free, as it holds
             // every report. The answer goes unread, because no state here
             // stands on where the line landed.
-            let _ = ui.post_notice(outcome.line(), clock());
+            let _ = state.ui.post_notice(outcome.line(), clock());
         }
-        Event::IssueFinished(outcome) => {
-            issue.finished();
+        Event::IssueFinished { outcome, .. } => {
+            state.issue.finished();
             // A run that worked says nothing: the browser is the answer. A run
             // that failed says why, in the words of another program, so it
             // waits for a key the way git's error text does.
             if let Some(message) = outcome.message() {
-                ui.post_error(message.to_string());
+                state.ui.post_error(message.to_string());
             }
         }
         Event::PushFinished(outcome) => {
             let succeeded = outcome.success;
-            ui.finished(outcome, clock());
+            state.ui.finished(outcome, clock());
             // A successful push moved the upstream, so the header's arrows and
             // tracking segment are stale the moment it lands — walk now rather
             // than leaving a wrong count on screen until the next refresh. A
@@ -1637,7 +1821,19 @@ where
 /// to zero. The accepted cost: a repository deleted for good leaves a frozen
 /// (but visibly aging) frame until the user quits. That is the right failure for
 /// a monitor — a wrong-but-labeled-old screen beats no screen.
-fn event_loop<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIssue, StartConflicts>(
+fn event_loop<
+    Collect,
+    RenderFn,
+    Dims,
+    Paint,
+    Clock,
+    Tick,
+    StartPush,
+    StartIssue,
+    StartConflicts,
+    Worktrees,
+    Switch,
+>(
     rx: &Receiver<Event>,
     debounce: Duration,
     displayed: &mut String,
@@ -1652,32 +1848,46 @@ fn event_loop<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIssue
         StartPush,
         StartIssue,
         StartConflicts,
+        Worktrees,
+        Switch,
     >,
 ) -> Result<()>
 where
-    Collect: FnMut() -> Result<Snapshot>,
+    Collect: FnMut(&WorktreePath) -> Result<Snapshot>,
     RenderFn: FnMut(&Snapshot, Dimensions, FrameTiming) -> Render,
     Dims: Fn() -> Dimensions,
     Paint: FnMut(&str) -> Result<()>,
     Clock: Fn() -> Instant,
     Tick: Fn(Option<Duration>) -> Option<Duration>,
-    StartPush: FnMut(PushCommand),
-    StartIssue: FnMut(crate::issue::IssueCommand),
-    StartConflicts: FnMut(),
+    StartPush: FnMut(PushCommand, &WorktreePath),
+    StartIssue: FnMut(crate::issue::IssueCommand, &WorktreePath, Generation),
+    StartConflicts: FnMut(&WorktreePath, Generation),
+    Worktrees: FnMut() -> Vec<WorktreeEntry>,
+    Switch: FnMut(&WorktreePath) -> Result<Snapshot, String>,
 {
     let LoopStart {
-        mut cache,
+        cache,
         mut freshest,
-        mut schedule,
-        mut ui,
+        schedule,
+        ui,
         session,
+        home,
     } = start;
-    // The probe answers on the loop's own channel, so the key is unbound until
-    // it does and the loop never waits for it.
-    let mut issue = IssueRun::new(session);
-    // The loop owns the state of `m`, and the thread that measures never
-    // touches it. So the one-run rule needs no lock.
-    let mut conflicts = ConflictsRun::new();
+    let mut state = LoopState {
+        cache,
+        schedule,
+        ui,
+        // The probe answers on the loop's own channel, so the key is unbound
+        // until it does and the loop never waits for it.
+        issue: IssueRun::new(session),
+        // The loop owns the state of `m`, and the thread that measures never
+        // touches it. So the one-run rule needs no lock.
+        conflicts: ConflictsRun::new(),
+        // The loop starts on the worktree where the user started gsw.
+        current: home.clone(),
+        home,
+        generation: Generation::default(),
+    };
     loop {
         // Wait for the first event, or — when the decay timer is enabled — wake
         // after `interval` of quiet for a tick.
@@ -1690,28 +1900,20 @@ where
         // and — while a countdown is on screen — the cadence that countdown
         // needs to keep moving. The clock is read only when a walk is actually
         // owed.
-        let walk_wait = schedule
+        let walk_wait = state
+            .schedule
             .next_walk_at()
             .map(|at| at.saturating_duration_since((hooks.clock)()));
         let wait = wait_window(&[
             (hooks.next_tick)(freshest),
             walk_wait,
-            schedule.interval.map(|_| CLOCK_CADENCE),
-            ui.next_tick(),
+            state.schedule.interval.map(|_| CLOCK_CADENCE),
+            state.ui.next_tick(),
         ]);
         let woke_for_timeout = match wait {
             Some(interval) => match rx.recv_timeout(interval) {
                 Ok(event) => {
-                    if absorb(
-                        event,
-                        &mut pending,
-                        &mut ui,
-                        &mut issue,
-                        &mut conflicts,
-                        &cache,
-                        &mut hooks,
-                    ) == Flow::Quit
-                    {
+                    if absorb(event, &mut pending, &mut state, &mut hooks) == Flow::Quit {
                         break;
                     }
                     false
@@ -1721,16 +1923,7 @@ where
             },
             None => match rx.recv() {
                 Ok(event) => {
-                    if absorb(
-                        event,
-                        &mut pending,
-                        &mut ui,
-                        &mut issue,
-                        &mut conflicts,
-                        &cache,
-                        &mut hooks,
-                    ) == Flow::Quit
-                    {
+                    if absorb(event, &mut pending, &mut state, &mut hooks) == Flow::Quit {
                         break;
                     }
                     false
@@ -1757,16 +1950,7 @@ where
                     Ok(event) => {
                         // Asked before `absorb`, which takes the event by value.
                         let streamed = matches!(event, Event::PushOutput(_));
-                        if absorb(
-                            event,
-                            &mut pending,
-                            &mut ui,
-                            &mut issue,
-                            &mut conflicts,
-                            &cache,
-                            &mut hooks,
-                        ) == Flow::Quit
-                        {
+                        if absorb(event, &mut pending, &mut state, &mut hooks) == Flow::Quit {
                             // Unlike the first wake, a quit that arrives inside
                             // the drain still paints: the events ahead of it in
                             // this burst have already been applied, and the
@@ -1810,17 +1994,17 @@ where
         let walk_now = if saw_force {
             // Manual refresh (`r`): lift the cooldown gate and walk now. The walk
             // branch re-measures cost and re-arms the throttle from it.
-            schedule.force();
+            state.schedule.force();
             true
         } else if saw_fs {
-            matches!(schedule.on_change(now), Walk::Now)
+            matches!(state.schedule.on_change(now), Walk::Now)
         } else if woke_for_timeout {
             // Only a walk the schedule OWES fires here — a deferred change's
             // coalesced walk, or a timed refresh — and only once it has actually
             // fallen due: a decay tick or a clock tick that fires ahead of it (a
             // shorter wait than the walk deadline) re-renders from cache without
             // walking, so Part A and Part B compose.
-            matches!(schedule.next_walk_at(), Some(due) if now >= due)
+            matches!(state.schedule.next_walk_at(), Some(due) if now >= due)
         } else {
             false
         };
@@ -1829,7 +2013,7 @@ where
         // before: a walk and a resize. Hoisted out of the branches so the frame
         // height below is computed from dimensions that are already current.
         if walk_now || saw_resize {
-            cache.dims = (hooks.dimensions)();
+            state.cache.dims = (hooks.dimensions)();
         }
         // What the push overlay will paint under the frame, and how tall the
         // frame is left — one call, because they are one division of the pane
@@ -1846,20 +2030,20 @@ where
         // rather than left answerable by an Enter nobody was asked for. That is
         // the backstop only. A `p` pressed in a pane that was already too short
         // raises no question in the first place — `absorb` settles that with
-        // `cache.dims`, because no render runs between two keys of one burst —
+        // `state.cache.dims`, because no render runs between two keys of one burst —
         // so what this catches is the pane that shrank under a question that
         // did fit when it was asked. It runs after this wake's events have been
         // absorbed and before the next wake reads one, so the key a user
         // presses in reaction to what this paints is classified against the
         // mode this pane actually showed them.
-        let overlay = ui.overlay(cache.dims, now);
+        let overlay = state.ui.overlay(state.cache.dims, now);
         let frame_dims = Dimensions {
             height: overlay.frame_rows(),
-            ..cache.dims
+            ..state.cache.dims
         };
 
         let render = if walk_now {
-            let collected = (hooks.collect)();
+            let collected = (hooks.collect)(&state.current);
             // Measure the walk's wall-clock cost around collect and feed it to
             // the throttle, which arms the next cooldown (= 100·cost) from it.
             // Deliberately outside the match: a *failed* walk still paid for a
@@ -1867,18 +2051,18 @@ where
             // every walk, so gating the retries on the same duty-cycle budget is
             // what keeps a permanently-deleted repo from pinning a core.
             let cost = (hooks.clock)().saturating_duration_since(now);
-            schedule.record(now, cost);
+            state.schedule.record(now, cost);
             match collected {
                 Ok(snapshot) => {
                     // Re-seed the collection time to the walk's start so a later
                     // decay tick or resize advances ages from *this* walk, not
                     // the previous one.
-                    cache.collected_at = now;
-                    cache.snapshot = snapshot;
+                    state.cache.collected_at = now;
+                    state.cache.snapshot = snapshot;
                     (hooks.render)(
-                        &cache.snapshot,
+                        &state.cache.snapshot,
                         frame_dims,
-                        timing(Duration::ZERO, &schedule, now),
+                        timing(Duration::ZERO, &state.schedule, now),
                     )
                 }
                 // A walk can fail for reasons that are none of the user's
@@ -1893,29 +2077,29 @@ where
                 // freshness exactly when it has none. The frame therefore keeps
                 // aging truthfully while the repository is unreadable.
                 Err(_) => {
-                    let age_offset = now.saturating_duration_since(cache.collected_at);
+                    let age_offset = now.saturating_duration_since(state.cache.collected_at);
                     (hooks.render)(
-                        &cache.snapshot,
+                        &state.cache.snapshot,
                         frame_dims,
-                        timing(age_offset, &schedule, now),
+                        timing(age_offset, &state.schedule, now),
                     )
                 }
             }
         } else if saw_resize {
-            let age_offset = now.saturating_duration_since(cache.collected_at);
+            let age_offset = now.saturating_duration_since(state.cache.collected_at);
             (hooks.render)(
-                &cache.snapshot,
+                &state.cache.snapshot,
                 frame_dims,
-                timing(age_offset, &schedule, now),
+                timing(age_offset, &state.schedule, now),
             )
         } else {
             // Decay tick, or an FS change the throttle deferred: re-render the
             // cached snapshot, advancing every displayed age by the elapsed time.
-            let age_offset = now.saturating_duration_since(cache.collected_at);
+            let age_offset = now.saturating_duration_since(state.cache.collected_at);
             (hooks.render)(
-                &cache.snapshot,
+                &state.cache.snapshot,
                 frame_dims,
-                timing(age_offset, &schedule, now),
+                timing(age_offset, &state.schedule, now),
             )
         };
 
@@ -2164,6 +2348,30 @@ mod tests {
             width_offset: 0,
             refresh_interval: None,
         }
+    }
+
+    /// `resolve_home` gives the root of the work tree in the spelling of
+    /// [`WorktreePath::resolve`], so the loop compares the home worktree with
+    /// the paths of the list correctly. A root that went away after `main`
+    /// opened it is refused, before watch mode takes the screen.
+    #[test]
+    fn resolve_home_gives_the_resolved_root_and_refuses_a_root_that_went_away() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("repo");
+        testrepo::init_repo_at(&root);
+        let handle = RepoHandle::discover(&root).expect("the fixture is a work tree");
+
+        assert_eq!(
+            resolve_home(&handle).expect("the root is there"),
+            WorktreePath::resolve(&root).expect("the fixture made the root"),
+        );
+
+        std::fs::remove_dir_all(&root).expect("delete the work tree");
+        let refused = resolve_home(&handle).expect_err("no directory is at the root");
+        assert!(
+            refused.to_string().starts_with(HOME_UNRESOLVED),
+            "the refusal must say why, got {refused}",
+        );
     }
 
     #[test]
@@ -3387,6 +3595,18 @@ mod tests {
         None
     }
 
+    /// The home worktree of the loop tests in this module. It is a fake path:
+    /// no hook of these tests touches the filesystem through it.
+    pub(super) fn loop_home() -> WorktreePath {
+        WorktreePath::fake("/code/home")
+    }
+
+    /// A `switch` hook that refuses every switch, and so changes nothing. No
+    /// loop test that uses it presses an arrow key, so the loop never calls it.
+    pub(super) fn no_switch(_target: &WorktreePath) -> Result<Snapshot, String> {
+        Err("this loop test watches one worktree".to_string())
+    }
+
     /// Build a [`Render`] with the given frame and no freshest age — enough for
     /// the event-driven loop tests, which don't exercise the cadence.
     pub(super) fn frame(output: &str) -> Render {
@@ -3471,9 +3691,10 @@ mod tests {
                 schedule: WalkSchedule::new(Some(interval), base, Duration::ZERO),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -3490,9 +3711,13 @@ mod tests {
                 // A decay tick on the same cadence, so the loop always wakes:
                 // the test must fail when no walk is scheduled, not block.
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                switch: no_switch,
             },
         )
         .expect("loop");
@@ -3527,9 +3752,10 @@ mod tests {
                 ),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || Ok(empty_snapshot()),
+                collect: |_current: &WorktreePath| Ok(empty_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, timing: FrameTiming| {
                     seen = Some(timing);
                     let _ = tx.send(Event::Quit);
@@ -3539,9 +3765,13 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: || clock_at,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                switch: no_switch,
             },
         )
         .expect("loop");
@@ -3576,9 +3806,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -3591,9 +3822,13 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: stepping_clock(base, Duration::from_secs(60)),
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                switch: no_switch,
             },
         )
         .expect("loop");
@@ -3631,9 +3866,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -3645,9 +3881,13 @@ mod tests {
                 },
                 clock: || now,
                 next_tick: timer_off,
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                switch: no_switch,
             },
         )
         .expect("loop");
@@ -3679,9 +3919,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -3695,9 +3936,13 @@ mod tests {
                 },
                 clock: || now,
                 next_tick: timer_off,
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                switch: no_switch,
             },
         )
         .expect("loop");
@@ -3728,9 +3973,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -3742,9 +3988,13 @@ mod tests {
                 },
                 clock: || now,
                 next_tick: timer_off,
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                switch: no_switch,
             },
         )
         .expect("loop");
@@ -3773,9 +4023,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || Ok(empty_snapshot()),
+                collect: |_current: &WorktreePath| Ok(empty_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                     renders += 1;
                     // End the loop right after this first tick-driven render.
@@ -3791,9 +4042,13 @@ mod tests {
                 // Tiny interval so the tick fires fast; the cadence-vs-age
                 // mapping is covered by the next_tick tests.
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                switch: no_switch,
             },
         )
         .expect("loop");
@@ -3825,9 +4080,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || Ok(empty_snapshot()),
+                collect: |_current: &WorktreePath| Ok(empty_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                     renders += 1;
                     let _ = tx.send(Event::Quit);
@@ -3840,9 +4096,13 @@ mod tests {
                 },
                 clock: || now,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                switch: no_switch,
             },
         )
         .expect("loop");
@@ -3874,9 +4134,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -3890,9 +4151,13 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: || clock_at,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                switch: no_switch,
             },
         )
         .expect("loop");
@@ -3932,9 +4197,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -3946,9 +4212,13 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: || now,
                 next_tick: timer_off,
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                switch: no_switch,
             },
         )
         .expect("loop");
@@ -3990,9 +4260,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || Ok(empty_snapshot()),
+                collect: |_current: &WorktreePath| Ok(empty_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, timing: FrameTiming| {
                     offsets.push(timing.age_offset);
                     // First render is the FS walk (offset 0); the next wake is a
@@ -4010,9 +4281,13 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                switch: no_switch,
             },
         )
         .expect("loop");
@@ -4071,9 +4346,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -4096,9 +4372,13 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: timer_off,
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                switch: no_switch,
             },
         )
         .expect("loop");
@@ -4151,9 +4431,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -4186,9 +4467,13 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                switch: no_switch,
             },
         )
         .expect("loop");
@@ -4228,9 +4513,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -4257,9 +4543,13 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: || base,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                switch: no_switch,
             },
         )
         .expect("loop");
@@ -4306,9 +4596,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -4335,9 +4626,13 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: timer_off,
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                switch: no_switch,
             },
         )
         .expect("loop");
@@ -4384,9 +4679,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -4412,9 +4708,13 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: timer_off,
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                switch: no_switch,
             },
         )
         .expect("loop");
@@ -4451,9 +4751,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -4469,9 +4770,13 @@ mod tests {
                 },
                 clock: || base,
                 next_tick: timer_off,
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                switch: no_switch,
             },
         )
         .expect("loop");
@@ -4521,9 +4826,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     // The exact shape `collect_snapshot` produces when the ref
                     // store has gone missing mid-walk.
@@ -4539,9 +4845,13 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: || clock_at,
                 next_tick: timer_off,
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                switch: no_switch,
             },
         );
 
@@ -4608,9 +4918,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     Err(anyhow::anyhow!("status platform: repository is gone"))
                 },
@@ -4633,9 +4944,13 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: timer_off,
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                switch: no_switch,
             },
         );
 
@@ -4705,9 +5020,10 @@ mod tests {
                 schedule: no_timed_refresh(),
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     collects += 1;
                     if collects == 1 {
                         // The repo is momentarily unreadable — mid-`gc`, say.
@@ -4751,9 +5067,13 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: timer_off,
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                switch: no_switch,
             },
         );
 
@@ -4848,7 +5168,9 @@ mod tests {
 
 #[cfg(test)]
 mod push_loop_tests {
-    use super::tests::{frame, stepping_clock, timer_off, TEST_DEBOUNCE, TEST_DIMS};
+    use super::tests::{
+        frame, loop_home, no_switch, stepping_clock, timer_off, TEST_DEBOUNCE, TEST_DIMS,
+    };
     use super::*;
     use crate::conflicts::ConflictsOutcome;
     use crate::push::PushOutcome;
@@ -5033,9 +5355,10 @@ mod push_loop_tests {
                 schedule: no_timed_refresh_for_push(),
                 ui: PushUi::new(false),
                 session,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || {
+                collect: |_current: &WorktreePath| {
                     seen.borrow_mut().collects += 1;
                     Ok(pushable_snapshot())
                 },
@@ -5050,11 +5373,19 @@ mod push_loop_tests {
                 },
                 clock,
                 next_tick: timer_off,
-                start_push: |command: PushCommand| seen.borrow_mut().pushes.push(command),
-                start_issue: |command: crate::issue::IssueCommand| {
+                start_push: |command: PushCommand, _current: &WorktreePath| {
+                    seen.borrow_mut().pushes.push(command)
+                },
+                start_issue: |command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {
                     seen.borrow_mut().issue_runs.push(command);
                 },
-                start_conflicts: || seen.borrow_mut().conflict_runs += 1,
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {
+                    seen.borrow_mut().conflict_runs += 1
+                },
+                worktrees: Vec::new,
+                switch: no_switch,
             },
         )
         .expect("loop");
@@ -5422,12 +5753,10 @@ mod push_loop_tests {
         let (_screen, seen) = run_loop(vec![
             probe_answered(),
             press_g(),
-            Event::IssueFinished(crate::issue::IssueOutcome::new(
-                "ggs",
-                true,
-                &[],
-                "exit status: 0",
-            )),
+            Event::IssueFinished {
+                generation: Generation::default(),
+                outcome: crate::issue::IssueOutcome::new("ggs", true, &[], "exit status: 0"),
+            },
             press_g(),
             Event::Quit,
         ]);
@@ -5446,12 +5775,15 @@ mod push_loop_tests {
         let (screen, _seen) = run_loop(vec![
             probe_answered(),
             press_g(),
-            Event::IssueFinished(crate::issue::IssueOutcome::new(
-                "ggs",
-                false,
-                &["branch main names no issue".to_string()],
-                "exit status: 2",
-            )),
+            Event::IssueFinished {
+                generation: Generation::default(),
+                outcome: crate::issue::IssueOutcome::new(
+                    "ggs",
+                    false,
+                    &["branch main names no issue".to_string()],
+                    "exit status: 2",
+                ),
+            },
             Event::Quit,
         ]);
         assert!(
@@ -5466,12 +5798,10 @@ mod push_loop_tests {
         let (screen, _seen) = run_loop(vec![
             probe_answered(),
             press_g(),
-            Event::IssueFinished(crate::issue::IssueOutcome::new(
-                "ggs",
-                true,
-                &[],
-                "exit status: 0",
-            )),
+            Event::IssueFinished {
+                generation: Generation::default(),
+                outcome: crate::issue::IssueOutcome::new("ggs", true, &[], "exit status: 0"),
+            },
             Event::Quit,
         ]);
         assert_eq!(
@@ -5496,12 +5826,18 @@ mod push_loop_tests {
 
     /// The branch of a run against `main`, as the loop receives it.
     fn started_against_main() -> Event {
-        Event::ConflictsStarted("main".to_string())
+        Event::ConflictsStarted {
+            generation: Generation::default(),
+            branch: "main".to_string(),
+        }
     }
 
     /// The outcome of a run, as the loop receives it.
     fn finished(outcome: ConflictsOutcome) -> Event {
-        Event::ConflictsFinished(outcome)
+        Event::ConflictsFinished {
+            generation: Generation::default(),
+            outcome,
+        }
     }
 
     /// A run against `main` whose two replays both came back clean.
@@ -5787,9 +6123,10 @@ mod push_loop_tests {
                 schedule: no_timed_refresh_for_push(),
                 ui: pushed_ui(base),
                 session: crate::remote::Session::Local,
+                home: loop_home(),
             },
             LoopHooks {
-                collect: || Ok(pushable_snapshot()),
+                collect: |_current: &WorktreePath| Ok(pushable_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| frame("FRAME"),
                 dimensions: || TEST_DIMS,
                 paint: |output: &str| {
@@ -5810,9 +6147,13 @@ mod push_loop_tests {
                     }
                 },
                 next_tick: timer_off,
-                start_push: |_command: PushCommand| {},
-                start_issue: |_command: crate::issue::IssueCommand| {},
-                start_conflicts: || {},
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_issue: |_command: crate::issue::IssueCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                switch: no_switch,
             },
         )
         .expect("loop");
@@ -6205,9 +6546,10 @@ mod push_loop_tests {
                     schedule: no_timed_refresh_for_push(),
                     ui: PushUi::new(false),
                     session: crate::remote::Session::Local,
+                    home: loop_home(),
                 },
                 LoopHooks {
-                    collect: || Ok(pushable_snapshot()),
+                    collect: |_current: &WorktreePath| Ok(pushable_snapshot()),
                     render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                         frame("FRAME")
                     },
@@ -6215,11 +6557,19 @@ mod push_loop_tests {
                     paint: |_output: &str| Ok(()),
                     clock: move || base,
                     next_tick: timer_off,
-                    start_push: |command: PushCommand| seen.borrow_mut().pushes.push(command),
-                    start_issue: |command: crate::issue::IssueCommand| {
+                    start_push: |command: PushCommand, _current: &WorktreePath| {
+                        seen.borrow_mut().pushes.push(command)
+                    },
+                    start_issue: |command: crate::issue::IssueCommand,
+                                  _current: &WorktreePath,
+                                  _generation: Generation| {
                         seen.borrow_mut().issue_runs.push(command);
                     },
-                    start_conflicts: || seen.borrow_mut().conflict_runs += 1,
+                    start_conflicts: |_current: &WorktreePath, _generation: Generation| {
+                        seen.borrow_mut().conflict_runs += 1
+                    },
+                    worktrees: Vec::new,
+                    switch: no_switch,
                 },
             )
             .expect("loop");

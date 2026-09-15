@@ -1187,6 +1187,20 @@ impl PushUi {
         }
     }
 
+    /// Take every message off the row and out of the queue: a status line of
+    /// any [`Life`], the question, and every message held for the row.
+    ///
+    /// A switch of the worktree calls it, because each of those messages
+    /// describes the worktree that the frame showed before the switch. That
+    /// includes a progress notice, which no key removes, and an error that
+    /// waits for a key. Neither describes the new worktree.
+    ///
+    /// It is never called while a push runs. The loop does not switch then,
+    /// because the window under the frame belongs to the worktree that
+    /// pushes. If it is called then, the running push stays with its window,
+    /// and its outcome still arrives. The held messages go all the same.
+    pub(crate) fn clear(&mut self) {}
+
     /// What the push feature shows in a pane of `dims`: the lines that fit
     /// there, how many rows the frame must give up to make room for them
     /// (`Overlay::rows`), and how many rows the frame keeps
