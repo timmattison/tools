@@ -1836,7 +1836,13 @@ where
                 list.down();
             }
         }
-        Event::ListGo | Event::ListClose => {}
+        Event::ListGo => {}
+        // The watch stays on the worktree that the frame showed before the
+        // list opened. The row is free again, so the next frame posts the
+        // oldest message that waited for the list.
+        Event::ListClose => {
+            let _ = state.ui.close_list();
+        }
         Event::IssueRequested => {
             // One read of the clock, for both halves of one press. The arming
             // and the message it stands for must end at the same moment, and
