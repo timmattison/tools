@@ -13,9 +13,11 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use shellquote::shell_quote;
 
+use crate::lines::LineSplitter;
 use crate::push::PushOutcome;
 use crate::shell::ShellCommand;
 
@@ -246,11 +248,102 @@ fn run(
     workdir: &Path,
     on_line: &dyn Fn(String),
 ) -> PushOutcome {
-    let _ = (shell, workdir, on_line);
+    let _ = on_line;
+    let name = command.command().name();
+
+    let mut child = Command::new(shell);
+    // Interactive is the load-bearing half. `grp` is a shell function, and a
+    // function lives only in a shell that read the rc file.
+    child.arg("-ic").arg(command.script()).current_dir(workdir);
+
+    let finished = match child.output() {
+        Ok(finished) => finished,
+        // The shell is gone, or it cannot be started. Rare, and worth saying
+        // plainly: every other failure here is the command's own words.
+        Err(error) => {
+            return PushOutcome {
+                success: false,
+                output: format!("cannot run {name}: {error}"),
+            }
+        }
+    };
+
+    let mut record = Record::new();
+    record.extend(painted(&finished.stdout));
+    record.extend(painted(&finished.stderr));
+
     PushOutcome {
-        success: true,
-        output: String::new(),
+        success: finished.status.success(),
+        output: record.into_text(),
     }
+}
+
+/// Every line a run has written, in arrival order, as one string with a newline
+/// between each line and the one before it.
+///
+/// **One growing string, and not one [`String`] for each line.** A pre-push
+/// hook that builds and tests a workspace prints hundreds of thousands of
+/// lines, and a vector of them is a heap allocation each — then one more copy
+/// of the whole run to join them at the end, for a record that
+/// [`crate::push::failure_lines`] reads three lines of and a run that worked
+/// reads none of. Appending in place costs the growth of one buffer instead,
+/// and the text it holds is what `join("\n")` gives, byte for byte: the
+/// separator goes *between* the lines, so there is no newline at the end and a
+/// run that said nothing leaves the empty string behind.
+///
+/// The flag beside the text is what the text alone cannot say. "The buffer is
+/// still empty" is not the question "has a line landed yet": a line can *be*
+/// empty — an `echo ""` in a hook keeps its row, by the rule
+/// [`crate::lines::LineSplitter`] states — and to ask the buffer would swallow
+/// the newline that belongs after such a first line.
+struct Record {
+    /// What every line said, with a newline between one line and the next.
+    text: String,
+    /// Whether any line at all has landed.
+    any_line_recorded: bool,
+}
+
+impl Record {
+    /// A record of a run that has said nothing yet.
+    fn new() -> Self {
+        Self {
+            text: String::new(),
+            any_line_recorded: false,
+        }
+    }
+
+    /// Add one line to the end of the record.
+    fn push(&mut self, line: &str) {
+        if self.any_line_recorded {
+            self.text.push('\n');
+        }
+        self.any_line_recorded = true;
+        self.text.push_str(line);
+    }
+
+    /// Add every line of `lines` to the end of the record, in order.
+    fn extend(&mut self, lines: impl IntoIterator<Item = String>) {
+        for line in lines {
+            self.push(&line);
+        }
+    }
+
+    /// The record, as the text an outcome carries.
+    fn into_text(self) -> String {
+        self.text
+    }
+}
+
+/// `bytes` as lines gsw can paint.
+///
+/// [`crate::lines::LineSplitter`] is the one place a child's bytes become such
+/// text — a tab is up to eight columns and an escape sequence repaints the
+/// frame in another program's colors.
+fn painted(bytes: &[u8]) -> Vec<String> {
+    let mut splitter = LineSplitter::new();
+    let mut lines = splitter.feed(bytes);
+    lines.extend(splitter.finish());
+    lines
 }
 
 #[cfg(test)]
