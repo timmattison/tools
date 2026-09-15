@@ -13,6 +13,11 @@
 //! one that `swt create` printed, so it can go directly to `swt merge`. The
 //! branch is the local branch without `refs/heads/`.
 //!
+//! When the branch has no children, stdout stays empty and a one-line note that
+//! names the branch goes to stderr. The status is still 0, because no children
+//! is an answer and not a failure. `[ -n "$(swt list)" ]` is thus a complete
+//! check.
+//!
 //! The source is the worktree registry of git, `git worktree list --porcelain
 //! -z`. `list` does not scan directories. A directory beside the parent is not
 //! a worktree until git says so, and the directory name is for people. In the
@@ -51,6 +56,12 @@ const WORKTREE_LABEL: &str = "worktree";
 /// The label of the field that holds the full ref of the branch that the
 /// worktree has checked out.
 const BRANCH_LABEL: &str = "branch";
+
+/// What `list` writes to stderr, before the name of the branch, when the branch
+/// has no children. Stdout stays empty, so a caller that captures it reads no
+/// children. A person reads this note and knows why. The wording lives here and
+/// nowhere else.
+const NO_CHILDREN_NOTE: &str = "No child worktrees of the branch";
 
 /// One entry of the worktree registry, with the fields that `list` reads.
 ///
@@ -167,6 +178,9 @@ fn children_of(registry: Vec<RegisteredWorktree>, parent: &BranchName) -> Vec<Ch
 /// stderr and the command fails. A detached HEAD has no branch, so the command
 /// fails there too.
 ///
+/// When the branch has no children, nothing goes to stdout.
+/// [`NO_CHILDREN_NOTE`] and the branch go to stderr, and the command succeeds.
+///
 /// Returns the status that `swt` exits with.
 pub fn list() -> ExitCode {
     let current = match head_branch(None) {
@@ -186,10 +200,15 @@ pub fn list() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let listing: String = children_of(parse_registry(&registry.out), &current)
-        .iter()
-        .map(Child::line)
-        .collect();
+    let children = children_of(parse_registry(&registry.out), &current);
+    if children.is_empty() {
+        // No children is an answer, not a failure. Stdout stays empty for a
+        // caller, and a person reads why on stderr.
+        eprintln!("{NO_CHILDREN_NOTE} {current}.");
+        return ExitCode::SUCCESS;
+    }
+
+    let listing: String = children.iter().map(Child::line).collect();
     // One write for the whole listing, so a reader that stops after the first
     // line does not cut a later write in half.
     print!("{listing}");
