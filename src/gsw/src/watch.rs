@@ -7641,4 +7641,162 @@ mod push_loop_tests {
             Some(Duration::from_secs(10)),
         );
     }
+
+    /// The generation of a run that started before the first switch.
+    fn before_the_switch() -> Generation {
+        Generation::default()
+    }
+
+    /// The generation of a run that started after one switch.
+    fn after_one_switch() -> Generation {
+        Generation::default().next()
+    }
+
+    /// A run of `m` with the generation `generation` knows it measures against
+    /// `main`, as the loop receives it.
+    fn started_in(generation: Generation) -> Event {
+        Event::ConflictsStarted {
+            generation,
+            branch: "main".to_string(),
+        }
+    }
+
+    /// A run of `m` with the generation `generation` ended with `outcome`, as
+    /// the loop receives it.
+    fn finished_in(generation: Generation, outcome: ConflictsOutcome) -> Event {
+        Event::ConflictsFinished {
+            generation,
+            outcome,
+        }
+    }
+
+    #[test]
+    fn an_m_outcome_from_before_a_switch_is_dropped_and_m_works_again() {
+        // The run continues in bravo, where it started, and its outcome
+        // arrives with the frame on charlie. A line under the frame must
+        // describe the worktree in the frame, so the outcome goes. The key is
+        // free again, and the next run carries the new generation.
+        let (screen, seen) = run_in(
+            World::three(),
+            vec![
+                press_m(),
+                started_in(before_the_switch()),
+                key(KeyCode::Right),
+                finished_in(before_the_switch(), measured_clean()),
+                press_m(),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {CHARLIE}"),
+            "the outcome of the run in bravo must not reach the row of charlie",
+        );
+        assert_eq!(
+            seen.conflict_paths,
+            vec![
+                (worktree(BRAVO), before_the_switch()),
+                (worktree(CHARLIE), after_one_switch()),
+            ],
+            "the outcome must free the key, and the next run must carry the new generation",
+        );
+    }
+
+    #[test]
+    fn a_g_outcome_from_before_a_switch_is_dropped_and_g_works_again() {
+        // The same rule for the issue key: its error describes the worktree
+        // where the run started.
+        let (screen, seen) = run_in(
+            World::three(),
+            vec![
+                probe_answered(),
+                press_g(),
+                key(KeyCode::Right),
+                issue_failed_in(before_the_switch()),
+                press_g(),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {CHARLIE}"),
+            "the error of the run in bravo must not reach the row of charlie",
+        );
+        assert_eq!(
+            seen.issue_paths,
+            vec![
+                (worktree(BRAVO), before_the_switch()),
+                (worktree(CHARLIE), after_one_switch()),
+            ],
+            "the outcome must free the key, and the next run must carry the new generation",
+        );
+    }
+
+    #[test]
+    fn a_stale_m_notice_puts_nothing_under_the_frame() {
+        // A run from before the switch says which branch it measures against
+        // only after the switch. The notice describes bravo, so it goes
+        // nowhere.
+        let (screen, _seen) = run_in(
+            World::three(),
+            vec![
+                press_m(),
+                key(KeyCode::Right),
+                started_in(before_the_switch()),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(strip_ansi(&screen), format!("FRAME {CHARLIE}"));
+    }
+
+    #[test]
+    fn the_one_run_rule_of_m_and_g_spans_a_switch() {
+        // A run continues after a switch, in the worktree where it started,
+        // and the rule of one run at a time holds for the whole process.
+        let (_screen, seen) = run_in(
+            World::three(),
+            vec![press_m(), key(KeyCode::Right), press_m(), Event::Quit],
+        );
+        assert_eq!(
+            seen.conflict_runs, 1,
+            "a run of `m` in flight must refuse a second run after a switch",
+        );
+
+        let (_screen, seen) = run_in(
+            World::three(),
+            vec![
+                probe_answered(),
+                press_g(),
+                key(KeyCode::Right),
+                press_g(),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.issue_runs.len(),
+            1,
+            "a run of `G` in flight must refuse a second run after a switch, got {:?}",
+            seen.issue_runs,
+        );
+    }
+
+    #[test]
+    fn the_outcome_of_a_run_that_started_after_the_switch_reaches_the_row() {
+        // Only an old generation is dropped. A run that started on charlie
+        // describes charlie, so its notice and its result reach the row.
+        let (screen, _seen) = run_in(
+            World::three(),
+            vec![
+                key(KeyCode::Right),
+                press_m(),
+                started_in(after_one_switch()),
+                finished_in(after_one_switch(), measured_clean()),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {CHARLIE}\n{MEASURED_CLEAN} (0s ago)"),
+        );
+    }
 }
