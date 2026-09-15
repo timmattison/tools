@@ -12,6 +12,10 @@
 //!
 //! Argv arrays close the injection hole but not the *nonsense* hole, which is
 //! what [`validate_worktree_name`] is for.
+//!
+//! Two newtypes carry names across this boundary. A [`WorktreeName`] passed
+//! [`validate_worktree_name`]. A [`BranchName`] came from git through
+//! [`head_branch`]. No other module can make either one.
 
 use std::ffi::OsStr;
 use std::fmt;
@@ -40,6 +44,17 @@ const PORCELAIN_FLAG: &str = "--porcelain";
 /// Excludes untracked files from the listing. Only ever added, never negated:
 /// untracked files are in the porcelain listing unless this says otherwise.
 const NO_UNTRACKED_FLAG: &str = "--untracked-files=no";
+
+/// The query that [`head_branch`] runs. It asks for the full ref that HEAD
+/// points at. `--quiet` makes git exit 1 with no output for a detached HEAD.
+///
+/// It uses neither `--short` nor `rev-parse --abbrev-ref`. When a tag has the
+/// same name as the branch, both of those print `heads/<branch>`.
+const HEAD_REF_ARGS: [&str; 3] = ["symbolic-ref", "--quiet", "HEAD"];
+
+/// The namespace of the local branches. [`head_branch`] removes it from the
+/// full ref, so the name it returns is the branch as a person spells it.
+const LOCAL_BRANCH_NAMESPACE: &str = "refs/heads/";
 
 /// A git command that failed somewhere the caller cannot treat failure as an
 /// answer, carrying git's combined output as the explanation.
@@ -253,6 +268,99 @@ pub fn worktree_dirt(cwd: &Path, include_untracked: bool) -> Result<String, GitF
     }
 }
 
+/// The name of a local branch, as git reported it for a checked-out HEAD,
+/// without the `refs/heads/` namespace.
+///
+/// The private field has the same job as the one in [`WorktreeName`]. Only
+/// this module makes one, and only from an answer of git. A `BranchName` in a
+/// signature is thus a name that git gave, never a string that a caller typed.
+/// The name keeps every `/` it has, so `feat/foo` stays `feat/foo`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BranchName(String);
+
+impl BranchName {
+    /// Borrows the branch name as git spells it, for example `feat/foo`.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for BranchName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// What a worktree has checked out, as [`head_branch`] reads it.
+///
+/// Both outcomes are answers, not errors. A caller that needs a branch must
+/// handle the second outcome explicitly, because a detached HEAD has no branch
+/// to name anything after.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeadBranch {
+    /// HEAD points at this local branch.
+    Branch(BranchName),
+    /// HEAD points at no local branch. Usually HEAD is detached and holds a
+    /// commit. A HEAD that points at a ref outside `refs/heads/` also gives
+    /// this outcome, because it has no local branch either.
+    Detached,
+}
+
+/// Reads the branch that a worktree has checked out.
+///
+/// `cwd` is a directory in the worktree to ask about. `None` means the current
+/// working directory. `swt create` reads the parent branch with this function
+/// and puts it into the branch of the child.
+///
+/// It reads the full ref with `git symbolic-ref --quiet HEAD` and removes
+/// `refs/heads/`. It does not read the short name. When a tag has the same
+/// name as the branch, git spells the short name `heads/<branch>`. A child
+/// would then name a parent branch that does not exist.
+///
+/// Returns [`HeadBranch::Branch`] for a local branch. Returns
+/// [`HeadBranch::Detached`] when HEAD is detached, or when HEAD points at a ref
+/// outside `refs/heads/`.
+///
+/// # Errors
+///
+/// Returns a [`GitFailure`] that carries the output of git when git fails for
+/// a different reason, for example outside a repository. A detached HEAD is
+/// not an error. Under `--quiet`, git exits 1 and writes nothing for it.
+pub fn head_branch(cwd: Option<&Path>) -> Result<HeadBranch, GitFailure> {
+    head_branch_from(git(HEAD_REF_ARGS, cwd))
+}
+
+/// Turns the outcome of the HEAD query into the answer of [`head_branch`].
+///
+/// The pure half of [`head_branch`]. It takes the outcome as an argument, so
+/// the unit tests pin each outcome without a repository. The unit tests of the
+/// naming step in `create` also make their `BranchName` values here, so no
+/// second constructor exists.
+///
+/// `read` is the outcome of [`HEAD_REF_ARGS`]. The ref is its first line,
+/// because [`run_git`] puts stdout before stderr. A warning on stderr thus
+/// cannot become part of the branch name.
+pub(crate) fn head_branch_from(read: Outcome) -> Result<HeadBranch, GitFailure> {
+    if !read.ok {
+        // Under `--quiet`, git reports a detached HEAD only through its exit
+        // status. Any output explains a different failure, and the user must
+        // see it.
+        return if read.out.trim().is_empty() {
+            Ok(HeadBranch::Detached)
+        } else {
+            Err(GitFailure(read.out))
+        };
+    }
+    let full_ref = read.out.lines().next().unwrap_or_default();
+    Ok(full_ref
+        .strip_prefix(LOCAL_BRANCH_NAMESPACE)
+        .filter(|branch| !branch.is_empty())
+        .map_or(HeadBranch::Detached, |branch| {
+            HeadBranch::Branch(BranchName(branch.to_string()))
+        }))
+}
+
 /// Human-readable statement of what a worktree name may contain.
 ///
 /// Kept as one string so the rule a name was judged against and the rule quoted
@@ -262,12 +370,13 @@ pub const WORKTREE_NAME_RULE: &str =
 
 /// The characters that a worktree name must not start with.
 ///
-/// The name opens a component of the branch `swt/<name>-<token>`, and git
-/// refuses a ref component that starts with `.` (`git help check-ref-format`,
-/// rule 1). The limit on a leading `.` also refuses `.` and `..`. The name also
-/// opens the directory name `<name>-<token>.swt`, and a command that gets a
-/// relative path that starts with `-` reads it as options: `ls -b-abc123.swt`
-/// fails.
+/// The name opens the last component of the branch
+/// `swt/<parent branch>/<name>-<token>`, and git refuses a ref component that
+/// starts with `.` (`git help check-ref-format`, rule 1). The limit on a
+/// leading `.` also refuses `.` and `..`. The name opens the directory name
+/// `<name>-<token>.swt` only when the parent worktree has no name, as for `/`.
+/// A command that gets a relative path that starts with `-` reads it as
+/// options: `ls -b-abc123.swt` fails.
 const FORBIDDEN_FIRST_CHARS: [char; 2] = ['-', '.'];
 
 /// A sequence that git refuses anywhere in a ref (`git help check-ref-format`,
@@ -323,8 +432,8 @@ impl fmt::Display for WorktreeName {
 /// Passing git argv arrays already removes the injection risk, but an unchecked
 /// name still yields nonsense: `../..` escapes the worktree parent directory,
 /// `/` silently nests the branch, a leading `.` or a `..` anywhere gives a
-/// branch that git refuses, and a leading `-` gives a directory name that reads
-/// as options.
+/// branch that git refuses, and a leading `-` can give a directory name that
+/// reads as options.
 ///
 /// `name` is the raw string as supplied on the command line. Returns the
 /// validated name, or `None` if it violates [`WORKTREE_NAME_RULE`] — callers are
@@ -345,7 +454,91 @@ pub fn validate_worktree_name(name: &str) -> Option<WorktreeName> {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_worktree_name, WorktreeName};
+    use super::{
+        head_branch_from, validate_worktree_name, BranchName, GitFailure, HeadBranch, WorktreeName,
+    };
+    use crate::green_check::Outcome;
+
+    /// The answer that the tests expect for a checked-out branch `raw`.
+    fn branch(raw: &str) -> HeadBranch {
+        HeadBranch::Branch(BranchName(raw.to_string()))
+    }
+
+    // The reason to read the full ref: only `refs/heads/` comes off, so a
+    // branch keeps every `/` that it has.
+    #[test]
+    fn a_ref_under_refs_heads_is_that_branch_with_its_slashes() {
+        for (full_ref, expected) in [
+            ("refs/heads/issue-42\n", "issue-42"),
+            ("refs/heads/feat/foo\n", "feat/foo"),
+        ] {
+            assert_eq!(
+                head_branch_from(Outcome::succeeded(full_ref)),
+                Ok(branch(expected)),
+                "{full_ref:?}"
+            );
+        }
+    }
+
+    // `run_git` puts stdout before stderr, so the ref is the first line. A
+    // warning after it must not become part of the branch name.
+    #[test]
+    fn output_after_the_first_line_is_not_part_of_the_branch() {
+        assert_eq!(
+            head_branch_from(Outcome::succeeded("refs/heads/main\nwarning: noise\n")),
+            Ok(branch("main"))
+        );
+    }
+
+    // Under `--quiet`, git exits 1 and writes nothing for a detached HEAD.
+    #[test]
+    fn a_failure_with_no_output_is_a_detached_head() {
+        assert_eq!(
+            head_branch_from(Outcome::failed("")),
+            Ok(HeadBranch::Detached)
+        );
+    }
+
+    // Every other failure writes an explanation, and the user must see it. A
+    // detached answer here would hide that explanation.
+    #[test]
+    fn a_failure_with_output_is_a_git_failure_that_carries_it() {
+        let complaint = "fatal: not a git repository (or any of the parent directories): .git\n";
+        assert_eq!(
+            head_branch_from(Outcome::failed(complaint)),
+            Err(GitFailure(complaint.to_string()))
+        );
+    }
+
+    // HEAD can point at a ref outside `refs/heads/`. That is not a local
+    // branch, so it gets the same answer as a detached HEAD. An empty name
+    // gets that answer too, because it cannot name a branch.
+    #[test]
+    fn a_ref_outside_refs_heads_is_no_branch() {
+        for full_ref in [
+            "refs/remotes/origin/main\n",
+            "refs/tags/v1\n",
+            "refs/heads/\n",
+            "",
+        ] {
+            assert_eq!(
+                head_branch_from(Outcome::succeeded(full_ref)),
+                Ok(HeadBranch::Detached),
+                "{full_ref:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_branch_name_reads_back_as_git_spells_it() {
+        let Ok(HeadBranch::Branch(name)) =
+            head_branch_from(Outcome::succeeded("refs/heads/feat/foo\n"))
+        else {
+            panic!("a ref under refs/heads/ must read back as a branch");
+        };
+        assert_eq!(name.as_str(), "feat/foo");
+        assert_eq!(name.to_string(), "feat/foo", "Display must match as_str");
+    }
 
     /// Names that survive validation, paired with why each shape has to keep
     /// working: between them they cover every character class the rule allows.
@@ -394,11 +587,11 @@ mod tests {
         ("../evil", "path traversal"),
         (
             "-b",
-            "a leading dash gives a directory name that reads as options",
+            "a leading dash can give a directory name that reads as options",
         ),
         (
             "-rf",
-            "a leading dash gives a directory name that reads as options",
+            "a leading dash can give a directory name that reads as options",
         ),
         ("", "an empty name yields an empty path component"),
         ("with\nnewline", "a newline breaks ref parsing"),

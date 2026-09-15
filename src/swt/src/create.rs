@@ -21,18 +21,36 @@
 //! over one directory, and a token spelled from the clock alone collides in the
 //! millisecond an orchestrator fans them out in.
 //!
+//! Each name also names the parent, which is the worktree where `swt create`
+//! runs (issue #500):
+//!
+//! ```text
+//! directory  <parent>/../<parent worktree name>--<name>-<token>.swt
+//! branch     swt/<parent branch>/<name>-<token>
+//! ```
+//!
+//! The branch is the key. It keeps the parent branch as it is, slashes
+//! included, and `<name>-<token>` never contains a `/`. The parent branch is
+//! thus exactly the text between `swt/` and the last `/`. The directory stays
+//! beside the parent, so `ls` shows each child next to its parent. The
+//! directory name is for people, and no code parses it. A parent on a detached
+//! HEAD has no branch, so `create` refuses it before it makes anything.
+//!
 //! What survives a failed check is reported, never assumed. Teardown is
 //! best-effort — git refuses to remove a working tree whose `.git` link has gone
 //! missing — and claiming a cleanup that did not happen would strand the user
 //! with an orphaned worktree *and* branch they were told did not exist.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::git::{git_must, validate_worktree_name, WorktreeName, WORKTREE_NAME_RULE};
+use crate::git::{
+    git_must, head_branch, validate_worktree_name, BranchName, HeadBranch, WorktreeName,
+    WORKTREE_NAME_RULE,
+};
 use crate::green_check::is_green;
 use crate::teardown::{hold_unverified_worktree, remove_unverified_worktree};
 use shellquote::shell_quote;
@@ -43,6 +61,11 @@ const TOPLEVEL_ARGS: [&str; 2] = ["rev-parse", "--show-toplevel"];
 /// Suffix every subagent worktree directory carries, so a stray directory beside
 /// a repository is recognizable as `swt`'s at a glance.
 const WORKTREE_SUFFIX: &str = ".swt";
+
+/// Separates the name of the parent worktree from the name of the child in a
+/// directory name. The directory name is for people, and no code parses it.
+/// Two hyphens stand out beside the single hyphens in names and tokens.
+const PARENT_SEPARATOR: &str = "--";
 
 /// Namespace every branch `swt` creates lives under.
 const BRANCH_PREFIX: &str = "swt";
@@ -155,10 +178,13 @@ impl fmt::Display for UniqueToken {
 /// worktrees wearing one name, and two callers picking their own tokens is
 /// exactly how that happens. There is no way to build one of these with a token
 /// in only one of the two names.
+///
+/// Both names also carry the parent. The directory carries the name of the
+/// parent worktree, and the branch carries the parent branch.
 struct WorktreeNaming {
-    /// The worktree directory, beside the repository root.
+    /// The worktree directory, beside the parent worktree.
     path: PathBuf,
-    /// The branch checked out in it.
+    /// The branch checked out in it, under the parent branch.
     branch: String,
 }
 
@@ -166,33 +192,52 @@ impl WorktreeNaming {
     /// Names the worktree and branch for this invocation, minting the token they
     /// share.
     ///
-    /// `root` is the repository root and `name` the validated worktree name.
-    fn mint(root: &Path, name: &WorktreeName) -> Self {
-        Self::with_token(root, name, &UniqueToken::mint())
+    /// `root` is the toplevel of the parent worktree, `parent_branch` the branch
+    /// that it has checked out, and `name` the validated worktree name.
+    fn mint(root: &Path, parent_branch: &BranchName, name: &WorktreeName) -> Self {
+        Self::with_token(root, parent_branch, name, &UniqueToken::mint())
     }
 
     /// Names both from a token supplied by the caller — a pure function of
-    /// `(root, name, token)`, so the naming can be pinned without a clock, a
-    /// repository or a subprocess.
-    fn with_token(root: &Path, name: &WorktreeName, token: &UniqueToken) -> Self {
+    /// `(root, parent_branch, name, token)`, so the naming can be pinned without
+    /// a clock, a repository or a subprocess.
+    ///
+    /// The directory is `<parent name>--<name>-<token>.swt`, beside `root`. The
+    /// parent name is the last component of `root`, and it goes in as an
+    /// `OsStr`, so a parent name that is not UTF-8 stays as it is. When `root`
+    /// has no last component, as for `/`, the directory is `<name>-<token>.swt`
+    /// with no parent part. The branch is `swt/<parent_branch>/<name>-<token>`.
+    fn with_token(
+        root: &Path,
+        parent_branch: &BranchName,
+        name: &WorktreeName,
+        token: &UniqueToken,
+    ) -> Self {
+        // One spelling of the part that belongs to the child, so the two names
+        // cannot drift apart.
+        let child = format!("{name}-{token}");
+        let mut file_name = OsString::new();
+        if let Some(parent_name) = root.file_name() {
+            file_name.push(parent_name);
+            file_name.push(PARENT_SEPARATOR);
+        }
+        file_name.push(&child);
+        file_name.push(WORKTREE_SUFFIX);
         Self {
             // The lexical parent, which is what resolving
-            // `<root>/../<name>-<token>.swt` comes to: git answers
+            // `<root>/../<file name>` comes to: git answers
             // `--show-toplevel` with an absolute, already-normalized path, so
             // there is no `..` component left for a lexical step to get wrong. A
             // root with nothing above it stands in for itself, exactly as path
             // resolution treats `/..`.
-            path: root
-                .parent()
-                .unwrap_or(root)
-                .join(format!("{name}-{token}{WORKTREE_SUFFIX}")),
-            branch: format!("{BRANCH_PREFIX}/{name}-{token}"),
+            path: root.parent().unwrap_or(root).join(file_name),
+            branch: format!("{BRANCH_PREFIX}/{parent_branch}/{child}"),
         }
     }
 
-    /// The worktree directory: a sibling of the repository root, so worktrees
-    /// sit beside the repo rather than inside it, where git would have to be told
-    /// to ignore them.
+    /// The worktree directory: a sibling of the parent worktree root, so
+    /// worktrees sit beside the repo rather than inside it, where git would have
+    /// to be told to ignore them.
     fn path(&self) -> &Path {
         &self.path
     }
@@ -210,6 +255,11 @@ impl WorktreeNaming {
 /// to stop that is before anything exists to clean up. A rejected name is
 /// reported on stderr together with the rule it broke, and the command fails.
 ///
+/// The branch of the parent worktree is read next, also before anything
+/// exists, because both names carry it. A parent on a detached HEAD has no
+/// branch, so the command fails there. When git fails in that read, its own
+/// output goes to stderr, and the command fails.
+///
 /// On success the worktree's path — and nothing else — goes to stdout, so a
 /// caller can capture it cleanly. On a red check the worktree and its branch are
 /// torn down again, what that teardown actually did is reported on stderr, and
@@ -221,9 +271,20 @@ pub fn create(raw_name: &str) -> ExitCode {
     };
 
     let root = PathBuf::from(git_must(TOPLEVEL_ARGS, None));
+    // Read before anything exists, because both names carry the parent branch.
+    let parent_branch = match head_branch(Some(&root)) {
+        Ok(HeadBranch::Branch(branch)) => branch,
+        // A detached HEAD has no branch to name the child after.
+        Ok(HeadBranch::Detached) => return ExitCode::FAILURE,
+        // The account of git itself, which already ends in a newline.
+        Err(failure) => {
+            eprint!("{failure}");
+            return ExitCode::FAILURE;
+        }
+    };
     // One token, both names: minted here and nowhere else, so the directory and
     // the branch a run leaves behind visibly belong to each other.
-    let naming = WorktreeNaming::mint(&root, &name);
+    let naming = WorktreeNaming::mint(&root, &parent_branch, &name);
     let branch = naming.branch();
     let path = naming.path();
 
@@ -304,13 +365,14 @@ fn report_teardown(path: &Path, branch: &str) {
 #[cfg(test)]
 mod tests {
     use super::{base36, UniqueToken, WorktreeNaming};
-    use crate::git::validate_worktree_name;
+    use crate::git::{head_branch_from, validate_worktree_name, BranchName, HeadBranch};
+    use crate::green_check::Outcome;
     use std::collections::BTreeSet;
     use std::path::Path;
     use std::process::Command;
     use tempfile::TempDir;
 
-    /// A repository root for the naming tests.
+    /// The toplevel of a parent worktree for the naming tests.
     const ROOT: &str = "/repos/tools";
 
     /// One member of each character class that the worktree name rule allows:
@@ -363,12 +425,24 @@ mod tests {
     }
 
     /// A stand-in token, so the naming tests read as the pure functions of
-    /// `(root, name, token)` that they are.
+    /// `(root, parent_branch, name, token)` that they are.
     const TOKEN: &str = "abc123";
+
+    /// The branch that the parent at [`ROOT`] has checked out.
+    const PARENT_BRANCH: &str = "issue-42";
 
     /// A validated name for the helpers under test.
     fn name(raw: &str) -> crate::git::WorktreeName {
         validate_worktree_name(raw).expect("fixture name should validate")
+    }
+
+    /// A parent branch, made the one way that a `BranchName` is made: from the
+    /// answer that git gives for a checked-out branch.
+    fn branch(raw: &str) -> BranchName {
+        match head_branch_from(Outcome::succeeded(format!("refs/heads/{raw}\n"))) {
+            Ok(HeadBranch::Branch(branch)) => branch,
+            other => panic!("fixture branch {raw:?} should read back as a branch, got {other:?}"),
+        }
     }
 
     /// A token spelled literally, for tests about what is done *with* a token
@@ -377,9 +451,21 @@ mod tests {
         UniqueToken(raw.to_string())
     }
 
-    /// Names both halves of one invocation from a literal token.
+    /// Names both halves of one invocation from a literal token, for a parent at
+    /// [`ROOT`] on [`PARENT_BRANCH`].
     fn naming(raw_name: &str, raw_token: &str) -> WorktreeNaming {
-        WorktreeNaming::with_token(Path::new(ROOT), &name(raw_name), &token(raw_token))
+        naming_on(PARENT_BRANCH, raw_name, raw_token)
+    }
+
+    /// Names both halves of one invocation from a literal token, for a parent at
+    /// [`ROOT`] on the branch `raw_branch`.
+    fn naming_on(raw_branch: &str, raw_name: &str, raw_token: &str) -> WorktreeNaming {
+        WorktreeNaming::with_token(
+            Path::new(ROOT),
+            &branch(raw_branch),
+            &name(raw_name),
+            &token(raw_token),
+        )
     }
 
     // The branch suffix has to be spelled exactly the way the TypeScript
@@ -406,28 +492,77 @@ mod tests {
     fn the_worktree_is_a_sibling_of_the_repository_root() {
         assert_eq!(
             naming("fix-parser", TOKEN).path(),
-            Path::new("/repos/fix-parser-abc123.swt"),
-            "the worktree belongs beside the repository, not inside it"
+            Path::new("/repos/tools--fix-parser-abc123.swt"),
+            "the worktree belongs beside the parent, not inside it, and names the parent"
         );
     }
 
+    // The one root with no last component. It has no name to carry, so the
+    // directory has no parent part.
     #[test]
     fn a_root_with_no_parent_still_names_a_worktree() {
-        let no_parent = WorktreeNaming::with_token(Path::new("/"), &name("x"), &token(TOKEN));
+        let no_parent = WorktreeNaming::with_token(
+            Path::new("/"),
+            &branch(PARENT_BRANCH),
+            &name("x"),
+            &token(TOKEN),
+        );
         assert_eq!(
             no_parent.path(),
             Path::new("/x-abc123.swt"),
-            "a root with nothing above it resolves '..' to itself, as path resolution does"
+            "a root with nothing above it resolves '..' to itself, as path resolution does, \
+             and has no name to put before the child"
         );
     }
 
     // The branch is namespaced under `swt/` so a repository's own branches are
-    // never confused for a subagent's.
+    // never confused for a subagent's. The parent branch comes next, so all
+    // children of one branch share one prefix.
     #[test]
-    fn a_branch_is_the_name_under_the_swt_namespace_with_the_token_suffixed() {
+    fn a_branch_is_the_parent_branch_and_the_name_under_the_swt_namespace() {
         assert_eq!(
             naming("fix-parser", TOKEN).branch(),
-            "swt/fix-parser-abc123"
+            "swt/issue-42/fix-parser-abc123"
+        );
+    }
+
+    // A parent branch keeps every `/` that it has, and `<name>-<token>` has
+    // none. The parent is thus exactly the text between `swt/` and the last
+    // `/`. A reader of the branch relies on that split.
+    #[test]
+    fn a_parent_branch_with_a_slash_stays_as_it_is_in_the_branch() {
+        let naming = naming_on("feat/foo", "fix-parser", TOKEN);
+        assert_eq!(naming.branch(), "swt/feat/foo/fix-parser-abc123");
+        assert_eq!(
+            naming
+                .branch()
+                .strip_prefix("swt/")
+                .and_then(|rest| rest.rsplit_once('/')),
+            Some(("feat/foo", "fix-parser-abc123")),
+            "the parent must be the text between `swt/` and the last `/`"
+        );
+    }
+
+    // The directory name goes in as an `OsStr`, so a parent name that is not
+    // UTF-8 reaches the directory byte for byte. A lossy conversion puts U+FFFD
+    // there, and the directory then names a parent that does not exist.
+    #[cfg(unix)]
+    #[test]
+    fn a_parent_name_that_is_not_utf8_stays_as_it_is_in_the_directory() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = Path::new(OsStr::from_bytes(b"/repos/tools\xff"));
+        let naming = WorktreeNaming::with_token(
+            root,
+            &branch(PARENT_BRANCH),
+            &name("fix-parser"),
+            &token(TOKEN),
+        );
+        assert_eq!(
+            naming.path().as_os_str().as_bytes(),
+            b"/repos/tools\xff--fix-parser-abc123.swt".as_slice(),
+            "a parent name that is not UTF-8 must reach the directory byte for byte"
         );
     }
 
@@ -446,14 +581,14 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let path_token = file_name
-            .strip_prefix("fix-parser-")
+            .strip_prefix("tools--fix-parser-")
             .and_then(|rest| rest.strip_suffix(".swt"))
             .unwrap_or_else(|| {
                 panic!("the worktree path must embed a uniqueness token, got {file_name:?}")
             });
         let branch_token = naming
             .branch()
-            .strip_prefix("swt/fix-parser-")
+            .strip_prefix("swt/issue-42/fix-parser-")
             .unwrap_or_else(|| panic!("branch should be namespaced, got {:?}", naming.branch()));
         assert_eq!(
             path_token, branch_token,
@@ -482,7 +617,10 @@ mod tests {
             .iter()
             .filter_map(|raw| {
                 let name = validate_worktree_name(raw)?;
-                Some((raw, WorktreeNaming::mint(Path::new(ROOT), &name)))
+                Some((
+                    raw,
+                    WorktreeNaming::mint(Path::new(ROOT), &branch(PARENT_BRANCH), &name),
+                ))
             })
             .collect();
         assert!(
@@ -577,7 +715,12 @@ mod tests {
                 "a token must be base 36: {spelled:?}"
             );
 
-            let naming = WorktreeNaming::with_token(Path::new(ROOT), &name("fix-parser"), &token);
+            let naming = WorktreeNaming::with_token(
+                Path::new(ROOT),
+                &branch(PARENT_BRANCH),
+                &name("fix-parser"),
+                &token,
+            );
             assert!(
                 git_accepts_branch(scratch.path(), naming.branch()),
                 "git must accept the branch with the token spliced in: {:?}",
