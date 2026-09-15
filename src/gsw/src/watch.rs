@@ -1291,6 +1291,11 @@ const HOME_UNRESOLVED: &str = "gsw cannot resolve the work tree it started in";
 /// worktree.
 const ONE_WORKTREE: &str = "gsw watches the worktree it started in, and no other";
 
+/// What gsw says after it went back to the home worktree, after the path of
+/// the worktree that went away: `<path> no longer exists — back to the home
+/// worktree`. See [`LoopState::return_home_if_gone`].
+const WORKTREE_GONE: &str = "no longer exists — back to the home worktree";
+
 /// The home worktree: the root of the work tree that `handle` opened, in the
 /// one spelling that every comparison of the loop uses.
 ///
@@ -1525,21 +1530,13 @@ struct LoopState {
 }
 
 impl LoopState {
-    /// Switch the loop to `target`. Every kind of switch goes through here.
+    /// Switch the loop to `target` for a key the user pressed: an arrow key,
+    /// or Enter in the list.
     ///
-    /// 1. Read the clock, open `target` through `open`, and read the clock
-    ///    again for the cost of the open.
-    /// 2. On `Ok`, the snapshot of `target` goes into the cache, collected
-    ///    now, and the schedule records the open as a walk, which starts the
-    ///    refresh clock again. The loop then watches `target`, and the
-    ///    generation moves on, so an outcome of a run that started before the
-    ///    switch is known as stale. Every message under the frame goes,
-    ///    because each one describes the worktree the frame showed before, and
-    ///    the `G` key loses its arming with the message that armed it.
-    /// 3. On `Err`, the loop stays on the worktree it shows, and the reason
-    ///    takes the row on a line that fades, because it is gsw's report about
-    ///    a key the user pressed. The cache, the schedule, and the worktree do
-    ///    not change.
+    /// The switch starts at a read of the clock, and [`LoopState::enter`]
+    /// does it. On `Err`, the loop stays on the worktree it shows, and the
+    /// reason takes the row on a line that fades, because it is gsw's report
+    /// about a key the user pressed.
     ///
     /// [`absorb`] calls it when it reads the key, and not at the next frame. So
     /// a `p`, `G`, or `m` later in the same burst acts on the new worktree, as
@@ -1551,23 +1548,94 @@ impl LoopState {
         open: &mut impl FnMut(&WorktreePath) -> Result<Snapshot, String>,
     ) {
         let now = clock();
+        // The answer goes unread: no state here stands on where the line
+        // landed.
+        if let Err(reason) = self.enter(target, now, clock, open) {
+            let _ = self.ui.post_notice(reason, now);
+        }
+    }
+
+    /// Open `target` and move the loop to it. Every switch goes through here:
+    /// the switch of a key, and the return to the home worktree.
+    ///
+    /// 1. Open `target` through `open`, and read the clock for the cost of the
+    ///    open, counted from `since`.
+    /// 2. On `Ok`, the snapshot of `target` goes into the cache, collected at
+    ///    `since`, and the schedule records the open as a walk that started
+    ///    at `since`, which starts the refresh clock again. The loop then
+    ///    watches `target`, and the generation moves on, so an outcome of a
+    ///    run that started before the switch is known as stale. Every message
+    ///    under the frame goes, and the list closes, because each one
+    ///    describes the worktree the frame showed before. The `G` key loses
+    ///    its arming with the message that armed it.
+    /// 3. On `Err`, nothing changes, and the reason comes back. The caller
+    ///    decides whether the reason goes on the row.
+    fn enter(
+        &mut self,
+        target: WorktreePath,
+        since: Instant,
+        clock: &impl Fn() -> Instant,
+        open: &mut impl FnMut(&WorktreePath) -> Result<Snapshot, String>,
+    ) -> Result<(), String> {
         let opened = open(&target);
-        let cost = clock().saturating_duration_since(now);
-        match opened {
-            Ok(snapshot) => {
-                self.cache.snapshot = snapshot;
-                self.cache.collected_at = now;
-                self.schedule.record(now, cost);
-                self.current = target;
-                self.generation = self.generation.next();
-                self.ui.clear();
-                self.issue.disarm();
-            }
+        let cost = clock().saturating_duration_since(since);
+        let snapshot = opened?;
+        self.cache.snapshot = snapshot;
+        self.cache.collected_at = since;
+        self.schedule.record(since, cost);
+        self.current = target;
+        self.generation = self.generation.next();
+        self.ui.clear();
+        self.issue.disarm();
+        Ok(())
+    }
+
+    /// After a walk of the current worktree failed: go back to the home
+    /// worktree when the current worktree no longer exists, and say so on a
+    /// line that fades.
+    ///
+    /// The current worktree no longer exists when the list of the worktrees
+    /// no longer holds it: `git worktree remove` or `swt merge` took it. Three
+    /// failed walks keep the rule of a failed walk, which is the last good
+    /// snapshot at its true age:
+    ///
+    /// - a walk of the home worktree, which has no home to go back to;
+    /// - a walk while a push runs, because the window under the frame belongs
+    ///   to the worktree that pushes. A later failed walk goes home, after the
+    ///   push;
+    /// - a walk of a worktree that the list still holds. Such a walk failed
+    ///   for a moment, as when `git gc` swaps the ref store under it.
+    ///
+    /// The switch counts from `now`, the instant of this wake, so its cost
+    /// holds the failed walk and the open of home. Both are git work of this
+    /// wake, and the duty cycle pays for both. The frame of home is then
+    /// placed at `now` like every frame of the wake, so its refresh clock
+    /// shows the whole interval.
+    ///
+    /// The switch clears the row, the question, and the list, and the line
+    /// goes on the row after that, so the line is on the frame that shows
+    /// home. A switch that fails changes nothing and posts nothing. Every
+    /// later failed walk tries again, and a line would come back on each one.
+    fn return_home_if_gone(
+        &mut self,
+        now: Instant,
+        clock: &impl Fn() -> Instant,
+        worktrees: &mut impl FnMut() -> Vec<WorktreeEntry>,
+        open: &mut impl FnMut(&WorktreePath) -> Result<Snapshot, String>,
+    ) {
+        if self.current == self.home || self.ui.mode() == InputMode::Pushing {
+            return;
+        }
+        if worktrees().iter().any(|entry| entry.path == self.current) {
+            return;
+        }
+        let gone = self.current.clone();
+        if self.enter(self.home.clone(), now, clock, open).is_ok() {
             // The answer goes unread: no state here stands on where the line
             // landed.
-            Err(reason) => {
-                let _ = self.ui.post_notice(reason, now);
-            }
+            let _ = self
+                .ui
+                .post_notice(format!("{} {WORKTREE_GONE}", gone.as_path().display()), now);
         }
     }
 
@@ -1643,9 +1711,10 @@ struct LoopHooks<
     /// Read the worktrees of the repository again, sorted by path, as
     /// [`crate::worktrees::list_worktrees`] gives them.
     ///
-    /// Left and Right call it at each press, because `nwt` and `swt` add and
-    /// remove worktrees while gsw runs, so a list read once at start is soon
-    /// wrong.
+    /// Left, Right, and Down call it at each press, because `nwt` and `swt`
+    /// add and remove worktrees while gsw runs, so a list read once at start
+    /// is soon wrong. A walk that fails calls it too, to learn whether the
+    /// worktree on the screen still exists.
     worktrees: Worktrees,
     /// Open the worktree at the path, start its watcher, and walk it, as one
     /// step.
@@ -1993,6 +2062,9 @@ fn paths_of(entries: Vec<WorktreeEntry>) -> Vec<WorktreePath> {
 ///   nothing (suppression);
 /// - a walk that *fails* does not end the loop: the last good snapshot is
 ///   re-rendered at its true age and the next event retries (see below);
+/// - a walk that fails because the worktree on the screen went away goes back
+///   to the home worktree, with a line that says so
+///   ([`LoopState::return_home_if_gone`]);
 /// - while the list of the worktrees is open, the frame is the frame of the
 ///   list (`render_list` in `hooks`), and every other frame is the status
 ///   frame (`render`);
@@ -2011,7 +2083,9 @@ fn paths_of(entries: Vec<WorktreeEntry>) -> Vec<WorktreePath> {
 /// stale frame goes on aging honestly rather than resetting every displayed age
 /// to zero. The accepted cost: a repository deleted for good leaves a frozen
 /// (but visibly aging) frame until the user quits. That is the right failure for
-/// a monitor — a wrong-but-labeled-old screen beats no screen.
+/// a monitor — a wrong-but-labeled-old screen beats no screen. A worktree other
+/// than the home worktree that goes away for good is the one exception: the
+/// loop goes back to the home worktree ([`LoopState::return_home_if_gone`]).
 fn event_loop<
     Collect,
     RenderFn,
@@ -2243,6 +2317,15 @@ where
                     // "just now", or the monitor would claim freshness exactly
                     // when it has none. The frame therefore keeps aging
                     // truthfully while the repository is unreadable.
+                    //
+                    // One failure does not pass: the worktree on the screen
+                    // went away. Then gsw goes back to the home worktree.
+                    state.return_home_if_gone(
+                        now,
+                        &hooks.clock,
+                        &mut hooks.worktrees,
+                        &mut hooks.switch,
+                    );
                 }
             }
         }
