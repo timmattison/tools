@@ -1,0 +1,157 @@
+//! `swt list` end to end: which worktrees count as the children of a branch,
+//! and what a caller reads on each stream.
+//!
+//! Every case drives the real binary against a fixture repository. Each child
+//! comes from the real `swt create`, because the branch of a child is the
+//! contract between the two commands. A test that made child branches by hand
+//! would pin only its own copy of that format.
+//!
+//! Unix only: the fixtures are `sh` scripts dropped as executable `.swt-check`
+//! overrides, which is precisely how the escape hatch is documented.
+#![cfg(unix)]
+
+mod support;
+
+use std::path::{Path, PathBuf};
+
+use support::{exiting_check, git, run_swt, unique, write_swt_check, TestRepo};
+
+/// The namespace of the local branches. A test removes it from the full ref,
+/// so it compares the branch as a person spells it.
+const LOCAL_BRANCH_NAMESPACE: &str = "refs/heads/";
+
+/// The branch of the parent in the tests that need only one parent. It has no
+/// `/`, so no test here depends on how a nested branch is read.
+const PARENT_BRANCH: &str = "issue-42";
+
+/// A worktree that the real `swt create` made, as a test reads it back.
+struct Child {
+    /// The path that `swt create` printed on stdout.
+    path: PathBuf,
+    /// The branch that the child has checked out, without `refs/heads/`.
+    branch: String,
+}
+
+/// Runs the real `swt create` in the worktree at `parent` with a check that
+/// passes, and returns the child that it made.
+///
+/// The name comes from [`unique`], so a concurrent run of the same test cannot
+/// meet this child. Panics when `swt create` fails, because every test here
+/// needs the child to exist.
+fn create_child(parent: &Path, label: &str) -> Child {
+    // `swt` reads the override from the root of the worktree where it runs.
+    write_swt_check(parent, &exiting_check(0));
+    let output = run_swt(parent, &["create", &unique(label)]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "fixture precondition: swt create in {} must succeed: {}",
+        parent.display(),
+        support::stderr(&output)
+    );
+    let stdout = support::stdout(&output);
+    let printed = stdout
+        .strip_suffix('\n')
+        .filter(|line| !line.contains('\n'))
+        .unwrap_or_else(|| panic!("swt create must print exactly one path, got {stdout:?}"));
+    let path = PathBuf::from(printed);
+    let branch = checked_out_branch(&path);
+    Child { path, branch }
+}
+
+/// The branch that the worktree at `path` has checked out.
+///
+/// It reads the full ref and removes `refs/heads/`. The short name is not safe:
+/// when a tag has the same name, git spells it `heads/<branch>`.
+fn checked_out_branch(path: &Path) -> String {
+    let full_ref = git(path, &["symbolic-ref", "--quiet", "HEAD"]);
+    full_ref
+        .strip_prefix(LOCAL_BRANCH_NAMESPACE)
+        .unwrap_or_else(|| {
+            panic!(
+                "the worktree at {} must have a local branch checked out, got {full_ref:?}",
+                path.display()
+            )
+        })
+        .to_string()
+}
+
+/// The line that `swt list` must print for `child`: the path, a tab, and the
+/// branch.
+fn line(child: &Child) -> String {
+    format!("{}\t{}\n", child.path.display(), child.branch)
+}
+
+/// What `swt list` must print for `children`: the line of each child, in the
+/// order of their paths.
+///
+/// The order comes from the paths and not from the order of the arguments, so
+/// the expectation does not depend on the order of the registry of git.
+fn listing(children: &[&Child]) -> String {
+    let mut sorted = children.to_vec();
+    sorted.sort_by(|left, right| left.path.cmp(&right.path));
+    sorted.into_iter().map(line).collect()
+}
+
+// Issue #500. A parent sees exactly its own children, one line each. The path
+// comes first and is the path that `swt create` printed, so a caller can give
+// it directly to `swt merge`. Two worktrees that are not children of the parent
+// share the registry: a child of `main`, and a worktree on a branch in the old
+// format. The filter thus has something to leave out.
+#[test]
+fn a_parent_lists_exactly_its_children_as_a_path_a_tab_and_a_branch() {
+    let repo = TestRepo::new();
+    let parent = repo.add_worktree_on("parent", PARENT_BRANCH);
+    let first = create_child(&parent.path, "first");
+    let second = create_child(&parent.path, "second");
+    let child_of_main = create_child(repo.path(), "elsewhere");
+    let old_format = repo.add_worktree("bystander");
+    // Mutation guard. It proves that the registry holds both bystanders, so an
+    // empty filter cannot pass this test.
+    let registry = repo.git(&["worktree", "list", "--porcelain"]);
+    for bystander in [&child_of_main.path, &old_format.path] {
+        assert!(
+            registry.contains(&format!("worktree {}\n", bystander.display())),
+            "fixture precondition: the registry must hold {}: {registry}",
+            bystander.display()
+        );
+    }
+
+    let output = run_swt(&parent.path, &["list"]);
+    let stderr = support::stderr(&output);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "swt list in a parent with children must succeed: {stderr}"
+    );
+    assert_eq!(
+        support::stdout(&output),
+        listing(&[&first, &second]),
+        "stdout must hold exactly the children of {PARENT_BRANCH}, one line each, \
+         in the order of their paths: {stderr}"
+    );
+}
+
+// `list` starts from the branch that is checked out where it runs. Outside a
+// repository there is no branch, and the user must see the explanation of git.
+#[test]
+fn list_outside_a_repository_fails_with_gits_own_complaint() {
+    let output = support::run_swt_outside_a_repository(&["list"]);
+    let stderr = support::stderr(&output);
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a list with no repository to read must fail: {stderr}"
+    );
+    assert_eq!(
+        support::stdout(&output),
+        "",
+        "a failed list prints no line for a caller to read"
+    );
+    assert!(
+        stderr.contains("not a git repository"),
+        "the explanation of git must reach the user: {stderr}"
+    );
+}
