@@ -18,8 +18,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 
 use support::{
-    exiting_check, git, run_swt, shell_command, swt_command, unique, write_swt_check, TestRepo,
-    MAIN_BRANCH, SWT_CHECK, TRACKED_FILE, WORKTREE_SUFFIX,
+    entry_names, exiting_check, git, recorded_calls, recording_function, run_swt, shell_command,
+    swt_command, unique, write_swt_check, TestRepo, MAIN_BRANCH, SWT_CHECK, TRACKED_FILE,
+    WORKTREE_SUFFIX,
 };
 
 /// A check that records the directory it ran in. `pwd -P` asks the kernel rather
@@ -52,12 +53,6 @@ const SHELL_HOSTILE_PARENT_BRANCHES: [&str; 3] = ["it's", "fix;id", "a$(touch${I
 /// The text in stderr immediately before the recovery line that a failed
 /// teardown prints.
 const RECOVERY_LINE_LABEL: &str = "Remove it by hand:\n  ";
-
-/// A shell function that takes the place of git when a test runs a recovery
-/// line. It runs nothing. It prints the count of its arguments, then each
-/// argument, and it ends each one with a NUL. A shell function takes precedence
-/// over the `git` on `PATH`.
-const RECORDING_GIT: &str = r#"git() { printf '%s\0' "$#" "$@"; }"#;
 
 /// Decodes a finished run's stdout.
 fn stdout_of(output: &Output) -> String {
@@ -142,35 +137,6 @@ fn token_after(text: &str, label: &str, terminator: &str) -> String {
     token.to_string()
 }
 
-/// Reads back the calls that [`RECORDING_GIT`] printed, as one list of
-/// arguments for each call, in the order of the calls.
-///
-/// Panics when `stdout` does not have the shape that the function prints: a
-/// count, then that number of arguments, with a NUL at the end of each field.
-fn recorded_git_calls(stdout: &str) -> Vec<Vec<String>> {
-    let mut fields = stdout.split_terminator('\0');
-    let mut calls = Vec::new();
-    while let Some(count) = fields.next() {
-        let count: usize = count.parse().unwrap_or_else(|_| {
-            panic!(
-                "a recorded call must start with its argument count, got {count:?} in {stdout:?}"
-            )
-        });
-        let arguments: Vec<String> = fields
-            .by_ref()
-            .take(count)
-            .map(ToString::to_string)
-            .collect();
-        assert_eq!(
-            arguments.len(),
-            count,
-            "a recorded call has fewer arguments than its count in {stdout:?}"
-        );
-        calls.push(arguments);
-    }
-    calls
-}
-
 /// Starts a `swt create <name>` without waiting for it, with both streams
 /// captured. Spawning is separated from waiting so the collision case can have
 /// two runs genuinely overlap — waited on in turn, the second would simply find
@@ -187,18 +153,7 @@ fn spawn_create(repo: &TestRepo, name: &str) -> Child {
 /// Sorted names of everything sitting beside the repository, so an orphaned
 /// worktree cannot hide by being merely un-asserted-about.
 fn beside_the_repo(repo: &TestRepo) -> Vec<String> {
-    let mut entries: Vec<String> = fs::read_dir(repo.siblings())
-        .expect("the fixture's sibling directory should be readable")
-        .map(|entry| {
-            entry
-                .expect("sibling directory entry")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect();
-    entries.sort();
-    entries
+    entry_names(repo.siblings())
 }
 
 // The whole point of the command: a worktree branched from a verified HEAD, and
@@ -729,7 +684,8 @@ fn a_shell_reads_the_recovery_line_as_the_two_commands_it_names() {
         // An empty directory, so a file that the line makes is easy to see.
         let shell_dir = repo.sibling("recovery-shell");
         fs::create_dir(&shell_dir).expect("an empty directory for the shell");
-        let pasted = shell_command(&shell_dir, &format!("{RECORDING_GIT}\n{recovery_line}"))
+        let script = format!("{}\n{recovery_line}", recording_function("git"));
+        let pasted = shell_command(&shell_dir, &script)
             .output()
             .expect("the shell should run");
 
@@ -741,7 +697,7 @@ fn a_shell_reads_the_recovery_line_as_the_two_commands_it_names() {
             stderr_of(&pasted)
         );
         assert_eq!(
-            recorded_git_calls(&stdout_of(&pasted)),
+            recorded_calls(&stdout_of(&pasted)),
             vec![
                 vec![
                     "worktree",
@@ -753,18 +709,8 @@ fn a_shell_reads_the_recovery_line_as_the_two_commands_it_names() {
             ],
             "a shell must read each value in the recovery line as one argument: {recovery_line}"
         );
-        let left_behind: Vec<String> = fs::read_dir(&shell_dir)
-            .expect("the directory of the shell should be readable")
-            .map(|entry| {
-                entry
-                    .expect("shell directory entry")
-                    .file_name()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect();
         assert_eq!(
-            left_behind,
+            entry_names(&shell_dir),
             Vec::<String>::new(),
             "a shell must run no command that the parent branch {parent_branch:?} spells: \
              {recovery_line}"

@@ -191,6 +191,67 @@ pub fn shell_command(dir: &Path, script: &str) -> Command {
     cmd
 }
 
+/// The text of a shell function that takes the place of the command `name`,
+/// for a test that runs a line that a person pastes into a shell.
+///
+/// The function runs nothing. It prints the count of its arguments, then each
+/// argument, and it ends each one with a NUL. A shell function takes precedence
+/// over a command of the same name on `PATH`, so the real command never runs.
+/// Put the text before the pasted line in the script of [`shell_command`], and
+/// read the output back with [`recorded_calls`].
+pub fn recording_function(name: &str) -> String {
+    format!(r#"{name}() {{ printf '%s\0' "$#" "$@"; }}"#)
+}
+
+/// Reads back the calls that a [`recording_function`] printed, as one list of
+/// arguments for each call, in the order of the calls.
+///
+/// Panics when `stdout` does not have the shape that the function prints: a
+/// count, then that number of arguments, with a NUL at the end of each field.
+pub fn recorded_calls(stdout: &str) -> Vec<Vec<String>> {
+    let mut fields = stdout.split_terminator('\0');
+    let mut calls = Vec::new();
+    while let Some(count) = fields.next() {
+        let count: usize = count.parse().unwrap_or_else(|_| {
+            panic!(
+                "a recorded call must start with its argument count, got {count:?} in {stdout:?}"
+            )
+        });
+        let arguments: Vec<String> = fields
+            .by_ref()
+            .take(count)
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            arguments.len(),
+            count,
+            "a recorded call has fewer arguments than its count in {stdout:?}"
+        );
+        calls.push(arguments);
+    }
+    calls
+}
+
+/// The names of the entries in `dir`, sorted.
+///
+/// A test reads it to see every file that a run left in a directory. A name
+/// that is not valid UTF-8 comes back with replacement characters, so it still
+/// shows in a failure message.
+pub fn entry_names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap_or_else(|err| panic!("could not read the directory {}: {err}", dir.display()))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|err| panic!("could not read an entry of {}: {err}", dir.display()))
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
 /// Runs git in `dir`, tolerating a non-zero exit.
 ///
 /// Returns whether git succeeded and its combined stdout/stderr — some fixtures
