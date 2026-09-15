@@ -140,8 +140,14 @@ fn main_worktree(repo: &gix::Repository) -> Option<Found> {
 /// The linked worktree that `proxy` names. `None` when gix cannot read its
 /// `gitdir` file, when its directory does not exist, or when gix cannot open
 /// its admin dir.
+///
+/// git writes the `gitdir` file as an absolute path, or, with
+/// `--relative-paths`, as a path relative to the admin dir. gix gives the path
+/// back as it is. The join with the admin dir resolves the relative form. An
+/// absolute path replaces the admin dir in the join, so the absolute form
+/// stays as it is.
 fn linked_worktree(proxy: gix::worktree::Proxy<'_>) -> Option<Found> {
-    let path = WorktreePath::resolve(&proxy.base().ok()?)?;
+    let path = WorktreePath::resolve(&proxy.git_dir().join(proxy.base().ok()?))?;
     let repo = proxy.into_repo_with_possibly_inaccessible_worktree().ok()?;
     Some(Found { path, repo })
 }
