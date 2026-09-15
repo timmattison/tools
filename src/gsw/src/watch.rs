@@ -2247,6 +2247,16 @@ where
             }
         }
 
+        // The open list takes the rows under the head of the frame. A pane
+        // that leaves it no row closes it, so Enter never chooses a row that
+        // the user did not see. The check comes after the walk, because the
+        // snapshot sets how tall the head is, and before the overlay, so a
+        // message that waited for the list reaches the row on the frame that
+        // closes it.
+        if crate::list_rows(&state.cache.snapshot, state.cache.dims) == 0 {
+            let _ = state.ui.close_list();
+        }
+
         // What the push overlay will paint under the frame, and how tall the
         // frame is left — one call, because they are one division of the pane
         // both have to share. The frame is rendered shorter by exactly what the
