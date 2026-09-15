@@ -8067,4 +8067,72 @@ mod push_loop_tests {
             format!("FRAME {CHARLIE}\n{MEASURED_CLEAN} (0s ago)"),
         );
     }
+
+    #[test]
+    fn down_opens_the_list_with_the_cursor_on_the_current_worktree() {
+        // The list opens on the worktree that the frame shows, and the screen
+        // is what the list hook drew, with nothing under it. Down reads the
+        // list once, and walks and switches nothing.
+        let (screen, seen) = run_in(World::three(), vec![key(KeyCode::Down), Event::Quit]);
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("LIST {BRAVO}: {ALPHA} >{BRAVO}⌂ {CHARLIE}"),
+        );
+        assert_eq!(seen.listings, 1, "Down must read the list once");
+        assert_eq!(seen.collects, 0, "Down must not walk");
+        assert!(seen.switches.is_empty(), "Down must not switch");
+
+        // After a switch, the cursor is on the worktree that the frame shows,
+        // and the home mark stays on the home worktree.
+        let (screen, _seen) = run_in(
+            World::three(),
+            vec![key(KeyCode::Right), key(KeyCode::Down), Event::Quit],
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("LIST {CHARLIE}: {ALPHA} {BRAVO}⌂ >{CHARLIE}"),
+        );
+    }
+
+    #[test]
+    fn with_one_worktree_down_opens_a_list_of_one_row() {
+        let (screen, _seen) = run_in(World::alone(), vec![key(KeyCode::Down), Event::Quit]);
+        assert_eq!(strip_ansi(&screen), format!("LIST {ALONE}: >{ALONE}⌂"));
+    }
+
+    #[test]
+    fn while_the_list_is_open_every_other_key_does_nothing() {
+        // The list takes the pane. `r` walks nothing, `p` and `y` push
+        // nothing, `G` and `m` start nothing, Left and Right switch nothing,
+        // and the list stays open with its cursor where it was.
+        let (screen, seen) = run_in(
+            World::three(),
+            vec![
+                probe_answered(),
+                key(KeyCode::Down),
+                key(KeyCode::Char('r')),
+                key(KeyCode::Char('p')),
+                key(KeyCode::Char('y')),
+                press_g(),
+                press_m(),
+                key(KeyCode::Left),
+                key(KeyCode::Right),
+                key(KeyCode::Char('x')),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("LIST {BRAVO}: {ALPHA} >{BRAVO}⌂ {CHARLIE}"),
+        );
+        assert_eq!(seen.collects, 0, "`r` must not walk");
+        assert!(seen.pushes.is_empty(), "`p` and `y` must not push");
+        assert!(seen.issue_runs.is_empty(), "`G` must not run");
+        assert_eq!(seen.conflict_runs, 0, "`m` must not measure");
+        assert!(
+            seen.switches.is_empty(),
+            "Left and Right must not switch, got {:?}",
+            seen.switches,
+        );
+    }
 }
