@@ -1809,7 +1809,16 @@ where
         // Down reads the list again at each press, as Left and Right do,
         // because `nwt` and `swt` add and remove worktrees while gsw runs.
         // The cursor starts on the worktree that the frame shows.
+        //
+        // A pane with no row for the list opens none, so Enter never chooses
+        // a row that the user did not see, as `p` never asks a question that
+        // the pane cannot show. `cache.dims` is the pane that the user saw at
+        // the press. The check comes before the read, so such a pane pays for
+        // no read of the list.
         Event::OpenList => {
+            if crate::list_rows(&state.cache.snapshot, state.cache.dims) == 0 {
+                return Flow::Continue;
+            }
             let entries = (hooks.worktrees)();
             if let Some(list) = WorktreeList::open(entries, &state.current, state.home.clone()) {
                 state.ui.open_list(list);
