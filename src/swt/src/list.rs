@@ -19,13 +19,21 @@
 //!
 //! When the branch has no children, stdout stays empty and a one-line note that
 //! names the branch goes to stderr. The status is still 0, because no children
-//! is an answer and not a failure. `[ -n "$(swt list)" ]` is thus a complete
-//! check.
+//! is an answer and not a failure.
 //!
 //! A detached HEAD has no branch, so it has no children to ask about. `list`
 //! then prints nothing on stdout, says why on stderr, and exits 1. It reads
 //! HEAD through [`head_branch`]. `create` uses the same read, and refuses a
 //! detached HEAD for the same reason.
+//!
+//! A failure also leaves stdout empty, for example on a detached HEAD, or when
+//! `swt` is not on the `PATH` of a hook. Thus a check must read the exit status
+//! before it reads stdout. This check gives 0 for children, 1 for no children,
+//! and 2 for a failure:
+//! `children="$(swt list)" || exit 2; [ -n "$children" ]`. In POSIX, an
+//! assignment that holds a command substitution gets the status of the
+//! substitution, so `|| exit 2` sees the failure. With `exit 1`, a failure
+//! gets the status of no children, and a caller cannot tell the two apart.
 //!
 //! The source is the worktree registry of git, `git worktree list --porcelain
 //! -z`. `list` does not scan directories. A directory beside the parent is not

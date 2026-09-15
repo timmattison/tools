@@ -790,9 +790,12 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - `swt list` prints the child worktrees of the branch that is checked out where it runs. Each child
     is one line on stdout, sorted by path: the path, a tab, and the branch. The path can go directly
     to `swt merge`. A child whose directory is gone gets a third field, `prunable`. With no children,
-    stdout is empty, a note goes to stderr, and the exit status is 0, so `[ -n "$(swt list)" ]` is a
-    complete check. On a detached HEAD, `swt list` exits 1 and says why. It shows a child only when
-    the parent in the branch of the child is equal to the current branch. A prefix is not sufficient:
+    stdout is empty, a note goes to stderr, and the exit status is 0. On a detached HEAD, `swt list`
+    exits 1 and says why. A failure also leaves stdout empty, for example on a detached HEAD, or
+    when `swt` is not on the `PATH` of a hook. Thus a check must read the exit status before it
+    reads stdout. This check gives 0 for children, 1 for no children, and 2 for a failure:
+    `children="$(swt list)" || exit 2; [ -n "$children" ]`. `swt list` shows a child only when the
+    parent in the branch of the child is equal to the current branch. A prefix is not sufficient:
     the children of `feat/foo` are not children of `feat`. Worktrees in the old format
     `swt/<name>-<token>` have no parent in their branch, so `swt list` does not show them.
   - A hook or a skill can find the child branches with plain git, without `swt`:

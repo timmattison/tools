@@ -323,11 +323,11 @@ fn a_child_of_a_longer_branch_is_not_a_child_of_its_prefix() {
     );
 }
 
-// Issue #500. A branch with no children prints nothing on stdout, so
-// `[ -n "$(swt list)" ]` is a complete check. A note on stderr tells a person
-// why the output is empty. The status is 0, because no children is an answer
-// and not a failure. The registry holds a child of `main` and a worktree in the
-// old format, so the empty answer does not come from an empty registry.
+// Issue #500. A branch with no children prints nothing on stdout. A note on
+// stderr tells a person why the output is empty. The status is 0, because no
+// children is an answer and not a failure. The registry holds a child of `main`
+// and a worktree in the old format, so the empty answer does not come from an
+// empty registry.
 #[test]
 fn a_parent_with_no_children_prints_nothing_and_a_note_that_names_it() {
     let repo = TestRepo::new();
