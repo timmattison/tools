@@ -40,6 +40,10 @@ const NESTED_PARENT_BRANCH: &str = "feat/foo";
 /// name the branch.
 const NO_CHILDREN_PHRASE: &str = "No child worktrees";
 
+/// The word that git gives a worktree whose directory is gone. `swt list` adds
+/// the same word as a third field to the line of such a child.
+const PRUNABLE_FIELD: &str = "prunable";
+
 /// A worktree that the real `swt create` made, as a test reads it back.
 struct Child {
     /// The path that `swt create` printed on stdout.
@@ -118,6 +122,16 @@ fn path_arg(path: &Path) -> &str {
 /// branch.
 fn line(child: &Child) -> String {
     format!("{}\t{}\n", child.path.display(), child.branch)
+}
+
+/// The line that `swt list` must print for `child` when git marks it prunable:
+/// the path, a tab, the branch, a tab, and [`PRUNABLE_FIELD`].
+fn prunable_line(child: &Child) -> String {
+    format!(
+        "{}\t{}\t{PRUNABLE_FIELD}\n",
+        child.path.display(),
+        child.branch
+    )
 }
 
 /// What `swt list` must print for `children`: the line of each child, in the
@@ -254,6 +268,59 @@ fn a_parent_with_no_children_prints_nothing_and_a_note_that_names_it() {
     assert!(
         note.contains(NO_CHILDREN_PHRASE) && note.contains(PARENT_BRANCH),
         "the note must say {NO_CHILDREN_PHRASE:?} and name {PARENT_BRANCH}, got {note:?}"
+    );
+}
+
+// Issue #500. A child whose directory was deleted by hand stays in the registry
+// of git, and git marks it prunable. `swt list` must still show it, with a
+// third field that tells the user to prune it. The other child keeps two
+// fields, so the third field marks one child and not the whole listing.
+#[test]
+fn a_child_whose_directory_is_gone_is_listed_as_prunable() {
+    let repo = TestRepo::new();
+    let parent = repo.add_worktree_on("parent", PARENT_BRANCH);
+    let gone = create_child(&parent.path, "gone");
+    let kept = create_child(&parent.path, "kept");
+    fs::remove_dir_all(&gone.path).expect("the directory of a child should be removable");
+    // Mutation guard. It proves that git still registers the child whose
+    // directory is gone, and that git marks it prunable.
+    let registry = repo.git(&["worktree", "list", "--porcelain"]);
+    let record = registry
+        .split("\n\n")
+        .find(|record| record.starts_with(&format!("worktree {}\n", gone.path.display())))
+        .unwrap_or_else(|| {
+            panic!(
+                "fixture precondition: the registry must still hold {}: {registry}",
+                gone.path.display()
+            )
+        });
+    assert!(
+        record
+            .lines()
+            .any(|field| field.split_whitespace().next() == Some(PRUNABLE_FIELD)),
+        "fixture precondition: git must mark {} {PRUNABLE_FIELD}: {record}",
+        gone.path.display()
+    );
+
+    let output = run_swt(&parent.path, &["list"]);
+    let stderr = support::stderr(&output);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "swt list must succeed when a child directory is gone: {stderr}"
+    );
+    let mut expected = [
+        (gone.path.clone(), prunable_line(&gone)),
+        (kept.path.clone(), line(&kept)),
+    ];
+    expected.sort();
+    let expected: String = expected.into_iter().map(|(_, text)| text).collect();
+    assert_eq!(
+        support::stdout(&output),
+        expected,
+        "the child whose directory is gone must carry the field {PRUNABLE_FIELD:?}, and only \
+         that child: {stderr}"
     );
 }
 
