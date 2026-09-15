@@ -57,37 +57,53 @@ pub struct AllCredentialsInUse {
 /// Selects the credential a tunnel is generated from.
 ///
 /// A directory that already holds a `.env` names the credential its tunnel was
-/// generated from, and `existing_label` carries that name. That credential is
-/// selected again, whole label against whole label, even when a running tunnel
-/// already holds its key: the container holding it is the tunnel this very
-/// directory started, and regenerating the directory must not move it to
-/// another key.
+/// generated from, and `existing_label` carries that name. `own_container` is
+/// the name of the gluetun container that this run writes.
 ///
-/// Every other call falls back to the ordinary rule — the first credential
-/// whose value appears in no running tunnel. `existing_label` of [`None`] is
-/// one such call, and so is a label that no credential carries any more,
-/// because the credential was removed from 1Password.
+/// This function selects the named credential again, whole label against
+/// whole label, when no running tunnel of another name holds its key. So the
+/// credential stays when a tunnel of `own_container` holds its key. Docker
+/// refuses two containers of one name, so that tunnel is the tunnel of this
+/// directory, or a tunnel that cannot run beside it. A second run into the
+/// directory therefore does not move its tunnel to another key.
+///
+/// A running tunnel of another name that holds the named key is not the tunnel
+/// that this run writes. Two tunnels must not carry one key, so this function
+/// does not keep the named credential. It uses the ordinary rule, and
+/// [`Selection::Replaced`] names the holder.
+///
+/// The ordinary rule selects the first credential whose key no running tunnel
+/// holds. A call with an `existing_label` of [`None`] also uses it. So does a
+/// label that no credential carries any more, because the credential is no
+/// longer in 1Password.
 ///
 /// `total` counts the available credentials and `in_use` counts the ones a
 /// running tunnel holds, under either rule.
 ///
 /// # Errors
 ///
-/// Returns `AllCredentialsInUse` when a running container holds every
-/// credential and none of them carries `existing_label`.
+/// Returns `AllCredentialsInUse` when a running tunnel holds every credential
+/// and this function does not keep the named credential. That happens when no
+/// credential carries `existing_label`, or when a running tunnel of another
+/// name holds the named key.
 pub fn select_credential(
     available: &[ItemField],
     running: &[RunningTunnel],
     existing_label: Option<&str>,
-    _own_container: &str,
+    own_container: &str,
 ) -> Result<SelectedCredential, AllCredentialsInUse> {
-    let mut named: Option<&ItemField> = None;
+    // The credential that `existing_label` names, and a running tunnel of
+    // another name that holds its key.
+    let mut named: Option<(&ItemField, Option<&RunningTunnel>)> = None;
     let mut first_free: Option<&ItemField> = None;
     let mut in_use_count = 0_usize;
 
     for field in available {
         if named.is_none() && existing_label == Some(field.label.as_str()) {
-            named = Some(field);
+            let other_holder = running
+                .iter()
+                .find(|r| r.wireguard_key == field.value && r.container_name != own_container);
+            named = Some((field, other_holder));
         }
         if running.iter().any(|r| r.wireguard_key == field.value) {
             in_use_count += 1;
@@ -96,12 +112,20 @@ pub fn select_credential(
         }
     }
 
-    if let Some(field) = named.or(first_free) {
-        let selection = if named.is_some() {
-            Selection::Reused
-        } else {
-            Selection::FirstFree
-        };
+    let chosen = match (named, first_free) {
+        (Some((field, None)), _) => Some((field, Selection::Reused)),
+        (Some((named_field, Some(holder))), Some(free)) => Some((
+            free,
+            Selection::Replaced {
+                named_label: named_field.label.clone(),
+                holder: holder.container_name.clone(),
+            },
+        )),
+        (None, Some(free)) => Some((free, Selection::FirstFree)),
+        (_, None) => None,
+    };
+
+    if let Some((field, selection)) = chosen {
         return Ok(SelectedCredential {
             field_label: field.label.clone(),
             key: field.value.clone(),
@@ -591,9 +615,10 @@ mod tests {
 
     #[test]
     fn a_named_label_is_kept_while_its_own_tunnel_runs() {
-        // Regenerating a directory whose tunnel is up must not move that
-        // tunnel to a different key: the container holding this key is the
-        // one this directory started.
+        // A second run into a directory whose tunnel is up must not move that
+        // tunnel to another key. The tunnel that holds the key carries the
+        // name that this run writes. Docker refuses two containers of one
+        // name, so the two can never run with one key at the same time.
         let available = vec![field("credential", "key-1"), field("credential-2", "key-2")];
         let running = vec![tunnel("vpn-gluetun", "key-2")];
         let result =
@@ -606,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn a_named_label_never_reaches_the_all_in_use_error() {
+    fn a_named_label_that_its_own_tunnel_holds_never_reaches_the_all_in_use_error() {
         let available = vec![field("credential", "key-1"), field("credential-2", "key-2")];
         let running = vec![
             tunnel("scraper-gluetun", "key-1"),
