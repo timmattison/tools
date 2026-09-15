@@ -1143,14 +1143,34 @@ impl Watched {
     /// Open the worktree at `path`, and watch it. The watcher sends its events
     /// on `tx`. A switch opens its target here.
     ///
+    /// [`RepoHandle::discover`] walks up from `path`, as git does. So a
+    /// directory of the list that lost its `.git` file opens the repository
+    /// around it: a linked worktree inside the main worktree opens the main
+    /// worktree. The open therefore makes sure that the work tree it opened
+    /// resolves to `path` itself. Without that check, the frame would show the
+    /// status of one worktree under the name of another.
+    ///
     /// # Errors
     ///
-    /// Refuses with [`NOT_A_WORK_TREE`] when no git work tree opens at `path`,
-    /// and with the reasons of [`from_handle`](Self::from_handle). Each reason
-    /// names `path`.
+    /// Refuses with [`DIRECTORY_GONE`] when no directory is at `path`. Refuses
+    /// with [`NOT_A_WORK_TREE`] when no git work tree opens at `path`, or when
+    /// the work tree that opens is not `path`. Refuses with the reasons of
+    /// [`from_handle`](Self::from_handle) too. Each reason names `path`.
     fn open(path: &WorktreePath, tx: Sender<Event>) -> Result<Self, String> {
+        let shown = path.as_path().display();
+        if WorktreePath::resolve(path.as_path()).is_none() {
+            return Err(format!("{DIRECTORY_GONE}: {shown}"));
+        }
         let handle = RepoHandle::discover(path.as_path())
-            .ok_or_else(|| format!("{NOT_A_WORK_TREE}: {}", path.as_path().display()))?;
+            .filter(|handle| {
+                handle
+                    .repo()
+                    .workdir()
+                    .and_then(WorktreePath::resolve)
+                    .as_ref()
+                    == Some(path)
+            })
+            .ok_or_else(|| format!("{NOT_A_WORK_TREE}: {shown}"))?;
         Self::from_handle(handle, path.clone(), tx)
     }
 
@@ -1482,14 +1502,6 @@ const NOT_A_WORK_TREE: &str = "gsw cannot go to a directory that is not a git wo
 
 /// Why gsw refuses to go to a worktree whose directory no longer exists. The
 /// line names the directory after this text.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Watched::open refuses with it after a test states that refusal. The expectation \
-                  fails the build when it does, so this attribute cannot stay after that"
-    )
-)]
 const DIRECTORY_GONE: &str = "gsw cannot go to a worktree whose directory no longer exists";
 
 /// Why gsw refuses to watch a worktree when its filesystem watcher does not
