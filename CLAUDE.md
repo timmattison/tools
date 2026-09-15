@@ -619,6 +619,25 @@ tool's own entry would otherwise document a tool named `To`.
   cargo actually builds, so a binary the guard never learned to discover shows
   up as a set difference instead of a clean report
 
+## Specs and Plans
+
+A spec **must** live in `specs/` and a plan **must** live in `plans/`, both at
+the repository root. A file in any other directory named `specs` or `plans` is
+in the wrong place.
+
+### Why
+
+The superpowers skills write specs and plans to `docs/superpowers/` by default.
+This repository took that default three times: #198 (`portplz`), #200
+(`kitchen-sync`), and #191 (`vpn-tunnel`). Nothing failed, so the files stayed
+there until a review of #191 found them.
+
+### Guards Enforcing This
+
+- `repo_guards::doc_placement` (`src/repo-guards/src/doc_placement.rs`) — every
+  file in a `specs` or `plans` directory below the repository root fails
+  `cargo test`
+
 ## UTF-8 String Safety
 
 All tools in this repository **must** handle UTF-8 strings safely. Never use byte-level indexing that could panic on multi-byte characters.
