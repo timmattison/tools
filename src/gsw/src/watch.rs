@@ -9133,13 +9133,16 @@ mod push_loop_tests {
 /// that the suite runs in.
 #[cfg(test)]
 mod watched_tests {
+    use std::cell::RefCell;
     use std::path::Path;
-    use std::sync::mpsc;
+    use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
+    use std::time::{Duration, Instant};
 
     use tempfile::TempDir;
 
     use super::tests::walk_config;
-    use super::{Event, Watched};
+    use super::{switch_watched, Event, Watched};
+    use crate::render::Snapshot;
     use crate::repo::RepoHandle;
     use crate::testrepo::{git, git_stdout, init_repo, init_repo_at};
     use crate::worktrees::{WorktreeBadge, WorktreePath};
@@ -9280,5 +9283,245 @@ mod watched_tests {
             .expect("walk the fixture");
 
         assert_eq!(snapshot.worktree, None);
+    }
+
+    /// The name of the file that a test changes in a worktree, to learn which
+    /// worktree a walk read.
+    const CHANGED: &str = "changed.txt";
+
+    /// How long a test waits for a filesystem watcher: for the old watcher to
+    /// hang up, and for the new watcher to report a change. Generous, because a
+    /// loaded machine delays both. Each wait ends as soon as its answer
+    /// arrives.
+    const WATCHER_DEADLINE: Duration = Duration::from_secs(20);
+
+    /// How long the channel of the new watcher must stay quiet before the test
+    /// writes the file that must wake it. The events of the switch itself
+    /// arrive in this window, so the event that the test then waits for comes
+    /// from its own write.
+    const QUIET: Duration = Duration::from_millis(500);
+
+    /// The paths of the files that `snapshot` lists.
+    fn files_of(snapshot: &Snapshot) -> Vec<&str> {
+        snapshot
+            .files
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect()
+    }
+
+    /// Assert that the watch is still on the worktree at `dir`, on `branch`:
+    /// the path of `watched` is `dir`, and a walk reads a file that changes in
+    /// `dir`.
+    fn assert_still_on(watched: &RefCell<Watched>, dir: &Path, branch: &str, home: &WorktreePath) {
+        assert_eq!(
+            watched.borrow().path,
+            resolved(dir),
+            "the watch must stay on the old worktree",
+        );
+        std::fs::write(dir.join(CHANGED), "changed\n").expect("write in the old worktree");
+        let later = watched
+            .borrow_mut()
+            .walk(&walk_config(), home)
+            .expect("walk the old worktree");
+        assert_eq!(
+            later.branch, branch,
+            "a later walk must read the old worktree"
+        );
+        assert!(
+            files_of(&later).contains(&CHANGED),
+            "a later walk must read the old worktree, got {:?}",
+            files_of(&later),
+        );
+    }
+
+    /// Whether every sender of `rx` hangs up before `deadline` passes. An event
+    /// that arrives first is read and dropped, because it was sent before the
+    /// hang-up.
+    fn hangs_up(rx: &Receiver<Event>, deadline: Duration) -> bool {
+        let give_up_at = Instant::now() + deadline;
+        while let Some(left) = give_up_at.checked_duration_since(Instant::now()) {
+            match rx.recv_timeout(left) {
+                Ok(_) => {}
+                Err(RecvTimeoutError::Disconnected) => return true,
+                Err(RecvTimeoutError::Timeout) => return false,
+            }
+        }
+        false
+    }
+
+    /// Whether a filesystem event reaches `rx` before `deadline` passes.
+    fn wakes(rx: &Receiver<Event>, deadline: Duration) -> bool {
+        let give_up_at = Instant::now() + deadline;
+        while let Some(left) = give_up_at.checked_duration_since(Instant::now()) {
+            match rx.recv_timeout(left) {
+                Ok(Event::FsChanged) => return true,
+                Ok(_) => {}
+                Err(_) => return false,
+            }
+        }
+        false
+    }
+
+    /// Read and drop every event on `rx` until the channel stays quiet for
+    /// [`QUIET`], or until `deadline` passes.
+    fn drain(rx: &Receiver<Event>, deadline: Duration) {
+        let give_up_at = Instant::now() + deadline;
+        while Instant::now() < give_up_at {
+            if rx.recv_timeout(QUIET).is_err() {
+                return;
+            }
+        }
+    }
+
+    /// A switch that works moves every later walk to the new worktree. The
+    /// switch gives the first frame of the new worktree. A later walk reads a
+    /// file that changed in the new worktree, and its badge names the new
+    /// worktree.
+    #[test]
+    fn a_switch_that_works_makes_every_later_walk_read_the_new_worktree() {
+        let dir = siblings();
+        let main = dir.path().join(MAIN);
+        let linked = dir.path().join(LINKED);
+        let home = resolved(&main);
+        let cfg = walk_config();
+        let (tx, _rx) = mpsc::channel();
+        let watched = RefCell::new(seeded(&main, tx.clone()));
+
+        let first = switch_watched(&watched, &resolved(&linked), tx, &cfg, &home)
+            .unwrap_or_else(|reason| panic!("the switch to {LINKED} must work: {reason}"));
+        assert_eq!(
+            first.branch, LINKED,
+            "the switch gives the first frame of the new worktree",
+        );
+        assert_eq!(watched.borrow().path, resolved(&linked));
+
+        std::fs::write(linked.join(CHANGED), "changed\n").expect("write in the new worktree");
+        let later = watched
+            .borrow_mut()
+            .walk(&cfg, &home)
+            .expect("walk the new worktree");
+
+        assert_eq!(later.branch, LINKED);
+        assert!(
+            files_of(&later).contains(&CHANGED),
+            "a later walk must read the new worktree, got {:?}",
+            files_of(&later),
+        );
+        assert_eq!(
+            later.worktree,
+            Some(WorktreeBadge {
+                position: 2,
+                count: 3,
+                home: false,
+                label: LINKED.to_string(),
+            }),
+            "the badge must name the new worktree",
+        );
+    }
+
+    /// A switch to a worktree whose directory is gone fails. The reason names
+    /// the directory, and the watch stays on the old worktree.
+    #[test]
+    fn a_switch_to_a_directory_that_is_gone_leaves_the_old_worktree_and_gives_the_reason() {
+        let dir = siblings();
+        let main = dir.path().join(MAIN);
+        let linked = dir.path().join(LINKED);
+        let home = resolved(&main);
+        let target = resolved(&linked);
+        std::fs::remove_dir_all(&linked).expect("delete the directory of the linked worktree");
+        let (tx, _rx) = mpsc::channel();
+        let watched = RefCell::new(seeded(&main, tx.clone()));
+
+        let reason = switch_watched(&watched, &target, tx, &walk_config(), &home)
+            .expect_err("a directory that is gone must refuse the switch");
+
+        assert_still_on(&watched, &main, MAIN, &home);
+        assert!(
+            reason.contains(&target.as_path().display().to_string()),
+            "the reason must name the directory: {reason}",
+        );
+    }
+
+    /// A switch whose walk fails leaves the old worktree in place, as a switch
+    /// whose open fails does: the switch replaces the old worktree only when
+    /// both work. The new worktree opens, but its index is not an index, so its
+    /// status walk fails. The reason names the directory.
+    #[test]
+    fn a_switch_whose_walk_fails_leaves_the_old_worktree_and_gives_the_reason() {
+        let dir = siblings();
+        let main = dir.path().join(MAIN);
+        let linked = dir.path().join(LINKED);
+        let home = resolved(&main);
+        let target = resolved(&linked);
+        let index = git_stdout(
+            &linked,
+            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+        );
+        std::fs::write(&index, "not an index").expect("spoil the index of the linked worktree");
+        let (tx, _rx) = mpsc::channel();
+        let watched = RefCell::new(seeded(&main, tx.clone()));
+
+        let reason = switch_watched(&watched, &target, tx, &walk_config(), &home)
+            .expect_err("a worktree whose walk fails must refuse the switch");
+
+        assert_still_on(&watched, &main, MAIN, &home);
+        assert!(
+            reason.contains(&target.as_path().display().to_string()),
+            "the reason must name the directory: {reason}",
+        );
+    }
+
+    /// After a switch, a change to a file in the new worktree wakes the loop,
+    /// and a change in the old worktree does not.
+    ///
+    /// The watchers are real `notify` watchers, on sibling worktrees. A
+    /// worktree inside another is under the recursive watch of the other by
+    /// design, so a nested layout proves nothing about the switch.
+    ///
+    /// The first watcher sends on one channel, and the switch gives the new
+    /// watcher another channel. That makes the negative half exact, where a
+    /// quiet window only makes it likely: the old channel reports that every
+    /// sender hung up. The old watcher and its sender are then gone, so no
+    /// change in the old worktree can ever reach the loop through them, and a
+    /// write in the old worktree finds the channel hung up still. In production
+    /// both watchers send on the one channel of the loop, and the new watcher
+    /// does not watch the old worktree, because the two are siblings.
+    ///
+    /// The positive half first waits for the channel of the new watcher to go
+    /// quiet, so the event that it waits for comes from the write of the test.
+    /// Every wait has a deadline. The drop of `watched` at the end stops the
+    /// new watcher and joins its thread, so nothing of the test outlives it.
+    #[test]
+    fn after_a_switch_a_change_in_the_new_worktree_wakes_the_loop_and_one_in_the_old_does_not() {
+        let dir = siblings();
+        let main = dir.path().join(MAIN);
+        let linked = dir.path().join(LINKED);
+        let home = resolved(&main);
+        let (old_tx, old_rx) = mpsc::channel();
+        let watched = RefCell::new(seeded(&main, old_tx));
+        let (new_tx, new_rx) = mpsc::channel();
+
+        switch_watched(&watched, &resolved(&linked), new_tx, &walk_config(), &home)
+            .unwrap_or_else(|reason| panic!("the switch to {LINKED} must work: {reason}"));
+
+        assert!(
+            hangs_up(&old_rx, WATCHER_DEADLINE),
+            "the switch must stop the old watcher, and drop its sender, within {}s",
+            WATCHER_DEADLINE.as_secs(),
+        );
+        std::fs::write(main.join(CHANGED), "changed\n").expect("write in the old worktree");
+        assert!(
+            matches!(old_rx.try_recv(), Err(TryRecvError::Disconnected)),
+            "a change in the old worktree must not reach the loop",
+        );
+
+        drain(&new_rx, WATCHER_DEADLINE);
+        std::fs::write(linked.join(CHANGED), "changed\n").expect("write in the new worktree");
+        assert!(
+            wakes(&new_rx, WATCHER_DEADLINE),
+            "a change in the new worktree must wake the loop within {}s",
+            WATCHER_DEADLINE.as_secs(),
+        );
     }
 }
