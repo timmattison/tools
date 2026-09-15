@@ -9,14 +9,6 @@
 //! [`badge`], and [`WorktreeList`] read no git and no filesystem, so the loop
 //! decides each key from the paths alone, and the tests build their paths with
 //! `WorktreePath::fake`.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "watch mode does not use the list yet. The expectation fails the build when it \
-                  does, so this attribute cannot stay after that"
-    )
-)]
 
 use std::path::{Path, PathBuf};
 

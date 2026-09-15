@@ -31,7 +31,9 @@ use crate::conflicts::ConflictsWorker;
 use crate::push::{PushCommand, PushUi};
 use crate::render::Snapshot;
 use crate::repo::RepoHandle;
-use crate::worktrees::{head_label, worktree_paths, WorktreeEntry, WorktreeList, WorktreePath};
+use crate::worktrees::{
+    head_label, list_worktrees, worktree_paths, WorktreeEntry, WorktreeList, WorktreePath,
+};
 use crate::{collect_snapshot, render_frame, render_list_frame, FrameTiming, Render, RenderConfig};
 use termwindow::{
     effective_terminal_height, effective_terminal_width, DEFAULT_TERMINAL_HEIGHT,
@@ -1226,12 +1228,18 @@ fn switch_watched(
     Ok(snapshot)
 }
 
-/// The worktrees that Left, Right, and Down read at each press.
+/// The worktrees that Left, Right, and Down read at each press: every worktree
+/// of the repository of the watched worktree, sorted by path, each with its
+/// label.
 ///
-/// It gives no worktree, so Left and Right find no target, and Down opens no
-/// list.
-fn listed(_watched: &RefCell<Watched>) -> Vec<WorktreeEntry> {
-    Vec::new()
+/// Every worktree of a repository shares one common directory, so the list is
+/// the same from each of them. gix reads the admin directories again at each
+/// call, so a worktree that `nwt` or `swt` added or removed since the last
+/// press is in the list or out of it. [`list_worktrees`] opens each linked
+/// worktree for its label, which costs more than the paths alone. A key press
+/// pays for that, and a walk never does.
+fn listed(watched: &RefCell<Watched>) -> Vec<WorktreeEntry> {
+    list_worktrees(watched.borrow().handle.repo())
 }
 
 /// Run the live watch loop: take over the alternate screen, seed the snapshot
