@@ -258,7 +258,7 @@ pub fn worktree_dirt(cwd: &Path, include_untracked: bool) -> Result<String, GitF
 /// Kept as one string so the rule a name was judged against and the rule quoted
 /// back to the user can never drift apart.
 pub const WORKTREE_NAME_RULE: &str =
-    "allowed: letters, digits, '.', '_' and '-'; must not start with '-', and must not be '.' or '..'";
+    "allowed: letters, digits, '.', '_' and '-'; must not start with '-' or '.', and must not contain '..'";
 
 /// Names that are built only from allowed characters and are still meaningless
 /// as a path component: `.` resolves to the worktree parent directory itself and
@@ -328,6 +328,11 @@ pub fn validate_worktree_name(name: &str) -> Option<WorktreeName> {
         return None;
     }
     if RESERVED_WORKTREE_NAMES.contains(&name) {
+        return None;
+    }
+    // The name opens a component of the branch `swt/<name>-<token>`, and git
+    // refuses a ref component that starts with `.` and a ref that contains `..`.
+    if name.starts_with('.') || name.contains("..") {
         return None;
     }
     Some(WorktreeName(name.to_string()))
