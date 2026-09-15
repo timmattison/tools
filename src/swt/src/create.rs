@@ -372,7 +372,9 @@ pub fn create(raw_name: &str) -> ExitCode {
 ///
 /// `path` is the worktree directory and `branch` the branch checked out in it,
 /// both named in the message so a failed teardown leaves a copy-pasteable
-/// recovery command behind.
+/// recovery command behind. The recovery command puts both values in shell
+/// quotes. The branch holds the parent branch as git gave it, and git accepts
+/// a branch such as `fix;id` that a shell reads as two commands.
 fn report_teardown(path: &Path, branch: &str) {
     // A teardown nobody had left to do is reported as a cleanup, because the
     // state it claims is the state that holds: somebody else already got there.
@@ -390,9 +392,10 @@ fn report_teardown(path: &Path, branch: &str) {
     // git's own account, then the command that finishes the job by hand.
     eprint!("{}", failed.out);
     eprintln!(
-        "Could not clean up {}. Remove it by hand:\n  git worktree remove --force {} && git branch -D {branch}",
+        "Could not clean up {}. Remove it by hand:\n  git worktree remove --force {} && git branch -D {}",
         path.display(),
-        shell_quote(&path.to_string_lossy())
+        shell_quote(&path.to_string_lossy()),
+        shell_quote(branch)
     );
 }
 
