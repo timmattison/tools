@@ -320,9 +320,17 @@ fn run_in(
         }
     };
 
-    // What the command wrote between the last poll and its exit.
+    // What the command wrote between the last poll and its exit, and then the
+    // line it left unterminated on each stream.
     drain(&mut run.stdout, &mut record, on_line);
     drain(&mut run.stderr, &mut record, on_line);
+    for line in [run.stdout.finish(), run.stderr.finish()]
+        .into_iter()
+        .flatten()
+    {
+        record.push(&line);
+        on_line(line);
+    }
 
     PushOutcome {
         success: status.success(),
@@ -337,7 +345,7 @@ fn run_in(
 /// account of one stream, and to join two such accounts is what puts the verdict
 /// of a command in the middle of its output rather than at the end.
 fn drain(stream: &mut Stream, record: &mut Record, on_line: &dyn Fn(String)) {
-    for line in painted(&stream.new_bytes()) {
+    for line in stream.new_lines() {
         record.push(&line);
         on_line(line);
     }
@@ -375,6 +383,19 @@ struct Stream {
     file: NamedTempFile,
     /// The handle gsw reads through, which has an offset of its own.
     reader: File,
+    /// What turns the bytes of this stream into lines.
+    ///
+    /// **One splitter for each stream, and it lives as long as the stream
+    /// does.** A splitter holds the bytes of a line that has no terminator yet,
+    /// from one read to the next, and a read stops wherever the child happened
+    /// to be. So a splitter made afresh for each read reports that place as the
+    /// end of a line: a command drawing a progress bar has its stale state
+    /// taken for a row, and a line cut in the middle of a character arrives as
+    /// two rows with a replacement character between them. A splitter shared
+    /// between the two streams is the other half of the same rule, and
+    /// [`crate::lines::LineSplitter`] states it: the tail of one stream would
+    /// join the first line of the other.
+    splitter: LineSplitter,
 }
 
 impl Stream {
@@ -382,7 +403,25 @@ impl Stream {
     fn new(scratch: &Path) -> std::io::Result<Self> {
         let file = NamedTempFile::new_in(scratch)?;
         let reader = file.reopen()?;
-        Ok(Self { file, reader })
+        Ok(Self {
+            file,
+            reader,
+            splitter: LineSplitter::new(),
+        })
+    }
+
+    /// Every line the child has completed since the last read.
+    fn new_lines(&mut self) -> Vec<String> {
+        let bytes = self.new_bytes();
+        self.splitter.feed(&bytes)
+    }
+
+    /// The line the child left unterminated, once it has gone.
+    ///
+    /// A command that exits without a final newline still said something, and
+    /// to drop it is to lose the last line of every command that ends that way.
+    fn finish(&mut self) -> Option<String> {
+        self.splitter.finish()
     }
 
     /// Where the child writes this stream.
@@ -503,18 +542,6 @@ impl Record {
     fn into_text(self) -> String {
         self.text
     }
-}
-
-/// `bytes` as lines gsw can paint.
-///
-/// [`crate::lines::LineSplitter`] is the one place a child's bytes become such
-/// text — a tab is up to eight columns and an escape sequence repaints the
-/// frame in another program's colors.
-fn painted(bytes: &[u8]) -> Vec<String> {
-    let mut splitter = LineSplitter::new();
-    let mut lines = splitter.feed(bytes);
-    lines.extend(splitter.finish());
-    lines
 }
 
 #[cfg(test)]
