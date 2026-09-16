@@ -8482,6 +8482,143 @@ mod push_loop_tests {
         );
     }
 
+    /// One run that takes the row: its name, the events that ask for it and
+    /// answer `y`, the event that ends it well, and whether it leaves HEAD
+    /// where it is.
+    type RowRun = (&'static str, Vec<Event>, Event, bool);
+
+    /// The three runs that take the row, built fresh for each run of the loop.
+    ///
+    /// A push leaves HEAD where it is. A rebase and a merge move HEAD for the
+    /// whole run, and a measurement starts its scratch worktree from HEAD.
+    fn row_runs() -> Vec<RowRun> {
+        let mut runs: Vec<RowRun> = vec![(
+            "a push",
+            vec![key(KeyCode::Char('p')), key(KeyCode::Char('y'))],
+            Event::PushFinished(PushOutcome {
+                success: true,
+                output: String::new(),
+            }),
+            true,
+        )];
+        for update in crate::update::BaseUpdate::ALL {
+            runs.push((
+                update.verb(),
+                vec![
+                    base_update_probe_answered(update),
+                    press_base_update(update),
+                    key(KeyCode::Char('y')),
+                ],
+                Event::BaseUpdateFinished(PushOutcome {
+                    success: true,
+                    output: String::new(),
+                }),
+                false,
+            ));
+        }
+        runs
+    }
+
+    #[test]
+    fn m_measures_during_a_push_and_starts_nothing_during_a_rebase_or_a_merge() {
+        // A measurement during a rebase or a merge starts from a HEAD that the
+        // run moves, so it measures a branch that is half rewritten.
+        for (what, start, _end, keeps_head) in row_runs() {
+            let base = Instant::now();
+            let mut events = start;
+            events.extend([press_m(), Event::Quit]);
+            let (_displayed, seen) = drive(events, behind_alone(), move || base);
+            assert_eq!(
+                seen.pushes.len() + seen.base_updates.len(),
+                1,
+                "{what} must start, or `m` meets no run",
+            );
+            assert_eq!(
+                seen.conflict_runs,
+                usize::from(keeps_head),
+                "`m` during {what}",
+            );
+        }
+    }
+
+    /// The base of a measurement that a run overlaps. A name of its own, so a
+    /// line of that measurement differs from a line of the next one, which
+    /// runs against `main`.
+    const OVERLAPPED_BASE: &str = "trunk";
+
+    #[test]
+    fn a_measurement_that_a_rebase_or_a_merge_overlapped_says_nothing_and_frees_m() {
+        // The measurement started before the run moved HEAD, so its line
+        // describes a branch that is gone. That line waits for the row and
+        // reaches it after the run ends, where it reads as a measurement of
+        // the new branch. So it says nothing, in either order of its events.
+        // A push moves no HEAD, so a measurement that overlapped a push still
+        // reports. In every case the outcome frees `m`.
+        for during in [true, false] {
+            for (what, start, end, keeps_head) in row_runs() {
+                let order = if during {
+                    "events during the run"
+                } else {
+                    "events after the run"
+                };
+                let overlapped = || {
+                    vec![
+                        Event::ConflictsStarted {
+                            generation: Generation::default(),
+                            branch: OVERLAPPED_BASE.to_string(),
+                        },
+                        finished(ConflictsOutcome::Measured {
+                            branch: OVERLAPPED_BASE.to_string(),
+                            rebase: Ok(gitscratch::Conflicts::nothing_replayed()),
+                            merge: Ok(gitscratch::Conflicts::nothing_replayed()),
+                            dirty: false,
+                        }),
+                    ]
+                };
+                let mut first = vec![press_m()];
+                first.extend(start);
+                let mut bursts = vec![first];
+                if during {
+                    bursts.push(overlapped());
+                }
+                bursts.push(vec![end]);
+                // A key takes the report of the run off the row, so the row
+                // is free for a line that waited.
+                bursts.push(vec![key(KeyCode::Char('x'))]);
+                if !during {
+                    bursts.push(overlapped());
+                }
+                bursts.push(vec![
+                    press_m(),
+                    started_against_main(),
+                    finished(measured_clean()),
+                    Event::Quit,
+                ]);
+
+                let base = Instant::now();
+                let (displayed, seen) = drive_bursts(bursts, behind_alone(), move || base);
+
+                assert_eq!(
+                    seen.conflict_runs, 2,
+                    "{what}, {order}: the outcome must free `m`",
+                );
+                let reported = seen
+                    .paints
+                    .iter()
+                    .any(|paint| strip_ansi(paint).contains(OVERLAPPED_BASE));
+                assert_eq!(
+                    reported, keeps_head,
+                    "{what}, {order}: a line of the overlapped measurement, in {:?}",
+                    seen.paints,
+                );
+                assert!(
+                    strip_ansi(&displayed).contains(MEASURED_CLEAN),
+                    "{what}, {order}: the next measurement must report, got {displayed:?}",
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_bound_r_asks_its_question_and_an_unbound_m_says_nothing() {
         // Each key has a probe of its own, so one of them is bound while the
