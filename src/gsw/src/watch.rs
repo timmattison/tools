@@ -2862,29 +2862,33 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 ///   cannot be quit while it waits on the network is a monitor that has to be
 ///   killed from another pane.
 /// - [`InputMode::Normal`]: `q` quits, `r` forces a refresh, `p` asks to push,
-///   `G` asks for the issue of the branch, and `m` asks to measure a rebase and
-///   a merge against the default branch. Up goes to the home worktree, Left to
-///   the previous worktree, Right to the next worktree, and Down opens the
-///   list of the worktrees.
+///   `G` asks for the issue of the branch, `R` asks to rebase the branch onto
+///   its base, `M` asks to merge the base into the branch, and `m` asks to
+///   measure a rebase and a merge against the default branch. Up goes to the
+///   home worktree, Left to the previous worktree, Right to the next worktree,
+///   and Down opens the list of the worktrees.
 /// - [`InputMode::Confirm`]: `y` and Enter push, `n`, Esc, and `q` cancel.
 ///   Nothing else acts — with a question on screen, `q` is the answer "no",
-///   not "quit", `r` is not a refresh, and an arrow key is no answer at all.
-///   That is why the mode exists.
+///   not "quit", `r` is not a refresh, `R` and `M` do not ask a second
+///   question, and an arrow key is no answer at all. That is why the mode
+///   exists.
 /// - [`InputMode::Pushing`]: `q` quits, `r` refreshes, `G` still asks for the
 ///   issue — a browser conflicts with nothing a push does — and `m` still asks
-///   to measure, because a measurement is read-only for the repository. `p` is
-///   inert, so an impatient second press cannot start an overlapping push. The
-///   arrow keys are inert too: the window under the frame belongs to the
-///   worktree that pushes, so the watch stays on that worktree.
+///   to measure, because a measurement is read-only for the repository. `p`,
+///   `R`, and `M` are inert, so an impatient second press cannot start an
+///   overlapping run: a rebase and a push must not overlap, and a base update
+///   that runs puts the loop in this same mode. The arrow keys are inert too:
+///   the window under the frame belongs to the worktree that pushes, so the
+///   watch stays on that worktree.
 /// - [`InputMode::List`]: Up and Down move the cursor, Enter goes to the
 ///   worktree under it, and Esc and `q` close the list. Every other key gives
-///   `None` and does nothing at all: `r` does not walk, `p` does not ask, `G`
-///   and `m` start nothing, and no line leaves the row. The list takes the
-///   pane, so the frame that such a key acts on is not on the screen.
-/// - `M` is not bound. It does what every unbound key does in the mode.
-/// - `G` acts only where `keys` says a command exists. Where it does not, the
-///   key does what any other unbound key does, which is the one silent case
-///   this feature has.
+///   `None` and does nothing at all: `r` does not walk, `p` does not ask, `G`,
+///   `R`, `M`, and `m` start nothing, and no line leaves the row. The list
+///   takes the pane, so the frame that such a key acts on is not on the
+///   screen.
+/// - `G`, `R`, and `M` act only where `keys` says each one has a command
+///   behind it. Where one does not, that key does what any other unbound key
+///   does, which is the one silent case this feature has.
 /// - Every other press in the three other modes is [`Event::Dismiss`], which
 ///   clears a status message and otherwise does nothing.
 fn classify_input(key: KeyEvent, mode: InputMode, keys: CommandKeys) -> Option<Event> {
@@ -2916,6 +2920,17 @@ fn classify_input(key: KeyEvent, mode: InputMode, keys: CommandKeys) -> Option<E
             // reason to refuse. With no command behind it the key falls
             // through to `Dismiss`, which is what every unbound key gives.
             KeyCode::Char('G') if keys.issue == Binding::Bound => Event::IssueRequested,
+            // A rebase and a push must not overlap, and a base update that
+            // runs puts the loop in `Pushing` — so these two keys act in the
+            // normal mode alone, as `p` does. With no command behind one of
+            // them, that key falls through to `Dismiss`, which is what every
+            // unbound key gives.
+            KeyCode::Char('R') if mode == InputMode::Normal && keys.rebase == Binding::Bound => {
+                Event::BaseUpdateRequested(crate::update::BaseUpdate::Rebase)
+            }
+            KeyCode::Char('M') if mode == InputMode::Normal && keys.merge == Binding::Bound => {
+                Event::BaseUpdateRequested(crate::update::BaseUpdate::Merge)
+            }
             // A measurement is read-only for the repository of the user, so a
             // push in flight is no reason to refuse it either.
             KeyCode::Char('m') => Event::ConflictsRequested,
