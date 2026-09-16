@@ -12,6 +12,8 @@
 //! runs, and the run itself.
 
 use std::ffi::{OsStr, OsString};
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 
@@ -278,7 +280,6 @@ fn run_in(
     scratch: &Path,
     on_line: &dyn Fn(String),
 ) -> PushOutcome {
-    let _ = on_line;
     let name = command.command().name();
 
     let mut run = match start(shell, command, workdir, scratch) {
@@ -294,10 +295,19 @@ fn run_in(
         }
     };
 
+    let mut record = Record::new();
     let status = loop {
         match run.child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) => std::thread::sleep(PROBE_POLL),
+            Ok(None) => {
+                // Read where the command stands, then wait. The window under
+                // the frame is the whole reason a poll happens at all: a
+                // pre-push hook takes minutes, and a user who sees nothing for
+                // those minutes cannot tell a slow hook from a hang.
+                drain(&mut run.stdout, &mut record, on_line);
+                drain(&mut run.stderr, &mut record, on_line);
+                std::thread::sleep(PROBE_POLL);
+            }
             // The child cannot be asked about, so nothing can be waited for
             // either. Saying so plainly is the answer a shell that cannot be
             // started gets.
@@ -310,13 +320,26 @@ fn run_in(
         }
     };
 
-    let mut record = Record::new();
-    record.extend(painted(&read(run.stdout.path())));
-    record.extend(painted(&read(run.stderr.path())));
+    // What the command wrote between the last poll and its exit.
+    drain(&mut run.stdout, &mut record, on_line);
+    drain(&mut run.stderr, &mut record, on_line);
 
     PushOutcome {
         success: status.success(),
         output: record.into_text(),
+    }
+}
+
+/// Report every line `stream` has written since the last read, and keep it.
+///
+/// The record and the caller get the same lines in the same order, because both
+/// are fed here. A drain that also gave its own text back would be a second
+/// account of one stream, and to join two such accounts is what puts the verdict
+/// of a command in the middle of its output rather than at the end.
+fn drain(stream: &mut Stream, record: &mut Record, on_line: &dyn Fn(String)) {
+    for line in painted(&stream.new_bytes()) {
+        record.push(&line);
+        on_line(line);
     }
 }
 
@@ -333,9 +356,62 @@ struct RunInFlight {
     /// The shell, which is what the run waits for.
     child: Child,
     /// Where the child writes what it did.
-    stdout: NamedTempFile,
+    stdout: Stream,
     /// Where the child writes why it stopped.
-    stderr: NamedTempFile,
+    stderr: Stream,
+}
+
+/// One stream of a run: the file the child writes to, and the handle gsw reads
+/// it through.
+///
+/// **The two handles are two handles on purpose.** The child writes at the
+/// offset it inherited, and this reads at an offset of its own — so every read
+/// gives the bytes that arrived since the last one, and neither side moves the
+/// other's place in the file.
+struct Stream {
+    /// The file itself. Dropping it takes the file away, and a child that still
+    /// holds it goes on writing to a file with no name, which costs the space
+    /// only until that child ends.
+    file: NamedTempFile,
+    /// The handle gsw reads through, which has an offset of its own.
+    reader: File,
+}
+
+impl Stream {
+    /// A stream whose file is made in `scratch`.
+    fn new(scratch: &Path) -> std::io::Result<Self> {
+        let file = NamedTempFile::new_in(scratch)?;
+        let reader = file.reopen()?;
+        Ok(Self { file, reader })
+    }
+
+    /// Where the child writes this stream.
+    fn writer(&self) -> std::io::Result<Stdio> {
+        Ok(Stdio::from(self.file.as_file().try_clone()?))
+    }
+
+    /// The bytes the child has written since the last read.
+    ///
+    /// A read that fails ends this pass with what it has. The run is still
+    /// going, so the next poll asks again, and an error invented here would put
+    /// words in the command's mouth.
+    fn new_bytes(&mut self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 8192];
+        loop {
+            match self.reader.read(&mut buffer) {
+                // The end of the file as it stands. The child writes more after
+                // this, and the next read starts where this one stopped.
+                Ok(0) => break,
+                Ok(read) => bytes.extend_from_slice(&buffer[..read]),
+                // A signal arrived mid-read. Nothing was lost and nothing is
+                // wrong.
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        bytes
+    }
 }
 
 /// Start `command` in `workdir`, with a file of `scratch` for each of its two
@@ -346,8 +422,8 @@ fn start(
     workdir: &Path,
     scratch: &Path,
 ) -> std::io::Result<RunInFlight> {
-    let stdout = NamedTempFile::new_in(scratch)?;
-    let stderr = NamedTempFile::new_in(scratch)?;
+    let stdout = Stream::new(scratch)?;
+    let stderr = Stream::new(scratch)?;
 
     // The child is interactive, it carries no `GIT_` variable out of the
     // environment of gsw, and it is detached from the terminal — see
@@ -363,23 +439,14 @@ fn start(
         // the rc file still wins, because the rc file loads inside the child
         // after this value was placed.
         .env(TERMINAL_PROMPT_VAR, "0")
-        .stdout(Stdio::from(stdout.as_file().try_clone()?))
-        .stderr(Stdio::from(stderr.as_file().try_clone()?));
+        .stdout(stdout.writer()?)
+        .stderr(stderr.writer()?);
 
     Ok(RunInFlight {
         child: builder.spawn()?,
         stdout,
         stderr,
     })
-}
-
-/// Everything in the file at `path`, or nothing where it cannot be read.
-///
-/// A file that cannot be read counts as a file with nothing in it. The run is
-/// over either way, and a read that failed is not something to put in front of
-/// the words the command wrote on the other stream.
-fn read(path: &Path) -> Vec<u8> {
-    std::fs::read(path).unwrap_or_default()
 }
 
 /// Every line a run has written, in arrival order, as one string with a newline
