@@ -357,9 +357,20 @@ fn run_in(
         on_line(line);
     }
 
+    let success = status.success();
+    let mut text = record.into_text();
+    if !success && text.trim().is_empty() {
+        // A failure with nothing to show would paint a blank row, and a blank
+        // row under the frame reads as a run that worked. The status is all the
+        // command left, and the name is the whole line the user wrote into the
+        // variable — a message that named the first word alone would report
+        // `grp failed` for a run of `grp --fork-point`.
+        text = format!("{name} failed ({status})");
+    }
+
     PushOutcome {
-        success: status.success(),
-        output: record.into_text(),
+        success,
+        output: text,
     }
 }
 
