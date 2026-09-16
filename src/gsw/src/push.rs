@@ -218,10 +218,16 @@ pub(crate) enum PushPrompt {
         /// its own — so the hint is a fact about the question rather than a
         /// convention the row can hold on its own.
         hint: String,
-        /// Whether this push creates a branch on the remote. The display layer
-        /// colors this case differently, so a create can never be mistaken for
-        /// a routine update at a glance.
-        creates_remote_branch: bool,
+        /// Whether this question deserves the color of one the user must read
+        /// twice.
+        ///
+        /// Two acts earn it, and for the same reason. A push that creates a
+        /// remote branch puts something on a shared remote that nobody has
+        /// seen, and a rebase rewrites every commit of the branch and then
+        /// force-pushes the result. Neither can be allowed to look like the
+        /// routine act beside it, and the color is what carries that in the
+        /// half second before the words are read.
+        caution: bool,
         /// The command this question described, and what `y` runs.
         command: Confirmed,
         /// What to show once this command succeeds. Composed here, with the
@@ -267,7 +273,7 @@ pub(crate) fn prompt_for(
             PushPrompt::Confirm {
                 question,
                 hint: confirm_hint(PUSH_VERB),
-                creates_remote_branch: true,
+                caution: true,
                 // `-u` records the new remote branch as the upstream, so the
                 // push after this one is a plain update.
                 command: Confirmed::Push(PushCommand::new(
@@ -282,7 +288,7 @@ pub(crate) fn prompt_for(
             PushPrompt::Confirm {
                 question: format!("Push {commits} {unit} to {target}?"),
                 hint: confirm_hint(PUSH_VERB),
-                creates_remote_branch: false,
+                caution: false,
                 // Bare `push`: git reads the remote and the refspec out of the
                 // branch config, so a branch tracking something other than the
                 // repository's default remote still goes to the right place.
@@ -702,7 +708,7 @@ enum State {
     Asking {
         question: String,
         hint: String,
-        creates_remote_branch: bool,
+        caution: bool,
         command: Confirmed,
         success_message: String,
     },
@@ -979,13 +985,13 @@ impl PushUi {
             PushPrompt::Confirm {
                 question,
                 hint,
-                creates_remote_branch,
+                caution,
                 command,
                 success_message,
             } => State::Asking {
                 question,
                 hint,
-                creates_remote_branch,
+                caution,
                 command,
                 success_message,
             },
@@ -1455,14 +1461,14 @@ impl PushUi {
             State::Asking {
                 question,
                 hint,
-                creates_remote_branch,
+                caution,
                 ..
             } => {
                 let line = truncate_right(&format!("{question}  {hint}"), width);
                 // Yellow marks the push that puts something new on a shared
                 // remote. The wording says so too — the color is what carries
                 // it in the half second before the words are read.
-                vec![if *creates_remote_branch {
+                vec![if *caution {
                     line.yellow().to_string()
                 } else {
                     line
@@ -2007,13 +2013,7 @@ mod tests {
         let prompt = prompt_for("gsw-push", Some("origin"), None);
         assert_eq!(text(&prompt), "Create new remote branch origin/gsw-push?");
         assert!(
-            matches!(
-                prompt,
-                PushPrompt::Confirm {
-                    creates_remote_branch: true,
-                    ..
-                },
-            ),
+            matches!(prompt, PushPrompt::Confirm { caution: true, .. },),
             "a create must be flagged so the display layer can set it apart",
         );
     }
@@ -2026,13 +2026,7 @@ mod tests {
         let prompt = prompt_for("gsw-push", Some("origin"), Some(&up));
         assert_eq!(text(&prompt), "Push 3 commits to origin/gsw-push?");
         assert!(
-            matches!(
-                prompt,
-                PushPrompt::Confirm {
-                    creates_remote_branch: false,
-                    ..
-                },
-            ),
+            matches!(prompt, PushPrompt::Confirm { caution: false, .. },),
             "updating an existing branch must not be flagged as a create",
         );
     }
@@ -2252,6 +2246,18 @@ mod ui_tests {
         testcolor::strip_ansi(&testcolor::with_forced_ansi(|| {
             ui.overlay(dims, now).text()
         }))
+    }
+
+    /// What `ui` paints in a pane wide enough for a question, with the escapes
+    /// left in, so a test can read the color off the row.
+    ///
+    /// The escapes are forced on for the same reason [`painted`] forces them
+    /// on: `colored` decides at format time from process-global state that
+    /// other tests in this binary toggle, so a raw render carries no color at
+    /// all in some runs. The one door to that override is `testcolor`, and
+    /// clippy bans every other spelling of it.
+    fn escapes(ui: &mut PushUi, now: Instant) -> String {
+        testcolor::with_forced_ansi(|| ui.overlay(tall_pane(120), now).text())
     }
 
     #[test]
@@ -3168,6 +3174,31 @@ mod ui_tests {
             ui.confirm(t0()),
             None,
             "a second y must not start a second run",
+        );
+    }
+
+    #[test]
+    fn the_rebase_question_wears_the_color_of_caution_and_the_merge_question_does_not() {
+        // A rebase rewrites every commit of the branch and `grp` force-pushes
+        // the result, so a branch that somebody else has pulled is a branch
+        // they must repair. That is the question the color of the create is
+        // for. A merge writes one commit and pushes it, which is the routine
+        // act the count in the header is about.
+        let now = t0();
+        let rebase = escapes(&mut asking_base_update(BaseUpdate::Rebase, now), now);
+        let glyphs = testcolor::strip_ansi(&rebase);
+        assert_eq!(
+            rebase,
+            testcolor::with_forced_ansi(|| glyphs.yellow().to_string()),
+            "the rebase question must be drawn in the color of the question that \
+             creates a remote branch",
+        );
+
+        let merge = escapes(&mut asking_base_update(BaseUpdate::Merge, now), now);
+        assert_eq!(
+            merge,
+            testcolor::strip_ansi(&merge),
+            "the merge question is routine, so it takes the color of the row",
         );
     }
 
