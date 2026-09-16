@@ -876,10 +876,40 @@ pub(crate) mod stub_shell {
         /// What the last run found when it reached for the controlling
         /// terminal, written by a stub that looks for one.
         tty: PathBuf,
+        /// The file a stub that waits for a gate waits for, written by the
+        /// test rather than by the stub.
+        gate: PathBuf,
     }
 
     /// Where a stub's tail names the file it records its process id in.
     const PID_FILE: &str = "<PID_FILE>";
+
+    /// Where a stub's tail names the file it waits for.
+    ///
+    /// A third placeholder of the shape [`PID_FILE`] has, and it travels the
+    /// other way: the test writes this file, and the stub reads it.
+    const GATE_FILE: &str = "<GATE_FILE>";
+
+    /// Most times a stub looks for its gate before it gives up.
+    ///
+    /// The bound is the point. A stub that waited for a gate nobody opens holds
+    /// the suite for the life of the session, and the test that opens the gate
+    /// is exactly the test that can fail before it gets there.
+    const GATE_POLLS: u32 = 200;
+
+    /// How long a stub sleeps between two looks at its gate, in seconds.
+    ///
+    /// [`GATE_POLLS`] of these is twenty seconds, which is longer than
+    /// [`GAVE_UP_WITHIN`] — so a test gives up first, and the stub that ends
+    /// after it says which of the two happened.
+    const GATE_POLL: &str = "0.1";
+
+    /// The `printf` that is a program rather than a builtin of the shell.
+    ///
+    /// A builtin writes through the stdio of the shell, which buffers a whole
+    /// block when the output is a file. A separate process flushes when it
+    /// ends, so what it wrote is in the file the moment it is gone.
+    const EXTERNAL_PRINTF: &str = "/usr/bin/printf";
 
     /// Where a stub's tail names the file it records the terminal in.
     ///
@@ -934,9 +964,11 @@ pub(crate) mod stub_shell {
             let pid = dir.path().join("pid");
             let cwd = dir.path().join("cwd");
             let tty = dir.path().join("tty");
+            let gate = dir.path().join("gate");
             let tail = tail
                 .replace(PID_FILE, &shell_quote(&pid.display().to_string()))
-                .replace(TTY_FILE, &shell_quote(&tty.display().to_string()));
+                .replace(TTY_FILE, &shell_quote(&tty.display().to_string()))
+                .replace(GATE_FILE, &shell_quote(&gate.display().to_string()));
             let script = format!(
                 "#!/bin/sh\n\
                  [ -n \"${{{WARMUP_VAR}:-}}\" ] && exit 0\n\
@@ -959,6 +991,7 @@ pub(crate) mod stub_shell {
                 pid,
                 cwd,
                 tty,
+                gate,
             };
             stub.warm();
             stub
@@ -1057,6 +1090,51 @@ pub(crate) mod stub_shell {
         /// recorded id is the id of the process that outlives the shell.
         pub(crate) fn outlived_by_a_child() -> Self {
             Self::new(&format!("sleep 30 &\necho $! > {PID_FILE}\nexit 0"))
+        }
+
+        /// A stub that writes `said`, waits for its gate, and then exits 0.
+        ///
+        /// This is the shape that proves a line reached the caller **while the
+        /// command was still running.** The caller opens the gate when it sees
+        /// the line, so a runner that reports nothing until the child exits
+        /// waits for a gate that nobody opens.
+        ///
+        /// **The wait is bounded**, at [`GATE_POLLS`] looks of [`GATE_POLL`]
+        /// each, so such a run ends by itself rather than holding the suite.
+        /// The stub exits 1 where the gate never opened, which says in the
+        /// outcome which of the two happened.
+        ///
+        /// **The words go through an external `printf`.** A builtin writes
+        /// through the stdio of the shell, and stdio buffers a whole block when
+        /// the output is a file — so the line would sit in that buffer until
+        /// the shell exited, which is the very thing this stub exists to rule
+        /// out. A separate process flushes when it ends.
+        pub(crate) fn saying_then_waiting_for_a_gate(said: &str) -> Self {
+            Self::new(&format!(
+                "{EXTERNAL_PRINTF} '%s\\n' {}\n{}",
+                shell_quote(said),
+                Self::gate_wait(),
+            ))
+        }
+
+        /// The shell that waits for [`GATE_FILE`], and exits 1 where it never
+        /// arrived.
+        fn gate_wait() -> String {
+            format!(
+                "i=0\n\
+                 while [ $i -lt {GATE_POLLS} ]; do\n\
+                 \t[ -f {GATE_FILE} ] && break\n\
+                 \tsleep {GATE_POLL}\n\
+                 \ti=$((i + 1))\n\
+                 done\n\
+                 [ -f {GATE_FILE} ] || exit 1\n\
+                 exit 0",
+            )
+        }
+
+        /// Open the gate of a stub that waits for one.
+        pub(crate) fn open_gate(&self) {
+            std::fs::write(&self.gate, b"open").expect("open the gate");
         }
 
         /// Wait for the hanging stub to record its process id.

@@ -510,7 +510,8 @@ mod run_tests {
         TTY_REFUSED,
     };
     use crate::testrepo::{git, init_repo};
-    use std::sync::mpsc::channel;
+    use std::sync::mpsc::{channel, Receiver};
+    use std::time::Instant;
     use tempfile::TempDir;
 
     /// The base every fixture here names, which is also the name `grp` and
@@ -658,6 +659,93 @@ mod run_tests {
             .expect("the run must return when the shell exits, not when its children do");
         assert!(outcome.success, "the shell exited 0: {:?}", outcome.output,);
         kill_now(stub.wait_for_pid());
+    }
+
+    /// What a run reported, in the order its callbacks fired.
+    ///
+    /// One channel for both, so the test reads the two in the order the run
+    /// produced them: a line that arrived after the outcome is a line this
+    /// never sees before the outcome, which is the defect under test.
+    #[derive(Debug)]
+    enum Report {
+        /// A line the command wrote.
+        Line(String),
+        /// The run ended.
+        Done(PushOutcome),
+    }
+
+    /// What the gated stub says before it waits.
+    const FIRST_LINE: &str = "Rebasing (1/3)";
+
+    #[test]
+    fn a_line_reaches_the_caller_before_the_command_exits() {
+        // This is the whole of the live window. `grp` runs a pre-push hook that
+        // builds and tests a workspace, which takes minutes, and output that
+        // arrives only when the command exits is output that arrives when
+        // nobody needs it any more.
+        //
+        // The stub says one line and then waits for a gate that this test opens
+        // when it sees that line, so a runner that reports nothing until the
+        // child exits waits for a gate that never opens. Every wait here is
+        // bounded.
+        let stub = StubShell::saying_then_waiting_for_a_gate(FIRST_LINE);
+        let workdir = work_tree();
+        let shell = stub.as_shell().to_os_string();
+        let dir = workdir.path().to_path_buf();
+        let (tx, rx) = channel();
+        let line_tx = tx.clone();
+        std::thread::spawn(move || {
+            let outcome = run(&shell, &default_command(), &dir, &move |line| {
+                let _ = line_tx.send(Report::Line(line));
+            });
+            let _ = tx.send(Report::Done(outcome));
+        });
+
+        let first = rx.recv_timeout(GAVE_UP_WITHIN);
+        // The gate is opened before the assertion. A failed assertion ends the
+        // test where it stands, and a stub that waits for a gate nobody opened
+        // is the one thing that must not outlive it.
+        stub.open_gate();
+        match first {
+            Ok(Report::Line(line)) => assert_eq!(
+                line, FIRST_LINE,
+                "the line the command wrote must arrive as the command wrote it",
+            ),
+            Ok(Report::Done(outcome)) => panic!(
+                "the run reported the outcome before it reported the line: {:?}",
+                outcome.output,
+            ),
+            Err(error) => {
+                panic!("no line reached the caller while the command was still running: {error}",)
+            }
+        }
+
+        let outcome = last_report(&rx);
+        assert!(
+            outcome.success,
+            "the stub exits 0 once the gate is open: {:?}",
+            outcome.output,
+        );
+        assert!(
+            outcome.output.contains(FIRST_LINE),
+            "the record must keep the line as well: {:?}",
+            outcome.output,
+        );
+    }
+
+    /// The outcome of a run, read off `reports` past every line before it.
+    ///
+    /// Bounded, because a run that never ends would otherwise hold the suite
+    /// for the life of the session.
+    fn last_report(reports: &Receiver<Report>) -> PushOutcome {
+        let give_up_at = Instant::now() + GAVE_UP_WITHIN;
+        loop {
+            let left = give_up_at.saturating_duration_since(Instant::now());
+            match reports.recv_timeout(left).expect("the run must end") {
+                Report::Line(_) => {}
+                Report::Done(outcome) => return outcome,
+            }
+        }
     }
 
     #[test]
