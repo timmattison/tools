@@ -574,6 +574,14 @@ pub(crate) fn start_run(mut child: Command, scratch: &Path) -> std::io::Result<R
     })
 }
 
+/// How often [`RunInFlight::wait`] reads the two files of a run.
+///
+/// Each read is what moves the window under the frame. A run with no deadline
+/// wakes at this rate for as long as it lasts, which can be minutes. Each wake
+/// asks whether the child exited and reads two files that usually hold no new
+/// bytes, on a thread of its own, so it delays no frame.
+const RUN_POLL: Duration = Duration::from_millis(25);
+
 impl RunInFlight {
     /// Wait for the child to exit, and give each line to `on_line` as it lands.
     ///
@@ -609,7 +617,7 @@ impl RunInFlight {
                 self.finish(on_line);
                 return Ok(RunEnd::StillRunning(self.child));
             }
-            std::thread::sleep(PROBE_POLL);
+            std::thread::sleep(RUN_POLL);
         }
     }
 
