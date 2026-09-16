@@ -662,6 +662,17 @@ enum Event {
     /// already on this channel by the time the outcome is sent — which is what
     /// keeps a late line from reopening a window the outcome just closed.
     PushFinished(crate::push::PushOutcome),
+    /// A rebase onto the base, or a merge of the base, has finished — either
+    /// way.
+    ///
+    /// It carries the outcome a push carries, because the row reports the two
+    /// the same way: a command that either worked or wrote a reason. What it
+    /// does not share is what happens next. **Every outcome of this one walks
+    /// the repository**, and a failed push walks nothing: a push that failed
+    /// changed nothing to re-read, and a rebase that failed stopped in the
+    /// middle of rewriting the branch. The `⚠ rebase` row of the header is what
+    /// says so, and only a walk puts it there.
+    BaseUpdateFinished(crate::push::PushOutcome),
     /// A key press with no other meaning. Clears a status message if one is on
     /// screen and does nothing otherwise, which is what keeps a push error up
     /// until the user has actually looked at the screen.
@@ -1442,6 +1453,8 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                     });
                 });
             },
+            start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                _current: &WorktreePath| {},
             start_push: |command: PushCommand, current: &WorktreePath| {
                 // Two senders on the one channel, so a line and the outcome
                 // re-enter the loop the same way every other event does —
@@ -1902,6 +1915,7 @@ struct LoopHooks<
     Clock,
     Tick,
     StartPush,
+    StartBaseUpdate,
     StartIssue,
     StartConflicts,
     Worktrees,
@@ -1932,6 +1946,15 @@ struct LoopHooks<
     /// outcome back as [`Event::PushFinished`]; tests record the command and
     /// decide for themselves when — or whether — the outcome arrives.
     start_push: StartPush,
+    /// Start a confirmed rebase onto the base or merge of the base, given the
+    /// [`crate::update::BaseUpdateCommand`] the question described — the act,
+    /// the branch and the base it named, and the user's own command — and the
+    /// worktree to run it in, which is the worktree on the screen at the press.
+    /// Production spawns a thread that runs the command, sends each line it
+    /// writes back as [`Event::PushOutput`], and sends the outcome as
+    /// [`Event::BaseUpdateFinished`]; tests record the command and decide for
+    /// themselves when, or whether, the outcome arrives.
+    start_base_update: StartBaseUpdate,
     /// Start a run of the issue command in the worktree on the screen at the
     /// press. Production spawns a thread that runs it and sends the outcome
     /// back as [`Event::IssueFinished`], with the [`Generation`] it was given;
@@ -2033,9 +2056,9 @@ enum Flow {
 /// is where the push, the issue key, and `m` do their work.
 #[expect(
     clippy::type_complexity,
-    reason = "the loop takes one generic for each of its thirteen hooks, so each hook stays \
+    reason = "the loop takes one generic for each of its fourteen hooks, so each hook stays \
               a plain closure that a test replaces with a fake. A type alias spells the same \
-              thirteen generics, and the borrow of the whole value keeps every call of \
+              fourteen generics, and the borrow of the whole value keeps every call of \
               absorb the same"
 )]
 fn absorb<
@@ -2047,6 +2070,7 @@ fn absorb<
     Clock,
     Tick,
     StartPush,
+    StartBaseUpdate,
     StartIssue,
     StartConflicts,
     Worktrees,
@@ -2065,6 +2089,7 @@ fn absorb<
         Clock,
         Tick,
         StartPush,
+        StartBaseUpdate,
         StartIssue,
         StartConflicts,
         Worktrees,
@@ -2075,6 +2100,7 @@ fn absorb<
 where
     Clock: Fn() -> Instant,
     StartPush: FnMut(PushCommand, &WorktreePath),
+    StartBaseUpdate: FnMut(crate::update::BaseUpdateCommand, &WorktreePath),
     StartIssue: FnMut(crate::shell::ShellCommand, &WorktreePath, Generation),
     StartConflicts: FnMut(&WorktreePath, Generation),
     Worktrees: FnMut() -> Vec<WorktreeEntry>,
@@ -2254,6 +2280,7 @@ where
                 state.ui.post_error(message.to_string());
             }
         }
+        Event::BaseUpdateFinished(_) => {}
         Event::PushFinished(outcome) => {
             let succeeded = outcome.success;
             state.ui.finished(outcome, clock());
@@ -2342,9 +2369,9 @@ where
 /// loop goes back to the home worktree ([`LoopState::return_home_if_gone`]).
 #[expect(
     clippy::type_complexity,
-    reason = "the loop takes one generic for each of its thirteen hooks, so each hook stays \
+    reason = "the loop takes one generic for each of its fourteen hooks, so each hook stays \
               a plain closure that a test replaces with a fake. A type alias spells the same \
-              thirteen generics, as the expectation on absorb says"
+              fourteen generics, as the expectation on absorb says"
 )]
 fn event_loop<
     Collect,
@@ -2355,6 +2382,7 @@ fn event_loop<
     Clock,
     Tick,
     StartPush,
+    StartBaseUpdate,
     StartIssue,
     StartConflicts,
     Worktrees,
@@ -2374,6 +2402,7 @@ fn event_loop<
         Clock,
         Tick,
         StartPush,
+        StartBaseUpdate,
         StartIssue,
         StartConflicts,
         Worktrees,
@@ -2390,6 +2419,7 @@ where
     Clock: Fn() -> Instant,
     Tick: Fn(Option<Duration>) -> Option<Duration>,
     StartPush: FnMut(PushCommand, &WorktreePath),
+    StartBaseUpdate: FnMut(crate::update::BaseUpdateCommand, &WorktreePath),
     StartIssue: FnMut(crate::shell::ShellCommand, &WorktreePath, Generation),
     StartConflicts: FnMut(&WorktreePath, Generation),
     Worktrees: FnMut() -> Vec<WorktreeEntry>,
@@ -4540,6 +4570,8 @@ mod tests {
                 // the test must fail when no walk is scheduled, not block.
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
                 start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -4596,6 +4628,8 @@ mod tests {
                 clock: || clock_at,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
                 start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -4655,6 +4689,8 @@ mod tests {
                 clock: stepping_clock(base, Duration::from_secs(60)),
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
                 start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -4716,6 +4752,8 @@ mod tests {
                 clock: || now,
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
                 start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -4773,6 +4811,8 @@ mod tests {
                 clock: || now,
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
                 start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -4827,6 +4867,8 @@ mod tests {
                 clock: || now,
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
                 start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -4883,6 +4925,8 @@ mod tests {
                 // mapping is covered by the next_tick tests.
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
                 start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -4939,6 +4983,8 @@ mod tests {
                 clock: || now,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
                 start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -4996,6 +5042,8 @@ mod tests {
                 clock: || clock_at,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
                 start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -5059,6 +5107,8 @@ mod tests {
                 clock: || now,
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
                 start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -5130,6 +5180,8 @@ mod tests {
                 },
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
                 start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -5223,6 +5275,8 @@ mod tests {
                 },
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
                 start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -5320,6 +5374,8 @@ mod tests {
                 },
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
                 start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -5398,6 +5454,8 @@ mod tests {
                 clock: || base,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
                 start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -5483,6 +5541,8 @@ mod tests {
                 },
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
                 start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -5567,6 +5627,8 @@ mod tests {
                 },
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
                 start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -5631,6 +5693,8 @@ mod tests {
                 clock: || base,
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
                 start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -5708,6 +5772,8 @@ mod tests {
                 clock: || clock_at,
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
                 start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -5809,6 +5875,8 @@ mod tests {
                 },
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
                 start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -5934,6 +6002,8 @@ mod tests {
                 },
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
                 start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -6128,6 +6198,11 @@ mod push_loop_tests {
         /// The worktree each push started in, in the order of
         /// [`Seen::pushes`].
         push_paths: Vec<WorktreePath>,
+        /// Every rebase or merge of the base the loop started, in order.
+        base_updates: Vec<crate::update::BaseUpdateCommand>,
+        /// The worktree each of those started in, in the order of
+        /// [`Seen::base_updates`].
+        base_update_paths: Vec<WorktreePath>,
         /// The worktree and the generation of each run of the issue command,
         /// in the order of [`Seen::issue_runs`].
         issue_paths: Vec<(WorktreePath, Generation)>,
@@ -6231,6 +6306,7 @@ mod push_loop_tests {
             events,
             Setup {
                 dims,
+                ui: PushUi::new(false),
                 measured: dims,
                 render: Box::new(move |_snapshot: &Snapshot, frame_dims: Dimensions| {
                     render_frame(frame_dims)
@@ -6277,6 +6353,14 @@ mod push_loop_tests {
     struct Setup {
         /// The pane the loop renders into.
         dims: Dimensions,
+        /// What the loop shows under the frame when it starts, and the input
+        /// mode that goes with it.
+        ///
+        /// Almost every test starts with nothing on the row and puts a question
+        /// there with a key. The keys of the rebase and the merge arrive in a
+        /// later slice, so a test about those reaches the row through
+        /// [`PushUi::request_base_update`] and hands the loop what it built.
+        ui: PushUi,
         /// The pane that the `dimensions` hook measures, which the loop reads
         /// at each walk and each resize. It differs from `dims` only in a test
         /// of a pane that changes size under the loop.
@@ -6480,6 +6564,7 @@ mod push_loop_tests {
     ) -> (String, Seen) {
         let Setup {
             dims,
+            ui,
             measured,
             render,
             session,
@@ -6527,7 +6612,7 @@ mod push_loop_tests {
                 },
                 freshest: None,
                 schedule,
-                ui: PushUi::new(false),
+                ui,
                 session,
                 home: world.home.clone(),
             },
@@ -6566,6 +6651,12 @@ mod push_loop_tests {
                     let mut seen = seen.borrow_mut();
                     seen.pushes.push(command);
                     seen.push_paths.push(current.clone());
+                },
+                start_base_update: |command: crate::update::BaseUpdateCommand,
+                                    current: &WorktreePath| {
+                    let mut seen = seen.borrow_mut();
+                    seen.base_updates.push(command);
+                    seen.base_update_paths.push(current.clone());
                 },
                 start_issue: |command: crate::shell::ShellCommand,
                               current: &WorktreePath,
@@ -7376,6 +7467,8 @@ mod push_loop_tests {
                 },
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
                 start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
@@ -7466,6 +7559,129 @@ mod push_loop_tests {
         // reach the push.
         let (_, seen) = run_loop(vec![key(KeyCode::Char('y')), Event::Quit]);
         assert!(seen.pushes.is_empty(), "y alone must not push");
+    }
+
+    /// How far behind the base the snapshot of a base-update test stands. Any
+    /// count above zero does: the count is the reason the key acts at all.
+    const BEHIND: u32 = 5;
+
+    /// A [`PushUi`] with the question of a rebase already on the row, asked at
+    /// `at` against a branch [`BEHIND`] commits behind its base.
+    ///
+    /// The key that asks it arrives in a later slice, so these tests reach the
+    /// row through the door the key will use. The question is the state the
+    /// loop has to act on, and a press is only one way to reach it.
+    fn asking_rebase_ui(at: Instant) -> PushUi {
+        let mut ui = PushUi::new(false);
+        ui.request_base_update(
+            &Snapshot {
+                commits_behind: BEHIND,
+                ..pushable_snapshot()
+            },
+            crate::update::BaseUpdate::Rebase,
+            &crate::shell::ShellCommand::new(
+                None,
+                crate::update::BaseUpdate::Rebase.default_command(),
+            )
+            .expect("a name"),
+            TEST_DIMS,
+            at,
+        );
+        ui
+    }
+
+    /// A [`PushUi`] with that rebase already running, confirmed at `at`.
+    fn running_rebase_ui(at: Instant) -> PushUi {
+        let mut ui = asking_rebase_ui(at);
+        ui.confirm(at).expect("the question must confirm");
+        ui
+    }
+
+    #[test]
+    fn confirming_a_base_update_starts_the_command_the_question_described() {
+        // `y` on the question of `R` must run the command the sentence named,
+        // in the worktree the frame shows — the whole safety property of asking
+        // first. It must reach the runner of that act and no other: a push
+        // started here would push the branch without the rebase the user asked
+        // for.
+        let base = Instant::now();
+        let (_displayed, seen) = drive(
+            vec![key(KeyCode::Char('y')), Event::Quit],
+            Setup {
+                ui: asking_rebase_ui(base),
+                ..in_world(World::alone())
+            },
+            move || base,
+        );
+
+        let [command] = seen.base_updates.as_slice() else {
+            panic!(
+                "one confirmed base update must reach the runner, got {:?}",
+                seen.base_updates,
+            );
+        };
+        assert_eq!(command.update(), crate::update::BaseUpdate::Rebase);
+        assert_eq!(command.branch(), ALONE);
+        assert_eq!(command.base(), "main");
+        assert_eq!(command.command().name(), "grp");
+        assert_eq!(
+            seen.base_update_paths,
+            vec![worktree(ALONE)],
+            "the run belongs to the worktree the frame shows",
+        );
+        assert!(
+            seen.pushes.is_empty(),
+            "a confirmed rebase must start no push, got {:?}",
+            seen.pushes,
+        );
+    }
+
+    #[test]
+    fn every_outcome_of_a_base_update_walks_git_again() {
+        // **Unlike a push.** A push that failed changed nothing to re-read, so
+        // it walks nothing. A rebase that failed rewrote part of the branch and
+        // stopped in the middle of it, and the `⚠ rebase` row of the header is
+        // what says so — only a walk puts it there. A rebase that worked moved
+        // every commit and pushed them, so the counts in the header are stale
+        // the moment it lands.
+        let cases = [
+            (
+                "a rebase that worked",
+                PushOutcome {
+                    success: true,
+                    output: "grp: rebased onto 'main'\n".to_string(),
+                },
+                "Rebased gsw-push onto main with grp",
+            ),
+            (
+                "a rebase that stopped on a conflict",
+                PushOutcome {
+                    success: false,
+                    output: "error: could not apply d3eee9d… feature edit\n".to_string(),
+                },
+                "error: could not apply d3eee9d… feature edit",
+            ),
+        ];
+
+        for (what, outcome, shows) in cases {
+            let base = Instant::now();
+            let (displayed, seen) = drive(
+                vec![Event::BaseUpdateFinished(outcome), Event::Quit],
+                Setup {
+                    ui: running_rebase_ui(base),
+                    ..in_world(World::alone())
+                },
+                move || base,
+            );
+            assert_eq!(
+                seen.collects, 1,
+                "{what} must re-walk, or the header describes a repository that moved",
+            );
+            assert!(
+                displayed.contains(shows),
+                "{what} must reach the row, got {displayed:?}",
+            );
+        }
     }
 
     #[test]
@@ -7790,6 +8006,10 @@ mod push_loop_tests {
                     start_push: |command: PushCommand, _current: &WorktreePath| {
                         seen.borrow_mut().pushes.push(command)
                     },
+                    start_base_update:
+                        |command: crate::update::BaseUpdateCommand, _current: &WorktreePath| {
+                            seen.borrow_mut().base_updates.push(command)
+                        },
                     start_issue: |command: crate::shell::ShellCommand,
                                   _current: &WorktreePath,
                                   _generation: Generation| {
@@ -7826,6 +8046,7 @@ mod push_loop_tests {
     fn in_world(world: World) -> Setup {
         Setup {
             dims: TEST_DIMS,
+            ui: PushUi::new(false),
             measured: TEST_DIMS,
             render: Box::new(frame_of),
             session: crate::remote::Session::Local,
