@@ -176,6 +176,21 @@ impl BaseUpdate {
         }
     }
 
+    /// What the row says while this act runs on `branch` and `base`, through
+    /// the user's `command`, without the age [`crate::push`] puts after it.
+    ///
+    /// The same sentence as the question, in the tense of work in flight, and
+    /// written beside it for the same reason: the order of the names is what
+    /// tells a rebase from a merge. It names the command as well, because a
+    /// run of minutes is a run the user has to be able to recognize.
+    fn running_notice(self, branch: &str, base: &str, command: &ShellCommand) -> String {
+        let name = command.name();
+        match self {
+            Self::Rebase => format!("Rebasing {branch} onto {base} with {name}…"),
+            Self::Merge => format!("Merging {base} into {branch} with {name}…"),
+        }
+    }
+
     /// What a refused run tells the user to do.
     ///
     /// The letter comes from [`BaseUpdate::key`] rather than from a string of
@@ -354,7 +369,7 @@ pub(crate) fn base_update_prompt_for(
         question: update.question(branch, base, snapshot.commits_behind, command),
         hint: crate::push::confirm_hint(update.verb()),
         caution: update.caution(),
-        running_notice: crate::push::RUNNING_NOTICE.to_string(),
+        running_notice: update.running_notice(branch, base, command),
         command: Confirmed::BaseUpdate(BaseUpdateCommand::new(
             update,
             branch,
