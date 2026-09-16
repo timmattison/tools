@@ -722,18 +722,18 @@ fn start(
     let stderr = Stream::new(scratch)?;
 
     // The child is interactive, it carries no `GIT_` variable out of the
-    // environment of gsw, and it is detached from the terminal — see
-    // [`shell_child`], which states all three rules and is the one place they
-    // are written.
+    // environment of gsw but the six a user states on purpose, and it is
+    // detached from the terminal — see [`shell_child`], which states all three
+    // rules and is the one place they are written.
     let mut builder = shell_child(shell, command.script());
     builder
         .current_dir(workdir)
         .stdin(Stdio::null())
-        // **After the sweep, so it survives it.** The sweep removes every
-        // `GIT_` variable this process holds, and a value placed ahead of it
-        // would leave with the rest. A user who exports the variable again in
-        // the rc file still wins, because the rc file loads inside the child
-        // after this value was placed.
+        // **After the sweep, so it wins.** The sweep keeps the value of this
+        // variable that gsw holds, and this call replaces that value with `0`.
+        // A user who exports the variable again in the rc file still wins,
+        // because the rc file loads inside the child after this value was
+        // placed.
         .env(TERMINAL_PROMPT_VAR, "0")
         .stdout(stdout.writer()?)
         .stderr(stderr.writer()?);
@@ -1757,9 +1757,10 @@ mod run_tests {
         // it fails at once and says why, and that reason reaches the row like
         // every other failure.
         //
-        // The value is set after the sweep, so it survives it. A user who
-        // exports the variable again in the rc file still wins, because the rc
-        // file loads inside the child after this value was placed.
+        // The value is set after the sweep, so it wins over the value gsw
+        // holds. A user who exports the variable again in the rc file still
+        // wins, because the rc file loads inside the child after this value was
+        // placed.
         let stub = StubShell::answering(0);
         let workdir = work_tree();
         let _ = run_quiet(stub.as_shell(), &default_command(), workdir.path());

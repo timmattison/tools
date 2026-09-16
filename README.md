@@ -638,10 +638,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       cannot read the keyboard gsw reads, and it gets no `GIT_` variable out of gsw's own
       environment, so it cannot be aimed at another repository. The rule there is the `GIT_`
       prefix and never a list of names: `GIT_DIR` aims git elsewhere, and so do `GIT_COMMON_DIR`
-      and `GIT_CEILING_DIRECTORIES`, while `GIT_CONFIG_PARAMETERS` sets any key at all. Your own
-      rc file loads inside that shell after the sweep, so a `GIT_` variable you export on purpose
-      is set again there — the sweep takes away what gsw carried in, which is what a pre-commit
-      hook hands it.
+      and `GIT_CEILING_DIRECTORIES`, while `GIT_CONFIG_PARAMETERS` sets any key at all. The six
+      variables you state on purpose stay: `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_SSH`,
+      `GIT_SSH_COMMAND`, `GIT_ASKPASS` and `GIT_TERMINAL_PROMPT`. A pre-commit hook exports
+      none of those. Your shell or direnv does.
     - A run gets a minute. One run at a time is the rule, so a run that never ends would hold `G`
       for the rest of the session — and a key that does nothing and says nothing is exactly what
       an unbound key looks like. So after 60 seconds gsw stops waiting, says
@@ -730,9 +730,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       the newest lines. **The run has no deadline**, because a pre-push hook of this workspace
       builds and tests every crate and runs for minutes — the notice counts the time, so a run
       that hangs shows as a run that hangs. The run holds the row: `p`, `R`, and `M` do nothing
-      until it ends, while `G` and `m` still act. The child gets no terminal and no `GIT_`
-      variable out of gsw's own environment, and it has `GIT_TERMINAL_PROMPT=0`, so nothing it
-      starts can prompt behind a question gsw never drew.
+      until it ends, while `G` and `m` still act. The child gets no terminal, and no `GIT_`
+      variable out of gsw's own environment but the six you state on purpose, so your SSH key
+      and your identity still reach the push. After that sweep gsw sets `GIT_TERMINAL_PROMPT=0`,
+      so nothing the child starts can prompt behind a question gsw never drew.
     - A run that worked leaves gsw's own sentence and, under it, the last line your command wrote
       — `Rebased issue-12 onto main with grp (4s ago)`, then
       `grp: rebased onto 'main'; 'issue-12' has no upstream - skipping push`. That second row is

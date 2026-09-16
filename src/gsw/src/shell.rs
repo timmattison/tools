@@ -300,7 +300,7 @@ pub(crate) fn user_shell() -> OsString {
 /// terminal, because an interactive shell opens `/dev/tty` and takes the
 /// keyboard that `gsw` is reading. Denied a terminal, both zsh and bash turn
 /// job control off and start anyway. And it carries no `GIT_` variable out of
-/// the environment of `gsw`.
+/// the environment of `gsw`, except the six that a user states on purpose.
 ///
 /// **The rule is the `GIT_` prefix, and never a list of names.** The command
 /// the user supplies runs git, or a program that runs git: the command of `G`
@@ -309,29 +309,27 @@ pub(crate) fn user_shell() -> OsString {
 /// `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` aim git at another
 /// repository, `GIT_COMMON_DIR` moves the files git reads outside a worktree —
 /// config and refs among them — `GIT_CEILING_DIRECTORIES` stops the walk that
-/// finds a repository at all, and `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_GLOBAL`
-/// and `GIT_CONFIG_SYSTEM` set any key they like. A list that named all of
-/// those today would still be a list, and it strips nothing new the day git
-/// adds a variable. So this calls
-/// [`gitscratch::shed_inherited_git_environment`], which enumerates
-/// [`std::env::vars_os`] and removes every name that starts with `GIT_`. That
-/// rule is written once, in the crate that states it, and it is tested there.
+/// finds a repository at all, and `GIT_CONFIG_PARAMETERS` sets any key it
+/// likes. A list that named all of those today would still be a list, and it
+/// strips nothing new the day git adds a variable. So this calls
+/// [`gitscratch::shed_inherited_git_environment_keeping_user_intent`], which
+/// enumerates [`std::env::vars_os`] and removes every name that starts with
+/// `GIT_`, except six. That rule is written once, in the crate that states it,
+/// and it is tested there.
 ///
-/// **A sweep is right here, where an allowlist is right for a tool that spawns
-/// git itself.** The sweep takes the variables off the environment of `gsw`,
-/// and this child is an interactive shell: `-i` makes it read the rc file of
-/// the user, so a `GIT_` variable that the user exports on purpose is set again
-/// inside the child, after the sweep. What the sweep removes is therefore only
-/// what reaches the child from `gsw` itself, and that is exactly the hazard — a
-/// `gsw` started from inside a pre-commit hook holds `GIT_DIR`,
+/// **The sweep keeps the six names of
+/// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`], because this child acts for the
+/// user.** A `gsw` started from inside a pre-commit hook holds `GIT_DIR`,
 /// `GIT_INDEX_FILE`, `GIT_PREFIX` and `GIT_CONFIG_PARAMETERS`, and the user
-/// asked for none of them. `nwt` spawns `git` and not an interactive shell, so
-/// nothing re-states what it strips, and it needs an allowlist for the
-/// variables a user means to keep. This child has the rc file for that.
+/// asked for none of them. But a user also exports `GIT_SSH_COMMAND` or
+/// `GIT_CONFIG_GLOBAL` at the prompt, through direnv, or through a shim, and
+/// the rc file that `-i` reads does not state those again. The command of `R`
+/// and `M` pushes, so a child without them fails to authenticate, or rebases
+/// under the wrong identity.
 pub(crate) fn shell_child(shell: &OsStr, script: String) -> Command {
     let mut command = Command::new(shell);
     command.arg("-ic").arg(script);
-    gitscratch::shed_inherited_git_environment(&mut command);
+    gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
     detach_from_terminal(&mut command);
     command
 }
