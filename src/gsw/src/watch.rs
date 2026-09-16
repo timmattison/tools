@@ -9,7 +9,7 @@
 //! unit-tested without a pty.
 
 use std::cell::RefCell;
-use std::ffi::OsString;
+use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -1472,12 +1472,15 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     // frames, never during one.
     let push_tx = tx.clone();
 
-    // The shell the issue key uses, resolved once. The probe asks it whether
-    // the command exists and a run asks it to run the command, and both must
-    // ask the same shell.
+    // The shell that every key which runs a command of the user asks, resolved
+    // once. A probe asks it whether the command exists and a run asks it to run
+    // the command, and both must ask the same shell.
     let shell = crate::shell::user_shell();
     let issue_tx = tx.clone();
-    spawn_issue_probe(shell.clone(), tx.clone());
+    // The environment is read here, once, and the values go on from there. The
+    // handles are dropped, which detaches the threads: the loop waits for no
+    // probe.
+    spawn_command_probes(&CommandValues::read(), &shell, &tx);
 
     // The worker that measures for `m`. It reports on the channel of the loop,
     // as the push and the issue key do. The quit below waits for it, because a
@@ -1684,32 +1687,116 @@ fn resolve_home(handle: &RepoHandle) -> Result<WorktreePath> {
         .ok_or_else(|| anyhow::anyhow!("{HOME_UNRESOLVED}: {}", root.display()))
 }
 
-/// Ask the shell, once, whether the issue command exists, and report the
-/// answer on the loop's own channel.
+/// What the environment says each key that runs a command of the user runs.
 ///
-/// On a thread of its own, because an interactive shell reads an rc file and
-/// an rc file is somebody else's code: it can take a second, and it can take
-/// forever. The loop never waits for this. Until the answer arrives the key is
-/// unbound, and a shell that says no sends nothing at all — so the key stays
-/// unbound and silent for the life of the process.
+/// **One value for all of them, and one read.** The environment is
+/// process-global state, and this is the one place `gsw` reads these variables:
+/// [`CommandValues::read`] takes them all at once, and every function under it
+/// takes the values as an argument. A test of the probes then hands over the
+/// values it wants to try and touches no such state — `cargo test` runs the
+/// tests of one binary on many threads, and a test that set `GSW_REBASE_COMMAND`
+/// would change what every sibling test reads.
 ///
-/// The answer arrives once. A function added to the rc file after `gsw`
-/// started needs a restart.
-fn spawn_issue_probe(shell: OsString, tx: Sender<Event>) {
-    // Read here rather than on the thread, so the value and the process that
-    // holds it are read in one place. An absent variable gives the default
-    // name, and an empty one turns the feature off.
-    let named = std::env::var_os(crate::issue::ISSUE_COMMAND_ENV)
-        .map(|value| value.to_string_lossy().into_owned());
-    thread::spawn(move || {
-        if let Some(command) = crate::shell::resolve(
-            named.as_deref(),
-            crate::issue::DEFAULT_ISSUE_COMMAND,
-            &shell,
-        ) {
-            let _ = tx.send(Event::IssueCommandFound(command));
+/// A field is `None` where the variable is unset, which is the case that takes
+/// the default name of that key. A field of an empty value turns its own key
+/// off, and [`crate::shell::ShellCommand::new`] is where that rule lives.
+struct CommandValues {
+    /// What [`crate::issue::ISSUE_COMMAND_ENV`] says `G` runs.
+    issue: Option<String>,
+    /// What [`crate::update::REBASE_COMMAND_ENV`] says `R` runs.
+    rebase: Option<String>,
+    /// What [`crate::update::MERGE_COMMAND_ENV`] says `M` runs.
+    merge: Option<String>,
+}
+
+impl CommandValues {
+    /// What the environment of this process says.
+    fn read() -> Self {
+        Self {
+            issue: read_value(crate::issue::ISSUE_COMMAND_ENV),
+            rebase: read_value(crate::update::BaseUpdate::Rebase.env()),
+            merge: read_value(crate::update::BaseUpdate::Merge.env()),
         }
-    });
+    }
+
+    /// What the variable of `update` says its key runs.
+    fn base_update(&self, update: crate::update::BaseUpdate) -> Option<&str> {
+        match update {
+            crate::update::BaseUpdate::Rebase => self.rebase.as_deref(),
+            crate::update::BaseUpdate::Merge => self.merge.as_deref(),
+        }
+    }
+}
+
+/// The value of `name`, as text, or `None` where the environment names none.
+///
+/// A value that is not text on this system arrives through
+/// [`std::ffi::OsStr::to_string_lossy`] rather than as nothing, so a name with
+/// one byte in it that no character owns still names the rest of the command.
+fn read_value(name: &str) -> Option<String> {
+    std::env::var_os(name).map(|value| value.to_string_lossy().into_owned())
+}
+
+/// Ask the shell, once, whether the command of every key that runs one exists,
+/// and report each answer on the loop's own channel.
+///
+/// **One thread and one shell for each key.** A shell that answered for several
+/// names at once would need its standard output parsed, and an rc file can
+/// print to that output — so the answer of such a shell says as much about the
+/// banner of the user as about the commands. Exit status carries one answer,
+/// which is why each name gets a shell of its own.
+///
+/// On threads of their own, because an interactive shell reads an rc file and
+/// an rc file is somebody else's code: it can take a second, and it can take
+/// forever. The loop never waits for any of them. Until the answer of a key
+/// arrives that key is unbound, and a shell that says no sends nothing at all —
+/// so that key stays unbound and silent for the life of the process.
+///
+/// Each answer arrives once. A function added to the rc file after `gsw`
+/// started needs a restart.
+///
+/// **The handles are for a test.** Production drops them, which detaches the
+/// threads: the loop waits for no probe, and it quits without one. A test waits
+/// for them, because a test that read the record of the shells before they had
+/// run would report a probe that works as a probe that starts nothing.
+fn spawn_command_probes(
+    values: &CommandValues,
+    shell: &OsStr,
+    tx: &Sender<Event>,
+) -> Vec<thread::JoinHandle<()>> {
+    let issue_tx = tx.clone();
+    vec![spawn_probe(
+        shell,
+        values.issue.as_deref(),
+        crate::issue::DEFAULT_ISSUE_COMMAND,
+        move |command| {
+            let _ = issue_tx.send(Event::IssueCommandFound(command));
+        },
+    )]
+}
+
+/// Ask `shell` on a thread of its own about the command that `value` names,
+/// falling back on `default`, and hand a command it has to `found`.
+///
+/// `found` runs on that thread and only where the shell said yes. A value that
+/// turns the key off starts no shell at all, which is what keeps a public
+/// repository from asking every user's shell about one person's function.
+fn spawn_probe<Found>(
+    shell: &OsStr,
+    value: Option<&str>,
+    default: &'static str,
+    found: Found,
+) -> thread::JoinHandle<()>
+where
+    Found: FnOnce(crate::shell::ShellCommand) + Send + 'static,
+{
+    let shell = shell.to_os_string();
+    let value = value.map(str::to_string);
+    thread::spawn(move || {
+        if let Some(command) = crate::shell::resolve(value.as_deref(), default, &shell) {
+            found(command);
+        }
+    })
 }
 
 /// Start the recursive filesystem watcher that feeds [`Event::FsChanged`] into
