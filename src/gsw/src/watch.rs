@@ -640,6 +640,18 @@ enum Event {
     /// The user asked to push (`p`) — show the confirmation, or say why there
     /// is nothing to confirm.
     PushRequested,
+    /// The user asked to bring the branch up to date with its base: `R` for a
+    /// rebase onto it, `M` for a merge of it.
+    ///
+    /// It carries the act, because one event for two keys is what keeps the
+    /// two from drifting apart: every difference between them is a method of
+    /// [`crate::update::BaseUpdate`], and the loop reads it the same way for
+    /// each.
+    ///
+    /// Only [`classify_input`] makes one, and it makes one only where the key
+    /// has a command behind it — so the loop never receives a request it
+    /// cannot serve.
+    BaseUpdateRequested(crate::update::BaseUpdate),
     /// The user confirmed the push at the prompt (`y` or Enter).
     PushConfirmed,
     /// The user declined the push at the prompt (`n`, Esc, or `q`).
@@ -778,19 +790,37 @@ pub(crate) enum InputMode {
     List,
 }
 
-/// Whether the `G` key has a command behind it.
+/// Whether one key has a command behind it.
 ///
 /// A separate value from [`InputMode`], because it is not a mode: it changes
-/// what one key does and it changes no other key. It is a parameter of
-/// [`classify_input`] rather than a flag that function reads, so the absent
-/// case is testable with no shell.
+/// what one key does and it changes no other key. It reaches
+/// [`classify_input`] as a parameter rather than as a flag that function
+/// reads, so the unbound case of every such key is testable with no shell.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum IssueKey {
-    /// The command exists. `G` asks for the issue.
+pub(crate) enum Binding {
+    /// The command exists. The key acts.
     Bound,
-    /// The command does not exist, or the probe has not answered yet. `G`
+    /// The command does not exist, or the probe has not answered yet. The key
     /// does nothing, the way an unbound key does.
     Unbound,
+}
+
+/// Which of the three keys that run a command of the user have one behind
+/// them: `G`, `R`, and `M`.
+///
+/// One value rather than three parameters of [`classify_input`], because the
+/// three answers travel together and arrive together: each of the three probes
+/// answers on the loop's own channel, and the key table reads whatever has
+/// arrived by the press. A fourth such key then adds a field here and moves no
+/// call site.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct CommandKeys {
+    /// Whether `G`, which opens the issue of the branch, has a command.
+    issue: Binding,
+    /// Whether `R`, which rebases the branch onto its base, has a command.
+    rebase: Binding,
+    /// Whether `M`, which merges the base into the branch, has a command.
+    merge: Binding,
 }
 
 /// What one press of `G` does.
@@ -854,11 +884,11 @@ impl IssueRun {
     }
 
     /// Whether `G` has a command behind it.
-    fn key(&self) -> IssueKey {
+    fn key(&self) -> Binding {
         if self.command.is_some() {
-            IssueKey::Bound
+            Binding::Bound
         } else {
-            IssueKey::Unbound
+            Binding::Unbound
         }
     }
 
@@ -2133,7 +2163,14 @@ where
         Event::Resize => pending.resize = true,
         Event::ForceRefresh => pending.force = true,
         Event::Key(key) => {
-            if let Some(action) = classify_input(key, state.ui.mode(), state.issue.key()) {
+            // Nothing probes for a rebase or a merge command yet, so neither
+            // key has one behind it.
+            let keys = CommandKeys {
+                issue: state.issue.key(),
+                rebase: Binding::Unbound,
+                merge: Binding::Unbound,
+            };
+            if let Some(action) = classify_input(key, state.ui.mode(), keys) {
                 // Every key but `G` takes the arming away. The message that
                 // asks for the second press is the armed state, and this key
                 // is not that press.
@@ -2148,6 +2185,7 @@ where
                 .ui
                 .request(&state.cache.snapshot, state.cache.dims, clock());
         }
+        Event::BaseUpdateRequested(_) => {}
         // `confirm` yields the command only once, so a second `y` that raced
         // the mode change starts nothing. It says which act was confirmed, and
         // that is the only thing that decides which runner starts: the row
@@ -2844,12 +2882,12 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 ///   and `m` start nothing, and no line leaves the row. The list takes the
 ///   pane, so the frame that such a key acts on is not on the screen.
 /// - `M` is not bound. It does what every unbound key does in the mode.
-/// - `G` acts only where `issue` says a command exists. Where it does not, the
+/// - `G` acts only where `keys` says a command exists. Where it does not, the
 ///   key does what any other unbound key does, which is the one silent case
 ///   this feature has.
 /// - Every other press in the three other modes is [`Event::Dismiss`], which
 ///   clears a status message and otherwise does nothing.
-fn classify_input(key: KeyEvent, mode: InputMode, issue: IssueKey) -> Option<Event> {
+fn classify_input(key: KeyEvent, mode: InputMode, keys: CommandKeys) -> Option<Event> {
     let KeyEvent {
         code,
         modifiers,
@@ -2877,7 +2915,7 @@ fn classify_input(key: KeyEvent, mode: InputMode, issue: IssueKey) -> Option<Eve
             // A browser opens beside the monitor, so a push in flight is no
             // reason to refuse. With no command behind it the key falls
             // through to `Dismiss`, which is what every unbound key gives.
-            KeyCode::Char('G') if issue == IssueKey::Bound => Event::IssueRequested,
+            KeyCode::Char('G') if keys.issue == Binding::Bound => Event::IssueRequested,
             // A measurement is read-only for the repository of the user, so a
             // push in flight is no reason to refuse it either.
             KeyCode::Char('m') => Event::ConflictsRequested,
@@ -2992,6 +3030,7 @@ fn restore_terminal() {
 mod tests {
     use super::*;
     use crate::testrepo;
+    use crate::update::BaseUpdate;
     use ignore::gitignore::GitignoreBuilder;
     use termwindow::WRAPPER_CHROME_ROWS;
 
@@ -3838,9 +3877,48 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    /// Both values of the new key's availability. Every old key means the
-    /// same thing under each of them: the new key must move no old one.
-    const BOTH_AVAILABILITIES: [IssueKey; 2] = [IssueKey::Bound, IssueKey::Unbound];
+    /// One combination of the three bindings, as [`classify_input`] reads it.
+    const fn bindings(issue: Binding, rebase: Binding, merge: Binding) -> CommandKeys {
+        CommandKeys {
+            issue,
+            rebase,
+            merge,
+        }
+    }
+
+    /// Every combination of the three bindings, all eight of them.
+    ///
+    /// Every old key means the same thing under each of them: a new key must
+    /// move no old one. Three keys read this value and each reads one field of
+    /// it, so a combination left out here is a pair of keys nobody holds
+    /// against each other.
+    const EVERY_BINDING_COMBINATION: [CommandKeys; 8] = {
+        use Binding::{Bound, Unbound};
+        [
+            bindings(Unbound, Unbound, Unbound),
+            bindings(Unbound, Unbound, Bound),
+            bindings(Unbound, Bound, Unbound),
+            bindings(Unbound, Bound, Bound),
+            bindings(Bound, Unbound, Unbound),
+            bindings(Bound, Unbound, Bound),
+            bindings(Bound, Bound, Unbound),
+            bindings(Bound, Bound, Bound),
+        ]
+    };
+
+    /// The combinations in which `G` has a command behind it.
+    fn issue_bound() -> impl Iterator<Item = CommandKeys> {
+        EVERY_BINDING_COMBINATION
+            .into_iter()
+            .filter(|keys| keys.issue == Binding::Bound)
+    }
+
+    /// The combinations in which `G` has none.
+    fn issue_unbound() -> impl Iterator<Item = CommandKeys> {
+        EVERY_BINDING_COMBINATION
+            .into_iter()
+            .filter(|keys| keys.issue == Binding::Unbound)
+    }
 
     /// Every mode a key can arrive in.
     const EVERY_MODE: [InputMode; 4] = [
@@ -3867,13 +3945,13 @@ mod tests {
     fn classify_input_maps_the_r_key_to_force_refresh() {
         // Pressing `r` is the manual-refresh escape hatch: the input classifier
         // must turn an `r` key PRESS into Event::ForceRefresh.
-        for issue in BOTH_AVAILABILITIES {
+        for keys in EVERY_BINDING_COMBINATION {
             assert!(
                 matches!(
-                    classify_input(press(KeyCode::Char('r')), InputMode::Normal, issue),
+                    classify_input(press(KeyCode::Char('r')), InputMode::Normal, keys),
                     Some(Event::ForceRefresh),
                 ),
-                "`r` must refresh with {issue:?}",
+                "`r` must refresh with {keys:?}",
             );
         }
     }
@@ -3889,27 +3967,27 @@ mod tests {
             kind: KeyEventKind::Release,
             ..press(KeyCode::Char('r'))
         };
-        for issue in BOTH_AVAILABILITIES {
+        for keys in EVERY_BINDING_COMBINATION {
             assert!(
-                classify_input(r_release, InputMode::Normal, issue).is_none(),
+                classify_input(r_release, InputMode::Normal, keys).is_none(),
                 "a key release must be ignored — only a press acts",
             );
 
             // `q` and Ctrl-C both request a quit.
             assert!(matches!(
-                classify_input(press(KeyCode::Char('q')), InputMode::Normal, issue),
+                classify_input(press(KeyCode::Char('q')), InputMode::Normal, keys),
                 Some(Event::Quit),
             ));
             let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
             assert!(matches!(
-                classify_input(ctrl_c, InputMode::Normal, issue),
+                classify_input(ctrl_c, InputMode::Normal, keys),
                 Some(Event::Quit),
             ));
 
             // An unrelated key press acts on nothing, but is not silence: it
             // clears a status message that may be on screen.
             assert!(matches!(
-                classify_input(press(KeyCode::Char('x')), InputMode::Normal, issue),
+                classify_input(press(KeyCode::Char('x')), InputMode::Normal, keys),
                 Some(Event::Dismiss),
             ));
         }
@@ -3936,13 +4014,13 @@ mod tests {
         // The push key. It opens the confirmation from the normal mode, and is
         // inert while a push is already running — an impatient second press
         // must not start an overlapping push.
-        for issue in BOTH_AVAILABILITIES {
+        for keys in EVERY_BINDING_COMBINATION {
             assert!(matches!(
-                classify_input(press(KeyCode::Char('p')), InputMode::Normal, issue),
+                classify_input(press(KeyCode::Char('p')), InputMode::Normal, keys),
                 Some(Event::PushRequested),
             ));
             assert!(matches!(
-                classify_input(press(KeyCode::Char('p')), InputMode::Pushing, issue),
+                classify_input(press(KeyCode::Char('p')), InputMode::Pushing, keys),
                 Some(Event::Dismiss),
             ));
         }
@@ -3953,13 +4031,15 @@ mod tests {
         // The issue key. A browser opens beside the monitor, which conflicts
         // with nothing a push does — so it acts in both of those modes.
         for mode in [InputMode::Normal, InputMode::Pushing] {
-            assert!(
-                matches!(
-                    classify_input(press(KeyCode::Char('G')), mode, IssueKey::Bound),
-                    Some(Event::IssueRequested),
-                ),
-                "`G` must ask for the issue in {mode:?}",
-            );
+            for keys in issue_bound() {
+                assert!(
+                    matches!(
+                        classify_input(press(KeyCode::Char('G')), mode, keys),
+                        Some(Event::IssueRequested),
+                    ),
+                    "`G` must ask for the issue in {mode:?} with {keys:?}",
+                );
+            }
         }
     }
 
@@ -3967,14 +4047,15 @@ mod tests {
     fn g_does_nothing_while_the_confirmation_is_up() {
         // That mode owns the answer to a question. No new key may trap the
         // user in it.
-        assert!(matches!(
-            classify_input(
-                press(KeyCode::Char('G')),
-                InputMode::Confirm,
-                IssueKey::Bound
-            ),
-            Some(Event::Dismiss),
-        ));
+        for keys in issue_bound() {
+            assert!(
+                matches!(
+                    classify_input(press(KeyCode::Char('G')), InputMode::Confirm, keys),
+                    Some(Event::Dismiss),
+                ),
+                "`G` must not answer the question with {keys:?}",
+            );
+        }
     }
 
     #[test]
@@ -3982,15 +4063,13 @@ mod tests {
         // Silence belongs to this case only, and it is the silence of an
         // unbound key rather than a code path of its own.
         for mode in EVERY_MODE {
-            assert_eq!(
-                meaning(classify_input(
-                    press(KeyCode::Char('G')),
-                    mode,
-                    IssueKey::Unbound
-                )),
-                unbound(mode),
-                "`G` must do nothing in {mode:?} with no command behind it",
-            );
+            for keys in issue_unbound() {
+                assert_eq!(
+                    meaning(classify_input(press(KeyCode::Char('G')), mode, keys)),
+                    unbound(mode),
+                    "`G` must do nothing in {mode:?} with no command behind it, with {keys:?}",
+                );
+            }
         }
     }
 
@@ -3999,11 +4078,11 @@ mod tests {
         // The user asked for `G`. A shifted key and an unshifted one are two
         // keys, and only one of them was asked for.
         for mode in EVERY_MODE {
-            for issue in BOTH_AVAILABILITIES {
+            for keys in EVERY_BINDING_COMBINATION {
                 assert_eq!(
-                    meaning(classify_input(press(KeyCode::Char('g')), mode, issue)),
+                    meaning(classify_input(press(KeyCode::Char('g')), mode, keys)),
                     unbound(mode),
-                    "`g` must stay unbound in {mode:?} with {issue:?}",
+                    "`g` must stay unbound in {mode:?} with {keys:?}",
                 );
             }
         }
@@ -4017,10 +4096,10 @@ mod tests {
             ..press(KeyCode::Char('G'))
         };
         for mode in EVERY_MODE {
-            for issue in BOTH_AVAILABILITIES {
+            for keys in EVERY_BINDING_COMBINATION {
                 assert!(
-                    classify_input(g_release, mode, issue).is_none(),
-                    "a release of `G` must be ignored in {mode:?} with {issue:?}",
+                    classify_input(g_release, mode, keys).is_none(),
+                    "a release of `G` must be ignored in {mode:?} with {keys:?}",
                 );
             }
         }
@@ -4038,38 +4117,140 @@ mod tests {
             ..press(KeyCode::Char('m'))
         };
         for mode in EVERY_MODE {
-            for issue in BOTH_AVAILABILITIES {
-                let m = classify_input(press(KeyCode::Char('m')), mode, issue);
+            for keys in EVERY_BINDING_COMBINATION {
+                let m = classify_input(press(KeyCode::Char('m')), mode, keys);
                 match mode {
                     InputMode::Normal | InputMode::Pushing => assert!(
                         matches!(m, Some(Event::ConflictsRequested)),
-                        "`m` must ask to measure in {mode:?} with {issue:?}",
+                        "`m` must ask to measure in {mode:?} with {keys:?}",
                     ),
                     InputMode::Confirm => assert!(
                         matches!(m, Some(Event::Dismiss)),
-                        "`m` must not answer the push question with {issue:?}",
+                        "`m` must not answer the push question with {keys:?}",
                     ),
                     // The list takes the pane, so a measurement of the frame
                     // under it is a key the user pressed at nothing.
                     InputMode::List => assert!(
                         m.is_none(),
-                        "`m` must do nothing while the list is open with {issue:?}",
+                        "`m` must do nothing while the list is open with {keys:?}",
                     ),
                 }
 
-                // A shifted key and an unshifted one are two keys, and only
-                // one of them was asked for.
+                // A shifted key and an unshifted one are two keys, and the
+                // shifted one is now a key of its own: it asks to merge the
+                // base into the branch. It must never measure, whatever binds
+                // it, because a measurement changes nothing and a merge
+                // writes a commit and pushes it.
+                let shifted = meaning(classify_input(press(KeyCode::Char('M')), mode, keys));
+                let asks = mode == InputMode::Normal && keys.merge == Binding::Bound;
                 assert_eq!(
-                    meaning(classify_input(press(KeyCode::Char('M')), mode, issue)),
-                    unbound(mode),
-                    "`M` must stay unbound in {mode:?} with {issue:?}",
+                    shifted,
+                    if asks {
+                        asks_for(BaseUpdate::Merge)
+                    } else {
+                        unbound(mode)
+                    },
+                    "`M` in {mode:?} with {keys:?}",
                 );
 
                 // Only a press acts, and the new key is no exception.
                 assert!(
-                    classify_input(m_release, mode, issue).is_none(),
-                    "a release of `m` must be ignored in {mode:?} with {issue:?}",
+                    classify_input(m_release, mode, keys).is_none(),
+                    "a release of `m` must be ignored in {mode:?} with {keys:?}",
                 );
+            }
+        }
+    }
+
+    /// The two keys that bring the branch up to date with its base, each with
+    /// the act it asks for.
+    ///
+    /// One table for both, because the two keys run the same code over two
+    /// sets of words: a rule stated for one of them and not the other is the
+    /// place the two drift apart.
+    const BASE_UPDATE_KEYS: [(KeyCode, BaseUpdate); 2] = [
+        (KeyCode::Char('R'), BaseUpdate::Rebase),
+        (KeyCode::Char('M'), BaseUpdate::Merge),
+    ];
+
+    #[test]
+    fn r_and_m_ask_for_their_own_act_in_the_normal_mode() {
+        // Each key asks for the act it belongs to and for no other. A press of
+        // `R` that asked for a merge would write a commit where the user asked
+        // for the commits of the branch to move, and `grp` and `gmp` are two
+        // different commands of the user.
+        for keys in EVERY_BINDING_COMBINATION {
+            for (code, update) in BASE_UPDATE_KEYS {
+                if binding_for(keys, update) != Binding::Bound {
+                    continue;
+                }
+                assert_eq!(
+                    meaning(classify_input(press(code), InputMode::Normal, keys)),
+                    asks_for(update),
+                    "{code:?} must ask for a {} with {keys:?}",
+                    update.verb(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn r_and_m_act_in_no_mode_but_the_normal_one() {
+        // A question on the screen owns its answer, so neither key may answer
+        // it: a `y` is the only yes. A run in flight owns the window under the
+        // frame, and a rebase and a push must not overlap, so both keys go
+        // quiet there as `p` does — and a base update that runs puts the loop
+        // in that same mode. The list takes the pane, so a key that acts on
+        // the frame acts on a frame the user cannot see.
+        for keys in EVERY_BINDING_COMBINATION {
+            for (code, _) in BASE_UPDATE_KEYS {
+                for mode in [InputMode::Confirm, InputMode::Pushing, InputMode::List] {
+                    assert_eq!(
+                        meaning(classify_input(press(code), mode, keys)),
+                        unbound(mode),
+                        "{code:?} must do nothing in {mode:?} with {keys:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn r_and_m_do_nothing_where_the_key_has_no_command() {
+        // gsw ships neither command, so a user who has written neither must
+        // see no sign of either key. The silence is the silence of an unbound
+        // key rather than a code path of its own, and it holds in every mode.
+        for keys in EVERY_BINDING_COMBINATION {
+            for (code, update) in BASE_UPDATE_KEYS {
+                if binding_for(keys, update) != Binding::Unbound {
+                    continue;
+                }
+                for mode in EVERY_MODE {
+                    assert_eq!(
+                        meaning(classify_input(press(code), mode, keys)),
+                        unbound(mode),
+                        "{code:?} must do nothing in {mode:?} with {keys:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_release_of_r_or_m_is_ignored() {
+        // Only a press acts, and the two new keys are no exception.
+        for keys in EVERY_BINDING_COMBINATION {
+            for (code, _) in BASE_UPDATE_KEYS {
+                let release = KeyEvent {
+                    kind: KeyEventKind::Release,
+                    ..press(code)
+                };
+                for mode in EVERY_MODE {
+                    assert!(
+                        classify_input(release, mode, keys).is_none(),
+                        "a release of {code:?} must be ignored in {mode:?} with {keys:?}",
+                    );
+                }
             }
         }
     }
@@ -4077,13 +4258,13 @@ mod tests {
     #[test]
     fn the_confirmation_accepts_y_and_enter() {
         for code in [KeyCode::Char('y'), KeyCode::Char('Y'), KeyCode::Enter] {
-            for issue in BOTH_AVAILABILITIES {
+            for keys in EVERY_BINDING_COMBINATION {
                 assert!(
                     matches!(
-                        classify_input(press(code), InputMode::Confirm, issue),
+                        classify_input(press(code), InputMode::Confirm, keys),
                         Some(Event::PushConfirmed),
                     ),
-                    "{code:?} must confirm the push with {issue:?}",
+                    "{code:?} must confirm the push with {keys:?}",
                 );
             }
         }
@@ -4100,13 +4281,13 @@ mod tests {
             KeyCode::Char('q'),
             KeyCode::Esc,
         ] {
-            for issue in BOTH_AVAILABILITIES {
+            for keys in EVERY_BINDING_COMBINATION {
                 assert!(
                     matches!(
-                        classify_input(press(code), InputMode::Confirm, issue),
+                        classify_input(press(code), InputMode::Confirm, keys),
                         Some(Event::PushCancelled),
                     ),
-                    "{code:?} must cancel the push with {issue:?}",
+                    "{code:?} must cancel the push with {keys:?}",
                 );
             }
         }
@@ -4117,10 +4298,10 @@ mod tests {
         // With a question on screen, `r` must not refresh and `p` must not
         // re-ask. Anything that is not an answer does nothing.
         for code in [KeyCode::Char('r'), KeyCode::Char('p'), KeyCode::Char('x')] {
-            for issue in BOTH_AVAILABILITIES {
+            for keys in EVERY_BINDING_COMBINATION {
                 assert!(
                     matches!(
-                        classify_input(press(code), InputMode::Confirm, issue),
+                        classify_input(press(code), InputMode::Confirm, keys),
                         Some(Event::Dismiss),
                     ),
                     "{code:?} must not act while the confirmation is up",
@@ -4135,9 +4316,9 @@ mod tests {
         // that has to be killed from another pane.
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         for mode in EVERY_MODE {
-            for issue in BOTH_AVAILABILITIES {
+            for keys in EVERY_BINDING_COMBINATION {
                 assert!(
-                    matches!(classify_input(ctrl_c, mode, issue), Some(Event::Quit)),
+                    matches!(classify_input(ctrl_c, mode, keys), Some(Event::Quit)),
                     "Ctrl-C must quit from {mode:?}",
                 );
             }
@@ -4148,13 +4329,13 @@ mod tests {
     fn q_and_r_still_work_while_a_push_runs() {
         // The push runs off this thread, so the monitor stays live underneath
         // it: quitting and refreshing keep working.
-        for issue in BOTH_AVAILABILITIES {
+        for keys in EVERY_BINDING_COMBINATION {
             assert!(matches!(
-                classify_input(press(KeyCode::Char('q')), InputMode::Pushing, issue),
+                classify_input(press(KeyCode::Char('q')), InputMode::Pushing, keys),
                 Some(Event::Quit),
             ));
             assert!(matches!(
-                classify_input(press(KeyCode::Char('r')), InputMode::Pushing, issue),
+                classify_input(press(KeyCode::Char('r')), InputMode::Pushing, keys),
                 Some(Event::ForceRefresh),
             ));
         }
@@ -4179,8 +4360,28 @@ mod tests {
             Some(Event::Dismiss) => "Dismiss",
             Some(Event::PushConfirmed) => "PushConfirmed",
             Some(Event::PushCancelled) => "PushCancelled",
+            Some(Event::BaseUpdateRequested(update)) => asks_for(update),
             Some(_) => "another event",
             None => "nothing",
+        }
+    }
+
+    /// What [`meaning`] names a press that asks for `update`.
+    ///
+    /// The one place the two names are written, so a test that expects a
+    /// rebase and a table that reports one cannot spell it two ways.
+    fn asks_for(update: BaseUpdate) -> &'static str {
+        match update {
+            BaseUpdate::Rebase => "BaseUpdateRequested(Rebase)",
+            BaseUpdate::Merge => "BaseUpdateRequested(Merge)",
+        }
+    }
+
+    /// Whether the key of `update` has a command behind it, in `keys`.
+    fn binding_for(keys: CommandKeys, update: BaseUpdate) -> Binding {
+        match update {
+            BaseUpdate::Rebase => keys.rebase,
+            BaseUpdate::Merge => keys.merge,
         }
     }
 
@@ -4245,13 +4446,13 @@ mod tests {
             EVERY_MODE,
             "the table must cover every input mode",
         );
-        for issue in BOTH_AVAILABILITIES {
+        for keys in EVERY_BINDING_COMBINATION {
             for (mode, meanings) in table {
                 for (code, expected) in TABLE_KEYS.into_iter().zip(meanings) {
                     assert_eq!(
-                        meaning(classify_input(press(code), mode, issue)),
+                        meaning(classify_input(press(code), mode, keys)),
                         expected,
-                        "{code:?} in {mode:?} with {issue:?}",
+                        "{code:?} in {mode:?} with {keys:?}",
                     );
                 }
             }
@@ -4265,15 +4466,15 @@ mod tests {
         // does not walk, `p` does not ask, `G` and `m` start nothing, and no
         // key takes a line off the row. Ctrl-C still quits.
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        for issue in BOTH_AVAILABILITIES {
+        for keys in EVERY_BINDING_COMBINATION {
             assert_eq!(
                 meaning(classify_input(
                     press(KeyCode::Char('q')),
                     InputMode::List,
-                    issue
+                    keys
                 )),
                 "ListClose",
-                "`q` must close the list with {issue:?}",
+                "`q` must close the list with {keys:?}",
             );
             for code in [
                 KeyCode::Char('r'),
@@ -4289,15 +4490,15 @@ mod tests {
                 KeyCode::PageDown,
             ] {
                 assert_eq!(
-                    meaning(classify_input(press(code), InputMode::List, issue)),
+                    meaning(classify_input(press(code), InputMode::List, keys)),
                     "nothing",
-                    "{code:?} must do nothing in the list with {issue:?}",
+                    "{code:?} must do nothing in the list with {keys:?}",
                 );
             }
             assert_eq!(
-                meaning(classify_input(ctrl_c, InputMode::List, issue)),
+                meaning(classify_input(ctrl_c, InputMode::List, keys)),
                 "Quit",
-                "Ctrl-C must quit from the list with {issue:?}",
+                "Ctrl-C must quit from the list with {keys:?}",
             );
         }
     }
@@ -4309,13 +4510,13 @@ mod tests {
         // flight owns the window under the frame, and that window belongs to
         // the worktree that pushes, so an arrow key does nothing then either.
         // Enter and Esc keep their meaning at the question.
-        for issue in BOTH_AVAILABILITIES {
+        for keys in EVERY_BINDING_COMBINATION {
             for mode in [InputMode::Confirm, InputMode::Pushing] {
                 for code in ARROWS {
                     assert_eq!(
-                        meaning(classify_input(press(code), mode, issue)),
+                        meaning(classify_input(press(code), mode, keys)),
                         "Dismiss",
-                        "{code:?} in {mode:?} with {issue:?}",
+                        "{code:?} in {mode:?} with {keys:?}",
                     );
                 }
             }
@@ -4323,19 +4524,19 @@ mod tests {
                 meaning(classify_input(
                     press(KeyCode::Enter),
                     InputMode::Confirm,
-                    issue
+                    keys
                 )),
                 "PushConfirmed",
-                "Enter must still push with {issue:?}",
+                "Enter must still push with {keys:?}",
             );
             assert_eq!(
                 meaning(classify_input(
                     press(KeyCode::Esc),
                     InputMode::Confirm,
-                    issue
+                    keys
                 )),
                 "PushCancelled",
-                "Esc must still cancel with {issue:?}",
+                "Esc must still cancel with {keys:?}",
             );
         }
     }
@@ -4344,15 +4545,15 @@ mod tests {
     fn a_release_of_an_arrow_key_is_ignored_in_every_mode() {
         // Only a press acts, and the arrow keys are no exception.
         for mode in EVERY_MODE {
-            for issue in BOTH_AVAILABILITIES {
+            for keys in EVERY_BINDING_COMBINATION {
                 for code in ARROWS {
                     let release = KeyEvent {
                         kind: KeyEventKind::Release,
                         ..press(code)
                     };
                     assert!(
-                        classify_input(release, mode, issue).is_none(),
-                        "a release of {code:?} must be ignored in {mode:?} with {issue:?}",
+                        classify_input(release, mode, keys).is_none(),
+                        "a release of {code:?} must be ignored in {mode:?} with {keys:?}",
                     );
                 }
             }
