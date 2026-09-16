@@ -782,6 +782,32 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     directory *shared* by every worktree of the repo (`git rev-parse --git-common-dir`), so two merges
     launched from two different worktrees of one repo contend for the same lock. Drop an executable
     `.swt-check` at the parent repo root to override the default green check.
+  - In a parent worktree on the branch `<branch>`, `swt create <name>` makes the branch
+    `swt/<branch>/<name>-<token>` and the directory `<parent-worktree-name>--<name>-<token>.swt`
+    beside the parent. One token keys both names, and `ls` shows each child next to its parent.
+    `swt create` refuses a detached HEAD before it creates anything, because a detached HEAD has no
+    branch to relate the child to.
+  - `swt list` prints the child worktrees of the branch that is checked out where it runs. Each child
+    is one line on stdout, sorted by path: the path, a tab, and the branch. The path can go directly
+    to `swt merge`. A child whose directory is gone gets a third field, `prunable`. With no children,
+    stdout is empty, a note goes to stderr, and the exit status is 0. On a detached HEAD, `swt list`
+    exits 1 and says why. A failure also leaves stdout empty, for example on a detached HEAD, or
+    when `swt` is not on the `PATH` of a hook. Thus a check must read the exit status before it
+    reads stdout. This check gives 0 for children, 1 for no children, and 2 for a failure:
+    `children="$(swt list)" || exit 2; [ -n "$children" ]`. `swt list` shows a child only when the
+    parent in the branch of the child is equal to the current branch. A prefix is not sufficient:
+    the children of `feat/foo` are not children of `feat`. Worktrees in the old format
+    `swt/<name>-<token>` have no parent in their branch, so `swt list` does not show them.
+  - A hook or a skill can find the child branches with plain git, without `swt`:
+
+    ```sh
+    git for-each-ref --format='%(refname:short)' "refs/heads/swt/$(git branch --show-current)/*"
+    ```
+
+    In `git for-each-ref`, `*` does not match `/`, so the pattern for `feat` leaves out the children
+    of `feat/foo`. Do not use `git branch --list 'swt/feat/*'`, where `*` matches `/`. Do not get the
+    branch from `git symbolic-ref --short HEAD`, which prints `heads/feat` when a tag `feat` exists.
+    This command finds child branches, and `swt list` finds child worktrees.
   - To install: `cargo install --git https://github.com/timmattison/tools swt`
   - Upgrading from the old TypeScript version: it was installed by symlinking `swt/swt.ts` into your
     `PATH`. That file is gone, so the symlink now dangles — and depending on `PATH` order it can keep

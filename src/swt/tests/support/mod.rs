@@ -9,25 +9,33 @@
 //!
 //! - **The repository is a subdirectory of its [`TempDir`], never the temp dir
 //!   itself.** `swt create` places a new worktree at
-//!   `<repo>/../<name>-<token>.swt` — a *sibling* of the repo root. With the
+//!   `<repo>/../<repo name>--<name>-<token>.swt` — a *sibling* of the repo
+//!   root. With the
 //!   repo at the temp dir root that sibling
 //!   would land in the shared system temp directory, where it escapes cleanup
 //!   and where two concurrent runs of the same test collide on it.
 //!   [`TestRepo::siblings`] is that parent directory, and it is inside the
 //!   `TempDir`.
-//! - **The host is scrubbed out of every child the suite spawns.** git exports
-//!   `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` into a hook's environment,
-//!   and this repo's own pre-commit hook runs `cargo test`. If those leak
-//!   through, a fixture's `git init`/`add`/`commit` targets *this* repository
-//!   despite the working directory — which has happened here before. The host's
+//! - **The host is scrubbed out of every child the suite spawns.** Git exports
+//!   its own `GIT_` variables into the environment of a hook, and the
+//!   pre-commit hook of this repository runs `cargo test`. Git obeys those
+//!   variables before the working directory of a command. A leaked `GIT_DIR` or
+//!   `GIT_INDEX_FILE` thus aims a fixture's `git init`/`add`/`commit` at *this*
+//!   repository, and that has happened here before. A leaked
+//!   `GIT_OBJECT_DIRECTORY` sends the objects of a fixture into another store,
+//!   and a leaked `GIT_CONFIG_PARAMETERS` injects configuration into the child.
+//!   So [`sandboxed`] sheds the whole `GIT_` prefix through
+//!   [`gitscratch::shed_inherited_git_environment`]. It holds no list of names,
+//!   because a list misses every variable that git adds later. The host's
 //!   global and system gitconfig is a quieter version of the same problem: it
-//!   decides hooks paths, aliases and credential helpers for a suite that is
-//!   supposed to depend on nothing but its own fixture. [`sandboxed`] removes
-//!   both, at the one place [`git_command`] and [`swt_command`] share, and
-//!   [`TestRepo::new`] additionally refuses to build a fixture at all while the
-//!   git location variables are set, because the tests that call `swt`'s git
-//!   functions *in process* inherit this process's environment and cannot be
-//!   protected from the outside.
+//!   decides hooks paths, aliases and credential helpers for a suite that must
+//!   depend on its own fixture and nothing else. [`sandboxed`] points both at
+//!   an empty file. It applies both rules at the one place that [`git_command`],
+//!   [`swt_command`] and [`shell_command`] share. [`TestRepo::new`] also
+//!   refuses to build a fixture while the git location variables are set. The
+//!   tests that call the git functions of `swt` *in process* inherit the
+//!   environment of this process, and the harness cannot protect them from the
+//!   outside.
 //! - **Every name is process-unique.** Two copies of this test binary run
 //!   concurrently in this repo — the pre-commit hook's `cargo test` racing a
 //!   manual one — so every worktree path and branch name is keyed on
@@ -56,6 +64,10 @@ const INHERITED_GIT_ENV: [&str; 4] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FIL
 /// a subdirectory so that a worktree created beside it stays inside the temp dir.
 const REPO_DIR: &str = "repo";
 
+/// The branch that every fixture repository starts on. A test reads it back as
+/// the parent branch of a child that `swt create` makes in the main checkout.
+pub const MAIN_BRANCH: &str = "main";
+
 /// The one file every fixture repository has committed, for tests that need a
 /// tracked path to modify, stage or delete.
 pub const TRACKED_FILE: &str = "tracked.txt";
@@ -68,10 +80,10 @@ pub const SWT_CHECK: &str = ".swt-check";
 /// that happens to start with a hyphen, and the command that owns it — not clap —
 /// must be the one to answer for it.
 ///
-/// The list lives here because both commands take such a value and each pins it
-/// separately: `create` refuses the name against its naming rule, `merge`
-/// resolves the path and reports that nothing is there. One list keeps the two
-/// halves from drifting into covering different spellings.
+/// The list lives here because `create` and `merge` both take such a value, and
+/// each pins it separately: `create` refuses the name against its naming rule,
+/// `merge` resolves the path and reports that nothing is there. One list keeps
+/// the two halves from drifting into covering different spellings.
 pub const OPTION_LOOKING_NAMES: [&str; 3] = ["-b", "-rf", "--force"];
 
 /// Suffix every worktree directory `swt create` builds carries.
@@ -125,28 +137,33 @@ pub fn assert_git_env_is_sandboxed() {
 }
 
 /// Applies the isolation rules to a child the suite is about to spawn, whether
-/// that child is a fixture's git or the real `swt` binary.
+/// that child is a fixture's git, the real `swt` binary, or a shell that runs
+/// git.
 ///
-/// The single place the rules live, so the two entrances that build children
-/// ([`git_command`] and [`swt_command`]) cannot drift apart — a rule applied at
-/// only one of them leaves half the suite reading the host's git configuration
-/// while the harness reads as sandboxed. Two rules:
+/// The single place the rules live, so the three entrances that build children
+/// ([`git_command`], [`swt_command`] and [`shell_command`]) cannot drift apart —
+/// a rule applied at only some of them leaves part of the suite reading the
+/// host's git configuration while the harness reads as sandboxed. Two rules, in
+/// this order:
 ///
+/// - **Every inherited `GIT_` variable is removed**, through
+///   [`gitscratch::shed_inherited_git_environment`]. The rule is the prefix,
+///   not a list of names. Git obeys `GIT_OBJECT_DIRECTORY` and
+///   `GIT_CONFIG_PARAMETERS` as it obeys `GIT_DIR`, and a list misses every
+///   variable that git adds later. The child then acts on its working
+///   directory and nothing else.
 /// - **The host's global and system config is replaced with an empty file.**
 ///   Otherwise `core.hooksPath`, `pull.rebase`, aliases, advice settings and
 ///   credential helpers from the developer's or CI machine's gitconfig decide
 ///   what the child does. A fixture pins [`FIXTURE_CONFIG`] locally, which
-///   covers those four keys and nothing else.
-/// - **Any git location the ambient environment exported is removed**, so the
-///   child acts on its working directory and nothing else.
+///   covers those four keys and nothing else. This rule comes after the sweep.
+///   The sweep removes both names when this process holds them, and a value
+///   set after the sweep wins.
 fn sandboxed(cmd: &mut Command) -> &mut Command {
+    gitscratch::shed_inherited_git_environment(cmd);
     cmd.stdin(Stdio::null())
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null");
-    for var in INHERITED_GIT_ENV {
-        cmd.env_remove(var);
-    }
-    cmd
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
 }
 
 /// A git invocation in `dir`, sandboxed from the host by [`sandboxed`] exactly
@@ -155,6 +172,84 @@ pub fn git_command(dir: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new("git");
     sandboxed(&mut cmd).args(args).current_dir(dir);
     cmd
+}
+
+/// The shell that [`shell_command`] runs, by its absolute path. Every POSIX
+/// system has a shell there.
+const SHELL: &str = "/bin/sh";
+
+/// A shell in `dir` that runs `script`, sandboxed from the host by
+/// [`sandboxed`] exactly as every other spawn of the suite is.
+///
+/// A test uses it to run a command line as a person or a hook types it, with
+/// quotes and command substitutions. `script` goes to the shell as the one
+/// argument after `-c`. Every git that the script runs inherits the
+/// environment of the shell, so the one sweep covers each of them too.
+pub fn shell_command(dir: &Path, script: &str) -> Command {
+    let mut cmd = Command::new(SHELL);
+    sandboxed(&mut cmd).arg("-c").arg(script).current_dir(dir);
+    cmd
+}
+
+/// The text of a shell function that takes the place of the command `name`,
+/// for a test that runs a line that a person pastes into a shell.
+///
+/// The function runs nothing. It prints the count of its arguments, then each
+/// argument, and it ends each one with a NUL. A shell function takes precedence
+/// over a command of the same name on `PATH`, so the real command never runs.
+/// Put the text before the pasted line in the script of [`shell_command`], and
+/// read the output back with [`recorded_calls`].
+pub fn recording_function(name: &str) -> String {
+    format!(r#"{name}() {{ printf '%s\0' "$#" "$@"; }}"#)
+}
+
+/// Reads back the calls that a [`recording_function`] printed, as one list of
+/// arguments for each call, in the order of the calls.
+///
+/// Panics when `stdout` does not have the shape that the function prints: a
+/// count, then that number of arguments, with a NUL at the end of each field.
+pub fn recorded_calls(stdout: &str) -> Vec<Vec<String>> {
+    let mut fields = stdout.split_terminator('\0');
+    let mut calls = Vec::new();
+    while let Some(count) = fields.next() {
+        let count: usize = count.parse().unwrap_or_else(|_| {
+            panic!(
+                "a recorded call must start with its argument count, got {count:?} in {stdout:?}"
+            )
+        });
+        let arguments: Vec<String> = fields
+            .by_ref()
+            .take(count)
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            arguments.len(),
+            count,
+            "a recorded call has fewer arguments than its count in {stdout:?}"
+        );
+        calls.push(arguments);
+    }
+    calls
+}
+
+/// The names of the entries in `dir`, sorted.
+///
+/// A test reads it to see every file that a run left in a directory. A name
+/// that is not valid UTF-8 comes back with replacement characters, so it still
+/// shows in a failure message.
+pub fn entry_names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap_or_else(|err| panic!("could not read the directory {}: {err}", dir.display()))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|err| panic!("could not read an entry of {}: {err}", dir.display()))
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
 }
 
 /// Runs git in `dir`, tolerating a non-zero exit.
@@ -220,7 +315,7 @@ impl TestRepo {
         let root = siblings.join(REPO_DIR);
         fs::create_dir(&root).expect("repo subdirectory");
 
-        git(&root, &["init", "--quiet", "-b", "main"]);
+        git(&root, &["init", "--quiet", "-b", MAIN_BRANCH]);
         for (key, value) in FIXTURE_CONFIG {
             git(&root, &["config", "--local", key, value]);
         }
@@ -245,6 +340,13 @@ impl TestRepo {
     /// and cannot collide with a concurrent run.
     pub fn siblings(&self) -> &Path {
         &self.siblings
+    }
+
+    /// The sorted names of every entry beside the repository. A test compares
+    /// the whole list, so an orphaned worktree cannot hide because no assertion
+    /// names it.
+    pub fn entries_beside(&self) -> Vec<String> {
+        entry_names(&self.siblings)
     }
 
     /// Names a process-unique path beside the repository. Nothing is created.
@@ -283,38 +385,57 @@ impl TestRepo {
 
     /// Adds a linked worktree beside the repository, on a fresh branch at `HEAD`.
     pub fn add_worktree(&self, label: &str) -> LinkedWorktree {
-        let branch = unique(&format!("swt/{label}"));
+        self.add_worktree_on(label, &unique(&format!("swt/{label}")))
+    }
+
+    /// Adds a linked worktree beside the repository, on a new branch named
+    /// `branch` at `HEAD`.
+    ///
+    /// A test that pins the names of a child needs to choose the branch of the
+    /// parent, and [`TestRepo::add_worktree`] chooses a branch of its own. Each
+    /// fixture is a private temporary repository, so a fixed branch name cannot
+    /// meet a concurrent run. The directory name still comes from [`unique`], as
+    /// every other path in the suite does.
+    pub fn add_worktree_on(&self, label: &str, branch: &str) -> LinkedWorktree {
         let path = self.sibling(label);
         let path_arg = path.to_str().expect("utf-8 fixture path");
-        self.git(&[
-            "worktree", "add", "--quiet", "-b", &branch, path_arg, "HEAD",
-        ]);
-        LinkedWorktree { path, branch }
+        self.git(&["worktree", "add", "--quiet", "-b", branch, path_arg, "HEAD"]);
+        LinkedWorktree {
+            path,
+            branch: branch.to_string(),
+        }
     }
 
     /// Every directory beside the repository that a `swt create <name>` could
     /// have left behind, sorted.
     ///
     /// The worktree path carries a uniqueness token minted inside the child
-    /// process, so a test cannot predict it and has to go looking. The scan
-    /// deliberately matches the un-tokenized `<name>.swt` as well as
-    /// `<name>-<token>.swt`: a regression that dropped the token again would
-    /// otherwise walk straight past every "nothing survived" assertion by
-    /// leaving an orphan under a name the scan was not looking for.
+    /// process, so a test cannot predict it and has to go looking. The result
+    /// holds each entry beside the repository whose name ends with `.swt` and
+    /// contains `name`. That finds the current format,
+    /// `<parent>--<name>-<token>.swt`, for a parent of any name. It also finds
+    /// the older `<name>-<token>.swt` and the untokenized `<name>.swt`. A
+    /// regression to an older format thus cannot leave an orphan that the
+    /// "nothing survived" assertions do not see. Every name comes from
+    /// [`unique`], so a match on containment cannot find the directory of
+    /// another test.
     pub fn created_worktrees(&self, name: &str) -> Vec<PathBuf> {
-        let mut found: Vec<PathBuf> = fs::read_dir(&self.siblings)
-            .expect("the fixture's sibling directory should be readable")
-            .filter_map(|entry| {
-                let entry = entry.expect("sibling directory entry");
-                let file_name = entry.file_name().to_string_lossy().into_owned();
-                let stem = file_name.strip_suffix(WORKTREE_SUFFIX)?;
-                let belongs = stem == name
-                    || stem
-                        .strip_prefix(name)
-                        .is_some_and(|token| token.starts_with('-'));
-                belongs.then(|| entry.path())
-            })
-            .collect();
+        self.entries_beside()
+            .into_iter()
+            .filter(|entry| entry.ends_with(WORKTREE_SUFFIX) && entry.contains(name))
+            .map(|entry| self.siblings.join(entry))
+            .collect()
+    }
+
+    /// Every branch that a `swt create <name>` could have left behind, sorted.
+    ///
+    /// The `git branch --list` pattern is `swt/*<name>-*`. In that command a `*`
+    /// also matches a `/`, so the pattern finds `swt/<parent>/<name>-<token>`
+    /// for a parent branch of any depth. It also finds the older
+    /// `swt/<name>-<token>`. A regression to that format thus cannot leave a
+    /// branch that the "nothing survived" assertions do not see.
+    pub fn created_branches(&self, name: &str) -> Vec<String> {
+        let mut found = self.branches(&format!("swt/*{name}-*"));
         found.sort();
         found
     }
@@ -374,8 +495,8 @@ pub fn exiting_check(status: i32) -> String {
 ///
 /// The single, mandatory entrance for spawning `swt`. It is sandboxed by
 /// [`sandboxed`], so the binary under test gets the same treatment a fixture's
-/// own git gets: an empty global and system git config, no inherited git
-/// location, and a nulled stdin so an unexpected prompt cannot hang the suite.
+/// own git gets: an empty global and system git config, no inherited `GIT_`
+/// variable, and a nulled stdin so an unexpected prompt cannot hang the suite.
 pub fn swt_command(cwd: &Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_swt"));
     sandboxed(&mut cmd).current_dir(cwd);

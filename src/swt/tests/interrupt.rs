@@ -101,29 +101,6 @@ fn scratch() -> TempDir {
         .expect("scratch temp dir")
 }
 
-/// Sorted names of everything sitting beside a fixture repository, so an
-/// orphaned worktree cannot hide by being merely un-asserted-about.
-fn beside_the_repo(repo: &TestRepo) -> Vec<String> {
-    let mut entries: Vec<String> = fs::read_dir(repo.siblings())
-        .expect("the fixture's sibling directory should be readable")
-        .map(|entry| {
-            entry
-                .expect("sibling directory entry")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect();
-    entries.sort();
-    entries
-}
-
-/// The `git branch --list` pattern matching every branch a `swt create <name>`
-/// could have left behind.
-fn branch_pattern(name: &str) -> String {
-    format!("swt/{name}-*")
-}
-
 /// A PATH-shadowing `git` that announces `swt`'s teardown and then holds its
 /// first command open.
 ///
@@ -353,11 +330,11 @@ fn interrupted_create_leaves_nothing_behind(signal: c_int, expected_status: i32)
         worktree.display()
     );
     assert!(
-        repo.branches(&branch_pattern(&name)).is_empty(),
+        repo.created_branches(&name).is_empty(),
         "signal {signal} left an orphaned branch:\n{stderr}"
     );
     assert_eq!(
-        beside_the_repo(&repo),
+        repo.entries_beside(),
         vec!["repo".to_string()],
         "signal {signal} left something beside the repository:\n{stderr}"
     );
@@ -422,7 +399,7 @@ fn a_second_interrupt_cannot_truncate_the_teardown_the_first_asked_for() {
         worktree.display()
     );
     assert!(
-        repo.branches(&branch_pattern(&name)).is_empty(),
+        repo.created_branches(&name).is_empty(),
         "a second interrupt truncated teardown, orphaning the branch:\n{stderr}"
     );
 }

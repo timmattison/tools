@@ -24,7 +24,7 @@ signal-hook.workspace = true
 # The unit tests ask git whether it accepts a branch name. A pre-commit hook
 # exports its git environment into the tests that it runs, and the rule for
 # which variables to shed lives in gitscratch, not in a copy here.
-gitscratch.workspace = true
+gitscratch = { workspace = true, features = ["testing"] }
 libc.workspace = true
 regex.workspace = true
 tempfile.workspace = true
