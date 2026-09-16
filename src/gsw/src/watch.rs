@@ -1799,6 +1799,160 @@ where
     })
 }
 
+#[cfg(all(test, unix))]
+mod probe_tests {
+    use super::*;
+    use crate::shell::stub_shell::StubShell;
+    use crate::update::BaseUpdate;
+
+    /// What a probe puts in front of the word it asks the shell about.
+    ///
+    /// The tests read the record of the stub through this, so they assert on
+    /// the question the shell was really asked and never on a count of runs.
+    const PROBE_PREFIX: &str = "command -v ";
+
+    /// The values of the three variables, as a test states them.
+    ///
+    /// `None` is a variable the environment does not set, which is the case
+    /// that takes the default name of that key. No test of this module sets a
+    /// variable: `cargo test` runs the tests of one binary on many threads, so
+    /// a test that set `GSW_REBASE_COMMAND` would change what every sibling
+    /// test reads.
+    fn values(issue: Option<&str>, rebase: Option<&str>, merge: Option<&str>) -> CommandValues {
+        CommandValues {
+            issue: issue.map(str::to_string),
+            rebase: rebase.map(str::to_string),
+            merge: merge.map(str::to_string),
+        }
+    }
+
+    /// Probe `values` against `stub`, and give the word each shell was asked
+    /// about and what each answer said, both sorted.
+    ///
+    /// **It waits for every thread the spawn started.** The stub writes its
+    /// record as it runs, so a read before the shells had run would report a
+    /// probe that works as a probe that starts nothing. The wait is bounded by
+    /// the deadline of the probe itself, which kills a shell that never
+    /// answers.
+    ///
+    /// Sorted, because three shells answer in whatever order they finish. What
+    /// each test here is about is which questions were asked, and never which
+    /// of them was asked first.
+    fn probed(values: &CommandValues, stub: &StubShell) -> (Vec<String>, Vec<String>) {
+        let (tx, rx) = mpsc::channel();
+        for handle in spawn_command_probes(values, stub.as_shell(), &tx) {
+            handle.join().expect("a probe thread must not panic");
+        }
+        // The spawn holds a sender for each key, and each of those goes with
+        // the thread that held it. This is the last one, and the read below
+        // ends when it goes.
+        drop(tx);
+        let mut words: Vec<String> = stub
+            .runs()
+            .lines()
+            .filter_map(|line| line.strip_prefix(PROBE_PREFIX))
+            .map(|word| word.trim_matches('\'').to_string())
+            .collect();
+        words.sort();
+        let mut answers: Vec<String> = rx.into_iter().map(|event| answer(&event)).collect();
+        answers.sort();
+        (words, answers)
+    }
+
+    /// What one answer says: the key it belongs to, and the command it carries.
+    ///
+    /// The key rather than the name of the variant, because the question each
+    /// test asks is whether an answer reached the key it belongs to. An answer
+    /// that reached the other key would bind `M` to the command that rebases.
+    fn answer(event: &Event) -> String {
+        match event {
+            Event::IssueCommandFound(command) => format!("G {}", command.name()),
+            Event::BaseUpdateCommandFound(update, command) => {
+                format!("{} {}", update.key(), command.name())
+            }
+            _ => "another event".to_string(),
+        }
+    }
+
+    #[test]
+    fn an_unset_variable_probes_the_default_command_of_its_own_key() {
+        // Three keys, three shells, three questions. A key whose variable the
+        // environment never names still asks about the name it falls back on,
+        // because that name is what the key runs.
+        let stub = StubShell::answering(0);
+        let (words, _) = probed(&values(None, None, None), &stub);
+        assert_eq!(
+            words,
+            [
+                crate::issue::DEFAULT_ISSUE_COMMAND,
+                BaseUpdate::Merge.default_command(),
+                BaseUpdate::Rebase.default_command(),
+            ],
+            "each key must ask the shell about its own default command",
+        );
+    }
+
+    #[test]
+    fn an_empty_variable_starts_no_shell_for_its_own_key_alone() {
+        // The one way to say "do not do this at all" on a public repository
+        // whose defaults name one person's shell functions. It must cost
+        // nothing at all — no shell, and so no rc file read — and it must turn
+        // off the one key it names and no other.
+        let stub = StubShell::answering(0);
+        let (words, answers) = probed(&values(None, Some(""), None), &stub);
+        assert_eq!(
+            words,
+            [
+                crate::issue::DEFAULT_ISSUE_COMMAND,
+                BaseUpdate::Merge.default_command(),
+            ],
+            "an empty GSW_REBASE_COMMAND must start no shell for R, and leave G and M probing",
+        );
+        assert_eq!(
+            answers,
+            ["G ggs", "M gmp"],
+            "a key that started no shell must send no answer",
+        );
+    }
+
+    #[test]
+    fn a_variable_with_a_name_in_it_probes_that_command() {
+        // The name of the command belongs to the user. `gmp` is the name one
+        // person's rc file gives it, and a user who calls it something else
+        // must have gsw ask about the name they chose.
+        let stub = StubShell::answering(0);
+        let (words, answers) = probed(&values(None, None, Some("mymerge")), &stub);
+        assert_eq!(
+            words,
+            [
+                crate::issue::DEFAULT_ISSUE_COMMAND,
+                BaseUpdate::Rebase.default_command(),
+                "mymerge",
+            ],
+            "GSW_MERGE_COMMAND must name the command that M asks about",
+        );
+        assert_eq!(
+            answers,
+            ["G ggs", "M mymerge", "R grp"],
+            "the answer of M must carry the command the user named",
+        );
+    }
+
+    #[test]
+    fn each_answer_arrives_as_the_event_of_its_own_key() {
+        // Three answers on one channel, and each must reach the key it belongs
+        // to. An answer that reached the other key would bind `M` to the
+        // command that rebases the branch and force-pushes it.
+        let stub = StubShell::answering(0);
+        let (_, answers) = probed(&values(None, None, None), &stub);
+        assert_eq!(
+            answers,
+            ["G ggs", "M gmp", "R grp"],
+            "each key must be bound by the answer of its own probe",
+        );
+    }
+}
+
 /// Start the recursive filesystem watcher that feeds [`Event::FsChanged`] into
 /// the loop. Returns the live watcher, which the caller must keep in scope: a
 /// dropped watcher stops delivering events.
