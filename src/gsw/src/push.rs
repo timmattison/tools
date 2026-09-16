@@ -781,8 +781,9 @@ pub(crate) struct PushUi {
     truecolor: bool,
 }
 
-/// What the push feature is currently doing. Private: the loop drives this
-/// through [`PushUi`]'s methods and reads it only through
+/// What the row under the frame is currently doing: for a push, for a rebase
+/// onto the base, and for a merge of the base alike. Private: the loop drives
+/// this through [`PushUi`]'s methods and reads it only through
 /// [`PushUi::mode`]/[`PushUi::overlay`].
 enum State {
     /// Nothing on screen and nothing pending.
@@ -817,9 +818,10 @@ enum State {
         /// What the row says once the command has worked, as the question
         /// composed it.
         success: SuccessReport,
-        /// When the push started, against the watch loop's injected clock. The
+        /// When the run started, against the watch loop's injected clock. The
         /// notice reports the age from it, so a hook that takes minutes looks
-        /// like a push in progress rather than like a hang.
+        /// like a run in progress rather than like a hang. A rebase reaches
+        /// that same hook, because it pushes what it rewrote.
         started_at: Instant,
         /// The most recent output lines, oldest first, capped at
         /// [`MAX_PUSH_OUTPUT_ROWS`].
@@ -861,8 +863,9 @@ enum State {
 /// is a sentence that quietly stops being true — and a message that stays has
 /// no countdown to report. There is no third combination to represent.
 enum Life {
-    /// Stays until the user presses a key. git's own words about a push that
-    /// failed, drawn red, and the one message gsw will not remove by itself.
+    /// Stays until the user presses a key. The words a failed run wrote —
+    /// git's own, or those of the command behind `R` or `M` — drawn red, and
+    /// the one message gsw will not remove by itself.
     UntilDismissed,
     /// Says how long ago it was posted, fades toward black across
     /// [`STATUS_LIFETIME`], and then takes itself off the screen.
@@ -1174,7 +1177,7 @@ impl PushUi {
         };
         recent.push_back(line);
         // A hook can print thousands of lines, and every one of them costs
-        // memory until the push ends. Trimming on arrival bounds that at the
+        // memory until the run ends. Trimming on arrival bounds that at the
         // window's own size rather than at the hook's output.
         while recent.len() > MAX_PUSH_OUTPUT_ROWS {
             recent.pop_front();
