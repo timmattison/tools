@@ -7770,6 +7770,36 @@ mod push_loop_tests {
     }
 
     #[test]
+    fn an_r_between_two_g_presses_on_a_remote_shell_takes_the_arming_away() {
+        // `R` is a key other than `G`, so it takes the arming away, as every
+        // such key does — and it must take it away through the one rule that
+        // says so, rather than around it. The branch of this world already
+        // contains its base, so the `R` refuses with a line and the loop stays
+        // in the mode the second `G` needs.
+        let base = Instant::now();
+        let (_screen, seen) = drive(
+            vec![
+                probe_answered(),
+                base_update_probe_answered(crate::update::BaseUpdate::Rebase),
+                press_g(),
+                press_base_update(crate::update::BaseUpdate::Rebase),
+                press_g(),
+                Event::Quit,
+            ],
+            Setup {
+                session: crate::remote::Session::Remote,
+                ..in_world(World::alone())
+            },
+            move || base,
+        );
+        assert!(
+            seen.issue_runs.is_empty(),
+            "a press of `R` between the presses must leave the second one asking, got {:?}",
+            seen.issue_runs,
+        );
+    }
+
+    #[test]
     fn the_loop_wakes_itself_to_take_an_expired_message_off_the_screen() {
         // A status message expires against the clock, and on a quiet
         // repository nothing else is due to wake the loop: no filesystem
