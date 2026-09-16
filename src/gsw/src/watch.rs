@@ -2106,7 +2106,7 @@ where
         // `confirm` yields the command only once, so a second `y` that raced
         // the mode change starts nothing.
         Event::PushConfirmed => {
-            if let Some(command) = state.ui.confirm(clock()) {
+            if let Some(crate::push::Confirmed::Push(command)) = state.ui.confirm(clock()) {
                 (hooks.start_push)(command, &state.current);
             }
         }

@@ -20,6 +20,7 @@ use crate::child::detach_from_terminal;
 use crate::lines::LineSplitter;
 use crate::render::{Snapshot, UpstreamStatus};
 use crate::repo::DETACHED_HEAD;
+use crate::update::BaseUpdateCommand;
 use crate::watch::{Dimensions, InputMode};
 use crate::worktrees::WorktreeList;
 use textfit::truncate_right;
@@ -165,23 +166,48 @@ impl PushCommand {
     }
 }
 
-/// What the watch loop does when the user presses `p`.
+/// What a confirmation runs: a push of gsw's own, or a command of the user's
+/// that brings the branch up to date with the base.
 ///
-/// This is the whole interface [`prompt_for`] hands back, and it is deliberately
-/// two cases rather than five: the caller asks a question or shows a message,
-/// and never learns which plan produced either. A [`PushPlan`] variant added
-/// later — a rejected force push, a protected branch — changes the wording here
-/// without touching the loop that displays it.
+/// One value, because one row asks every question of watch mode and one key
+/// answers each of them. `y` means "run what the question described", and the
+/// question is the only thing that knows what that is — so the answer carries
+/// the work itself rather than a name the loop would have to look the work up
+/// by. A second value beside this one would be a second thing for `y` to
+/// consult, and the two could disagree about which question is on the screen.
+///
+/// Each variant is built only by the function that composes its own question,
+/// so a command nobody confirmed cannot be assembled somewhere else and handed
+/// to a runner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Confirmed {
+    /// A push, as [`prompt_for`] planned it.
+    Push(PushCommand),
+    /// A rebase onto the base or a merge of the base, as
+    /// [`crate::update::base_update_prompt_for`] planned it. The command is the
+    /// user's own, and it pushes the branch itself once it has finished.
+    BaseUpdate(BaseUpdateCommand),
+}
+
+/// What the watch loop does when the user presses a key that runs something.
+///
+/// This is the whole interface [`prompt_for`] hands back, and
+/// [`crate::update::base_update_prompt_for`] hands back the same thing for the
+/// keys that rebase onto the base or merge it in. It is deliberately two cases
+/// rather than one for each plan: the caller asks a question or shows a
+/// message, and never learns which plan produced either. A [`PushPlan`] variant
+/// added later — a rejected force push, a protected branch — changes the
+/// wording here without touching the loop that displays it.
 ///
 /// [`PushPrompt::Confirm`] carries the command with the question, so the
-/// arguments cannot be requested for a push that must never run. The invariant
-/// is structural: there is no way to hold a `Confirm` without holding the exact
-/// [`PushCommand`] the confirmation described — the argument list *and* the
-/// branch it was written for, which is what the runner re-checks before it
-/// pushes.
+/// arguments cannot be requested for a command that must never run. The
+/// invariant is structural: there is no way to hold a `Confirm` without holding
+/// the exact [`Confirmed`] the question described — for a push, the argument
+/// list *and* the branch it was written for, which is what the runner re-checks
+/// before it pushes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PushPrompt {
-    /// Ask before running the push.
+    /// Ask before running the command.
     Confirm {
         /// The question, without the key hint — the display layer owns the
         /// `[y/N]` convention.
@@ -190,9 +216,9 @@ pub(crate) enum PushPrompt {
         /// colors this case differently, so a create can never be mistaken for
         /// a routine update at a glance.
         creates_remote_branch: bool,
-        /// The branch and the arguments this question described.
-        command: PushCommand,
-        /// What to show once this push succeeds. Composed here, with the
+        /// The command this question described, and what `y` runs.
+        command: Confirmed,
+        /// What to show once this command succeeds. Composed here, with the
         /// question, so the two sentences describe the same act — a push
         /// confirmed as a create reports itself as a create.
         success_message: String,
@@ -237,10 +263,10 @@ pub(crate) fn prompt_for(
                 creates_remote_branch: true,
                 // `-u` records the new remote branch as the upstream, so the
                 // push after this one is a plain update.
-                command: PushCommand::new(
+                command: Confirmed::Push(PushCommand::new(
                     branch.clone(),
                     vec!["push".to_string(), "-u".to_string(), remote, branch],
-                ),
+                )),
                 success_message,
             }
         }
@@ -255,7 +281,7 @@ pub(crate) fn prompt_for(
                 // Which branch's config it reads is decided by HEAD at exec
                 // time, which is why the command carries the branch this
                 // question was written for.
-                command: PushCommand::new(branch, vec!["push".to_string()]),
+                command: Confirmed::Push(PushCommand::new(branch, vec!["push".to_string()])),
                 success_message: format!("Pushed {commits} {unit} to {target}"),
             }
         }
@@ -668,7 +694,7 @@ enum State {
     Asking {
         question: String,
         creates_remote_branch: bool,
-        command: PushCommand,
+        command: Confirmed,
         success_message: String,
     },
     /// `git push` is running, and this is what it has said so far.
@@ -947,13 +973,14 @@ impl PushUi {
         };
     }
 
-    /// Handle `y`: start the push, returning the [`PushCommand`] to run, or
-    /// `None` when no confirmation was on screen to accept.
+    /// Handle `y`: start what the question described, returning the
+    /// [`Confirmed`] command to run, or `None` when no confirmation was on
+    /// screen to accept.
     ///
     /// Moving to [`State::Running`] as it hands the command over is what makes
     /// a second `y` — one that raced the mode change — return `None` rather than
-    /// start an overlapping push.
-    pub(crate) fn confirm(&mut self, now: Instant) -> Option<PushCommand> {
+    /// start an overlapping run.
+    pub(crate) fn confirm(&mut self, now: Instant) -> Option<Confirmed> {
         let State::Asking {
             command,
             success_message,
@@ -1767,11 +1794,18 @@ mod tests {
         }
     }
 
-    /// The command a confirmable prompt carries. Panics on a refusal, so a test
-    /// that expected a push and got a message fails on the line that asked.
+    /// The push a confirmable prompt carries. Panics on a refusal, so a test
+    /// that expected a push and got a message fails on the line that asked, and
+    /// panics on a prompt that carries another act, which no caller here plans.
     fn command(prompt: &PushPrompt) -> &PushCommand {
         match prompt {
-            PushPrompt::Confirm { command, .. } => command,
+            PushPrompt::Confirm {
+                command: Confirmed::Push(command),
+                ..
+            } => command,
+            PushPrompt::Confirm { command, .. } => {
+                panic!("expected a push, got {command:?}")
+            }
             PushPrompt::Refuse { message } => {
                 panic!("expected a confirmable prompt, got a refusal: {message}")
             }
@@ -1956,12 +1990,12 @@ mod tests {
         // The question, the argument list, and the branch the question named
         // travel together, so what runs on `y` is what the sentence promised —
         // and the runner can still tell whether the repository moved under it.
-        let PushPrompt::Confirm { command, .. } = prompt_for("gsw-push", Some("origin"), None)
-        else {
-            panic!("an untracked branch with a remote must be confirmable");
-        };
-        assert_eq!(command.args(), ["push", "-u", "origin", "gsw-push"]);
-        assert_eq!(command.branch(), "gsw-push");
+        let prompt = prompt_for("gsw-push", Some("origin"), None);
+        assert_eq!(
+            command(&prompt).args(),
+            ["push", "-u", "origin", "gsw-push"]
+        );
+        assert_eq!(command(&prompt).branch(), "gsw-push");
     }
 
     #[test]
@@ -2999,7 +3033,9 @@ mod ui_tests {
     #[test]
     fn confirming_hands_back_the_command_and_switches_to_pushing() {
         let mut ui = asking();
-        let command = ui.confirm(t0()).expect("a question on screen must confirm");
+        let Some(Confirmed::Push(command)) = ui.confirm(t0()) else {
+            panic!("a question about a push must confirm a push");
+        };
         assert_eq!(command.args(), ["push", "-u", "origin", "gsw-push"]);
         assert_eq!(
             command.branch(),

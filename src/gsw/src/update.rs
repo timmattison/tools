@@ -21,7 +21,8 @@ use shellquote::shell_quote;
 use tempfile::NamedTempFile;
 
 use crate::lines::LineSplitter;
-use crate::push::{current_branch, PushOutcome};
+use crate::push::{current_branch, Confirmed, PushOutcome, PushPrompt};
+use crate::render::Snapshot;
 use crate::shell::{shell_child, ShellCommand, PROBE_POLL};
 
 /// The variable that holds the command `R` runs.
@@ -205,6 +206,42 @@ impl BaseUpdateCommand {
     /// [`shell_quote`] makes it one word whatever is in it.
     pub(crate) fn script(&self) -> String {
         format!("{} {}", self.command.name(), shell_quote(&self.base))
+    }
+}
+
+/// Decide what pressing the key of `update` does, given the branch state gsw
+/// already renders.
+///
+/// A pure function of the snapshot, the act, and the command. It reads no
+/// repository, it starts no shell, and it reads no clock — so every rule below
+/// is testable against a value a test writes out, which is what a table of five
+/// refusals needs.
+///
+/// **The only caller of [`BaseUpdateCommand::new`].** That is what keeps a
+/// command nobody confirmed from being assembled somewhere else and handed to
+/// [`run`]: a value of that type exists only where a user was shown these
+/// words and answered them. It is the rule [`crate::push::PushCommand`] states
+/// about [`crate::push::prompt_for`], and it is why this function lives here
+/// rather than beside that one — the constructor stays private to the module
+/// that owns the rules of `R` and `M`.
+///
+/// It gives the [`PushPrompt`] that `p` gives, because the row that shows the
+/// question and the key that answers it are the row and the key of a push.
+pub(crate) fn base_update_prompt_for(
+    snapshot: &Snapshot,
+    update: BaseUpdate,
+    command: &ShellCommand,
+) -> PushPrompt {
+    PushPrompt::Confirm {
+        question: String::new(),
+        creates_remote_branch: false,
+        command: Confirmed::BaseUpdate(BaseUpdateCommand::new(
+            update,
+            snapshot.branch.as_str(),
+            snapshot.base.as_str(),
+            command.clone(),
+        )),
+        success_message: String::new(),
     }
 }
 
@@ -595,6 +632,115 @@ impl Record {
     /// The record, as the text an outcome carries.
     fn into_text(self) -> String {
         self.text
+    }
+}
+
+#[cfg(test)]
+mod question_tests {
+    use super::*;
+
+    /// The branch every question here is asked about.
+    const BRANCH: &str = "issue-12";
+
+    /// The base every question here names, which is also the name `grp` and
+    /// `gmp` fall back on.
+    const BASE: &str = "main";
+
+    /// A snapshot of [`BRANCH`], `behind` commits behind [`BASE`], with nothing
+    /// in progress.
+    ///
+    /// The question reads four fields of the snapshot — the branch, the base,
+    /// the count, and the operation — so every other field here holds what a
+    /// repository with no file and no commit gives.
+    fn behind(behind: u32) -> Snapshot {
+        Snapshot {
+            branch: BRANCH.to_string(),
+            base: BASE.to_string(),
+            commits_ahead: 0,
+            commits_behind: behind,
+            files: Vec::new(),
+            log: Vec::new(),
+            upstream: None,
+            operation: None,
+            push_remote: None,
+            worktree: None,
+        }
+    }
+
+    /// What `update` puts on the row for `snapshot`, running the command that
+    /// `value` names.
+    fn prompt(snapshot: &Snapshot, update: BaseUpdate, value: &str) -> PushPrompt {
+        base_update_prompt_for(
+            snapshot,
+            update,
+            &ShellCommand::new(Some(value), update.default_command()).expect("a name"),
+        )
+    }
+
+    /// The question `update` asks about `snapshot`, running the command that
+    /// `value` names.
+    ///
+    /// # Panics
+    ///
+    /// Panics where the act is refused. A test that reads the question is a
+    /// test about the words a user is shown, and a refusal shows none of them.
+    fn question_running(snapshot: &Snapshot, update: BaseUpdate, value: &str) -> String {
+        match prompt(snapshot, update, value) {
+            PushPrompt::Confirm { question, .. } => question,
+            PushPrompt::Refuse { message } => {
+                panic!("the act must be offered, and it was refused with {message:?}")
+            }
+        }
+    }
+
+    /// The question `update` asks about `snapshot`, running the command it
+    /// falls back on.
+    ///
+    /// # Panics
+    ///
+    /// Panics where the act is refused, as [`question_running`] does.
+    fn question(snapshot: &Snapshot, update: BaseUpdate) -> String {
+        question_running(snapshot, update, update.default_command())
+    }
+
+    #[test]
+    fn the_question_names_the_act_the_branch_the_base_the_count_and_the_command() {
+        // Every one of the five is what the user reads in the half second
+        // before pressing `y`. The command is named because it belongs to the
+        // user: `p` never force-pushes and `grp` does, so a question that left
+        // the command out would let the user think the rule of `p` holds here.
+        assert_eq!(
+            question(&behind(5), BaseUpdate::Rebase),
+            "Rebase issue-12 onto main (5 commits behind), then push with grp?",
+        );
+        assert_eq!(
+            question(&behind(5), BaseUpdate::Merge),
+            "Merge main (5 commits behind) into issue-12, then push with gmp?",
+        );
+    }
+
+    #[test]
+    fn a_count_of_one_takes_the_singular() {
+        assert_eq!(
+            question(&behind(1), BaseUpdate::Rebase),
+            "Rebase issue-12 onto main (1 commit behind), then push with grp?",
+        );
+        assert_eq!(
+            question(&behind(1), BaseUpdate::Merge),
+            "Merge main (1 commit behind) into issue-12, then push with gmp?",
+        );
+    }
+
+    #[test]
+    fn the_question_names_the_whole_command_line_and_not_its_first_word() {
+        // The value of the variable is a whole command line, as
+        // [`ShellCommand::name`] gives it. A question that named the first word
+        // alone would describe a run of `grp` and the shell would run `grp
+        // --fork-point`.
+        assert_eq!(
+            question_running(&behind(2), BaseUpdate::Rebase, "grp --fork-point"),
+            "Rebase issue-12 onto main (2 commits behind), then push with grp --fork-point?",
+        );
     }
 }
 
