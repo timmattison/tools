@@ -344,7 +344,7 @@ pub(crate) fn next_tick(freshest_age: Duration) -> Option<Duration> {
 /// arrives inside this window and collapses into a single repaint.
 ///
 /// A quiet channel is the only thing that ends the drain for every event but
-/// one. [`Event::PushOutput`] is the exception, and [`PUSH_DRAIN_BUDGET`] says
+/// one. [`Event::RunOutput`] is the exception, and [`PUSH_DRAIN_BUDGET`] says
 /// why.
 const DEBOUNCE: Duration = Duration::from_millis(150);
 
@@ -362,7 +362,7 @@ const DEBOUNCE: Duration = Duration::from_millis(150);
 ///
 /// The accepted cost is one repaint per 250 ms while a push is streaming, and
 /// only while one is: the deadline is armed by the first
-/// [`Event::PushOutput`] of a wake and the clock is not read at all on a wake
+/// [`Event::RunOutput`] of a wake and the clock is not read at all on a wake
 /// that sees none, so a filesystem burst still coalesces byte for byte as it
 /// did before this constant existed. 250 ms is above the ~100 ms at which a
 /// screen stops reading as live and far below the point at which a reader
@@ -673,20 +673,24 @@ enum Event {
     /// It names no act either, for the reason [`Event::Confirmed`] gives: the
     /// answer takes away whatever question stands, and nothing starts.
     Cancelled,
-    /// A running push wrote a line. Carried one line at a time rather than as
-    /// a batch at the end, because the point of it is to arrive early: a
-    /// pre-push hook can hold the push for minutes, and a batch would land
-    /// when the wait it explains is already over.
+    /// A run that the row owns wrote a line: a push, a rebase onto the base,
+    /// or a merge of the base. All three write through this one event, because
+    /// the window under the frame is the same window.
+    ///
+    /// Carried one line at a time rather than as a batch at the end, because
+    /// the point of it is to arrive early: a pre-push hook can hold any of
+    /// those runs for minutes, and a batch would land when the wait it explains
+    /// is already over.
     ///
     /// Arriving early is only half of it — the loop must also *leave* its
     /// debounce drain to paint what arrived, and this is the only event that
-    /// can go on producing for the length of the push. [`PUSH_DRAIN_BUDGET`]
+    /// can go on producing for the length of the run. [`PUSH_DRAIN_BUDGET`]
     /// is what stops the drain re-batching what the runner deliberately did
     /// not.
-    PushOutput(String),
+    RunOutput(String),
     /// A push that was running has finished, either way.
     ///
-    /// Always arrives after the last [`Event::PushOutput`] of the same push.
+    /// Always arrives after the last [`Event::RunOutput`] of the same push.
     /// The runner joins its reader threads before it reports, so every line is
     /// already on this channel by the time the outcome is sent — which is what
     /// keeps a late line from reopening a window the outcome just closed.
@@ -1588,7 +1592,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                     command,
                     current.as_path().to_path_buf(),
                     move |line| {
-                        let _ = line_tx.send(Event::PushOutput(line));
+                        let _ = line_tx.send(Event::RunOutput(line));
                     },
                     move |outcome| {
                         let _ = finish_tx.send(Event::BaseUpdateFinished(outcome));
@@ -1605,7 +1609,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                     command,
                     current.as_path().to_path_buf(),
                     move |line| {
-                        let _ = line_tx.send(Event::PushOutput(line));
+                        let _ = line_tx.send(Event::RunOutput(line));
                     },
                     move |outcome| {
                         let _ = finish_tx.send(Event::PushFinished(outcome));
@@ -2346,7 +2350,7 @@ struct LoopHooks<
     /// the branch and the base it named, and the user's own command — and the
     /// worktree to run it in, which is the worktree on the screen at the press.
     /// Production spawns a thread that runs the command, sends each line it
-    /// writes back as [`Event::PushOutput`], and sends the outcome as
+    /// writes back as [`Event::RunOutput`], and sends the outcome as
     /// [`Event::BaseUpdateFinished`]; tests record the command and decide for
     /// themselves when, or whether, the outcome arrives.
     start_base_update: StartBaseUpdate,
@@ -2558,7 +2562,7 @@ where
             }
             None => {}
         },
-        Event::PushOutput(line) => state.ui.output_line(line),
+        Event::RunOutput(line) => state.ui.output_line(line),
         Event::Cancelled => state.ui.cancel(),
         Event::Dismiss => state.ui.dismiss(),
         // Left and Right read the paths of the worktrees again at each press,
@@ -2944,7 +2948,7 @@ where
                 match rx.recv_timeout(debounce) {
                     Ok(event) => {
                         // Asked before `absorb`, which takes the event by value.
-                        let streamed = matches!(event, Event::PushOutput(_));
+                        let streamed = matches!(event, Event::RunOutput(_));
                         if absorb(event, &mut pending, &mut state, &mut hooks) == Flow::Quit {
                             // Unlike the first wake, a quit that arrives inside
                             // the drain still paints: the events ahead of it in
@@ -8685,7 +8689,7 @@ mod push_loop_tests {
         let (displayed, _) = run_loop(vec![
             key(KeyCode::Char('p')),
             key(KeyCode::Char('y')),
-            Event::PushOutput("Compiling gsw v0.1.0".to_string()),
+            Event::RunOutput("Compiling gsw v0.1.0".to_string()),
             Event::Quit,
         ]);
 
@@ -8720,7 +8724,7 @@ mod push_loop_tests {
         // without sleeping: deterministic, and parallel-safe.
         let mut events = vec![key(KeyCode::Char('p')), key(KeyCode::Char('y'))];
         events.extend(
-            (1..=FLOOD_LINES).map(|line| Event::PushOutput(format!("Compiling crate {line}"))),
+            (1..=FLOOD_LINES).map(|line| Event::RunOutput(format!("Compiling crate {line}"))),
         );
         events.push(Event::Quit);
 
