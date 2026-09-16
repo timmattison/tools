@@ -546,8 +546,19 @@ fn drain(stream: Option<impl std::io::Read>, report: &(dyn Fn(String) + Sync)) {
 /// [`crate::repo::branch_name`] and the header gsw draws. git refuses `HEAD` as
 /// a branch name, so it can never equal a branch a confirmation named — a
 /// detached checkout always reads as a change.
-fn current_branch(workdir: &Path) -> Option<String> {
-    let output = Command::new("git")
+///
+/// **The child sheds the inherited git environment.** git obeys the environment
+/// before it obeys the directory it was pointed at, so a `gsw` started from
+/// inside a hook holds a `GIT_DIR` that answers this question about the
+/// repository being committed to. That answer is some other branch, or no
+/// branch at all, and every confirmation would then be refused as a checkout
+/// that never happened. The rule is the `GIT_` prefix and never a list of
+/// names, and the six names of [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`] stay
+/// because a person sets each of those on purpose — this runs for that person.
+pub(crate) fn current_branch(workdir: &Path) -> Option<String> {
+    let mut command = Command::new("git");
+    gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
+    let output = command
         .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
         .current_dir(workdir)
         .stdin(Stdio::null())

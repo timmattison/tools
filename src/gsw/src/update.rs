@@ -21,7 +21,7 @@ use shellquote::shell_quote;
 use tempfile::NamedTempFile;
 
 use crate::lines::LineSplitter;
-use crate::push::PushOutcome;
+use crate::push::{current_branch, PushOutcome};
 use crate::shell::{shell_child, ShellCommand, PROBE_POLL};
 
 /// The variable that holds the command `R` runs.
@@ -281,6 +281,31 @@ fn run_in(
     on_line: &dyn Fn(String),
 ) -> PushOutcome {
     let name = command.command().name();
+
+    // **The branch is compared first, and a mismatch starts no shell.** A
+    // question describes the repository as it stood when the key was pressed,
+    // and the answer arrives whenever the user presses `y` — long enough for a
+    // checkout in another pane to land in between. `grp` reads HEAD when the
+    // shell starts it, so it would rebase a branch the question never named and
+    // push it. The gap between this read and the shell's own is microseconds
+    // rather than seconds, and nothing here closes it entirely, short of a lock
+    // git does not offer.
+    //
+    // `None` means git could not be run at all. The run goes ahead in that
+    // case, as a push does: to refuse here would blame a checkout that never
+    // happened, and a git that cannot start rebases nothing either.
+    if let Some(current) = current_branch(workdir) {
+        if current != command.branch() {
+            return PushOutcome {
+                success: false,
+                output: format!(
+                    "branch changed from {} to {current} since the confirmation — {}",
+                    command.branch(),
+                    command.update().retry_advice(),
+                ),
+            };
+        }
+    }
 
     let mut run = match start(shell, command, workdir, scratch) {
         Ok(run) => run,
