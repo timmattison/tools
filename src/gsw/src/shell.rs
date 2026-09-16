@@ -304,7 +304,7 @@ pub(crate) fn user_shell() -> OsString {
 /// asked for none of them. `nwt` spawns `git` and not an interactive shell, so
 /// nothing re-states what it strips, and it needs an allowlist for the
 /// variables a user means to keep. This child has the rc file for that.
-fn shell_child(shell: &OsStr, script: String) -> Command {
+pub(crate) fn shell_child(shell: &OsStr, script: String) -> Command {
     let mut command = Command::new(shell);
     command.arg("-ic").arg(script);
     gitscratch::shed_inherited_git_environment(&mut command);
@@ -568,70 +568,14 @@ pub(crate) fn written_lines(run: &RunInFlight) -> Vec<String> {
 #[cfg(all(test, unix))]
 mod run_tests {
     use super::stub_shell::{
-        kill_now, test_process_can_open_the_terminal, StubShell, ANSWER_DEADLINE, GAVE_UP_WITHIN,
-        TTY_REFUSED,
+        a_child_of_this_test_passes, kill_now, test_name, test_process_can_open_the_terminal,
+        StubShell, ANSWER_DEADLINE, CHILD_RAN, GAVE_UP_WITHIN, GIT_PREFIX, HOSTILE_GIT_ENVIRONMENT,
+        HOSTILE_MARKER, TTY_REFUSED,
     };
     use super::*;
     use crate::issue::{run, DEFAULT_ISSUE_COMMAND};
     use std::path::PathBuf;
     use std::sync::mpsc::channel;
-
-    /// The prefix that makes a variable git's.
-    ///
-    /// The rule the children hold is this prefix, and never a list of names, so
-    /// the test that reads their environment back asks about the prefix too. A
-    /// test that asked about a list of names would pass for a variable the list
-    /// forgot.
-    const GIT_PREFIX: &str = "GIT_";
-
-    /// The variable that tells this test binary it is the child, and that it
-    /// must do the work rather than start a child of its own.
-    ///
-    /// The name carries no [`GIT_PREFIX`], so the sweep under test leaves it
-    /// alone and the child can still read it.
-    const HOSTILE_MARKER: &str = "GSW_HOSTILE_GIT_ENVIRONMENT";
-
-    /// The line the child prints after its last assertion holds.
-    ///
-    /// libtest exits 0 when a filter names no test, so a child that ran nothing
-    /// reads exactly like a child that passed. The parent looks for this line
-    /// as well as for the exit status.
-    const CHILD_RAN: &str = "gsw-hostile-environment-child-ran";
-
-    /// How long the parent waits for the child.
-    ///
-    /// The stub shell answers at once, so a healthy child takes milliseconds.
-    /// The bound is here for the child that hangs: a test that waits for such a
-    /// child holds the run for the life of the session.
-    const CHILD_DEADLINE: Duration = Duration::from_secs(30);
-
-    /// A hostile environment: every variable that aims git, or configures it,
-    /// or stops it from finding a repository at all.
-    ///
-    /// A pre-commit hook exports several of these, so a `gsw` started from
-    /// inside one holds them for real. The paths name nothing on this machine,
-    /// because a variable that reached a child must be visible as a variable
-    /// and never as work done in another repository.
-    ///
-    /// `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` aim git at another
-    /// repository. `GIT_COMMON_DIR` moves the files git reads outside a
-    /// worktree, config and refs among them, so a leaked one gives `gh` another
-    /// `remote.origin.url`. `GIT_CEILING_DIRECTORIES` stops the walk that finds
-    /// a repository. `GIT_OBJECT_DIRECTORY` moves the objects.
-    /// `GIT_CONFIG_PARAMETERS` and `GIT_CONFIG_GLOBAL` set any key at all.
-    const HOSTILE_GIT_ENVIRONMENT: [(&str, &str); 8] = [
-        ("GIT_DIR", "/gsw-decoy/.git"),
-        ("GIT_WORK_TREE", "/gsw-decoy"),
-        ("GIT_INDEX_FILE", "/gsw-decoy/.git/index"),
-        ("GIT_COMMON_DIR", "/gsw-decoy/.git"),
-        ("GIT_CEILING_DIRECTORIES", "/gsw-decoy"),
-        ("GIT_OBJECT_DIRECTORY", "/gsw-decoy/.git/objects"),
-        (
-            "GIT_CONFIG_PARAMETERS",
-            "'remote.origin.url=https://example.invalid/decoy.git'",
-        ),
-        ("GIT_CONFIG_GLOBAL", "/gsw-decoy/gitconfig"),
-    ];
 
     /// `path` with every symbolic link in it resolved.
     ///
@@ -796,85 +740,6 @@ mod run_tests {
         kill_now(stub.wait_for_pid());
     }
 
-    /// Start this test binary again, with `test` named and the hostile
-    /// environment on it, and fail where that child fails.
-    ///
-    /// The child writes to two files rather than to two pipes, for the reason
-    /// [`RunInFlight`] gives: a pipe is read to its end, and the end arrives
-    /// when the last writer lets go.
-    ///
-    /// The wait is bounded. A child that hangs is killed and reaped, and the
-    /// test then fails, because a test that waits for such a child holds the
-    /// run for the life of the session.
-    ///
-    /// The child runs in a directory of its own, which is a temporary directory
-    /// and no repository.
-    fn a_child_of_this_test_passes(test: &str) {
-        let workdir = tempfile::tempdir().expect("tempdir");
-        let stdout = NamedTempFile::new().expect("a file for what the child says");
-        let stderr = NamedTempFile::new().expect("a file for why the child stopped");
-        let mut command = Command::new(std::env::current_exe().expect("the path of this binary"));
-        command
-            .args(["--exact", "--nocapture", test])
-            .current_dir(workdir.path())
-            .env(HOSTILE_MARKER, "1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(
-                stdout.as_file().try_clone().expect("clone the file"),
-            ))
-            .stderr(Stdio::from(
-                stderr.as_file().try_clone().expect("clone the file"),
-            ));
-        for (name, value) in HOSTILE_GIT_ENVIRONMENT {
-            command.env(name, value);
-        }
-        let mut child = command.spawn().expect("start this test binary again");
-
-        let give_up_at = Instant::now() + CHILD_DEADLINE;
-        let status = loop {
-            match child.try_wait().expect("ask about the child") {
-                Some(status) => break status,
-                None => {
-                    if Instant::now() >= give_up_at {
-                        // The kill comes before the panic. A panic ends the
-                        // test where it stands, and the process this test
-                        // started is the one thing that must not outlive it.
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        panic!(
-                            "the child did not finish within {}s",
-                            CHILD_DEADLINE.as_secs(),
-                        );
-                    }
-                    std::thread::sleep(PROBE_POLL);
-                }
-            }
-        };
-
-        let said = format!(
-            "{}{}",
-            std::fs::read_to_string(stdout.path()).unwrap_or_default(),
-            std::fs::read_to_string(stderr.path()).unwrap_or_default(),
-        );
-        assert!(status.success(), "the child failed ({status}):\n{said}");
-        assert!(
-            said.contains(CHILD_RAN),
-            "the child ran no test, so it passed for the wrong reason. libtest exits 0 when a \
-             filter names no test, and the filter was {test:?}:\n{said}",
-        );
-    }
-
-    /// The name of this test, the way libtest spells it.
-    ///
-    /// `module_path!` starts with the name of the crate and a test name does
-    /// not, so the first part goes. The rest of the path comes from the
-    /// compiler, so a module that moves needs no edit here.
-    fn test_name(function: &str) -> String {
-        let module = module_path!();
-        let module = module.split_once("::").map_or(module, |(_, rest)| rest);
-        format!("{module}::{function}")
-    }
-
     /// Neither child carries a `GIT_` variable out of the environment of `gsw`.
     ///
     /// **This test starts this test binary again, and the hostile environment
@@ -903,6 +768,7 @@ mod run_tests {
     fn neither_child_carries_a_git_variable_out_of_a_hostile_environment() {
         if std::env::var_os(HOSTILE_MARKER).is_none() {
             a_child_of_this_test_passes(&test_name(
+                module_path!(),
                 "neither_child_carries_a_git_variable_out_of_a_hostile_environment",
             ));
             return;
@@ -1278,6 +1144,159 @@ pub(crate) mod stub_shell {
             std::thread::sleep(PROBE_POLL);
         }
         true
+    }
+
+    /// The prefix that makes a variable git's.
+    ///
+    /// The rule the children hold is this prefix, and never a list of names, so
+    /// a test that reads their environment back asks about the prefix too. A
+    /// test that asked about a list of names would pass for a variable the list
+    /// forgot.
+    pub(crate) const GIT_PREFIX: &str = "GIT_";
+
+    /// The variable that tells this test binary it is the child, and that it
+    /// must do the work rather than start a child of its own.
+    ///
+    /// The name carries no [`GIT_PREFIX`], so the sweep under test leaves it
+    /// alone and the child can still read it.
+    pub(crate) const HOSTILE_MARKER: &str = "GSW_HOSTILE_GIT_ENVIRONMENT";
+
+    /// The line a child prints after its last assertion holds.
+    ///
+    /// libtest exits 0 when a filter names no test, so a child that ran nothing
+    /// reads exactly like a child that passed. The parent looks for this line
+    /// as well as for the exit status.
+    pub(crate) const CHILD_RAN: &str = "gsw-hostile-environment-child-ran";
+
+    /// How long the parent waits for the child.
+    ///
+    /// The stub shell answers at once, so a healthy child takes milliseconds.
+    /// The bound is here for the child that hangs: a test that waits for such a
+    /// child holds the run for the life of the session.
+    const CHILD_DEADLINE: Duration = Duration::from_secs(30);
+
+    /// A hostile environment: every variable that aims git, or configures it,
+    /// or stops it from finding a repository at all, and the one that lets it
+    /// ask a question at the terminal.
+    ///
+    /// A pre-commit hook exports several of these, so a `gsw` started from
+    /// inside one holds them for real. The paths name nothing on this machine,
+    /// because a variable that reached a child must be visible as a variable
+    /// and never as work done in another repository.
+    ///
+    /// `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` aim git at another
+    /// repository. `GIT_COMMON_DIR` moves the files git reads outside a
+    /// worktree, config and refs among them, so a leaked one gives `gh` another
+    /// `remote.origin.url`. `GIT_CEILING_DIRECTORIES` stops the walk that finds
+    /// a repository. `GIT_OBJECT_DIRECTORY` moves the objects.
+    /// `GIT_CONFIG_PARAMETERS` and `GIT_CONFIG_GLOBAL` set any key at all.
+    /// `GIT_TERMINAL_PROMPT` is the one a run sets again after the sweep, so a
+    /// value of `1` here is what proves the run's own value wins.
+    pub(crate) const HOSTILE_GIT_ENVIRONMENT: [(&str, &str); 9] = [
+        ("GIT_DIR", "/gsw-decoy/.git"),
+        ("GIT_WORK_TREE", "/gsw-decoy"),
+        ("GIT_INDEX_FILE", "/gsw-decoy/.git/index"),
+        ("GIT_COMMON_DIR", "/gsw-decoy/.git"),
+        ("GIT_CEILING_DIRECTORIES", "/gsw-decoy"),
+        ("GIT_OBJECT_DIRECTORY", "/gsw-decoy/.git/objects"),
+        (
+            "GIT_CONFIG_PARAMETERS",
+            "'remote.origin.url=https://example.invalid/decoy.git'",
+        ),
+        ("GIT_CONFIG_GLOBAL", "/gsw-decoy/gitconfig"),
+        ("GIT_TERMINAL_PROMPT", "1"),
+    ];
+
+    /// Start this test binary again, with `test` named and the hostile
+    /// environment on it, and fail where that child fails.
+    ///
+    /// **A `GIT_` variable is process-global state**, so a test that sets one
+    /// in this process changes what every other test in this binary reads, and
+    /// several of them run real git. A child holds an environment of its own,
+    /// so the hostile values reach the code under test and reach nothing else.
+    /// That is also what makes the result the same under a shell and under the
+    /// pre-commit hook of this repository, which exports `GIT_` variables into
+    /// `cargo test`: the child sets the whole list itself.
+    ///
+    /// The child writes to two files rather than to two pipes, for the reason
+    /// [`RunInFlight`] gives: a pipe is read to its end, and the end arrives
+    /// when the last writer lets go.
+    ///
+    /// The wait is bounded. A child that hangs is killed and reaped, and the
+    /// test then fails, because a test that waits for such a child holds the
+    /// run for the life of the session.
+    ///
+    /// The child runs in a directory of its own, which is a temporary directory
+    /// and no repository.
+    ///
+    /// # Panics
+    ///
+    /// Panics where the child cannot be started, where it fails, where it hangs
+    /// past [`CHILD_DEADLINE`], and where it printed no [`CHILD_RAN`].
+    pub(crate) fn a_child_of_this_test_passes(test: &str) {
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let stdout = NamedTempFile::new().expect("a file for what the child says");
+        let stderr = NamedTempFile::new().expect("a file for why the child stopped");
+        let mut command = Command::new(std::env::current_exe().expect("the path of this binary"));
+        command
+            .args(["--exact", "--nocapture", test])
+            .current_dir(workdir.path())
+            .env(HOSTILE_MARKER, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(
+                stdout.as_file().try_clone().expect("clone the file"),
+            ))
+            .stderr(Stdio::from(
+                stderr.as_file().try_clone().expect("clone the file"),
+            ));
+        for (name, value) in HOSTILE_GIT_ENVIRONMENT {
+            command.env(name, value);
+        }
+        let mut child = command.spawn().expect("start this test binary again");
+
+        let give_up_at = Instant::now() + CHILD_DEADLINE;
+        let status = loop {
+            match child.try_wait().expect("ask about the child") {
+                Some(status) => break status,
+                None => {
+                    if Instant::now() >= give_up_at {
+                        // The kill comes before the panic. A panic ends the
+                        // test where it stands, and the process this test
+                        // started is the one thing that must not outlive it.
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        panic!(
+                            "the child did not finish within {}s",
+                            CHILD_DEADLINE.as_secs(),
+                        );
+                    }
+                    std::thread::sleep(PROBE_POLL);
+                }
+            }
+        };
+
+        let said = format!(
+            "{}{}",
+            std::fs::read_to_string(stdout.path()).unwrap_or_default(),
+            std::fs::read_to_string(stderr.path()).unwrap_or_default(),
+        );
+        assert!(status.success(), "the child failed ({status}):\n{said}");
+        assert!(
+            said.contains(CHILD_RAN),
+            "the child ran no test, so it passed for the wrong reason. libtest exits 0 when a \
+             filter names no test, and the filter was {test:?}:\n{said}",
+        );
+    }
+
+    /// The name of the test `function` of `module`, the way libtest spells it.
+    ///
+    /// `module` is the `module_path!()` of the caller, which starts with the
+    /// name of the crate. A test name does not, so the first part goes. The
+    /// rest comes from the compiler, so a module that moves needs no edit at
+    /// the call site.
+    pub(crate) fn test_name(module: &str, function: &str) -> String {
+        let module = module.split_once("::").map_or(module, |(_, rest)| rest);
+        format!("{module}::{function}")
     }
 
     /// End the process of `pid` now.

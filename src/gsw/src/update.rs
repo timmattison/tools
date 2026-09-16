@@ -234,6 +234,14 @@ pub(crate) fn spawn<L, F>(
     std::thread::spawn(move || on_finish(run(&shell, &command, &workdir, &on_line)));
 }
 
+/// The variable that decides whether git asks a question at the terminal.
+///
+/// gsw holds the alternate screen in raw mode, so a git that can ask would read
+/// the same keys the event thread is reading, behind a question gsw never drew.
+/// Set to `0`, git fails at once and says why, and that reason reaches the row
+/// like every other failure.
+const TERMINAL_PROMPT_VAR: &str = "GIT_TERMINAL_PROMPT";
+
 /// Run `command` in `workdir` to its end, reporting each line as it lands.
 ///
 /// The blocking half of [`spawn`], separated so it can be tested against a stub
@@ -400,7 +408,12 @@ mod script_tests {
 #[cfg(all(test, unix))]
 mod run_tests {
     use super::*;
-    use crate::shell::stub_shell::StubShell;
+    use crate::shell::stub_shell::{
+        a_child_of_this_test_passes, test_name, test_process_can_open_the_terminal, StubShell,
+        CHILD_RAN, GIT_PREFIX, HOSTILE_GIT_ENVIRONMENT, HOSTILE_MARKER, TTY_REFUSED,
+    };
+    use crate::testrepo::{git, init_repo};
+    use tempfile::TempDir;
 
     /// The base every fixture here names, which is also the name `grp` and
     /// `gmp` fall back on.
@@ -430,6 +443,19 @@ mod run_tests {
         run(shell, command, workdir, &|_| {})
     }
 
+    /// A repository checked out on [`BRANCH`], which is what every run here
+    /// acts on.
+    ///
+    /// A real repository rather than an empty directory, because the run reads
+    /// the branch before it starts a shell: a directory that is no repository
+    /// reports no branch, and every test here would then measure the refusal
+    /// rather than the run.
+    fn work_tree() -> TempDir {
+        let dir = init_repo();
+        git(dir.path(), &["checkout", "-q", "-b", BRANCH]);
+        dir
+    }
+
     /// `path` with every symbolic link in it resolved.
     ///
     /// macOS reaches a temporary directory through a symbolic link, so the path
@@ -445,7 +471,7 @@ mod run_tests {
         // file can find it. The script is the whole line the question
         // described, base and all.
         let stub = StubShell::answering(0);
-        let workdir = tempfile::tempdir().expect("tempdir");
+        let workdir = work_tree();
         let _ = run_quiet(
             stub.as_shell(),
             &confirmed("grp --fork-point"),
@@ -467,14 +493,14 @@ mod run_tests {
         // `grp` rebases the repository of the directory it runs in, and watch
         // mode moves between worktrees of one repository.
         let stub = StubShell::answering(0);
-        let workdir = tempfile::tempdir().expect("tempdir");
+        let workdir = work_tree();
         let _ = run_quiet(stub.as_shell(), &default_command(), workdir.path());
         assert_eq!(resolved(&stub.cwd()), resolved(workdir.path()));
     }
 
     #[test]
     fn the_exit_status_of_the_shell_decides_the_outcome() {
-        let workdir = tempfile::tempdir().expect("tempdir");
+        let workdir = work_tree();
         let worked = StubShell::answering(0);
         assert!(
             run_quiet(worked.as_shell(), &default_command(), workdir.path()).success,
@@ -495,7 +521,7 @@ mod run_tests {
         let stub = StubShell::new(
             "echo 'rebased onto main'\necho 'no upstream - skipping push' >&2\nexit 1",
         );
-        let workdir = tempfile::tempdir().expect("tempdir");
+        let workdir = work_tree();
         let outcome = run_quiet(stub.as_shell(), &default_command(), workdir.path());
         assert!(
             outcome.output.contains("rebased onto main"),
@@ -506,6 +532,115 @@ mod run_tests {
             outcome.output.contains("no upstream - skipping push"),
             "why it stopped must reach the outcome too: {:?}",
             outcome.output,
+        );
+    }
+
+    #[test]
+    fn the_run_child_cannot_open_the_controlling_terminal() {
+        // Watch mode holds the alternate screen in raw mode, and this child is
+        // an interactive shell. Such a shell opens `/dev/tty` for job control
+        // and for every prompt it paints, so a child that keeps the controlling
+        // terminal reads the keys the event thread of `gsw` waits for and
+        // paints over the frame. The reach of this child is the longest of the
+        // three: `grp` rebases and then pushes, and a push asks `ssh` for a key
+        // and `ssh` asks the terminal for the passphrase.
+        if !test_process_can_open_the_terminal() {
+            eprintln!(
+                "skipped: this test process has no controlling terminal, so /dev/tty is \
+                 unopenable for every child regardless - the assertion would hold vacuously",
+            );
+            return;
+        }
+
+        let stub = StubShell::probing_the_terminal();
+        let workdir = work_tree();
+        let outcome = run_quiet(stub.as_shell(), &default_command(), workdir.path());
+        assert!(outcome.success, "the stub exits 0, so the run must work");
+        assert_eq!(
+            stub.terminal_record(),
+            TTY_REFUSED,
+            "the run child keeps the controlling terminal, so the command of the user can paint \
+             over the frame of gsw and take the keys gsw is reading",
+        );
+    }
+
+    #[test]
+    fn the_run_child_carries_no_git_variable_out_of_a_hostile_environment() {
+        // **This test starts this test binary again, and the hostile
+        // environment goes on that child.** A `GIT_` variable is
+        // process-global state, and several tests of this binary run real git.
+        //
+        // The variables matter more here than anywhere else in gsw: `grp`
+        // rebases the branch and then pushes it, so a leaked `GIT_DIR` or
+        // `GIT_CONFIG_PARAMETERS` rewrites the history of a repository the user
+        // never named and sends it to a remote.
+        //
+        // **The armed control comes first.** The child asserts that it really
+        // holds each hostile variable. An assertion that a variable is absent
+        // passes just as readily where there was nothing to remove.
+        if std::env::var_os(HOSTILE_MARKER).is_none() {
+            a_child_of_this_test_passes(&test_name(
+                module_path!(),
+                "the_run_child_carries_no_git_variable_out_of_a_hostile_environment",
+            ));
+            return;
+        }
+
+        for (name, _) in HOSTILE_GIT_ENVIRONMENT {
+            assert!(
+                std::env::var_os(name).is_some(),
+                "the child must really hold {name}, or there is nothing here to remove and the \
+                 assertion below is measured against nothing",
+            );
+        }
+
+        let stub = StubShell::answering(0);
+        let workdir = work_tree();
+        let outcome = run_quiet(stub.as_shell(), &default_command(), workdir.path());
+        assert!(outcome.success, "the stub exits 0, so the run must work");
+
+        let environment = stub.environment();
+        assert!(
+            !environment.is_empty(),
+            "the child must record the environment it ran in",
+        );
+        let carried: Vec<&str> = environment
+            .lines()
+            .filter(|line| {
+                line.split_once('=').is_some_and(|(key, _)| {
+                    key.starts_with(GIT_PREFIX) && key != TERMINAL_PROMPT_VAR
+                })
+            })
+            .collect();
+        assert!(
+            carried.is_empty(),
+            "a child of gsw carried a git variable out of the environment of gsw. Each of these \
+             aims the rebase and the push that follows it, or configures them, somewhere the user \
+             never pointed them: {carried:?}",
+        );
+
+        println!("{CHILD_RAN}");
+    }
+
+    #[test]
+    fn the_run_child_is_told_not_to_ask_at_the_terminal() {
+        // The other half of the terminal rule, and git's own. `grp` pushes,
+        // and git asks for an HTTP user name and password itself. Told not to,
+        // it fails at once and says why, and that reason reaches the row like
+        // every other failure.
+        //
+        // The value is set after the sweep, so it survives it. A user who
+        // exports the variable again in the rc file still wins, because the rc
+        // file loads inside the child after this value was placed.
+        let stub = StubShell::answering(0);
+        let workdir = work_tree();
+        let _ = run_quiet(stub.as_shell(), &default_command(), workdir.path());
+        let environment = stub.environment();
+        assert!(
+            environment
+                .lines()
+                .any(|line| line == format!("{TERMINAL_PROMPT_VAR}=0")),
+            "git must be told not to ask at the terminal: {environment:?}",
         );
     }
 }
