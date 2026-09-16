@@ -938,6 +938,22 @@ mod run_tests {
     }
 
     #[test]
+    fn a_failure_that_said_nothing_names_the_command_and_the_status() {
+        // A failure with nothing to show would paint a blank row, and a blank
+        // row under the frame reads as a run that worked. The exit status is
+        // all the command left, and the name is the whole value the user wrote
+        // into the variable.
+        let stub = StubShell::answering(1);
+        let workdir = work_tree();
+        let outcome = run_quiet(stub.as_shell(), &default_command(), workdir.path());
+        assert!(!outcome.success, "the stub exits 1");
+        assert_eq!(
+            outcome.output, "grp failed (exit status: 1)",
+            "a failure must always carry something to show",
+        );
+    }
+
+    #[test]
     fn a_checkout_after_the_confirmation_refuses_the_run_and_starts_no_shell() {
         // The window the question opens. `R` reads the branch and the base
         // while `issue-12` is checked out, `y` arrives seconds later, and a
