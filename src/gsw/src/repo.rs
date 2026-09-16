@@ -143,10 +143,19 @@ pub fn branch_name(repo: &gix::Repository) -> String {
     }
 }
 
+/// The branch names gsw takes as the base of a repository, in the order it
+/// prefers them.
+///
+/// Read by [`resolve_base`], which picks the first of them that resolves, and
+/// by the keys that rebase onto the base or merge it in, which act on no other
+/// base at all. One list, so what those keys accept cannot drift from what this
+/// module chooses.
+pub const DEFAULT_BASE_NAMES: [&str; 2] = ["main", "master"];
+
 /// Pick the first base ref that resolves: `main`, then `master`, then
 /// `origin/HEAD`'s target, else `"HEAD"` (so commits-ahead degrades to 0).
 pub fn resolve_base(repo: &gix::Repository) -> String {
-    for candidate in ["main", "master"] {
+    for candidate in DEFAULT_BASE_NAMES {
         if repo.rev_parse_single(candidate).is_ok() {
             return candidate.to_string();
         }

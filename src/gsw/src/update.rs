@@ -22,7 +22,8 @@ use tempfile::NamedTempFile;
 
 use crate::lines::LineSplitter;
 use crate::push::{current_branch, Confirmed, PushOutcome, PushPrompt};
-use crate::render::Snapshot;
+use crate::render::{Operation, Snapshot};
+use crate::repo::DETACHED_HEAD;
 use crate::shell::{shell_child, ShellCommand, PROBE_POLL};
 
 /// The variable that holds the command `R` runs.
@@ -104,6 +105,32 @@ impl BaseUpdate {
         match self {
             Self::Rebase => "rebase",
             Self::Merge => "merge",
+        }
+    }
+
+    /// The act that git is holding, for an operation it has not finished.
+    ///
+    /// git holds a rebase or a merge, and each of them is one of these — so the
+    /// refusal that names an unfinished operation reads its word from
+    /// [`BaseUpdate::verb`] like every other message. A rebase that git holds is
+    /// then called a rebase under both keys, and by the word the `⚠ rebase` row
+    /// of the header is already using.
+    const fn held(operation: &Operation) -> Self {
+        match operation {
+            Operation::Rebase { .. } => Self::Rebase,
+            Operation::Merge { .. } => Self::Merge,
+        }
+    }
+
+    /// What this act says where the repository offers no base for it to act on.
+    ///
+    /// The two sentences name the base that gsw was looking for, because the
+    /// user can do something about that: a repository whose default branch is
+    /// neither of those names is one these keys leave alone altogether.
+    const fn no_base_refusal(self) -> &'static str {
+        match self {
+            Self::Rebase => "no main or master branch to rebase onto",
+            Self::Merge => "no main or master branch to merge",
         }
     }
 
@@ -254,23 +281,67 @@ impl BaseUpdateCommand {
 ///
 /// It gives the [`PushPrompt`] that `p` gives, because the row that shows the
 /// question and the key that answers it are the row and the key of a push.
+///
+/// **The refusals are read in order, and the first that applies wins.** Several
+/// of them describe one repository at once — a rebase that stopped on a
+/// conflict is a detached HEAD *and* an operation in progress — and the order
+/// puts the thing the user has to deal with first at the top. Each one posts a
+/// fading line and asks nothing, because none of them is an error: they are the
+/// repository saying that this key has nothing to do here.
 pub(crate) fn base_update_prompt_for(
     snapshot: &Snapshot,
     update: BaseUpdate,
     command: &ShellCommand,
 ) -> PushPrompt {
+    let branch = snapshot.branch.as_str();
+    let base = snapshot.base.as_str();
+    let refuse = |message: String| PushPrompt::Refuse { message };
+
+    // No branch to act on. git refuses `HEAD` as the name of a branch, so
+    // `grp` has nothing to rebase and `gmp` has nothing to merge into.
+    if branch == DETACHED_HEAD {
+        return refuse(format!(
+            "{DETACHED_HEAD} is detached — check out a branch to {}",
+            update.verb(),
+        ));
+    }
+    // **No base these keys may act on.** `resolve_base` falls back on the
+    // target of `origin/HEAD` and then on HEAD itself, and neither is a base
+    // for this: a local `trunk` whose base resolves to `origin/trunk` would
+    // have `grp` rebase the branch onto its own remote branch and then push the
+    // default branch of the repository. The guard inside `grp` exists to stop
+    // that push, and it compares two names, and here the names differ.
+    if !crate::repo::DEFAULT_BASE_NAMES.contains(&base) {
+        return refuse(update.no_base_refusal().to_string());
+    }
+    // The user is on the base itself, so there is no branch to bring up to
+    // date. Above the count below it, because a branch is never behind itself
+    // and `main already contains main` says nothing.
+    if branch == base {
+        return refuse(format!("on {base} — nothing to {}", update.verb()));
+    }
+    // git is holding an operation that the user must finish or abort, and gsw
+    // does neither. The `⚠ rebase` row of the header is showing it already.
+    if let Some(operation) = &snapshot.operation {
+        return refuse(format!(
+            "a {} is in progress — finish it first",
+            BaseUpdate::held(operation).verb(),
+        ));
+    }
+    // Nothing to bring over. The count in the header is the whole reason for
+    // these keys, and at zero a rebase would rewrite every commit of the branch
+    // and force-push the result for no gain.
+    if snapshot.commits_behind == 0 {
+        return refuse(format!("{branch} already contains {base}"));
+    }
+
     PushPrompt::Confirm {
-        question: update.question(
-            &snapshot.branch,
-            &snapshot.base,
-            snapshot.commits_behind,
-            command,
-        ),
+        question: update.question(branch, base, snapshot.commits_behind, command),
         creates_remote_branch: false,
         command: Confirmed::BaseUpdate(BaseUpdateCommand::new(
             update,
-            snapshot.branch.as_str(),
-            snapshot.base.as_str(),
+            branch,
+            base,
             command.clone(),
         )),
         success_message: String::new(),
