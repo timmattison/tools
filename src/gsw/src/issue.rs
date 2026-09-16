@@ -55,7 +55,8 @@ impl IssueOutcome {
         }
         Self {
             message: Some(
-                last_with_text(lines).unwrap_or_else(|| format!("{name} failed ({status})")),
+                last_with_text(lines.iter().map(String::as_str))
+                    .unwrap_or_else(|| format!("{name} failed ({status})")),
             ),
         }
     }
@@ -75,7 +76,7 @@ impl IssueOutcome {
     pub(crate) fn unfinished(name: &str, lines: &[String], deadline: Duration) -> Self {
         let waited = format!("{name} has not finished after {}s", deadline.as_secs());
         Self {
-            message: Some(match last_with_text(lines) {
+            message: Some(match last_with_text(lines.iter().map(String::as_str)) {
                 Some(said) => format!("{waited}: {said}"),
                 None => waited,
             }),

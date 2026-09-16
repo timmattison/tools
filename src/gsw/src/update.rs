@@ -191,6 +191,22 @@ impl BaseUpdate {
         }
     }
 
+    /// What the row says once this act has worked on `branch` and `base`
+    /// through the user's `command`, without the age [`crate::push`] puts after
+    /// it.
+    ///
+    /// The third tense of the one sentence, beside the other two. It names the
+    /// command because the command decided what happened: `grp` rebases and
+    /// force-pushes, and a sentence that said `Rebased` alone would leave the
+    /// user to guess whether anything reached the remote.
+    fn done_sentence(self, branch: &str, base: &str, command: &ShellCommand) -> String {
+        let name = command.name();
+        match self {
+            Self::Rebase => format!("Rebased {branch} onto {base} with {name}"),
+            Self::Merge => format!("Merged {base} into {branch} with {name}"),
+        }
+    }
+
     /// What a refused run tells the user to do.
     ///
     /// The letter comes from [`BaseUpdate::key`] rather than from a string of
@@ -376,8 +392,12 @@ pub(crate) fn base_update_prompt_for(
             base,
             command.clone(),
         )),
-        success: crate::push::SuccessReport::Alone {
-            sentence: String::new(),
+        // **The last line of the command goes under the sentence of gsw.**
+        // `grp` and `gmp` report a push they skipped only there, so the
+        // sentence alone would tell the user that the branch is on the remote
+        // when it is not.
+        success: crate::push::SuccessReport::WithLastLine {
+            sentence: update.done_sentence(branch, base, command),
         },
     }
 }

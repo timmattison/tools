@@ -448,9 +448,19 @@ pub(crate) fn resolve(value: Option<&str>, default: &str, shell: &OsStr) -> Opti
 /// stopped. The one with text in it, because a command that ends its last line
 /// with a newline leaves an empty line after it, and an empty row under the
 /// frame reads as a run that said nothing.
-pub(crate) fn last_with_text(lines: &[String]) -> Option<String> {
+///
+/// It takes whatever yields the lines, rather than a slice of them, because the
+/// callers hold a run differently: `G` keeps one string for each row it read,
+/// and `R` keeps one string with a newline between each row and the one before
+/// it. A slice would make the second caller copy the whole run of a pre-push
+/// hook to read one line of it.
+pub(crate) fn last_with_text<'a, Lines>(lines: Lines) -> Option<String>
+where
+    Lines: IntoIterator<Item = &'a str>,
+    Lines::IntoIter: DoubleEndedIterator,
+{
     lines
-        .iter()
+        .into_iter()
         .rev()
         .find(|line| !line.trim().is_empty())
         .map(|line| line.trim_end().to_string())

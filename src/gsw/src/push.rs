@@ -220,10 +220,28 @@ pub(crate) enum SuccessReport {
 impl SuccessReport {
     /// The rows this report puts under the frame, for a command that wrote
     /// `output`.
+    ///
+    /// The last line with text in it, by the rule
+    /// [`crate::shell::last_with_text`] states: a command says what it was
+    /// doing and then says why it stopped, and a command that ends its last
+    /// line with a newline leaves an empty line after it. A run that said
+    /// nothing leaves gsw's sentence alone, because a blank row under the frame
+    /// reads as a run that said something not worth showing.
+    ///
+    /// The row is indented by [`WINDOW_INDENT`], as the rows of the window of a
+    /// run in flight are, because it is the command speaking inside gsw's
+    /// frame.
     fn rows(self, output: &str) -> Vec<String> {
-        let _ = output;
         match self {
-            Self::Alone { sentence } | Self::WithLastLine { sentence } => vec![sentence],
+            Self::Alone { sentence } => vec![sentence],
+            Self::WithLastLine { sentence } => {
+                let mut rows = vec![sentence];
+                rows.extend(
+                    crate::shell::last_with_text(output.lines())
+                        .map(|last| format!("{WINDOW_INDENT}{last}")),
+                );
+                rows
+            }
         }
     }
 }
@@ -1575,13 +1593,19 @@ impl PushUi {
                 // failure's reason is — see [`failure_lines`]. The running
                 // window sizes itself first for the same reason.
                 let dropped = lines.len().saturating_sub(Overlay::rows_to_spare(dims));
-                // The age goes on the last row, which for every message that
-                // has one is the only row: a success and a refusal are one
-                // sentence each. The two kinds that never age are git's
-                // several-line error text and a progress notice. Numbered
-                // before the drop above, so the row that carries it is the
-                // message's last and not merely the last one that fitted.
-                let last = lines.len().saturating_sub(1);
+                // **The age goes on the first row the pane shows.** A message
+                // that ages is gsw's own news, and gsw's own sentence is its
+                // first row: a run of `R` that worked says what it did, and
+                // puts the last line of the command under that. The age belongs
+                // beside the sentence rather than at the end of somebody else's
+                // words. It is also the row the user is sure to see — the drop
+                // above takes rows off the *front*, so the row that carries the
+                // age is the first that fitted rather than one the pane cut.
+                //
+                // Every other message that ages is one row, so this moves none
+                // of them: a refusal and a push that worked are one sentence
+                // each. The two kinds that never age are git's several-line
+                // error text and a progress notice.
                 lines
                     .iter()
                     .enumerate()
@@ -1593,7 +1617,7 @@ impl PushUi {
                         // Saturating for the reason [`Life::elapsed`] gives.
                         Life::Fading { posted_at } => {
                             let elapsed = now.saturating_duration_since(*posted_at);
-                            let line = if row == last {
+                            let line = if row == dropped {
                                 format!("{line} ({} ago)", format_age_detailed(elapsed))
                             } else {
                                 line.clone()
@@ -3298,6 +3322,59 @@ mod ui_tests {
         assert_eq!(
             painted(&mut ui, tall_pane(120), now),
             "Merged main into gsw-push with gmp (0s ago)",
+        );
+    }
+
+    #[test]
+    fn a_base_update_that_failed_keeps_the_words_of_the_command_until_a_key() {
+        // A rebase that stopped on a conflict leaves a repository the user has
+        // to repair, and what the command wrote is what says how. So it waits
+        // for a key exactly as a failed push does: the clock must not take a
+        // remedy away while the user is looking at another pane. gsw aborts
+        // nothing, and the `⚠ rebase` row of the header goes on saying that
+        // git is holding the rebase.
+        let now = t0();
+        let mut ui = asking_base_update(BaseUpdate::Rebase, now);
+        ui.confirm(now).expect("the question must confirm");
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output: "Rebasing (1/3)\nCONFLICT (content): Merge conflict in a.txt\n\
+                         hint: Resolve all conflicts manually\n\
+                         error: could not apply d3eee9d… feature edit\n"
+                    .to_string(),
+            },
+            now,
+        );
+
+        let rows = escapes(&mut ui, now);
+        let glyphs = testcolor::strip_ansi(&rows);
+        assert_eq!(
+            glyphs,
+            "Rebasing (1/3)\nCONFLICT (content): Merge conflict in a.txt\n\
+             error: could not apply d3eee9d… feature edit",
+            "the last lines of the run must reach the row, and the hint must go first",
+        );
+        assert_eq!(
+            rows,
+            testcolor::with_forced_ansi(|| glyphs
+                .lines()
+                .map(|line| line.red().to_string())
+                .collect::<Vec<_>>()
+                .join("\n")),
+            "the words of a command that failed are drawn red",
+        );
+        assert_eq!(
+            ui.next_tick(),
+            None,
+            "a message that waits for a key does not age",
+        );
+
+        ui.dismiss();
+        assert_eq!(
+            painted(&mut ui, tall_pane(120), now),
+            "",
+            "a key must take it off the screen",
         );
     }
 
