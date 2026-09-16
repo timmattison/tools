@@ -190,6 +190,44 @@ pub(crate) enum Confirmed {
     BaseUpdate(BaseUpdateCommand),
 }
 
+/// What the row says about a command that worked.
+///
+/// Two cases, because two kinds of command report differently. A push is gsw's
+/// own work, so gsw's sentence is the whole of what happened. `grp` and `gmp`
+/// are the user's, and each of them reports a push it skipped only in its last
+/// line — so gsw's sentence alone would tell the user that the branch is on the
+/// remote when it is not.
+///
+/// The question composes this, beside the sentence and the notice, so the act
+/// that was confirmed is the act that is reported. A flag that
+/// [`PushUi::finished`] read instead would put the choice in the one place that
+/// no longer knows which question was asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SuccessReport {
+    /// gsw's sentence, and nothing under it.
+    Alone {
+        /// What gsw says the command did.
+        sentence: String,
+    },
+    /// gsw's sentence, and under it the last line with text that the command
+    /// wrote.
+    WithLastLine {
+        /// What gsw says the command did.
+        sentence: String,
+    },
+}
+
+impl SuccessReport {
+    /// The rows this report puts under the frame, for a command that wrote
+    /// `output`.
+    fn rows(self, output: &str) -> Vec<String> {
+        let _ = output;
+        match self {
+            Self::Alone { sentence } | Self::WithLastLine { sentence } => vec![sentence],
+        }
+    }
+}
+
 /// What the watch loop does when the user presses a key that runs something.
 ///
 /// This is the whole interface [`prompt_for`] hands back, and
@@ -240,7 +278,7 @@ pub(crate) enum PushPrompt {
         /// What to show once this command succeeds. Composed here, with the
         /// question, so the two sentences describe the same act — a push
         /// confirmed as a create reports itself as a create.
-        success_message: String,
+        success: SuccessReport,
     },
     /// Run nothing and show this instead. Not an error: the common cause is a
     /// branch that is already fully pushed.
@@ -276,7 +314,9 @@ pub(crate) fn prompt_for(
         // reads it in the half second before pressing `y`.
         PushPlan::Create { remote, branch } => {
             let question = format!("Create new remote branch {remote}/{branch}?");
-            let success_message = format!("Created {remote}/{branch}");
+            let success = SuccessReport::Alone {
+                sentence: format!("Created {remote}/{branch}"),
+            };
             PushPrompt::Confirm {
                 question,
                 hint: confirm_hint(PUSH_VERB),
@@ -288,7 +328,7 @@ pub(crate) fn prompt_for(
                     vec!["push".to_string(), "-u".to_string(), remote, branch],
                 )),
                 running_notice: RUNNING_NOTICE.to_string(),
-                success_message,
+                success,
             }
         }
         PushPlan::Update { target, commits } => {
@@ -305,7 +345,9 @@ pub(crate) fn prompt_for(
                 // question was written for.
                 command: Confirmed::Push(PushCommand::new(branch, vec!["push".to_string()])),
                 running_notice: RUNNING_NOTICE.to_string(),
-                success_message: format!("Pushed {commits} {unit} to {target}"),
+                success: SuccessReport::Alone {
+                    sentence: format!("Pushed {commits} {unit} to {target}"),
+                },
             }
         }
         PushPlan::UpToDate { target } => PushPrompt::Refuse {
@@ -720,7 +762,7 @@ enum State {
         caution: bool,
         command: Confirmed,
         running_notice: String,
-        success_message: String,
+        success: SuccessReport,
     },
     /// The command a question described is running, and this is what it has
     /// said so far.
@@ -728,7 +770,9 @@ enum State {
         /// What the row says about the run, without its age. It comes from the
         /// question, so the act that was confirmed is the act that is reported.
         notice: String,
-        success_message: String,
+        /// What the row says once the command has worked, as the question
+        /// composed it.
+        success: SuccessReport,
         /// When the push started, against the watch loop's injected clock. The
         /// notice reports the age from it, so a hook that takes minutes looks
         /// like a push in progress rather than like a hang.
@@ -1002,14 +1046,14 @@ impl PushUi {
                 caution,
                 command,
                 running_notice,
-                success_message,
+                success,
             } => State::Asking {
                 question,
                 hint,
                 caution,
                 command,
                 running_notice,
-                success_message,
+                success,
             },
             // A refusal describes the repository as it stood when the key was
             // pressed, so it goes stale exactly the way a success does — and
@@ -1057,7 +1101,7 @@ impl PushUi {
         let State::Asking {
             command,
             running_notice,
-            success_message,
+            success,
             ..
         } = std::mem::replace(&mut self.state, State::Idle)
         else {
@@ -1065,7 +1109,7 @@ impl PushUi {
         };
         self.state = State::Running {
             notice: running_notice,
-            success_message,
+            success,
             started_at: now,
             recent: VecDeque::new(),
         };
@@ -1148,23 +1192,23 @@ impl PushUi {
         }
     }
 
-    /// Handle a finished push: replace the running notice with the outcome.
+    /// Handle a finished run: replace the running notice with the outcome.
     ///
-    /// On success the wording comes from the plan that was confirmed, not from
-    /// git's output, so a create reports itself as a create. On failure it is
-    /// git's own words — a gsw paraphrase of a push error would drop exactly
-    /// the detail the user needs.
+    /// On success the report comes from the question that was confirmed, not
+    /// from what the command wrote, so a create reports itself as a create —
+    /// see [`SuccessReport`], which decides there whether the command's own
+    /// last line goes under gsw's sentence. On failure it is the command's own
+    /// words: a gsw paraphrase of a push error would drop exactly the detail
+    /// the user needs.
     ///
     /// The same split decides how long the message stays: `now` starts the
     /// countdown on a success, and a failure gets no countdown at all. See
     /// [`Life`] for why those are one decision.
     pub(crate) fn finished(&mut self, outcome: PushOutcome, now: Instant) {
-        let success_message = match std::mem::replace(&mut self.state, State::Idle) {
-            State::Running {
-                success_message, ..
-            } => success_message,
-            // A finish with no push running: nothing to report against, so
-            // leave the screen as it is rather than inventing a message.
+        let success = match std::mem::replace(&mut self.state, State::Idle) {
+            State::Running { success, .. } => success,
+            // A finish with no run going: nothing to report against, so leave
+            // the screen as it is rather than inventing a message.
             other => {
                 self.state = other;
                 return;
@@ -1172,7 +1216,10 @@ impl PushUi {
         };
 
         let (lines, life) = if outcome.success {
-            (vec![success_message], Life::Fading { posted_at: now })
+            (
+                success.rows(&outcome.output),
+                Life::Fading { posted_at: now },
+            )
         } else {
             (failure_lines(&outcome.output), Life::UntilDismissed)
         };
@@ -3198,6 +3245,59 @@ mod ui_tests {
             ui.confirm(t0()),
             None,
             "a second y must not start a second run",
+        );
+    }
+
+    /// What a rebase that worked wrote, with its verdict in the last line.
+    const SKIPPED_THE_PUSH: &str = "grp: rebased onto 'main'; 'gsw-push' has no upstream - \
+                                    skipping push";
+
+    #[test]
+    fn a_base_update_that_worked_reports_it_and_shows_the_last_line_of_the_command() {
+        // **The second row is necessary.** `grp` and `gmp` report a push they
+        // skipped only in their last line, so gsw's sentence alone would tell
+        // the user that the branch is on the remote when it is not.
+        //
+        // The age goes on the first row the pane shows, which is gsw's own
+        // sentence. The row under it is the command speaking, and it is
+        // indented for that reason.
+        let now = t0();
+        let mut ui = asking_base_update(BaseUpdate::Rebase, now);
+        ui.confirm(now).expect("the question must confirm");
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: format!("Rebasing (1/3)\n{SKIPPED_THE_PUSH}\n"),
+            },
+            now,
+        );
+        assert_eq!(
+            painted(&mut ui, tall_pane(120), now + Duration::from_secs(4)),
+            format!(
+                "Rebased gsw-push onto main with grp (4s ago)\n{WINDOW_INDENT}{SKIPPED_THE_PUSH}",
+            ),
+        );
+    }
+
+    #[test]
+    fn a_base_update_that_said_nothing_leaves_the_sentence_of_gsw_alone() {
+        // A blank row under the frame reads as a run that said something not
+        // worth showing. The rule of `shell::last_with_text`: a command that
+        // ends its last line with a newline leaves an empty line after it, and
+        // a command that said nothing at all leaves no line to show.
+        let now = t0();
+        let mut ui = asking_base_update(BaseUpdate::Merge, now);
+        ui.confirm(now).expect("the question must confirm");
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: "\n  \n".to_string(),
+            },
+            now,
+        );
+        assert_eq!(
+            painted(&mut ui, tall_pane(120), now),
+            "Merged main into gsw-push with gmp (0s ago)",
         );
     }
 

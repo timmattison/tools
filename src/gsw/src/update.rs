@@ -376,7 +376,9 @@ pub(crate) fn base_update_prompt_for(
             base,
             command.clone(),
         )),
-        success_message: String::new(),
+        success: crate::push::SuccessReport::Alone {
+            sentence: String::new(),
+        },
     }
 }
 
