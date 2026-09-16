@@ -69,10 +69,19 @@ impl BaseUpdate {
     /// Both acts, for a caller that does the same work for each of them.
     ///
     /// The probe starts one shell for each key at startup, and the tests here
-    /// state a rule once and hold it for both. An array rather than an
-    /// iterator, so a variant added later fails to compile here rather than
-    /// going quietly unprobed.
-    pub(crate) const ALL: [Self; 2] = [Self::Rebase, Self::Merge];
+    /// state a rule once and hold it for both. One list of names makes the
+    /// array and a match with no wildcard, so an act that the enum has and the
+    /// list does not fails to compile here.
+    pub(crate) const ALL: [Self; 2] = {
+        macro_rules! every_act {
+            ($($act:ident),+) => {
+                match Self::Rebase {
+                    $(Self::$act)|+ => [$(Self::$act),+],
+                }
+            };
+        }
+        every_act!(Rebase, Merge)
+    };
 
     /// The variable that names the command this act runs.
     pub(crate) const fn env(self) -> &'static str {
