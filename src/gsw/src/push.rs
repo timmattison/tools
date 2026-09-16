@@ -3526,7 +3526,7 @@ mod ui_tests {
 
     #[test]
     fn confirming_with_no_question_up_runs_nothing() {
-        // Belt and braces against a stray PushConfirmed: with no confirmation
+        // Belt and braces against a stray answer of yes: with no confirmation
         // on screen there is no command to run, and inventing one would push
         // without asking.
         let mut ui = PushUi::new(false);

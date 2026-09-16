@@ -661,8 +661,13 @@ enum Event {
     /// that cannot be started, and a shell that never answers all send
     /// nothing, so that key stays unbound and silent.
     BaseUpdateCommandFound(crate::update::BaseUpdate, crate::shell::ShellCommand),
-    /// The user confirmed the push at the prompt (`y` or Enter).
-    PushConfirmed,
+    /// The user said yes to the question on the row (`y` or Enter).
+    ///
+    /// It names no act, because the row holds the question of three keys: a
+    /// push, a rebase onto the base, or a merge of the base. What the answer
+    /// starts is what the question described, and
+    /// [`crate::push::PushUi::confirm`] is what says which of them that is.
+    Confirmed,
     /// The user declined the push at the prompt (`n`, Esc, or `q`).
     PushCancelled,
     /// A running push wrote a line. Carried one line at a time rather than as
@@ -2541,7 +2546,7 @@ where
         // that is the only thing that decides which runner starts: the row
         // asks one question at a time, and the answer carries the work the
         // user was shown.
-        Event::PushConfirmed => match state.ui.confirm(clock()) {
+        Event::Confirmed => match state.ui.confirm(clock()) {
             Some(crate::push::Confirmed::Push(command)) => {
                 (hooks.start_push)(command, &state.current);
             }
@@ -3301,7 +3306,7 @@ fn classify_input(key: KeyEvent, mode: InputMode, keys: CommandKeys) -> Option<E
             _ => Event::Dismiss,
         },
         InputMode::Confirm => match code {
-            KeyCode::Char('y' | 'Y') | KeyCode::Enter => Event::PushConfirmed,
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter => Event::Confirmed,
             KeyCode::Char('n' | 'N' | 'q') | KeyCode::Esc => Event::PushCancelled,
             _ => Event::Dismiss,
         },
@@ -4631,7 +4636,7 @@ mod tests {
                 assert!(
                     matches!(
                         classify_input(press(code), InputMode::Confirm, keys),
-                        Some(Event::PushConfirmed),
+                        Some(Event::Confirmed),
                     ),
                     "{code:?} must confirm the push with {keys:?}",
                 );
@@ -4727,7 +4732,7 @@ mod tests {
             Some(Event::ListClose) => "ListClose",
             Some(Event::Quit) => "Quit",
             Some(Event::Dismiss) => "Dismiss",
-            Some(Event::PushConfirmed) => "PushConfirmed",
+            Some(Event::Confirmed) => "Confirmed",
             Some(Event::PushCancelled) => "PushCancelled",
             Some(Event::BaseUpdateRequested(update)) => asks_for(update),
             Some(_) => "another event",
@@ -4793,7 +4798,7 @@ mod tests {
                     "Dismiss",
                     "Dismiss",
                     "Dismiss",
-                    "PushConfirmed",
+                    "Confirmed",
                     "PushCancelled",
                 ],
             ),
@@ -4895,7 +4900,7 @@ mod tests {
                     InputMode::Confirm,
                     keys
                 )),
-                "PushConfirmed",
+                "Confirmed",
                 "Enter must still push with {keys:?}",
             );
             assert_eq!(
@@ -7619,7 +7624,7 @@ mod push_loop_tests {
         let (screen, seen) = run_loop_remote(vec![
             probe_answered(),
             Event::PushRequested,
-            Event::PushConfirmed,
+            Event::Confirmed,
             press_g(),
             press_g(),
             Event::Quit,
@@ -7874,7 +7879,7 @@ mod push_loop_tests {
     fn a_run_during_a_push() -> Vec<Event> {
         vec![
             Event::PushRequested,
-            Event::PushConfirmed,
+            Event::Confirmed,
             press_m(),
             started_against_main(),
             finished(measured_clean()),
