@@ -1030,7 +1030,7 @@ impl PushUi {
     pub(crate) fn mode(&self) -> InputMode {
         match self.state {
             State::Asking { .. } => InputMode::Confirm,
-            State::Running { .. } => InputMode::Pushing,
+            State::Running { .. } => InputMode::Running,
             State::Listing { .. } => InputMode::List,
             State::Idle | State::Status { .. } => InputMode::Normal,
         }
@@ -2425,7 +2425,7 @@ mod ui_tests {
             !text.contains("names no issue"),
             "the held message must wait its turn, got {text:?}",
         );
-        assert_eq!(ui.mode(), InputMode::Pushing, "the push is still running");
+        assert_eq!(ui.mode(), InputMode::Running, "the push is still running");
     }
 
     #[test]
@@ -2662,7 +2662,7 @@ mod ui_tests {
             !text.contains(NOTICE),
             "the held notice must wait its turn, got {text:?}",
         );
-        assert_eq!(ui.mode(), InputMode::Pushing, "the push is still running");
+        assert_eq!(ui.mode(), InputMode::Running, "the push is still running");
     }
 
     #[test]
@@ -2842,7 +2842,7 @@ mod ui_tests {
 
         ui.clear();
 
-        assert_eq!(ui.mode(), InputMode::Pushing, "the push is still running");
+        assert_eq!(ui.mode(), InputMode::Running, "the push is still running");
         let text = painted(&mut ui, tall_pane(80), now);
         assert!(
             text.contains(RUNNING_NOTICE),
@@ -3046,7 +3046,7 @@ mod ui_tests {
         let mut ui = pushing(now);
         ui.output_line("Compiling gsw v0.1.0".to_string());
         ui.open_list(three_worktrees());
-        assert_eq!(ui.mode(), InputMode::Pushing, "the push must keep the row");
+        assert_eq!(ui.mode(), InputMode::Running, "the push must keep the row");
         assert_eq!(cursor_of(&ui), None, "no list may open over the push");
         let text = painted(&mut ui, tall_pane(80), now);
         assert!(
@@ -3292,7 +3292,7 @@ mod ui_tests {
         assert_eq!(command.branch(), "gsw-push");
         assert_eq!(command.base(), "main");
         assert_eq!(command.command().name(), "grp");
-        assert_eq!(ui.mode(), InputMode::Pushing);
+        assert_eq!(ui.mode(), InputMode::Running);
         assert_eq!(
             ui.confirm(t0()),
             None,
@@ -3516,7 +3516,7 @@ mod ui_tests {
             "gsw-push",
             "the branch the question named must reach the runner",
         );
-        assert_eq!(ui.mode(), InputMode::Pushing);
+        assert_eq!(ui.mode(), InputMode::Running);
         assert_eq!(
             ui.overlay(tall_pane(80), t0()).rows(),
             1,
@@ -3536,7 +3536,7 @@ mod ui_tests {
 
     #[test]
     fn confirming_twice_runs_the_push_once() {
-        // The second `y` arrives after the mode has already moved to Pushing.
+        // The second `y` arrives after the mode has already moved to Running.
         // It must not produce a second command.
         let mut ui = asking();
         assert!(ui.confirm(t0()).is_some());
@@ -4095,7 +4095,7 @@ mod ui_tests {
         ui.dismiss();
         assert_eq!(
             ui.mode(),
-            InputMode::Pushing,
+            InputMode::Running,
             "a stray key must not hide a running push",
         );
     }
