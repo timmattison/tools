@@ -13,13 +13,14 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Child, Stdio};
 
 use shellquote::shell_quote;
+use tempfile::NamedTempFile;
 
 use crate::lines::LineSplitter;
 use crate::push::PushOutcome;
-use crate::shell::{shell_child, ShellCommand};
+use crate::shell::{shell_child, ShellCommand, PROBE_POLL};
 
 /// The variable that holds the command `R` runs.
 ///
@@ -250,34 +251,41 @@ const TERMINAL_PROMPT_VAR: &str = "GIT_TERMINAL_PROMPT";
 /// The outcome is a [`PushOutcome`], which is what lets the row report a rebase
 /// the way it reports a push: both are a command that either worked or wrote a
 /// reason.
+///
+/// **There is no deadline.** A pre-push hook in this workspace builds and tests
+/// a workspace, which takes minutes, and `grp` runs one. The run ends when the
+/// shell exits.
 fn run(
     shell: &OsStr,
     command: &BaseUpdateCommand,
     workdir: &Path,
     on_line: &dyn Fn(String),
 ) -> PushOutcome {
+    run_in(shell, command, workdir, &std::env::temp_dir(), on_line)
+}
+
+/// [`run`], with the directory that holds the two files of the run named.
+///
+/// The directory is a parameter so a test can watch it: the rule that no file
+/// of a run keeps a name while the run is in flight is a rule about a
+/// directory, and a test that read the whole temporary directory of the machine
+/// would read every other program's files as well. Production passes
+/// [`std::env::temp_dir`].
+fn run_in(
+    shell: &OsStr,
+    command: &BaseUpdateCommand,
+    workdir: &Path,
+    scratch: &Path,
+    on_line: &dyn Fn(String),
+) -> PushOutcome {
     let _ = on_line;
     let name = command.command().name();
 
-    // The child is interactive, it carries no `GIT_` variable out of the
-    // environment of gsw, and it is detached from the terminal — see
-    // [`shell_child`], which states all three rules and is the one place they
-    // are written.
-    let mut child = shell_child(shell, command.script());
-    child
-        .current_dir(workdir)
-        .stdin(Stdio::null())
-        // **After the sweep, so it survives it.** The sweep removes every
-        // `GIT_` variable this process holds, and a value placed ahead of it
-        // would leave with the rest. A user who exports the variable again in
-        // the rc file still wins, because the rc file loads inside the child
-        // after this value was placed.
-        .env(TERMINAL_PROMPT_VAR, "0");
-
-    let finished = match child.output() {
-        Ok(finished) => finished,
-        // The shell is gone, or it cannot be started. Rare, and worth saying
-        // plainly: every other failure here is the command's own words.
+    let mut run = match start(shell, command, workdir, scratch) {
+        Ok(run) => run,
+        // The shell is gone, it cannot be started, or there is nowhere to put
+        // what it writes. Rare, and worth saying plainly: every other failure
+        // here is the command's own words.
         Err(error) => {
             return PushOutcome {
                 success: false,
@@ -286,14 +294,92 @@ fn run(
         }
     };
 
+    let status = loop {
+        match run.child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => std::thread::sleep(PROBE_POLL),
+            // The child cannot be asked about, so nothing can be waited for
+            // either. Saying so plainly is the answer a shell that cannot be
+            // started gets.
+            Err(error) => {
+                return PushOutcome {
+                    success: false,
+                    output: format!("cannot wait for {name}: {error}"),
+                }
+            }
+        }
+    };
+
     let mut record = Record::new();
-    record.extend(painted(&finished.stdout));
-    record.extend(painted(&finished.stderr));
+    record.extend(painted(&read(run.stdout.path())));
+    record.extend(painted(&read(run.stderr.path())));
 
     PushOutcome {
-        success: finished.status.success(),
+        success: status.success(),
         output: record.into_text(),
     }
+}
+
+/// A run in flight: the shell, and the two files it writes to.
+///
+/// **The files are files, and never pipes.** A pipe is read to its end, and the
+/// end arrives only when the last writer lets go — so a child the command
+/// leaves behind holds the run open long after the shell is gone. `grp` pushes,
+/// and a push starts a credential helper or an agent that does exactly that. A
+/// file has no such wait, and it also cannot fill up and stop the child the way
+/// a pipe that nobody reads does: a pre-push hook that builds a workspace
+/// writes far more than a pipe holds.
+struct RunInFlight {
+    /// The shell, which is what the run waits for.
+    child: Child,
+    /// Where the child writes what it did.
+    stdout: NamedTempFile,
+    /// Where the child writes why it stopped.
+    stderr: NamedTempFile,
+}
+
+/// Start `command` in `workdir`, with a file of `scratch` for each of its two
+/// streams.
+fn start(
+    shell: &OsStr,
+    command: &BaseUpdateCommand,
+    workdir: &Path,
+    scratch: &Path,
+) -> std::io::Result<RunInFlight> {
+    let stdout = NamedTempFile::new_in(scratch)?;
+    let stderr = NamedTempFile::new_in(scratch)?;
+
+    // The child is interactive, it carries no `GIT_` variable out of the
+    // environment of gsw, and it is detached from the terminal — see
+    // [`shell_child`], which states all three rules and is the one place they
+    // are written.
+    let mut builder = shell_child(shell, command.script());
+    builder
+        .current_dir(workdir)
+        .stdin(Stdio::null())
+        // **After the sweep, so it survives it.** The sweep removes every
+        // `GIT_` variable this process holds, and a value placed ahead of it
+        // would leave with the rest. A user who exports the variable again in
+        // the rc file still wins, because the rc file loads inside the child
+        // after this value was placed.
+        .env(TERMINAL_PROMPT_VAR, "0")
+        .stdout(Stdio::from(stdout.as_file().try_clone()?))
+        .stderr(Stdio::from(stderr.as_file().try_clone()?));
+
+    Ok(RunInFlight {
+        child: builder.spawn()?,
+        stdout,
+        stderr,
+    })
+}
+
+/// Everything in the file at `path`, or nothing where it cannot be read.
+///
+/// A file that cannot be read counts as a file with nothing in it. The run is
+/// over either way, and a read that failed is not something to put in front of
+/// the words the command wrote on the other stream.
+fn read(path: &Path) -> Vec<u8> {
+    std::fs::read(path).unwrap_or_default()
 }
 
 /// Every line a run has written, in arrival order, as one string with a newline
