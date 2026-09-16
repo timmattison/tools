@@ -12,9 +12,9 @@
 
 use std::ffi::OsStr;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use crate::shell::{last_with_text, start_run, written_lines, ShellCommand, PROBE_POLL};
+use crate::shell::{last_with_text, run_command, start_run, OutputStream, RunEnd, ShellCommand};
 
 /// The variable that holds the command `G` runs.
 ///
@@ -144,49 +144,41 @@ fn run_in(
     deadline: Duration,
 ) -> IssueOutcome {
     let name = command.name();
-    let mut run = match start_run(shell, command, workdir, scratch) {
+    // The shell is gone, it cannot be started, there is nowhere to put what it
+    // writes, or it cannot be asked about. Rare, and worth saying plainly:
+    // every other failure here is the child's own words.
+    let cannot_run = |error: std::io::Error| IssueOutcome {
+        message: Some(format!("cannot run {name}: {error}")),
+    };
+    let run = match start_run(run_command(shell, command, workdir), scratch) {
         Ok(run) => run,
-        // The shell is gone, it cannot be started, or there is nowhere to put
-        // what it writes. Rare, and worth saying plainly: every other failure
-        // here is the child's own words.
-        Err(error) => {
-            return IssueOutcome {
-                message: Some(format!("cannot run {name}: {error}")),
-            }
-        }
+        Err(error) => return cannot_run(error),
     };
 
-    let give_up_at = Instant::now() + deadline;
-    loop {
-        match run.child.try_wait() {
-            Ok(Some(status)) => {
-                let lines = written_lines(&run);
-                return IssueOutcome::new(name, status.success(), &lines, &status.to_string());
-            }
-            Ok(None) => {
-                if Instant::now() >= give_up_at {
-                    // Read the files where they stand. A command that said why
-                    // before it stopped answering is worth showing, and the
-                    // timeout is worth saying either way.
-                    let lines = written_lines(&run);
-                    let outcome = IssueOutcome::unfinished(name, &lines, deadline);
-                    let mut child = run.child;
-                    std::thread::spawn(move || {
-                        let _ = child.wait();
-                    });
-                    return outcome;
-                }
-                std::thread::sleep(PROBE_POLL);
-            }
-            // The child cannot be asked about, so nothing can be waited for
-            // either. Saying so plainly is the same answer a shell that cannot
-            // be started gets.
-            Err(error) => {
-                return IssueOutcome {
-                    message: Some(format!("cannot run {name}: {error}")),
-                }
-            }
+    // Standard output first, then standard error, whatever order the lines
+    // arrived in. That is the order a refusal reads in: a command says what it
+    // did on one stream and why it stopped on the other.
+    let mut lines = Vec::new();
+    let mut reasons = Vec::new();
+    let end = run.wait(Some(deadline), &mut |stream, line| match stream {
+        OutputStream::Stdout => lines.push(line),
+        OutputStream::Stderr => reasons.push(line),
+    });
+    lines.append(&mut reasons);
+
+    match end {
+        Ok(RunEnd::Exited(status)) => {
+            IssueOutcome::new(name, status.success(), &lines, &status.to_string())
         }
+        // A command that said why before it stopped answering is worth
+        // showing, and the timeout is worth saying either way.
+        Ok(RunEnd::StillRunning(mut child)) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            IssueOutcome::unfinished(name, &lines, deadline)
+        }
+        Err(error) => cannot_run(error),
     }
 }
 
@@ -240,6 +232,7 @@ mod run_tests {
         alive, entries_of, kill_now, StubShell, GAVE_UP_WITHIN, HANG_DEADLINE,
     };
     use std::sync::mpsc::channel;
+    use std::time::Instant;
 
     /// The default command, which is what every test here runs.
     fn default_command() -> ShellCommand {

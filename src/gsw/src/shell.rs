@@ -4,8 +4,8 @@
 //! Such a command is usually a shell function, so only a shell can find it and
 //! only a shell can run it. This module asks the shell both questions, and it
 //! holds what every one of those keys needs: the shell itself, the type a
-//! command name becomes, the probe that asks whether the command exists, and
-//! the child that runs it.
+//! command name becomes, the probe that asks whether the command exists, the
+//! child that runs it, and the run that reads what that child writes.
 //!
 //! The command can carry arguments, which splits the two questions. The shell
 //! answers `command -v` about a name, so the question about existence carries
@@ -17,8 +17,10 @@
 //! [`crate::issue`].
 
 use std::ffi::{OsStr, OsString};
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use shellquote::shell_quote;
@@ -506,10 +508,9 @@ where
 /// value of `gh issue view --web` is four words to the shell, and one quoted
 /// word to a shell would be a command no machine has.
 ///
-/// The caller attaches the two files the child writes to. Where the output
-/// goes is the one thing about this child that a deadline depends on, so
-/// [`start_run`] owns it.
-fn run_command(shell: &OsStr, command: &ShellCommand, workdir: &Path) -> Command {
+/// The caller hands this child to [`start_run`], which attaches the two files
+/// the child writes to.
+pub(crate) fn run_command(shell: &OsStr, command: &ShellCommand, workdir: &Path) -> Command {
     let mut child = shell_child(shell, command.name().to_string());
     // Every command a key runs reads the repository of the directory it runs
     // in. The command of `G` asks `gh` about the issue, and `gh` reads the
@@ -518,85 +519,227 @@ fn run_command(shell: &OsStr, command: &ShellCommand, workdir: &Path) -> Command
     child
 }
 
-/// A run in flight: the child, and the two files it writes to.
-///
-/// The files are the load-bearing half, and they are files rather than pipes.
-/// A pipe makes the reader wait for end of file, and end of file arrives only
-/// when the last writer lets go — so a child the command leaves behind holds
-/// the run open long after the shell is gone. `xdg-open` leaves exactly such a
-/// child. A file has no such wait, and it also cannot fill up and stop the
-/// child the way a pipe that nobody reads does.
-///
-/// Each file is removed when this value is dropped. A child that still holds
-/// one keeps writing to it, because a file a process has open outlives its
-/// name, and the space comes back when that child ends.
-pub(crate) struct RunInFlight {
-    /// The shell, which is what the deadline waits for.
-    pub(crate) child: Child,
+/// Which stream of a child a line came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutputStream {
     /// Where the child writes what it did.
-    stdout: NamedTempFile,
+    Stdout,
     /// Where the child writes why it stopped.
-    stderr: NamedTempFile,
+    Stderr,
 }
 
-/// Start `command` in `workdir`, with a file of `scratch` for each of its two
-/// streams.
-pub(crate) fn start_run(
-    shell: &OsStr,
-    command: &ShellCommand,
-    workdir: &Path,
-    scratch: &Path,
-) -> std::io::Result<RunInFlight> {
-    let stdout = NamedTempFile::new_in(scratch)?;
-    let stderr = NamedTempFile::new_in(scratch)?;
-    let mut builder = run_command(shell, command, workdir);
-    builder
-        .stdout(Stdio::from(stdout.as_file().try_clone()?))
-        .stderr(Stdio::from(stderr.as_file().try_clone()?));
-    let child = builder.spawn()?;
+/// How [`RunInFlight::wait`] ended.
+#[derive(Debug)]
+pub(crate) enum RunEnd {
+    /// The child exited, and every line it wrote has been reported.
+    Exited(ExitStatus),
+    /// The child was still running at the deadline. The caller owns it now,
+    /// and the caller must reap it.
+    StillRunning(Child),
+}
+
+/// A run in flight: the shell, and the two files it writes to.
+///
+/// Every key that runs a command the user supplies runs it through this, so
+/// the rules of a run are written once.
+///
+/// **The files are files, and never pipes.** A pipe is read to its end, and the
+/// end arrives only when the last writer lets go — so a child the command
+/// leaves behind holds the run open long after the shell is gone. `xdg-open`
+/// leaves such a child, and so does a push that starts a credential helper. A
+/// file has no such wait, and it also cannot fill up and stop the child the way
+/// a pipe that nobody reads does: a pre-push hook that builds a workspace
+/// writes far more than a pipe holds.
+pub(crate) struct RunInFlight {
+    /// The shell, which is what the run waits for.
+    child: Child,
+    /// Where the child writes what it did.
+    stdout: Stream,
+    /// Where the child writes why it stopped.
+    stderr: Stream,
+}
+
+/// Start `child`, with a file of `scratch` for each of its two streams.
+///
+/// The caller builds the child, because each key sets it up in its own way.
+/// Where the output goes is the same for every key, so this sets it.
+pub(crate) fn start_run(mut child: Command, scratch: &Path) -> std::io::Result<RunInFlight> {
+    let stdout = Stream::new(scratch)?;
+    let stderr = Stream::new(scratch)?;
+    child.stdout(stdout.writer()?).stderr(stderr.writer()?);
     Ok(RunInFlight {
-        child,
+        child: child.spawn()?,
         stdout,
         stderr,
     })
 }
 
-/// `bytes` as lines gsw can paint.
-///
-/// [`LineSplitter`] is the one place a child's bytes become such text — a tab
-/// is up to eight columns and an escape sequence repaints the frame in another
-/// program's colors.
-///
-/// **One splitter for each stream, which is the rule [`LineSplitter`] states
-/// for itself.** A splitter holds the bytes of a line that has no terminator
-/// yet, and it holds them from one call to the next. So a single splitter
-/// across both streams gives the tail of standard output to the first line of
-/// standard error and reports the two as one line. A command that stops
-/// mid-word makes that line a word no program wrote, and a command that stops
-/// in the middle of a character puts a replacement character in front of the
-/// reason. The reason is the one thing this feature puts on the screen. This
-/// function takes one stream, so each caller of it gets a splitter of its own.
-fn painted_lines(bytes: &[u8]) -> Vec<String> {
-    let mut splitter = LineSplitter::new();
-    let mut lines = splitter.feed(bytes);
-    lines.extend(splitter.finish());
-    lines
+impl RunInFlight {
+    /// Wait for the child to exit, and give each line to `on_line` as it lands.
+    ///
+    /// Each poll reads standard output and then standard error. The window
+    /// under the frame is the whole reason a poll reads at all: a pre-push hook
+    /// takes minutes, and a user who sees nothing for those minutes cannot tell
+    /// a slow hook from a hang.
+    ///
+    /// With a `deadline`, the wait stops there and gives the child back, still
+    /// running. It kills nothing. With no deadline, the wait ends only when the
+    /// child exits.
+    ///
+    /// The last read also gives the line each stream left unterminated.
+    ///
+    /// # Errors
+    ///
+    /// The error of a child that cannot be asked about.
+    pub(crate) fn wait(
+        mut self,
+        deadline: Option<Duration>,
+        on_line: &mut dyn FnMut(OutputStream, String),
+    ) -> std::io::Result<RunEnd> {
+        let give_up_at = deadline.map(|deadline| Instant::now() + deadline);
+        loop {
+            if let Some(status) = self.child.try_wait()? {
+                // What the command wrote between the last poll and its exit.
+                self.drain(on_line);
+                self.finish(on_line);
+                return Ok(RunEnd::Exited(status));
+            }
+            self.drain(on_line);
+            if give_up_at.is_some_and(|give_up_at| Instant::now() >= give_up_at) {
+                self.finish(on_line);
+                return Ok(RunEnd::StillRunning(self.child));
+            }
+            std::thread::sleep(PROBE_POLL);
+        }
+    }
+
+    /// Give `on_line` every line each stream completed since the last read.
+    fn drain(&mut self, on_line: &mut dyn FnMut(OutputStream, String)) {
+        for line in self.stdout.new_lines() {
+            on_line(OutputStream::Stdout, line);
+        }
+        for line in self.stderr.new_lines() {
+            on_line(OutputStream::Stderr, line);
+        }
+    }
+
+    /// Give `on_line` the line each stream left unterminated.
+    fn finish(&mut self, on_line: &mut dyn FnMut(OutputStream, String)) {
+        if let Some(line) = self.stdout.finish() {
+            on_line(OutputStream::Stdout, line);
+        }
+        if let Some(line) = self.stderr.finish() {
+            on_line(OutputStream::Stderr, line);
+        }
+    }
 }
 
-/// Everything the run has written so far, standard output first.
+/// One stream of a run: the file the child writes to, and the handle gsw reads
+/// it through.
 ///
-/// That is the order a refusal reads in: a command says what it did on one
-/// stream and why it stopped on the other.
-///
-/// A file that cannot be read counts as a file with nothing in it. The run is
-/// over either way, and a read that failed is not something to put in front of
-/// the words the command wrote on the other stream.
-pub(crate) fn written_lines(run: &RunInFlight) -> Vec<String> {
-    let mut lines = painted_lines(&std::fs::read(run.stdout.path()).unwrap_or_default());
-    lines.extend(painted_lines(
-        &std::fs::read(run.stderr.path()).unwrap_or_default(),
-    ));
-    lines
+/// **The two handles are two handles on purpose.** The child writes at the
+/// offset it inherited, and this reads at an offset of its own — so every read
+/// gives the bytes that arrived since the last one, and neither side moves the
+/// other's place in the file.
+struct Stream {
+    /// The handle the child writes through.
+    ///
+    /// gsw writes nothing to it. It is held open so that the file lives from
+    /// the moment its name goes to the moment the child has a handle of its
+    /// own.
+    writer: File,
+    /// The handle gsw reads through, which has an offset of its own.
+    reader: File,
+    /// What turns the bytes of this stream into lines.
+    ///
+    /// **One splitter for each stream, and it lives as long as the stream
+    /// does.** A splitter holds the bytes of a line that has no terminator yet,
+    /// from one read to the next, and a read stops wherever the child happened
+    /// to be. So a splitter made afresh for each read reports that place as the
+    /// end of a line: a command drawing a progress bar has its stale state
+    /// taken for a row, and a line cut in the middle of a character arrives as
+    /// two rows with a replacement character between them. A splitter shared
+    /// between the two streams is the other half of the same rule, and
+    /// [`crate::lines::LineSplitter`] states it: the tail of one stream would
+    /// join the first line of the other.
+    splitter: LineSplitter,
+}
+
+impl Stream {
+    /// A stream whose file is made in `scratch`, and whose name is then taken
+    /// off it.
+    ///
+    /// **The name goes as soon as both handles are open.** A quit kills the
+    /// thread of a run where it stands, and a thread that dies runs no
+    /// destructor — so a file that still carries a name outlives the session
+    /// that made it, and a rebase whose hook builds a workspace leaves a great
+    /// deal of it behind. A file with no name is the same file: Unix keeps it
+    /// for as long as a process holds it open, so the child goes on writing and
+    /// the reader goes on reading, and the space comes back the moment the last
+    /// of them lets go.
+    ///
+    /// The read handle is opened by name, so it is opened before the name goes.
+    /// It has an offset of its own, which is what makes each read give the bytes
+    /// that arrived since the last one.
+    ///
+    /// **A name that cannot be removed is no reason to refuse the run.** The
+    /// file is there and both handles are open, so the run works exactly as it
+    /// always did and the only cost is one file left in a temporary directory —
+    /// which is what every run cost before this. To fail here would take the
+    /// key away instead.
+    fn new(scratch: &Path) -> std::io::Result<Self> {
+        let file = NamedTempFile::new_in(scratch)?;
+        let reader = file.reopen()?;
+        let (writer, path) = file.into_parts();
+        let _ = path.close();
+        Ok(Self {
+            writer,
+            reader,
+            splitter: LineSplitter::new(),
+        })
+    }
+
+    /// Every line the child has completed since the last read.
+    fn new_lines(&mut self) -> Vec<String> {
+        let bytes = self.new_bytes();
+        self.splitter.feed(&bytes)
+    }
+
+    /// The line the child left unterminated, once gsw reads no more.
+    ///
+    /// A command that exits without a final newline still said something, and
+    /// to drop it is to lose the last line of every command that ends that way.
+    fn finish(&mut self) -> Option<String> {
+        self.splitter.finish()
+    }
+
+    /// Where the child writes this stream.
+    fn writer(&self) -> std::io::Result<Stdio> {
+        Ok(Stdio::from(self.writer.try_clone()?))
+    }
+
+    /// The bytes the child has written since the last read.
+    ///
+    /// A read that fails ends this pass with what it has. The run is still
+    /// going, so the next poll asks again, and an error invented here would put
+    /// words in the command's mouth.
+    fn new_bytes(&mut self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 8192];
+        loop {
+            match self.reader.read(&mut buffer) {
+                // The end of the file as it stands. The child writes more after
+                // this, and the next read starts where this one stopped.
+                Ok(0) => break,
+                Ok(read) => bytes.extend_from_slice(&buffer[..read]),
+                // A signal arrived mid-read. Nothing was lost and nothing is
+                // wrong.
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        bytes
+    }
 }
 
 #[cfg(all(test, unix))]

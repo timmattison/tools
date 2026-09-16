@@ -4,29 +4,25 @@
 //! base into the branch. Neither act is gsw's own. Each key runs one command
 //! that the user supplies, in the user's own interactive shell, and that
 //! command pushes the branch when it has finished. [`crate::shell`] holds the
-//! shell, the type a command name becomes, and the probe that asks whether the
-//! command exists.
+//! shell, the type a command name becomes, the probe that asks whether the
+//! command exists, and the run that reads what the command writes.
 //!
 //! What is here is what belongs to these two keys alone: the variable that
 //! names each command, the name each key falls back on, the line the shell
-//! runs, and the run itself.
+//! runs, and the record of what the run said.
 
 use std::ffi::{OsStr, OsString};
-use std::fs::File;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Stdio};
+use std::process::Stdio;
 
 use shellquote::shell_quote;
-use tempfile::NamedTempFile;
 
-use crate::lines::LineSplitter;
 use crate::push::{
     confirm_hint, current_branch, Confirmed, PushOutcome, PushPrompt, SuccessReport,
 };
 use crate::render::{Operation, Snapshot};
 use crate::repo::DETACHED_HEAD;
-use crate::shell::{shell_child, ShellCommand, PROBE_POLL};
+use crate::shell::{shell_child, start_run, RunEnd, ShellCommand};
 
 /// The variable that holds the command `R` runs.
 ///
@@ -513,7 +509,22 @@ fn run_in(
         }
     }
 
-    let mut run = match start(shell, command, workdir, scratch) {
+    // The child is interactive, it carries no `GIT_` variable out of the
+    // environment of gsw but the six a user states on purpose, and it is
+    // detached from the terminal — see [`shell_child`], which states all three
+    // rules and is the one place they are written.
+    let mut child = shell_child(shell, command.script());
+    child
+        .current_dir(workdir)
+        .stdin(Stdio::null())
+        // **After the sweep, so it wins.** The sweep keeps the value of this
+        // variable that gsw holds, and this call replaces that value with `0`.
+        // A user who exports the variable again in the rc file still wins,
+        // because the rc file loads inside the child after this value was
+        // placed.
+        .env(TERMINAL_PROMPT_VAR, "0");
+
+    let run = match start_run(child, scratch) {
         Ok(run) => run,
         // The shell is gone, it cannot be started, or there is nowhere to put
         // what it writes. Rare, and worth saying plainly: every other failure
@@ -526,42 +537,28 @@ fn run_in(
         }
     };
 
+    // The record and the caller get the same lines in the same order, because
+    // both are fed here. A second account of one stream is what puts the
+    // verdict of a command in the middle of its output rather than at the end.
     let mut record = Record::new();
-    let status = loop {
-        match run.child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                // Read where the command stands, then wait. The window under
-                // the frame is the whole reason a poll happens at all: a
-                // pre-push hook takes minutes, and a user who sees nothing for
-                // those minutes cannot tell a slow hook from a hang.
-                drain(&mut run.stdout, &mut record, on_line);
-                drain(&mut run.stderr, &mut record, on_line);
-                std::thread::sleep(PROBE_POLL);
-            }
-            // The child cannot be asked about, so nothing can be waited for
-            // either. Saying so plainly is the answer a shell that cannot be
-            // started gets.
-            Err(error) => {
-                return PushOutcome {
-                    success: false,
-                    output: format!("cannot wait for {name}: {error}"),
-                }
+    let status = match run.wait(None, &mut |_, line| {
+        record.push(&line);
+        on_line(line);
+    }) {
+        Ok(RunEnd::Exited(status)) => status,
+        Ok(RunEnd::StillRunning(_)) => {
+            unreachable!("a wait with no deadline ends only when the child exits")
+        }
+        // The child cannot be asked about, so nothing can be waited for
+        // either. Saying so plainly is the answer a shell that cannot be
+        // started gets.
+        Err(error) => {
+            return PushOutcome {
+                success: false,
+                output: format!("cannot wait for {name}: {error}"),
             }
         }
     };
-
-    // What the command wrote between the last poll and its exit, and then the
-    // line it left unterminated on each stream.
-    drain(&mut run.stdout, &mut record, on_line);
-    drain(&mut run.stderr, &mut record, on_line);
-    for line in [run.stdout.finish(), run.stderr.finish()]
-        .into_iter()
-        .flatten()
-    {
-        record.push(&line);
-        on_line(line);
-    }
 
     let success = status.success();
     let mut text = record.into_text();
@@ -578,180 +575,6 @@ fn run_in(
         success,
         output: text,
     }
-}
-
-/// Report every line `stream` has written since the last read, and keep it.
-///
-/// The record and the caller get the same lines in the same order, because both
-/// are fed here. A drain that also gave its own text back would be a second
-/// account of one stream, and to join two such accounts is what puts the verdict
-/// of a command in the middle of its output rather than at the end.
-fn drain(stream: &mut Stream, record: &mut Record, on_line: &dyn Fn(String)) {
-    for line in stream.new_lines() {
-        record.push(&line);
-        on_line(line);
-    }
-}
-
-/// A run in flight: the shell, and the two files it writes to.
-///
-/// **The files are files, and never pipes.** A pipe is read to its end, and the
-/// end arrives only when the last writer lets go — so a child the command
-/// leaves behind holds the run open long after the shell is gone. `grp` pushes,
-/// and a push starts a credential helper or an agent that does exactly that. A
-/// file has no such wait, and it also cannot fill up and stop the child the way
-/// a pipe that nobody reads does: a pre-push hook that builds a workspace
-/// writes far more than a pipe holds.
-struct RunInFlight {
-    /// The shell, which is what the run waits for.
-    child: Child,
-    /// Where the child writes what it did.
-    stdout: Stream,
-    /// Where the child writes why it stopped.
-    stderr: Stream,
-}
-
-/// One stream of a run: the file the child writes to, and the handle gsw reads
-/// it through.
-///
-/// **The two handles are two handles on purpose.** The child writes at the
-/// offset it inherited, and this reads at an offset of its own — so every read
-/// gives the bytes that arrived since the last one, and neither side moves the
-/// other's place in the file.
-struct Stream {
-    /// The handle the child writes through.
-    ///
-    /// gsw writes nothing to it. It is held open so that the file lives from
-    /// the moment its name goes to the moment the child has a handle of its
-    /// own.
-    writer: File,
-    /// The handle gsw reads through, which has an offset of its own.
-    reader: File,
-    /// What turns the bytes of this stream into lines.
-    ///
-    /// **One splitter for each stream, and it lives as long as the stream
-    /// does.** A splitter holds the bytes of a line that has no terminator yet,
-    /// from one read to the next, and a read stops wherever the child happened
-    /// to be. So a splitter made afresh for each read reports that place as the
-    /// end of a line: a command drawing a progress bar has its stale state
-    /// taken for a row, and a line cut in the middle of a character arrives as
-    /// two rows with a replacement character between them. A splitter shared
-    /// between the two streams is the other half of the same rule, and
-    /// [`crate::lines::LineSplitter`] states it: the tail of one stream would
-    /// join the first line of the other.
-    splitter: LineSplitter,
-}
-
-impl Stream {
-    /// A stream whose file is made in `scratch`, and whose name is then taken
-    /// off it.
-    ///
-    /// **The name goes as soon as both handles are open.** A quit kills the
-    /// thread of a run where it stands, and a thread that dies runs no
-    /// destructor — so a file that still carries a name outlives the session
-    /// that made it, and a rebase whose hook builds a workspace leaves a great
-    /// deal of it behind. A file with no name is the same file: Unix keeps it
-    /// for as long as a process holds it open, so the child goes on writing and
-    /// the reader goes on reading, and the space comes back the moment the last
-    /// of them lets go.
-    ///
-    /// The read handle is opened by name, so it is opened before the name goes.
-    /// It has an offset of its own, which is what makes each read give the bytes
-    /// that arrived since the last one.
-    ///
-    /// **A name that cannot be removed is no reason to refuse the run.** The
-    /// file is there and both handles are open, so the run works exactly as it
-    /// always did and the only cost is one file left in a temporary directory —
-    /// which is what every run cost before this. To fail here would take the
-    /// key away instead.
-    fn new(scratch: &Path) -> std::io::Result<Self> {
-        let file = NamedTempFile::new_in(scratch)?;
-        let reader = file.reopen()?;
-        let (writer, path) = file.into_parts();
-        let _ = path.close();
-        Ok(Self {
-            writer,
-            reader,
-            splitter: LineSplitter::new(),
-        })
-    }
-
-    /// Every line the child has completed since the last read.
-    fn new_lines(&mut self) -> Vec<String> {
-        let bytes = self.new_bytes();
-        self.splitter.feed(&bytes)
-    }
-
-    /// The line the child left unterminated, once it has gone.
-    ///
-    /// A command that exits without a final newline still said something, and
-    /// to drop it is to lose the last line of every command that ends that way.
-    fn finish(&mut self) -> Option<String> {
-        self.splitter.finish()
-    }
-
-    /// Where the child writes this stream.
-    fn writer(&self) -> std::io::Result<Stdio> {
-        Ok(Stdio::from(self.writer.try_clone()?))
-    }
-
-    /// The bytes the child has written since the last read.
-    ///
-    /// A read that fails ends this pass with what it has. The run is still
-    /// going, so the next poll asks again, and an error invented here would put
-    /// words in the command's mouth.
-    fn new_bytes(&mut self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        let mut buffer = [0_u8; 8192];
-        loop {
-            match self.reader.read(&mut buffer) {
-                // The end of the file as it stands. The child writes more after
-                // this, and the next read starts where this one stopped.
-                Ok(0) => break,
-                Ok(read) => bytes.extend_from_slice(&buffer[..read]),
-                // A signal arrived mid-read. Nothing was lost and nothing is
-                // wrong.
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(_) => break,
-            }
-        }
-        bytes
-    }
-}
-
-/// Start `command` in `workdir`, with a file of `scratch` for each of its two
-/// streams.
-fn start(
-    shell: &OsStr,
-    command: &BaseUpdateCommand,
-    workdir: &Path,
-    scratch: &Path,
-) -> std::io::Result<RunInFlight> {
-    let stdout = Stream::new(scratch)?;
-    let stderr = Stream::new(scratch)?;
-
-    // The child is interactive, it carries no `GIT_` variable out of the
-    // environment of gsw but the six a user states on purpose, and it is
-    // detached from the terminal — see [`shell_child`], which states all three
-    // rules and is the one place they are written.
-    let mut builder = shell_child(shell, command.script());
-    builder
-        .current_dir(workdir)
-        .stdin(Stdio::null())
-        // **After the sweep, so it wins.** The sweep keeps the value of this
-        // variable that gsw holds, and this call replaces that value with `0`.
-        // A user who exports the variable again in the rc file still wins,
-        // because the rc file loads inside the child after this value was
-        // placed.
-        .env(TERMINAL_PROMPT_VAR, "0")
-        .stdout(stdout.writer()?)
-        .stderr(stderr.writer()?);
-
-    Ok(RunInFlight {
-        child: builder.spawn()?,
-        stdout,
-        stderr,
-    })
 }
 
 /// Every line a run has written, in arrival order, as one string with a newline
