@@ -949,6 +949,85 @@ mod run_tests {
     }
 
     #[test]
+    fn no_file_of_a_run_keeps_a_name_while_the_run_is_in_flight_or_after_it() {
+        // **A quit during a run kills the thread of that run where it stands,
+        // and a thread that dies runs no destructor.** So a file that still
+        // carries a name stays in the temporary directory for good, and a
+        // rebase of a workspace whose hook writes a great deal leaves a great
+        // deal of it. Unix keeps an open file that has lost its name, so the
+        // child goes on writing and the reader goes on reading, and the space
+        // comes back the moment the last of them lets go.
+        //
+        // The directory is this test's own, so what it reads is the two files
+        // of this run and nothing else on the machine.
+        let stub = StubShell::saying_then_waiting_for_a_gate(FIRST_LINE);
+        let workdir = work_tree();
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let shell = stub.as_shell().to_os_string();
+        let dir = workdir.path().to_path_buf();
+        let scratch_path = scratch.path().to_path_buf();
+        let (tx, rx) = channel();
+        let line_tx = tx.clone();
+        std::thread::spawn(move || {
+            let outcome = run_in(
+                &shell,
+                &default_command(),
+                &dir,
+                &scratch_path,
+                &move |line| {
+                    let _ = line_tx.send(Report::Line(line));
+                },
+            );
+            let _ = tx.send(Report::Done(outcome));
+        });
+
+        // The line says the child is running and has already written, so the
+        // two files of this run exist by now.
+        let first = rx.recv_timeout(GAVE_UP_WITHIN);
+        let in_flight = entries_of(scratch.path());
+        // The gate is opened before the assertions, so the stub ends whatever
+        // this test does next.
+        stub.open_gate();
+        assert!(
+            matches!(&first, Ok(Report::Line(line)) if line == FIRST_LINE),
+            "the run must be in flight and writing: {first:?}",
+        );
+        assert!(
+            in_flight.is_empty(),
+            "a file of a run in flight keeps a name, so a quit leaves it behind for good: \
+             {in_flight:?}",
+        );
+
+        let (_, outcome) = rest_of_the_run(&rx);
+        assert!(
+            outcome.success,
+            "the stub exits 0 once the gate is open: {:?}",
+            outcome.output,
+        );
+        let afterwards = entries_of(scratch.path());
+        assert!(
+            afterwards.is_empty(),
+            "no file may outlive the run: {afterwards:?}",
+        );
+    }
+
+    /// The name of everything in `dir`, in order.
+    fn entries_of(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("read the directory")
+            .map(|entry| {
+                entry
+                    .expect("an entry of the directory")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
     fn a_failure_that_said_nothing_names_the_command_and_the_status() {
         // A failure with nothing to show would paint a blank row, and a blank
         // row under the frame reads as a run that worked. The exit status is
