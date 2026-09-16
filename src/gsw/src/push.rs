@@ -230,6 +230,13 @@ pub(crate) enum PushPrompt {
         caution: bool,
         /// The command this question described, and what `y` runs.
         command: Confirmed,
+        /// What the row says while that command runs, without its age.
+        ///
+        /// Composed here, with the question, because the sentence names the
+        /// act that was confirmed: a press of `R` reports a rebase, and only
+        /// the question knows it was one. [`PushUi::overlay`] puts the age
+        /// after it.
+        running_notice: String,
         /// What to show once this command succeeds. Composed here, with the
         /// question, so the two sentences describe the same act — a push
         /// confirmed as a create reports itself as a create.
@@ -280,6 +287,7 @@ pub(crate) fn prompt_for(
                     branch.clone(),
                     vec!["push".to_string(), "-u".to_string(), remote, branch],
                 )),
+                running_notice: RUNNING_NOTICE.to_string(),
                 success_message,
             }
         }
@@ -296,6 +304,7 @@ pub(crate) fn prompt_for(
                 // time, which is why the command carries the branch this
                 // question was written for.
                 command: Confirmed::Push(PushCommand::new(branch, vec!["push".to_string()])),
+                running_notice: RUNNING_NOTICE.to_string(),
                 success_message: format!("Pushed {commits} {unit} to {target}"),
             }
         }
@@ -710,10 +719,15 @@ enum State {
         hint: String,
         caution: bool,
         command: Confirmed,
+        running_notice: String,
         success_message: String,
     },
-    /// `git push` is running, and this is what it has said so far.
+    /// The command a question described is running, and this is what it has
+    /// said so far.
     Running {
+        /// What the row says about the run, without its age. It comes from the
+        /// question, so the act that was confirmed is the act that is reported.
+        notice: String,
         success_message: String,
         /// When the push started, against the watch loop's injected clock. The
         /// notice reports the age from it, so a hook that takes minutes looks
@@ -987,12 +1001,14 @@ impl PushUi {
                 hint,
                 caution,
                 command,
+                running_notice,
                 success_message,
             } => State::Asking {
                 question,
                 hint,
                 caution,
                 command,
+                running_notice,
                 success_message,
             },
             // A refusal describes the repository as it stood when the key was
@@ -1040,6 +1056,7 @@ impl PushUi {
     pub(crate) fn confirm(&mut self, now: Instant) -> Option<Confirmed> {
         let State::Asking {
             command,
+            running_notice,
             success_message,
             ..
         } = std::mem::replace(&mut self.state, State::Idle)
@@ -1047,6 +1064,7 @@ impl PushUi {
             return None;
         };
         self.state = State::Running {
+            notice: running_notice,
             success_message,
             started_at: now,
             recent: VecDeque::new(),
@@ -1475,10 +1493,13 @@ impl PushUi {
                 }]
             }
             State::Running {
-                started_at, recent, ..
+                notice,
+                started_at,
+                recent,
+                ..
             } => {
                 let elapsed = now.saturating_duration_since(*started_at);
-                let notice = format!("{RUNNING_NOTICE} ({})", format_age_detailed(elapsed));
+                let notice = format!("{notice} ({})", format_age_detailed(elapsed));
                 let mut rows = vec![truncate_right(&notice, width)];
 
                 // The window is sized here rather than left to the clamp at
@@ -1676,7 +1697,10 @@ pub(crate) fn confirm_hint(verb: &str) -> String {
 const WINDOW_INDENT: &str = "  ";
 
 /// What a running push says while the network round trip is in flight.
-const RUNNING_NOTICE: &str = "Pushing…";
+///
+/// The notice of a push alone. Every question carries its own now, because a
+/// rebase that runs for minutes must say on the row which act is running.
+pub(crate) const RUNNING_NOTICE: &str = "Pushing…";
 
 /// How long a status message gsw wrote itself stays under the frame.
 ///
@@ -3174,6 +3198,33 @@ mod ui_tests {
             ui.confirm(t0()),
             None,
             "a second y must not start a second run",
+        );
+    }
+
+    #[test]
+    fn a_running_base_update_takes_its_notice_from_the_question_and_counts_the_time() {
+        // The run carries no deadline, because a pre-push hook of this
+        // workspace builds and tests every crate in it and takes minutes. So
+        // the notice names the act that is running and counts the time, and a
+        // run that hangs shows on the screen as a run that hangs. `Pushing…`
+        // here would name neither the act nor the command.
+        let now = t0();
+        let mut ui = asking_base_update(BaseUpdate::Rebase, now);
+        ui.confirm(now).expect("the question must confirm");
+        assert_eq!(
+            painted(&mut ui, tall_pane(120), now + Duration::from_secs(72)),
+            "Rebasing gsw-push onto main with grp… (1m12s)",
+        );
+    }
+
+    #[test]
+    fn a_running_merge_says_that_it_is_merging() {
+        let now = t0();
+        let mut ui = asking_base_update(BaseUpdate::Merge, now);
+        ui.confirm(now).expect("the question must confirm");
+        assert_eq!(
+            painted(&mut ui, tall_pane(120), now + Duration::from_secs(4)),
+            "Merging main into gsw-push with gmp… (4s)",
         );
     }
 

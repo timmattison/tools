@@ -354,6 +354,7 @@ pub(crate) fn base_update_prompt_for(
         question: update.question(branch, base, snapshot.commits_behind, command),
         hint: crate::push::confirm_hint(update.verb()),
         caution: update.caution(),
+        running_notice: crate::push::RUNNING_NOTICE.to_string(),
         command: Confirmed::BaseUpdate(BaseUpdateCommand::new(
             update,
             branch,
