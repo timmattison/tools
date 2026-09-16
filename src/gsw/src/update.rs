@@ -337,6 +337,7 @@ pub(crate) fn base_update_prompt_for(
 
     PushPrompt::Confirm {
         question: update.question(branch, base, snapshot.commits_behind, command),
+        hint: crate::push::confirm_hint("push"),
         creates_remote_branch: false,
         command: Confirmed::BaseUpdate(BaseUpdateCommand::new(
             update,
@@ -808,6 +809,20 @@ mod question_tests {
         question_running(snapshot, update, update.default_command())
     }
 
+    /// The keys that answer the question `update` asks about `snapshot`.
+    ///
+    /// # Panics
+    ///
+    /// Panics where the act is refused, as [`question_running`] does.
+    fn hint(snapshot: &Snapshot, update: BaseUpdate) -> String {
+        match prompt(snapshot, update, update.default_command()) {
+            PushPrompt::Confirm { hint, .. } => hint,
+            PushPrompt::Refuse { message } => {
+                panic!("the act must be offered, and it was refused with {message:?}")
+            }
+        }
+    }
+
     /// Why `update` refuses to act on `snapshot`.
     ///
     /// # Panics
@@ -861,6 +876,22 @@ mod question_tests {
         assert_eq!(
             question_running(&behind(2), BaseUpdate::Rebase, "grp --fork-point"),
             "Rebase issue-12 onto main (2 commits behind), then push with grp --fork-point?",
+        );
+    }
+
+    #[test]
+    fn the_hint_names_the_act_that_enter_carries_out() {
+        // The hint is spelled out rather than the usual `[y/N]`, because Enter
+        // confirms — so the word after `Enter =` is the whole promise. A hint
+        // that said `push` under the `R` question would name the act of another
+        // key on the one prompt in gsw that force-pushes.
+        assert_eq!(
+            hint(&behind(5), BaseUpdate::Rebase),
+            "[y/Enter = rebase, n/Esc = cancel]",
+        );
+        assert_eq!(
+            hint(&behind(5), BaseUpdate::Merge),
+            "[y/Enter = merge, n/Esc = cancel]",
         );
     }
 

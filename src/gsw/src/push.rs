@@ -209,9 +209,14 @@ pub(crate) enum Confirmed {
 pub(crate) enum PushPrompt {
     /// Ask before running the command.
     Confirm {
-        /// The question, without the key hint — the display layer owns the
-        /// `[y/N]` convention.
+        /// The question, without the key hint, which is the value below.
         question: String,
+        /// The keys that answer the question, and what each one does, as
+        /// [`confirm_hint`] spells them. It rides with the question because
+        /// three keys ask one now, and each of them binds Enter to an act of
+        /// its own — so the hint is a fact about the question rather than a
+        /// convention the row can hold on its own.
+        hint: String,
         /// Whether this push creates a branch on the remote. The display layer
         /// colors this case differently, so a create can never be mistaken for
         /// a routine update at a glance.
@@ -260,6 +265,7 @@ pub(crate) fn prompt_for(
             let success_message = format!("Created {remote}/{branch}");
             PushPrompt::Confirm {
                 question,
+                hint: confirm_hint(PUSH_VERB),
                 creates_remote_branch: true,
                 // `-u` records the new remote branch as the upstream, so the
                 // push after this one is a plain update.
@@ -274,6 +280,7 @@ pub(crate) fn prompt_for(
             let unit = if commits == 1 { "commit" } else { "commits" };
             PushPrompt::Confirm {
                 question: format!("Push {commits} {unit} to {target}?"),
+                hint: confirm_hint(PUSH_VERB),
                 creates_remote_branch: false,
                 // Bare `push`: git reads the remote and the refspec out of the
                 // branch config, so a branch tracking something other than the
@@ -693,6 +700,7 @@ enum State {
     /// mode below can never promise a question the user was not shown.
     Asking {
         question: String,
+        hint: String,
         creates_remote_branch: bool,
         command: Confirmed,
         success_message: String,
@@ -954,11 +962,13 @@ impl PushUi {
             PushPrompt::Confirm { .. } if Overlay::rows_to_spare(dims) == 0 => State::Idle,
             PushPrompt::Confirm {
                 question,
+                hint,
                 creates_remote_branch,
                 command,
                 success_message,
             } => State::Asking {
                 question,
+                hint,
                 creates_remote_branch,
                 command,
                 success_message,
@@ -1403,10 +1413,11 @@ impl PushUi {
             State::Idle | State::Listing { .. } => Vec::new(),
             State::Asking {
                 question,
+                hint,
                 creates_remote_branch,
                 ..
             } => {
-                let line = truncate_right(&format!("{question}  {CONFIRM_HINT}"), width);
+                let line = truncate_right(&format!("{question}  {hint}"), width);
                 // Yellow marks the push that puts something new on a shared
                 // remote. The wording says so too — the color is what carries
                 // it in the half second before the words are read.
@@ -1585,19 +1596,30 @@ impl Overlay {
     }
 }
 
-/// The key hint shown with every confirmation.
+/// The word every message about a push of gsw's own uses for it.
+const PUSH_VERB: &str = "push";
+
+/// The key hint shown with a confirmation, for an act that `verb` names.
 ///
 /// Spelled out rather than the usual `[y/N]`. That convention's capital letter
 /// means "this is what Enter gives you", and Enter *confirms* here — so `[y/N]`
 /// would promise that the key people reach for by reflex is the safe one, on
-/// the one prompt in gsw that writes to a shared remote.
+/// the prompts in gsw that write to a shared remote.
 ///
 /// The same reasoning is why a question this hint cannot be drawn with is never
 /// raised (see [`PushUi::request`], and [`PushUi::overlay`] for the pane that
 /// shrinks under one). What makes Enter safe to bind to a push is that the user
 /// is looking at the sentence saying so. Off the screen, the binding keeps the
 /// risk and loses the sentence.
-const CONFIRM_HINT: &str = "[y/Enter = push, n/Esc = cancel]";
+///
+/// One function rather than one constant for each key, because three keys now
+/// ask a question and three spellings of one convention are three things that
+/// drift apart. The verb is the act of the question the hint goes under, so the
+/// promise names what Enter does here rather than what it does under some other
+/// key.
+pub(crate) fn confirm_hint(verb: &str) -> String {
+    format!("[y/Enter = {verb}, n/Esc = cancel]")
+}
 
 /// What the window's rows are indented by.
 ///
@@ -3005,7 +3027,7 @@ mod ui_tests {
         // that lies about the riskiest key on the prompt is worse than a long
         // one.
         assert!(
-            overlay.contains(CONFIRM_HINT),
+            overlay.contains(&confirm_hint(PUSH_VERB)),
             "the overlay owns the key hint, got {overlay:?}",
         );
     }
@@ -3025,7 +3047,7 @@ mod ui_tests {
         assert!(
             !ui.overlay(tall_pane(80), t0())
                 .text()
-                .contains(CONFIRM_HINT),
+                .contains(&confirm_hint(PUSH_VERB)),
             "a refusal must not offer keys that do nothing",
         );
     }
@@ -4226,6 +4248,7 @@ mod ui_tests {
         type Replace = fn(&mut PushUi, Instant);
 
         let now = t0();
+        let push_hint = confirm_hint(PUSH_VERB);
         let replacements: [(&str, Replace, &str); 4] = [
             (
                 "a notice",
@@ -4247,7 +4270,7 @@ mod ui_tests {
             (
                 "a press of p",
                 |ui, now| ui.request(&snapshot(None), tall_pane(80), now),
-                CONFIRM_HINT,
+                &push_hint,
             ),
         ];
 
