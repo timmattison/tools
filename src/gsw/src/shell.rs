@@ -152,6 +152,30 @@ mod tests {
     }
 
     #[test]
+    fn a_default_of_nothing_but_space_names_no_command() {
+        // The one rule of this type is that the value is never empty, and the
+        // default arrives through a parameter — so the rule must hold against
+        // the default as well as against the value. A key whose own default is
+        // empty is a key with no command behind it, which is the answer an
+        // empty variable already gets.
+        assert_eq!(
+            ShellCommand::new(None, ""),
+            None,
+            "an empty default must name no command",
+        );
+        assert_eq!(
+            ShellCommand::new(None, "   "),
+            None,
+            "a default with nothing but space in it must name no command",
+        );
+        assert_eq!(
+            ShellCommand::new(Some("  "), "\t"),
+            None,
+            "a value of space and a default of space together must name no command",
+        );
+    }
+
+    #[test]
     fn the_space_around_a_name_is_dropped() {
         // A variable written in an rc file collects space. The name inside it
         // is still the name.
