@@ -1111,14 +1111,40 @@ pub(crate) mod stub_shell {
         /// out. A separate process flushes when it ends.
         pub(crate) fn saying_then_waiting_for_a_gate(said: &str) -> Self {
             Self::new(&format!(
-                "{EXTERNAL_PRINTF} '%s\\n' {}\n{}",
+                "{EXTERNAL_PRINTF} '%s\\n' {}\n{}\nexit 0",
                 shell_quote(said),
                 Self::gate_wait(),
             ))
         }
 
+        /// A stub that says `said`, starts a row it draws over, waits for its
+        /// gate, and then draws that row again and ends it.
+        ///
+        /// `states` is what the row reads before the gate and after it. A
+        /// command that draws a progress bar writes exactly this: a carriage
+        /// return takes the cursor back to column zero, and the next state is
+        /// printed over the one before it, so the row the user sees is the last
+        /// state and never the ones under it.
+        ///
+        /// **The two writes are two writes on purpose.** A reader that starts a
+        /// splitter afresh for each read reports the state it happened to stop
+        /// on as a row of its own, and the gate is what makes the split between
+        /// the reads a fact rather than a race.
+        pub(crate) fn redrawing_a_row(said: &str, states: [&str; 2]) -> Self {
+            Self::new(&format!(
+                "{EXTERNAL_PRINTF} '%s\\n%s' {} {}\n{}\n{EXTERNAL_PRINTF} '\\r%s\\n' {}\nexit 0",
+                shell_quote(said),
+                shell_quote(states[0]),
+                Self::gate_wait(),
+                shell_quote(states[1]),
+            ))
+        }
+
         /// The shell that waits for [`GATE_FILE`], and exits 1 where it never
         /// arrived.
+        ///
+        /// It carries no exit of its own for the gate that opened, so a caller
+        /// can put more work after it.
         fn gate_wait() -> String {
             format!(
                 "i=0\n\
@@ -1127,8 +1153,7 @@ pub(crate) mod stub_shell {
                  \tsleep {GATE_POLL}\n\
                  \ti=$((i + 1))\n\
                  done\n\
-                 [ -f {GATE_FILE} ] || exit 1\n\
-                 exit 0",
+                 [ -f {GATE_FILE} ] || exit 1",
             )
         }
 

@@ -744,6 +744,13 @@ mod run_tests {
     /// What the gated stub says before it waits.
     const FIRST_LINE: &str = "Rebasing (1/3)";
 
+    /// The state a drawn row holds before the gate opens.
+    const PROGRESS_FIRST: &str = "Writing objects:  12%";
+
+    /// The state that same row holds after it, which is the state the user
+    /// reads.
+    const PROGRESS_LAST: &str = "Writing objects: 100%";
+
     #[test]
     fn a_line_reaches_the_caller_before_the_command_exits() {
         // This is the whole of the live window. `grp` runs a pre-push hook that
@@ -787,7 +794,7 @@ mod run_tests {
             }
         }
 
-        let outcome = last_report(&rx);
+        let (_, outcome) = rest_of_the_run(&rx);
         assert!(
             outcome.success,
             "the stub exits 0 once the gate is open: {:?}",
@@ -800,17 +807,68 @@ mod run_tests {
         );
     }
 
-    /// The outcome of a run, read off `reports` past every line before it.
+    #[test]
+    fn a_row_a_command_draws_over_shows_its_newest_state_on_one_row() {
+        // A push draws its progress by going back to column zero and printing
+        // over the row it drew, so `12%` and `100%` are two states of one row
+        // and never two rows. The window under the frame is six rows tall, and
+        // a state that is already painted over must not spend one of them.
+        //
+        // The two writes land in two reads, because the gate opens between
+        // them. A reader that starts a splitter afresh for each read reports
+        // whatever state it stopped on, so the stale state takes a row of its
+        // own — which is what this asserts against.
+        let stub = StubShell::redrawing_a_row(FIRST_LINE, [PROGRESS_FIRST, PROGRESS_LAST]);
+        let workdir = work_tree();
+        let shell = stub.as_shell().to_os_string();
+        let dir = workdir.path().to_path_buf();
+        let (tx, rx) = channel();
+        let line_tx = tx.clone();
+        std::thread::spawn(move || {
+            let outcome = run(&shell, &default_command(), &dir, &move |line| {
+                let _ = line_tx.send(Report::Line(line));
+            });
+            let _ = tx.send(Report::Done(outcome));
+        });
+
+        let first = rx.recv_timeout(GAVE_UP_WITHIN);
+        // The gate is opened before the assertion, so the stub ends whatever
+        // this test does next.
+        stub.open_gate();
+        assert!(
+            matches!(&first, Ok(Report::Line(line)) if line == FIRST_LINE),
+            "the line before the drawn row must arrive first: {first:?}",
+        );
+
+        let (lines, outcome) = rest_of_the_run(&rx);
+        assert!(
+            outcome.success,
+            "the stub exits 0 once the gate is open: {:?}",
+            outcome.output,
+        );
+        assert_eq!(
+            lines,
+            vec![PROGRESS_LAST.to_string()],
+            "the drawn row must arrive once, in its newest state",
+        );
+    }
+
+    /// Every line `reports` still carries, and the outcome that closes it.
     ///
     /// Bounded, because a run that never ends would otherwise hold the suite
     /// for the life of the session.
-    fn last_report(reports: &Receiver<Report>) -> PushOutcome {
+    ///
+    /// # Panics
+    ///
+    /// Panics where no outcome arrives inside [`GAVE_UP_WITHIN`].
+    fn rest_of_the_run(reports: &Receiver<Report>) -> (Vec<String>, PushOutcome) {
         let give_up_at = Instant::now() + GAVE_UP_WITHIN;
+        let mut lines = Vec::new();
         loop {
             let left = give_up_at.saturating_duration_since(Instant::now());
             match reports.recv_timeout(left).expect("the run must end") {
-                Report::Line(_) => {}
-                Report::Done(outcome) => return outcome,
+                Report::Line(line) => lines.push(line),
+                Report::Done(outcome) => return (lines, outcome),
             }
         }
     }
