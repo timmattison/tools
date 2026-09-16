@@ -7,6 +7,14 @@
 //! be tested without a network or a pty. Only [`run_push`], the blocking half of
 //! [`spawn`], starts a process: the push itself, and the read of HEAD that
 //! checks the repository is still on the branch the confirmation named.
+//!
+//! **The row under the frame is here too, and it is not the push's alone.**
+//! [`PushUi`] owns every question watch mode asks, every run it shows in
+//! flight, and the input mode that goes with each — for `p`, and for the keys
+//! that rebase the branch onto the base or merge the base into it
+//! ([`crate::update`]). One owner, because one row can carry one question at a
+//! time, and because a second owner could disagree with the first about which
+//! question the user is looking at.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -683,34 +691,52 @@ pub(crate) fn current_branch(workdir: &Path) -> Option<String> {
     Some(name)
 }
 
-/// How a finished `git push` came out.
+/// How a finished run came out: a `git push`, or the user's own command behind
+/// `R` or `M`.
 ///
-/// `output` is everything the child said on both pipes, in the order it was
+/// One type for both, because the row reports both the same way — a command
+/// that either worked or wrote a reason — and because the words that report
+/// each of them come from the question rather than from here (see
+/// [`SuccessReport`]).
+///
+/// `output` is everything the child said on both streams, in the order it was
 /// read, kept whole: choosing which of it to show is [`PushUi`]'s job, and a
 /// runner that pre-digested it would decide the wording from a place with no
 /// idea how many rows are free.
 ///
 /// The order is load-bearing. [`failure_lines`] shows the last lines, and on a
 /// failed pre-push hook the last line is git's verdict on stderr — which comes
-/// after a hook that wrote to stdout, and only after.
+/// after a hook that wrote to stdout, and only after. The report of a run that
+/// worked reads the last line for the same reason: `grp` says there that it
+/// skipped the push.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PushOutcome {
-    /// Whether `git push` exited zero.
+    /// Whether the command exited zero.
     pub success: bool,
-    /// Everything git wrote, both streams, in the order they were captured.
+    /// Everything the command wrote, both streams, in the order they were
+    /// captured.
     pub output: String,
 }
 
 /// Everything watch mode puts under the frame, and the input mode that goes
 /// with it.
 ///
-/// The name says `Push` because the push is what owns the row and what every
-/// state below describes: a question, a push in flight, and the outcome of
-/// one. It is **not** the push's alone. The `G` key runs a command of the
-/// user's own, and a command that refuses says why — so
-/// [`PushUi::post_error`], [`PushUi::post_notice`] and
-/// [`PushUi::post_progress`] are the doors another feature posts through, and
-/// they are what keeps the features from painting over each other.
+/// The name says `Push` because the push is the act every state below was
+/// written for: a question, a run in flight, and the outcome of one. It is
+/// **not** the push's alone, and it owns two other kinds of thing.
+///
+/// A question of any key comes through one of two doors — [`PushUi::request`]
+/// for `p`, [`PushUi::request_base_update`] for the keys that rebase the branch
+/// onto the base or merge the base into it — and each question carries its own
+/// words: the hint that names what Enter does, the notice its run shows, and
+/// the report it leaves behind. The states below therefore never learn which
+/// key asked, and a third key that asks a question adds no state here.
+///
+/// A message from a feature that asks nothing comes through
+/// [`PushUi::post_error`], [`PushUi::post_notice`] or
+/// [`PushUi::post_progress`] — the `G` key runs a command of the user's own,
+/// and a command that refuses says why. Those doors are what keeps the features
+/// from painting over each other.
 ///
 /// Watch mode holds one of these and asks it two questions — what mode are we
 /// in, and what does the pane show. It never learns whether a prompt or an
@@ -1134,12 +1160,14 @@ impl PushUi {
         Some(command)
     }
 
-    /// Handle one line of a running push's output.
+    /// Handle one line of a running command's output.
     ///
-    /// Ignored in every other state. The reader threads are joined before the
-    /// outcome is sent, so a line cannot really arrive after the push
-    /// finished — but a window that a late line could reopen would paint over
-    /// the error the user is reading, and the rule costs nothing to state.
+    /// Ignored in every other state. A line cannot really arrive after the run
+    /// that wrote it has finished — the push joins its reader threads before it
+    /// reports, and a base update reads its files and reports its last lines on
+    /// the one thread that then reports the outcome — but a window that a late
+    /// line could reopen would paint over the error the user is reading, and
+    /// the rule costs nothing to state.
     pub(crate) fn output_line(&mut self, line: String) {
         let State::Running { recent, .. } = &mut self.state else {
             return;
