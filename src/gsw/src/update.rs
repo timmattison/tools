@@ -254,9 +254,10 @@ const TERMINAL_PROMPT_VAR: &str = "GIT_TERMINAL_PROMPT";
 /// the way it reports a push: both are a command that either worked or wrote a
 /// reason.
 ///
-/// **There is no deadline.** A pre-push hook in this workspace builds and tests
-/// a workspace, which takes minutes, and `grp` runs one. The run ends when the
-/// shell exits.
+/// **There is no deadline.** `grp` pushes, and a pre-push hook of this
+/// workspace builds and tests every crate in it, which takes minutes. The run
+/// ends when the shell exits, and the notice counts the time — so a run that
+/// hangs shows on the screen as a run that hangs.
 fn run(
     shell: &OsStr,
     command: &BaseUpdateCommand,
