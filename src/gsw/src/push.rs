@@ -7,6 +7,14 @@
 //! be tested without a network or a pty. Only [`run_push`], the blocking half of
 //! [`spawn`], starts a process: the push itself, and the read of HEAD that
 //! checks the repository is still on the branch the confirmation named.
+//!
+//! **The row under the frame is here too, and it is not the push's alone.**
+//! [`PushUi`] owns every question watch mode asks, every run it shows in
+//! flight, and the input mode that goes with each — for `p`, and for the keys
+//! that rebase the branch onto the base or merge the base into it
+//! ([`crate::update`]). One owner, because one row can carry one question at a
+//! time, and because a second owner could disagree with the first about which
+//! question the user is looking at.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -20,6 +28,8 @@ use crate::child::detach_from_terminal;
 use crate::lines::LineSplitter;
 use crate::render::{Snapshot, UpstreamStatus};
 use crate::repo::DETACHED_HEAD;
+use crate::shell::ShellCommand;
+use crate::update::{base_update_prompt_for, BaseUpdate, BaseUpdateCommand};
 use crate::watch::{Dimensions, InputMode};
 use crate::worktrees::WorktreeList;
 use textfit::truncate_right;
@@ -165,37 +175,136 @@ impl PushCommand {
     }
 }
 
-/// What the watch loop does when the user presses `p`.
+/// What a confirmation runs: a push of gsw's own, or a command of the user's
+/// that brings the branch up to date with the base.
 ///
-/// This is the whole interface [`prompt_for`] hands back, and it is deliberately
-/// two cases rather than five: the caller asks a question or shows a message,
-/// and never learns which plan produced either. A [`PushPlan`] variant added
-/// later — a rejected force push, a protected branch — changes the wording here
-/// without touching the loop that displays it.
+/// One value, because one row asks every question of watch mode and one key
+/// answers each of them. `y` means "run what the question described", and the
+/// question is the only thing that knows what that is — so the answer carries
+/// the work itself rather than a name the loop would have to look the work up
+/// by. A second value beside this one would be a second thing for `y` to
+/// consult, and the two could disagree about which question is on the screen.
+///
+/// Each variant is built only by the function that composes its own question,
+/// so a command nobody confirmed cannot be assembled somewhere else and handed
+/// to a runner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Confirmed {
+    /// A push, as [`prompt_for`] planned it.
+    Push(PushCommand),
+    /// A rebase onto the base or a merge of the base, as
+    /// [`crate::update::base_update_prompt_for`] planned it. The command is the
+    /// user's own, and it pushes the branch itself once it has finished.
+    BaseUpdate(BaseUpdateCommand),
+}
+
+/// What the row says about a command that worked.
+///
+/// Two cases, because two kinds of command report differently. A push is gsw's
+/// own work, so gsw's sentence is the whole of what happened. `grp` and `gmp`
+/// are the user's, and each of them reports a push it skipped only in its last
+/// line — so gsw's sentence alone would tell the user that the branch is on the
+/// remote when it is not.
+///
+/// The question composes this, beside the sentence and the notice, so the act
+/// that was confirmed is the act that is reported. A flag that
+/// [`PushUi::finished`] read instead would put the choice in the one place that
+/// no longer knows which question was asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SuccessReport {
+    /// gsw's sentence, and nothing under it.
+    Alone {
+        /// What gsw says the command did.
+        sentence: String,
+    },
+    /// gsw's sentence, and under it the last line with text that the command
+    /// wrote.
+    WithLastLine {
+        /// What gsw says the command did.
+        sentence: String,
+    },
+}
+
+impl SuccessReport {
+    /// The rows this report puts under the frame, for a command that wrote
+    /// `output`.
+    ///
+    /// The last line with text in it, by the rule
+    /// [`crate::shell::last_with_text`] states: a command says what it was
+    /// doing and then says why it stopped, and a command that ends its last
+    /// line with a newline leaves an empty line after it. A run that said
+    /// nothing leaves gsw's sentence alone, because a blank row under the frame
+    /// reads as a run that said something not worth showing.
+    ///
+    /// The row is indented by [`WINDOW_INDENT`], as the rows of the window of a
+    /// run in flight are, because it is the command speaking inside gsw's
+    /// frame.
+    fn rows(self, output: &str) -> Vec<String> {
+        match self {
+            Self::Alone { sentence } => vec![sentence],
+            Self::WithLastLine { sentence } => {
+                let mut rows = vec![sentence];
+                rows.extend(
+                    crate::shell::last_with_text(output.lines())
+                        .map(|last| format!("{WINDOW_INDENT}{last}")),
+                );
+                rows
+            }
+        }
+    }
+}
+
+/// What the watch loop does when the user presses a key that runs something.
+///
+/// This is the whole interface [`prompt_for`] hands back, and
+/// [`crate::update::base_update_prompt_for`] hands back the same thing for the
+/// keys that rebase onto the base or merge it in. It is deliberately two cases
+/// rather than one for each plan: the caller asks a question or shows a
+/// message, and never learns which plan produced either. A [`PushPlan`] variant
+/// added later — a rejected force push, a protected branch — changes the
+/// wording here without touching the loop that displays it.
 ///
 /// [`PushPrompt::Confirm`] carries the command with the question, so the
-/// arguments cannot be requested for a push that must never run. The invariant
-/// is structural: there is no way to hold a `Confirm` without holding the exact
-/// [`PushCommand`] the confirmation described — the argument list *and* the
-/// branch it was written for, which is what the runner re-checks before it
-/// pushes.
+/// arguments cannot be requested for a command that must never run. The
+/// invariant is structural: there is no way to hold a `Confirm` without holding
+/// the exact [`Confirmed`] the question described — for a push, the argument
+/// list *and* the branch it was written for, which is what the runner re-checks
+/// before it pushes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PushPrompt {
-    /// Ask before running the push.
+    /// Ask before running the command.
     Confirm {
-        /// The question, without the key hint — the display layer owns the
-        /// `[y/N]` convention.
+        /// The question, without the key hint, which is the value below.
         question: String,
-        /// Whether this push creates a branch on the remote. The display layer
-        /// colors this case differently, so a create can never be mistaken for
-        /// a routine update at a glance.
-        creates_remote_branch: bool,
-        /// The branch and the arguments this question described.
-        command: PushCommand,
-        /// What to show once this push succeeds. Composed here, with the
+        /// The keys that answer the question, and what each one does, as
+        /// [`confirm_hint`] spells them. It rides with the question because
+        /// three keys ask one now, and each of them binds Enter to an act of
+        /// its own — so the hint is a fact about the question rather than a
+        /// convention the row can hold on its own.
+        hint: String,
+        /// Whether this question deserves the color of one the user must read
+        /// twice.
+        ///
+        /// Two acts earn it, and for the same reason. A push that creates a
+        /// remote branch puts something on a shared remote that nobody has
+        /// seen, and a rebase rewrites every commit of the branch and then
+        /// force-pushes the result. Neither can be allowed to look like the
+        /// routine act beside it, and the color is what carries that in the
+        /// half second before the words are read.
+        caution: bool,
+        /// The command this question described, and what `y` runs.
+        command: Confirmed,
+        /// What the row says while that command runs, without its age.
+        ///
+        /// Composed here, with the question, because the sentence names the
+        /// act that was confirmed: a press of `R` reports a rebase, and only
+        /// the question knows it was one. [`PushUi::overlay`] puts the age
+        /// after it.
+        running_notice: String,
+        /// What to show once this command succeeds. Composed here, with the
         /// question, so the two sentences describe the same act — a push
         /// confirmed as a create reports itself as a create.
-        success_message: String,
+        success: SuccessReport,
     },
     /// Run nothing and show this instead. Not an error: the common cause is a
     /// branch that is already fully pushed.
@@ -231,32 +340,40 @@ pub(crate) fn prompt_for(
         // reads it in the half second before pressing `y`.
         PushPlan::Create { remote, branch } => {
             let question = format!("Create new remote branch {remote}/{branch}?");
-            let success_message = format!("Created {remote}/{branch}");
+            let success = SuccessReport::Alone {
+                sentence: format!("Created {remote}/{branch}"),
+            };
             PushPrompt::Confirm {
                 question,
-                creates_remote_branch: true,
+                hint: confirm_hint(PUSH_VERB),
+                caution: true,
                 // `-u` records the new remote branch as the upstream, so the
                 // push after this one is a plain update.
-                command: PushCommand::new(
+                command: Confirmed::Push(PushCommand::new(
                     branch.clone(),
                     vec!["push".to_string(), "-u".to_string(), remote, branch],
-                ),
-                success_message,
+                )),
+                running_notice: RUNNING_NOTICE.to_string(),
+                success,
             }
         }
         PushPlan::Update { target, commits } => {
             let unit = if commits == 1 { "commit" } else { "commits" };
             PushPrompt::Confirm {
                 question: format!("Push {commits} {unit} to {target}?"),
-                creates_remote_branch: false,
+                hint: confirm_hint(PUSH_VERB),
+                caution: false,
                 // Bare `push`: git reads the remote and the refspec out of the
                 // branch config, so a branch tracking something other than the
                 // repository's default remote still goes to the right place.
                 // Which branch's config it reads is decided by HEAD at exec
                 // time, which is why the command carries the branch this
                 // question was written for.
-                command: PushCommand::new(branch, vec!["push".to_string()]),
-                success_message: format!("Pushed {commits} {unit} to {target}"),
+                command: Confirmed::Push(PushCommand::new(branch, vec!["push".to_string()])),
+                running_notice: RUNNING_NOTICE.to_string(),
+                success: SuccessReport::Alone {
+                    sentence: format!("Pushed {commits} {unit} to {target}"),
+                },
             }
         }
         PushPlan::UpToDate { target } => PushPrompt::Refuse {
@@ -546,8 +663,19 @@ fn drain(stream: Option<impl std::io::Read>, report: &(dyn Fn(String) + Sync)) {
 /// [`crate::repo::branch_name`] and the header gsw draws. git refuses `HEAD` as
 /// a branch name, so it can never equal a branch a confirmation named — a
 /// detached checkout always reads as a change.
-fn current_branch(workdir: &Path) -> Option<String> {
-    let output = Command::new("git")
+///
+/// **The child sheds the inherited git environment.** git obeys the environment
+/// before it obeys the directory it was pointed at, so a `gsw` started from
+/// inside a hook holds a `GIT_DIR` that answers this question about the
+/// repository being committed to. That answer is some other branch, or no
+/// branch at all, and every confirmation would then be refused as a checkout
+/// that never happened. The rule is the `GIT_` prefix and never a list of
+/// names, and the six names of [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`] stay
+/// because a person sets each of those on purpose — this runs for that person.
+pub(crate) fn current_branch(workdir: &Path) -> Option<String> {
+    let mut command = Command::new("git");
+    gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
+    let output = command
         .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
         .current_dir(workdir)
         .stdin(Stdio::null())
@@ -563,34 +691,52 @@ fn current_branch(workdir: &Path) -> Option<String> {
     Some(name)
 }
 
-/// How a finished `git push` came out.
+/// How a finished run came out: a `git push`, or the user's own command behind
+/// `R` or `M`.
 ///
-/// `output` is everything the child said on both pipes, in the order it was
+/// One type for both, because the row reports both the same way — a command
+/// that either worked or wrote a reason — and because the words that report
+/// each of them come from the question rather than from here (see
+/// [`SuccessReport`]).
+///
+/// `output` is everything the child said on both streams, in the order it was
 /// read, kept whole: choosing which of it to show is [`PushUi`]'s job, and a
 /// runner that pre-digested it would decide the wording from a place with no
 /// idea how many rows are free.
 ///
 /// The order is load-bearing. [`failure_lines`] shows the last lines, and on a
 /// failed pre-push hook the last line is git's verdict on stderr — which comes
-/// after a hook that wrote to stdout, and only after.
+/// after a hook that wrote to stdout, and only after. The report of a run that
+/// worked reads the last line for the same reason: `grp` says there that it
+/// skipped the push.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PushOutcome {
-    /// Whether `git push` exited zero.
+    /// Whether the command exited zero.
     pub success: bool,
-    /// Everything git wrote, both streams, in the order they were captured.
+    /// Everything the command wrote, both streams, in the order they were
+    /// captured.
     pub output: String,
 }
 
 /// Everything watch mode puts under the frame, and the input mode that goes
 /// with it.
 ///
-/// The name says `Push` because the push is what owns the row and what every
-/// state below describes: a question, a push in flight, and the outcome of
-/// one. It is **not** the push's alone. The `G` key runs a command of the
-/// user's own, and a command that refuses says why — so
-/// [`PushUi::post_error`], [`PushUi::post_notice`] and
-/// [`PushUi::post_progress`] are the doors another feature posts through, and
-/// they are what keeps the features from painting over each other.
+/// The name says `Push` because the push is the act every state below was
+/// written for: a question, a run in flight, and the outcome of one. It is
+/// **not** the push's alone, and it owns two other kinds of thing.
+///
+/// A question of any key comes through one of two doors — [`PushUi::request`]
+/// for `p`, [`PushUi::request_base_update`] for the keys that rebase the branch
+/// onto the base or merge the base into it — and each question carries its own
+/// words: the hint that names what Enter does, the notice its run shows, and
+/// the report it leaves behind. The states below therefore never learn which
+/// key asked, and a third key that asks a question adds no state here.
+///
+/// A message from a feature that asks nothing comes through
+/// [`PushUi::post_error`], [`PushUi::post_notice`] or
+/// [`PushUi::post_progress`] — the `G` key runs a command of the user's own,
+/// and a command that refuses says why. Those doors are what keeps the features
+/// from painting over each other.
 ///
 /// Watch mode holds one of these and asks it two questions — what mode are we
 /// in, and what does the pane show. It never learns whether a prompt or an
@@ -635,8 +781,9 @@ pub(crate) struct PushUi {
     truecolor: bool,
 }
 
-/// What the push feature is currently doing. Private: the loop drives this
-/// through [`PushUi`]'s methods and reads it only through
+/// What the row under the frame is currently doing: for a push, for a rebase
+/// onto the base, and for a merge of the base alike. Private: the loop drives
+/// this through [`PushUi`]'s methods and reads it only through
 /// [`PushUi::mode`]/[`PushUi::overlay`].
 enum State {
     /// Nothing on screen and nothing pending.
@@ -656,16 +803,25 @@ enum State {
     /// mode below can never promise a question the user was not shown.
     Asking {
         question: String,
-        creates_remote_branch: bool,
-        command: PushCommand,
-        success_message: String,
+        hint: String,
+        caution: bool,
+        command: Confirmed,
+        running_notice: String,
+        success: SuccessReport,
     },
-    /// `git push` is running, and this is what it has said so far.
+    /// The command a question described is running, and this is what it has
+    /// said so far.
     Running {
-        success_message: String,
-        /// When the push started, against the watch loop's injected clock. The
+        /// What the row says about the run, without its age. It comes from the
+        /// question, so the act that was confirmed is the act that is reported.
+        notice: String,
+        /// What the row says once the command has worked, as the question
+        /// composed it.
+        success: SuccessReport,
+        /// When the run started, against the watch loop's injected clock. The
         /// notice reports the age from it, so a hook that takes minutes looks
-        /// like a push in progress rather than like a hang.
+        /// like a run in progress rather than like a hang. A rebase reaches
+        /// that same hook, because it pushes what it rewrote.
         started_at: Instant,
         /// The most recent output lines, oldest first, capped at
         /// [`MAX_PUSH_OUTPUT_ROWS`].
@@ -707,8 +863,9 @@ enum State {
 /// is a sentence that quietly stops being true — and a message that stays has
 /// no countdown to report. There is no third combination to represent.
 enum Life {
-    /// Stays until the user presses a key. git's own words about a push that
-    /// failed, drawn red, and the one message gsw will not remove by itself.
+    /// Stays until the user presses a key. The words a failed run wrote —
+    /// git's own, or those of the command behind `R` or `M` — drawn red, and
+    /// the one message gsw will not remove by itself.
     UntilDismissed,
     /// Says how long ago it was posted, fades toward black across
     /// [`STATUS_LIFETIME`], and then takes itself off the screen.
@@ -876,7 +1033,7 @@ impl PushUi {
     pub(crate) fn mode(&self) -> InputMode {
         match self.state {
             State::Asking { .. } => InputMode::Confirm,
-            State::Running { .. } => InputMode::Pushing,
+            State::Running { .. } => InputMode::Running,
             State::Listing { .. } => InputMode::List,
             State::Idle | State::Status { .. } => InputMode::Normal,
         }
@@ -907,26 +1064,45 @@ impl PushUi {
     /// but that now covers only the pane resized down while a question is
     /// already up: the render path is the only thing that sees the new size.
     pub(crate) fn request(&mut self, snapshot: &Snapshot, dims: Dimensions, now: Instant) {
-        self.state = match prompt_for(
-            &snapshot.branch,
-            snapshot.push_remote.as_deref(),
-            snapshot.upstream.as_ref(),
-        ) {
+        self.ask(
+            prompt_for(
+                &snapshot.branch,
+                snapshot.push_remote.as_deref(),
+                snapshot.upstream.as_ref(),
+            ),
+            dims,
+            now,
+        );
+    }
+
+    /// Put `prompt` on the row: the question with the keys that answer it, or
+    /// the refusal with a life of its own.
+    ///
+    /// The body every door into the row shares, so no two of them can reach
+    /// different answers about the same row. It replaces whatever was on
+    /// screen, which is why a key pressed with a stale error up asks its
+    /// question instead of stacking a row under the old one.
+    fn ask(&mut self, prompt: PushPrompt, dims: Dimensions, now: Instant) {
+        self.state = match prompt {
             // Nowhere to put the question, so it is not asked. Idle rather than
-            // a message: see above.
+            // a message: see [`PushUi::request`].
             PushPrompt::Confirm { .. } if Overlay::rows_to_spare(dims) == 0 => State::Idle,
             PushPrompt::Confirm {
                 question,
-                creates_remote_branch,
+                hint,
+                caution,
                 command,
-                success_message,
+                running_notice,
+                success,
             } => State::Asking {
                 question,
-                creates_remote_branch,
+                hint,
+                caution,
                 command,
-                success_message,
+                running_notice,
+                success,
             },
-            // A refusal describes the repository as it stood when `p` was
+            // A refusal describes the repository as it stood when the key was
             // pressed, so it goes stale exactly the way a success does — and
             // costs the frame the same row until it does.
             PushPrompt::Refuse { message } => State::Status {
@@ -936,42 +1112,72 @@ impl PushUi {
         };
     }
 
-    /// Handle `y`: start the push, returning the [`PushCommand`] to run, or
-    /// `None` when no confirmation was on screen to accept.
+    /// Handle `R` or `M`: work out what the user's command would do to the
+    /// branch and either ask or explain.
+    ///
+    /// The door beside [`PushUi::request`], and it obeys the two rules that one
+    /// obeys. A pane with no row to draw the question in raises no question and
+    /// is left [`State::Idle`], so the `y` or Enter behind the key is an
+    /// ordinary key. A refusal posts a fading line, because it describes the
+    /// repository as it stood at the press and goes stale exactly as a success
+    /// does.
+    ///
+    /// It takes the command because the command is the user's, and gsw learns
+    /// of it from a probe that answers on the loop's own channel. The question
+    /// names it, so a key whose command is not there yet has no question to
+    /// ask.
+    pub(crate) fn request_base_update(
+        &mut self,
+        snapshot: &Snapshot,
+        update: BaseUpdate,
+        command: &ShellCommand,
+        dims: Dimensions,
+        now: Instant,
+    ) {
+        self.ask(base_update_prompt_for(snapshot, update, command), dims, now);
+    }
+
+    /// Handle `y`: start what the question described, returning the
+    /// [`Confirmed`] command to run, or `None` when no confirmation was on
+    /// screen to accept.
     ///
     /// Moving to [`State::Running`] as it hands the command over is what makes
     /// a second `y` — one that raced the mode change — return `None` rather than
-    /// start an overlapping push.
-    pub(crate) fn confirm(&mut self, now: Instant) -> Option<PushCommand> {
+    /// start an overlapping run.
+    pub(crate) fn confirm(&mut self, now: Instant) -> Option<Confirmed> {
         let State::Asking {
             command,
-            success_message,
+            running_notice,
+            success,
             ..
         } = std::mem::replace(&mut self.state, State::Idle)
         else {
             return None;
         };
         self.state = State::Running {
-            success_message,
+            notice: running_notice,
+            success,
             started_at: now,
             recent: VecDeque::new(),
         };
         Some(command)
     }
 
-    /// Handle one line of a running push's output.
+    /// Handle one line of a running command's output.
     ///
-    /// Ignored in every other state. The reader threads are joined before the
-    /// outcome is sent, so a line cannot really arrive after the push
-    /// finished — but a window that a late line could reopen would paint over
-    /// the error the user is reading, and the rule costs nothing to state.
+    /// Ignored in every other state. A line cannot really arrive after the run
+    /// that wrote it has finished — the push joins its reader threads before it
+    /// reports, and a base update reads its files and reports its last lines on
+    /// the one thread that then reports the outcome — but a window that a late
+    /// line could reopen would paint over the error the user is reading, and
+    /// the rule costs nothing to state.
     pub(crate) fn output_line(&mut self, line: String) {
         let State::Running { recent, .. } = &mut self.state else {
             return;
         };
         recent.push_back(line);
         // A hook can print thousands of lines, and every one of them costs
-        // memory until the push ends. Trimming on arrival bounds that at the
+        // memory until the run ends. Trimming on arrival bounds that at the
         // window's own size rather than at the hook's output.
         while recent.len() > MAX_PUSH_OUTPUT_ROWS {
             recent.pop_front();
@@ -1035,23 +1241,23 @@ impl PushUi {
         }
     }
 
-    /// Handle a finished push: replace the running notice with the outcome.
+    /// Handle a finished run: replace the running notice with the outcome.
     ///
-    /// On success the wording comes from the plan that was confirmed, not from
-    /// git's output, so a create reports itself as a create. On failure it is
-    /// git's own words — a gsw paraphrase of a push error would drop exactly
-    /// the detail the user needs.
+    /// On success the report comes from the question that was confirmed, not
+    /// from what the command wrote, so a create reports itself as a create —
+    /// see [`SuccessReport`], which decides there whether the command's own
+    /// last line goes under gsw's sentence. On failure it is the command's own
+    /// words: a gsw paraphrase of a push error would drop exactly the detail
+    /// the user needs.
     ///
     /// The same split decides how long the message stays: `now` starts the
     /// countdown on a success, and a failure gets no countdown at all. See
     /// [`Life`] for why those are one decision.
     pub(crate) fn finished(&mut self, outcome: PushOutcome, now: Instant) {
-        let success_message = match std::mem::replace(&mut self.state, State::Idle) {
-            State::Running {
-                success_message, ..
-            } => success_message,
-            // A finish with no push running: nothing to report against, so
-            // leave the screen as it is rather than inventing a message.
+        let success = match std::mem::replace(&mut self.state, State::Idle) {
+            State::Running { success, .. } => success,
+            // A finish with no run going: nothing to report against, so leave
+            // the screen as it is rather than inventing a message.
             other => {
                 self.state = other;
                 return;
@@ -1059,7 +1265,10 @@ impl PushUi {
         };
 
         let (lines, life) = if outcome.success {
-            (vec![success_message], Life::Fading { posted_at: now })
+            (
+                success.rows(&outcome.output),
+                Life::Fading { posted_at: now },
+            )
         } else {
             (failure_lines(&outcome.output), Life::UntilDismissed)
         };
@@ -1365,24 +1574,28 @@ impl PushUi {
             State::Idle | State::Listing { .. } => Vec::new(),
             State::Asking {
                 question,
-                creates_remote_branch,
+                hint,
+                caution,
                 ..
             } => {
-                let line = truncate_right(&format!("{question}  {CONFIRM_HINT}"), width);
+                let line = truncate_right(&format!("{question}  {hint}"), width);
                 // Yellow marks the push that puts something new on a shared
                 // remote. The wording says so too — the color is what carries
                 // it in the half second before the words are read.
-                vec![if *creates_remote_branch {
+                vec![if *caution {
                     line.yellow().to_string()
                 } else {
                     line
                 }]
             }
             State::Running {
-                started_at, recent, ..
+                notice,
+                started_at,
+                recent,
+                ..
             } => {
                 let elapsed = now.saturating_duration_since(*started_at);
-                let notice = format!("{RUNNING_NOTICE} ({})", format_age_detailed(elapsed));
+                let notice = format!("{notice} ({})", format_age_detailed(elapsed));
                 let mut rows = vec![truncate_right(&notice, width)];
 
                 // The window is sized here rather than left to the clamp at
@@ -1411,13 +1624,19 @@ impl PushUi {
                 // failure's reason is — see [`failure_lines`]. The running
                 // window sizes itself first for the same reason.
                 let dropped = lines.len().saturating_sub(Overlay::rows_to_spare(dims));
-                // The age goes on the last row, which for every message that
-                // has one is the only row: a success and a refusal are one
-                // sentence each. The two kinds that never age are git's
-                // several-line error text and a progress notice. Numbered
-                // before the drop above, so the row that carries it is the
-                // message's last and not merely the last one that fitted.
-                let last = lines.len().saturating_sub(1);
+                // **The age goes on the first row the pane shows.** A message
+                // that ages is gsw's own news, and gsw's own sentence is its
+                // first row: a run of `R` that worked says what it did, and
+                // puts the last line of the command under that. The age belongs
+                // beside the sentence rather than at the end of somebody else's
+                // words. It is also the row the user is sure to see — the drop
+                // above takes rows off the *front*, so the row that carries the
+                // age is the first that fitted rather than one the pane cut.
+                //
+                // Every other message that ages is one row, so this moves none
+                // of them: a refusal and a push that worked are one sentence
+                // each. The two kinds that never age are git's several-line
+                // error text and a progress notice.
                 lines
                     .iter()
                     .enumerate()
@@ -1429,7 +1648,7 @@ impl PushUi {
                         // Saturating for the reason [`Life::elapsed`] gives.
                         Life::Fading { posted_at } => {
                             let elapsed = now.saturating_duration_since(*posted_at);
-                            let line = if row == last {
+                            let line = if row == dropped {
                                 format!("{line} ({} ago)", format_age_detailed(elapsed))
                             } else {
                                 line.clone()
@@ -1547,19 +1766,30 @@ impl Overlay {
     }
 }
 
-/// The key hint shown with every confirmation.
+/// The word every message about a push of gsw's own uses for it.
+const PUSH_VERB: &str = "push";
+
+/// The key hint shown with a confirmation, for an act that `verb` names.
 ///
 /// Spelled out rather than the usual `[y/N]`. That convention's capital letter
 /// means "this is what Enter gives you", and Enter *confirms* here — so `[y/N]`
 /// would promise that the key people reach for by reflex is the safe one, on
-/// the one prompt in gsw that writes to a shared remote.
+/// the prompts in gsw that write to a shared remote.
 ///
 /// The same reasoning is why a question this hint cannot be drawn with is never
 /// raised (see [`PushUi::request`], and [`PushUi::overlay`] for the pane that
 /// shrinks under one). What makes Enter safe to bind to a push is that the user
 /// is looking at the sentence saying so. Off the screen, the binding keeps the
 /// risk and loses the sentence.
-const CONFIRM_HINT: &str = "[y/Enter = push, n/Esc = cancel]";
+///
+/// One function rather than one constant for each key, because three keys now
+/// ask a question and three spellings of one convention are three things that
+/// drift apart. The verb is the act of the question the hint goes under, so the
+/// promise names what Enter does here rather than what it does under some other
+/// key.
+pub(crate) fn confirm_hint(verb: &str) -> String {
+    format!("[y/Enter = {verb}, n/Esc = cancel]")
+}
 
 /// What the window's rows are indented by.
 ///
@@ -1569,6 +1799,9 @@ const CONFIRM_HINT: &str = "[y/Enter = push, n/Esc = cancel]";
 const WINDOW_INDENT: &str = "  ";
 
 /// What a running push says while the network round trip is in flight.
+///
+/// The notice of a push alone. Every question carries its own now, because a
+/// rebase that runs for minutes must say on the row which act is running.
 const RUNNING_NOTICE: &str = "Pushing…";
 
 /// How long a status message gsw wrote itself stays under the frame.
@@ -1756,11 +1989,18 @@ mod tests {
         }
     }
 
-    /// The command a confirmable prompt carries. Panics on a refusal, so a test
-    /// that expected a push and got a message fails on the line that asked.
+    /// The push a confirmable prompt carries. Panics on a refusal, so a test
+    /// that expected a push and got a message fails on the line that asked, and
+    /// panics on a prompt that carries another act, which no caller here plans.
     fn command(prompt: &PushPrompt) -> &PushCommand {
         match prompt {
-            PushPrompt::Confirm { command, .. } => command,
+            PushPrompt::Confirm {
+                command: Confirmed::Push(command),
+                ..
+            } => command,
+            PushPrompt::Confirm { command, .. } => {
+                panic!("expected a push, got {command:?}")
+            }
             PushPrompt::Refuse { message } => {
                 panic!("expected a confirmable prompt, got a refusal: {message}")
             }
@@ -1899,13 +2139,7 @@ mod tests {
         let prompt = prompt_for("gsw-push", Some("origin"), None);
         assert_eq!(text(&prompt), "Create new remote branch origin/gsw-push?");
         assert!(
-            matches!(
-                prompt,
-                PushPrompt::Confirm {
-                    creates_remote_branch: true,
-                    ..
-                },
-            ),
+            matches!(prompt, PushPrompt::Confirm { caution: true, .. },),
             "a create must be flagged so the display layer can set it apart",
         );
     }
@@ -1918,13 +2152,7 @@ mod tests {
         let prompt = prompt_for("gsw-push", Some("origin"), Some(&up));
         assert_eq!(text(&prompt), "Push 3 commits to origin/gsw-push?");
         assert!(
-            matches!(
-                prompt,
-                PushPrompt::Confirm {
-                    creates_remote_branch: false,
-                    ..
-                },
-            ),
+            matches!(prompt, PushPrompt::Confirm { caution: false, .. },),
             "updating an existing branch must not be flagged as a create",
         );
     }
@@ -1945,12 +2173,12 @@ mod tests {
         // The question, the argument list, and the branch the question named
         // travel together, so what runs on `y` is what the sentence promised —
         // and the runner can still tell whether the repository moved under it.
-        let PushPrompt::Confirm { command, .. } = prompt_for("gsw-push", Some("origin"), None)
-        else {
-            panic!("an untracked branch with a remote must be confirmable");
-        };
-        assert_eq!(command.args(), ["push", "-u", "origin", "gsw-push"]);
-        assert_eq!(command.branch(), "gsw-push");
+        let prompt = prompt_for("gsw-push", Some("origin"), None);
+        assert_eq!(
+            command(&prompt).args(),
+            ["push", "-u", "origin", "gsw-push"]
+        );
+        assert_eq!(command(&prompt).branch(), "gsw-push");
     }
 
     #[test]
@@ -2085,6 +2313,45 @@ mod ui_tests {
         ui
     }
 
+    /// How far behind the base every question about a base update here is
+    /// asked. Any count above zero does: the count is the reason the key acts
+    /// at all.
+    const BEHIND: u32 = 5;
+
+    /// A snapshot of `gsw-push`, [`BEHIND`] commits behind `main`, which is
+    /// what a rebase or a merge is asked about.
+    fn behind_the_base() -> Snapshot {
+        Snapshot {
+            commits_behind: BEHIND,
+            ..snapshot(None)
+        }
+    }
+
+    /// The command `update` runs here, which is the one it falls back on.
+    fn base_update_command(update: BaseUpdate) -> ShellCommand {
+        ShellCommand::new(None, update.default_command()).expect("a name")
+    }
+
+    /// A UI with the question of `update` already on screen, asked at `now` in
+    /// a pane of `dims`.
+    fn asking_base_update_in(update: BaseUpdate, dims: Dimensions, now: Instant) -> PushUi {
+        let mut ui = PushUi::new(false);
+        ui.request_base_update(
+            &behind_the_base(),
+            update,
+            &base_update_command(update),
+            dims,
+            now,
+        );
+        ui
+    }
+
+    /// A UI with the question of `update` already on screen, asked at `now` in
+    /// a pane with room for it.
+    fn asking_base_update(update: BaseUpdate, now: Instant) -> PushUi {
+        asking_base_update_in(update, tall_pane(80), now)
+    }
+
     /// A UI with a push already running, confirmed at `now`.
     fn pushing(now: Instant) -> PushUi {
         let mut ui = PushUi::new(false);
@@ -2105,6 +2372,18 @@ mod ui_tests {
         testcolor::strip_ansi(&testcolor::with_forced_ansi(|| {
             ui.overlay(dims, now).text()
         }))
+    }
+
+    /// What `ui` paints in a pane wide enough for a question, with the escapes
+    /// left in, so a test can read the color off the row.
+    ///
+    /// The escapes are forced on for the same reason [`painted`] forces them
+    /// on: `colored` decides at format time from process-global state that
+    /// other tests in this binary toggle, so a raw render carries no color at
+    /// all in some runs. The one door to that override is `testcolor`, and
+    /// clippy bans every other spelling of it.
+    fn escapes(ui: &mut PushUi, now: Instant) -> String {
+        testcolor::with_forced_ansi(|| ui.overlay(tall_pane(120), now).text())
     }
 
     #[test]
@@ -2149,7 +2428,7 @@ mod ui_tests {
             !text.contains("names no issue"),
             "the held message must wait its turn, got {text:?}",
         );
-        assert_eq!(ui.mode(), InputMode::Pushing, "the push is still running");
+        assert_eq!(ui.mode(), InputMode::Running, "the push is still running");
     }
 
     #[test]
@@ -2386,7 +2665,7 @@ mod ui_tests {
             !text.contains(NOTICE),
             "the held notice must wait its turn, got {text:?}",
         );
-        assert_eq!(ui.mode(), InputMode::Pushing, "the push is still running");
+        assert_eq!(ui.mode(), InputMode::Running, "the push is still running");
     }
 
     #[test]
@@ -2566,7 +2845,7 @@ mod ui_tests {
 
         ui.clear();
 
-        assert_eq!(ui.mode(), InputMode::Pushing, "the push is still running");
+        assert_eq!(ui.mode(), InputMode::Running, "the push is still running");
         let text = painted(&mut ui, tall_pane(80), now);
         assert!(
             text.contains(RUNNING_NOTICE),
@@ -2770,7 +3049,7 @@ mod ui_tests {
         let mut ui = pushing(now);
         ui.output_line("Compiling gsw v0.1.0".to_string());
         ui.open_list(three_worktrees());
-        assert_eq!(ui.mode(), InputMode::Pushing, "the push must keep the row");
+        assert_eq!(ui.mode(), InputMode::Running, "the push must keep the row");
         assert_eq!(cursor_of(&ui), None, "no list may open over the push");
         let text = painted(&mut ui, tall_pane(80), now);
         assert!(
@@ -2960,8 +3239,251 @@ mod ui_tests {
         // that lies about the riskiest key on the prompt is worse than a long
         // one.
         assert!(
-            overlay.contains(CONFIRM_HINT),
+            overlay.contains(&confirm_hint(PUSH_VERB)),
             "the overlay owns the key hint, got {overlay:?}",
+        );
+    }
+
+    #[test]
+    fn requesting_a_base_update_asks_the_question_and_takes_the_keys() {
+        // `R` on a branch behind the base must put the question on screen AND
+        // switch the key table, or `y` would be read as an ordinary key.
+        let mut ui = asking_base_update(BaseUpdate::Rebase, t0());
+        assert_eq!(ui.mode(), InputMode::Confirm);
+        let overlay = painted(&mut ui, tall_pane(120), t0());
+        assert!(
+            overlay.contains("Rebase gsw-push onto main (5 commits behind), then push with grp?"),
+            "the question must be on screen, got {overlay:?}",
+        );
+        assert!(
+            overlay.contains(&confirm_hint("rebase")),
+            "the keys that answer it go with it, got {overlay:?}",
+        );
+    }
+
+    #[test]
+    fn requesting_a_base_update_that_is_refused_explains_instead_of_asking() {
+        // The refusal is a message, not a question: the keys must stay normal,
+        // so `y` does not answer a prompt that is not there.
+        let mut ui = PushUi::new(false);
+        ui.request_base_update(
+            &snapshot(None),
+            BaseUpdate::Rebase,
+            &base_update_command(BaseUpdate::Rebase),
+            tall_pane(80),
+            t0(),
+        );
+        assert_eq!(ui.mode(), InputMode::Normal);
+        let overlay = painted(&mut ui, tall_pane(80), t0());
+        assert!(
+            overlay.contains("gsw-push already contains main"),
+            "the reason must reach the row, got {overlay:?}",
+        );
+    }
+
+    #[test]
+    fn confirming_a_base_update_hands_back_the_command_it_described_once() {
+        // The act, the branch, the base, and the command travel together, so
+        // what runs on `y` is what the sentence promised — and the runner can
+        // still tell whether the repository moved under it. The second `y` is
+        // one that raced the mode change, and it must start nothing.
+        let mut ui = asking_base_update(BaseUpdate::Rebase, t0());
+        let Some(Confirmed::BaseUpdate(command)) = ui.confirm(t0()) else {
+            panic!("a question about a rebase must confirm a rebase");
+        };
+        assert_eq!(command.update(), BaseUpdate::Rebase);
+        assert_eq!(command.branch(), "gsw-push");
+        assert_eq!(command.base(), "main");
+        assert_eq!(command.command().name(), "grp");
+        assert_eq!(ui.mode(), InputMode::Running);
+        assert_eq!(
+            ui.confirm(t0()),
+            None,
+            "a second y must not start a second run",
+        );
+    }
+
+    /// What a rebase that worked wrote, with its verdict in the last line.
+    const SKIPPED_THE_PUSH: &str = "grp: rebased onto 'main'; 'gsw-push' has no upstream - \
+                                    skipping push";
+
+    #[test]
+    fn a_base_update_that_worked_reports_it_and_shows_the_last_line_of_the_command() {
+        // **The second row is necessary.** `grp` and `gmp` report a push they
+        // skipped only in their last line, so gsw's sentence alone would tell
+        // the user that the branch is on the remote when it is not.
+        //
+        // The age goes on the first row the pane shows, which is gsw's own
+        // sentence. The row under it is the command speaking, and it is
+        // indented for that reason.
+        let now = t0();
+        let mut ui = asking_base_update(BaseUpdate::Rebase, now);
+        ui.confirm(now).expect("the question must confirm");
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: format!("Rebasing (1/3)\n{SKIPPED_THE_PUSH}\n"),
+            },
+            now,
+        );
+        assert_eq!(
+            painted(&mut ui, tall_pane(120), now + Duration::from_secs(4)),
+            format!(
+                "Rebased gsw-push onto main with grp (4s ago)\n{WINDOW_INDENT}{SKIPPED_THE_PUSH}",
+            ),
+        );
+    }
+
+    #[test]
+    fn a_base_update_that_said_nothing_leaves_the_sentence_of_gsw_alone() {
+        // A blank row under the frame reads as a run that said something not
+        // worth showing. The rule of `shell::last_with_text`: a command that
+        // ends its last line with a newline leaves an empty line after it, and
+        // a command that said nothing at all leaves no line to show.
+        let now = t0();
+        let mut ui = asking_base_update(BaseUpdate::Merge, now);
+        ui.confirm(now).expect("the question must confirm");
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: "\n  \n".to_string(),
+            },
+            now,
+        );
+        assert_eq!(
+            painted(&mut ui, tall_pane(120), now),
+            "Merged main into gsw-push with gmp (0s ago)",
+        );
+    }
+
+    #[test]
+    fn a_base_update_that_failed_keeps_the_words_of_the_command_until_a_key() {
+        // A rebase that stopped on a conflict leaves a repository the user has
+        // to repair, and what the command wrote is what says how. So it waits
+        // for a key exactly as a failed push does: the clock must not take a
+        // remedy away while the user is looking at another pane. gsw aborts
+        // nothing, and the `⚠ rebase` row of the header goes on saying that
+        // git is holding the rebase.
+        let now = t0();
+        let mut ui = asking_base_update(BaseUpdate::Rebase, now);
+        ui.confirm(now).expect("the question must confirm");
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output: "Rebasing (1/3)\nCONFLICT (content): Merge conflict in a.txt\n\
+                         hint: Resolve all conflicts manually\n\
+                         error: could not apply d3eee9d… feature edit\n"
+                    .to_string(),
+            },
+            now,
+        );
+
+        let rows = escapes(&mut ui, now);
+        let glyphs = testcolor::strip_ansi(&rows);
+        assert_eq!(
+            glyphs,
+            "Rebasing (1/3)\nCONFLICT (content): Merge conflict in a.txt\n\
+             error: could not apply d3eee9d… feature edit",
+            "the last lines of the run must reach the row, and the hint must go first",
+        );
+        assert_eq!(
+            rows,
+            testcolor::with_forced_ansi(|| glyphs
+                .lines()
+                .map(|line| line.red().to_string())
+                .collect::<Vec<_>>()
+                .join("\n")),
+            "the words of a command that failed are drawn red",
+        );
+        assert_eq!(
+            ui.next_tick(),
+            None,
+            "a message that waits for a key does not age",
+        );
+
+        ui.dismiss();
+        assert_eq!(
+            painted(&mut ui, tall_pane(120), now),
+            "",
+            "a key must take it off the screen",
+        );
+    }
+
+    #[test]
+    fn a_running_base_update_takes_its_notice_from_the_question_and_counts_the_time() {
+        // The run carries no deadline, because a pre-push hook of this
+        // workspace builds and tests every crate in it and takes minutes. So
+        // the notice names the act that is running and counts the time, and a
+        // run that hangs shows on the screen as a run that hangs. `Pushing…`
+        // here would name neither the act nor the command.
+        let now = t0();
+        let mut ui = asking_base_update(BaseUpdate::Rebase, now);
+        ui.confirm(now).expect("the question must confirm");
+        assert_eq!(
+            painted(&mut ui, tall_pane(120), now + Duration::from_secs(72)),
+            "Rebasing gsw-push onto main with grp… (1m12s)",
+        );
+    }
+
+    #[test]
+    fn a_running_merge_says_that_it_is_merging() {
+        let now = t0();
+        let mut ui = asking_base_update(BaseUpdate::Merge, now);
+        ui.confirm(now).expect("the question must confirm");
+        assert_eq!(
+            painted(&mut ui, tall_pane(120), now + Duration::from_secs(4)),
+            "Merging main into gsw-push with gmp… (4s)",
+        );
+    }
+
+    #[test]
+    fn the_rebase_question_wears_the_color_of_caution_and_the_merge_question_does_not() {
+        // A rebase rewrites every commit of the branch and `grp` force-pushes
+        // the result, so a branch that somebody else has pulled is a branch
+        // they must repair. That is the question the color of the create is
+        // for. A merge writes one commit and pushes it, which is the routine
+        // act the count in the header is about.
+        let now = t0();
+        let rebase = escapes(&mut asking_base_update(BaseUpdate::Rebase, now), now);
+        let glyphs = testcolor::strip_ansi(&rebase);
+        assert_eq!(
+            rebase,
+            testcolor::with_forced_ansi(|| glyphs.yellow().to_string()),
+            "the rebase question must be drawn in the color of the question that \
+             creates a remote branch",
+        );
+
+        let merge = escapes(&mut asking_base_update(BaseUpdate::Merge, now), now);
+        assert_eq!(
+            merge,
+            testcolor::strip_ansi(&merge),
+            "the merge question is routine, so it takes the color of the row",
+        );
+    }
+
+    #[test]
+    fn a_pane_with_no_row_to_spare_raises_no_base_update_question() {
+        // The rule of the row, which both doors into it obey: a question the
+        // user cannot see must not be answerable, or Enter pressed out of
+        // reflex at an unchanged frame force-pushes a rewritten branch. The
+        // same rule holds `p`, and it is written once.
+        let mut ui = asking_base_update_in(
+            BaseUpdate::Rebase,
+            Dimensions {
+                width: 80,
+                height: 1,
+            },
+            t0(),
+        );
+        assert_eq!(
+            ui.mode(),
+            InputMode::Normal,
+            "the keys must stay ordinary where no question was shown",
+        );
+        assert_eq!(
+            ui.confirm(t0()),
+            None,
+            "there must be nothing for a y to answer",
         );
     }
 
@@ -2980,7 +3502,7 @@ mod ui_tests {
         assert!(
             !ui.overlay(tall_pane(80), t0())
                 .text()
-                .contains(CONFIRM_HINT),
+                .contains(&confirm_hint(PUSH_VERB)),
             "a refusal must not offer keys that do nothing",
         );
     }
@@ -2988,14 +3510,16 @@ mod ui_tests {
     #[test]
     fn confirming_hands_back_the_command_and_switches_to_pushing() {
         let mut ui = asking();
-        let command = ui.confirm(t0()).expect("a question on screen must confirm");
+        let Some(Confirmed::Push(command)) = ui.confirm(t0()) else {
+            panic!("a question about a push must confirm a push");
+        };
         assert_eq!(command.args(), ["push", "-u", "origin", "gsw-push"]);
         assert_eq!(
             command.branch(),
             "gsw-push",
             "the branch the question named must reach the runner",
         );
-        assert_eq!(ui.mode(), InputMode::Pushing);
+        assert_eq!(ui.mode(), InputMode::Running);
         assert_eq!(
             ui.overlay(tall_pane(80), t0()).rows(),
             1,
@@ -3005,7 +3529,7 @@ mod ui_tests {
 
     #[test]
     fn confirming_with_no_question_up_runs_nothing() {
-        // Belt and braces against a stray PushConfirmed: with no confirmation
+        // Belt and braces against a stray answer of yes: with no confirmation
         // on screen there is no command to run, and inventing one would push
         // without asking.
         let mut ui = PushUi::new(false);
@@ -3015,7 +3539,7 @@ mod ui_tests {
 
     #[test]
     fn confirming_twice_runs_the_push_once() {
-        // The second `y` arrives after the mode has already moved to Pushing.
+        // The second `y` arrives after the mode has already moved to Running.
         // It must not produce a second command.
         let mut ui = asking();
         assert!(ui.confirm(t0()).is_some());
@@ -3574,7 +4098,7 @@ mod ui_tests {
         ui.dismiss();
         assert_eq!(
             ui.mode(),
-            InputMode::Pushing,
+            InputMode::Running,
             "a stray key must not hide a running push",
         );
     }
@@ -4179,6 +4703,7 @@ mod ui_tests {
         type Replace = fn(&mut PushUi, Instant);
 
         let now = t0();
+        let push_hint = confirm_hint(PUSH_VERB);
         let replacements: [(&str, Replace, &str); 4] = [
             (
                 "a notice",
@@ -4200,7 +4725,7 @@ mod ui_tests {
             (
                 "a press of p",
                 |ui, now| ui.request(&snapshot(None), tall_pane(80), now),
-                CONFIRM_HINT,
+                &push_hint,
             ),
         ];
 
