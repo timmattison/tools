@@ -122,6 +122,21 @@ impl BaseUpdate {
         }
     }
 
+    /// Whether the question about this act deserves the color of one the user
+    /// must read twice.
+    ///
+    /// A rebase rewrites every commit of the branch, and the command then
+    /// force-pushes the result — so a branch that somebody else has pulled is a
+    /// branch they must repair. A merge writes one commit and pushes it, which
+    /// is the routine act the count in the header is about, and a color of
+    /// caution on every question is a color that says nothing.
+    const fn caution(self) -> bool {
+        match self {
+            Self::Rebase => true,
+            Self::Merge => false,
+        }
+    }
+
     /// What this act says where the repository offers no base for it to act on.
     ///
     /// The two sentences name the base that gsw was looking for, because the
@@ -338,7 +353,7 @@ pub(crate) fn base_update_prompt_for(
     PushPrompt::Confirm {
         question: update.question(branch, base, snapshot.commits_behind, command),
         hint: crate::push::confirm_hint(update.verb()),
-        caution: false,
+        caution: update.caution(),
         command: Confirmed::BaseUpdate(BaseUpdateCommand::new(
             update,
             branch,
