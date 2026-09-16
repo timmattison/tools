@@ -13,13 +13,13 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::Stdio;
 
 use shellquote::shell_quote;
 
 use crate::lines::LineSplitter;
 use crate::push::PushOutcome;
-use crate::shell::ShellCommand;
+use crate::shell::{shell_child, ShellCommand};
 
 /// The variable that holds the command `R` runs.
 ///
@@ -259,10 +259,20 @@ fn run(
     let _ = on_line;
     let name = command.command().name();
 
-    let mut child = Command::new(shell);
-    // Interactive is the load-bearing half. `grp` is a shell function, and a
-    // function lives only in a shell that read the rc file.
-    child.arg("-ic").arg(command.script()).current_dir(workdir);
+    // The child is interactive, it carries no `GIT_` variable out of the
+    // environment of gsw, and it is detached from the terminal — see
+    // [`shell_child`], which states all three rules and is the one place they
+    // are written.
+    let mut child = shell_child(shell, command.script());
+    child
+        .current_dir(workdir)
+        .stdin(Stdio::null())
+        // **After the sweep, so it survives it.** The sweep removes every
+        // `GIT_` variable this process holds, and a value placed ahead of it
+        // would leave with the rest. A user who exports the variable again in
+        // the rc file still wins, because the rc file loads inside the child
+        // after this value was placed.
+        .env(TERMINAL_PROMPT_VAR, "0");
 
     let finished = match child.output() {
         Ok(finished) => finished,
