@@ -529,9 +529,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     budget pushes the timed refresh out past the interval, and the countdown shows the longer wait
     rather than promising one it will not keep.
   - Watch-mode keys: `q` or Ctrl-C quits, `r` forces an immediate refresh, `p` pushes the
-    current branch, `G` opens the issue the branch names, `m` measures a rebase and a merge
-    against the default branch, and the arrow keys move the watch between the worktrees of the
-    repository. Ctrl-C quits from anywhere, including while a push is in flight.
+    current branch, `G` opens the issue the branch names, `R` rebases the branch onto the base
+    and pushes it, `M` merges the base into the branch and pushes it, `m` measures a rebase and
+    a merge against the default branch, and the arrow keys move the watch between the worktrees
+    of the repository. Ctrl-C quits from anywhere, including while a push is in flight.
   - `p` always asks first, and the question names the branch, the remote, and how much is going —
     so what you confirm is what runs. If the checkout moves in another pane between the question
     and your answer, the push is refused rather than redirected at the branch that is there now:
@@ -637,10 +638,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       cannot read the keyboard gsw reads, and it gets no `GIT_` variable out of gsw's own
       environment, so it cannot be aimed at another repository. The rule there is the `GIT_`
       prefix and never a list of names: `GIT_DIR` aims git elsewhere, and so do `GIT_COMMON_DIR`
-      and `GIT_CEILING_DIRECTORIES`, while `GIT_CONFIG_PARAMETERS` sets any key at all. Your own
-      rc file loads inside that shell after the sweep, so a `GIT_` variable you export on purpose
-      is set again there — the sweep takes away what gsw carried in, which is what a pre-commit
-      hook hands it.
+      and `GIT_CEILING_DIRECTORIES`, while `GIT_CONFIG_PARAMETERS` sets any key at all. The six
+      variables you state on purpose stay: `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_SSH`,
+      `GIT_SSH_COMMAND`, `GIT_ASKPASS` and `GIT_TERMINAL_PROMPT`. A pre-commit hook exports
+      none of those. Your shell or direnv does.
     - A run gets a minute. One run at a time is the rule, so a run that never ends would hold `G`
       for the rest of the session — and a key that does nothing and says nothing is exactly what
       an unbound key looks like. So after 60 seconds gsw stops waiting, says
@@ -678,10 +679,75 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       line, and `m` works again at once. A detached HEAD is measured, as `grind` measures one.
     - The two replays run one after the other on a thread of their own, in the scratch worktrees
       of `gitscratch`: no hook runs, and your refs do not move. The replay is read-only for your
-      repository, so `m` works while a push is in flight. A quit during a run shows
+      repository, so `m` works while a push is in flight. A replay starts from HEAD, and `R` and
+      `M` move HEAD, so `m` does nothing while one of them runs, and a run that one of them
+      overlaps shows no line. A quit during a run shows
       `Waiting for grind and grime to finish…` and waits for the replay in flight to remove its
       scratch worktree. The second replay does not start. A scratch worktree that a quit abandoned
       would stay registered in your repository and point at a deleted directory.
+  - `R` rebases the branch onto the base and pushes it, and `M` merges the base into the branch
+    and pushes it. They are the two answers to the behind count the header already shows. Neither
+    act is gsw's own: each key runs one command that you supply, in your own interactive shell,
+    with the work tree as its current directory, and that command pushes the branch itself once it
+    has finished.
+    - `GSW_REBASE_COMMAND` holds the command of `R` and defaults to `grp`. `GSW_MERGE_COMMAND`
+      holds the command of `M` and defaults to `gmp`. This repository ships neither one: both are
+      shell functions of one person, which is why each name is yours to set. Set a variable to an
+      empty string to turn that key off, and gsw then asks no shell about it.
+    - **The value is a whole command line**, as the value of `GSW_ISSUE_COMMAND` is, so it can
+      carry arguments. gsw asks your shell about the first word and runs the whole line.
+      **gsw puts the base on the end of that line as one quoted word**, so `grp --fork-point` runs
+      `grp --fork-point 'main'`. The base goes on the line because the question names it and what
+      you confirm is what runs, and because `grp` and `gmp` fall back on `main`, which fails in a
+      repository whose base is `master`. **A command that replaces `grp` or `gmp` must therefore
+      take the base as its last argument.**
+    - **Where the command does not exist, the key does nothing and says nothing** — the way `G`
+      does, and the way an unbound key does. gsw asks your shell about each of the three commands
+      once, at startup, so a function you add to your rc file after gsw started needs a restart.
+    - Each key asks first, and the question names the act, the branch, the base, how far behind it
+      is, and the command: `Rebase issue-12 onto main (5 commits behind), then push with grp?`, or
+      `Merge main (1 commit behind) into issue-12, then push with gmp?`. Answer with `y`/Enter, or
+      with `n`/Esc/`q`. The hint names the act rather than the push, because the act is what Enter
+      starts. **`p` never force-pushes, but `R` runs your command, and `grp` force-pushes** — so
+      the `R` question takes the yellow of a question to read twice, the way the question that
+      creates a remote branch does, because a rebase rewrites every commit of the branch. The `M`
+      question takes the routine color. In a pane with no row to spare, neither key asks at all,
+      for the reason `p` does not.
+    - Where the repository gives the key nothing to do, it asks nothing and posts a fading line
+      instead. A detached HEAD gets `HEAD is detached — check out a branch to rebase`, a base that
+      is neither `main` nor `master` gets `no main or master branch to rebase onto`, HEAD on the
+      base itself gets `on main — nothing to rebase`, an operation that git is still holding gets
+      `a rebase is in progress — finish it first`, and a branch that is behind by nothing gets
+      `issue-12 already contains main`. The first line that applies is the one you get, so a
+      rebase stopped on a conflict reports the detached HEAD it left. `M` says `merge` where `R`
+      says `rebase`, except in the line about an operation in progress: that one names the
+      operation git holds, whichever key you pressed. gsw refuses no other case: a dirty work
+      tree reaches your command, and git says what it thinks of one. gsw fetches nothing and
+      neither command fetches, so the base is your local branch.
+    - A checkout in another pane between the question and your answer refuses the run and starts
+      no shell, as it refuses a push: gsw says the branch changed, and you press `R` again for a
+      question about the branch that is there now.
+    - While the command runs, its output shows live under the frame, in the window a push uses: a
+      `Rebasing issue-12 onto main with grp… (1m12s)` notice, and up to six indented rows carrying
+      the newest lines. **The run has no deadline**, because a pre-push hook of this workspace
+      builds and tests every crate and runs for minutes — the notice counts the time, so a run
+      that hangs shows as a run that hangs. The run holds the row: `p`, `R`, `M`, and `m` do
+      nothing until it ends, while `G` still acts. The child gets no terminal, and no `GIT_`
+      variable out of gsw's own environment but the six you state on purpose, so your SSH key
+      and your identity still reach the push. After that sweep gsw sets `GIT_TERMINAL_PROMPT=0`,
+      so nothing the child starts can prompt behind a question gsw never drew.
+    - A run that worked leaves gsw's own sentence and, under it, the last line your command wrote
+      — `Rebased issue-12 onto main with grp (4s ago)`, then
+      `grp: rebased onto 'main'; 'issue-12' has no upstream - skipping push`. That second row is
+      necessary: `grp` and `gmp` report a push they skipped only in their last line. Both rows age
+      and fade off the screen after a minute. A run that failed leaves the last lines of the
+      output in red, where they wait for a key, as git's error text does.
+    - **A quit does not stop the command.** A rebase that gsw stopped in the middle would leave a
+      repository you must repair, and nobody saw it stop. So gsw exits and your command runs on. A
+      rebase that then stops on a conflict shows in the `⚠ rebase` row the next time you start.
+    - Every outcome walks the repository at once, and not success alone: a rebase that stopped on
+      a conflict changed the repository as much as one that finished, and only a walk puts the new
+      counts and the `⚠ rebase` row in the header.
   - The arrow keys move the watch between the worktrees of the repository: the main worktree and
     every linked worktree, such as the ones `nwt` makes for each issue. The worktree where you
     started gsw is the **home worktree**.

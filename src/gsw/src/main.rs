@@ -31,11 +31,16 @@ mod push;
 mod remote;
 mod render;
 mod repo;
+/// The shell that runs a command the user supplies, for every key that runs one.
+mod shell;
 mod snapshot;
 /// Shared git fixtures for the unit tests. Test-only: it shells out to `git` to
 /// build throwaway repositories, which the shipped binary never does.
 #[cfg(test)]
 mod testrepo;
+/// Bringing the branch up to date with the base, through a command the user
+/// supplies, for the `R` and `M` keys.
+mod update;
 mod watch;
 /// The worktrees of the repository, sorted by path, for the arrow keys.
 mod worktrees;
@@ -56,8 +61,10 @@ mod worktrees;
                   Watch-mode keys: q or Ctrl-C quits, r refreshes now, p pushes the current \
                   branch after a confirmation that names what it will do — a branch not yet on \
                   the remote is confirmed as creating one — G opens the issue the branch \
-                  names, m measures a rebase and a merge against the default branch, and the \
-                  arrow keys move the watch between the worktrees of the repository. \
+                  names, R rebases the branch onto the base and pushes it, M merges the base \
+                  into the branch and pushes it, m measures a rebase and a merge against the \
+                  default branch, and the arrow keys move the watch between the worktrees of \
+                  the repository. \
                   A push whose branch stopped being \
                   checked out between the question and the answer is refused, not redirected. \
                   p never force-pushes.\n\n\
@@ -80,8 +87,42 @@ mod worktrees;
                   HEAD. The bottom row says `Running grind and grime against main…` until the \
                   run ends. Then one line such as `main: rebase clean · merge 1 hunk in 1 \
                   file` takes its place and fades off after a minute. One run at a time: m \
-                  does nothing while a run is in flight. A quit during a run waits for the \
-                  replay in flight, so no scratch worktree stays behind.\n\n\
+                  does nothing while a run is in flight. A rebase or a merge that starts \
+                  during a run moves HEAD, so that run shows no line. A quit during a run \
+                  waits for the replay in flight, so no scratch worktree stays behind.\n\n\
+                  R rebases the branch onto the base and pushes it, and M merges the base into \
+                  the branch and pushes it. Neither act is gsw's own: each key runs one command \
+                  that you supply, in your own interactive shell, and that command pushes the \
+                  branch itself. GSW_REBASE_COMMAND holds the command of R and it defaults to \
+                  `grp`. GSW_MERGE_COMMAND holds the command of M and it defaults to `gmp`. \
+                  This repository ships neither one: both are shell functions of one person, \
+                  which is why each name is yours to set. Set a variable to an empty string to \
+                  turn that key off, and gsw then asks no shell about it. The value is a whole \
+                  command line, as the value of GSW_ISSUE_COMMAND is, and gsw puts the base on \
+                  the end of that line as one quoted word — a value of `grp --fork-point` runs \
+                  `grp --fork-point 'main'`. A command that replaces grp or gmp must therefore \
+                  take the base as its last argument. Where the command does not exist, the key \
+                  does nothing and says nothing, the way G does. Each key asks first, and the \
+                  question names the act, the branch, the base, how far behind it is, and the \
+                  command: y or Enter runs it, and n, Esc, or q cancels it. p never \
+                  force-pushes, but R runs your command, and grp force-pushes — so the R \
+                  question takes the color of caution, because a rebase rewrites the commits of \
+                  the branch. The key asks nothing and posts a fading line instead where the \
+                  repository gives it nothing to do: a detached HEAD, a base that is neither \
+                  main nor master, HEAD on the base itself, a rebase or a merge that git is \
+                  holding, and a branch that already contains the base. gsw fetches nothing and \
+                  neither command fetches, so the base is your local branch. While the command \
+                  runs, its output shows live in the window under the frame that a push uses, \
+                  and the notice counts the time. The run has no deadline, because a pre-push \
+                  hook of this workspace runs for minutes. While it runs, p, R, M, and m do \
+                  nothing, and G still acts. A run that worked leaves the sentence of gsw \
+                  and, under it, the last line the command wrote, because grp and gmp report a \
+                  push they skipped only there. A run that failed leaves the last lines of the \
+                  output, in red, until you press a key. A quit does not stop the command: a \
+                  rebase that gsw stopped in the middle would leave a repository you must \
+                  repair, and a rebase that stops on a conflict shows in the ⚠ rebase row at \
+                  the next start. Every outcome walks the repository at once, so the header \
+                  shows the new counts.\n\n\
                   Up goes to the home worktree, where gsw started. Left and Right go to the \
                   previous and the next worktree in path order, which is the order of cwt, and \
                   they wrap. Down opens a list of the worktrees: Up and Down move the cursor, \

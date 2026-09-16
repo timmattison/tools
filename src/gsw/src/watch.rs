@@ -9,7 +9,7 @@
 //! unit-tested without a pty.
 
 use std::cell::RefCell;
-use std::ffi::OsString;
+use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -344,32 +344,37 @@ pub(crate) fn next_tick(freshest_age: Duration) -> Option<Duration> {
 /// arrives inside this window and collapses into a single repaint.
 ///
 /// A quiet channel is the only thing that ends the drain for every event but
-/// one. [`Event::PushOutput`] is the exception, and [`PUSH_DRAIN_BUDGET`] says
+/// one. [`Event::RunOutput`] is the exception, and [`RUN_DRAIN_BUDGET`] says
 /// why.
 const DEBOUNCE: Duration = Duration::from_millis(150);
 
-/// How long the drain goes on absorbing a running push's output before it
-/// leaves and paints, whatever is still queued behind it.
+/// How long the drain goes on absorbing the output of a running command before
+/// it leaves and paints, whatever is still queued behind it.
+///
+/// The command is a push, a rebase onto the base, or a merge of the base. All
+/// three write into the one window under the frame, and this budget is what
+/// keeps that window moving for all three.
 ///
 /// [`DEBOUNCE`] ends a drain on a channel that has gone quiet, which is the
 /// right rule for a filesystem burst: a burst is finite, and its end is what
-/// says the repository has settled. A push's output is neither. A pre-push
-/// hook that builds and tests a workspace prints far faster than one line per
-/// [`DEBOUNCE`], for minutes on end, so a drain with no deadline of its own
-/// would absorb the whole build and paint once when it finished — the window
-/// empty and the `Pushing…` age frozen throughout, which is precisely the
-/// frozen screen the output window exists to answer.
+/// says the repository has settled. The output of such a run is neither. A
+/// pre-push hook that builds and tests a workspace prints far faster than one
+/// line per [`DEBOUNCE`], for minutes on end, so a drain with no deadline of
+/// its own would absorb the whole build and paint once when it finished — the
+/// window empty and the age of the notice frozen throughout, which is precisely
+/// the frozen screen the output window exists to answer. A rebase reaches that
+/// same hook, because it pushes what it rewrote.
 ///
-/// The accepted cost is one repaint per 250 ms while a push is streaming, and
+/// The accepted cost is one repaint per 250 ms while a run is streaming, and
 /// only while one is: the deadline is armed by the first
-/// [`Event::PushOutput`] of a wake and the clock is not read at all on a wake
+/// [`Event::RunOutput`] of a wake and the clock is not read at all on a wake
 /// that sees none, so a filesystem burst still coalesces byte for byte as it
 /// did before this constant existed. 250 ms is above the ~100 ms at which a
 /// screen stops reading as live and far below the point at which a reader
 /// would call it stuck, and it is deliberately longer than [`DEBOUNCE`]: a
 /// budget shorter than the debounce window would repaint on lines a single
 /// window could have carried together.
-const PUSH_DRAIN_BUDGET: Duration = Duration::from_millis(250);
+const RUN_DRAIN_BUDGET: Duration = Duration::from_millis(250);
 
 /// Whether a filesystem change may walk git right now, or must wait out the
 /// adaptive cooldown. Returned by [`WalkSchedule::on_change`].
@@ -640,28 +645,72 @@ enum Event {
     /// The user asked to push (`p`) — show the confirmation, or say why there
     /// is nothing to confirm.
     PushRequested,
-    /// The user confirmed the push at the prompt (`y` or Enter).
-    PushConfirmed,
-    /// The user declined the push at the prompt (`n`, Esc, or `q`).
-    PushCancelled,
-    /// A running push wrote a line. Carried one line at a time rather than as
-    /// a batch at the end, because the point of it is to arrive early: a
-    /// pre-push hook can hold the push for minutes, and a batch would land
-    /// when the wait it explains is already over.
+    /// The user asked to bring the branch up to date with its base: `R` for a
+    /// rebase onto it, `M` for a merge of it.
+    ///
+    /// It carries the act, because one event for two keys is what keeps the
+    /// two from drifting apart: every difference between them is a method of
+    /// [`crate::update::BaseUpdate`], and the loop reads it the same way for
+    /// each.
+    ///
+    /// Only [`classify_input`] makes one, and it makes one only where the key
+    /// has a command behind it — so the loop never receives a request it
+    /// cannot serve.
+    BaseUpdateRequested(crate::update::BaseUpdate),
+    /// The probe of one of the two keys found its command, and this is its
+    /// name.
+    ///
+    /// One event for each key, because each key has a probe of its own and the
+    /// three probes answer in whatever order their shells finish. A key is
+    /// unbound until its own answer arrives. A shell that says no, a shell
+    /// that cannot be started, and a shell that never answers all send
+    /// nothing, so that key stays unbound and silent.
+    BaseUpdateCommandFound(crate::update::BaseUpdate, crate::shell::ShellCommand),
+    /// The user said yes to the question on the row (`y` or Enter).
+    ///
+    /// It names no act, because the row holds the question of three keys: a
+    /// push, a rebase onto the base, or a merge of the base. What the answer
+    /// starts is what the question described, and
+    /// [`crate::push::PushUi::confirm`] is what says which of them that is.
+    Confirmed,
+    /// The user said no to the question on the row (`n`, Esc, or `q`).
+    ///
+    /// It names no act either, for the reason [`Event::Confirmed`] gives: the
+    /// answer takes away whatever question stands, and nothing starts.
+    Cancelled,
+    /// A run that the row owns wrote a line: a push, a rebase onto the base,
+    /// or a merge of the base. All three write through this one event, because
+    /// the window under the frame is the same window.
+    ///
+    /// Carried one line at a time rather than as a batch at the end, because
+    /// the point of it is to arrive early: a pre-push hook can hold any of
+    /// those runs for minutes, and a batch would land when the wait it explains
+    /// is already over.
     ///
     /// Arriving early is only half of it — the loop must also *leave* its
     /// debounce drain to paint what arrived, and this is the only event that
-    /// can go on producing for the length of the push. [`PUSH_DRAIN_BUDGET`]
+    /// can go on producing for the length of the run. [`RUN_DRAIN_BUDGET`]
     /// is what stops the drain re-batching what the runner deliberately did
     /// not.
-    PushOutput(String),
+    RunOutput(String),
     /// A push that was running has finished, either way.
     ///
-    /// Always arrives after the last [`Event::PushOutput`] of the same push.
+    /// Always arrives after the last [`Event::RunOutput`] of the same push.
     /// The runner joins its reader threads before it reports, so every line is
     /// already on this channel by the time the outcome is sent — which is what
     /// keeps a late line from reopening a window the outcome just closed.
     PushFinished(crate::push::PushOutcome),
+    /// A rebase onto the base, or a merge of the base, has finished — either
+    /// way.
+    ///
+    /// It carries the outcome a push carries, because the row reports the two
+    /// the same way: a command that either worked or wrote a reason. What it
+    /// does not share is what happens next. **Every outcome of this one walks
+    /// the repository**, and a failed push walks nothing: a push that failed
+    /// changed nothing to re-read, and a rebase that failed stopped in the
+    /// middle of rewriting the branch. The `⚠ rebase` row of the header is what
+    /// says so, and only a walk puts it there.
+    BaseUpdateFinished(crate::push::PushOutcome),
     /// A key press with no other meaning. Clears a status message if one is on
     /// screen and does nothing otherwise, which is what keeps a push error up
     /// until the user has actually looked at the screen.
@@ -698,7 +747,7 @@ enum Event {
     /// Sent only where the command exists. A shell that says no, a shell that
     /// cannot be started, and a shell that never answers all send nothing, so
     /// the key stays unbound and silent.
-    IssueCommandFound(crate::issue::IssueCommand),
+    IssueCommandFound(crate::shell::ShellCommand),
     /// A run of the issue command has finished, either way.
     IssueFinished {
         /// The generation that [`LoopHooks::start_issue`] was given for this
@@ -752,14 +801,21 @@ pub(crate) enum InputMode {
     /// and Right move the watch between the worktrees, and Down opens the list
     /// of the worktrees.
     Normal,
-    /// A push confirmation is on screen and is waiting for an answer. The
+    /// A confirmation is on screen and is waiting for an answer: the question
+    /// of a push, of a rebase onto the base, or of a merge of the base. The
     /// arrow keys never answer it.
     Confirm,
-    /// A push is running. `p` is inert here, so two pushes cannot overlap. The
-    /// arrow keys are inert too, because the window under the frame belongs to
-    /// the worktree that pushes, and a push that succeeds walks that worktree
-    /// again.
-    Pushing,
+    /// A command of one of those three keys is running. `p`, `R`, and `M` are
+    /// all inert here, so no two of those runs overlap — a rebase and a push
+    /// of one branch least of all. The arrow keys are inert too, because the
+    /// window under the frame belongs to the worktree that runs the command,
+    /// and every run that ends walks that worktree again.
+    ///
+    /// It is named for what runs rather than for the key that started it: a
+    /// rebase and a merge run in it as a push does, and it is the mode that
+    /// `push::State::Running` gives. The [`RunKind`] changes one key: `m` acts
+    /// in a push and is inert in a rebase or a merge.
+    Running(RunKind),
     /// The list of the worktrees is open. Up and Down move its cursor, Enter
     /// goes to the worktree under the cursor, and Esc and `q` close it. Every
     /// other key does nothing at all, because the list takes the pane, and a
@@ -767,19 +823,50 @@ pub(crate) enum InputMode {
     List,
 }
 
-/// Whether the `G` key has a command behind it.
+/// Which command runs in [`InputMode::Running`].
+///
+/// A measurement of `m` starts its scratch worktree from HEAD. So the key
+/// table must know whether the run in flight moves HEAD.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum RunKind {
+    /// A push. It leaves HEAD where it is.
+    Push,
+    /// A rebase onto the base or a merge of the base. It moves HEAD for the
+    /// whole run.
+    BaseUpdate,
+}
+
+/// Whether one key has a command behind it.
 ///
 /// A separate value from [`InputMode`], because it is not a mode: it changes
-/// what one key does and it changes no other key. It is a parameter of
-/// [`classify_input`] rather than a flag that function reads, so the absent
-/// case is testable with no shell.
+/// what one key does and it changes no other key. It reaches
+/// [`classify_input`] as a parameter rather than as a flag that function
+/// reads, so the unbound case of every such key is testable with no shell.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum IssueKey {
-    /// The command exists. `G` asks for the issue.
+pub(crate) enum Binding {
+    /// The command exists. The key acts.
     Bound,
-    /// The command does not exist, or the probe has not answered yet. `G`
+    /// The command does not exist, or the probe has not answered yet. The key
     /// does nothing, the way an unbound key does.
     Unbound,
+}
+
+/// Which of the three keys that run a command of the user have one behind
+/// them: `G`, `R`, and `M`.
+///
+/// One value rather than three parameters of [`classify_input`], because the
+/// three answers travel together and arrive together: each of the three probes
+/// answers on the loop's own channel, and the key table reads whatever has
+/// arrived by the press. A fourth such key then adds a field here and moves no
+/// call site.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct CommandKeys {
+    /// Whether `G`, which opens the issue of the branch, has a command.
+    issue: Binding,
+    /// Whether `R`, which rebases the branch onto its base, has a command.
+    rebase: Binding,
+    /// Whether `M`, which merges the base into the branch, has a command.
+    merge: Binding,
 }
 
 /// What one press of `G` does.
@@ -790,7 +877,7 @@ pub(crate) enum IssueKey {
 #[derive(Debug, PartialEq, Eq)]
 enum IssuePress {
     /// Run this command.
-    Run(crate::issue::IssueCommand),
+    Run(crate::shell::ShellCommand),
     /// Put this under the frame, and wait for a second press.
     Ask(String),
     /// Nothing at all.
@@ -807,7 +894,7 @@ enum IssuePress {
 struct IssueRun {
     /// The command the probe found. `None` until the probe answers, and
     /// forever where it found none or where the feature is off.
-    command: Option<crate::issue::IssueCommand>,
+    command: Option<crate::shell::ShellCommand>,
     /// Whether a run is in flight. One run at a time: a browser opening twice
     /// is two tabs nobody asked for.
     running: bool,
@@ -843,16 +930,16 @@ impl IssueRun {
     }
 
     /// Whether `G` has a command behind it.
-    fn key(&self) -> IssueKey {
+    fn key(&self) -> Binding {
         if self.command.is_some() {
-            IssueKey::Bound
+            Binding::Bound
         } else {
-            IssueKey::Unbound
+            Binding::Unbound
         }
     }
 
     /// Keep the command the probe found.
-    fn found(&mut self, command: crate::issue::IssueCommand) {
+    fn found(&mut self, command: crate::shell::ShellCommand) {
         self.command = Some(command);
     }
 
@@ -941,6 +1028,71 @@ impl IssueRun {
     }
 }
 
+/// The command behind each of the two keys that bring the branch up to date
+/// with its base.
+///
+/// One value for the pair, beside [`IssueRun`], because the pair is what the
+/// key table reads: [`BaseUpdateCommands::keys`] answers for all three of those
+/// keys at once, and the `G` half of its answer comes from [`IssueRun::key`].
+///
+/// It holds no flag for a run in flight, and [`IssueRun`] holds one. A run of
+/// `R` or `M` takes the row for the whole of its life, so the loop is in
+/// [`InputMode::Running`] until it ends and the key table refuses a second
+/// press there. A run of `G` opens a browser and leaves the row alone, so
+/// nothing but that flag stops a second press of it.
+struct BaseUpdateCommands {
+    /// The command `R` runs. `None` until the probe of that key answers, and
+    /// forever where it found none or where the key is off.
+    rebase: Option<crate::shell::ShellCommand>,
+    /// The command `M` runs, on the same terms.
+    merge: Option<crate::shell::ShellCommand>,
+}
+
+impl BaseUpdateCommands {
+    /// Neither probe has answered, so neither key acts.
+    const fn new() -> Self {
+        Self {
+            rebase: None,
+            merge: None,
+        }
+    }
+
+    /// Keep the command the probe of `update` found.
+    fn found(&mut self, update: crate::update::BaseUpdate, command: crate::shell::ShellCommand) {
+        match update {
+            crate::update::BaseUpdate::Rebase => self.rebase = Some(command),
+            crate::update::BaseUpdate::Merge => self.merge = Some(command),
+        }
+    }
+
+    /// The command of `update`, or `None` where its key has none.
+    fn command(&self, update: crate::update::BaseUpdate) -> Option<&crate::shell::ShellCommand> {
+        match update {
+            crate::update::BaseUpdate::Rebase => self.rebase.as_ref(),
+            crate::update::BaseUpdate::Merge => self.merge.as_ref(),
+        }
+    }
+
+    /// Whether the key of `update` has a command behind it.
+    fn binding(&self, update: crate::update::BaseUpdate) -> Binding {
+        if self.command(update).is_some() {
+            Binding::Bound
+        } else {
+            Binding::Unbound
+        }
+    }
+
+    /// Which of the three keys that run a command of the user have one, with
+    /// the answer for `G` from [`IssueRun::key`].
+    fn keys(&self, issue: Binding) -> CommandKeys {
+        CommandKeys {
+            issue,
+            rebase: self.binding(crate::update::BaseUpdate::Rebase),
+            merge: self.binding(crate::update::BaseUpdate::Merge),
+        }
+    }
+}
+
 /// What one press of `m` does.
 ///
 /// An enum and not a `bool`, for the reason [`IssuePress`] gives: the loop does
@@ -965,16 +1117,22 @@ enum ConflictsPress {
 /// its outcome a moment before its thread ends, so that answer can say a run
 /// is in flight just after the outcome arrived, and a press then would do
 /// nothing for no reason the user can see.
-struct ConflictsRun {
-    /// Whether a run is in flight. Set by the press that starts the run, and
-    /// cleared by the outcome of that run.
-    running: bool,
+enum ConflictsRun {
+    /// No run in flight.
+    Idle,
+    /// A run is in flight. Set by the press that starts the run, and cleared
+    /// by the outcome of that run.
+    Measuring,
+    /// A run is in flight, and a rebase or a merge started after it. The run
+    /// started from the HEAD that the update moves, so its line describes a
+    /// branch that is gone. Cleared by the outcome of that run.
+    Overlapped,
 }
 
 impl ConflictsRun {
     /// No run in flight.
     fn new() -> Self {
-        Self { running: false }
+        Self::Idle
     }
 
     /// What one press of `m` does now.
@@ -983,16 +1141,30 @@ impl ConflictsRun {
     /// so every press after it answers nothing until
     /// [`ConflictsRun::finished`].
     fn press(&mut self) -> ConflictsPress {
-        if self.running {
-            return ConflictsPress::Nothing;
+        match self {
+            Self::Idle => {
+                *self = Self::Measuring;
+                ConflictsPress::Start
+            }
+            Self::Measuring | Self::Overlapped => ConflictsPress::Nothing,
         }
-        self.running = true;
-        ConflictsPress::Start
+    }
+
+    /// A rebase or a merge started, so a run in flight is overlapped.
+    fn base_update_started(&mut self) {
+        if matches!(self, Self::Measuring) {
+            *self = Self::Overlapped;
+        }
+    }
+
+    /// Whether the run in flight is overlapped. Its events post nothing.
+    fn overlapped(&self) -> bool {
+        matches!(self, Self::Overlapped)
     }
 
     /// The outcome of the run arrived, so `m` starts a run again.
     fn finished(&mut self) {
-        self.running = false;
+        *self = Self::Idle;
     }
 }
 
@@ -1357,12 +1529,15 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     // frames, never during one.
     let push_tx = tx.clone();
 
-    // The shell the issue key uses, resolved once. The probe asks it whether
-    // the command exists and a run asks it to run the command, and both must
-    // ask the same shell.
-    let shell = crate::issue::user_shell();
+    // The shell that every key which runs a command of the user asks, resolved
+    // once. A probe asks it whether the command exists and a run asks it to run
+    // the command, and both must ask the same shell.
+    let shell = crate::shell::user_shell();
     let issue_tx = tx.clone();
-    spawn_issue_probe(shell.clone(), tx.clone());
+    // The environment is read here, once, and the values go on from there. The
+    // handles are dropped, which detaches the threads: the loop waits for no
+    // probe.
+    spawn_command_probes(&CommandValues::read(), &shell, &tx);
 
     // The worker that measures for `m`. It reports on the channel of the loop,
     // as the push and the issue key do. The quit below waits for it, because a
@@ -1425,7 +1600,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             paint: |output: &str| paint_output(output),
             clock: Instant::now,
             next_tick: |freshest: Option<Duration>| freshest.and_then(next_tick),
-            start_issue: |command: crate::issue::IssueCommand,
+            start_issue: |command: crate::shell::ShellCommand,
                           current: &WorktreePath,
                           generation: Generation| {
                 // The run keeps the generation of its press and sends it back
@@ -1442,6 +1617,27 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                     });
                 });
             },
+            start_base_update: |command: crate::update::BaseUpdateCommand,
+                                current: &WorktreePath| {
+                // Two senders on the one channel, as the push has: a line and
+                // the outcome re-enter the loop the way every other event
+                // does, applied between frames rather than during one. The
+                // lines are the push's own event, because the window under the
+                // frame is the same window.
+                let line_tx = push_tx.clone();
+                let finish_tx = push_tx.clone();
+                crate::update::spawn(
+                    shell.clone(),
+                    command,
+                    current.as_path().to_path_buf(),
+                    move |line| {
+                        let _ = line_tx.send(Event::RunOutput(line));
+                    },
+                    move |outcome| {
+                        let _ = finish_tx.send(Event::BaseUpdateFinished(outcome));
+                    },
+                );
+            },
             start_push: |command: PushCommand, current: &WorktreePath| {
                 // Two senders on the one channel, so a line and the outcome
                 // re-enter the loop the same way every other event does —
@@ -1452,7 +1648,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                     command,
                     current.as_path().to_path_buf(),
                     move |line| {
-                        let _ = line_tx.send(Event::PushOutput(line));
+                        let _ = line_tx.send(Event::RunOutput(line));
                     },
                     move |outcome| {
                         let _ = finish_tx.send(Event::PushFinished(outcome));
@@ -1548,28 +1744,285 @@ fn resolve_home(handle: &RepoHandle) -> Result<WorktreePath> {
         .ok_or_else(|| anyhow::anyhow!("{HOME_UNRESOLVED}: {}", root.display()))
 }
 
-/// Ask the shell, once, whether the issue command exists, and report the
-/// answer on the loop's own channel.
+/// What the environment says each key that runs a command of the user runs.
 ///
-/// On a thread of its own, because an interactive shell reads an rc file and
-/// an rc file is somebody else's code: it can take a second, and it can take
-/// forever. The loop never waits for this. Until the answer arrives the key is
-/// unbound, and a shell that says no sends nothing at all — so the key stays
-/// unbound and silent for the life of the process.
+/// **One value for all of them, and one read.** The environment is
+/// process-global state, and this is the one place `gsw` reads these variables:
+/// [`CommandValues::read`] takes them all at once, and every function under it
+/// takes the values as an argument. A test of the probes then hands over the
+/// values it wants to try and touches no such state — `cargo test` runs the
+/// tests of one binary on many threads, and a test that set `GSW_REBASE_COMMAND`
+/// would change what every sibling test reads.
 ///
-/// The answer arrives once. A function added to the rc file after `gsw`
-/// started needs a restart.
-fn spawn_issue_probe(shell: OsString, tx: Sender<Event>) {
-    // Read here rather than on the thread, so the value and the process that
-    // holds it are read in one place. An absent variable gives the default
-    // name, and an empty one turns the feature off.
-    let named = std::env::var_os(crate::issue::ISSUE_COMMAND_ENV)
-        .map(|value| value.to_string_lossy().into_owned());
-    thread::spawn(move || {
-        if let Some(command) = crate::issue::resolve(named.as_deref(), &shell) {
-            let _ = tx.send(Event::IssueCommandFound(command));
+/// A field is `None` where the variable is unset, which is the case that takes
+/// the default name of that key. A field of an empty value turns its own key
+/// off, and [`crate::shell::ShellCommand::new`] is where that rule lives.
+struct CommandValues {
+    /// What [`crate::issue::ISSUE_COMMAND_ENV`] says `G` runs.
+    issue: Option<String>,
+    /// What [`crate::update::REBASE_COMMAND_ENV`] says `R` runs.
+    rebase: Option<String>,
+    /// What [`crate::update::MERGE_COMMAND_ENV`] says `M` runs.
+    merge: Option<String>,
+}
+
+impl CommandValues {
+    /// What the environment of this process says.
+    fn read() -> Self {
+        Self {
+            issue: read_value(crate::issue::ISSUE_COMMAND_ENV),
+            rebase: read_value(crate::update::BaseUpdate::Rebase.env()),
+            merge: read_value(crate::update::BaseUpdate::Merge.env()),
         }
-    });
+    }
+
+    /// What the variable of `update` says its key runs.
+    fn base_update(&self, update: crate::update::BaseUpdate) -> Option<&str> {
+        match update {
+            crate::update::BaseUpdate::Rebase => self.rebase.as_deref(),
+            crate::update::BaseUpdate::Merge => self.merge.as_deref(),
+        }
+    }
+}
+
+/// The value of `name`, as text, or `None` where the environment names none.
+///
+/// A value that is not text on this system arrives through
+/// [`std::ffi::OsStr::to_string_lossy`] rather than as nothing, so a name with
+/// one byte in it that no character owns still names the rest of the command.
+fn read_value(name: &str) -> Option<String> {
+    std::env::var_os(name).map(|value| value.to_string_lossy().into_owned())
+}
+
+/// Ask the shell, once, whether the command of every key that runs one exists,
+/// and report each answer on the loop's own channel.
+///
+/// **One thread and one shell for each key.** A shell that answered for several
+/// names at once would need its standard output parsed, and an rc file can
+/// print to that output — so the answer of such a shell says as much about the
+/// banner of the user as about the commands. Exit status carries one answer,
+/// which is why each name gets a shell of its own.
+///
+/// On threads of their own, because an interactive shell reads an rc file and
+/// an rc file is somebody else's code: it can take a second, and it can take
+/// forever. The loop never waits for any of them. Until the answer of a key
+/// arrives that key is unbound, and a shell that says no sends nothing at all —
+/// so that key stays unbound and silent for the life of the process.
+///
+/// Each answer arrives once. A function added to the rc file after `gsw`
+/// started needs a restart.
+///
+/// **The handles are for a test.** Production drops them, which detaches the
+/// threads: the loop waits for no probe, and it quits without one. A test waits
+/// for them, because a test that read the record of the shells before they had
+/// run would report a probe that works as a probe that starts nothing.
+fn spawn_command_probes(
+    values: &CommandValues,
+    shell: &OsStr,
+    tx: &Sender<Event>,
+) -> Vec<thread::JoinHandle<()>> {
+    let issue_tx = tx.clone();
+    let mut probes = vec![spawn_probe(
+        shell,
+        values.issue.as_deref(),
+        crate::issue::DEFAULT_ISSUE_COMMAND,
+        move |command| {
+            let _ = issue_tx.send(Event::IssueCommandFound(command));
+        },
+    )];
+    // Over the acts rather than over two names, so a third act would be probed
+    // here without an edit: every difference between the two is a method of
+    // `BaseUpdate`, the variable and the default name among them.
+    probes.extend(crate::update::BaseUpdate::ALL.map(|update| {
+        let update_tx = tx.clone();
+        spawn_probe(
+            shell,
+            values.base_update(update),
+            update.default_command(),
+            move |command| {
+                let _ = update_tx.send(Event::BaseUpdateCommandFound(update, command));
+            },
+        )
+    }));
+    probes
+}
+
+/// Ask `shell` on a thread of its own about the command that `value` names,
+/// falling back on `default`, and hand a command it has to `found`.
+///
+/// `found` runs on that thread and only where the shell said yes. A value that
+/// turns the key off starts no shell at all, which is what keeps a public
+/// repository from asking every user's shell about one person's function.
+fn spawn_probe<Found>(
+    shell: &OsStr,
+    value: Option<&str>,
+    default: &'static str,
+    found: Found,
+) -> thread::JoinHandle<()>
+where
+    Found: FnOnce(crate::shell::ShellCommand) + Send + 'static,
+{
+    let shell = shell.to_os_string();
+    let value = value.map(str::to_string);
+    thread::spawn(move || {
+        if let Some(command) = crate::shell::resolve(value.as_deref(), default, &shell) {
+            found(command);
+        }
+    })
+}
+
+#[cfg(all(test, unix))]
+mod probe_tests {
+    use super::*;
+    use crate::shell::stub_shell::StubShell;
+    use crate::update::BaseUpdate;
+
+    /// What a probe puts in front of the word it asks the shell about.
+    ///
+    /// The tests read the record of the stub through this, so they assert on
+    /// the question the shell was really asked and never on a count of runs.
+    const PROBE_PREFIX: &str = "command -v ";
+
+    /// The values of the three variables, as a test states them.
+    ///
+    /// `None` is a variable the environment does not set, which is the case
+    /// that takes the default name of that key. No test of this module sets a
+    /// variable: `cargo test` runs the tests of one binary on many threads, so
+    /// a test that set `GSW_REBASE_COMMAND` would change what every sibling
+    /// test reads.
+    fn values(issue: Option<&str>, rebase: Option<&str>, merge: Option<&str>) -> CommandValues {
+        CommandValues {
+            issue: issue.map(str::to_string),
+            rebase: rebase.map(str::to_string),
+            merge: merge.map(str::to_string),
+        }
+    }
+
+    /// Probe `values` against `stub`, and give the word each shell was asked
+    /// about and what each answer said, both sorted.
+    ///
+    /// **It waits for every thread the spawn started.** The stub writes its
+    /// record as it runs, so a read before the shells had run would report a
+    /// probe that works as a probe that starts nothing. The wait is bounded by
+    /// the deadline of the probe itself, which kills a shell that never
+    /// answers.
+    ///
+    /// Sorted, because three shells answer in whatever order they finish. What
+    /// each test here is about is which questions were asked, and never which
+    /// of them was asked first.
+    fn probed(values: &CommandValues, stub: &StubShell) -> (Vec<String>, Vec<String>) {
+        let (tx, rx) = mpsc::channel();
+        for handle in spawn_command_probes(values, stub.as_shell(), &tx) {
+            handle.join().expect("a probe thread must not panic");
+        }
+        // The spawn holds a sender for each key, and each of those goes with
+        // the thread that held it. This is the last one, and the read below
+        // ends when it goes.
+        drop(tx);
+        let mut words: Vec<String> = stub
+            .runs()
+            .lines()
+            .filter_map(|line| line.strip_prefix(PROBE_PREFIX))
+            .map(|word| word.trim_matches('\'').to_string())
+            .collect();
+        words.sort();
+        let mut answers: Vec<String> = rx.into_iter().map(|event| answer(&event)).collect();
+        answers.sort();
+        (words, answers)
+    }
+
+    /// What one answer says: the key it belongs to, and the command it carries.
+    ///
+    /// The key rather than the name of the variant, because the question each
+    /// test asks is whether an answer reached the key it belongs to. An answer
+    /// that reached the other key would bind `M` to the command that rebases.
+    fn answer(event: &Event) -> String {
+        match event {
+            Event::IssueCommandFound(command) => format!("G {}", command.name()),
+            Event::BaseUpdateCommandFound(update, command) => {
+                format!("{} {}", update.key(), command.name())
+            }
+            _ => "another event".to_string(),
+        }
+    }
+
+    #[test]
+    fn an_unset_variable_probes_the_default_command_of_its_own_key() {
+        // Three keys, three shells, three questions. A key whose variable the
+        // environment never names still asks about the name it falls back on,
+        // because that name is what the key runs.
+        let stub = StubShell::answering(0);
+        let (words, _) = probed(&values(None, None, None), &stub);
+        assert_eq!(
+            words,
+            [
+                crate::issue::DEFAULT_ISSUE_COMMAND,
+                BaseUpdate::Merge.default_command(),
+                BaseUpdate::Rebase.default_command(),
+            ],
+            "each key must ask the shell about its own default command",
+        );
+    }
+
+    #[test]
+    fn an_empty_variable_starts_no_shell_for_its_own_key_alone() {
+        // The one way to say "do not do this at all" on a public repository
+        // whose defaults name one person's shell functions. It must cost
+        // nothing at all — no shell, and so no rc file read — and it must turn
+        // off the one key it names and no other.
+        let stub = StubShell::answering(0);
+        let (words, answers) = probed(&values(None, Some(""), None), &stub);
+        assert_eq!(
+            words,
+            [
+                crate::issue::DEFAULT_ISSUE_COMMAND,
+                BaseUpdate::Merge.default_command(),
+            ],
+            "an empty GSW_REBASE_COMMAND must start no shell for R, and leave G and M probing",
+        );
+        assert_eq!(
+            answers,
+            ["G ggs", "M gmp"],
+            "a key that started no shell must send no answer",
+        );
+    }
+
+    #[test]
+    fn a_variable_with_a_name_in_it_probes_that_command() {
+        // The name of the command belongs to the user. `gmp` is the name one
+        // person's rc file gives it, and a user who calls it something else
+        // must have gsw ask about the name they chose.
+        let stub = StubShell::answering(0);
+        let (words, answers) = probed(&values(None, None, Some("mymerge")), &stub);
+        assert_eq!(
+            words,
+            [
+                crate::issue::DEFAULT_ISSUE_COMMAND,
+                BaseUpdate::Rebase.default_command(),
+                "mymerge",
+            ],
+            "GSW_MERGE_COMMAND must name the command that M asks about",
+        );
+        assert_eq!(
+            answers,
+            ["G ggs", "M mymerge", "R grp"],
+            "the answer of M must carry the command the user named",
+        );
+    }
+
+    #[test]
+    fn each_answer_arrives_as_the_event_of_its_own_key() {
+        // Three answers on one channel, and each must reach the key it belongs
+        // to. An answer that reached the other key would bind `M` to the
+        // command that rebases the branch and force-pushes it.
+        let stub = StubShell::answering(0);
+        let (_, answers) = probed(&values(None, None, None), &stub);
+        assert_eq!(
+            answers,
+            ["G ggs", "M gmp", "R grp"],
+            "each key must be bound by the answer of its own probe",
+        );
+    }
 }
 
 /// Start the recursive filesystem watcher that feeds [`Event::FsChanged`] into
@@ -1749,12 +2202,14 @@ struct LoopState {
     ui: PushUi,
     /// The state of the `G` key.
     issue: IssueRun,
+    /// The commands behind the `R` and `M` keys.
+    base_updates: BaseUpdateCommands,
     /// The state of the `m` key.
     conflicts: ConflictsRun,
     /// The worktree where the user started gsw.
     home: WorktreePath,
-    /// The worktree that the frame shows. The walk, `p`, `G`, and `m` act on
-    /// it. It starts at [`LoopState::home`].
+    /// The worktree that the frame shows. The walk, `p`, `R`, `M`, `G`, and
+    /// `m` act on it. It starts at [`LoopState::home`].
     current: WorktreePath,
     /// How many switches the loop has made. See [`Generation`].
     generation: Generation,
@@ -1832,9 +2287,9 @@ impl LoopState {
     /// last good snapshot at its true age:
     ///
     /// - a walk of the home worktree, which has no home to go back to;
-    /// - a walk while a push runs, because the window under the frame belongs
-    ///   to the worktree that pushes. A later failed walk goes home, after the
-    ///   push;
+    /// - a walk while a push, a rebase, or a merge runs, because the window
+    ///   under the frame belongs to the worktree that the command runs in. A
+    ///   later failed walk goes home, after the run;
     /// - a walk of a worktree that the list still holds. Such a walk failed
     ///   for a moment, as when `git gc` swaps the ref store under it.
     ///
@@ -1860,7 +2315,7 @@ impl LoopState {
         worktree_paths: &mut impl FnMut() -> Vec<WorktreePath>,
         open: &mut impl FnMut(&WorktreePath) -> Result<Snapshot, String>,
     ) {
-        if self.current == self.home || self.ui.mode() == InputMode::Pushing {
+        if self.current == self.home || matches!(self.ui.mode(), InputMode::Running(_)) {
             return;
         }
         if worktree_paths().contains(&self.current) {
@@ -1898,6 +2353,7 @@ struct LoopHooks<
     Clock,
     Tick,
     StartPush,
+    StartBaseUpdate,
     StartIssue,
     StartConflicts,
     Worktrees,
@@ -1928,6 +2384,15 @@ struct LoopHooks<
     /// outcome back as [`Event::PushFinished`]; tests record the command and
     /// decide for themselves when — or whether — the outcome arrives.
     start_push: StartPush,
+    /// Start a confirmed rebase onto the base or merge of the base, given the
+    /// [`crate::update::BaseUpdateCommand`] the question described — the act,
+    /// the branch and the base it named, and the user's own command — and the
+    /// worktree to run it in, which is the worktree on the screen at the press.
+    /// Production spawns a thread that runs the command, sends each line it
+    /// writes back as [`Event::RunOutput`], and sends the outcome as
+    /// [`Event::BaseUpdateFinished`]; tests record the command and decide for
+    /// themselves when, or whether, the outcome arrives.
+    start_base_update: StartBaseUpdate,
     /// Start a run of the issue command in the worktree on the screen at the
     /// press. Production spawns a thread that runs it and sends the outcome
     /// back as [`Event::IssueFinished`], with the [`Generation`] it was given;
@@ -2029,9 +2494,9 @@ enum Flow {
 /// is where the push, the issue key, and `m` do their work.
 #[expect(
     clippy::type_complexity,
-    reason = "the loop takes one generic for each of its thirteen hooks, so each hook stays \
+    reason = "the loop takes one generic for each of its fourteen hooks, so each hook stays \
               a plain closure that a test replaces with a fake. A type alias spells the same \
-              thirteen generics, and the borrow of the whole value keeps every call of \
+              fourteen generics, and the borrow of the whole value keeps every call of \
               absorb the same"
 )]
 fn absorb<
@@ -2043,6 +2508,7 @@ fn absorb<
     Clock,
     Tick,
     StartPush,
+    StartBaseUpdate,
     StartIssue,
     StartConflicts,
     Worktrees,
@@ -2061,6 +2527,7 @@ fn absorb<
         Clock,
         Tick,
         StartPush,
+        StartBaseUpdate,
         StartIssue,
         StartConflicts,
         Worktrees,
@@ -2071,7 +2538,8 @@ fn absorb<
 where
     Clock: Fn() -> Instant,
     StartPush: FnMut(PushCommand, &WorktreePath),
-    StartIssue: FnMut(crate::issue::IssueCommand, &WorktreePath, Generation),
+    StartBaseUpdate: FnMut(crate::update::BaseUpdateCommand, &WorktreePath),
+    StartIssue: FnMut(crate::shell::ShellCommand, &WorktreePath, Generation),
     StartConflicts: FnMut(&WorktreePath, Generation),
     Worktrees: FnMut() -> Vec<WorktreeEntry>,
     Paths: FnMut() -> Vec<WorktreePath>,
@@ -2084,7 +2552,8 @@ where
         Event::Resize => pending.resize = true,
         Event::ForceRefresh => pending.force = true,
         Event::Key(key) => {
-            if let Some(action) = classify_input(key, state.ui.mode(), state.issue.key()) {
+            let keys = state.base_updates.keys(state.issue.key());
+            if let Some(action) = classify_input(key, state.ui.mode(), keys) {
                 // Every key but `G` takes the arming away. The message that
                 // asks for the second press is the armed state, and this key
                 // is not that press.
@@ -2099,15 +2568,42 @@ where
                 .ui
                 .request(&state.cache.snapshot, state.cache.dims, clock());
         }
-        // `confirm` yields the command only once, so a second `y` that raced
-        // the mode change starts nothing.
-        Event::PushConfirmed => {
-            if let Some(command) = state.ui.confirm(clock()) {
-                (hooks.start_push)(command, &state.current);
+        // The question describes the command of the act, so the press reads
+        // that command here and the row takes it. The key table makes no
+        // request for a key with no command behind it, so the silence below is
+        // for a press that raced the answer of its own probe — and it is the
+        // silence of an unbound key, which is what the key was at the press.
+        Event::BaseUpdateRequested(update) => {
+            if let Some(command) = state.base_updates.command(update) {
+                state.ui.request_base_update(
+                    &state.cache.snapshot,
+                    update,
+                    command,
+                    state.cache.dims,
+                    clock(),
+                );
             }
         }
-        Event::PushOutput(line) => state.ui.output_line(line),
-        Event::PushCancelled => state.ui.cancel(),
+        Event::BaseUpdateCommandFound(update, command) => {
+            state.base_updates.found(update, command);
+        }
+        // `confirm` yields the command only once, so a second `y` that raced
+        // the mode change starts nothing. It says which act was confirmed, and
+        // that is the only thing that decides which runner starts: the row
+        // asks one question at a time, and the answer carries the work the
+        // user was shown.
+        Event::Confirmed => match state.ui.confirm(clock()) {
+            Some(crate::push::Confirmed::Push(command)) => {
+                (hooks.start_push)(command, &state.current);
+            }
+            Some(crate::push::Confirmed::BaseUpdate(command)) => {
+                state.conflicts.base_update_started();
+                (hooks.start_base_update)(command, &state.current);
+            }
+            None => {}
+        },
+        Event::RunOutput(line) => state.ui.output_line(line),
+        Event::Cancelled => state.ui.cancel(),
         Event::Dismiss => state.ui.dismiss(),
         // Left and Right read the paths of the worktrees again at each press,
         // because `nwt` and `swt` add and remove worktrees while gsw runs.
@@ -2225,6 +2721,14 @@ where
         Event::IssueFinished { generation, .. } if state.is_stale(generation) => {
             state.issue.finished();
         }
+        // A run that a rebase or a merge overlapped measured the branch before
+        // the update moved HEAD. Its line reaches the row after the update, and
+        // then reads as a measurement of the new branch. So it posts nothing,
+        // and its outcome still frees the key. See [`ConflictsRun::Overlapped`].
+        Event::ConflictsStarted { .. } if state.conflicts.overlapped() => {}
+        Event::ConflictsFinished { .. } if state.conflicts.overlapped() => {
+            state.conflicts.finished();
+        }
         // A busy row drops the notice and does not hold it. A held notice
         // reaches the row after the outcome, and says that a run is in flight
         // when none is. See [`PushUi::post_progress`].
@@ -2249,6 +2753,16 @@ where
             if let Some(message) = outcome.message() {
                 state.ui.post_error(message.to_string());
             }
+        }
+        // **A walk on every outcome, and not on success alone.** A rebase that
+        // failed still changed the repository: it rewrites the commits one at a
+        // time and stops where one of them conflicts, and the `⚠ rebase` row of
+        // the header is what tells the user that git is holding it. Only a walk
+        // puts that row there. A rebase that worked moved every commit and
+        // pushed them, so every count in the header is stale as well.
+        Event::BaseUpdateFinished(outcome) => {
+            state.ui.finished(outcome, clock());
+            pending.force = true;
         }
         Event::PushFinished(outcome) => {
             let succeeded = outcome.success;
@@ -2291,9 +2805,10 @@ where
 /// displayed (see [`Event::Key`] for why the reader thread must not).
 ///
 /// The loop watches one worktree at a time, the current worktree, and it starts
-/// on `start.home`. The walk, `p`, `G`, and `m` act on the current worktree. The
-/// arrow keys change it through [`LoopState::switch_to`], inside [`absorb`], so
-/// the next key of the same burst already acts on the new worktree.
+/// on `start.home`. The walk, `p`, `R`, `M`, `G`, and `m` act on the current
+/// worktree. The arrow keys change it through [`LoopState::switch_to`], inside
+/// [`absorb`], so the next key of the same burst already acts on the new
+/// worktree.
 ///
 /// `hooks` bundles the side effects (collect, render, terminal-size query, paint,
 /// clock, tick cadence) so the loop is one function testable without a TTY or
@@ -2338,9 +2853,9 @@ where
 /// loop goes back to the home worktree ([`LoopState::return_home_if_gone`]).
 #[expect(
     clippy::type_complexity,
-    reason = "the loop takes one generic for each of its thirteen hooks, so each hook stays \
+    reason = "the loop takes one generic for each of its fourteen hooks, so each hook stays \
               a plain closure that a test replaces with a fake. A type alias spells the same \
-              thirteen generics, as the expectation on absorb says"
+              fourteen generics, as the expectation on absorb says"
 )]
 fn event_loop<
     Collect,
@@ -2351,6 +2866,7 @@ fn event_loop<
     Clock,
     Tick,
     StartPush,
+    StartBaseUpdate,
     StartIssue,
     StartConflicts,
     Worktrees,
@@ -2370,6 +2886,7 @@ fn event_loop<
         Clock,
         Tick,
         StartPush,
+        StartBaseUpdate,
         StartIssue,
         StartConflicts,
         Worktrees,
@@ -2386,7 +2903,8 @@ where
     Clock: Fn() -> Instant,
     Tick: Fn(Option<Duration>) -> Option<Duration>,
     StartPush: FnMut(PushCommand, &WorktreePath),
-    StartIssue: FnMut(crate::issue::IssueCommand, &WorktreePath, Generation),
+    StartBaseUpdate: FnMut(crate::update::BaseUpdateCommand, &WorktreePath),
+    StartIssue: FnMut(crate::shell::ShellCommand, &WorktreePath, Generation),
     StartConflicts: FnMut(&WorktreePath, Generation),
     Worktrees: FnMut() -> Vec<WorktreeEntry>,
     Paths: FnMut() -> Vec<WorktreePath>,
@@ -2407,6 +2925,8 @@ where
         // The probe answers on the loop's own channel, so the key is unbound
         // until it does and the loop never waits for it.
         issue: IssueRun::new(session),
+        // One probe for each of the two keys, on the same terms.
+        base_updates: BaseUpdateCommands::new(),
         // The loop owns the state of `m`, and the thread that measures never
         // touches it. So the one-run rule needs no lock.
         conflicts: ConflictsRun::new(),
@@ -2460,15 +2980,15 @@ where
         };
 
         // Coalesce a filesystem burst: keep draining until the channel stays
-        // quiet for a full `debounce` — or, once a running push has streamed a
-        // line into this drain, until `PUSH_DRAIN_BUDGET` has passed since it
+        // quiet for a full `debounce` — or, once a running command has streamed
+        // a line into this drain, until `RUN_DRAIN_BUDGET` has passed since it
         // did. A burst ends on its own, so a quiet channel is the signal that
-        // it has; a push's output need not end for minutes, so it gets a
-        // deadline instead of a signal. A tick has no burst behind it.
+        // it has; the output of such a run need not end for minutes, so it gets
+        // a deadline instead of a signal. A tick has no burst behind it.
         let mut quitting = false;
         if !woke_for_timeout {
-            // Armed by the first line of push output this drain sees, and left
-            // `None` otherwise — so a drain with no push behind it reads the
+            // Armed by the first line of run output this drain sees, and left
+            // `None` otherwise — so a drain with no run behind it reads the
             // clock exactly as many times as it did before this deadline
             // existed, and filesystem coalescing is unchanged.
             let mut drain_until: Option<Instant> = None;
@@ -2476,7 +2996,7 @@ where
                 match rx.recv_timeout(debounce) {
                     Ok(event) => {
                         // Asked before `absorb`, which takes the event by value.
-                        let streamed = matches!(event, Event::PushOutput(_));
+                        let streamed = matches!(event, Event::RunOutput(_));
                         if absorb(event, &mut pending, &mut state, &mut hooks) == Flow::Quit {
                             // Unlike the first wake, a quit that arrives inside
                             // the drain still paints: the events ahead of it in
@@ -2488,7 +3008,7 @@ where
                         }
                         if streamed {
                             let due = *drain_until
-                                .get_or_insert_with(|| (hooks.clock)() + PUSH_DRAIN_BUDGET);
+                                .get_or_insert_with(|| (hooks.clock)() + RUN_DRAIN_BUDGET);
                             if (hooks.clock)() >= due {
                                 break;
                             }
@@ -2755,32 +3275,39 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 ///   cannot be quit while it waits on the network is a monitor that has to be
 ///   killed from another pane.
 /// - [`InputMode::Normal`]: `q` quits, `r` forces a refresh, `p` asks to push,
-///   `G` asks for the issue of the branch, and `m` asks to measure a rebase and
-///   a merge against the default branch. Up goes to the home worktree, Left to
-///   the previous worktree, Right to the next worktree, and Down opens the
-///   list of the worktrees.
-/// - [`InputMode::Confirm`]: `y` and Enter push, `n`, Esc, and `q` cancel.
-///   Nothing else acts — with a question on screen, `q` is the answer "no",
-///   not "quit", `r` is not a refresh, and an arrow key is no answer at all.
-///   That is why the mode exists.
-/// - [`InputMode::Pushing`]: `q` quits, `r` refreshes, `G` still asks for the
-///   issue — a browser conflicts with nothing a push does — and `m` still asks
-///   to measure, because a measurement is read-only for the repository. `p` is
-///   inert, so an impatient second press cannot start an overlapping push. The
-///   arrow keys are inert too: the window under the frame belongs to the
-///   worktree that pushes, so the watch stays on that worktree.
+///   `G` asks for the issue of the branch, `R` asks to rebase the branch onto
+///   its base, `M` asks to merge the base into the branch, and `m` asks to
+///   measure a rebase and a merge against the default branch. Up goes to the
+///   home worktree, Left to the previous worktree, Right to the next worktree,
+///   and Down opens the list of the worktrees.
+/// - [`InputMode::Confirm`]: `y` and Enter carry out whatever the question on
+///   the row asks about — a push, a rebase, or a merge — and `n`, Esc, and `q`
+///   cancel it. Nothing else acts: with a question on screen, `q` is the answer
+///   "no", not "quit", `r` is not a refresh, `R` and `M` do not ask a second
+///   question, and an arrow key is no answer at all. That is why the mode
+///   exists.
+/// - [`InputMode::Running`]: `q` quits, `r` refreshes, and `G` still asks for
+///   the issue — a browser conflicts with nothing any of these runs does. `m`
+///   still asks to measure during a push, because a measurement is read-only
+///   for the repository. A rebase or a merge moves HEAD, and a measurement
+///   starts from HEAD, so `m` is inert during those two runs. `p`, `R`, and
+///   `M` are inert, so an impatient second press cannot start an overlapping
+///   run: a rebase and a push must not overlap, and a base update that runs
+///   puts the loop in this same mode. The arrow keys
+///   are inert too: the window under the frame belongs to the worktree that the
+///   command runs in, so the watch stays on that worktree.
 /// - [`InputMode::List`]: Up and Down move the cursor, Enter goes to the
 ///   worktree under it, and Esc and `q` close the list. Every other key gives
-///   `None` and does nothing at all: `r` does not walk, `p` does not ask, `G`
-///   and `m` start nothing, and no line leaves the row. The list takes the
-///   pane, so the frame that such a key acts on is not on the screen.
-/// - `M` is not bound. It does what every unbound key does in the mode.
-/// - `G` acts only where `issue` says a command exists. Where it does not, the
-///   key does what any other unbound key does, which is the one silent case
-///   this feature has.
+///   `None` and does nothing at all: `r` does not walk, `p` does not ask, `G`,
+///   `R`, `M`, and `m` start nothing, and no line leaves the row. The list
+///   takes the pane, so the frame that such a key acts on is not on the
+///   screen.
+/// - `G`, `R`, and `M` act only where `keys` says each one has a command
+///   behind it. Where one does not, that key does what any other unbound key
+///   does, which is the one silent case this feature has.
 /// - Every other press in the three other modes is [`Event::Dismiss`], which
 ///   clears a status message and otherwise does nothing.
-fn classify_input(key: KeyEvent, mode: InputMode, issue: IssueKey) -> Option<Event> {
+fn classify_input(key: KeyEvent, mode: InputMode, keys: CommandKeys) -> Option<Event> {
     let KeyEvent {
         code,
         modifiers,
@@ -2799,7 +3326,7 @@ fn classify_input(key: KeyEvent, mode: InputMode, issue: IssueKey) -> Option<Eve
     }
 
     let event = match mode {
-        InputMode::Normal | InputMode::Pushing => match code {
+        InputMode::Normal | InputMode::Running(_) => match code {
             KeyCode::Char('q') => Event::Quit,
             KeyCode::Char('r') => Event::ForceRefresh,
             // A push already running makes a second request meaningless
@@ -2808,10 +3335,26 @@ fn classify_input(key: KeyEvent, mode: InputMode, issue: IssueKey) -> Option<Eve
             // A browser opens beside the monitor, so a push in flight is no
             // reason to refuse. With no command behind it the key falls
             // through to `Dismiss`, which is what every unbound key gives.
-            KeyCode::Char('G') if issue == IssueKey::Bound => Event::IssueRequested,
+            KeyCode::Char('G') if keys.issue == Binding::Bound => Event::IssueRequested,
+            // A rebase and a push must not overlap, and a base update that
+            // runs puts the loop in `Running` — so these two keys act in the
+            // normal mode alone, as `p` does. With no command behind one of
+            // them, that key falls through to `Dismiss`, which is what every
+            // unbound key gives.
+            KeyCode::Char('R') if mode == InputMode::Normal && keys.rebase == Binding::Bound => {
+                Event::BaseUpdateRequested(crate::update::BaseUpdate::Rebase)
+            }
+            KeyCode::Char('M') if mode == InputMode::Normal && keys.merge == Binding::Bound => {
+                Event::BaseUpdateRequested(crate::update::BaseUpdate::Merge)
+            }
             // A measurement is read-only for the repository of the user, so a
-            // push in flight is no reason to refuse it either.
-            KeyCode::Char('m') => Event::ConflictsRequested,
+            // push in flight is no reason to refuse it. It starts from HEAD,
+            // and a rebase or a merge moves HEAD, so those two runs refuse it.
+            KeyCode::Char('m')
+                if matches!(mode, InputMode::Normal | InputMode::Running(RunKind::Push)) =>
+            {
+                Event::ConflictsRequested
+            }
             // The arrow keys move the watch to another worktree. The window
             // of a running push belongs to the worktree that pushes, so they
             // act in the normal mode only, as `p` does.
@@ -2825,8 +3368,8 @@ fn classify_input(key: KeyEvent, mode: InputMode, issue: IssueKey) -> Option<Eve
             _ => Event::Dismiss,
         },
         InputMode::Confirm => match code {
-            KeyCode::Char('y' | 'Y') | KeyCode::Enter => Event::PushConfirmed,
-            KeyCode::Char('n' | 'N' | 'q') | KeyCode::Esc => Event::PushCancelled,
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter => Event::Confirmed,
+            KeyCode::Char('n' | 'N' | 'q') | KeyCode::Esc => Event::Cancelled,
             _ => Event::Dismiss,
         },
         InputMode::List => match code {
@@ -2923,6 +3466,7 @@ fn restore_terminal() {
 mod tests {
     use super::*;
     use crate::testrepo;
+    use crate::update::BaseUpdate;
     use ignore::gitignore::GitignoreBuilder;
     use termwindow::WRAPPER_CHROME_ROWS;
 
@@ -3769,16 +4313,62 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    /// Both values of the new key's availability. Every old key means the
-    /// same thing under each of them: the new key must move no old one.
-    const BOTH_AVAILABILITIES: [IssueKey; 2] = [IssueKey::Bound, IssueKey::Unbound];
+    /// One combination of the three bindings, as [`classify_input`] reads it.
+    const fn bindings(issue: Binding, rebase: Binding, merge: Binding) -> CommandKeys {
+        CommandKeys {
+            issue,
+            rebase,
+            merge,
+        }
+    }
+
+    /// Every combination of the three bindings, all eight of them.
+    ///
+    /// Every old key means the same thing under each of them: a new key must
+    /// move no old one. Three keys read this value and each reads one field of
+    /// it, so a combination left out here is a pair of keys nobody holds
+    /// against each other.
+    const EVERY_BINDING_COMBINATION: [CommandKeys; 8] = {
+        use Binding::{Bound, Unbound};
+        [
+            bindings(Unbound, Unbound, Unbound),
+            bindings(Unbound, Unbound, Bound),
+            bindings(Unbound, Bound, Unbound),
+            bindings(Unbound, Bound, Bound),
+            bindings(Bound, Unbound, Unbound),
+            bindings(Bound, Unbound, Bound),
+            bindings(Bound, Bound, Unbound),
+            bindings(Bound, Bound, Bound),
+        ]
+    };
+
+    /// The combinations in which `G` has a command behind it.
+    fn issue_bound() -> impl Iterator<Item = CommandKeys> {
+        EVERY_BINDING_COMBINATION
+            .into_iter()
+            .filter(|keys| keys.issue == Binding::Bound)
+    }
+
+    /// The combinations in which `G` has none.
+    fn issue_unbound() -> impl Iterator<Item = CommandKeys> {
+        EVERY_BINDING_COMBINATION
+            .into_iter()
+            .filter(|keys| keys.issue == Binding::Unbound)
+    }
 
     /// Every mode a key can arrive in.
-    const EVERY_MODE: [InputMode; 4] = [
+    const EVERY_MODE: [InputMode; 5] = [
         InputMode::Normal,
         InputMode::Confirm,
-        InputMode::Pushing,
+        InputMode::Running(RunKind::Push),
+        InputMode::Running(RunKind::BaseUpdate),
         InputMode::List,
+    ];
+
+    /// Both modes of a run in flight.
+    const EVERY_RUN: [InputMode; 2] = [
+        InputMode::Running(RunKind::Push),
+        InputMode::Running(RunKind::BaseUpdate),
     ];
 
     /// What a key with no meaning gives in `mode`, as [`meaning`] names it.
@@ -3789,7 +4379,7 @@ mod tests {
     /// an unbound key does in it.
     fn unbound(mode: InputMode) -> &'static str {
         match mode {
-            InputMode::Normal | InputMode::Confirm | InputMode::Pushing => "Dismiss",
+            InputMode::Normal | InputMode::Confirm | InputMode::Running(_) => "Dismiss",
             InputMode::List => "nothing",
         }
     }
@@ -3798,13 +4388,13 @@ mod tests {
     fn classify_input_maps_the_r_key_to_force_refresh() {
         // Pressing `r` is the manual-refresh escape hatch: the input classifier
         // must turn an `r` key PRESS into Event::ForceRefresh.
-        for issue in BOTH_AVAILABILITIES {
+        for keys in EVERY_BINDING_COMBINATION {
             assert!(
                 matches!(
-                    classify_input(press(KeyCode::Char('r')), InputMode::Normal, issue),
+                    classify_input(press(KeyCode::Char('r')), InputMode::Normal, keys),
                     Some(Event::ForceRefresh),
                 ),
-                "`r` must refresh with {issue:?}",
+                "`r` must refresh with {keys:?}",
             );
         }
     }
@@ -3820,27 +4410,27 @@ mod tests {
             kind: KeyEventKind::Release,
             ..press(KeyCode::Char('r'))
         };
-        for issue in BOTH_AVAILABILITIES {
+        for keys in EVERY_BINDING_COMBINATION {
             assert!(
-                classify_input(r_release, InputMode::Normal, issue).is_none(),
+                classify_input(r_release, InputMode::Normal, keys).is_none(),
                 "a key release must be ignored — only a press acts",
             );
 
             // `q` and Ctrl-C both request a quit.
             assert!(matches!(
-                classify_input(press(KeyCode::Char('q')), InputMode::Normal, issue),
+                classify_input(press(KeyCode::Char('q')), InputMode::Normal, keys),
                 Some(Event::Quit),
             ));
             let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
             assert!(matches!(
-                classify_input(ctrl_c, InputMode::Normal, issue),
+                classify_input(ctrl_c, InputMode::Normal, keys),
                 Some(Event::Quit),
             ));
 
             // An unrelated key press acts on nothing, but is not silence: it
             // clears a status message that may be on screen.
             assert!(matches!(
-                classify_input(press(KeyCode::Char('x')), InputMode::Normal, issue),
+                classify_input(press(KeyCode::Char('x')), InputMode::Normal, keys),
                 Some(Event::Dismiss),
             ));
         }
@@ -3867,15 +4457,17 @@ mod tests {
         // The push key. It opens the confirmation from the normal mode, and is
         // inert while a push is already running — an impatient second press
         // must not start an overlapping push.
-        for issue in BOTH_AVAILABILITIES {
+        for keys in EVERY_BINDING_COMBINATION {
             assert!(matches!(
-                classify_input(press(KeyCode::Char('p')), InputMode::Normal, issue),
+                classify_input(press(KeyCode::Char('p')), InputMode::Normal, keys),
                 Some(Event::PushRequested),
             ));
-            assert!(matches!(
-                classify_input(press(KeyCode::Char('p')), InputMode::Pushing, issue),
-                Some(Event::Dismiss),
-            ));
+            for mode in EVERY_RUN {
+                assert!(matches!(
+                    classify_input(press(KeyCode::Char('p')), mode, keys),
+                    Some(Event::Dismiss),
+                ));
+            }
         }
     }
 
@@ -3883,14 +4475,20 @@ mod tests {
     fn g_asks_for_the_issue_while_the_monitor_and_a_push_run() {
         // The issue key. A browser opens beside the monitor, which conflicts
         // with nothing a push does — so it acts in both of those modes.
-        for mode in [InputMode::Normal, InputMode::Pushing] {
-            assert!(
-                matches!(
-                    classify_input(press(KeyCode::Char('G')), mode, IssueKey::Bound),
-                    Some(Event::IssueRequested),
-                ),
-                "`G` must ask for the issue in {mode:?}",
-            );
+        for mode in [
+            InputMode::Normal,
+            InputMode::Running(RunKind::Push),
+            InputMode::Running(RunKind::BaseUpdate),
+        ] {
+            for keys in issue_bound() {
+                assert!(
+                    matches!(
+                        classify_input(press(KeyCode::Char('G')), mode, keys),
+                        Some(Event::IssueRequested),
+                    ),
+                    "`G` must ask for the issue in {mode:?} with {keys:?}",
+                );
+            }
         }
     }
 
@@ -3898,14 +4496,15 @@ mod tests {
     fn g_does_nothing_while_the_confirmation_is_up() {
         // That mode owns the answer to a question. No new key may trap the
         // user in it.
-        assert!(matches!(
-            classify_input(
-                press(KeyCode::Char('G')),
-                InputMode::Confirm,
-                IssueKey::Bound
-            ),
-            Some(Event::Dismiss),
-        ));
+        for keys in issue_bound() {
+            assert!(
+                matches!(
+                    classify_input(press(KeyCode::Char('G')), InputMode::Confirm, keys),
+                    Some(Event::Dismiss),
+                ),
+                "`G` must not answer the question with {keys:?}",
+            );
+        }
     }
 
     #[test]
@@ -3913,15 +4512,13 @@ mod tests {
         // Silence belongs to this case only, and it is the silence of an
         // unbound key rather than a code path of its own.
         for mode in EVERY_MODE {
-            assert_eq!(
-                meaning(classify_input(
-                    press(KeyCode::Char('G')),
-                    mode,
-                    IssueKey::Unbound
-                )),
-                unbound(mode),
-                "`G` must do nothing in {mode:?} with no command behind it",
-            );
+            for keys in issue_unbound() {
+                assert_eq!(
+                    meaning(classify_input(press(KeyCode::Char('G')), mode, keys)),
+                    unbound(mode),
+                    "`G` must do nothing in {mode:?} with no command behind it, with {keys:?}",
+                );
+            }
         }
     }
 
@@ -3930,11 +4527,11 @@ mod tests {
         // The user asked for `G`. A shifted key and an unshifted one are two
         // keys, and only one of them was asked for.
         for mode in EVERY_MODE {
-            for issue in BOTH_AVAILABILITIES {
+            for keys in EVERY_BINDING_COMBINATION {
                 assert_eq!(
-                    meaning(classify_input(press(KeyCode::Char('g')), mode, issue)),
+                    meaning(classify_input(press(KeyCode::Char('g')), mode, keys)),
                     unbound(mode),
-                    "`g` must stay unbound in {mode:?} with {issue:?}",
+                    "`g` must stay unbound in {mode:?} with {keys:?}",
                 );
             }
         }
@@ -3948,10 +4545,10 @@ mod tests {
             ..press(KeyCode::Char('G'))
         };
         for mode in EVERY_MODE {
-            for issue in BOTH_AVAILABILITIES {
+            for keys in EVERY_BINDING_COMBINATION {
                 assert!(
-                    classify_input(g_release, mode, issue).is_none(),
-                    "a release of `G` must be ignored in {mode:?} with {issue:?}",
+                    classify_input(g_release, mode, keys).is_none(),
+                    "a release of `G` must be ignored in {mode:?} with {keys:?}",
                 );
             }
         }
@@ -3960,47 +4557,159 @@ mod tests {
     #[test]
     fn m_measures_while_the_monitor_and_a_push_run_and_never_answers_the_question() {
         // A measurement is read-only for the repository of the user, so a
-        // push in flight is no reason to refuse it. A question on screen owns
-        // its answer, so `m` there is a key with no meaning, and it must never
-        // push or cancel. The match on the mode is total, so a mode added
-        // later must say what `m` means in it.
+        // push in flight is no reason to refuse it. A rebase or a merge moves
+        // the HEAD that a measurement starts from, and a question on screen
+        // owns its answer. So `m` is a key with no meaning in both, and it
+        // must never push or cancel. The match on the mode is total, so a mode
+        // added later must say what `m` means in it.
         let m_release = KeyEvent {
             kind: KeyEventKind::Release,
             ..press(KeyCode::Char('m'))
         };
         for mode in EVERY_MODE {
-            for issue in BOTH_AVAILABILITIES {
-                let m = classify_input(press(KeyCode::Char('m')), mode, issue);
+            for keys in EVERY_BINDING_COMBINATION {
+                let m = classify_input(press(KeyCode::Char('m')), mode, keys);
                 match mode {
-                    InputMode::Normal | InputMode::Pushing => assert!(
+                    InputMode::Normal | InputMode::Running(RunKind::Push) => assert!(
                         matches!(m, Some(Event::ConflictsRequested)),
-                        "`m` must ask to measure in {mode:?} with {issue:?}",
+                        "`m` must ask to measure in {mode:?} with {keys:?}",
+                    ),
+                    InputMode::Running(RunKind::BaseUpdate) => assert!(
+                        matches!(m, Some(Event::Dismiss)),
+                        "`m` must not measure during a rebase or a merge with {keys:?}",
                     ),
                     InputMode::Confirm => assert!(
                         matches!(m, Some(Event::Dismiss)),
-                        "`m` must not answer the push question with {issue:?}",
+                        "`m` must not answer the push question with {keys:?}",
                     ),
                     // The list takes the pane, so a measurement of the frame
                     // under it is a key the user pressed at nothing.
                     InputMode::List => assert!(
                         m.is_none(),
-                        "`m` must do nothing while the list is open with {issue:?}",
+                        "`m` must do nothing while the list is open with {keys:?}",
                     ),
                 }
 
-                // A shifted key and an unshifted one are two keys, and only
-                // one of them was asked for.
+                // A shifted key and an unshifted one are two keys, and the
+                // shifted one is now a key of its own: it asks to merge the
+                // base into the branch. It must never measure, whatever binds
+                // it, because a measurement changes nothing and a merge
+                // writes a commit and pushes it.
+                let shifted = meaning(classify_input(press(KeyCode::Char('M')), mode, keys));
+                let asks = mode == InputMode::Normal && keys.merge == Binding::Bound;
                 assert_eq!(
-                    meaning(classify_input(press(KeyCode::Char('M')), mode, issue)),
-                    unbound(mode),
-                    "`M` must stay unbound in {mode:?} with {issue:?}",
+                    shifted,
+                    if asks {
+                        asks_for(BaseUpdate::Merge)
+                    } else {
+                        unbound(mode)
+                    },
+                    "`M` in {mode:?} with {keys:?}",
                 );
 
                 // Only a press acts, and the new key is no exception.
                 assert!(
-                    classify_input(m_release, mode, issue).is_none(),
-                    "a release of `m` must be ignored in {mode:?} with {issue:?}",
+                    classify_input(m_release, mode, keys).is_none(),
+                    "a release of `m` must be ignored in {mode:?} with {keys:?}",
                 );
+            }
+        }
+    }
+
+    /// The two keys that bring the branch up to date with its base, each with
+    /// the act it asks for.
+    ///
+    /// One table for both, because the two keys run the same code over two
+    /// sets of words: a rule stated for one of them and not the other is the
+    /// place the two drift apart.
+    const BASE_UPDATE_KEYS: [(KeyCode, BaseUpdate); 2] = [
+        (KeyCode::Char('R'), BaseUpdate::Rebase),
+        (KeyCode::Char('M'), BaseUpdate::Merge),
+    ];
+
+    #[test]
+    fn r_and_m_ask_for_their_own_act_in_the_normal_mode() {
+        // Each key asks for the act it belongs to and for no other. A press of
+        // `R` that asked for a merge would write a commit where the user asked
+        // for the commits of the branch to move, and `grp` and `gmp` are two
+        // different commands of the user.
+        for keys in EVERY_BINDING_COMBINATION {
+            for (code, update) in BASE_UPDATE_KEYS {
+                if binding_for(keys, update) != Binding::Bound {
+                    continue;
+                }
+                assert_eq!(
+                    meaning(classify_input(press(code), InputMode::Normal, keys)),
+                    asks_for(update),
+                    "{code:?} must ask for a {} with {keys:?}",
+                    update.verb(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn r_and_m_act_in_no_mode_but_the_normal_one() {
+        // A question on the screen owns its answer, so neither key may answer
+        // it: a `y` is the only yes. A run in flight owns the window under the
+        // frame, and a rebase and a push must not overlap, so both keys go
+        // quiet there as `p` does — and a base update that runs puts the loop
+        // in that same mode. The list takes the pane, so a key that acts on
+        // the frame acts on a frame the user cannot see.
+        for keys in EVERY_BINDING_COMBINATION {
+            for (code, _) in BASE_UPDATE_KEYS {
+                for mode in [
+                    InputMode::Confirm,
+                    InputMode::Running(RunKind::Push),
+                    InputMode::Running(RunKind::BaseUpdate),
+                    InputMode::List,
+                ] {
+                    assert_eq!(
+                        meaning(classify_input(press(code), mode, keys)),
+                        unbound(mode),
+                        "{code:?} must do nothing in {mode:?} with {keys:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn r_and_m_do_nothing_where_the_key_has_no_command() {
+        // gsw ships neither command, so a user who has written neither must
+        // see no sign of either key. The silence is the silence of an unbound
+        // key rather than a code path of its own, and it holds in every mode.
+        for keys in EVERY_BINDING_COMBINATION {
+            for (code, update) in BASE_UPDATE_KEYS {
+                if binding_for(keys, update) != Binding::Unbound {
+                    continue;
+                }
+                for mode in EVERY_MODE {
+                    assert_eq!(
+                        meaning(classify_input(press(code), mode, keys)),
+                        unbound(mode),
+                        "{code:?} must do nothing in {mode:?} with {keys:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_release_of_r_or_m_is_ignored() {
+        // Only a press acts, and the two new keys are no exception.
+        for keys in EVERY_BINDING_COMBINATION {
+            for (code, _) in BASE_UPDATE_KEYS {
+                let release = KeyEvent {
+                    kind: KeyEventKind::Release,
+                    ..press(code)
+                };
+                for mode in EVERY_MODE {
+                    assert!(
+                        classify_input(release, mode, keys).is_none(),
+                        "a release of {code:?} must be ignored in {mode:?} with {keys:?}",
+                    );
+                }
             }
         }
     }
@@ -4008,13 +4717,13 @@ mod tests {
     #[test]
     fn the_confirmation_accepts_y_and_enter() {
         for code in [KeyCode::Char('y'), KeyCode::Char('Y'), KeyCode::Enter] {
-            for issue in BOTH_AVAILABILITIES {
+            for keys in EVERY_BINDING_COMBINATION {
                 assert!(
                     matches!(
-                        classify_input(press(code), InputMode::Confirm, issue),
-                        Some(Event::PushConfirmed),
+                        classify_input(press(code), InputMode::Confirm, keys),
+                        Some(Event::Confirmed),
                     ),
-                    "{code:?} must confirm the push with {issue:?}",
+                    "{code:?} must confirm the push with {keys:?}",
                 );
             }
         }
@@ -4031,13 +4740,13 @@ mod tests {
             KeyCode::Char('q'),
             KeyCode::Esc,
         ] {
-            for issue in BOTH_AVAILABILITIES {
+            for keys in EVERY_BINDING_COMBINATION {
                 assert!(
                     matches!(
-                        classify_input(press(code), InputMode::Confirm, issue),
-                        Some(Event::PushCancelled),
+                        classify_input(press(code), InputMode::Confirm, keys),
+                        Some(Event::Cancelled),
                     ),
-                    "{code:?} must cancel the push with {issue:?}",
+                    "{code:?} must cancel the push with {keys:?}",
                 );
             }
         }
@@ -4048,10 +4757,10 @@ mod tests {
         // With a question on screen, `r` must not refresh and `p` must not
         // re-ask. Anything that is not an answer does nothing.
         for code in [KeyCode::Char('r'), KeyCode::Char('p'), KeyCode::Char('x')] {
-            for issue in BOTH_AVAILABILITIES {
+            for keys in EVERY_BINDING_COMBINATION {
                 assert!(
                     matches!(
-                        classify_input(press(code), InputMode::Confirm, issue),
+                        classify_input(press(code), InputMode::Confirm, keys),
                         Some(Event::Dismiss),
                     ),
                     "{code:?} must not act while the confirmation is up",
@@ -4066,9 +4775,9 @@ mod tests {
         // that has to be killed from another pane.
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         for mode in EVERY_MODE {
-            for issue in BOTH_AVAILABILITIES {
+            for keys in EVERY_BINDING_COMBINATION {
                 assert!(
-                    matches!(classify_input(ctrl_c, mode, issue), Some(Event::Quit)),
+                    matches!(classify_input(ctrl_c, mode, keys), Some(Event::Quit)),
                     "Ctrl-C must quit from {mode:?}",
                 );
             }
@@ -4079,15 +4788,17 @@ mod tests {
     fn q_and_r_still_work_while_a_push_runs() {
         // The push runs off this thread, so the monitor stays live underneath
         // it: quitting and refreshing keep working.
-        for issue in BOTH_AVAILABILITIES {
-            assert!(matches!(
-                classify_input(press(KeyCode::Char('q')), InputMode::Pushing, issue),
-                Some(Event::Quit),
-            ));
-            assert!(matches!(
-                classify_input(press(KeyCode::Char('r')), InputMode::Pushing, issue),
-                Some(Event::ForceRefresh),
-            ));
+        for keys in EVERY_BINDING_COMBINATION {
+            for mode in EVERY_RUN {
+                assert!(matches!(
+                    classify_input(press(KeyCode::Char('q')), mode, keys),
+                    Some(Event::Quit),
+                ));
+                assert!(matches!(
+                    classify_input(press(KeyCode::Char('r')), mode, keys),
+                    Some(Event::ForceRefresh),
+                ));
+            }
         }
     }
 
@@ -4108,10 +4819,30 @@ mod tests {
             Some(Event::ListClose) => "ListClose",
             Some(Event::Quit) => "Quit",
             Some(Event::Dismiss) => "Dismiss",
-            Some(Event::PushConfirmed) => "PushConfirmed",
-            Some(Event::PushCancelled) => "PushCancelled",
+            Some(Event::Confirmed) => "Confirmed",
+            Some(Event::Cancelled) => "Cancelled",
+            Some(Event::BaseUpdateRequested(update)) => asks_for(update),
             Some(_) => "another event",
             None => "nothing",
+        }
+    }
+
+    /// What [`meaning`] names a press that asks for `update`.
+    ///
+    /// The one place the two names are written, so a test that expects a
+    /// rebase and a table that reports one cannot spell it two ways.
+    fn asks_for(update: BaseUpdate) -> &'static str {
+        match update {
+            BaseUpdate::Rebase => "BaseUpdateRequested(Rebase)",
+            BaseUpdate::Merge => "BaseUpdateRequested(Merge)",
+        }
+    }
+
+    /// Whether the key of `update` has a command behind it, in `keys`.
+    fn binding_for(keys: CommandKeys, update: BaseUpdate) -> Binding {
+        match update {
+            BaseUpdate::Rebase => keys.rebase,
+            BaseUpdate::Merge => keys.merge,
         }
     }
 
@@ -4135,7 +4866,7 @@ mod tests {
         // arrow key there does nothing. In the list, Up and Down move the
         // cursor, Enter goes, Esc closes, and Left and Right do nothing at
         // all.
-        let table: [(InputMode, [&str; 6]); 4] = [
+        let table: [(InputMode, [&str; 6]); 5] = [
             (
                 InputMode::Normal,
                 [
@@ -4154,11 +4885,12 @@ mod tests {
                     "Dismiss",
                     "Dismiss",
                     "Dismiss",
-                    "PushConfirmed",
-                    "PushCancelled",
+                    "Confirmed",
+                    "Cancelled",
                 ],
             ),
-            (InputMode::Pushing, ["Dismiss"; 6]),
+            (InputMode::Running(RunKind::Push), ["Dismiss"; 6]),
+            (InputMode::Running(RunKind::BaseUpdate), ["Dismiss"; 6]),
             (
                 InputMode::List,
                 [
@@ -4176,13 +4908,13 @@ mod tests {
             EVERY_MODE,
             "the table must cover every input mode",
         );
-        for issue in BOTH_AVAILABILITIES {
+        for keys in EVERY_BINDING_COMBINATION {
             for (mode, meanings) in table {
                 for (code, expected) in TABLE_KEYS.into_iter().zip(meanings) {
                     assert_eq!(
-                        meaning(classify_input(press(code), mode, issue)),
+                        meaning(classify_input(press(code), mode, keys)),
                         expected,
-                        "{code:?} in {mode:?} with {issue:?}",
+                        "{code:?} in {mode:?} with {keys:?}",
                     );
                 }
             }
@@ -4196,15 +4928,15 @@ mod tests {
         // does not walk, `p` does not ask, `G` and `m` start nothing, and no
         // key takes a line off the row. Ctrl-C still quits.
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        for issue in BOTH_AVAILABILITIES {
+        for keys in EVERY_BINDING_COMBINATION {
             assert_eq!(
                 meaning(classify_input(
                     press(KeyCode::Char('q')),
                     InputMode::List,
-                    issue
+                    keys
                 )),
                 "ListClose",
-                "`q` must close the list with {issue:?}",
+                "`q` must close the list with {keys:?}",
             );
             for code in [
                 KeyCode::Char('r'),
@@ -4220,15 +4952,15 @@ mod tests {
                 KeyCode::PageDown,
             ] {
                 assert_eq!(
-                    meaning(classify_input(press(code), InputMode::List, issue)),
+                    meaning(classify_input(press(code), InputMode::List, keys)),
                     "nothing",
-                    "{code:?} must do nothing in the list with {issue:?}",
+                    "{code:?} must do nothing in the list with {keys:?}",
                 );
             }
             assert_eq!(
-                meaning(classify_input(ctrl_c, InputMode::List, issue)),
+                meaning(classify_input(ctrl_c, InputMode::List, keys)),
                 "Quit",
-                "Ctrl-C must quit from the list with {issue:?}",
+                "Ctrl-C must quit from the list with {keys:?}",
             );
         }
     }
@@ -4240,13 +4972,17 @@ mod tests {
         // flight owns the window under the frame, and that window belongs to
         // the worktree that pushes, so an arrow key does nothing then either.
         // Enter and Esc keep their meaning at the question.
-        for issue in BOTH_AVAILABILITIES {
-            for mode in [InputMode::Confirm, InputMode::Pushing] {
+        for keys in EVERY_BINDING_COMBINATION {
+            for mode in [
+                InputMode::Confirm,
+                InputMode::Running(RunKind::Push),
+                InputMode::Running(RunKind::BaseUpdate),
+            ] {
                 for code in ARROWS {
                     assert_eq!(
-                        meaning(classify_input(press(code), mode, issue)),
+                        meaning(classify_input(press(code), mode, keys)),
                         "Dismiss",
-                        "{code:?} in {mode:?} with {issue:?}",
+                        "{code:?} in {mode:?} with {keys:?}",
                     );
                 }
             }
@@ -4254,19 +4990,19 @@ mod tests {
                 meaning(classify_input(
                     press(KeyCode::Enter),
                     InputMode::Confirm,
-                    issue
+                    keys
                 )),
-                "PushConfirmed",
-                "Enter must still push with {issue:?}",
+                "Confirmed",
+                "Enter must still push with {keys:?}",
             );
             assert_eq!(
                 meaning(classify_input(
                     press(KeyCode::Esc),
                     InputMode::Confirm,
-                    issue
+                    keys
                 )),
-                "PushCancelled",
-                "Esc must still cancel with {issue:?}",
+                "Cancelled",
+                "Esc must still cancel with {keys:?}",
             );
         }
     }
@@ -4275,15 +5011,15 @@ mod tests {
     fn a_release_of_an_arrow_key_is_ignored_in_every_mode() {
         // Only a press acts, and the arrow keys are no exception.
         for mode in EVERY_MODE {
-            for issue in BOTH_AVAILABILITIES {
+            for keys in EVERY_BINDING_COMBINATION {
                 for code in ARROWS {
                     let release = KeyEvent {
                         kind: KeyEventKind::Release,
                         ..press(code)
                     };
                     assert!(
-                        classify_input(release, mode, issue).is_none(),
-                        "a release of {code:?} must be ignored in {mode:?} with {issue:?}",
+                        classify_input(release, mode, keys).is_none(),
+                        "a release of {code:?} must be ignored in {mode:?} with {keys:?}",
                     );
                 }
             }
@@ -4536,7 +5272,9 @@ mod tests {
                 // the test must fail when no walk is scheduled, not block.
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -4592,7 +5330,9 @@ mod tests {
                 clock: || clock_at,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -4651,7 +5391,9 @@ mod tests {
                 clock: stepping_clock(base, Duration::from_secs(60)),
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -4712,7 +5454,9 @@ mod tests {
                 clock: || now,
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -4769,7 +5513,9 @@ mod tests {
                 clock: || now,
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -4823,7 +5569,9 @@ mod tests {
                 clock: || now,
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -4879,7 +5627,9 @@ mod tests {
                 // mapping is covered by the next_tick tests.
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -4935,7 +5685,9 @@ mod tests {
                 clock: || now,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -4992,7 +5744,9 @@ mod tests {
                 clock: || clock_at,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5055,7 +5809,9 @@ mod tests {
                 clock: || now,
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5126,7 +5882,9 @@ mod tests {
                 },
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5219,7 +5977,9 @@ mod tests {
                 },
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5316,7 +6076,9 @@ mod tests {
                 },
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5394,7 +6156,9 @@ mod tests {
                 clock: || base,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5479,7 +6243,9 @@ mod tests {
                 },
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5563,7 +6329,9 @@ mod tests {
                 },
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5627,7 +6395,9 @@ mod tests {
                 clock: || base,
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5704,7 +6474,9 @@ mod tests {
                 clock: || clock_at,
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5805,7 +6577,9 @@ mod tests {
                 },
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5930,7 +6704,9 @@ mod tests {
                 },
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -6107,7 +6883,7 @@ mod push_loop_tests {
         /// leave the same final screen behind.
         paints: Vec<String>,
         /// Every issue command the loop started a run of, in order.
-        issue_runs: Vec<crate::issue::IssueCommand>,
+        issue_runs: Vec<crate::shell::ShellCommand>,
         /// How many measurements the loop started with `m`.
         conflict_runs: usize,
         /// Every worktree the `switch` hook was asked to open, in order,
@@ -6124,6 +6900,11 @@ mod push_loop_tests {
         /// The worktree each push started in, in the order of
         /// [`Seen::pushes`].
         push_paths: Vec<WorktreePath>,
+        /// Every rebase or merge of the base the loop started, in order.
+        base_updates: Vec<crate::update::BaseUpdateCommand>,
+        /// The worktree each of those started in, in the order of
+        /// [`Seen::base_updates`].
+        base_update_paths: Vec<WorktreePath>,
         /// The worktree and the generation of each run of the issue command,
         /// in the order of [`Seen::issue_runs`].
         issue_paths: Vec<(WorktreePath, Generation)>,
@@ -6227,6 +7008,7 @@ mod push_loop_tests {
             events,
             Setup {
                 dims,
+                ui: PushUi::new(false),
                 measured: dims,
                 render: Box::new(move |_snapshot: &Snapshot, frame_dims: Dimensions| {
                     render_frame(frame_dims)
@@ -6273,6 +7055,14 @@ mod push_loop_tests {
     struct Setup {
         /// The pane the loop renders into.
         dims: Dimensions,
+        /// What the loop shows under the frame when it starts, and the input
+        /// mode that goes with it.
+        ///
+        /// Almost every test starts with nothing on the row and puts a question
+        /// there with a key. The keys of the rebase and the merge arrive in a
+        /// later slice, so a test about those reaches the row through
+        /// [`PushUi::request_base_update`] and hands the loop what it built.
+        ui: PushUi,
         /// The pane that the `dimensions` hook measures, which the loop reads
         /// at each walk and each resize. It differs from `dims` only in a test
         /// of a pane that changes size under the loop.
@@ -6361,6 +7151,14 @@ mod push_loop_tests {
         /// moves the clock of the loop on by this cost, as a real read of the
         /// list takes time. It is zero unless a test sets it.
         list_cost: Duration,
+        /// How far behind its base the branch of every worktree here stands.
+        ///
+        /// Zero unless a test sets it, because [`pushable_snapshot`] is level
+        /// with its base and every push test reads that snapshot. The keys of
+        /// a base update refuse a branch that is level — the count is the
+        /// whole reason they exist — so a test of those keys sets this
+        /// instead of moving the snapshot the push tests read.
+        behind: u32,
     }
 
     impl World {
@@ -6391,6 +7189,7 @@ mod push_loop_tests {
                 removed: Vec::new(),
                 unreadable: Vec::new(),
                 list_cost: Duration::ZERO,
+                behind: 0,
             }
         }
 
@@ -6445,6 +7244,13 @@ mod push_loop_tests {
             self.list_cost = cost;
             self
         }
+
+        /// This world, where every branch stands `commits` behind its base.
+        /// See [`World::behind`].
+        fn behind(mut self, commits: u32) -> Self {
+            self.behind = commits;
+            self
+        }
     }
 
     /// The shared body of every helper above: pre-load the queue, run the loop
@@ -6476,6 +7282,7 @@ mod push_loop_tests {
     ) -> (String, Seen) {
         let Setup {
             dims,
+            ui,
             measured,
             render,
             session,
@@ -6510,6 +7317,13 @@ mod push_loop_tests {
         let skew = std::cell::Cell::new(Duration::ZERO);
         let loop_clock = || clock() + skew.get();
         let base = loop_clock();
+        // Every branch of the world stands the same distance behind its base,
+        // so one number describes them all. See [`World::behind`].
+        let behind = world.behind;
+        let snapshot_here = move |path: &WorktreePath| Snapshot {
+            commits_behind: behind,
+            ..snapshot_of(path)
+        };
 
         event_loop(
             &rx,
@@ -6517,13 +7331,13 @@ mod push_loop_tests {
             &mut displayed,
             LoopStart {
                 cache: SnapshotCache {
-                    snapshot: snapshot_of(&world.home),
+                    snapshot: snapshot_here(&world.home),
                     collected_at: base,
                     dims,
                 },
                 freshest: None,
                 schedule,
-                ui: PushUi::new(false),
+                ui,
                 session,
                 home: world.home.clone(),
             },
@@ -6535,7 +7349,7 @@ mod push_loop_tests {
                     if removed.borrow().contains(current) || world.unreadable.contains(current) {
                         anyhow::bail!("{UNWALKABLE}: {}", current.as_path().display());
                     }
-                    Ok(snapshot_of(current))
+                    Ok(snapshot_here(current))
                 },
                 render: |snap: &Snapshot, frame_dims: Dimensions, timing: FrameTiming| {
                     queue_next_burst();
@@ -6563,7 +7377,13 @@ mod push_loop_tests {
                     seen.pushes.push(command);
                     seen.push_paths.push(current.clone());
                 },
-                start_issue: |command: crate::issue::IssueCommand,
+                start_base_update: |command: crate::update::BaseUpdateCommand,
+                                    current: &WorktreePath| {
+                    let mut seen = seen.borrow_mut();
+                    seen.base_updates.push(command);
+                    seen.base_update_paths.push(current.clone());
+                },
+                start_issue: |command: crate::shell::ShellCommand,
                               current: &WorktreePath,
                               generation: Generation| {
                     let mut seen = seen.borrow_mut();
@@ -6607,7 +7427,7 @@ mod push_loop_tests {
                     if world.vanishing.contains(target) {
                         removed.borrow_mut().push(target.clone());
                     }
-                    Ok(snapshot_of(target))
+                    Ok(snapshot_here(target))
                 },
             },
         )
@@ -6635,8 +7455,9 @@ mod push_loop_tests {
     const RESCUE_AFTER: Duration = Duration::from_secs(3);
 
     /// The command the probe found, which is what binds the `G` key.
-    fn found_command() -> crate::issue::IssueCommand {
-        crate::issue::IssueCommand::new(None).expect("the default names a command")
+    fn found_command() -> crate::shell::ShellCommand {
+        crate::shell::ShellCommand::new(None, crate::issue::DEFAULT_ISSUE_COMMAND)
+            .expect("the default names a command")
     }
 
     /// The probe's answer, as the loop receives it.
@@ -6895,7 +7716,7 @@ mod push_loop_tests {
         let (screen, seen) = run_loop_remote(vec![
             probe_answered(),
             Event::PushRequested,
-            Event::PushConfirmed,
+            Event::Confirmed,
             press_g(),
             press_g(),
             Event::Quit,
@@ -7150,7 +7971,7 @@ mod push_loop_tests {
     fn a_run_during_a_push() -> Vec<Event> {
         vec![
             Event::PushRequested,
-            Event::PushConfirmed,
+            Event::Confirmed,
             press_m(),
             started_against_main(),
             finished(measured_clean()),
@@ -7309,6 +8130,36 @@ mod push_loop_tests {
     }
 
     #[test]
+    fn an_r_between_two_g_presses_on_a_remote_shell_takes_the_arming_away() {
+        // `R` is a key other than `G`, so it takes the arming away, as every
+        // such key does — and it must take it away through the one rule that
+        // says so, rather than around it. The branch of this world already
+        // contains its base, so the `R` refuses with a line and the loop stays
+        // in the mode the second `G` needs.
+        let base = Instant::now();
+        let (_screen, seen) = drive(
+            vec![
+                probe_answered(),
+                base_update_probe_answered(crate::update::BaseUpdate::Rebase),
+                press_g(),
+                press_base_update(crate::update::BaseUpdate::Rebase),
+                press_g(),
+                Event::Quit,
+            ],
+            Setup {
+                session: crate::remote::Session::Remote,
+                ..in_world(World::alone())
+            },
+            move || base,
+        );
+        assert!(
+            seen.issue_runs.is_empty(),
+            "a press of `R` between the presses must leave the second one asking, got {:?}",
+            seen.issue_runs,
+        );
+    }
+
+    #[test]
     fn the_loop_wakes_itself_to_take_an_expired_message_off_the_screen() {
         // A status message expires against the clock, and on a quiet
         // repository nothing else is due to wake the loop: no filesystem
@@ -7371,7 +8222,9 @@ mod push_loop_tests {
                 },
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                start_issue: |_command: crate::issue::IssueCommand,
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
+                start_issue: |_command: crate::shell::ShellCommand,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -7461,6 +8314,432 @@ mod push_loop_tests {
         // reach the push.
         let (_, seen) = run_loop(vec![key(KeyCode::Char('y')), Event::Quit]);
         assert!(seen.pushes.is_empty(), "y alone must not push");
+    }
+
+    /// How far behind the base the snapshot of a base-update test stands. Any
+    /// count above zero does: the count is the reason the key acts at all.
+    const BEHIND: u32 = 5;
+
+    /// A [`PushUi`] with the question of a rebase already on the row, asked at
+    /// `at` against a branch [`BEHIND`] commits behind its base.
+    ///
+    /// The key that asks it arrives in a later slice, so these tests reach the
+    /// row through the door the key will use. The question is the state the
+    /// loop has to act on, and a press is only one way to reach it.
+    fn asking_rebase_ui(at: Instant) -> PushUi {
+        let mut ui = PushUi::new(false);
+        ui.request_base_update(
+            &Snapshot {
+                commits_behind: BEHIND,
+                ..pushable_snapshot()
+            },
+            crate::update::BaseUpdate::Rebase,
+            &crate::shell::ShellCommand::new(
+                None,
+                crate::update::BaseUpdate::Rebase.default_command(),
+            )
+            .expect("a name"),
+            TEST_DIMS,
+            at,
+        );
+        ui
+    }
+
+    /// A [`PushUi`] with that rebase already running, confirmed at `at`.
+    fn running_rebase_ui(at: Instant) -> PushUi {
+        let mut ui = asking_rebase_ui(at);
+        ui.confirm(at).expect("the question must confirm");
+        ui
+    }
+
+    #[test]
+    fn confirming_a_base_update_starts_the_command_the_question_described() {
+        // `y` on the question of `R` must run the command the sentence named,
+        // in the worktree the frame shows — the whole safety property of asking
+        // first. It must reach the runner of that act and no other: a push
+        // started here would push the branch without the rebase the user asked
+        // for.
+        let base = Instant::now();
+        let (_displayed, seen) = drive(
+            vec![key(KeyCode::Char('y')), Event::Quit],
+            Setup {
+                ui: asking_rebase_ui(base),
+                ..in_world(World::alone())
+            },
+            move || base,
+        );
+
+        let [command] = seen.base_updates.as_slice() else {
+            panic!(
+                "one confirmed base update must reach the runner, got {:?}",
+                seen.base_updates,
+            );
+        };
+        assert_eq!(command.update(), crate::update::BaseUpdate::Rebase);
+        assert_eq!(command.branch(), ALONE);
+        assert_eq!(command.base(), "main");
+        assert_eq!(command.command().name(), "grp");
+        assert_eq!(
+            seen.base_update_paths,
+            vec![worktree(ALONE)],
+            "the run belongs to the worktree the frame shows",
+        );
+        assert!(
+            seen.pushes.is_empty(),
+            "a confirmed rebase must start no push, got {:?}",
+            seen.pushes,
+        );
+    }
+
+    #[test]
+    fn every_outcome_of_a_base_update_walks_git_again() {
+        // **Unlike a push.** A push that failed changed nothing to re-read, so
+        // it walks nothing. A rebase that failed rewrote part of the branch and
+        // stopped in the middle of it, and the `⚠ rebase` row of the header is
+        // what says so — only a walk puts it there. A rebase that worked moved
+        // every commit and pushed them, so the counts in the header are stale
+        // the moment it lands.
+        let cases = [
+            (
+                "a rebase that worked",
+                PushOutcome {
+                    success: true,
+                    output: "grp: rebased onto 'main'\n".to_string(),
+                },
+                "Rebased gsw-push onto main with grp",
+            ),
+            (
+                "a rebase that stopped on a conflict",
+                PushOutcome {
+                    success: false,
+                    output: "error: could not apply d3eee9d… feature edit\n".to_string(),
+                },
+                "error: could not apply d3eee9d… feature edit",
+            ),
+        ];
+
+        for (what, outcome, shows) in cases {
+            let base = Instant::now();
+            let (displayed, seen) = drive(
+                vec![Event::BaseUpdateFinished(outcome), Event::Quit],
+                Setup {
+                    ui: running_rebase_ui(base),
+                    ..in_world(World::alone())
+                },
+                move || base,
+            );
+            assert_eq!(
+                seen.collects, 1,
+                "{what} must re-walk, or the header describes a repository that moved",
+            );
+            assert!(
+                displayed.contains(shows),
+                "{what} must reach the row, got {displayed:?}",
+            );
+        }
+    }
+
+    /// The command the probe of `update` found, which is what binds its key.
+    fn found_base_update_command(update: crate::update::BaseUpdate) -> crate::shell::ShellCommand {
+        crate::shell::ShellCommand::new(None, update.default_command())
+            .expect("the default names a command")
+    }
+
+    /// The answer of the probe of `update`, as the loop receives it.
+    fn base_update_probe_answered(update: crate::update::BaseUpdate) -> Event {
+        Event::BaseUpdateCommandFound(update, found_base_update_command(update))
+    }
+
+    /// One press of the key of `update`.
+    fn press_base_update(update: crate::update::BaseUpdate) -> Event {
+        key(KeyCode::Char(update.key()))
+    }
+
+    /// The one worktree of [`World::alone`], [`BEHIND`] commits behind its
+    /// base, which is the state both keys of a base update act in.
+    fn behind_alone() -> Setup {
+        in_world(World::alone().behind(BEHIND))
+    }
+
+    /// A pane wide enough for the whole question of a base update, hint and
+    /// all.
+    ///
+    /// The question names the act, the branch, the base, the count, and the
+    /// command of the user, which is longer than the 80 columns of
+    /// [`TEST_DIMS`] — and a row the pane elided says nothing about the words
+    /// gsw wrote.
+    const WIDE_PANE: Dimensions = Dimensions {
+        width: 120,
+        height: TEST_DIMS.height,
+    };
+
+    #[test]
+    fn r_then_y_starts_the_run_the_question_described_and_r_then_n_starts_none() {
+        // The whole path of the key, from the answer of its probe to the
+        // runner: the probe binds it, the press asks the question, and `y`
+        // runs the command that question named, in the worktree the frame
+        // shows. `n` is the other half of the same rule — a run that started
+        // after a no would rewrite the commits of the branch and force-push
+        // them against the word of the user.
+        for (answer, runs) in [(KeyCode::Char('y'), true), (KeyCode::Char('n'), false)] {
+            let base = Instant::now();
+            let (_displayed, seen) = drive(
+                vec![
+                    base_update_probe_answered(crate::update::BaseUpdate::Rebase),
+                    press_base_update(crate::update::BaseUpdate::Rebase),
+                    key(answer),
+                    Event::Quit,
+                ],
+                behind_alone(),
+                move || base,
+            );
+
+            if runs {
+                let [command] = seen.base_updates.as_slice() else {
+                    panic!(
+                        "`R` then {answer:?} must start one run, got {:?}",
+                        seen.base_updates,
+                    );
+                };
+                assert_eq!(command.update(), crate::update::BaseUpdate::Rebase);
+                assert_eq!(command.branch(), ALONE);
+                assert_eq!(command.base(), "main");
+                assert_eq!(command.command().name(), "grp");
+                assert_eq!(
+                    seen.base_update_paths,
+                    vec![worktree(ALONE)],
+                    "the run belongs to the worktree the frame shows",
+                );
+            } else {
+                assert!(
+                    seen.base_updates.is_empty(),
+                    "`R` then {answer:?} must start no run, got {:?}",
+                    seen.base_updates,
+                );
+            }
+            assert!(
+                seen.pushes.is_empty(),
+                "`R` then {answer:?} must start no push, got {:?}",
+                seen.pushes,
+            );
+        }
+    }
+
+    #[test]
+    fn p_r_and_m_start_nothing_while_a_base_update_runs() {
+        // The run owns the window under the frame and is rewriting the branch,
+        // so a second command in the same repository at the same time is the
+        // one thing the mode exists to prevent. The `y` at the end is the
+        // proof that none of the three left a question standing: a press that
+        // asked would be a press this answers.
+        let base = Instant::now();
+        let (_displayed, seen) = drive(
+            vec![
+                base_update_probe_answered(crate::update::BaseUpdate::Rebase),
+                base_update_probe_answered(crate::update::BaseUpdate::Merge),
+                key(KeyCode::Char('p')),
+                press_base_update(crate::update::BaseUpdate::Rebase),
+                press_base_update(crate::update::BaseUpdate::Merge),
+                key(KeyCode::Char('y')),
+                Event::Quit,
+            ],
+            Setup {
+                ui: running_rebase_ui(base),
+                ..behind_alone()
+            },
+            move || base,
+        );
+
+        assert!(
+            seen.base_updates.is_empty(),
+            "a key pressed during a run must start no second run, got {:?}",
+            seen.base_updates,
+        );
+        assert!(
+            seen.pushes.is_empty(),
+            "a `p` during a run must start no push, got {:?}",
+            seen.pushes,
+        );
+    }
+
+    /// One run that takes the row: its name, the events that ask for it and
+    /// answer `y`, the event that ends it well, and whether it leaves HEAD
+    /// where it is.
+    type RowRun = (&'static str, Vec<Event>, Event, bool);
+
+    /// The three runs that take the row, built fresh for each run of the loop.
+    ///
+    /// A push leaves HEAD where it is. A rebase and a merge move HEAD for the
+    /// whole run, and a measurement starts its scratch worktree from HEAD.
+    fn row_runs() -> Vec<RowRun> {
+        let mut runs: Vec<RowRun> = vec![(
+            "a push",
+            vec![key(KeyCode::Char('p')), key(KeyCode::Char('y'))],
+            Event::PushFinished(PushOutcome {
+                success: true,
+                output: String::new(),
+            }),
+            true,
+        )];
+        for update in crate::update::BaseUpdate::ALL {
+            runs.push((
+                update.verb(),
+                vec![
+                    base_update_probe_answered(update),
+                    press_base_update(update),
+                    key(KeyCode::Char('y')),
+                ],
+                Event::BaseUpdateFinished(PushOutcome {
+                    success: true,
+                    output: String::new(),
+                }),
+                false,
+            ));
+        }
+        runs
+    }
+
+    #[test]
+    fn m_measures_during_a_push_and_starts_nothing_during_a_rebase_or_a_merge() {
+        // A measurement during a rebase or a merge starts from a HEAD that the
+        // run moves, so it measures a branch that is half rewritten.
+        for (what, start, _end, keeps_head) in row_runs() {
+            let base = Instant::now();
+            let mut events = start;
+            events.extend([press_m(), Event::Quit]);
+            let (_displayed, seen) = drive(events, behind_alone(), move || base);
+            assert_eq!(
+                seen.pushes.len() + seen.base_updates.len(),
+                1,
+                "{what} must start, or `m` meets no run",
+            );
+            assert_eq!(
+                seen.conflict_runs,
+                usize::from(keeps_head),
+                "`m` during {what}",
+            );
+        }
+    }
+
+    /// The base of a measurement that a run overlaps. A name of its own, so a
+    /// line of that measurement differs from a line of the next one, which
+    /// runs against `main`.
+    const OVERLAPPED_BASE: &str = "trunk";
+
+    #[test]
+    fn a_measurement_that_a_rebase_or_a_merge_overlapped_says_nothing_and_frees_m() {
+        // The measurement started before the run moved HEAD, so its line
+        // describes a branch that is gone. That line waits for the row and
+        // reaches it after the run ends, where it reads as a measurement of
+        // the new branch. So it says nothing, in either order of its events.
+        // A push moves no HEAD, so a measurement that overlapped a push still
+        // reports. In every case the outcome frees `m`.
+        for during in [true, false] {
+            for (what, start, end, keeps_head) in row_runs() {
+                let order = if during {
+                    "events during the run"
+                } else {
+                    "events after the run"
+                };
+                let overlapped = || {
+                    vec![
+                        Event::ConflictsStarted {
+                            generation: Generation::default(),
+                            branch: OVERLAPPED_BASE.to_string(),
+                        },
+                        finished(ConflictsOutcome::Measured {
+                            branch: OVERLAPPED_BASE.to_string(),
+                            rebase: Ok(gitscratch::Conflicts::nothing_replayed()),
+                            merge: Ok(gitscratch::Conflicts::nothing_replayed()),
+                            dirty: false,
+                        }),
+                    ]
+                };
+                let mut first = vec![press_m()];
+                first.extend(start);
+                let mut bursts = vec![first];
+                if during {
+                    bursts.push(overlapped());
+                }
+                bursts.push(vec![end]);
+                // A key takes the report of the run off the row, so the row
+                // is free for a line that waited.
+                bursts.push(vec![key(KeyCode::Char('x'))]);
+                if !during {
+                    bursts.push(overlapped());
+                }
+                bursts.push(vec![
+                    press_m(),
+                    started_against_main(),
+                    finished(measured_clean()),
+                    Event::Quit,
+                ]);
+
+                let base = Instant::now();
+                let (displayed, seen) = drive_bursts(bursts, behind_alone(), move || base);
+
+                assert_eq!(
+                    seen.conflict_runs, 2,
+                    "{what}, {order}: the outcome must free `m`",
+                );
+                let reported = seen
+                    .paints
+                    .iter()
+                    .any(|paint| strip_ansi(paint).contains(OVERLAPPED_BASE));
+                assert_eq!(
+                    reported, keeps_head,
+                    "{what}, {order}: a line of the overlapped measurement, in {:?}",
+                    seen.paints,
+                );
+                assert!(
+                    strip_ansi(&displayed).contains(MEASURED_CLEAN),
+                    "{what}, {order}: the next measurement must report, got {displayed:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_bound_r_asks_its_question_and_an_unbound_m_says_nothing() {
+        // Each key has a probe of its own, so one of them is bound while the
+        // other is not — a user who wrote a rebase command and no merge one
+        // must get the key they wrote and no sign of the other.
+        let base = Instant::now();
+        let events = |code: KeyCode| {
+            vec![
+                base_update_probe_answered(crate::update::BaseUpdate::Rebase),
+                key(code),
+                Event::Quit,
+            ]
+        };
+
+        let wide = || Setup {
+            dims: WIDE_PANE,
+            measured: WIDE_PANE,
+            ..behind_alone()
+        };
+
+        let (asked, _) = drive(events(KeyCode::Char('R')), wide(), move || base);
+        assert_eq!(
+            strip_ansi(&asked),
+            format!(
+                "FRAME {ALONE}\nRebase {ALONE} onto main ({BEHIND} commits behind), then push \
+                 with grp?  [y/Enter = rebase, n/Esc = cancel]"
+            ),
+            "the bound key must put its question under the frame",
+        );
+
+        let (silent, seen) = drive(events(KeyCode::Char('M')), wide(), move || base);
+        assert_eq!(
+            strip_ansi(&silent),
+            format!("FRAME {ALONE}"),
+            "the unbound key must put nothing on the row",
+        );
+        assert!(
+            seen.base_updates.is_empty(),
+            "the unbound key must start nothing, got {:?}",
+            seen.base_updates,
+        );
     }
 
     #[test]
@@ -7632,7 +8911,7 @@ mod push_loop_tests {
         let (displayed, _) = run_loop(vec![
             key(KeyCode::Char('p')),
             key(KeyCode::Char('y')),
-            Event::PushOutput("Compiling gsw v0.1.0".to_string()),
+            Event::RunOutput("Compiling gsw v0.1.0".to_string()),
             Event::Quit,
         ]);
 
@@ -7667,7 +8946,7 @@ mod push_loop_tests {
         // without sleeping: deterministic, and parallel-safe.
         let mut events = vec![key(KeyCode::Char('p')), key(KeyCode::Char('y'))];
         events.extend(
-            (1..=FLOOD_LINES).map(|line| Event::PushOutput(format!("Compiling crate {line}"))),
+            (1..=FLOOD_LINES).map(|line| Event::RunOutput(format!("Compiling crate {line}"))),
         );
         events.push(Event::Quit);
 
@@ -7785,7 +9064,11 @@ mod push_loop_tests {
                     start_push: |command: PushCommand, _current: &WorktreePath| {
                         seen.borrow_mut().pushes.push(command)
                     },
-                    start_issue: |command: crate::issue::IssueCommand,
+                    start_base_update:
+                        |command: crate::update::BaseUpdateCommand, _current: &WorktreePath| {
+                            seen.borrow_mut().base_updates.push(command)
+                        },
+                    start_issue: |command: crate::shell::ShellCommand,
                                   _current: &WorktreePath,
                                   _generation: Generation| {
                         seen.borrow_mut().issue_runs.push(command);
@@ -7821,6 +9104,7 @@ mod push_loop_tests {
     fn in_world(world: World) -> Setup {
         Setup {
             dims: TEST_DIMS,
+            ui: PushUi::new(false),
             measured: TEST_DIMS,
             render: Box::new(frame_of),
             session: crate::remote::Session::Local,
@@ -8359,6 +9643,7 @@ mod push_loop_tests {
             schedule: no_timed_refresh_for_push(),
             ui: PushUi::new(false),
             issue,
+            base_updates: BaseUpdateCommands::new(),
             conflicts: ConflictsRun::new(),
             home: worktree(BRAVO),
             current: worktree(BRAVO),
