@@ -107,6 +107,33 @@ impl BaseUpdate {
         }
     }
 
+    /// The question this act asks about `branch` and `base`, with the branch
+    /// `behind` commits behind the base and the user's `command` about to run.
+    ///
+    /// The two sentences sit side by side because they are the same sentence
+    /// about two acts, and the order of the names is the difference between
+    /// them: a rebase moves the branch onto the base, and a merge brings the
+    /// base into the branch. The count goes with the base under both, because
+    /// the base is what the branch is behind.
+    ///
+    /// Everything that is the same for both — the count, its unit, and the
+    /// clause that names the command — is worked out above the match, so no
+    /// later reader has to compare two sentences to see whether they agree.
+    fn question(self, branch: &str, base: &str, behind: u32, command: &ShellCommand) -> String {
+        // "1 commits behind" reads as a defect in the tool, right beside the
+        // number it is about.
+        let unit = if behind == 1 { "commit" } else { "commits" };
+        let base = format!("{base} ({behind} {unit} behind)");
+        // The whole value the user wrote into the variable, and not its first
+        // word: a question that named `grp` alone would describe a different
+        // run from the one `grp --fork-point` carries out.
+        let name = command.name();
+        match self {
+            Self::Rebase => format!("Rebase {branch} onto {base}, then push with {name}?"),
+            Self::Merge => format!("Merge {base} into {branch}, then push with {name}?"),
+        }
+    }
+
     /// What a refused run tells the user to do.
     ///
     /// The letter comes from [`BaseUpdate::key`] rather than from a string of
@@ -233,7 +260,12 @@ pub(crate) fn base_update_prompt_for(
     command: &ShellCommand,
 ) -> PushPrompt {
     PushPrompt::Confirm {
-        question: String::new(),
+        question: update.question(
+            &snapshot.branch,
+            &snapshot.base,
+            snapshot.commits_behind,
+            command,
+        ),
         creates_remote_branch: false,
         command: Confirmed::BaseUpdate(BaseUpdateCommand::new(
             update,
