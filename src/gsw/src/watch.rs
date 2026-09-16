@@ -668,8 +668,11 @@ enum Event {
     /// starts is what the question described, and
     /// [`crate::push::PushUi::confirm`] is what says which of them that is.
     Confirmed,
-    /// The user declined the push at the prompt (`n`, Esc, or `q`).
-    PushCancelled,
+    /// The user said no to the question on the row (`n`, Esc, or `q`).
+    ///
+    /// It names no act either, for the reason [`Event::Confirmed`] gives: the
+    /// answer takes away whatever question stands, and nothing starts.
+    Cancelled,
     /// A running push wrote a line. Carried one line at a time rather than as
     /// a batch at the end, because the point of it is to arrive early: a
     /// pre-push hook can hold the push for minutes, and a batch would land
@@ -2556,7 +2559,7 @@ where
             None => {}
         },
         Event::PushOutput(line) => state.ui.output_line(line),
-        Event::PushCancelled => state.ui.cancel(),
+        Event::Cancelled => state.ui.cancel(),
         Event::Dismiss => state.ui.dismiss(),
         // Left and Right read the paths of the worktrees again at each press,
         // because `nwt` and `swt` add and remove worktrees while gsw runs.
@@ -3307,7 +3310,7 @@ fn classify_input(key: KeyEvent, mode: InputMode, keys: CommandKeys) -> Option<E
         },
         InputMode::Confirm => match code {
             KeyCode::Char('y' | 'Y') | KeyCode::Enter => Event::Confirmed,
-            KeyCode::Char('n' | 'N' | 'q') | KeyCode::Esc => Event::PushCancelled,
+            KeyCode::Char('n' | 'N' | 'q') | KeyCode::Esc => Event::Cancelled,
             _ => Event::Dismiss,
         },
         InputMode::List => match code {
@@ -4659,7 +4662,7 @@ mod tests {
                 assert!(
                     matches!(
                         classify_input(press(code), InputMode::Confirm, keys),
-                        Some(Event::PushCancelled),
+                        Some(Event::Cancelled),
                     ),
                     "{code:?} must cancel the push with {keys:?}",
                 );
@@ -4733,7 +4736,7 @@ mod tests {
             Some(Event::Quit) => "Quit",
             Some(Event::Dismiss) => "Dismiss",
             Some(Event::Confirmed) => "Confirmed",
-            Some(Event::PushCancelled) => "PushCancelled",
+            Some(Event::Cancelled) => "Cancelled",
             Some(Event::BaseUpdateRequested(update)) => asks_for(update),
             Some(_) => "another event",
             None => "nothing",
@@ -4799,7 +4802,7 @@ mod tests {
                     "Dismiss",
                     "Dismiss",
                     "Confirmed",
-                    "PushCancelled",
+                    "Cancelled",
                 ],
             ),
             (InputMode::Running, ["Dismiss"; 6]),
@@ -4909,7 +4912,7 @@ mod tests {
                     InputMode::Confirm,
                     keys
                 )),
-                "PushCancelled",
+                "Cancelled",
                 "Esc must still cancel with {keys:?}",
             );
         }
