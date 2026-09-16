@@ -87,8 +87,9 @@ mod worktrees;
                   HEAD. The bottom row says `Running grind and grime against main…` until the \
                   run ends. Then one line such as `main: rebase clean · merge 1 hunk in 1 \
                   file` takes its place and fades off after a minute. One run at a time: m \
-                  does nothing while a run is in flight. A quit during a run waits for the \
-                  replay in flight, so no scratch worktree stays behind.\n\n\
+                  does nothing while a run is in flight. A rebase or a merge that starts \
+                  during a run moves HEAD, so that run shows no line. A quit during a run \
+                  waits for the replay in flight, so no scratch worktree stays behind.\n\n\
                   R rebases the branch onto the base and pushes it, and M merges the base into \
                   the branch and pushes it. Neither act is gsw's own: each key runs one command \
                   that you supply, in your own interactive shell, and that command pushes the \
@@ -113,8 +114,8 @@ mod worktrees;
                   neither command fetches, so the base is your local branch. While the command \
                   runs, its output shows live in the window under the frame that a push uses, \
                   and the notice counts the time. The run has no deadline, because a pre-push \
-                  hook of this workspace runs for minutes. While it runs, p, R, and M do \
-                  nothing, and G and m still act. A run that worked leaves the sentence of gsw \
+                  hook of this workspace runs for minutes. While it runs, p, R, M, and m do \
+                  nothing, and G still acts. A run that worked leaves the sentence of gsw \
                   and, under it, the last line the command wrote, because grp and gmp report a \
                   push they skipped only there. A run that failed leaves the last lines of the \
                   output, in red, until you press a key. A quit does not stop the command: a \

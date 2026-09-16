@@ -813,13 +813,27 @@ pub(crate) enum InputMode {
     ///
     /// It is named for what runs rather than for the key that started it: a
     /// rebase and a merge run in it as a push does, and it is the mode that
-    /// `push::State::Running` gives.
-    Running,
+    /// `push::State::Running` gives. The [`RunKind`] changes one key: `m` acts
+    /// in a push and is inert in a rebase or a merge.
+    Running(RunKind),
     /// The list of the worktrees is open. Up and Down move its cursor, Enter
     /// goes to the worktree under the cursor, and Esc and `q` close it. Every
     /// other key does nothing at all, because the list takes the pane, and a
     /// key that acts on the frame acts on a frame that the user cannot see.
     List,
+}
+
+/// Which command runs in [`InputMode::Running`].
+///
+/// A measurement of `m` starts its scratch worktree from HEAD. So the key
+/// table must know whether the run in flight moves HEAD.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum RunKind {
+    /// A push. It leaves HEAD where it is.
+    Push,
+    /// A rebase onto the base or a merge of the base. It moves HEAD for the
+    /// whole run.
+    BaseUpdate,
 }
 
 /// Whether one key has a command behind it.
@@ -1103,16 +1117,22 @@ enum ConflictsPress {
 /// its outcome a moment before its thread ends, so that answer can say a run
 /// is in flight just after the outcome arrived, and a press then would do
 /// nothing for no reason the user can see.
-struct ConflictsRun {
-    /// Whether a run is in flight. Set by the press that starts the run, and
-    /// cleared by the outcome of that run.
-    running: bool,
+enum ConflictsRun {
+    /// No run in flight.
+    Idle,
+    /// A run is in flight. Set by the press that starts the run, and cleared
+    /// by the outcome of that run.
+    Measuring,
+    /// A run is in flight, and a rebase or a merge started after it. The run
+    /// started from the HEAD that the update moves, so its line describes a
+    /// branch that is gone. Cleared by the outcome of that run.
+    Overlapped,
 }
 
 impl ConflictsRun {
     /// No run in flight.
     fn new() -> Self {
-        Self { running: false }
+        Self::Idle
     }
 
     /// What one press of `m` does now.
@@ -1121,16 +1141,30 @@ impl ConflictsRun {
     /// so every press after it answers nothing until
     /// [`ConflictsRun::finished`].
     fn press(&mut self) -> ConflictsPress {
-        if self.running {
-            return ConflictsPress::Nothing;
+        match self {
+            Self::Idle => {
+                *self = Self::Measuring;
+                ConflictsPress::Start
+            }
+            Self::Measuring | Self::Overlapped => ConflictsPress::Nothing,
         }
-        self.running = true;
-        ConflictsPress::Start
+    }
+
+    /// A rebase or a merge started, so a run in flight is overlapped.
+    fn base_update_started(&mut self) {
+        if matches!(self, Self::Measuring) {
+            *self = Self::Overlapped;
+        }
+    }
+
+    /// Whether the run in flight is overlapped. Its events post nothing.
+    fn overlapped(&self) -> bool {
+        matches!(self, Self::Overlapped)
     }
 
     /// The outcome of the run arrived, so `m` starts a run again.
     fn finished(&mut self) {
-        self.running = false;
+        *self = Self::Idle;
     }
 }
 
@@ -2281,7 +2315,7 @@ impl LoopState {
         worktree_paths: &mut impl FnMut() -> Vec<WorktreePath>,
         open: &mut impl FnMut(&WorktreePath) -> Result<Snapshot, String>,
     ) {
-        if self.current == self.home || self.ui.mode() == InputMode::Running {
+        if self.current == self.home || matches!(self.ui.mode(), InputMode::Running(_)) {
             return;
         }
         if worktree_paths().contains(&self.current) {
@@ -2563,6 +2597,7 @@ where
                 (hooks.start_push)(command, &state.current);
             }
             Some(crate::push::Confirmed::BaseUpdate(command)) => {
+                state.conflicts.base_update_started();
                 (hooks.start_base_update)(command, &state.current);
             }
             None => {}
@@ -2685,6 +2720,14 @@ where
         }
         Event::IssueFinished { generation, .. } if state.is_stale(generation) => {
             state.issue.finished();
+        }
+        // A run that a rebase or a merge overlapped measured the branch before
+        // the update moved HEAD. Its line reaches the row after the update, and
+        // then reads as a measurement of the new branch. So it posts nothing,
+        // and its outcome still frees the key. See [`ConflictsRun::Overlapped`].
+        Event::ConflictsStarted { .. } if state.conflicts.overlapped() => {}
+        Event::ConflictsFinished { .. } if state.conflicts.overlapped() => {
+            state.conflicts.finished();
         }
         // A busy row drops the notice and does not hold it. A held notice
         // reaches the row after the outcome, and says that a run is in flight
@@ -3243,12 +3286,14 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 ///   "no", not "quit", `r` is not a refresh, `R` and `M` do not ask a second
 ///   question, and an arrow key is no answer at all. That is why the mode
 ///   exists.
-/// - [`InputMode::Running`]: `q` quits, `r` refreshes, `G` still asks for the
-///   issue — a browser conflicts with nothing any of these runs does — and `m`
-///   still asks to measure, because a measurement is read-only for the
-///   repository. `p`, `R`, and `M` are inert, so an impatient second press
-///   cannot start an overlapping run: a rebase and a push must not overlap, and
-///   a base update that runs puts the loop in this same mode. The arrow keys
+/// - [`InputMode::Running`]: `q` quits, `r` refreshes, and `G` still asks for
+///   the issue — a browser conflicts with nothing any of these runs does. `m`
+///   still asks to measure during a push, because a measurement is read-only
+///   for the repository. A rebase or a merge moves HEAD, and a measurement
+///   starts from HEAD, so `m` is inert during those two runs. `p`, `R`, and
+///   `M` are inert, so an impatient second press cannot start an overlapping
+///   run: a rebase and a push must not overlap, and a base update that runs
+///   puts the loop in this same mode. The arrow keys
 ///   are inert too: the window under the frame belongs to the worktree that the
 ///   command runs in, so the watch stays on that worktree.
 /// - [`InputMode::List`]: Up and Down move the cursor, Enter goes to the
@@ -3281,7 +3326,7 @@ fn classify_input(key: KeyEvent, mode: InputMode, keys: CommandKeys) -> Option<E
     }
 
     let event = match mode {
-        InputMode::Normal | InputMode::Running => match code {
+        InputMode::Normal | InputMode::Running(_) => match code {
             KeyCode::Char('q') => Event::Quit,
             KeyCode::Char('r') => Event::ForceRefresh,
             // A push already running makes a second request meaningless
@@ -3303,8 +3348,13 @@ fn classify_input(key: KeyEvent, mode: InputMode, keys: CommandKeys) -> Option<E
                 Event::BaseUpdateRequested(crate::update::BaseUpdate::Merge)
             }
             // A measurement is read-only for the repository of the user, so a
-            // push in flight is no reason to refuse it either.
-            KeyCode::Char('m') => Event::ConflictsRequested,
+            // push in flight is no reason to refuse it. It starts from HEAD,
+            // and a rebase or a merge moves HEAD, so those two runs refuse it.
+            KeyCode::Char('m')
+                if matches!(mode, InputMode::Normal | InputMode::Running(RunKind::Push)) =>
+            {
+                Event::ConflictsRequested
+            }
             // The arrow keys move the watch to another worktree. The window
             // of a running push belongs to the worktree that pushes, so they
             // act in the normal mode only, as `p` does.
@@ -4307,11 +4357,18 @@ mod tests {
     }
 
     /// Every mode a key can arrive in.
-    const EVERY_MODE: [InputMode; 4] = [
+    const EVERY_MODE: [InputMode; 5] = [
         InputMode::Normal,
         InputMode::Confirm,
-        InputMode::Running,
+        InputMode::Running(RunKind::Push),
+        InputMode::Running(RunKind::BaseUpdate),
         InputMode::List,
+    ];
+
+    /// Both modes of a run in flight.
+    const EVERY_RUN: [InputMode; 2] = [
+        InputMode::Running(RunKind::Push),
+        InputMode::Running(RunKind::BaseUpdate),
     ];
 
     /// What a key with no meaning gives in `mode`, as [`meaning`] names it.
@@ -4322,7 +4379,7 @@ mod tests {
     /// an unbound key does in it.
     fn unbound(mode: InputMode) -> &'static str {
         match mode {
-            InputMode::Normal | InputMode::Confirm | InputMode::Running => "Dismiss",
+            InputMode::Normal | InputMode::Confirm | InputMode::Running(_) => "Dismiss",
             InputMode::List => "nothing",
         }
     }
@@ -4405,10 +4462,12 @@ mod tests {
                 classify_input(press(KeyCode::Char('p')), InputMode::Normal, keys),
                 Some(Event::PushRequested),
             ));
-            assert!(matches!(
-                classify_input(press(KeyCode::Char('p')), InputMode::Running, keys),
-                Some(Event::Dismiss),
-            ));
+            for mode in EVERY_RUN {
+                assert!(matches!(
+                    classify_input(press(KeyCode::Char('p')), mode, keys),
+                    Some(Event::Dismiss),
+                ));
+            }
         }
     }
 
@@ -4416,7 +4475,11 @@ mod tests {
     fn g_asks_for_the_issue_while_the_monitor_and_a_push_run() {
         // The issue key. A browser opens beside the monitor, which conflicts
         // with nothing a push does — so it acts in both of those modes.
-        for mode in [InputMode::Normal, InputMode::Running] {
+        for mode in [
+            InputMode::Normal,
+            InputMode::Running(RunKind::Push),
+            InputMode::Running(RunKind::BaseUpdate),
+        ] {
             for keys in issue_bound() {
                 assert!(
                     matches!(
@@ -4494,10 +4557,11 @@ mod tests {
     #[test]
     fn m_measures_while_the_monitor_and_a_push_run_and_never_answers_the_question() {
         // A measurement is read-only for the repository of the user, so a
-        // push in flight is no reason to refuse it. A question on screen owns
-        // its answer, so `m` there is a key with no meaning, and it must never
-        // push or cancel. The match on the mode is total, so a mode added
-        // later must say what `m` means in it.
+        // push in flight is no reason to refuse it. A rebase or a merge moves
+        // the HEAD that a measurement starts from, and a question on screen
+        // owns its answer. So `m` is a key with no meaning in both, and it
+        // must never push or cancel. The match on the mode is total, so a mode
+        // added later must say what `m` means in it.
         let m_release = KeyEvent {
             kind: KeyEventKind::Release,
             ..press(KeyCode::Char('m'))
@@ -4506,9 +4570,13 @@ mod tests {
             for keys in EVERY_BINDING_COMBINATION {
                 let m = classify_input(press(KeyCode::Char('m')), mode, keys);
                 match mode {
-                    InputMode::Normal | InputMode::Running => assert!(
+                    InputMode::Normal | InputMode::Running(RunKind::Push) => assert!(
                         matches!(m, Some(Event::ConflictsRequested)),
                         "`m` must ask to measure in {mode:?} with {keys:?}",
+                    ),
+                    InputMode::Running(RunKind::BaseUpdate) => assert!(
+                        matches!(m, Some(Event::Dismiss)),
+                        "`m` must not measure during a rebase or a merge with {keys:?}",
                     ),
                     InputMode::Confirm => assert!(
                         matches!(m, Some(Event::Dismiss)),
@@ -4590,7 +4658,12 @@ mod tests {
         // the frame acts on a frame the user cannot see.
         for keys in EVERY_BINDING_COMBINATION {
             for (code, _) in BASE_UPDATE_KEYS {
-                for mode in [InputMode::Confirm, InputMode::Running, InputMode::List] {
+                for mode in [
+                    InputMode::Confirm,
+                    InputMode::Running(RunKind::Push),
+                    InputMode::Running(RunKind::BaseUpdate),
+                    InputMode::List,
+                ] {
                     assert_eq!(
                         meaning(classify_input(press(code), mode, keys)),
                         unbound(mode),
@@ -4716,14 +4789,16 @@ mod tests {
         // The push runs off this thread, so the monitor stays live underneath
         // it: quitting and refreshing keep working.
         for keys in EVERY_BINDING_COMBINATION {
-            assert!(matches!(
-                classify_input(press(KeyCode::Char('q')), InputMode::Running, keys),
-                Some(Event::Quit),
-            ));
-            assert!(matches!(
-                classify_input(press(KeyCode::Char('r')), InputMode::Running, keys),
-                Some(Event::ForceRefresh),
-            ));
+            for mode in EVERY_RUN {
+                assert!(matches!(
+                    classify_input(press(KeyCode::Char('q')), mode, keys),
+                    Some(Event::Quit),
+                ));
+                assert!(matches!(
+                    classify_input(press(KeyCode::Char('r')), mode, keys),
+                    Some(Event::ForceRefresh),
+                ));
+            }
         }
     }
 
@@ -4791,7 +4866,7 @@ mod tests {
         // arrow key there does nothing. In the list, Up and Down move the
         // cursor, Enter goes, Esc closes, and Left and Right do nothing at
         // all.
-        let table: [(InputMode, [&str; 6]); 4] = [
+        let table: [(InputMode, [&str; 6]); 5] = [
             (
                 InputMode::Normal,
                 [
@@ -4814,7 +4889,8 @@ mod tests {
                     "Cancelled",
                 ],
             ),
-            (InputMode::Running, ["Dismiss"; 6]),
+            (InputMode::Running(RunKind::Push), ["Dismiss"; 6]),
+            (InputMode::Running(RunKind::BaseUpdate), ["Dismiss"; 6]),
             (
                 InputMode::List,
                 [
@@ -4897,7 +4973,11 @@ mod tests {
         // the worktree that pushes, so an arrow key does nothing then either.
         // Enter and Esc keep their meaning at the question.
         for keys in EVERY_BINDING_COMBINATION {
-            for mode in [InputMode::Confirm, InputMode::Running] {
+            for mode in [
+                InputMode::Confirm,
+                InputMode::Running(RunKind::Push),
+                InputMode::Running(RunKind::BaseUpdate),
+            ] {
                 for code in ARROWS {
                     assert_eq!(
                         meaning(classify_input(press(code), mode, keys)),

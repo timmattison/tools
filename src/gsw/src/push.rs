@@ -30,7 +30,7 @@ use crate::render::{Snapshot, UpstreamStatus};
 use crate::repo::DETACHED_HEAD;
 use crate::shell::ShellCommand;
 use crate::update::{base_update_prompt_for, BaseUpdate, BaseUpdateCommand};
-use crate::watch::{Dimensions, InputMode};
+use crate::watch::{Dimensions, InputMode, RunKind};
 use crate::worktrees::WorktreeList;
 use textfit::truncate_right;
 
@@ -823,6 +823,9 @@ enum State {
         /// like a run in progress rather than like a hang. A rebase reaches
         /// that same hook, because it pushes what it rewrote.
         started_at: Instant,
+        /// Which command runs. [`PushUi::mode`] reports it, because `m` acts
+        /// during a push and not during a rebase or a merge.
+        run: RunKind,
         /// The most recent output lines, oldest first, capped at
         /// [`MAX_PUSH_OUTPUT_ROWS`].
         ///
@@ -1033,7 +1036,7 @@ impl PushUi {
     pub(crate) fn mode(&self) -> InputMode {
         match self.state {
             State::Asking { .. } => InputMode::Confirm,
-            State::Running { .. } => InputMode::Running,
+            State::Running { run, .. } => InputMode::Running(run),
             State::Listing { .. } => InputMode::List,
             State::Idle | State::Status { .. } => InputMode::Normal,
         }
@@ -1154,10 +1157,15 @@ impl PushUi {
         else {
             return None;
         };
+        let run = match command {
+            Confirmed::Push(_) => RunKind::Push,
+            Confirmed::BaseUpdate(_) => RunKind::BaseUpdate,
+        };
         self.state = State::Running {
             notice: running_notice,
             success,
             started_at: now,
+            run,
             recent: VecDeque::new(),
         };
         Some(command)
@@ -2428,7 +2436,11 @@ mod ui_tests {
             !text.contains("names no issue"),
             "the held message must wait its turn, got {text:?}",
         );
-        assert_eq!(ui.mode(), InputMode::Running, "the push is still running");
+        assert_eq!(
+            ui.mode(),
+            InputMode::Running(RunKind::Push),
+            "the push is still running"
+        );
     }
 
     #[test]
@@ -2665,7 +2677,11 @@ mod ui_tests {
             !text.contains(NOTICE),
             "the held notice must wait its turn, got {text:?}",
         );
-        assert_eq!(ui.mode(), InputMode::Running, "the push is still running");
+        assert_eq!(
+            ui.mode(),
+            InputMode::Running(RunKind::Push),
+            "the push is still running"
+        );
     }
 
     #[test]
@@ -2845,7 +2861,11 @@ mod ui_tests {
 
         ui.clear();
 
-        assert_eq!(ui.mode(), InputMode::Running, "the push is still running");
+        assert_eq!(
+            ui.mode(),
+            InputMode::Running(RunKind::Push),
+            "the push is still running"
+        );
         let text = painted(&mut ui, tall_pane(80), now);
         assert!(
             text.contains(RUNNING_NOTICE),
@@ -3049,7 +3069,11 @@ mod ui_tests {
         let mut ui = pushing(now);
         ui.output_line("Compiling gsw v0.1.0".to_string());
         ui.open_list(three_worktrees());
-        assert_eq!(ui.mode(), InputMode::Running, "the push must keep the row");
+        assert_eq!(
+            ui.mode(),
+            InputMode::Running(RunKind::Push),
+            "the push must keep the row"
+        );
         assert_eq!(cursor_of(&ui), None, "no list may open over the push");
         let text = painted(&mut ui, tall_pane(80), now);
         assert!(
@@ -3295,7 +3319,7 @@ mod ui_tests {
         assert_eq!(command.branch(), "gsw-push");
         assert_eq!(command.base(), "main");
         assert_eq!(command.command().name(), "grp");
-        assert_eq!(ui.mode(), InputMode::Running);
+        assert_eq!(ui.mode(), InputMode::Running(RunKind::BaseUpdate));
         assert_eq!(
             ui.confirm(t0()),
             None,
@@ -3519,7 +3543,7 @@ mod ui_tests {
             "gsw-push",
             "the branch the question named must reach the runner",
         );
-        assert_eq!(ui.mode(), InputMode::Running);
+        assert_eq!(ui.mode(), InputMode::Running(RunKind::Push));
         assert_eq!(
             ui.overlay(tall_pane(80), t0()).rows(),
             1,
@@ -4098,7 +4122,7 @@ mod ui_tests {
         ui.dismiss();
         assert_eq!(
             ui.mode(),
-            InputMode::Running,
+            InputMode::Running(RunKind::Push),
             "a stray key must not hide a running push",
         );
     }

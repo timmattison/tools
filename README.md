@@ -679,7 +679,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       line, and `m` works again at once. A detached HEAD is measured, as `grind` measures one.
     - The two replays run one after the other on a thread of their own, in the scratch worktrees
       of `gitscratch`: no hook runs, and your refs do not move. The replay is read-only for your
-      repository, so `m` works while a push is in flight. A quit during a run shows
+      repository, so `m` works while a push is in flight. A replay starts from HEAD, and `R` and
+      `M` move HEAD, so `m` does nothing while one of them runs, and a run that one of them
+      overlaps shows no line. A quit during a run shows
       `Waiting for grind and grime to finish…` and waits for the replay in flight to remove its
       scratch worktree. The second replay does not start. A scratch worktree that a quit abandoned
       would stay registered in your repository and point at a deleted directory.
@@ -729,8 +731,8 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       `Rebasing issue-12 onto main with grp… (1m12s)` notice, and up to six indented rows carrying
       the newest lines. **The run has no deadline**, because a pre-push hook of this workspace
       builds and tests every crate and runs for minutes — the notice counts the time, so a run
-      that hangs shows as a run that hangs. The run holds the row: `p`, `R`, and `M` do nothing
-      until it ends, while `G` and `m` still act. The child gets no terminal, and no `GIT_`
+      that hangs shows as a run that hangs. The run holds the row: `p`, `R`, `M`, and `m` do
+      nothing until it ends, while `G` still acts. The child gets no terminal, and no `GIT_`
       variable out of gsw's own environment but the six you state on purpose, so your SSH key
       and your identity still reach the push. After that sweep gsw sets `GIT_TERMINAL_PROMPT=0`,
       so nothing the child starts can prompt behind a question gsw never drew.
