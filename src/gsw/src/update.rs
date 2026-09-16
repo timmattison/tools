@@ -598,6 +598,7 @@ mod script_tests {
 #[cfg(all(test, unix))]
 mod run_tests {
     use super::*;
+    use crate::repo::DETACHED_HEAD;
     use crate::shell::stub_shell::{
         a_child_of_this_test_passes, kill_now, test_name, test_process_can_open_the_terminal,
         StubShell, CHILD_RAN, GAVE_UP_WITHIN, GIT_PREFIX, HOSTILE_GIT_ENVIRONMENT, HOSTILE_MARKER,
@@ -628,6 +629,17 @@ mod run_tests {
     /// A confirmed rebase running the default command.
     fn default_command() -> BaseUpdateCommand {
         confirmed(DEFAULT_REBASE_COMMAND)
+    }
+
+    /// A confirmed merge of [`BASE`] into [`BRANCH`], running the default
+    /// command of that act.
+    fn confirmed_merge() -> BaseUpdateCommand {
+        BaseUpdateCommand::new(
+            BaseUpdate::Merge,
+            BRANCH,
+            BASE,
+            ShellCommand::new(None, DEFAULT_MERGE_COMMAND).expect("a name"),
+        )
     }
 
     /// [`run`] for a test that does not read what arrived while it ran, which
@@ -898,6 +910,78 @@ mod run_tests {
                 Report::Done(outcome) => return (lines, outcome),
             }
         }
+    }
+
+    #[test]
+    fn a_checkout_after_the_confirmation_refuses_the_run_and_starts_no_shell() {
+        // The window the question opens. `R` reads the branch and the base
+        // while `issue-12` is checked out, `y` arrives seconds later, and a
+        // checkout in another pane lands in between. `grp` reads HEAD when the
+        // shell starts it, so it would rebase a branch the question never
+        // named and then push it. Nothing may run in that case.
+        let stub = StubShell::answering(0);
+        let workdir = work_tree();
+        git(workdir.path(), &["checkout", "-q", BASE]);
+
+        let outcome = run_quiet(stub.as_shell(), &default_command(), workdir.path());
+
+        assert!(
+            !outcome.success,
+            "a run whose branch changed must not report success: {:?}",
+            outcome.output,
+        );
+        assert!(
+            outcome
+                .output
+                .contains("branch changed from issue-12 to main"),
+            "the outcome must name both branches: {:?}",
+            outcome.output,
+        );
+        assert!(
+            outcome.output.contains("press R again"),
+            "the outcome must say how to ask again: {:?}",
+            outcome.output,
+        );
+        assert_eq!(stub.runs(), "", "a refused run must start no shell at all",);
+    }
+
+    #[test]
+    fn a_detached_head_after_the_confirmation_refuses_the_run() {
+        // The other way the checkout moves: a rebase, a bisect, or a plain
+        // checkout of a commit leaves no branch at all. git refuses `HEAD` as
+        // the name of a branch, so it can never match the name a question
+        // carried.
+        let stub = StubShell::answering(0);
+        let workdir = work_tree();
+        git(workdir.path(), &["checkout", "-q", "--detach"]);
+
+        let outcome = run_quiet(stub.as_shell(), &default_command(), workdir.path());
+
+        assert!(!outcome.success, "got {:?}", outcome.output);
+        assert!(
+            outcome.output.contains(DETACHED_HEAD),
+            "the outcome must name what HEAD is now: {:?}",
+            outcome.output,
+        );
+        assert_eq!(stub.runs(), "", "a refused run must start no shell at all");
+    }
+
+    #[test]
+    fn a_refused_run_names_the_key_of_its_own_act() {
+        // The advice belongs to the act, and not to a constant the push owns:
+        // `p` says `press p again`, and a refused merge must say `press M
+        // again` rather than send the user to the key of another feature.
+        let stub = StubShell::answering(0);
+        let workdir = work_tree();
+        git(workdir.path(), &["checkout", "-q", BASE]);
+
+        let outcome = run_quiet(stub.as_shell(), &confirmed_merge(), workdir.path());
+
+        assert!(
+            outcome.output.contains("press M again"),
+            "a refused merge must name the merge key: {:?}",
+            outcome.output,
+        );
     }
 
     #[test]
