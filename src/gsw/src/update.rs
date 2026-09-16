@@ -752,7 +752,7 @@ fn start(
 /// hook that builds and tests a workspace prints hundreds of thousands of
 /// lines, and a vector of them is a heap allocation each — then one more copy
 /// of the whole run to join them at the end, for a record that
-/// [`crate::push::failure_lines`] reads three lines of and a run that worked
+/// `push::failure_lines` reads three lines of and a run that worked
 /// reads none of. Appending in place costs the growth of one buffer instead,
 /// and the text it holds is what `join("\n")` gives, byte for byte: the
 /// separator goes *between* the lines, so there is no newline at the end and a

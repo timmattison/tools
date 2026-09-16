@@ -813,7 +813,7 @@ pub(crate) enum InputMode {
     ///
     /// It is named for what runs rather than for the key that started it: a
     /// rebase and a merge run in it as a push does, and it is the mode that
-    /// [`crate::push::State::Running`] gives.
+    /// `push::State::Running` gives.
     Running,
     /// The list of the worktrees is open. Up and Down move its cursor, Enter
     /// goes to the worktree under the cursor, and Esc and `q` close it. Every
