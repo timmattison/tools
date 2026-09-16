@@ -83,6 +83,11 @@ const CHECK_STATUS_CHILDREN: i32 = 0;
 /// The status of the documented check when the branch has no children.
 const CHECK_STATUS_NO_CHILDREN: i32 = 1;
 
+/// The status of the documented check when `swt list` failed. `README.md` and
+/// the module doc of `list` both name this number, so this test holds it. A
+/// hook that reads the status with `case $? in 2)` needs exactly this number.
+const CHECK_STATUS_FAILURE: i32 = 2;
+
 /// What a caller reads from the status of the documented check.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Answer {
@@ -92,16 +97,21 @@ enum Answer {
     NoChildren,
     /// `swt list` failed, so the check knows nothing about the children.
     Failure,
+    /// A status that neither document names. It carries the status, so a
+    /// failure message shows the number. `None` is a kill by a signal, which
+    /// the two documents do not name either.
+    Unknown(Option<i32>),
 }
 
 impl Answer {
-    /// The answer that `status` gives. Every status other than the two answers
-    /// is a failure, a kill by a signal included.
+    /// The answer that `status` gives. Each of the three answers has its own
+    /// number, and every other status is unknown.
     fn of(status: Option<i32>) -> Self {
         match status {
             Some(CHECK_STATUS_CHILDREN) => Self::Children,
             Some(CHECK_STATUS_NO_CHILDREN) => Self::NoChildren,
-            _ => Self::Failure,
+            Some(CHECK_STATUS_FAILURE) => Self::Failure,
+            other => Self::Unknown(other),
         }
     }
 }
@@ -564,8 +574,9 @@ fn the_documented_plain_git_command_finds_the_branches_that_swt_list_shows() {
 // leaves stdout empty, so a check that reads only stdout reports a failure as
 // no children. The test runs the check from the README itself, not a copy. The
 // module doc of `list` must state the same bytes, and the dotfiles document
-// `SWT.md` quotes them too. Children, no children and a failure must each give
-// a different status.
+// `SWT.md` quotes them too. Children give 0, no children give 1, and a failure
+// gives 2. Both documents name those three numbers, so this test holds all
+// three.
 #[test]
 fn the_documented_check_tells_children_no_children_and_a_failure_apart() {
     let readme = readme();
@@ -660,7 +671,8 @@ fn the_documented_check_tells_children_no_children_and_a_failure_apart() {
         .collect();
     assert_eq!(
         observed, expected,
-        "the check {check} must give 0 for children, 1 for no children, and another status \
-         for a failure: {runs:#?}"
+        "the check {check} must give {CHECK_STATUS_CHILDREN} for children, \
+         {CHECK_STATUS_NO_CHILDREN} for no children, and {CHECK_STATUS_FAILURE} for a failure: \
+         {runs:#?}"
     );
 }
