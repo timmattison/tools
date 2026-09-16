@@ -413,10 +413,12 @@ struct RunInFlight {
 /// gives the bytes that arrived since the last one, and neither side moves the
 /// other's place in the file.
 struct Stream {
-    /// The file itself. Dropping it takes the file away, and a child that still
-    /// holds it goes on writing to a file with no name, which costs the space
-    /// only until that child ends.
-    file: NamedTempFile,
+    /// The handle the child writes through.
+    ///
+    /// gsw writes nothing to it. It is held open so that the file lives from
+    /// the moment its name goes to the moment the child has a handle of its
+    /// own.
+    writer: File,
     /// The handle gsw reads through, which has an offset of its own.
     reader: File,
     /// What turns the bytes of this stream into lines.
@@ -435,12 +437,34 @@ struct Stream {
 }
 
 impl Stream {
-    /// A stream whose file is made in `scratch`.
+    /// A stream whose file is made in `scratch`, and whose name is then taken
+    /// off it.
+    ///
+    /// **The name goes as soon as both handles are open.** A quit kills the
+    /// thread of a run where it stands, and a thread that dies runs no
+    /// destructor — so a file that still carries a name outlives the session
+    /// that made it, and a rebase whose hook builds a workspace leaves a great
+    /// deal of it behind. A file with no name is the same file: Unix keeps it
+    /// for as long as a process holds it open, so the child goes on writing and
+    /// the reader goes on reading, and the space comes back the moment the last
+    /// of them lets go.
+    ///
+    /// The read handle is opened by name, so it is opened before the name goes.
+    /// It has an offset of its own, which is what makes each read give the bytes
+    /// that arrived since the last one.
+    ///
+    /// **A name that cannot be removed is no reason to refuse the run.** The
+    /// file is there and both handles are open, so the run works exactly as it
+    /// always did and the only cost is one file left in a temporary directory —
+    /// which is what every run cost before this. To fail here would take the
+    /// key away instead.
     fn new(scratch: &Path) -> std::io::Result<Self> {
         let file = NamedTempFile::new_in(scratch)?;
         let reader = file.reopen()?;
+        let (writer, path) = file.into_parts();
+        let _ = path.close();
         Ok(Self {
-            file,
+            writer,
             reader,
             splitter: LineSplitter::new(),
         })
@@ -462,7 +486,7 @@ impl Stream {
 
     /// Where the child writes this stream.
     fn writer(&self) -> std::io::Result<Stdio> {
-        Ok(Stdio::from(self.file.as_file().try_clone()?))
+        Ok(Stdio::from(self.writer.try_clone()?))
     }
 
     /// The bytes the child has written since the last read.
