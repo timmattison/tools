@@ -337,7 +337,7 @@ pub(crate) fn base_update_prompt_for(
 
     PushPrompt::Confirm {
         question: update.question(branch, base, snapshot.commits_behind, command),
-        hint: crate::push::confirm_hint("push"),
+        hint: crate::push::confirm_hint(update.verb()),
         creates_remote_branch: false,
         command: Confirmed::BaseUpdate(BaseUpdateCommand::new(
             update,
