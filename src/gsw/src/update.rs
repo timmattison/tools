@@ -419,10 +419,12 @@ mod script_tests {
 mod run_tests {
     use super::*;
     use crate::shell::stub_shell::{
-        a_child_of_this_test_passes, test_name, test_process_can_open_the_terminal, StubShell,
-        CHILD_RAN, GIT_PREFIX, HOSTILE_GIT_ENVIRONMENT, HOSTILE_MARKER, TTY_REFUSED,
+        a_child_of_this_test_passes, kill_now, test_name, test_process_can_open_the_terminal,
+        StubShell, CHILD_RAN, GAVE_UP_WITHIN, GIT_PREFIX, HOSTILE_GIT_ENVIRONMENT, HOSTILE_MARKER,
+        TTY_REFUSED,
     };
     use crate::testrepo::{git, init_repo};
+    use std::sync::mpsc::channel;
     use tempfile::TempDir;
 
     /// The base every fixture here names, which is also the name `grp` and
@@ -543,6 +545,33 @@ mod run_tests {
             "why it stopped must reach the outcome too: {:?}",
             outcome.output,
         );
+    }
+
+    #[test]
+    fn a_run_returns_when_the_shell_exits_and_not_when_its_children_do() {
+        // A child the command leaves behind inherits where the output goes. A
+        // pipe makes the run wait for end of file, and end of file arrives only
+        // when the last writer lets go — so such a child holds the run open
+        // long after the shell is gone, and the key is held for all of it. A
+        // file has no such wait. `grp` pushes, and a push starts a credential
+        // helper or an agent that outlives the command that asked it.
+        //
+        // The run happens on a thread of its own, so this test reports the
+        // defect rather than a wait of its own: a run that waits for the child
+        // never returns inside the bound, and the channel says so.
+        let stub = StubShell::outlived_by_a_child();
+        let workdir = work_tree();
+        let shell = stub.as_shell().to_os_string();
+        let dir = workdir.path().to_path_buf();
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run(&shell, &default_command(), &dir, &|_| {}));
+        });
+        let outcome = rx
+            .recv_timeout(GAVE_UP_WITHIN)
+            .expect("the run must return when the shell exits, not when its children do");
+        assert!(outcome.success, "the shell exited 0: {:?}", outcome.output,);
+        kill_now(stub.wait_for_pid());
     }
 
     #[test]
