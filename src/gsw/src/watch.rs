@@ -1453,8 +1453,27 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                     });
                 });
             },
-            start_base_update: |_command: crate::update::BaseUpdateCommand,
-                                _current: &WorktreePath| {},
+            start_base_update: |command: crate::update::BaseUpdateCommand,
+                                current: &WorktreePath| {
+                // Two senders on the one channel, as the push has: a line and
+                // the outcome re-enter the loop the way every other event
+                // does, applied between frames rather than during one. The
+                // lines are the push's own event, because the window under the
+                // frame is the same window.
+                let line_tx = push_tx.clone();
+                let finish_tx = push_tx.clone();
+                crate::update::spawn(
+                    shell.clone(),
+                    command,
+                    current.as_path().to_path_buf(),
+                    move |line| {
+                        let _ = line_tx.send(Event::PushOutput(line));
+                    },
+                    move |outcome| {
+                        let _ = finish_tx.send(Event::BaseUpdateFinished(outcome));
+                    },
+                );
+            },
             start_push: |command: PushCommand, current: &WorktreePath| {
                 // Two senders on the one channel, so a line and the outcome
                 // re-enter the loop the same way every other event does —
@@ -2130,12 +2149,19 @@ where
                 .request(&state.cache.snapshot, state.cache.dims, clock());
         }
         // `confirm` yields the command only once, so a second `y` that raced
-        // the mode change starts nothing.
-        Event::PushConfirmed => {
-            if let Some(crate::push::Confirmed::Push(command)) = state.ui.confirm(clock()) {
+        // the mode change starts nothing. It says which act was confirmed, and
+        // that is the only thing that decides which runner starts: the row
+        // asks one question at a time, and the answer carries the work the
+        // user was shown.
+        Event::PushConfirmed => match state.ui.confirm(clock()) {
+            Some(crate::push::Confirmed::Push(command)) => {
                 (hooks.start_push)(command, &state.current);
             }
-        }
+            Some(crate::push::Confirmed::BaseUpdate(command)) => {
+                (hooks.start_base_update)(command, &state.current);
+            }
+            None => {}
+        },
         Event::PushOutput(line) => state.ui.output_line(line),
         Event::PushCancelled => state.ui.cancel(),
         Event::Dismiss => state.ui.dismiss(),
@@ -2280,7 +2306,16 @@ where
                 state.ui.post_error(message.to_string());
             }
         }
-        Event::BaseUpdateFinished(_) => {}
+        // **A walk on every outcome, and not on success alone.** A rebase that
+        // failed still changed the repository: it rewrites the commits one at a
+        // time and stops where one of them conflicts, and the `⚠ rebase` row of
+        // the header is what tells the user that git is holding it. Only a walk
+        // puts that row there. A rebase that worked moved every commit and
+        // pushed them, so every count in the header is stale as well.
+        Event::BaseUpdateFinished(outcome) => {
+            state.ui.finished(outcome, clock());
+            pending.force = true;
+        }
         Event::PushFinished(outcome) => {
             let succeeded = outcome.success;
             state.ui.finished(outcome, clock());
