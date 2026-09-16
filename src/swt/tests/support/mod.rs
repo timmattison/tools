@@ -410,26 +410,21 @@ impl TestRepo {
     /// have left behind, sorted.
     ///
     /// The worktree path carries a uniqueness token minted inside the child
-    /// process, so a test cannot predict it and has to go looking. The scan
-    /// keeps each `.swt` entry whose file name contains `name`. That finds the
-    /// current format, `<parent>--<name>-<token>.swt`, for a parent of any
-    /// name. It also finds the older `<name>-<token>.swt` and the untokenized
-    /// `<name>.swt`. A regression to an older format thus cannot leave an
-    /// orphan that the "nothing survived" assertions do not see. Every name
-    /// comes from [`unique`], so a match on containment cannot find the
-    /// directory of another test.
+    /// process, so a test cannot predict it and has to go looking. The result
+    /// holds each entry beside the repository whose name ends with `.swt` and
+    /// contains `name`. That finds the current format,
+    /// `<parent>--<name>-<token>.swt`, for a parent of any name. It also finds
+    /// the older `<name>-<token>.swt` and the untokenized `<name>.swt`. A
+    /// regression to an older format thus cannot leave an orphan that the
+    /// "nothing survived" assertions do not see. Every name comes from
+    /// [`unique`], so a match on containment cannot find the directory of
+    /// another test.
     pub fn created_worktrees(&self, name: &str) -> Vec<PathBuf> {
-        let mut found: Vec<PathBuf> = fs::read_dir(&self.siblings)
-            .expect("the fixture's sibling directory should be readable")
-            .filter_map(|entry| {
-                let entry = entry.expect("sibling directory entry");
-                let file_name = entry.file_name().to_string_lossy().into_owned();
-                let belongs = file_name.ends_with(WORKTREE_SUFFIX) && file_name.contains(name);
-                belongs.then(|| entry.path())
-            })
-            .collect();
-        found.sort();
-        found
+        self.entries_beside()
+            .into_iter()
+            .filter(|entry| entry.ends_with(WORKTREE_SUFFIX) && entry.contains(name))
+            .map(|entry| self.siblings.join(entry))
+            .collect()
     }
 
     /// Every branch that a `swt create <name>` could have left behind, sorted.
