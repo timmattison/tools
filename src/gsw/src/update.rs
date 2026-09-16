@@ -21,7 +21,9 @@ use shellquote::shell_quote;
 use tempfile::NamedTempFile;
 
 use crate::lines::LineSplitter;
-use crate::push::{current_branch, Confirmed, PushOutcome, PushPrompt};
+use crate::push::{
+    confirm_hint, current_branch, Confirmed, PushOutcome, PushPrompt, SuccessReport,
+};
 use crate::render::{Operation, Snapshot};
 use crate::repo::DETACHED_HEAD;
 use crate::shell::{shell_child, ShellCommand, PROBE_POLL};
@@ -383,7 +385,7 @@ pub(crate) fn base_update_prompt_for(
 
     PushPrompt::Confirm {
         question: update.question(branch, base, snapshot.commits_behind, command),
-        hint: crate::push::confirm_hint(update.verb()),
+        hint: confirm_hint(update.verb()),
         caution: update.caution(),
         running_notice: update.running_notice(branch, base, command),
         command: Confirmed::BaseUpdate(BaseUpdateCommand::new(
@@ -396,7 +398,7 @@ pub(crate) fn base_update_prompt_for(
         // `grp` and `gmp` report a push they skipped only there, so the
         // sentence alone would tell the user that the branch is on the remote
         // when it is not.
-        success: crate::push::SuccessReport::WithLastLine {
+        success: SuccessReport::WithLastLine {
             sentence: update.done_sentence(branch, base, command),
         },
     }
