@@ -652,6 +652,15 @@ enum Event {
     /// has a command behind it — so the loop never receives a request it
     /// cannot serve.
     BaseUpdateRequested(crate::update::BaseUpdate),
+    /// The probe of one of the two keys found its command, and this is its
+    /// name.
+    ///
+    /// One event for each key, because each key has a probe of its own and the
+    /// three probes answer in whatever order their shells finish. A key is
+    /// unbound until its own answer arrives. A shell that says no, a shell
+    /// that cannot be started, and a shell that never answers all send
+    /// nothing, so that key stays unbound and silent.
+    BaseUpdateCommandFound(crate::update::BaseUpdate, crate::shell::ShellCommand),
     /// The user confirmed the push at the prompt (`y` or Enter).
     PushConfirmed,
     /// The user declined the push at the prompt (`n`, Esc, or `q`).
@@ -2186,6 +2195,7 @@ where
                 .request(&state.cache.snapshot, state.cache.dims, clock());
         }
         Event::BaseUpdateRequested(_) => {}
+        Event::BaseUpdateCommandFound(_, _) => {}
         // `confirm` yields the command only once, so a second `y` that raced
         // the mode change starts nothing. It says which act was confirmed, and
         // that is the only thing that decides which runner starts: the row
@@ -6700,6 +6710,14 @@ mod push_loop_tests {
         /// moves the clock of the loop on by this cost, as a real read of the
         /// list takes time. It is zero unless a test sets it.
         list_cost: Duration,
+        /// How far behind its base the branch of every worktree here stands.
+        ///
+        /// Zero unless a test sets it, because [`pushable_snapshot`] is level
+        /// with its base and every push test reads that snapshot. The keys of
+        /// a base update refuse a branch that is level — the count is the
+        /// whole reason they exist — so a test of those keys sets this
+        /// instead of moving the snapshot the push tests read.
+        behind: u32,
     }
 
     impl World {
@@ -6730,6 +6748,7 @@ mod push_loop_tests {
                 removed: Vec::new(),
                 unreadable: Vec::new(),
                 list_cost: Duration::ZERO,
+                behind: 0,
             }
         }
 
@@ -6782,6 +6801,13 @@ mod push_loop_tests {
         /// clock of the loop on by `cost`. See [`World::list_cost`].
         fn slow_list(mut self, cost: Duration) -> Self {
             self.list_cost = cost;
+            self
+        }
+
+        /// This world, where every branch stands `commits` behind its base.
+        /// See [`World::behind`].
+        fn behind(mut self, commits: u32) -> Self {
+            self.behind = commits;
             self
         }
     }
@@ -6850,6 +6876,13 @@ mod push_loop_tests {
         let skew = std::cell::Cell::new(Duration::ZERO);
         let loop_clock = || clock() + skew.get();
         let base = loop_clock();
+        // Every branch of the world stands the same distance behind its base,
+        // so one number describes them all. See [`World::behind`].
+        let behind = world.behind;
+        let snapshot_here = move |path: &WorktreePath| Snapshot {
+            commits_behind: behind,
+            ..snapshot_of(path)
+        };
 
         event_loop(
             &rx,
@@ -6857,7 +6890,7 @@ mod push_loop_tests {
             &mut displayed,
             LoopStart {
                 cache: SnapshotCache {
-                    snapshot: snapshot_of(&world.home),
+                    snapshot: snapshot_here(&world.home),
                     collected_at: base,
                     dims,
                 },
@@ -6875,7 +6908,7 @@ mod push_loop_tests {
                     if removed.borrow().contains(current) || world.unreadable.contains(current) {
                         anyhow::bail!("{UNWALKABLE}: {}", current.as_path().display());
                     }
-                    Ok(snapshot_of(current))
+                    Ok(snapshot_here(current))
                 },
                 render: |snap: &Snapshot, frame_dims: Dimensions, timing: FrameTiming| {
                     queue_next_burst();
@@ -6953,7 +6986,7 @@ mod push_loop_tests {
                     if world.vanishing.contains(target) {
                         removed.borrow_mut().push(target.clone());
                     }
-                    Ok(snapshot_of(target))
+                    Ok(snapshot_here(target))
                 },
             },
         )
@@ -7933,6 +7966,154 @@ mod push_loop_tests {
                 "{what} must reach the row, got {displayed:?}",
             );
         }
+    }
+
+    /// The command the probe of `update` found, which is what binds its key.
+    fn found_base_update_command(update: crate::update::BaseUpdate) -> crate::shell::ShellCommand {
+        crate::shell::ShellCommand::new(None, update.default_command())
+            .expect("the default names a command")
+    }
+
+    /// The answer of the probe of `update`, as the loop receives it.
+    fn base_update_probe_answered(update: crate::update::BaseUpdate) -> Event {
+        Event::BaseUpdateCommandFound(update, found_base_update_command(update))
+    }
+
+    /// One press of the key of `update`.
+    fn press_base_update(update: crate::update::BaseUpdate) -> Event {
+        key(KeyCode::Char(update.key()))
+    }
+
+    /// The one worktree of [`World::alone`], [`BEHIND`] commits behind its
+    /// base, which is the state both keys of a base update act in.
+    fn behind_alone() -> Setup {
+        in_world(World::alone().behind(BEHIND))
+    }
+
+    #[test]
+    fn r_then_y_starts_the_run_the_question_described_and_r_then_n_starts_none() {
+        // The whole path of the key, from the answer of its probe to the
+        // runner: the probe binds it, the press asks the question, and `y`
+        // runs the command that question named, in the worktree the frame
+        // shows. `n` is the other half of the same rule — a run that started
+        // after a no would rewrite the commits of the branch and force-push
+        // them against the word of the user.
+        for (answer, runs) in [(KeyCode::Char('y'), true), (KeyCode::Char('n'), false)] {
+            let base = Instant::now();
+            let (_displayed, seen) = drive(
+                vec![
+                    base_update_probe_answered(crate::update::BaseUpdate::Rebase),
+                    press_base_update(crate::update::BaseUpdate::Rebase),
+                    key(answer),
+                    Event::Quit,
+                ],
+                behind_alone(),
+                move || base,
+            );
+
+            if runs {
+                let [command] = seen.base_updates.as_slice() else {
+                    panic!(
+                        "`R` then {answer:?} must start one run, got {:?}",
+                        seen.base_updates,
+                    );
+                };
+                assert_eq!(command.update(), crate::update::BaseUpdate::Rebase);
+                assert_eq!(command.branch(), ALONE);
+                assert_eq!(command.base(), "main");
+                assert_eq!(command.command().name(), "grp");
+                assert_eq!(
+                    seen.base_update_paths,
+                    vec![worktree(ALONE)],
+                    "the run belongs to the worktree the frame shows",
+                );
+            } else {
+                assert!(
+                    seen.base_updates.is_empty(),
+                    "`R` then {answer:?} must start no run, got {:?}",
+                    seen.base_updates,
+                );
+            }
+            assert!(
+                seen.pushes.is_empty(),
+                "`R` then {answer:?} must start no push, got {:?}",
+                seen.pushes,
+            );
+        }
+    }
+
+    #[test]
+    fn p_r_and_m_start_nothing_while_a_base_update_runs() {
+        // The run owns the window under the frame and is rewriting the branch,
+        // so a second command in the same repository at the same time is the
+        // one thing the mode exists to prevent. The `y` at the end is the
+        // proof that none of the three left a question standing: a press that
+        // asked would be a press this answers.
+        let base = Instant::now();
+        let (_displayed, seen) = drive(
+            vec![
+                base_update_probe_answered(crate::update::BaseUpdate::Rebase),
+                base_update_probe_answered(crate::update::BaseUpdate::Merge),
+                key(KeyCode::Char('p')),
+                press_base_update(crate::update::BaseUpdate::Rebase),
+                press_base_update(crate::update::BaseUpdate::Merge),
+                key(KeyCode::Char('y')),
+                Event::Quit,
+            ],
+            Setup {
+                ui: running_rebase_ui(base),
+                ..behind_alone()
+            },
+            move || base,
+        );
+
+        assert!(
+            seen.base_updates.is_empty(),
+            "a key pressed during a run must start no second run, got {:?}",
+            seen.base_updates,
+        );
+        assert!(
+            seen.pushes.is_empty(),
+            "a `p` during a run must start no push, got {:?}",
+            seen.pushes,
+        );
+    }
+
+    #[test]
+    fn a_bound_r_asks_its_question_and_an_unbound_m_says_nothing() {
+        // Each key has a probe of its own, so one of them is bound while the
+        // other is not — a user who wrote a rebase command and no merge one
+        // must get the key they wrote and no sign of the other.
+        let base = Instant::now();
+        let events = |code: KeyCode| {
+            vec![
+                base_update_probe_answered(crate::update::BaseUpdate::Rebase),
+                key(code),
+                Event::Quit,
+            ]
+        };
+
+        let (asked, _) = drive(events(KeyCode::Char('R')), behind_alone(), move || base);
+        assert_eq!(
+            strip_ansi(&asked),
+            format!(
+                "FRAME {ALONE}\nRebase {ALONE} onto main ({BEHIND} commits behind), then push \
+                 with grp?  [y/Enter = rebase, n/Esc = cancel]"
+            ),
+            "the bound key must put its question under the frame",
+        );
+
+        let (silent, seen) = drive(events(KeyCode::Char('M')), behind_alone(), move || base);
+        assert_eq!(
+            strip_ansi(&silent),
+            format!("FRAME {ALONE}"),
+            "the unbound key must put nothing on the row",
+        );
+        assert!(
+            seen.base_updates.is_empty(),
+            "the unbound key must start nothing, got {:?}",
+            seen.base_updates,
+        );
     }
 
     #[test]
