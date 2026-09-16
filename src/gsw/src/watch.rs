@@ -1765,14 +1765,29 @@ fn spawn_command_probes(
     tx: &Sender<Event>,
 ) -> Vec<thread::JoinHandle<()>> {
     let issue_tx = tx.clone();
-    vec![spawn_probe(
+    let mut probes = vec![spawn_probe(
         shell,
         values.issue.as_deref(),
         crate::issue::DEFAULT_ISSUE_COMMAND,
         move |command| {
             let _ = issue_tx.send(Event::IssueCommandFound(command));
         },
-    )]
+    )];
+    // Over the acts rather than over two names, so a third act would be probed
+    // here without an edit: every difference between the two is a method of
+    // `BaseUpdate`, the variable and the default name among them.
+    probes.extend(crate::update::BaseUpdate::ALL.map(|update| {
+        let update_tx = tx.clone();
+        spawn_probe(
+            shell,
+            values.base_update(update),
+            update.default_command(),
+            move |command| {
+                let _ = update_tx.send(Event::BaseUpdateCommandFound(update, command));
+            },
+        )
+    }));
+    probes
 }
 
 /// Ask `shell` on a thread of its own about the command that `value` names,
