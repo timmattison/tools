@@ -20,7 +20,8 @@ use crate::child::detach_from_terminal;
 use crate::lines::LineSplitter;
 use crate::render::{Snapshot, UpstreamStatus};
 use crate::repo::DETACHED_HEAD;
-use crate::update::BaseUpdateCommand;
+use crate::shell::ShellCommand;
+use crate::update::{base_update_prompt_for, BaseUpdate, BaseUpdateCommand};
 use crate::watch::{Dimensions, InputMode};
 use crate::worktrees::WorktreeList;
 use textfit::truncate_right;
@@ -981,6 +982,31 @@ impl PushUi {
                 life: Life::Fading { posted_at: now },
             },
         };
+    }
+
+    /// Handle `R` or `M`: work out what the user's command would do to the
+    /// branch and either ask or explain.
+    ///
+    /// The door beside [`PushUi::request`], and it obeys the two rules that one
+    /// obeys. A pane with no row to draw the question in raises no question and
+    /// is left [`State::Idle`], so the `y` or Enter behind the key is an
+    /// ordinary key. A refusal posts a fading line, because it describes the
+    /// repository as it stood at the press and goes stale exactly as a success
+    /// does.
+    ///
+    /// It takes the command because the command is the user's, and gsw learns
+    /// of it from a probe that answers on the loop's own channel. The question
+    /// names it, so a key whose command is not there yet has no question to
+    /// ask.
+    pub(crate) fn request_base_update(
+        &mut self,
+        snapshot: &Snapshot,
+        update: BaseUpdate,
+        command: &ShellCommand,
+        dims: Dimensions,
+        now: Instant,
+    ) {
+        let _ = (snapshot, update, command, dims, now);
     }
 
     /// Handle `y`: start what the question described, returning the
@@ -2152,6 +2178,45 @@ mod ui_tests {
         ui
     }
 
+    /// How far behind the base every question about a base update here is
+    /// asked. Any count above zero does: the count is the reason the key acts
+    /// at all.
+    const BEHIND: u32 = 5;
+
+    /// A snapshot of `gsw-push`, [`BEHIND`] commits behind `main`, which is
+    /// what a rebase or a merge is asked about.
+    fn behind_the_base() -> Snapshot {
+        Snapshot {
+            commits_behind: BEHIND,
+            ..snapshot(None)
+        }
+    }
+
+    /// The command `update` runs here, which is the one it falls back on.
+    fn base_update_command(update: BaseUpdate) -> ShellCommand {
+        ShellCommand::new(None, update.default_command()).expect("a name")
+    }
+
+    /// A UI with the question of `update` already on screen, asked at `now` in
+    /// a pane of `dims`.
+    fn asking_base_update_in(update: BaseUpdate, dims: Dimensions, now: Instant) -> PushUi {
+        let mut ui = PushUi::new(false);
+        ui.request_base_update(
+            &behind_the_base(),
+            update,
+            &base_update_command(update),
+            dims,
+            now,
+        );
+        ui
+    }
+
+    /// A UI with the question of `update` already on screen, asked at `now` in
+    /// a pane with room for it.
+    fn asking_base_update(update: BaseUpdate, now: Instant) -> PushUi {
+        asking_base_update_in(update, tall_pane(80), now)
+    }
+
     /// A UI with a push already running, confirmed at `now`.
     fn pushing(now: Instant) -> PushUi {
         let mut ui = PushUi::new(false);
@@ -3029,6 +3094,65 @@ mod ui_tests {
         assert!(
             overlay.contains(&confirm_hint(PUSH_VERB)),
             "the overlay owns the key hint, got {overlay:?}",
+        );
+    }
+
+    #[test]
+    fn requesting_a_base_update_asks_the_question_and_takes_the_keys() {
+        // `R` on a branch behind the base must put the question on screen AND
+        // switch the key table, or `y` would be read as an ordinary key.
+        let mut ui = asking_base_update(BaseUpdate::Rebase, t0());
+        assert_eq!(ui.mode(), InputMode::Confirm);
+        let overlay = painted(&mut ui, tall_pane(120), t0());
+        assert!(
+            overlay.contains("Rebase gsw-push onto main (5 commits behind), then push with grp?"),
+            "the question must be on screen, got {overlay:?}",
+        );
+        assert!(
+            overlay.contains(&confirm_hint("rebase")),
+            "the keys that answer it go with it, got {overlay:?}",
+        );
+    }
+
+    #[test]
+    fn requesting_a_base_update_that_is_refused_explains_instead_of_asking() {
+        // The refusal is a message, not a question: the keys must stay normal,
+        // so `y` does not answer a prompt that is not there.
+        let mut ui = PushUi::new(false);
+        ui.request_base_update(
+            &snapshot(None),
+            BaseUpdate::Rebase,
+            &base_update_command(BaseUpdate::Rebase),
+            tall_pane(80),
+            t0(),
+        );
+        assert_eq!(ui.mode(), InputMode::Normal);
+        let overlay = painted(&mut ui, tall_pane(80), t0());
+        assert!(
+            overlay.contains("gsw-push already contains main"),
+            "the reason must reach the row, got {overlay:?}",
+        );
+    }
+
+    #[test]
+    fn confirming_a_base_update_hands_back_the_command_it_described_once() {
+        // The act, the branch, the base, and the command travel together, so
+        // what runs on `y` is what the sentence promised — and the runner can
+        // still tell whether the repository moved under it. The second `y` is
+        // one that raced the mode change, and it must start nothing.
+        let mut ui = asking_base_update(BaseUpdate::Rebase, t0());
+        let Some(Confirmed::BaseUpdate(command)) = ui.confirm(t0()) else {
+            panic!("a question about a rebase must confirm a rebase");
+        };
+        assert_eq!(command.update(), BaseUpdate::Rebase);
+        assert_eq!(command.branch(), "gsw-push");
+        assert_eq!(command.base(), "main");
+        assert_eq!(command.command().name(), "grp");
+        assert_eq!(ui.mode(), InputMode::Pushing);
+        assert_eq!(
+            ui.confirm(t0()),
+            None,
+            "a second y must not start a second run",
         );
     }
 
