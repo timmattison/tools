@@ -670,6 +670,8 @@ impl Record {
 #[cfg(test)]
 mod question_tests {
     use super::*;
+    use crate::render::Operation;
+    use crate::repo::DETACHED_HEAD;
 
     /// The branch every question here is asked about.
     const BRANCH: &str = "issue-12";
@@ -735,6 +737,22 @@ mod question_tests {
         question_running(snapshot, update, update.default_command())
     }
 
+    /// Why `update` refuses to act on `snapshot`.
+    ///
+    /// # Panics
+    ///
+    /// Panics where the act is offered. A test that reads a refusal is a test
+    /// about a key that must not run anything, and a question is exactly what
+    /// it must not raise.
+    fn refusal(snapshot: &Snapshot, update: BaseUpdate) -> String {
+        match prompt(snapshot, update, update.default_command()) {
+            PushPrompt::Refuse { message } => message,
+            PushPrompt::Confirm { question, .. } => {
+                panic!("the act must be refused, and it asked {question:?}")
+            }
+        }
+    }
+
     #[test]
     fn the_question_names_the_act_the_branch_the_base_the_count_and_the_command() {
         // Every one of the five is what the user reads in the half second
@@ -772,6 +790,148 @@ mod question_tests {
         assert_eq!(
             question_running(&behind(2), BaseUpdate::Rebase, "grp --fork-point"),
             "Rebase issue-12 onto main (2 commits behind), then push with grp --fork-point?",
+        );
+    }
+
+    #[test]
+    fn a_detached_head_leaves_no_branch_to_act_on() {
+        // git refuses `HEAD` as the name of a branch, so there is nothing for
+        // `grp` to rebase and nothing for `gmp` to merge into. A rebase that
+        // stopped on a conflict leaves HEAD exactly here.
+        let detached = Snapshot {
+            branch: DETACHED_HEAD.to_string(),
+            ..behind(5)
+        };
+        assert_eq!(
+            refusal(&detached, BaseUpdate::Rebase),
+            "HEAD is detached — check out a branch to rebase",
+        );
+        assert_eq!(
+            refusal(&detached, BaseUpdate::Merge),
+            "HEAD is detached — check out a branch to merge",
+        );
+    }
+
+    #[test]
+    fn a_base_that_is_neither_main_nor_master_is_refused() {
+        // `resolve_base` falls back on the target of `origin/HEAD`, and then on
+        // HEAD itself. Take a local `trunk` whose base resolves to
+        // `origin/trunk`: `grp` rebases `trunk` onto its own remote branch and
+        // then pushes the default branch of the repository. The guard inside
+        // `grp` exists to stop that push, and it compares two names, and here
+        // the names differ. One key press must not get past it.
+        let elsewhere = Snapshot {
+            base: "origin/trunk".to_string(),
+            ..behind(5)
+        };
+        assert_eq!(
+            refusal(&elsewhere, BaseUpdate::Rebase),
+            "no main or master branch to rebase onto",
+        );
+        assert_eq!(
+            refusal(&elsewhere, BaseUpdate::Merge),
+            "no main or master branch to merge",
+        );
+    }
+
+    #[test]
+    fn master_is_a_base_that_these_keys_act_on() {
+        // The other name `resolve_base` chooses, and the whole reason the base
+        // goes on the command line: `grp` falls back on `main`, so a bare `grp`
+        // fails here with no such branch or commit.
+        let on_master = Snapshot {
+            base: "master".to_string(),
+            ..behind(2)
+        };
+        assert_eq!(
+            question(&on_master, BaseUpdate::Rebase),
+            "Rebase issue-12 onto master (2 commits behind), then push with grp?",
+        );
+    }
+
+    #[test]
+    fn the_base_itself_has_nothing_to_bring_into_it() {
+        // The user is on `main`, so there is no branch to bring up to date.
+        //
+        // **This row wins over the row below it**, which the same snapshot also
+        // matches: a branch is never behind itself, so a rule that read the
+        // count first would say `main already contains main` and leave the user
+        // wondering which branch it meant.
+        let on_base = Snapshot {
+            branch: BASE.to_string(),
+            ..behind(0)
+        };
+        assert_eq!(
+            refusal(&on_base, BaseUpdate::Rebase),
+            "on main — nothing to rebase",
+        );
+        assert_eq!(
+            refusal(&on_base, BaseUpdate::Merge),
+            "on main — nothing to merge",
+        );
+    }
+
+    #[test]
+    fn an_operation_in_progress_is_named_by_what_git_holds() {
+        // A rebase that stopped on a conflict is a rebase the user must finish
+        // or abort, and gsw runs neither. The words name the operation git
+        // holds rather than the key that was pressed, so a press of `M` during
+        // a rebase sends the user to the rebase that is there instead of to a
+        // merge that nobody started. It is the operation the `⚠ rebase` row of
+        // the header is already showing.
+        let rebasing = Snapshot {
+            operation: Some(Operation::Rebase {
+                step: None,
+                conflicts: 1,
+            }),
+            ..behind(5)
+        };
+        let merging = Snapshot {
+            operation: Some(Operation::Merge { conflicts: 1 }),
+            ..behind(5)
+        };
+        for update in BaseUpdate::ALL {
+            assert_eq!(
+                refusal(&rebasing, update),
+                "a rebase is in progress — finish it first",
+            );
+            assert_eq!(
+                refusal(&merging, update),
+                "a merge is in progress — finish it first",
+            );
+        }
+    }
+
+    #[test]
+    fn a_branch_that_is_not_behind_already_carries_the_base() {
+        // The count in the header is the whole reason for these keys. At zero
+        // there is nothing to bring over, and `grp` would rewrite every commit
+        // of the branch and force-push the result for no gain at all.
+        for update in BaseUpdate::ALL {
+            assert_eq!(
+                refusal(&behind(0), update),
+                "issue-12 already contains main"
+            );
+        }
+    }
+
+    #[test]
+    fn the_first_refusal_that_applies_wins() {
+        // A rebase that stopped on a conflict detaches HEAD and leaves an
+        // operation in progress, so two rows of the table describe it. The
+        // higher row wins, because it names the thing the user has to deal with
+        // first: there is no branch here to act on whatever git is holding.
+        let stopped = Snapshot {
+            branch: DETACHED_HEAD.to_string(),
+            operation: Some(Operation::Rebase {
+                step: None,
+                conflicts: 1,
+            }),
+            ..behind(5)
+        };
+        assert_eq!(
+            refusal(&stopped, BaseUpdate::Rebase),
+            "HEAD is detached — check out a branch to rebase",
         );
     }
 }
