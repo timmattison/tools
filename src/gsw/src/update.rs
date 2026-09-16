@@ -1158,7 +1158,7 @@ mod run_tests {
     use super::*;
     use crate::repo::DETACHED_HEAD;
     use crate::shell::stub_shell::{
-        a_child_of_this_test_passes, kill_now, shed_git_lines, test_name,
+        a_child_of_this_test_passes, entries_of, kill_now, shed_git_lines, test_name,
         test_process_can_open_the_terminal, user_intent_lost, user_intent_value, StubShell,
         CHILD_RAN, GAVE_UP_WITHIN, HOSTILE_GIT_ENVIRONMENT, HOSTILE_MARKER, TTY_REFUSED,
     };
@@ -1531,22 +1531,6 @@ mod run_tests {
             afterwards.is_empty(),
             "no file may outlive the run: {afterwards:?}",
         );
-    }
-
-    /// The name of everything in `dir`, in order.
-    fn entries_of(dir: &Path) -> Vec<String> {
-        let mut names: Vec<String> = std::fs::read_dir(dir)
-            .expect("read the directory")
-            .map(|entry| {
-                entry
-                    .expect("an entry of the directory")
-                    .file_name()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect();
-        names.sort();
-        names
     }
 
     #[test]

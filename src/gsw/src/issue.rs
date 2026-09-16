@@ -109,10 +109,14 @@ const RUN_DEADLINE: Duration = Duration::from_secs(60);
 ///
 /// Blocking: the caller runs it on a thread of its own.
 pub(crate) fn run(shell: &OsStr, command: &ShellCommand, workdir: &Path) -> IssueOutcome {
-    run_with_deadline(shell, command, workdir, RUN_DEADLINE)
+    run_in(shell, command, workdir, &std::env::temp_dir(), RUN_DEADLINE)
 }
 
-/// Run `command` in `workdir`, and stop waiting after `deadline`.
+/// Run `command` in `workdir`, with the two files of the run in `scratch`, and
+/// stop waiting after `deadline`.
+///
+/// The directory is a parameter so a test can watch it. Production passes
+/// [`std::env::temp_dir`].
 ///
 /// **At the deadline gsw stops waiting, and it kills nothing.** This is the one
 /// place where a run and the probe part company, and the reason is whose
@@ -132,14 +136,15 @@ pub(crate) fn run(shell: &OsStr, command: &ShellCommand, workdir: &Path) -> Issu
 /// defunct entry for the life of the session — which is the cost this deadline
 /// exists to avoid. So the child goes to a thread that waits for it. That
 /// thread ends when the child ends, so the child is what bounds it.
-fn run_with_deadline(
+fn run_in(
     shell: &OsStr,
     command: &ShellCommand,
     workdir: &Path,
+    scratch: &Path,
     deadline: Duration,
 ) -> IssueOutcome {
     let name = command.name();
-    let mut run = match start_run(shell, command, workdir) {
+    let mut run = match start_run(shell, command, workdir, scratch) {
         Ok(run) => run,
         // The shell is gone, it cannot be started, or there is nowhere to put
         // what it writes. Rare, and worth saying plainly: every other failure
@@ -231,7 +236,10 @@ mod outcome_tests {
 #[cfg(all(test, unix))]
 mod run_tests {
     use super::*;
-    use crate::shell::stub_shell::{alive, kill_now, StubShell, GAVE_UP_WITHIN, HANG_DEADLINE};
+    use crate::shell::stub_shell::{
+        alive, entries_of, kill_now, StubShell, GAVE_UP_WITHIN, HANG_DEADLINE,
+    };
+    use std::sync::mpsc::channel;
 
     /// The default command, which is what every test here runs.
     fn default_command() -> ShellCommand {
@@ -273,11 +281,13 @@ mod run_tests {
         // file this process just wrote.
         let stub = StubShell::hanging();
         let workdir = tempfile::tempdir().expect("tempdir");
+        let scratch = tempfile::tempdir().expect("tempdir");
         let started = Instant::now();
-        let outcome = run_with_deadline(
+        let outcome = run_in(
             stub.as_shell(),
             &default_command(),
             workdir.path(),
+            scratch.path(),
             HANG_DEADLINE,
         );
         assert!(
@@ -304,10 +314,12 @@ mod run_tests {
         // files hold those words, and the deadline reads them where they are.
         let stub = StubShell::hanging_after_saying("waiting for the server");
         let workdir = tempfile::tempdir().expect("tempdir");
-        let outcome = run_with_deadline(
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let outcome = run_in(
             stub.as_shell(),
             &default_command(),
             workdir.path(),
+            scratch.path(),
             HANG_DEADLINE,
         );
         let message = outcome
@@ -333,10 +345,12 @@ mod run_tests {
         // user asked for.
         let stub = StubShell::hanging();
         let workdir = tempfile::tempdir().expect("tempdir");
-        let _ = run_with_deadline(
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let _ = run_in(
             stub.as_shell(),
             &default_command(),
             workdir.path(),
+            scratch.path(),
             HANG_DEADLINE,
         );
         let pid = stub.wait_for_pid();
@@ -345,5 +359,61 @@ mod run_tests {
             "the run must leave the user's own command running, and {pid} is gone",
         );
         kill_now(pid);
+    }
+
+    #[test]
+    fn no_file_of_a_run_keeps_a_name_while_the_run_is_in_flight_or_after_it() {
+        // **A quit during a run kills the thread of that run where it stands,
+        // and a thread that dies runs no destructor.** So a file that still
+        // carries a name stays in the temporary directory for good. The base
+        // update holds the same rule, and this holds it for `G`.
+        //
+        // The directory is this test's own, so what it reads is the two files
+        // of this run and nothing else on the machine.
+        let stub = StubShell::saying_then_waiting_for_a_gate("looking up the issue");
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let shell = stub.as_shell().to_os_string();
+        let dir = workdir.path().to_path_buf();
+        let scratch_path = scratch.path().to_path_buf();
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let outcome = run_in(
+                &shell,
+                &default_command(),
+                &dir,
+                &scratch_path,
+                RUN_DEADLINE,
+            );
+            let _ = tx.send(outcome);
+        });
+
+        // A record of the run says the child is running, so the two files of
+        // this run exist by now.
+        let started = stub.wait_for_a_run();
+        let in_flight = entries_of(scratch.path());
+        // The gate is opened before the assertions, so the stub ends whatever
+        // this test does next.
+        stub.open_gate();
+        assert!(started, "the stub never started, so no run was in flight");
+        assert!(
+            in_flight.is_empty(),
+            "a file of a run in flight keeps a name, so a quit leaves it behind for good: \
+             {in_flight:?}",
+        );
+
+        let outcome = rx
+            .recv_timeout(GAVE_UP_WITHIN)
+            .expect("the run must end once the gate is open");
+        assert_eq!(
+            outcome.message(),
+            None,
+            "the stub exits 0 once the gate is open",
+        );
+        let afterwards = entries_of(scratch.path());
+        assert!(
+            afterwards.is_empty(),
+            "no file may outlive the run: {afterwards:?}",
+        );
     }
 }

@@ -539,14 +539,16 @@ pub(crate) struct RunInFlight {
     stderr: NamedTempFile,
 }
 
-/// Start `command` in `workdir`, with a file for each of its two streams.
+/// Start `command` in `workdir`, with a file of `scratch` for each of its two
+/// streams.
 pub(crate) fn start_run(
     shell: &OsStr,
     command: &ShellCommand,
     workdir: &Path,
+    scratch: &Path,
 ) -> std::io::Result<RunInFlight> {
-    let stdout = NamedTempFile::new()?;
-    let stderr = NamedTempFile::new()?;
+    let stdout = NamedTempFile::new_in(scratch)?;
+    let stderr = NamedTempFile::new_in(scratch)?;
     let mut builder = run_command(shell, command, workdir);
     builder
         .stdout(Stdio::from(stdout.as_file().try_clone()?))
@@ -1232,6 +1234,22 @@ pub(crate) mod stub_shell {
             self.recorded_pid()
         }
 
+        /// Wait for the stub to record a run, and report whether it did.
+        ///
+        /// A record says the child is running, so every file the runner made
+        /// for it exists by now. The wait is bounded, and it gives an answer
+        /// rather than a panic, so a test can open a gate before it asserts.
+        pub(crate) fn wait_for_a_run(&self) -> bool {
+            let give_up_at = Instant::now() + GAVE_UP_WITHIN;
+            while self.runs().is_empty() {
+                if Instant::now() >= give_up_at {
+                    return false;
+                }
+                std::thread::sleep(PROBE_POLL);
+            }
+            true
+        }
+
         /// The stub, as the path to give the probe.
         pub(crate) fn as_shell(&self) -> &OsStr {
             self.path.as_os_str()
@@ -1300,6 +1318,22 @@ pub(crate) mod stub_shell {
             std::thread::sleep(PROBE_POLL);
         }
         true
+    }
+
+    /// The name of everything in `dir`, in order.
+    pub(crate) fn entries_of(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("read the directory")
+            .map(|entry| {
+                entry
+                    .expect("an entry of the directory")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
     }
 
     /// The prefix that makes a variable git's.
