@@ -591,13 +591,6 @@ impl Record {
         self.text.push_str(line);
     }
 
-    /// Add every line of `lines` to the end of the record, in order.
-    fn extend(&mut self, lines: impl IntoIterator<Item = String>) {
-        for line in lines {
-            self.push(&line);
-        }
-    }
-
     /// The record, as the text an outcome carries.
     fn into_text(self) -> String {
         self.text
