@@ -953,13 +953,28 @@ impl PushUi {
     /// but that now covers only the pane resized down while a question is
     /// already up: the render path is the only thing that sees the new size.
     pub(crate) fn request(&mut self, snapshot: &Snapshot, dims: Dimensions, now: Instant) {
-        self.state = match prompt_for(
-            &snapshot.branch,
-            snapshot.push_remote.as_deref(),
-            snapshot.upstream.as_ref(),
-        ) {
+        self.ask(
+            prompt_for(
+                &snapshot.branch,
+                snapshot.push_remote.as_deref(),
+                snapshot.upstream.as_ref(),
+            ),
+            dims,
+            now,
+        );
+    }
+
+    /// Put `prompt` on the row: the question with the keys that answer it, or
+    /// the refusal with a life of its own.
+    ///
+    /// The body every door into the row shares, so no two of them can reach
+    /// different answers about the same row. It replaces whatever was on
+    /// screen, which is why a key pressed with a stale error up asks its
+    /// question instead of stacking a row under the old one.
+    fn ask(&mut self, prompt: PushPrompt, dims: Dimensions, now: Instant) {
+        self.state = match prompt {
             // Nowhere to put the question, so it is not asked. Idle rather than
-            // a message: see above.
+            // a message: see [`PushUi::request`].
             PushPrompt::Confirm { .. } if Overlay::rows_to_spare(dims) == 0 => State::Idle,
             PushPrompt::Confirm {
                 question,
@@ -974,7 +989,7 @@ impl PushUi {
                 command,
                 success_message,
             },
-            // A refusal describes the repository as it stood when `p` was
+            // A refusal describes the repository as it stood when the key was
             // pressed, so it goes stale exactly the way a success does — and
             // costs the frame the same row until it does.
             PushPrompt::Refuse { message } => State::Status {
@@ -1006,7 +1021,7 @@ impl PushUi {
         dims: Dimensions,
         now: Instant,
     ) {
-        let _ = (snapshot, update, command, dims, now);
+        self.ask(base_update_prompt_for(snapshot, update, command), dims, now);
     }
 
     /// Handle `y`: start what the question described, returning the
@@ -3153,6 +3168,32 @@ mod ui_tests {
             ui.confirm(t0()),
             None,
             "a second y must not start a second run",
+        );
+    }
+
+    #[test]
+    fn a_pane_with_no_row_to_spare_raises_no_base_update_question() {
+        // The rule of the row, which both doors into it obey: a question the
+        // user cannot see must not be answerable, or Enter pressed out of
+        // reflex at an unchanged frame force-pushes a rewritten branch. The
+        // same rule holds `p`, and it is written once.
+        let mut ui = asking_base_update_in(
+            BaseUpdate::Rebase,
+            Dimensions {
+                width: 80,
+                height: 1,
+            },
+            t0(),
+        );
+        assert_eq!(
+            ui.mode(),
+            InputMode::Normal,
+            "the keys must stay ordinary where no question was shown",
+        );
+        assert_eq!(
+            ui.confirm(t0()),
+            None,
+            "there must be nothing for a y to answer",
         );
     }
 
