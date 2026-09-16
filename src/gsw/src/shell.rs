@@ -602,9 +602,10 @@ pub(crate) fn written_lines(run: &RunInFlight) -> Vec<String> {
 #[cfg(all(test, unix))]
 mod run_tests {
     use super::stub_shell::{
-        a_child_of_this_test_passes, kill_now, test_name, test_process_can_open_the_terminal,
-        StubShell, ANSWER_DEADLINE, CHILD_RAN, GAVE_UP_WITHIN, GIT_PREFIX, HOSTILE_GIT_ENVIRONMENT,
-        HOSTILE_MARKER, TTY_REFUSED,
+        a_child_of_this_test_passes, kill_now, shed_git_lines, test_name,
+        test_process_can_open_the_terminal, user_intent_lost, user_intent_value, StubShell,
+        ANSWER_DEADLINE, CHILD_RAN, GAVE_UP_WITHIN, HOSTILE_GIT_ENVIRONMENT, HOSTILE_MARKER,
+        TTY_REFUSED,
     };
     use super::*;
     use crate::issue::{run, DEFAULT_ISSUE_COMMAND};
@@ -774,7 +775,13 @@ mod run_tests {
         kill_now(stub.wait_for_pid());
     }
 
-    /// Neither child carries a `GIT_` variable out of the environment of `gsw`.
+    /// Each child sheds the `GIT_` variables of `gsw`, and keeps the ones a user
+    /// states on purpose.
+    ///
+    /// The user states `GIT_SSH_COMMAND` or `GIT_CONFIG_GLOBAL` in the session
+    /// too, at the prompt or through direnv, and not only in the rc file. An rc
+    /// file that the interactive child reads again does not state those, so the
+    /// sweep must keep them.
     ///
     /// **This test starts this test binary again, and the hostile environment
     /// goes on that child.** A `GIT_` variable is process-global state. A test
@@ -787,8 +794,9 @@ mod run_tests {
     /// list itself.
     ///
     /// **The armed control comes first.** The child asserts that it really
-    /// holds each hostile variable. An assertion that a variable is absent from
-    /// the stub passes just as readily where there was nothing to remove.
+    /// holds each hostile variable and each variable of the user. An assertion
+    /// that a variable is absent from the stub passes just as readily where
+    /// there was nothing to remove.
     ///
     /// **The stub records what the children got.** A test that reads the
     /// removals off the [`Command`] proves less: a sweep of the `GIT_` prefix
@@ -798,12 +806,14 @@ mod run_tests {
     ///
     /// Both children are covered here, the probe and the run, because both come
     /// from [`shell_child`] and the rule is a property of that one function.
+    /// Each child has a stub of its own, so a child that kept a variable does
+    /// not hide a child that lost it.
     #[test]
-    fn neither_child_carries_a_git_variable_out_of_a_hostile_environment() {
+    fn each_child_sheds_the_git_variables_of_gsw_and_keeps_those_of_the_user() {
         if std::env::var_os(HOSTILE_MARKER).is_none() {
             a_child_of_this_test_passes(&test_name(
                 module_path!(),
-                "neither_child_carries_a_git_variable_out_of_a_hostile_environment",
+                "each_child_sheds_the_git_variables_of_gsw_and_keeps_those_of_the_user",
             ));
             return;
         }
@@ -815,39 +825,50 @@ mod run_tests {
                  assertion below is measured against nothing",
             );
         }
+        for name in gitscratch::USER_INTENT_GIT_ENVIRONMENT {
+            assert_eq!(
+                std::env::var(name).ok(),
+                Some(user_intent_value(name)),
+                "the child must really hold {name}, or there is nothing here to keep",
+            );
+        }
 
-        let stub = StubShell::answering(0);
+        let probe_stub = StubShell::answering(0);
+        let run_stub = StubShell::answering(0);
         let workdir = tempfile::tempdir().expect("tempdir");
         assert!(
-            probe_with_deadline(stub.as_shell(), &default_command(), ANSWER_DEADLINE),
+            probe_with_deadline(probe_stub.as_shell(), &default_command(), ANSWER_DEADLINE),
             "the stub answers 0, so the probe must report the command present",
         );
-        let outcome = run(stub.as_shell(), &default_command(), workdir.path());
+        let outcome = run(run_stub.as_shell(), &default_command(), workdir.path());
         assert_eq!(
             outcome.message(),
             None,
             "the stub exits 0, so the run must report nothing",
         );
 
-        let environment = stub.environment();
-        assert!(
-            !environment.is_empty(),
-            "both children must record the environment they ran in",
-        );
-        let carried: Vec<&str> = environment
-            .lines()
-            .filter(|line| {
-                line.split_once('=')
-                    .is_some_and(|(key, _)| key.starts_with(GIT_PREFIX))
-            })
-            .collect();
-        assert!(
-            carried.is_empty(),
-            "a child of gsw carried a git variable out of the environment of gsw. The command \
-             asks `gh` about the issue, and `gh` reads the origin remote of the directory it runs \
-             in - so each of these aims that question, or configures it, somewhere the user never \
-             pointed it: {carried:?}",
-        );
+        for (child, stub) in [("probe", &probe_stub), ("run", &run_stub)] {
+            let environment = stub.environment();
+            assert!(
+                !environment.is_empty(),
+                "the {child} must record the environment it ran in",
+            );
+            let carried = shed_git_lines(&environment);
+            assert!(
+                carried.is_empty(),
+                "the {child} carried a git variable out of the environment of gsw. The command \
+                 asks `gh` about the issue, and `gh` reads the origin remote of the directory it \
+                 runs in - so each of these aims that question, or configures it, somewhere the \
+                 user never pointed it: {carried:?}",
+            );
+            let lost = user_intent_lost(&environment, None);
+            assert!(
+                lost.is_empty(),
+                "the {child} lost a git variable the user states on purpose. Without \
+                 GIT_SSH_COMMAND a user who holds a non-default key cannot authenticate, and \
+                 without GIT_CONFIG_GLOBAL git reads a configuration the user replaced: {lost:?}",
+            );
+        }
 
         println!("{CHILD_RAN}");
     }
@@ -1313,8 +1334,8 @@ pub(crate) mod stub_shell {
     const CHILD_DEADLINE: Duration = Duration::from_secs(30);
 
     /// A hostile environment: every variable that aims git, or configures it,
-    /// or stops it from finding a repository at all, and the one that lets it
-    /// ask a question at the terminal.
+    /// or stops it from finding a repository at all, and that no user states
+    /// on purpose. No child of `gsw` may carry one of these.
     ///
     /// A pre-commit hook exports several of these, so a `gsw` started from
     /// inside one holds them for real. The paths name nothing on this machine,
@@ -1326,10 +1347,13 @@ pub(crate) mod stub_shell {
     /// worktree, config and refs among them, so a leaked one gives `gh` another
     /// `remote.origin.url`. `GIT_CEILING_DIRECTORIES` stops the walk that finds
     /// a repository. `GIT_OBJECT_DIRECTORY` moves the objects.
-    /// `GIT_CONFIG_PARAMETERS` and `GIT_CONFIG_GLOBAL` set any key at all.
-    /// `GIT_TERMINAL_PROMPT` is the one a run sets again after the sweep, so a
-    /// value of `1` here is what proves the run's own value wins.
-    pub(crate) const HOSTILE_GIT_ENVIRONMENT: [(&str, &str); 9] = [
+    /// `GIT_CONFIG_PARAMETERS` sets any key at all.
+    ///
+    /// The child also holds each name of
+    /// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`], with the value
+    /// [`user_intent_value`] gives it. Those names come from the constant and
+    /// not from this table, so a name gitscratch adds is tested here too.
+    pub(crate) const HOSTILE_GIT_ENVIRONMENT: [(&str, &str); 7] = [
         ("GIT_DIR", "/gsw-decoy/.git"),
         ("GIT_WORK_TREE", "/gsw-decoy"),
         ("GIT_INDEX_FILE", "/gsw-decoy/.git/index"),
@@ -1340,9 +1364,53 @@ pub(crate) mod stub_shell {
             "GIT_CONFIG_PARAMETERS",
             "'remote.origin.url=https://example.invalid/decoy.git'",
         ),
-        ("GIT_CONFIG_GLOBAL", "/gsw-decoy/gitconfig"),
-        ("GIT_TERMINAL_PROMPT", "1"),
     ];
+
+    /// The value the hostile environment gives `name`, a name of
+    /// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`].
+    ///
+    /// Each value holds its own name, so a child that kept the name with
+    /// another value fails as surely as a child that lost it. The value is not
+    /// `0`, so a run that sets `GIT_TERMINAL_PROMPT=0` after the sweep shows
+    /// that its own value wins. The path names nothing on this machine, and no
+    /// git in the child connects to a host or asks a question, so no git reads
+    /// the value as a program or as a boolean.
+    pub(crate) fn user_intent_value(name: &str) -> String {
+        format!("/gsw-user-intent/{name}")
+    }
+
+    /// The `NAME=value` lines of `environment` that carry a `GIT_` variable no
+    /// user states on purpose.
+    ///
+    /// The rule is the [`GIT_PREFIX`] with the names of
+    /// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`] taken out, which is the rule
+    /// the children hold.
+    pub(crate) fn shed_git_lines(environment: &str) -> Vec<&str> {
+        environment
+            .lines()
+            .filter(|line| {
+                line.split_once('=').is_some_and(|(key, _)| {
+                    key.starts_with(GIT_PREFIX)
+                        && !gitscratch::USER_INTENT_GIT_ENVIRONMENT.contains(&key)
+                })
+            })
+            .collect()
+    }
+
+    /// The names of [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`] that
+    /// `environment` does not hold with the value [`user_intent_value`] gives
+    /// them, `except` left out.
+    pub(crate) fn user_intent_lost(environment: &str, except: Option<&str>) -> Vec<&'static str> {
+        gitscratch::USER_INTENT_GIT_ENVIRONMENT
+            .iter()
+            .copied()
+            .filter(|name| Some(*name) != except)
+            .filter(|name| {
+                let kept = format!("{name}={}", user_intent_value(name));
+                !environment.lines().any(|line| line == kept)
+            })
+            .collect()
+    }
 
     /// Start this test binary again, with `test` named and the hostile
     /// environment on it, and fail where that child fails.
@@ -1388,6 +1456,9 @@ pub(crate) mod stub_shell {
             ));
         for (name, value) in HOSTILE_GIT_ENVIRONMENT {
             command.env(name, value);
+        }
+        for name in gitscratch::USER_INTENT_GIT_ENVIRONMENT {
+            command.env(name, user_intent_value(name));
         }
         let mut child = command.spawn().expect("start this test binary again");
 

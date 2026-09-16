@@ -1149,9 +1149,9 @@ mod run_tests {
     use super::*;
     use crate::repo::DETACHED_HEAD;
     use crate::shell::stub_shell::{
-        a_child_of_this_test_passes, kill_now, test_name, test_process_can_open_the_terminal,
-        StubShell, CHILD_RAN, GAVE_UP_WITHIN, GIT_PREFIX, HOSTILE_GIT_ENVIRONMENT, HOSTILE_MARKER,
-        TTY_REFUSED,
+        a_child_of_this_test_passes, kill_now, shed_git_lines, test_name,
+        test_process_can_open_the_terminal, user_intent_lost, user_intent_value, StubShell,
+        CHILD_RAN, GAVE_UP_WITHIN, HOSTILE_GIT_ENVIRONMENT, HOSTILE_MARKER, TTY_REFUSED,
     };
     use crate::testrepo::{git, init_repo};
     use std::sync::mpsc::{channel, Receiver};
@@ -1658,7 +1658,7 @@ mod run_tests {
     }
 
     #[test]
-    fn the_run_child_carries_no_git_variable_out_of_a_hostile_environment() {
+    fn the_run_child_sheds_the_git_variables_of_gsw_and_keeps_those_of_the_user() {
         // **This test starts this test binary again, and the hostile
         // environment goes on that child.** A `GIT_` variable is
         // process-global state, and several tests of this binary run real git.
@@ -1666,15 +1666,24 @@ mod run_tests {
         // The variables matter more here than anywhere else in gsw: `grp`
         // rebases the branch and then pushes it, so a leaked `GIT_DIR` or
         // `GIT_CONFIG_PARAMETERS` rewrites the history of a repository the user
-        // never named and sends it to a remote.
+        // never named and sends it to a remote. The push is also why the child
+        // keeps what the user states: without `GIT_SSH_COMMAND` a user who
+        // holds a non-default key cannot authenticate, and without
+        // `GIT_CONFIG_GLOBAL` the rebase writes every commit under the wrong
+        // identity.
+        //
+        // `GIT_TERMINAL_PROMPT` is a name the user states, and the run sets it
+        // to `0` after the sweep, so that value must win over the one the
+        // child holds.
         //
         // **The armed control comes first.** The child asserts that it really
-        // holds each hostile variable. An assertion that a variable is absent
-        // passes just as readily where there was nothing to remove.
+        // holds each hostile variable and each variable of the user. An
+        // assertion that a variable is absent passes just as readily where
+        // there was nothing to remove.
         if std::env::var_os(HOSTILE_MARKER).is_none() {
             a_child_of_this_test_passes(&test_name(
                 module_path!(),
-                "the_run_child_carries_no_git_variable_out_of_a_hostile_environment",
+                "the_run_child_sheds_the_git_variables_of_gsw_and_keeps_those_of_the_user",
             ));
             return;
         }
@@ -1686,6 +1695,19 @@ mod run_tests {
                  assertion below is measured against nothing",
             );
         }
+        for name in gitscratch::USER_INTENT_GIT_ENVIRONMENT {
+            assert_eq!(
+                std::env::var(name).ok(),
+                Some(user_intent_value(name)),
+                "the child must really hold {name}, or there is nothing here to keep",
+            );
+        }
+        assert_ne!(
+            std::env::var(TERMINAL_PROMPT_VAR).ok().as_deref(),
+            Some("0"),
+            "the child must hold a {TERMINAL_PROMPT_VAR} other than 0, or the run's own value \
+             wins over nothing",
+        );
 
         let stub = StubShell::answering(0);
         let workdir = work_tree();
@@ -1697,19 +1719,32 @@ mod run_tests {
             !environment.is_empty(),
             "the child must record the environment it ran in",
         );
-        let carried: Vec<&str> = environment
-            .lines()
-            .filter(|line| {
-                line.split_once('=').is_some_and(|(key, _)| {
-                    key.starts_with(GIT_PREFIX) && key != TERMINAL_PROMPT_VAR
-                })
-            })
-            .collect();
+        let carried = shed_git_lines(&environment);
         assert!(
             carried.is_empty(),
             "a child of gsw carried a git variable out of the environment of gsw. Each of these \
              aims the rebase and the push that follows it, or configures them, somewhere the user \
              never pointed them: {carried:?}",
+        );
+        let lost = user_intent_lost(&environment, Some(TERMINAL_PROMPT_VAR));
+        assert!(
+            lost.is_empty(),
+            "the run child lost a git variable the user states on purpose, so the push that \
+             follows the rebase authenticates, or writes commits, in a way the user never chose: \
+             {lost:?}",
+        );
+        let prompts: Vec<&str> = environment
+            .lines()
+            .filter(|line| {
+                line.split_once('=')
+                    .is_some_and(|(key, _)| key == TERMINAL_PROMPT_VAR)
+            })
+            .collect();
+        assert_eq!(
+            prompts,
+            [format!("{TERMINAL_PROMPT_VAR}=0")],
+            "the run sets {TERMINAL_PROMPT_VAR}=0 after the sweep, so that value must win over \
+             the one the child holds",
         );
 
         println!("{CHILD_RAN}");
