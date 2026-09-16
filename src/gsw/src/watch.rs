@@ -991,6 +991,71 @@ impl IssueRun {
     }
 }
 
+/// The command behind each of the two keys that bring the branch up to date
+/// with its base.
+///
+/// One value for the pair, beside [`IssueRun`], because the pair is what the
+/// key table reads: [`BaseUpdateCommands::keys`] answers for all three of those
+/// keys at once, and the `G` half of its answer comes from [`IssueRun::key`].
+///
+/// It holds no flag for a run in flight, and [`IssueRun`] holds one. A run of
+/// `R` or `M` takes the row for the whole of its life, so the loop is in
+/// [`InputMode::Pushing`] until it ends and the key table refuses a second
+/// press there. A run of `G` opens a browser and leaves the row alone, so
+/// nothing but that flag stops a second press of it.
+struct BaseUpdateCommands {
+    /// The command `R` runs. `None` until the probe of that key answers, and
+    /// forever where it found none or where the key is off.
+    rebase: Option<crate::shell::ShellCommand>,
+    /// The command `M` runs, on the same terms.
+    merge: Option<crate::shell::ShellCommand>,
+}
+
+impl BaseUpdateCommands {
+    /// Neither probe has answered, so neither key acts.
+    const fn new() -> Self {
+        Self {
+            rebase: None,
+            merge: None,
+        }
+    }
+
+    /// Keep the command the probe of `update` found.
+    fn found(&mut self, update: crate::update::BaseUpdate, command: crate::shell::ShellCommand) {
+        match update {
+            crate::update::BaseUpdate::Rebase => self.rebase = Some(command),
+            crate::update::BaseUpdate::Merge => self.merge = Some(command),
+        }
+    }
+
+    /// The command of `update`, or `None` where its key has none.
+    fn command(&self, update: crate::update::BaseUpdate) -> Option<&crate::shell::ShellCommand> {
+        match update {
+            crate::update::BaseUpdate::Rebase => self.rebase.as_ref(),
+            crate::update::BaseUpdate::Merge => self.merge.as_ref(),
+        }
+    }
+
+    /// Whether the key of `update` has a command behind it.
+    fn binding(&self, update: crate::update::BaseUpdate) -> Binding {
+        if self.command(update).is_some() {
+            Binding::Bound
+        } else {
+            Binding::Unbound
+        }
+    }
+
+    /// Which of the three keys that run a command of the user have one, with
+    /// the answer for `G` from [`IssueRun::key`].
+    fn keys(&self, issue: Binding) -> CommandKeys {
+        CommandKeys {
+            issue,
+            rebase: self.binding(crate::update::BaseUpdate::Rebase),
+            merge: self.binding(crate::update::BaseUpdate::Merge),
+        }
+    }
+}
+
 /// What one press of `m` does.
 ///
 /// An enum and not a `bool`, for the reason [`IssuePress`] gives: the loop does
@@ -1824,12 +1889,14 @@ struct LoopState {
     ui: PushUi,
     /// The state of the `G` key.
     issue: IssueRun,
+    /// The commands behind the `R` and `M` keys.
+    base_updates: BaseUpdateCommands,
     /// The state of the `m` key.
     conflicts: ConflictsRun,
     /// The worktree where the user started gsw.
     home: WorktreePath,
-    /// The worktree that the frame shows. The walk, `p`, `G`, and `m` act on
-    /// it. It starts at [`LoopState::home`].
+    /// The worktree that the frame shows. The walk, `p`, `R`, `M`, `G`, and
+    /// `m` act on it. It starts at [`LoopState::home`].
     current: WorktreePath,
     /// How many switches the loop has made. See [`Generation`].
     generation: Generation,
@@ -2172,13 +2239,7 @@ where
         Event::Resize => pending.resize = true,
         Event::ForceRefresh => pending.force = true,
         Event::Key(key) => {
-            // Nothing probes for a rebase or a merge command yet, so neither
-            // key has one behind it.
-            let keys = CommandKeys {
-                issue: state.issue.key(),
-                rebase: Binding::Unbound,
-                merge: Binding::Unbound,
-            };
+            let keys = state.base_updates.keys(state.issue.key());
             if let Some(action) = classify_input(key, state.ui.mode(), keys) {
                 // Every key but `G` takes the arming away. The message that
                 // asks for the second press is the armed state, and this key
@@ -2194,8 +2255,25 @@ where
                 .ui
                 .request(&state.cache.snapshot, state.cache.dims, clock());
         }
-        Event::BaseUpdateRequested(_) => {}
-        Event::BaseUpdateCommandFound(_, _) => {}
+        // The question describes the command of the act, so the press reads
+        // that command here and the row takes it. The key table makes no
+        // request for a key with no command behind it, so the silence below is
+        // for a press that raced the answer of its own probe — and it is the
+        // silence of an unbound key, which is what the key was at the press.
+        Event::BaseUpdateRequested(update) => {
+            if let Some(command) = state.base_updates.command(update) {
+                state.ui.request_base_update(
+                    &state.cache.snapshot,
+                    update,
+                    command,
+                    state.cache.dims,
+                    clock(),
+                );
+            }
+        }
+        Event::BaseUpdateCommandFound(update, command) => {
+            state.base_updates.found(update, command);
+        }
         // `confirm` yields the command only once, so a second `y` that raced
         // the mode change starts nothing. It says which act was confirmed, and
         // that is the only thing that decides which runner starts: the row
@@ -2405,9 +2483,10 @@ where
 /// displayed (see [`Event::Key`] for why the reader thread must not).
 ///
 /// The loop watches one worktree at a time, the current worktree, and it starts
-/// on `start.home`. The walk, `p`, `G`, and `m` act on the current worktree. The
-/// arrow keys change it through [`LoopState::switch_to`], inside [`absorb`], so
-/// the next key of the same burst already acts on the new worktree.
+/// on `start.home`. The walk, `p`, `R`, `M`, `G`, and `m` act on the current
+/// worktree. The arrow keys change it through [`LoopState::switch_to`], inside
+/// [`absorb`], so the next key of the same burst already acts on the new
+/// worktree.
 ///
 /// `hooks` bundles the side effects (collect, render, terminal-size query, paint,
 /// clock, tick cadence) so the loop is one function testable without a TTY or
@@ -2524,6 +2603,8 @@ where
         // The probe answers on the loop's own channel, so the key is unbound
         // until it does and the loop never waits for it.
         issue: IssueRun::new(session),
+        // One probe for each of the two keys, on the same terms.
+        base_updates: BaseUpdateCommands::new(),
         // The loop owns the state of `m`, and the thread that measures never
         // touches it. So the one-run rule needs no lock.
         conflicts: ConflictsRun::new(),
@@ -7990,6 +8071,18 @@ mod push_loop_tests {
         in_world(World::alone().behind(BEHIND))
     }
 
+    /// A pane wide enough for the whole question of a base update, hint and
+    /// all.
+    ///
+    /// The question names the act, the branch, the base, the count, and the
+    /// command of the user, which is longer than the 80 columns of
+    /// [`TEST_DIMS`] — and a row the pane elided says nothing about the words
+    /// gsw wrote.
+    const WIDE_PANE: Dimensions = Dimensions {
+        width: 120,
+        height: TEST_DIMS.height,
+    };
+
     #[test]
     fn r_then_y_starts_the_run_the_question_described_and_r_then_n_starts_none() {
         // The whole path of the key, from the answer of its probe to the
@@ -8093,7 +8186,13 @@ mod push_loop_tests {
             ]
         };
 
-        let (asked, _) = drive(events(KeyCode::Char('R')), behind_alone(), move || base);
+        let wide = || Setup {
+            dims: WIDE_PANE,
+            measured: WIDE_PANE,
+            ..behind_alone()
+        };
+
+        let (asked, _) = drive(events(KeyCode::Char('R')), wide(), move || base);
         assert_eq!(
             strip_ansi(&asked),
             format!(
@@ -8103,7 +8202,7 @@ mod push_loop_tests {
             "the bound key must put its question under the frame",
         );
 
-        let (silent, seen) = drive(events(KeyCode::Char('M')), behind_alone(), move || base);
+        let (silent, seen) = drive(events(KeyCode::Char('M')), wide(), move || base);
         assert_eq!(
             strip_ansi(&silent),
             format!("FRAME {ALONE}"),
@@ -9017,6 +9116,7 @@ mod push_loop_tests {
             schedule: no_timed_refresh_for_push(),
             ui: PushUi::new(false),
             issue,
+            base_updates: BaseUpdateCommands::new(),
             conflicts: ConflictsRun::new(),
             home: worktree(BRAVO),
             current: worktree(BRAVO),
