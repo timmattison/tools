@@ -1799,7 +1799,7 @@ const WINDOW_INDENT: &str = "  ";
 ///
 /// The notice of a push alone. Every question carries its own now, because a
 /// rebase that runs for minutes must say on the row which act is running.
-pub(crate) const RUNNING_NOTICE: &str = "Pushing…";
+const RUNNING_NOTICE: &str = "Pushing…";
 
 /// How long a status message gsw wrote itself stays under the frame.
 ///
