@@ -38,6 +38,10 @@ const LOWEST_DEVICE_RATE_HZ: f64 = 8_000.0;
 /// The highest nominal rate of a real output device, in hertz.
 const HIGHEST_DEVICE_RATE_HZ: f64 = 384_000.0;
 
+/// A stream rate, in hertz, that the output unit refuses. It refuses a
+/// stream format from about 10 MHz up, with `kAudioUnitErr_FormatNotSupported`.
+const REFUSED_RATE_HZ: f64 = 1.0e12;
+
 /// A renderer that writes silence and counts its calls.
 struct CountingSilence {
     /// The number of calls. The test holds a clone.
@@ -185,5 +189,45 @@ fn a_drop_without_a_stop_stops_the_unit_and_frees_the_renderer() {
         calls.load(Ordering::Relaxed),
         at_drop,
         "the output unit called the renderer after the drop"
+    );
+}
+
+#[test]
+fn a_start_that_fails_names_the_call_and_frees_the_renderer() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let rate = SampleRate::new(REFUSED_RATE_HZ).expect("1 THz is a valid sample rate");
+
+    let started = OutputUnit::start(
+        rate,
+        CountingSilence {
+            calls: Arc::clone(&calls),
+        },
+    );
+    let error = match started {
+        Ok(unit) => {
+            let stopped = unit.stop();
+            panic!(
+                "the output unit started at {REFUSED_RATE_HZ} Hz (stop: {stopped:?}), and this \
+                 test needs a start that fails"
+            );
+        }
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .to_string()
+            .starts_with("AudioUnitSetProperty(kAudioUnitProperty_StreamFormat) failed"),
+        "the error does not name the call that failed: {error}"
+    );
+    assert_eq!(
+        Arc::strong_count(&calls),
+        1,
+        "the failed start did not free the renderer"
+    );
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        0,
+        "a unit that did not start called the renderer"
     );
 }
