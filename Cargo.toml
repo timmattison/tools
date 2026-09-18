@@ -190,6 +190,7 @@ clipboardmon = { path = "src/clipboardmon" }
 filewalker = { path = "src/filewalker" }
 gitscratch = { path = "src/gitscratch" }
 httpfile = { path = "src/httpfile" }
+occ = { path = "src/occ" }
 portplz-core = { path = "src/portplz-core" }
 proctree = { path = "src/proctree" }
 repowalker = { path = "src/repowalker" }

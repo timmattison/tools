@@ -18,6 +18,7 @@ path = "src/main.rs"
 buildinfo.workspace = true
 chrono.workspace = true
 clap.workspace = true
+occ.workspace = true
 thiserror.workspace = true
 
 [lints]
