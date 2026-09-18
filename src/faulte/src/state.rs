@@ -37,8 +37,14 @@ impl SessionState {
     /// Gives the state of the session of `record` at the time `now`.
     #[must_use]
     pub fn from_record(record: &SessionRecord, now: SystemTime) -> Self {
-        let _ = (record, now);
-        Self::Unknown
+        let _ = now;
+        match &record.status {
+            Some(SessionStatus::Idle) => Self::Idle { for_: None },
+            Some(SessionStatus::Busy) => Self::Busy,
+            Some(SessionStatus::Waiting) => Self::Waiting,
+            Some(SessionStatus::Other(text)) => Self::Other(text.clone()),
+            None => Self::Unknown,
+        }
     }
 }
 
