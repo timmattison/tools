@@ -470,7 +470,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     to fork it where you stand instead; and it refuses to resume a session that's already open in
     another running process (pass `--force` to override) so two processes can't corrupt the same
     session log. With `--here` it brings the session into the *current* directory instead, resuming
-    it as a forked (new-id) session so you can carry its context into a different working tree. If
+    it as a forked (new-id) session so you can carry its context into a different working tree.
+    After you gave the fork new input, the shell function prints
+    `Resume this fork with: crap <new-id>` when Claude exits. Thus you know the id of the fork and
+    not only the id of the original. If
     the id belongs to another account on the machine, `crap` finds it automatically — searching your
     own sessions first, then other users' as a self-first fallback — and resumes a private fork of
     it (or target a specific account with `--user <name>`, which fails up front and lists the real
@@ -3257,7 +3260,7 @@ Sometimes you don't want to go back to where a session started — you want to b
 crap --here 57570685-2d64-4431-8ab6-c021a12fa1af   # resume it right here
 ```
 
-Claude resolves `--resume <id>` only against the project folder that matches your current directory, so a plain `claude --resume <id>` from anywhere else fails with *"No conversation found with session ID"*. `crap --here` gets around that: it symlinks the session's transcript into the current directory's project folder so Claude can find it, then resumes it with `--fork-session`. Forking means Claude continues with the **full prior context under a brand-new session id**, so the original transcript is never modified.
+Claude resolves `--resume <id>` only against the project folder that matches your current directory, so a plain `claude --resume <id>` from anywhere else fails with *"No conversation found with session ID"*. `crap --here` gets around that: it symlinks the session's transcript into the current directory's project folder so Claude can find it, then resumes it with `--fork-session --session-id <new-id>`. Forking means Claude continues with the **full prior context under a brand-new session id**, so the original transcript is never modified.
 
 The symlink is only needed while Claude reads the transcript at startup. A background watcher removes it the moment the forked session file appears — typically within a second — so it doesn't linger for the whole session, and a final `rm` after the session ends serves as a safety net.
 
@@ -3268,15 +3271,31 @@ A couple of things to know:
 
 `--here` also accepts a cross-user source. Combine it with [`--user`](#resume-another-users-session---user) — `crap --here <id> --user alice` — to fork another account's session right here in your current directory. Because a transcript in someone else's home can never be found by a `claude --resume` you run yourself, `crap` **copies** it into your own tree rather than symlinking (nothing is ever linked into another user's home), then forks and cleans the copy up the same way it removes the symlink. A same-user `--here` still symlinks exactly as before. This is the escape hatch when the session's original directory is gone or you can't enter it: `--here` ignores that directory entirely.
 
-#### Choosing the forked session's id
+#### The forked session's id
 
-By default the fork gets a random new id, which you only learn after Claude starts. Pass a second argument to choose it yourself:
+The fork gets a new id, and `crap` chooses that id before Claude starts. When Claude exits, the shell function tells you the id:
+
+```text
+Resume this session with:
+claude --resume 9f8e7d6c-5b4a-3210-fedc-ba9876543210
+Resume this fork with: crap 9f8e7d6c-5b4a-3210-fedc-ba9876543210
+```
+
+The first two lines come from Claude, and the last line comes from `crap`. `crap <new-id>` resumes the fork from any directory. Use it, not the id you gave to `crap --here`: that id is the original session, which does not contain the work you did in the fork.
+
+`crap` prints its line only when Claude saved the fork. Claude writes the fork transcript only after your first new input, so if you exit the fork at once, there is no fork to resume, and neither Claude nor `crap` prints a resume line. The line from `crap` is also the one to trust when the session has a custom title (from `/rename`). Claude then prints `claude --resume "<title>"`, but the fork inherits the title, so that command opens a picker that lists both the fork and the original.
+
+Without a second argument, `crap` generates a UUID v4 for the fork. Pass a second argument to choose the id yourself:
 
 ```bash
 crap --here 57570685-2d64-4431-8ab6-c021a12fa1af 9f8e7d6c-5b4a-3210-fedc-ba9876543210
 ```
 
-The new id must be a valid UUID, and `crap` refuses it if it already names a session (so the fork can never overwrite an unrelated transcript). This is handy when a script needs to know the resumed session's id in advance — generate a UUID, hand it to `crap --here`, and you already know where the new transcript will live. Omit it to keep the random-id behavior.
+The new id must be a valid UUID, and `crap` refuses it if it already names a session, so the fork can never overwrite an unrelated transcript. A generated id gets the same checks. Choose the id yourself when a script must know the new id before Claude starts.
+
+The cross-user resume (below) forks too, so it gets a generated id and the same line.
+
+After you upgrade `crap`, run `crap --shell-setup` again. The resume line comes from the shell function, and an older function does not print it.
 
 ### Resume another user's session: automatic, or `--user`
 
@@ -3453,20 +3472,47 @@ If you prefer to add it manually, add this to your `~/.bashrc` or `~/.zshrc`:
 
 ```bash
 function crap() {
-    # --status only queries; it never changes the parent shell. Run it straight
-    # through so its output (a token, or a multi-line listing) reaches the
-    # terminal instead of being parsed as a "<session-id>\n<dir>" resume target.
+    # These flags make the binary print to stdout and exit 0 without mutating
+    # the parent shell: --status queries, --help/-h/--version/-V emit
+    # informational text, and --shell-setup writes the rc file (not the live
+    # shell) and prints activation instructions. Run them straight through so
+    # their output reaches the terminal instead of being parsed as a
+    # "<session-id>\n<dir>" resume target (which would otherwise `cd` into that
+    # text and mangle it). --shell-setup matters on upgrades, when this very
+    # function is already loaded and would otherwise swallow its instructions.
     case " $* " in
-        *" --status "*) command crap "$@"; return $? ;;
+        *" --status "*|*" --help "*|*" -h "*|*" --version "*|*" -V "*|*" --shell-setup "*)
+            command crap "$@"; return $? ;;
     esac
     local __crap_out
     __crap_out=$(command crap "$@") || return $?
-    if [ "${__crap_out%%$'\n'*}" = "__CRAP_HERE__" ]; then
-        local __crap_rest __crap_session __crap_link __crap_folder __crap_n0 __crap_watcher
+    local __crap_mode
+    __crap_mode=${__crap_out%%$'\n'*}
+    if [ "$__crap_mode" = "__CRAP_HERE__" ] || [ "$__crap_mode" = "__CRAP_FORK_AT__" ]; then
+        # A fork. Both wire shapes start "<mode>\n<session>\n<new-id>\n<link>".
+        # A cross-user resume (__CRAP_FORK_AT__) adds a trailing <dir>: the
+        # session's ORIGINAL directory, where the fork must run. The field that
+        # can hold any text is always last (the link for --here, the dir for a
+        # cross-user fork), so a path that contains newlines survives intact.
+        local __crap_rest __crap_session __crap_newid __crap_link __crap_dir __crap_folder __crap_n0 __crap_watcher
         __crap_rest=${__crap_out#*$'\n'}
         __crap_session=${__crap_rest%%$'\n'*}
-        __crap_link=${__crap_rest#*$'\n'}
+        __crap_rest=${__crap_rest#*$'\n'}
+        __crap_newid=${__crap_rest%%$'\n'*}
+        __crap_rest=${__crap_rest#*$'\n'}
+        if [ "$__crap_mode" = "__CRAP_FORK_AT__" ]; then
+            __crap_link=${__crap_rest%%$'\n'*}
+            __crap_dir=${__crap_rest#*$'\n'}
+            cd -- "$__crap_dir" || return 1
+        else
+            __crap_link=$__crap_rest
+        fi
         if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
+            # Claude only needs the import (a symlink, or a copy for a
+            # cross-user source) while it reads the transcript at startup;
+            # once it writes the forked session file, the import is
+            # vestigial. Watch the folder and drop it the moment a new .jsonl
+            # appears, rather than letting it linger for the whole session.
             __crap_folder=$(dirname -- "$__crap_link")
             __crap_n0=$(find "$__crap_folder" -maxdepth 1 -name '*.jsonl' 2>/dev/null | wc -l | tr -dc '0-9')
             (
@@ -3483,14 +3529,27 @@ function crap() {
             __crap_watcher=$!
             disown 2>/dev/null
         fi
+        # Build the resume argv: always --fork-session, so the original
+        # transcript is left untouched, and always --session-id with the id
+        # that the binary supplied, so the fork id is known after Claude exits.
+        # The earlier "command crap" call has already consumed the function's
+        # own arguments, so reusing the positional parameters here is safe.
+        set -- --resume "$__crap_session" --fork-session --session-id "$__crap_newid"
         if command -v clauded >/dev/null 2>&1; then
-            eval 'clauded --resume "$__crap_session" --fork-session'
+            eval 'clauded "$@"'
         else
-            claude --resume "$__crap_session" --fork-session
+            claude "$@"
         fi
         if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
             kill "$__crap_watcher" 2>/dev/null
             rm -f -- "$__crap_link"
+        fi
+        # Claude writes the fork transcript only after the first new input, so
+        # a fork that the user leaves at once is not saved. --status finds the
+        # fork exactly when "crap <new-id>" can resume it, so tell the id only
+        # then.
+        if command crap --status "$__crap_newid" >/dev/null 2>&1; then
+            printf 'Resume this fork with: crap %s\n' "$__crap_newid"
         fi
         return
     fi
@@ -3506,7 +3565,23 @@ function crap() {
 }
 ```
 
-The binary speaks one of three output shapes. By default it prints the session id on the first line and the original directory on the rest; the function takes the first line as the session id and everything after it as the directory (so a path containing a newline stays intact), `cd`s there, and resumes. For `--here` it leads with a `__CRAP_HERE__` marker — having already imported the session into the current directory's project folder (a symlink for a same-user source, or a copy for a cross-user source) — so the function stays put and resumes with `--fork-session`. A backgrounded watcher counts the `.jsonl` files in that folder and removes that import as soon as a new (forked) one appears, so it doesn't linger for the whole session; a `kill` plus `rm` after Claude exits stops the watcher and serves as a safety net. If the link field is `__CRAP_NO_LINK__`, no symlink was needed and the watcher is skipped. For a cross-user resume — whether `--user` asked for one or the automatic fallback found it — it leads with a `__CRAP_FORK_AT__` marker instead — the binary has already *copied* the foreign transcript into your own tree, and the wire layout appends the session's original directory as a trailing field, so the function `cd`s into that original directory and then runs the same `--fork-session` plus background-watcher cleanup sequence as `--here`. Forwarding `"$@"` lets flags like `--force` and `--here` reach the binary. The `eval` is intentional: shell aliases aren't expanded inside function bodies, so it ensures a `clauded` alias is honored at call time. The `command crap` calls reach the binary past the function of the same name.
+If you add the function manually, paste it again after each upgrade of `crap`. An older copy does not read the output of a newer binary correctly.
+
+The binary prints one of three output shapes on stdout:
+
+- **Default:** `<session-id>\n<dir>`. The function uses the first line as the session id and all of the remaining text as the directory. Thus a path that contains a newline stays whole. The function goes into that directory with `cd` and resumes the session.
+- **`--here`:** `__CRAP_HERE__\n<session-id>\n<new-id>\n<link-or-__CRAP_NO_LINK__>`. The binary already put the session into the project folder of the current directory. This import is a symlink for a same-user source, or a copy for a cross-user source. The function stays in the current directory.
+- **Cross-user:** `__CRAP_FORK_AT__\n<session-id>\n<new-id>\n<link-or-__CRAP_NO_LINK__>\n<dir>`. The binary already copied the transcript of the other user into your own tree. A cross-user resume from `--user` or from the automatic fallback gives this shape. The function goes into `<dir>` with `cd`. `<dir>` is the original directory of the session.
+
+The two fork shapes use one path through the function. The only difference is the `cd` for the cross-user shape. The field that can hold any text is always the last field, so a newline in a path does not break the fields.
+
+If the link field is not `__CRAP_NO_LINK__`, a watcher in the background counts the `.jsonl` files in the project folder. When a new file (the fork) appears, the watcher removes the import. Thus the import does not stay for the full session. After Claude exits, the function stops the watcher with `kill`. Then it removes the import with `rm`, in case the watcher did not. If the link field is `__CRAP_NO_LINK__`, the binary made no import, and the function starts no watcher.
+
+The function always resumes a fork with `--resume <session-id> --fork-session --session-id <new-id>`. `--fork-session` keeps the original transcript unchanged. `--session-id` gives the fork the id that the binary chose, so the function knows the fork id after Claude exits.
+
+After the cleanup, the function prints `Resume this fork with: crap <new-id>`. It prints this line only when `crap --status <new-id>` finds the fork. Claude saves the fork only after your first new input. Thus, if you exit a fork at once, the function prints no line.
+
+The function sends `--status`, `--help`, `-h`, `--version`, `-V`, and `--shell-setup` directly to the binary. These flags do not change the parent shell, and their output must go to the terminal. The function forwards `"$@"`, so flags such as `--force` and `--here` get to the binary. The `eval` is intentional. A shell does not expand aliases in a function body, so the `eval` makes sure that the function uses a `clauded` alias. The `command crap` calls get to the binary, not to the function of the same name.
 
 ### Exit Codes
 
