@@ -14,6 +14,8 @@
 use std::str::FromStr;
 use std::time::Duration;
 
+use chrono::NaiveDateTime;
+
 use crate::duration::Span;
 use crate::pid::Pid;
 
@@ -75,6 +77,16 @@ pub struct TopSample {
     /// The time between the two samples, from the clock lines that `top`
     /// printed. `None` when a clock line is absent or does not parse, or when
     /// the time is not more than zero.
+    ///
+    /// The delay of `top` is a minimum. On a loaded machine, the samples of a
+    /// 2 s delay were 4 s apart. So the window of the counts is
+    /// `max(interval, elapsed)`, and the interval alone when this is `None`.
+    ///
+    /// The clock lines are local time with one-second steps, and they name no
+    /// zone. A change of the clock between the samples, for example to
+    /// daylight saving time, changes this value. A backward change gives
+    /// `None`. A forward change gives a value that is too long, so a caller
+    /// also limits the window to the wall time that the run of `top` took.
     pub elapsed: Option<Duration>,
 }
 
@@ -169,8 +181,40 @@ pub fn parse(output: &str) -> Result<TopSample, TopParseError> {
     }
     Ok(TopSample {
         rows,
-        elapsed: None,
+        elapsed: elapsed(&lines),
     })
+}
+
+/// The first token of the first line of the header block of each sample.
+const PROCESSES: &str = "Processes:";
+
+/// The format of the clock line under each `Processes:` line. It is local
+/// time, and it names no zone.
+const CLOCK_FORMAT: &str = "%Y/%m/%d %H:%M:%S";
+
+/// Gives the time from the first clock line to the second one.
+///
+/// The clock line is the line after each `Processes:` line. The result is
+/// `None` unless there are exactly two such lines, both parse, and the
+/// difference is more than zero. The clock lines name no zone, so this
+/// subtracts them as dates and times without a zone.
+fn elapsed(lines: &[&str]) -> Option<Duration> {
+    let clocks: Vec<Option<NaiveDateTime>> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.split_ascii_whitespace().next() == Some(PROCESSES))
+        .map(|(index, _)| {
+            let clock = lines.get(index + 1)?;
+            NaiveDateTime::parse_from_str(clock.trim_ascii(), CLOCK_FORMAT).ok()
+        })
+        .collect();
+    let [Some(first), Some(second)] = clocks[..] else {
+        return None;
+    };
+    (second - first)
+        .to_std()
+        .ok()
+        .filter(|elapsed| !elapsed.is_zero())
 }
 
 /// The first token of the header row of each sample.

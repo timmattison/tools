@@ -2332,6 +2332,7 @@ name = "faulte"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "chrono",
  "clap",
  "thiserror 2.0.20",
 ]
