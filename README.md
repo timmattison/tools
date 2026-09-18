@@ -471,8 +471,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     another running process (pass `--force` to override) so two processes can't corrupt the same
     session log. With `--here` it brings the session into the *current* directory instead, resuming
     it as a forked (new-id) session so you can carry its context into a different working tree.
-    When Claude exits, it prints `Resume this fork with: crap <new-id>`, so you know the id of the
-    fork and not only the id of the original. If
+    After you gave the fork new input, the shell function prints
+    `Resume this fork with: crap <new-id>` when Claude exits. Thus you know the id of the fork and
+    not only the id of the original. If
     the id belongs to another account on the machine, `crap` finds it automatically — searching your
     own sessions first, then other users' as a self-first fallback — and resumes a private fork of
     it (or target a specific account with `--user <name>`, which fails up front and lists the real
