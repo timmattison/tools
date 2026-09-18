@@ -11,7 +11,7 @@
 use crate::process::ProcessFact;
 use crate::SessionId;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// How far the recorded session start can lie from the process start.
 ///
@@ -45,6 +45,16 @@ pub enum SessionStatus {
     ///
     /// The value `shell` is one such value on a live machine.
     Other(String),
+}
+
+impl SessionStatus {
+    /// Reads the text of a `status` field.
+    fn from_recorded(text: &str) -> Self {
+        match text {
+            "idle" => Self::Idle,
+            other => Self::Other(other.to_string()),
+        }
+    }
 }
 
 /// What one registry file records about a live session.
@@ -138,11 +148,23 @@ fn record_in(contents: &str, pid: u32, start_time_epoch_secs: u64) -> Option<Ses
             .and_then(serde_json::Value::as_str)?,
     )?;
 
+    // The facts below describe the session. A file without one of them still
+    // names its session. Thus each fact that cannot be read gives `None`, and
+    // the record stays.
     Some(SessionRecord {
         session,
-        status: None,
-        status_changed_at: None,
-        directory: None,
+        status: record
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .map(SessionStatus::from_recorded),
+        status_changed_at: record
+            .get("statusUpdatedAt")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|millis| UNIX_EPOCH.checked_add(Duration::from_millis(millis))),
+        directory: record
+            .get("cwd")
+            .and_then(serde_json::Value::as_str)
+            .map(PathBuf::from),
     })
 }
 
