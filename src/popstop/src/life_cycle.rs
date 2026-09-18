@@ -139,9 +139,11 @@ pub fn run_foreground(settings: &Settings) -> Result<(), Failure> {
         )?;
         stdout.flush()
     })
+    .map(|_stopped| ())
 }
 
-/// Runs a copy of popstop in `mode`, until a signal stops it.
+/// Runs a copy of popstop in `mode`, until a signal stops it. Gives the
+/// reason of the stop.
 ///
 /// `report_ready` tells the user, or the parent process, that the copy plays.
 ///
@@ -154,7 +156,7 @@ pub fn run(
     mode: Mode,
     settings: &Settings,
     report_ready: impl FnOnce(&Ready<'_>) -> io::Result<()>,
-) -> Result<(), Failure> {
+) -> Result<StopReason, Failure> {
     if let Err(problem) = set_background_qos() {
         // A class that the scheduler refused costs a little power, and
         // nothing else. The run continues.
@@ -179,12 +181,14 @@ pub fn run(
         .map_err(|problem| {
             Failure::error(&format!("the status lines cannot be written: {problem}"))
         })
-        .and(signals.wait_for_stop(settings.exit_after).map(|_| ()));
+        .and_then(|()| signals.wait_for_stop(settings.exit_after));
 
     // The keepalive stops on every path, and the lock goes only after it.
     let stopped = keepalive.stop().map_err(|problem| Failure::error(&problem));
     drop(guard);
-    ran.and(stopped)
+    // A run that failed already reports its own problem. A stop that failed
+    // after a good run is the problem that the user reads.
+    ran.and_then(|reason| stopped.map(|()| reason))
 }
 
 /// Gives the record of this process, for the lock file.
