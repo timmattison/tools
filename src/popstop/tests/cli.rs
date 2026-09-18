@@ -312,6 +312,45 @@ fn a_stop_with_no_copy_says_that_nothing_runs() {
 }
 
 #[test]
+fn a_stop_ends_a_foreground_copy_and_frees_the_lock() {
+    let temp = tempfile::tempdir().expect("a temporary directory");
+    let dir = temp.path().join("state");
+    let mut copy = Copy::start_in_the_foreground(&dir);
+    device_of_the_ready_lines(&mut copy);
+
+    let (status, report, errors) = ask_in(&dir, &["--stop"]);
+
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a stop that ended the copy is a success: {status}. Its stderr:\n{errors}"
+    );
+    assert_eq!(
+        report,
+        format!("popstop: the copy stopped (pid {})\n", copy.pid()),
+        "story 12: the report comes after the copy is gone, and it names the copy"
+    );
+    assert_eq!(errors, "", "a stop that worked says nothing on stderr");
+
+    let (ended, stderr) = copy.finish();
+    assert_eq!(
+        ended.code(),
+        Some(0),
+        "the copy stops with success: {ended}. Its stderr:\n{stderr}"
+    );
+    assert_eq!(stderr, "", "a copy that stops says nothing on stderr");
+    assert_eq!(holder(&dir), None, "the copy released the lock");
+
+    let (status, report, errors) = ask_in(&dir, &["--status"]);
+    assert_eq!(
+        status.code(),
+        Some(4),
+        "no copy runs after the stop: {status}. Its stderr:\n{errors}"
+    );
+    assert_eq!(report, "popstop: no copy runs\n");
+}
+
+#[test]
 fn a_status_with_no_copy_ends_with_the_status_of_no_copy() {
     let temp = tempfile::tempdir().expect("a temporary directory");
     let dir = temp.path().join("state");
