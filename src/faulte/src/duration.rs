@@ -34,11 +34,57 @@ pub enum ParseSpanError {
     },
 }
 
+/// The seconds in one day.
+const SECONDS_PER_DAY: u64 = 86_400;
+
+/// The seconds in one hour.
+const SECONDS_PER_HOUR: u64 = 3_600;
+
+/// The seconds in one minute.
+const SECONDS_PER_MINUTE: u64 = 60;
+
+/// Each unit that the parser accepts, and its length in seconds, largest
+/// first.
+const UNITS: [(&str, u64); 4] = [
+    ("d", SECONDS_PER_DAY),
+    ("h", SECONDS_PER_HOUR),
+    ("m", SECONDS_PER_MINUTE),
+    ("s", 1),
+];
+
+/// Gives the length in seconds of `unit`. A text with no unit is a number of
+/// seconds.
+fn seconds_per(unit: &str) -> Option<u64> {
+    if unit.is_empty() {
+        return Some(1);
+    }
+    UNITS
+        .iter()
+        .find(|(name, _)| *name == unit)
+        .map(|(_, seconds)| *seconds)
+}
+
 impl FromStr for Span {
     type Err = ParseSpanError;
 
-    fn from_str(_text: &str) -> Result<Self, Self::Err> {
-        Ok(Self(NonZeroU64::MIN))
+    /// Parses a whole number, then an optional unit: `s`, `m`, `h`, or `d`.
+    ///
+    /// The number is the text up to the last ASCII digit, and the unit is the
+    /// rest. Thus a sign, a decimal point, or a letter inside the number makes
+    /// the number fail, and does not become part of a unit.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let invalid = || ParseSpanError::Invalid {
+            text: text.to_owned(),
+        };
+        let number = text.trim_end_matches(|character: char| !character.is_ascii_digit());
+        let unit = text.strip_prefix(number).unwrap_or_default();
+        if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(invalid());
+        }
+        let per_unit = seconds_per(unit).ok_or_else(invalid)?;
+        let count: u64 = number.parse().map_err(|_| invalid())?;
+        let seconds = count.checked_mul(per_unit).ok_or_else(invalid)?;
+        NonZeroU64::new(seconds).map(Self).ok_or_else(invalid)
     }
 }
 
