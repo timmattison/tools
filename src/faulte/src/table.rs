@@ -62,13 +62,15 @@ const START_FORMAT: &str = "%a %b %d %H:%M:%S %Y";
 /// The first letter of the state of a zombie, as `ps` prints it.
 const ZOMBIE: char = 'Z';
 
+/// The count of tokens before the command: the PID, the parent, the UID, the
+/// RSS, the state, and the five tokens of the start time.
+const FIELDS: usize = 10;
+
 /// Reads one row.
 fn parse_row(line: &str) -> Option<ProcessRow> {
-    let mut tokens = line.split_ascii_whitespace();
-    let mut next = || tokens.next();
-    let (pid, ppid, uid, rss, stat) = (next()?, next()?, next()?, next()?, next()?);
-    let start = [next()?, next()?, next()?, next()?, next()?].join(" ");
-    let command = tokens.collect::<Vec<&str>>().join(" ");
+    let ([pid, ppid, uid, rss, stat, weekday, month, day, time, year], command) =
+        split_fields::<FIELDS>(line)?;
+    let start = [weekday, month, day, time, year].join(" ");
     let started = NaiveDateTime::parse_from_str(&start, START_FORMAT)
         .ok()?
         .and_utc()
@@ -80,8 +82,33 @@ fn parse_row(line: &str) -> Option<ProcessRow> {
         rss_kib: unsigned(rss)?,
         zombie: stat.starts_with(ZOMBIE),
         started_at_epoch_secs: u64::try_from(started).ok()?,
-        command,
+        command: command.to_owned(),
     })
+}
+
+/// Splits the first `N` tokens off `line`, and gives them with the rest of the
+/// line.
+///
+/// A token is a run of characters that are not ASCII white space. The rest
+/// keeps the spaces inside it, and loses the white space before and after it.
+/// The function splits only where `split_once` finds a separator, so it never
+/// cuts a multi-byte character. `None` means that `line` holds fewer than `N`
+/// tokens.
+fn split_fields<const N: usize>(line: &str) -> Option<([&str; N], &str)> {
+    let mut fields = [""; N];
+    let mut rest = line;
+    for field in &mut fields {
+        let trimmed = rest.trim_ascii_start();
+        let (token, after) = trimmed
+            .split_once(|character: char| character.is_ascii_whitespace())
+            .unwrap_or((trimmed, ""));
+        if token.is_empty() {
+            return None;
+        }
+        *field = token;
+        rest = after;
+    }
+    Some((fields, rest.trim_ascii()))
 }
 
 /// Reads a number of ASCII digits from `token`.
