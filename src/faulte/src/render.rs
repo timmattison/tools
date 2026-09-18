@@ -246,6 +246,9 @@ impl FromIterator<(Uid, String)> for Accounts {
 /// What holds the two halves of a header line apart.
 const DASH: &str = "—";
 
+/// What holds two measurements of one header line apart.
+const DOT: &str = " · ";
+
 /// The singular of the word for one entry of the ranking.
 const PROCESS: &str = "process";
 
@@ -302,15 +305,26 @@ pub struct Measurement<'a> {
 pub fn header(measurement: &Measurement<'_>) -> Vec<String> {
     let ranking = measurement.ranking;
     let processes = ranking.rows.len();
-    vec![format!(
-        "{} {} over a {} window (interval {}) {DASH} {} faults, {}/s",
-        separate(&processes.to_string()),
-        plural(processes, PROCESS, PROCESSES),
-        seconds(ranking.window),
-        measurement.interval,
-        count(ranking.total_faults),
-        rate(ranking.faults_per_second(ranking.total_faults)),
-    )]
+    vec![
+        format!(
+            "{} {} over a {} window (interval {}) {DASH} {} faults, {}/s",
+            separate(&processes.to_string()),
+            plural(processes, PROCESS, PROCESSES),
+            seconds(ranking.window),
+            measurement.interval,
+            count(ranking.total_faults),
+            rate(ranking.faults_per_second(ranking.total_faults)),
+        ),
+        format!(
+            "swap: {} in, {} out in {}{DOT}compressor {}{DOT}swap in use {} of {}",
+            count(measurement.swap.swapins),
+            count(measurement.swap.swapouts),
+            seconds(measurement.swap_window),
+            bytes(measurement.compressor_bytes),
+            bytes(measurement.usage.used_bytes),
+            bytes(measurement.usage.total_bytes),
+        ),
+    ]
 }
 
 #[cfg(test)]
