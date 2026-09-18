@@ -603,4 +603,66 @@ mod tests {
             Some("swap: 0 in, 0 out in 5.2 s · compressor 0 B · swap in use 0 B of 0 B")
         );
     }
+
+    /// Gives `ranking`, with `claude` as its total of Claude Code.
+    fn with_claude(mut ranking: Ranking, claude: ClaudeTotal) -> Ranking {
+        ranking.claude = claude;
+        ranking
+    }
+
+    /// The third line gives the total of Claude Code: the sessions, their
+    /// share of all faults, and how many of them another account owns. The
+    /// issue demands this line, because on 2026-09-18 the answer was the sum
+    /// of 213 rows and no single row showed it.
+    ///
+    /// A count of another account that is zero leaves the parenthesis out. A
+    /// Mac with no Claude Code process says so.
+    #[test]
+    fn the_third_line_gives_the_total_that_no_single_row_shows() {
+        let base = ranking(
+            vec![row(10, 500_000), row(20, 300_000), row(30, 159_812)],
+            959_812,
+        );
+        let both = with_claude(
+            base.clone(),
+            ClaudeTotal {
+                processes: 213,
+                other_account: 100,
+                faults: 865_752,
+            },
+        );
+        let mine = with_claude(
+            base.clone(),
+            ClaudeTotal {
+                processes: 213,
+                other_account: 0,
+                faults: 865_752,
+            },
+        );
+        let one = with_claude(
+            base.clone(),
+            ClaudeTotal {
+                processes: 1,
+                other_account: 0,
+                faults: 3_839,
+            },
+        );
+
+        assert_eq!(
+            header(&measurement(&both)).get(2).map(String::as_str),
+            Some("Claude: 213 sessions made 90.2% of all faults (100 of another account)")
+        );
+        assert_eq!(
+            header(&measurement(&mine)).get(2).map(String::as_str),
+            Some("Claude: 213 sessions made 90.2% of all faults")
+        );
+        assert_eq!(
+            header(&measurement(&one)).get(2).map(String::as_str),
+            Some("Claude: 1 session made 0.4% of all faults")
+        );
+        assert_eq!(
+            header(&measurement(&base)).get(2).map(String::as_str),
+            Some("Claude: no session is running")
+        );
+    }
 }
