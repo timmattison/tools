@@ -30,6 +30,36 @@ fn one_line(text: &[u8]) -> String {
         .join(" ")
 }
 
+/// `--limit` belongs to the ranking, and `faulte kill` refuses it.
+///
+/// The issue gives `--limit` to the ranking and `--max` to `faulte kill`. A
+/// flag that a command takes and then ignores is worse than a flag that it
+/// refuses: a person who writes `faulte kill --limit 3` reads the plan of
+/// every candidate and believes that it holds three.
+#[test]
+fn kill_refuses_the_limit_of_the_ranking() {
+    let output = run(&["kill", "--limit", "3", "--older-than", "9999d"]);
+    let stderr = one_line(&output.stderr);
+
+    assert_eq!(
+        output.status.code(),
+        Some(USAGE_ERROR),
+        "faulte kill --limit is a usage error, it wrote {stderr:?}"
+    );
+    assert!(
+        stderr.contains("--limit"),
+        "the message names the flag that faulte kill does not take: {stderr:?}"
+    );
+
+    // The ranking takes it, before the name of a command as well.
+    assert!(
+        run(&["--limit", "3", "kill", "--older-than", "9999d"])
+            .status
+            .success(),
+        "the ranking flag stands before the name of the command"
+    );
+}
+
 /// `--version` gives the name, the package version, the git hash, and the
 /// state of the tree, in the format that every tool of this repository uses.
 #[test]
