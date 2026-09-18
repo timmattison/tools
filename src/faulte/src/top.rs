@@ -351,7 +351,10 @@ mod tests {
             .iter()
             .find(|count| count.pid == Pid::new(20_997))
             .expect("PID 20997 is in the second sample");
-        assert_eq!(busy.faults, 165, "not 24,034,993, its count since it started");
+        assert_eq!(
+            busy.faults, 165,
+            "not 24,034,993, its count since it started"
+        );
     }
 
     /// One sample, three samples, and no sample are each refused. The count
@@ -362,14 +365,25 @@ mod tests {
         let three = two_samples("10     9000000   \n", "10     3         \n")
             + &sample("12:00:04", HEADER_ROW, "10     5         \n");
         let header_block_only = "Processes: 3 total \n2026/09/18 12:00:00\n\n";
-        let cases = [(one.as_str(), 1), (three.as_str(), 3), (header_block_only, 0), ("", 0)];
+        let cases = [
+            (one.as_str(), 1),
+            (three.as_str(), 3),
+            (header_block_only, 0),
+            ("", 0),
+        ];
 
         for (text, found) in cases {
             let error = parse(text).expect_err("an output that is not two samples is refused");
 
-            assert_eq!(error, TopParseError::SampleCount { found }, "the text {text:?}");
+            assert_eq!(
+                error,
+                TopParseError::SampleCount { found },
+                "the text {text:?}"
+            );
             assert!(
-                error.to_string().starts_with(&format!("top printed {found} header rows")),
+                error
+                    .to_string()
+                    .starts_with(&format!("top printed {found} header rows")),
                 "the message gives the count: {error}"
             );
         }
@@ -435,7 +449,9 @@ mod tests {
 
         assert_eq!(error, TopParseError::NoRows);
         assert!(
-            error.to_string().contains("no process in its second sample"),
+            error
+                .to_string()
+                .contains("no process in its second sample"),
             "the message says which sample is empty: {error}"
         );
     }
@@ -478,7 +494,12 @@ mod tests {
     /// Only one mark comes off. A second mark makes the row malformed.
     #[test]
     fn two_trailing_marks_make_a_malformed_row() {
-        for bad in ["10     12+-      ", "10     12--      ", "10     12++      ", "10+-   12        "] {
+        for bad in [
+            "10     12+-      ",
+            "10     12--      ",
+            "10     12++      ",
+            "10+-   12        ",
+        ] {
             let text = two_samples("10     9000000   \n", &format!("{bad}\n"));
 
             assert_eq!(
@@ -592,22 +613,41 @@ mod tests {
     #[test]
     fn a_missing_bad_or_backward_clock_gives_no_elapsed_time() {
         let cases = [
-            ("2026/09/18 12:00:05".to_owned(), "2026/09/18 12:00:02".to_owned()),
-            ("2026/09/18 12:00:02".to_owned(), "2026/09/18 12:00:02".to_owned()),
+            (
+                "2026/09/18 12:00:05".to_owned(),
+                "2026/09/18 12:00:02".to_owned(),
+            ),
+            (
+                "2026/09/18 12:00:02".to_owned(),
+                "2026/09/18 12:00:02".to_owned(),
+            ),
             ("not a time".to_owned(), "2026/09/18 12:00:02".to_owned()),
             ("2026/09/18 12:00:02".to_owned(), String::new()),
-            ("2026/09/18 12:00".to_owned(), "2026/09/18 12:00:02".to_owned()),
-            ("2026/09/18 25:00:00".to_owned(), "2026/09/18 12:00:02".to_owned()),
-            ("２０２６/09/18 12:00:00".to_owned(), "2026/09/18 12:00:02".to_owned()),
+            (
+                "2026/09/18 12:00".to_owned(),
+                "2026/09/18 12:00:02".to_owned(),
+            ),
+            (
+                "2026/09/18 25:00:00".to_owned(),
+                "2026/09/18 12:00:02".to_owned(),
+            ),
+            (
+                "２０２６/09/18 12:00:00".to_owned(),
+                "2026/09/18 12:00:02".to_owned(),
+            ),
         ];
         for (first, second) in cases {
             let sample = parse(&two_samples_at(&first, &second)).expect("a bad clock is no error");
 
-            assert_eq!(sample.elapsed, None, "the clock lines {first:?} and {second:?}");
+            assert_eq!(
+                sample.elapsed, None,
+                "the clock lines {first:?} and {second:?}"
+            );
             assert_eq!(sample.rows, [row(10, 3)]);
         }
 
-        let no_block = format!("{HEADER_ROW}\n10     9000000   \n{HEADER_ROW}\n10     3         \n");
+        let no_block =
+            format!("{HEADER_ROW}\n10     9000000   \n{HEADER_ROW}\n10     3         \n");
         let one_block = format!("{HEADER_ROW}\n10     9000000   \n")
             + &sample("12:00:02", HEADER_ROW, "10     3         \n");
         for text in [no_block, one_block] {
@@ -649,7 +689,13 @@ mod tests {
     fn the_delay_is_a_bare_number_of_seconds() {
         let arguments = arguments(span("10m"), 4_000);
 
-        assert_eq!(arguments.get(2..4), Some(["-s", "600"].map(String::from).as_slice()));
-        assert_eq!(arguments.get(6..8), Some(["-n", "4000"].map(String::from).as_slice()));
+        assert_eq!(
+            arguments.get(2..4),
+            Some(["-s", "600"].map(String::from).as_slice())
+        );
+        assert_eq!(
+            arguments.get(6..8),
+            Some(["-n", "4000"].map(String::from).as_slice())
+        );
     }
 }
