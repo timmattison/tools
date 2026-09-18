@@ -38,11 +38,15 @@ pub struct VmDelta {
 impl VmDelta {
     /// Gives the traffic from the counters `before` an interval to the
     /// counters `after` it.
+    ///
+    /// A counter that goes down gives no traffic. The counters count from the
+    /// time that the system started, so a lower value means that the system
+    /// started again between the two reads.
     #[must_use]
     pub fn between(before: VmCounters, after: VmCounters) -> Self {
         Self {
-            swapins: after.swapins - before.swapins,
-            swapouts: after.swapouts - before.swapouts,
+            swapins: after.swapins.saturating_sub(before.swapins),
+            swapouts: after.swapouts.saturating_sub(before.swapouts),
         }
     }
 }
