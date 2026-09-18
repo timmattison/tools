@@ -8,6 +8,8 @@
 //! reader must compare with another number is the whole product of this tool,
 //! so each formatter states one rule and has its own tests.
 
+use std::time::SystemTime;
+
 /// The text in place of a value that `faulte` could not read.
 ///
 /// One text for every absent value, the same as `occ`. A reader then learns
@@ -166,9 +168,27 @@ pub fn kibibytes(value: u64) -> String {
     bytes(value.saturating_mul(SIZE_STEP))
 }
 
+/// Gives the age of a process that started at `started_at_epoch_secs`, at the
+/// time `now`, for example `3h 12m`.
+///
+/// The format is the format of `occ`, so the two tools print an age the same
+/// way. A process with no start time gives [`ABSENT`]: `ps` does not list the
+/// kernel, so the row of PID 0 has no start time, and a guess there is a
+/// number that a reader cannot tell from a measured one.
+///
+/// A start time after `now` gives an age of no time. The clock of this Mac can
+/// move back between the read of the table and the read of `now`.
+#[must_use]
+pub fn age(started_at_epoch_secs: Option<u64>, now: SystemTime) -> String {
+    let _ = (started_at_epoch_secs, now);
+    ABSENT.to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::time::Duration;
 
     /// A count carries a separator between each group of three digits, from
     /// the right. A count below a thousand carries none.
@@ -283,6 +303,31 @@ mod tests {
 
         for (value, text) in cases {
             assert_eq!(kibibytes(value), text, "the size of {value} kibibytes");
+        }
+    }
+
+    /// The age is the time from the start of the process to now, in the format
+    /// of `occ`. A process with no start time gives the text of an absent
+    /// value, and a start time after now gives no time.
+    #[test]
+    fn the_age_is_the_time_from_the_start_of_the_process_to_now() {
+        let started = 1_780_000_000;
+        let cases = [
+            (None, ABSENT),
+            (Some(started), "0s"),
+            (Some(started + 5), "0s"),
+            (Some(started - 45), "45s"),
+            (Some(started - (3 * 3_600 + 12 * 60 + 59)), "3h 12m"),
+            (Some(started - (2 * 86_400 + 5 * 3_600)), "2d 5h"),
+        ];
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(started);
+
+        for (started_at_epoch_secs, text) in cases {
+            assert_eq!(
+                age(started_at_epoch_secs, now),
+                text,
+                "the start {started_at_epoch_secs:?}"
+            );
         }
     }
 }
