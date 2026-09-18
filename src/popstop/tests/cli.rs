@@ -41,6 +41,10 @@ const SIGINT: libc::c_int = 2;
 /// it to the copy that it holds.
 const SIGHUP: libc::c_int = 1;
 
+/// The number of `SIGTERM`. POSIX sets it to 15. `popstop --stop` sends it
+/// to the copy that runs.
+const SIGTERM: libc::c_int = 15;
+
 /// The line that tells the user about the sleep of the Mac.
 const NO_IDLE_SLEEP_LINE: &str = "popstop: this Mac does not idle sleep while popstop runs";
 
@@ -223,6 +227,11 @@ fn a_signal_stops_a_foreground_copy(signal: libc::c_int) {
 #[test]
 fn a_hangup_stops_a_foreground_copy() {
     a_signal_stops_a_foreground_copy(SIGHUP);
+}
+
+#[test]
+fn a_termination_signal_stops_a_foreground_copy() {
+    a_signal_stops_a_foreground_copy(SIGTERM);
 }
 
 #[test]
