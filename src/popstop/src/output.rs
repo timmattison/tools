@@ -22,10 +22,10 @@ use objc2_audio_toolbox::{
     AudioUnitRenderActionFlags, AudioUnitSetProperty, AudioUnitUninitialize,
 };
 use objc2_core_audio::{
-    kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyElementMain,
-    kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
-    kAudioObjectUnknown, AudioObjectGetPropertyData, AudioObjectID, AudioObjectPropertyAddress,
-    AudioObjectPropertySelector,
+    kAudioDevicePropertyNominalSampleRate, kAudioHardwarePropertyDefaultOutputDevice,
+    kAudioObjectPropertyElementMain, kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal,
+    kAudioObjectSystemObject, kAudioObjectUnknown, AudioObjectGetPropertyData, AudioObjectID,
+    AudioObjectPropertyAddress, AudioObjectPropertySelector,
 };
 use objc2_core_audio_types::{
     kAudioFormatFlagsNativeFloatPacked, kAudioFormatLinearPCM, AudioBuffer, AudioBufferList,
@@ -77,6 +77,8 @@ mod call {
     pub(super) const GET_DEFAULT_OUTPUT_DEVICE: &str =
         "AudioObjectGetPropertyData(kAudioHardwarePropertyDefaultOutputDevice)";
     pub(super) const GET_NAME: &str = "AudioObjectGetPropertyData(kAudioObjectPropertyName)";
+    pub(super) const GET_NOMINAL_SAMPLE_RATE: &str =
+        "AudioObjectGetPropertyData(kAudioDevicePropertyNominalSampleRate)";
 }
 
 /// The audio object of the whole audio system.
@@ -189,7 +191,24 @@ pub fn default_output_device_name() -> Result<String, AudioError> {
 ///
 /// Returns an [`AudioError`] that names the call that failed.
 pub fn default_output_sample_rate() -> Result<SampleRate, AudioError> {
-    SampleRate::new(1.0).ok_or_else(|| AudioError::no_result(call::GET_NAME, "stub"))
+    let device = default_output_device()?;
+    // SAFETY: the data of the nominal sample rate property is a `Float64`.
+    let hz: f64 = unsafe {
+        object_property(
+            device,
+            kAudioDevicePropertyNominalSampleRate,
+            call::GET_NOMINAL_SAMPLE_RATE,
+            0.0,
+        )
+    }?;
+    nominal_sample_rate(hz)
+}
+
+/// Makes a sample rate from the nominal rate that a device gave, in hertz.
+fn nominal_sample_rate(hz: f64) -> Result<SampleRate, AudioError> {
+    SampleRate::new(hz).ok_or_else(|| {
+        AudioError::no_result(call::GET_NOMINAL_SAMPLE_RATE, "gave no valid sample rate")
+    })
 }
 
 /// Gives the default output device, which the default output unit plays to.
