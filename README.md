@@ -470,7 +470,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     to fork it where you stand instead; and it refuses to resume a session that's already open in
     another running process (pass `--force` to override) so two processes can't corrupt the same
     session log. With `--here` it brings the session into the *current* directory instead, resuming
-    it as a forked (new-id) session so you can carry its context into a different working tree. If
+    it as a forked (new-id) session so you can carry its context into a different working tree.
+    When Claude exits, it prints `Resume this fork with: crap <new-id>`, so you know the id of the
+    fork and not only the id of the original. If
     the id belongs to another account on the machine, `crap` finds it automatically — searching your
     own sessions first, then other users' as a self-first fallback — and resumes a private fork of
     it (or target a specific account with `--user <name>`, which fails up front and lists the real
@@ -3268,15 +3270,31 @@ A couple of things to know:
 
 `--here` also accepts a cross-user source. Combine it with [`--user`](#resume-another-users-session---user) — `crap --here <id> --user alice` — to fork another account's session right here in your current directory. Because a transcript in someone else's home can never be found by a `claude --resume` you run yourself, `crap` **copies** it into your own tree rather than symlinking (nothing is ever linked into another user's home), then forks and cleans the copy up the same way it removes the symlink. A same-user `--here` still symlinks exactly as before. This is the escape hatch when the session's original directory is gone or you can't enter it: `--here` ignores that directory entirely.
 
-#### Choosing the forked session's id
+#### The forked session's id
 
-By default the fork gets a random new id, which you only learn after Claude starts. Pass a second argument to choose it yourself:
+The fork gets a new id, and `crap` chooses that id before Claude starts. When Claude exits, the shell function tells you the id:
+
+```text
+Resume this session with:
+claude --resume 9f8e7d6c-5b4a-3210-fedc-ba9876543210
+Resume this fork with: crap 9f8e7d6c-5b4a-3210-fedc-ba9876543210
+```
+
+The first two lines come from Claude, and the last line comes from `crap`. `crap <new-id>` resumes the fork from any directory. Use it, not the id you gave to `crap --here`: that id is the original session, which does not contain the work you did in the fork.
+
+`crap` prints its line only when Claude saved the fork. Claude writes the fork transcript only after your first new input, so if you exit the fork at once, there is no fork to resume, and neither Claude nor `crap` prints a resume line. The line from `crap` is also the one to trust when the session has a custom title (from `/rename`). Claude then prints `claude --resume "<title>"`, but the fork inherits the title, so that command opens a picker that lists both the fork and the original.
+
+Without a second argument, `crap` generates a UUID v4 for the fork. Pass a second argument to choose the id yourself:
 
 ```bash
 crap --here 57570685-2d64-4431-8ab6-c021a12fa1af 9f8e7d6c-5b4a-3210-fedc-ba9876543210
 ```
 
-The new id must be a valid UUID, and `crap` refuses it if it already names a session (so the fork can never overwrite an unrelated transcript). This is handy when a script needs to know the resumed session's id in advance — generate a UUID, hand it to `crap --here`, and you already know where the new transcript will live. Omit it to keep the random-id behavior.
+The new id must be a valid UUID, and `crap` refuses it if it already names a session, so the fork can never overwrite an unrelated transcript. A generated id gets the same checks. Choose the id yourself when a script must know the new id before Claude starts.
+
+The cross-user resume (below) forks too, so it gets a generated id and the same line.
+
+After you upgrade `crap`, run `crap --shell-setup` again. The resume line comes from the shell function, and an older function does not print it.
 
 ### Resume another user's session: automatic, or `--user`
 

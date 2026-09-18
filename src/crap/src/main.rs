@@ -11,10 +11,20 @@
 //! folder and resumes it as a `--fork-session` (a fresh id), leaving the
 //! original transcript untouched. Because the fork only reads that transcript,
 //! `--here` works even while the original session is still live in another
-//! process. The symlink is removed once the session ends. A second argument
-//! (`crap --here <id> <new-id>`) pins the fork to a chosen UUID via
-//! `claude --session-id` instead of a random one, provided it does not already
-//! name an existing session. `--here` also accepts a cross-user source
+//! process. The symlink is removed once the session ends.
+//!
+//! Every fork gets an id that `crap` knows before Claude starts. A second
+//! argument (`crap --here <id> <new-id>`) gives that id. Without it, `crap`
+//! generates a UUID v4. Either way the shell function passes the id to
+//! `claude --session-id`, and `crap` refuses an id that is not a UUID or that
+//! already names a session. When Claude exits, the shell function prints
+//! `Resume this fork with: crap <new-id>`, and that command works from any
+//! directory. It prints the line only when Claude saved the fork. Claude
+//! writes the fork transcript only after the first new input, so a fork that
+//! got no input has nothing to resume. The cross-user resume below gets the
+//! same id and the same line.
+//!
+//! `--here` also accepts a cross-user source
 //! (`crap --here <id> --user <name>`): the foreign transcript is *copied* into
 //! your own tree instead of symlinked, so nothing is ever linked into another
 //! user's home, and the copy is cleaned up the same way the symlink is.
