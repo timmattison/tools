@@ -278,6 +278,45 @@ mod tests {
         }
     }
 
+    /// The record of `SESSION` with no status, no time, and no directory.
+    fn bare_record() -> SessionRecord {
+        SessionRecord {
+            session: id(SESSION),
+            status: None,
+            status_changed_at: None,
+            directory: None,
+        }
+    }
+
+    #[test]
+    fn a_record_without_the_facts_still_names_its_session() {
+        // `occ` reports the session alone, so a file that gives only the
+        // session is still a record.
+        let started_millis = (PROCESS_START + 1) * 1_000;
+        let bare =
+            format!(r#"{{"pid":{PID},"sessionId":"{SESSION}","startedAt":{started_millis}}}"#);
+        assert_eq!(record_in(&bare, PID, PROCESS_START), Some(bare_record()));
+    }
+
+    #[test]
+    fn a_fact_of_the_wrong_type_gives_no_value_and_the_record_stays() {
+        let started_millis = (PROCESS_START + 1) * 1_000;
+        for facts in [
+            r#""status":7,"statusUpdatedAt":"yesterday","cwd":["/work"]"#,
+            r#""status":null,"statusUpdatedAt":-1,"cwd":null"#,
+            r#""status":true,"statusUpdatedAt":1789747743430.5,"cwd":7"#,
+        ] {
+            let mistyped = format!(
+                r#"{{"pid":{PID},"sessionId":"{SESSION}","startedAt":{started_millis},{facts}}}"#
+            );
+            assert_eq!(
+                record_in(&mistyped, PID, PROCESS_START),
+                Some(bare_record()),
+                "the facts {facts}"
+            );
+        }
+    }
+
     #[test]
     fn a_file_left_by_a_process_that_died_names_no_session() {
         // The identifier was reused. The file records a session that started
