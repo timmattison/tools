@@ -823,6 +823,39 @@ mod tests {
         }
     }
 
+    /// A target that is still the same process after `SIGKILL` is a session
+    /// that survived, and the report says so.
+    ///
+    /// The kernel stops a process that gets `SIGKILL`, so this answer is rare.
+    /// A process that is in an uninterruptible call of the kernel is one, and
+    /// a Mac that pages a process in from swap is slow at every step. The
+    /// person asked `faulte` to stop that session, so a report that says
+    /// nothing about it is a report that lies.
+    #[test]
+    fn a_target_that_is_the_same_process_after_sigkill_survived() {
+        let candidate = candidate(30);
+        let machine = machine_of(&[30], vec![vec![process(30, LAUNCHD_PID)]]);
+
+        let report = stop(&machine, &[candidate.clone()], ONE_POLL, ONE_POLL);
+
+        assert_eq!(
+            report,
+            StopReport {
+                survived: vec![candidate],
+                ..StopReport::default()
+            },
+            "the process holds the same PID and the same start time after SIGKILL"
+        );
+        assert_eq!(
+            machine.signals(),
+            vec![
+                (Pid::new(30), Signal::Terminate),
+                (Pid::new(30), Signal::Kill)
+            ],
+            "both signals went, and neither one stopped the process"
+        );
+    }
+
     /// Only `y` and `yes` confirm, in any case, after the spaces come off.
     ///
     /// Every other answer stops nothing: the end of the input, no text, a
