@@ -779,6 +779,41 @@ fn a_background_start_truncates_the_log_of_the_copy_before_it() {
 }
 
 #[test]
+fn a_copy_that_cannot_start_says_why_on_stderr_and_in_its_log() {
+    let temp = tempfile::tempdir().expect("a temporary directory");
+    let dir = temp.path().join("state");
+    let state = StateDir::new(dir.clone());
+    // A lock file that no copy can open: a directory with the name of the
+    // lock file. The start makes its log, and the copy fails before it plays.
+    fs::create_dir_all(state.lock_path()).expect("make a lock file that no copy can open");
+
+    let (status, report, problem) =
+        ask_in(&dir, &["--background", "--exit-after", EXIT_AFTER_SECONDS]);
+
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "story 10: a copy that cannot start ends the command that started it: {status}. Its \
+         stderr:\n{problem}"
+    );
+    assert_eq!(
+        report, "",
+        "a problem goes to stderr, thus a script that reads stdout sees nothing"
+    );
+    assert!(
+        problem.starts_with("popstop: the lock file cannot be used:"),
+        "the start says what the copy could not do:\n{problem}"
+    );
+
+    let log = fs::read_to_string(state.log_path()).expect("read the log of the copy");
+    assert_eq!(
+        log, problem,
+        "the copy wrote the same reason into its log, thus the log of a copy that said nothing \
+         holds the reason too"
+    );
+}
+
+#[test]
 fn a_hangup_stops_a_foreground_copy() {
     a_signal_stops_a_foreground_copy(SIGHUP);
 }
