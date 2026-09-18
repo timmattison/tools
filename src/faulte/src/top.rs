@@ -11,6 +11,7 @@
 //! the interval. [`parse`] reads the second sample only. A parser that reads
 //! the first sample ranks the old processes first, whatever they do now.
 
+use std::str::FromStr;
 use std::time::Duration;
 
 use crate::duration::Span;
@@ -195,9 +196,21 @@ fn parse_row(line: &str) -> Option<FaultCount> {
         return None;
     };
     Some(FaultCount {
-        pid: Pid::new(pid.parse().ok()?),
-        faults: faults.parse().ok()?,
+        pid: Pid::new(number(pid)?),
+        faults: number(faults)?,
     })
+}
+
+/// The marks that `top` can put after a number. The parser removes one.
+const TRAILING_MARKS: [char; 2] = ['+', '-'];
+
+/// Reads a number from `token`, after one trailing `+` or `-` is removed.
+fn number<T: FromStr>(token: &str) -> Option<T> {
+    token
+        .strip_suffix(TRAILING_MARKS)
+        .unwrap_or(token)
+        .parse()
+        .ok()
 }
 
 #[cfg(test)]
