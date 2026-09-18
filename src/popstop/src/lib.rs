@@ -8,6 +8,7 @@
 //!
 //! This library holds the parts of the tool that the tests reach:
 //!
+//! - [`exit_status`] names the exit statuses and lists them for `--help`.
 //! - [`signal`] makes the samples of the keepalive signal. It is pure and it
 //!   compiles on every platform.
 //! - [`lock`] makes sure that only one copy runs for each user. It uses the
@@ -17,6 +18,7 @@
 //! - `process` reads the kernel start time of a process. It compiles on macOS
 //!   only.
 
+pub mod exit_status;
 pub mod lock;
 #[cfg(target_os = "macos")]
 pub mod output;
