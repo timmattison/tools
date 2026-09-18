@@ -32,6 +32,13 @@ pub enum ParseSpanError {
     /// The text is empty.
     #[error("the duration is empty: {HINT}")]
     Empty,
+    /// The text gives zero seconds. No flag of `faulte` means anything at
+    /// zero.
+    #[error("{text:?} is zero: give a duration of 1 second or more")]
+    Zero {
+        /// The text as the person gave it.
+        text: String,
+    },
     /// The text is not a duration.
     #[error("{text:?} is not a duration")]
     Invalid {
@@ -144,5 +151,24 @@ mod tests {
             error.to_string().starts_with("the duration is empty: "),
             "the message says that the text is empty: {error}"
         );
+    }
+
+    #[test]
+    fn zero_is_refused_in_every_unit() {
+        for text in ["0", "0s", "0m", "0h", "0d", "000m"] {
+            let error = seconds(text).expect_err("zero is not a duration");
+
+            assert_eq!(
+                error,
+                ParseSpanError::Zero {
+                    text: text.to_owned()
+                },
+                "the text {text:?}"
+            );
+            assert!(
+                error.to_string().contains(&format!("{text:?}")),
+                "the message names the text {text:?}: {error}"
+            );
+        }
     }
 }
