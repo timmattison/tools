@@ -24,8 +24,8 @@ use std::time::{Duration, Instant};
 
 use popstop::background::CHILD_FLAG;
 use popstop::handshake::Handshake;
-use popstop::lock::{current_holder, HolderRecord, Mode, StartTime, StateDir};
-use popstop::message::start_time_text;
+use popstop::lock::{acquire, current_holder, HolderRecord, Mode, StartTime, StateDir};
+use popstop::message::{stale_record, start_time_text};
 use popstop::process::start_time;
 
 /// The time after which a copy stops by itself, as `--exit-after` takes it.
@@ -559,6 +559,20 @@ impl Bystander {
     /// Tells whether the process still runs.
     fn still_runs(&mut self) -> bool {
         self.0.try_wait().expect("look at the process").is_none()
+    }
+
+    /// Looks at the process for [`A_SIGNAL_ARRIVES_WITHIN`], and tells
+    /// whether it still runs at the end. The look ends early when the process
+    /// ends.
+    ///
+    /// A signal that went to the process ends it in that time, thus a test
+    /// that must show that no signal went out asks this.
+    fn still_runs_after_a_signal_can_arrive(&mut self) -> bool {
+        let deadline = Instant::now() + A_SIGNAL_ARRIVES_WITHIN;
+        while self.still_runs() && Instant::now() < deadline {
+            thread::sleep(POLL_INTERVAL);
+        }
+        self.still_runs()
     }
 }
 
@@ -1239,14 +1253,58 @@ fn a_record_in_a_lock_that_nobody_holds_makes_a_stop_send_no_signal() {
         "a stop that finds nothing says nothing on stderr"
     );
 
-    let deadline = Instant::now() + A_SIGNAL_ARRIVES_WITHIN;
-    while bystander.still_runs() && Instant::now() < deadline {
-        thread::sleep(POLL_INTERVAL);
-    }
     assert!(
-        bystander.still_runs(),
+        bystander.still_runs_after_a_signal_can_arrive(),
         "the stop sent a signal to a process that is not a copy of popstop"
     );
+}
+
+#[test]
+fn a_stop_sends_no_signal_to_a_pid_that_another_process_has_now() {
+    let temp = tempfile::tempdir().expect("a temporary directory");
+    let dir = temp.path().join("state");
+
+    // A holder writes its record a moment after it takes the lock, thus a stop
+    // can find the record of a copy that crashed in a lock that somebody
+    // holds. The system gave the PID of that copy to a process that is not
+    // popstop. The PID runs, and its start time is one microsecond before the
+    // start time in the record, thus only the identity check stands between
+    // the record and a signal to somebody else.
+    let mut bystander = Bystander::start();
+    let started_at = start_time(bystander.pid()).expect("the start time of the process");
+    let record = HolderRecord {
+        pid: bystander.pid(),
+        mode: Mode::Foreground,
+        started_at: StartTime::from_unix_micros(started_at.unix_micros() + 1),
+    };
+    let guard = acquire(&StateDir::new(dir.clone()), &record).expect("take the lock");
+
+    let (status, report, errors) = ask_in(&dir, &["--stop"]);
+
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "a record that names another process is an error while somebody holds the lock: \
+         {status}. Its stderr:\n{errors}"
+    );
+    assert_eq!(
+        errors,
+        format!("{}\n", stale_record(bystander.pid())),
+        "the stop tells the user that the record names another process"
+    );
+    assert_eq!(report, "", "a stop that refuses writes nothing on stdout");
+    assert!(
+        bystander.still_runs_after_a_signal_can_arrive(),
+        "the stop sent a signal to a process that has the PID of the record now"
+    );
+    assert_eq!(
+        holder(&dir),
+        Some(record),
+        "a stop that refuses changes nothing in the lock"
+    );
+
+    // The lock stays held until the stop and each look after it end.
+    drop(guard);
 }
 
 #[test]
