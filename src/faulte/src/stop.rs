@@ -6,6 +6,11 @@
 //! values, and the sequence reads this Mac through one trait. No unit test
 //! signals a real process.
 
+use occ::SessionRecord;
+
+use crate::plan::Candidate;
+use crate::table::ProcessRow;
+
 /// The one short answer that confirms.
 const SHORT_YES: &str = "y";
 
@@ -28,9 +33,162 @@ pub fn confirms(answer: Option<&str>) -> bool {
     })
 }
 
+/// What the check immediately before a signal decided about one candidate.
+///
+/// The plan can be minutes old when the person answers the question. Each
+/// variant other than [`Recheck::Proceed`] is a fact that the plan could not
+/// know, and each one stops the signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recheck {
+    /// Nothing about the session changed. The signal goes.
+    Proceed,
+    /// The process is gone. Its PID has no row, or its row is a zombie.
+    Exited,
+    /// The PID has a row of another process. The process of the plan exited,
+    /// and the operating system gave its number to a new process.
+    PidReused,
+    /// The session is not the idle session that the plan read. It has no
+    /// record now, or another status, or another time of the last status
+    /// change.
+    StatusChanged,
+    /// The session has a live descendant. It runs a tool or a shell now,
+    /// which rule 3 of the plan refuses.
+    DescendantStarted,
+}
+
+/// Reads `candidate` again, immediately before `faulte` signals it.
+///
+/// `fresh_table` and `fresh_record` come from a read that is newer than the
+/// plan. The person takes time to answer the question, and a session that the
+/// person started to use again in that time must survive.
+///
+/// The order of the tests is the order of the answers. The table answers
+/// first, because a PID that another process took answers nothing about the
+/// session that the plan named, and a record under such a PID is about a
+/// session that is gone.
+#[must_use]
+pub fn recheck(
+    candidate: &Candidate,
+    fresh_table: &[ProcessRow],
+    fresh_record: Option<&SessionRecord>,
+) -> Recheck {
+    let _ = (candidate, fresh_table, fresh_record);
+    Recheck::Exited
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::path::PathBuf;
+    use std::time::{Duration, SystemTime};
+
+    use occ::{SessionId, SessionStatus};
+
+    use crate::pid::{Pid, Uid};
+    use crate::ranking::{ClaudeView, RankedRow};
+    use crate::state::SessionState;
+
+    /// The time now in the tests, in seconds since the Unix epoch.
+    const NOW: u64 = 1_780_000_000;
+
+    /// The time when each process of the tests started, in seconds since the
+    /// Unix epoch: eight days ago.
+    const STARTED: u64 = NOW - 8 * 86_400;
+
+    /// The time since the session of the tests became idle, in seconds.
+    const IDLE_SECONDS: u64 = 3_600;
+
+    /// The UID of the account that runs the tests.
+    const VIEWER_UID: u32 = 501;
+
+    /// The PID of the parent of every process of the tests: `launchd`.
+    const LAUNCHD_PID: u32 = 1;
+
+    /// The working directory of a session in the tests.
+    const DIRECTORY: &str = "/Volumes/SamsungSSDs/code/tools";
+
+    /// Gives the time now in the tests.
+    fn now() -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(NOW)
+    }
+
+    /// Gives the time when the session of the tests became idle.
+    fn changed_at() -> SystemTime {
+        now() - Duration::from_secs(IDLE_SECONDS)
+    }
+
+    /// Gives the session of the process `pid`. Each PID gives a different
+    /// session, so an assertion names the session that it expects.
+    fn session_id(pid: u32) -> SessionId {
+        SessionId::parse(&format!("d3b0d921-f0a1-41fc-b309-{pid:012}"))
+            .expect("the text of the test session is a UUID")
+    }
+
+    /// Gives the candidate of the process `pid`, which the plan selected.
+    fn candidate(pid: u32) -> Candidate {
+        Candidate {
+            row: RankedRow {
+                pid: Pid::new(pid),
+                uid: Uid::new(VIEWER_UID),
+                faults: 1_000,
+                rss_kib: Some(831_488),
+                started_at_epoch_secs: Some(STARTED),
+                command: format!("claude --process {pid}"),
+                claude: ClaudeView::Session {
+                    id: session_id(pid),
+                    state: SessionState::Idle {
+                        for_: Some(Duration::from_secs(IDLE_SECONDS)),
+                    },
+                    directory: Some(PathBuf::from(DIRECTORY)),
+                    status_changed_at: Some(changed_at()),
+                },
+            },
+            session: session_id(pid),
+            started_at_epoch_secs: STARTED,
+            status_changed_at: Some(changed_at()),
+        }
+    }
+
+    /// Gives the table row of the process `pid`, whose parent is `ppid`.
+    fn process(pid: u32, ppid: u32) -> ProcessRow {
+        ProcessRow {
+            pid: Pid::new(pid),
+            ppid: Pid::new(ppid),
+            uid: Uid::new(VIEWER_UID),
+            rss_kib: 831_488,
+            zombie: false,
+            started_at_epoch_secs: STARTED,
+            command: format!("claude --process {pid}"),
+        }
+    }
+
+    /// Gives the registry record of the session of `pid`, which became idle
+    /// at `changed_at`.
+    fn record(pid: u32, changed_at: Option<SystemTime>) -> SessionRecord {
+        SessionRecord {
+            session: session_id(pid),
+            status: Some(SessionStatus::Idle),
+            status_changed_at: changed_at,
+            directory: Some(PathBuf::from(DIRECTORY)),
+        }
+    }
+
+    /// A session that did not change proceeds: its PID holds the same process
+    /// that the plan read, the registry still says that it is idle, the time
+    /// of the last status change is the same, and it started no process.
+    #[test]
+    fn a_session_that_did_not_change_proceeds() {
+        let candidate = candidate(30);
+        let table = [process(30, LAUNCHD_PID), process(31, LAUNCHD_PID)];
+        let record = record(30, Some(changed_at()));
+
+        assert_eq!(
+            recheck(&candidate, &table, Some(&record)),
+            Recheck::Proceed,
+            "nothing about the session changed"
+        );
+    }
 
     /// Only `y` and `yes` confirm, in any case, after the spaces come off.
     ///
