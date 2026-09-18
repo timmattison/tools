@@ -243,6 +243,9 @@ impl FromIterator<(Uid, String)> for Accounts {
     }
 }
 
+/// What holds the two halves of a header line apart.
+const DASH: &str = "—";
+
 /// The singular of the word for one entry of the ranking.
 const PROCESS: &str = "process";
 
@@ -297,8 +300,17 @@ pub struct Measurement<'a> {
 /// A Mac that hides nothing says nothing, the same as `occ`.
 #[must_use]
 pub fn header(measurement: &Measurement<'_>) -> Vec<String> {
-    let _ = measurement;
-    Vec::new()
+    let ranking = measurement.ranking;
+    let processes = ranking.rows.len();
+    vec![format!(
+        "{} {} over a {} window (interval {}) {DASH} {} faults, {}/s",
+        separate(&processes.to_string()),
+        plural(processes, PROCESS, PROCESSES),
+        seconds(ranking.window),
+        measurement.interval,
+        count(ranking.total_faults),
+        rate(ranking.faults_per_second(ranking.total_faults)),
+    )]
 }
 
 #[cfg(test)]
