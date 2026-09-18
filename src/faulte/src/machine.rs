@@ -9,7 +9,7 @@
 //! The real reader of macOS is the one part of `faulte` that runs a command or
 //! calls the kernel.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, Instant, SystemTime};
 
 use occ::SessionRecord;
@@ -232,6 +232,7 @@ pub fn observe(machine: &dyn Machine, interval: Span) -> Result<Observed, Machin
         viewer,
         now,
     });
+    let accounts = accounts_of(machine, &ranking);
     Ok(Observed {
         ranking,
         swap: VmDelta::between(before, after),
@@ -240,10 +241,23 @@ pub fn observe(machine: &dyn Machine, interval: Span) -> Result<Observed, Machin
         // sample is the one that says what this Mac is doing.
         compressor_bytes: after.compressor_bytes(machine.page_size()),
         swap_window,
-        accounts: Accounts::new(),
+        accounts,
         now,
         interval,
     })
+}
+
+/// Reads the name of each account that owns a row of `ranking`.
+///
+/// The map holds one entry for each account, and not one for each row. A Mac
+/// runs two accounts and a thousand processes, so a name for each row is a
+/// thousand reads of the same two names.
+fn accounts_of(machine: &dyn Machine, ranking: &Ranking) -> Accounts {
+    let owners: BTreeSet<Uid> = ranking.rows.iter().map(|row| row.uid).collect();
+    owners
+        .into_iter()
+        .filter_map(|uid| machine.account_name(uid).map(|name| (uid, name)))
+        .collect()
 }
 
 /// Reads the registry record of each Claude Code process of `table`.
