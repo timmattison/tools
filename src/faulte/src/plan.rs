@@ -102,6 +102,9 @@ pub struct NotSelected {
     pub runs_faulte: usize,
     /// The sessions that are not older than [`Rules::older_than`] (rule 1).
     pub too_young: usize,
+    /// The sessions with no registry record that the caller could read
+    /// (rule 2). Nothing proves such a session idle.
+    pub no_record: usize,
     /// The sessions whose status is not `idle` (rule 2).
     pub not_idle: usize,
     /// The sessions that are idle, and became idle inside
@@ -776,9 +779,58 @@ mod tests {
             NotSelected {
                 runs_faulte: 2,
                 too_young: 2,
+                no_record: 0,
                 not_idle: 2,
                 idle_too_short: 2,
                 live_descendant: 1,
+            }
+        );
+    }
+
+    /// A Claude Code session with no registry record is never a candidate,
+    /// and the plan counts it. Nothing proves such a session idle, so it
+    /// fails rule 2, and a stop of it names a session that nothing proved.
+    ///
+    /// The row goes through the rules in the same order as every other
+    /// session. A row that runs `faulte` counts under rule 4, and a young row
+    /// counts under rule 1. A row with a live descendant counts under rule 2,
+    /// because the plan tests rule 2 before rule 3.
+    ///
+    /// A process that is not Claude Code is in no count, because it is not a
+    /// session that the plan can stop.
+    #[test]
+    fn a_session_with_no_registry_record_is_counted_and_never_a_candidate() {
+        let ranking = ranking(vec![
+            row(20, OLD, ClaudeView::NoRecord),
+            row(30, YOUNG, ClaudeView::NoRecord),
+            row(40, OLD, ClaudeView::NoRecord),
+            row(50, OLD, ClaudeView::NoRecord),
+            row(60, OLD, ClaudeView::NotClaude),
+            session(70, OLD, idle(3_600)),
+        ]);
+        // The session 40 ran `faulte kill`, and the process 51 is a live
+        // descendant of the session 50.
+        let table = [
+            process(20, LAUNCHD_PID),
+            process(30, LAUNCHD_PID),
+            process(40, LAUNCHD_PID),
+            process(FAULTE_PID, 40),
+            process(50, LAUNCHD_PID),
+            process(51, 50),
+            process(60, LAUNCHD_PID),
+            process(70, LAUNCHD_PID),
+        ];
+
+        let plan = plan(&input(&ranking, &table, rules()));
+
+        assert_eq!(selected(&plan), vec![70]);
+        assert_eq!(
+            plan.not_selected,
+            NotSelected {
+                runs_faulte: 1,
+                too_young: 1,
+                no_record: 2,
+                ..NotSelected::default()
             }
         );
     }

@@ -662,6 +662,13 @@ fn not_selected_line(plan: &Plan) -> Option<String> {
             plan.rules.older_than,
         ));
     }
+    if not_selected.no_record > 0 {
+        parts.push(format!(
+            "{} {} no registry record",
+            count_of(not_selected.no_record),
+            plural(not_selected.no_record, "has", "have"),
+        ));
+    }
     if not_selected.not_idle > 0 {
         parts.push(format!("{} not idle", count_of(not_selected.not_idle)));
     }
@@ -1771,12 +1778,14 @@ mod tests {
         let every = drawn(NotSelected {
             runs_faulte: 1,
             too_young: 63,
+            no_record: 7,
             not_idle: 5,
             idle_too_short: 2,
             live_descendant: 3,
         });
-        let two = drawn(NotSelected {
+        let some = drawn(NotSelected {
             runs_faulte: 2,
+            no_record: 1,
             live_descendant: 1,
             ..NotSelected::default()
         });
@@ -1785,12 +1794,12 @@ mod tests {
         assert_eq!(
             every.lines().last(),
             Some(
-                "not selected: 1 runs faulte, 63 younger than 7d, 5 not idle, 2 idle for a shorter time, 3 have a live descendant"
+                "not selected: 1 runs faulte, 63 younger than 7d, 7 have no registry record, 5 not idle, 2 idle for a shorter time, 3 have a live descendant"
             )
         );
         assert_eq!(
-            two.lines().last(),
-            Some("not selected: 2 run faulte, 1 has a live descendant")
+            some.lines().last(),
+            Some("not selected: 2 run faulte, 1 has no registry record, 1 has a live descendant")
         );
         assert!(
             !none.contains(NOT_SELECTED),
