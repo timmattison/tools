@@ -44,6 +44,14 @@ const EXIT_AFTER_FLAG: &str = "--exit-after";
 /// The copy opens the default output device in that time, and a device that
 /// needs longer needs the user. The wait has a bound because a start that
 /// never ends is worse than a start that fails.
+///
+/// Measured on a Mac mini with USB speakers: eight starts, three seconds
+/// apart, took 0.19 s to 0.29 s each, so a start of one copy holds a margin
+/// of more than 30 times this bound. Twelve starts with no time between them
+/// took up to 6.8 s each, and one of the twelve passed the bound. The cause
+/// is Core Audio and not popstop: a device that a copy released a moment
+/// before opens slowly. So a test file that starts many copies together can
+/// fail here, and a person who starts one copy cannot.
 const HANDSHAKE_BOUND: Duration = Duration::from_secs(10);
 
 /// The longest time that a start waits for a copy that reported nothing.
