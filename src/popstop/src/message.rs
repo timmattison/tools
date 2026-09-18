@@ -8,7 +8,7 @@ use std::path::Path;
 
 use chrono::{DateTime, Local, TimeZone};
 
-use crate::lock::StartTime;
+use crate::lock::{HolderRecord, StartTime};
 
 /// The command that stops the copy that runs.
 const STOP_COMMAND: &str = "popstop --stop";
@@ -66,10 +66,30 @@ where
         )
 }
 
+/// Gives the text of the refusal of a start, for the copy that holds the
+/// lock. `stop_command` comes from [`stop_command`].
+///
+/// The text names the copy that runs, and it tells the user how to stop that
+/// copy. It has no newline at its end.
+#[must_use]
+pub fn refusal(holder: &HolderRecord, stop_command: &str) -> String {
+    refusal_in(holder, stop_command, &Local)
+}
+
+/// Gives the text of the refusal of a start, with the start time in `zone`.
+fn refusal_in<Tz>(holder: &HolderRecord, stop_command: &str, zone: &Tz) -> String
+where
+    Tz: TimeZone,
+    Tz::Offset: fmt::Display,
+{
+    let _ = (holder, stop_command, zone);
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{start_time_text_in, stop_command};
-    use crate::lock::StartTime;
+    use super::{refusal_in, start_time_text_in, stop_command};
+    use crate::lock::{HolderRecord, Mode, StartTime};
     use chrono::{FixedOffset, Utc};
     use std::path::Path;
 
@@ -108,6 +128,35 @@ mod tests {
             start_time_text_in(TEN_O_CLOCK_UTC, &west),
             "2026-09-17 23:00:00",
             "a zone west of UTC can show the day before"
+        );
+    }
+
+    #[test]
+    fn a_refusal_names_the_copy_that_runs_and_the_command_that_stops_it() {
+        let holder = HolderRecord {
+            pid: 4242,
+            mode: Mode::Foreground,
+            started_at: TEN_O_CLOCK_UTC,
+        };
+
+        assert_eq!(
+            refusal_in(&holder, "popstop --stop", &Utc),
+            "popstop: another copy runs (pid 4242, foreground, started 2026-09-18 10:00:00), so \
+             this copy did not start\n\
+             popstop: to stop the copy that runs, use this command: popstop --stop"
+        );
+
+        let background = HolderRecord {
+            pid: 5353,
+            mode: Mode::Background,
+            started_at: TEN_O_CLOCK_UTC,
+        };
+        assert_eq!(
+            refusal_in(&background, "popstop --stop --state-dir '/tmp/state'", &Utc),
+            "popstop: another copy runs (pid 5353, background, started 2026-09-18 10:00:00), so \
+             this copy did not start\n\
+             popstop: to stop the copy that runs, use this command: popstop --stop --state-dir \
+             '/tmp/state'"
         );
     }
 
