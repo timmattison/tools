@@ -243,6 +243,14 @@ PID    FAULTS    \n\
         SystemTime::UNIX_EPOCH + Duration::from_secs(STARTED + 86_400)
     }
 
+    /// Gives the fault count of `pid`.
+    fn count(pid: u32, faults: u64) -> FaultCount {
+        FaultCount {
+            pid: Pid::new(pid),
+            faults,
+        }
+    }
+
     /// Gives the table row of `pid`, owned by the viewer. The RSS is ten
     /// times the PID, so each row is different.
     fn process(pid: u32) -> ProcessRow {
@@ -328,5 +336,18 @@ PID    FAULTS    \n\
         );
         assert_eq!(ranking.rows.get(1).map(|row| row.faults), Some(3));
         assert_eq!(ranking.window, WINDOW);
+    }
+
+    /// Two processes with the same faults rank by PID, lowest first. Thus two
+    /// runs over the same sources print the same order, whatever order `top`
+    /// printed. The sample lists the tied PIDs from the highest down.
+    #[test]
+    fn equal_faults_rank_by_pid_lowest_first() {
+        let machine = Machine::new(
+            vec![count(30, 7), count(12, 7), count(20, 9), count(11, 7)],
+            [30, 12, 20, 11].map(process).to_vec(),
+        );
+
+        assert_eq!(pids(&machine.rank()), [20, 11, 12, 30]);
     }
 }
