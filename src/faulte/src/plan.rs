@@ -587,18 +587,28 @@ mod tests {
             row(200, YOUNG, ClaudeView::NotClaude),
             row(210, YOUNG, ClaudeView::NoRecord),
         ]);
-        let mut table = table_of(&[30, 40, 50, 60, 70, 90, 100, 110, 200, 210]);
-        table.extend([
+        // `table_of` puts `faulte` under `launchd`. Here the session 80 ran
+        // `faulte kill`, and the session 120 started the session 80, so both
+        // of them are ancestors of `faulte`.
+        let table = [
+            process(30, LAUNCHD_PID),
+            process(40, LAUNCHD_PID),
+            process(50, LAUNCHD_PID),
+            process(60, LAUNCHD_PID),
+            process(70, LAUNCHD_PID),
             process(71, 70),
+            process(90, LAUNCHD_PID),
             process(91, 90),
+            process(100, LAUNCHD_PID),
             process(101, 100),
+            process(110, LAUNCHD_PID),
             process(111, 110),
-            // The session 120 started the session 80, and the session 80 ran
-            // `faulte kill`. Both of them are ancestors of `faulte`.
+            process(200, LAUNCHD_PID),
+            process(210, LAUNCHD_PID),
             process(120, LAUNCHD_PID),
             process(80, 120),
             process(FAULTE_PID, 80),
-        ]);
+        ];
 
         let plan = plan(&input(&ranking, &table, rules()));
 
