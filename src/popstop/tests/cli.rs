@@ -326,7 +326,10 @@ fn a_status_names_the_copy_that_runs_its_mode_and_its_device() {
         Some(0),
         "a status with a copy that runs is a success: {status}. Its stderr:\n{errors}"
     );
-    assert_eq!(errors, "", "a status that finds a copy says nothing on stderr");
+    assert_eq!(
+        errors, "",
+        "a status that finds a copy says nothing on stderr"
+    );
     for named in [
         format!("pid {}", copy.pid()),
         "foreground".to_owned(),

@@ -11,6 +11,7 @@ use crate::exit_status;
 use crate::life_cycle::{Failure, Settings};
 use crate::lock::{self, HolderRecord, Release, StateDir};
 use crate::message;
+use crate::output;
 use crate::process::{self, Identity};
 
 /// The longest time that a stop waits for the copy to release the lock.
@@ -58,10 +59,22 @@ impl Report {
 /// cannot be read. A name of the default output device that cannot be read is
 /// not a failure: a copy runs, and that is the answer.
 pub fn status(settings: &Settings) -> Result<Report, Failure> {
-    let _dir = settings.state_dir()?;
+    let dir = settings.state_dir()?;
+    let Some(record) = holder(&dir)? else {
+        return Ok(Report {
+            status: exit_status::NO_COPY_RUNS,
+            text: message::no_copy_runs(),
+        });
+    };
+    // The default output unit follows the default output device, thus the
+    // device that popstop reads here is the device that the copy keeps awake.
+    let text = match output::default_output_device_name() {
+        Ok(name) => message::status_lines(&record, &name),
+        Err(problem) => message::status_lines_without_device_name(&record, &problem),
+    };
     Ok(Report {
-        status: exit_status::ERROR,
-        text: String::new(),
+        status: exit_status::SUCCESS,
+        text,
     })
 }
 
