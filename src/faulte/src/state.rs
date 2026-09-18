@@ -64,8 +64,7 @@ impl SessionState {
     /// time is known.
     #[must_use]
     pub fn is_idle_for_more_than(&self, threshold: Duration) -> bool {
-        let _ = threshold;
-        false
+        matches!(self, Self::Idle { for_: Some(for_) } if *for_ > threshold)
     }
 }
 
