@@ -155,6 +155,7 @@ pub fn parse(output: &str) -> Result<TopSample, TopParseError> {
         .iter()
         .enumerate()
         .skip(second_header + 1)
+        .filter(|(_, line)| !line.trim().is_empty())
         .map(|(index, line)| {
             parse_row(line).ok_or_else(|| TopParseError::MalformedRow {
                 number: index + 1,
