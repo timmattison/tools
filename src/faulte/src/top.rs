@@ -26,8 +26,8 @@ pub const PROGRAM: &str = "/usr/bin/top";
 /// The number of samples that `faulte` asks `top` for.
 ///
 /// The first sample holds the counter since each process started. The second
-/// sample holds the change over the interval, which is the rate that `faulte`
-/// ranks by.
+/// sample holds the change over the interval. `faulte` divides that change by
+/// the window to get the rate that it ranks by.
 const SAMPLES: usize = 2;
 
 /// The value of `-stats`: the columns that `faulte` asks `top` for. Both are
@@ -138,10 +138,25 @@ pub enum TopParseError {
 /// Reads the page faults of each process from the output of `top`, run with
 /// the [`arguments`] of `faulte`.
 ///
+/// A header row is a line whose first token is `PID`. The rows of the sample
+/// are the lines after the second header row. A blank line is not a row. The
+/// parser does not read the rows of the first sample.
+///
 /// # Errors
 ///
-/// Gives a [`TopParseError`] when the output is not two samples of the columns
-/// `PID FAULTS`, or when the second sample holds no row or a malformed row.
+/// The parser checks in this order, and the first failure gives the error:
+///
+/// 1. [`TopParseError::UnexpectedHeader`]: a header row is not exactly the
+///    tokens `PID FAULTS`.
+/// 2. [`TopParseError::SampleCount`]: the output does not hold exactly two
+///    header rows.
+/// 3. [`TopParseError::MalformedRow`]: a row of the second sample is not a
+///    `u32` and a `u64` of ASCII digits, each with one optional trailing `+`
+///    or `-`.
+/// 4. [`TopParseError::NoRows`]: the second sample holds no row.
+///
+/// A bad clock line is not an error. It gives a sample with no
+/// [`TopSample::elapsed`].
 pub fn parse(output: &str) -> Result<TopSample, TopParseError> {
     let lines: Vec<&str> = output.lines().collect();
     let headers = lines
@@ -437,6 +452,22 @@ mod tests {
                 "the message shows the line and the columns that faulte asked for: {message}"
             );
         }
+    }
+
+    /// A header row of other columns is the error, although the count of
+    /// header rows is also wrong. That header names the cause, and the count
+    /// does not.
+    #[test]
+    fn a_header_row_of_other_columns_comes_before_a_wrong_count() {
+        let text = sample("12:00:00", "PID    COMMAND   ", "10     launchd   \n");
+
+        assert_eq!(
+            parse(&text),
+            Err(TopParseError::UnexpectedHeader {
+                number: 5,
+                line: "PID    COMMAND   ".to_owned()
+            })
+        );
     }
 
     /// A second sample with no row is refused. An empty ranking looks the
