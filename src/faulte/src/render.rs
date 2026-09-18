@@ -223,8 +223,10 @@ impl Accounts {
     /// name for it.
     #[must_use]
     pub fn name_of(&self, uid: Uid) -> String {
-        let _ = &self.names;
-        uid.to_string()
+        self.names
+            .get(&uid)
+            .cloned()
+            .unwrap_or_else(|| uid.to_string())
     }
 }
 
