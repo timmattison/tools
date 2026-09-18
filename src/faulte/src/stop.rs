@@ -603,6 +603,8 @@ mod tests {
         signals: RefCell<Vec<(Pid, Signal)>>,
         /// The count of the waits that the sequence made.
         sleeps: RefCell<usize>,
+        /// The count of the reads of the process table that the sequence made.
+        reads: RefCell<usize>,
     }
 
     impl FakeMachine {
@@ -615,6 +617,7 @@ mod tests {
                 refusals: HashMap::new(),
                 signals: RefCell::new(Vec::new()),
                 sleeps: RefCell::new(0),
+                reads: RefCell::new(0),
             }
         }
 
@@ -647,10 +650,17 @@ mod tests {
         fn sleeps(&self) -> usize {
             *self.sleeps.borrow()
         }
+
+        /// Gives the count of the reads of the process table that the sequence
+        /// made.
+        fn reads(&self) -> usize {
+            *self.reads.borrow()
+        }
     }
 
     impl Machine for FakeMachine {
         fn process_table(&self) -> Result<Vec<ProcessRow>, MachineError> {
+            *self.reads.borrow_mut() += 1;
             let mut tables = self.tables.borrow_mut();
             if tables.len() > 1 {
                 tables.pop_front()
@@ -1068,6 +1078,39 @@ mod tests {
                 (Pid::new(30), Signal::Kill)
             ],
             "both signals went before the read that failed"
+        );
+    }
+
+    /// The grace period of a real run: thirty waits of one second each.
+    const FULL_GRACE: Duration = Duration::from_secs(30);
+
+    /// The sequence stops at the first read that finds every target gone, and
+    /// it does not wait out the rest of the grace period.
+    ///
+    /// The grace period is thirty seconds, because a Mac that is short of
+    /// memory is slow to page a process in. A session that closed its
+    /// transcript in one second is gone, and thirty seconds of waiting after
+    /// that is thirty seconds in which the person reads nothing.
+    #[test]
+    fn the_sequence_stops_at_the_first_read_that_finds_every_target_gone() {
+        let candidate = candidate(30);
+        let machine = machine_of(&[30], vec![vec![process(30, LAUNCHD_PID)], Vec::new()]);
+
+        let report = stop(&machine, &[candidate.clone()], FULL_GRACE, ONE_POLL);
+
+        assert_eq!(
+            report,
+            StopReport {
+                stopped: vec![candidate],
+                ..StopReport::default()
+            },
+            "the session was gone at the first read after SIGTERM"
+        );
+        assert_eq!(machine.sleeps(), 1, "the sequence waits once");
+        assert_eq!(
+            machine.reads(),
+            2,
+            "the table of the check, and the table that found the target gone"
         );
     }
 
