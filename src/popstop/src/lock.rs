@@ -3,9 +3,10 @@
 //! Only one copy of popstop runs for each user. A copy that runs holds an
 //! exclusive advisory lock on the lock file in its [`StateDir`].
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::fs::{self, File, OpenOptions, TryLockError};
+use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 /// The name of the state directory in the data directory of the user.
@@ -73,7 +74,8 @@ impl StateDir {
 }
 
 /// How a copy of popstop runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Mode {
     /// The copy holds a terminal and stops on Ctrl-C.
     Foreground,
@@ -92,7 +94,8 @@ impl fmt::Display for Mode {
 }
 
 /// The time at which a process started, in microseconds since the Unix epoch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct StartTime(u64);
 
 impl StartTime {
@@ -113,7 +116,9 @@ impl StartTime {
 ///
 /// A reader trusts a record only while the lock is held. After a crash, an
 /// old record can stay in a file that nobody locks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// The lock file holds the record as one line of JSON.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HolderRecord {
     /// The process ID of the holder.
     pub pid: u32,
@@ -149,23 +154,64 @@ pub enum AcquireError {
     Io(io::Error),
 }
 
+impl LockGuard {
+    /// Replaces the contents of the lock file with `record`, and puts the
+    /// data on the disk.
+    fn write_record(&mut self, record: &HolderRecord) -> io::Result<()> {
+        let mut line = serde_json::to_string(record)?;
+        line.push('\n');
+        self.file.set_len(0)?;
+        self.file.rewind()?;
+        self.file.write_all(line.as_bytes())?;
+        self.file.sync_data()
+    }
+}
+
 /// Gets the lock for this process, and writes `record` into the lock file.
+///
+/// It makes the state directory and the lock file when they do not exist. It
+/// writes the record before it returns the guard, so a reader that sees the
+/// lock held finds the record at once.
 ///
 /// # Errors
 ///
 /// Returns [`AcquireError::Held`] with the record of the holder when another
 /// copy holds the lock. Returns [`AcquireError::Io`] when the state directory
 /// or the lock file cannot be used.
-pub fn acquire(dir: &StateDir, _record: &HolderRecord) -> Result<LockGuard, AcquireError> {
+pub fn acquire(dir: &StateDir, record: &HolderRecord) -> Result<LockGuard, AcquireError> {
     fs::create_dir_all(dir.path()).map_err(AcquireError::Io)?;
-    let file = OpenOptions::new()
+    // No truncation here: the file can hold the record of a copy that runs.
+    let mut file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .open(dir.lock_path())
         .map_err(AcquireError::Io)?;
-    Ok(LockGuard { file })
+
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => {
+            return Err(read_record(&mut file).map_or_else(AcquireError::Io, AcquireError::Held));
+        }
+        Err(TryLockError::Error(error)) => return Err(AcquireError::Io(error)),
+    }
+
+    let mut guard = LockGuard { file };
+    guard.write_record(record).map_err(AcquireError::Io)?;
+    Ok(guard)
+}
+
+/// Reads the record in the lock file.
+///
+/// Returns an error of kind [`io::ErrorKind::InvalidData`] when the file does
+/// not hold a record.
+fn read_record(file: &mut File) -> io::Result<HolderRecord> {
+    file.rewind()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 #[cfg(test)]

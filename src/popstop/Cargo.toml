@@ -8,6 +8,8 @@ description = "Keeps the default audio output device awake with an inaudible sig
 buildinfo.workspace = true
 clap.workspace = true
 dirs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
