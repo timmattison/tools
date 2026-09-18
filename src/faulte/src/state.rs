@@ -35,11 +35,19 @@ pub enum SessionState {
 
 impl SessionState {
     /// Gives the state of the session of `record` at the time `now`.
+    ///
+    /// The idle time is `now` minus the time of the last status change. A
+    /// change after `now` gives no idle time, not a guess. The clock of this
+    /// Mac can move back, and a session can write its file between the time
+    /// that the caller reads `now` and the read of the file.
     #[must_use]
     pub fn from_record(record: &SessionRecord, now: SystemTime) -> Self {
-        let _ = now;
         match &record.status {
-            Some(SessionStatus::Idle) => Self::Idle { for_: None },
+            Some(SessionStatus::Idle) => Self::Idle {
+                for_: record
+                    .status_changed_at
+                    .and_then(|changed_at| now.duration_since(changed_at).ok()),
+            },
             Some(SessionStatus::Busy) => Self::Busy,
             Some(SessionStatus::Waiting) => Self::Waiting,
             Some(SessionStatus::Other(text)) => Self::Other(text.clone()),
