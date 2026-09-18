@@ -18,6 +18,7 @@
 //! without a real process table.
 
 pub mod duration;
+pub mod machine;
 pub mod pid;
 pub mod ranking;
 pub mod render;
