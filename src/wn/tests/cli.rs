@@ -105,6 +105,14 @@ const THREE_ISSUES: &str = r#"{"data":{"repository":{
 /// answer names #278 whichever command it prints.
 const ONE_OPEN_CHAIN: &str = "#277 → #278";
 
+/// What GitHub says about `#515` when it is an open pull request.
+///
+/// A pull request is work that already exists, so the answer of a chain that
+/// names it tells the reader to finish it and names no command that starts it.
+const ONE_OPEN_PULL_REQUEST: &str = r#"{"data":{"repository":{
+"i515":{"__typename":"PullRequest","number":515,"title":"The finished work","state":"OPEN"}
+}}}"#;
+
 /// A plan of three streams, as a record for each stream.
 ///
 /// The notes carry real prose, because real prose is the trap the plan reader
@@ -817,6 +825,25 @@ fn walks_the_chain_and_names_the_issue_to_start() {
             "\n",
             "Start #278 next with 'si 278'\n",
         )
+    );
+}
+
+#[test]
+fn an_open_pull_request_of_a_chain_is_work_to_finish_and_not_to_start() {
+    // The work of an open pull request exists already. A start command for
+    // its number sends the reader to begin that work a second time, so the
+    // answer tells them to review it and merge it instead.
+    let gh = FakeGh::new(ONE_OPEN_PULL_REQUEST);
+    let output = run(&gh, &["--repo", REPO, "#515"], "80", false);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.ends_with("Finish PR #515 next: review it and merge it\n"),
+        "the answer tells the reader to finish the pull request, in {text}"
+    );
+    assert!(
+        !text.contains("si 515"),
+        "the answer names no command that starts the pull request, in {text}"
     );
 }
 
