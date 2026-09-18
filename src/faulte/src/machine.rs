@@ -294,7 +294,7 @@ pub fn observe(machine: &dyn Machine, interval: Span) -> Result<Observed, Machin
     let accounts = accounts_of(machine, &ranking);
     Ok(Observed {
         ranking,
-        table: Vec::new(),
+        table,
         swap: VmDelta::between(before, after),
         usage,
         // The compressor holds what it holds now, so the count after the
