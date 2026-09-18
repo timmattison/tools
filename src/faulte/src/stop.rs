@@ -72,7 +72,15 @@ pub fn recheck(
     fresh_table: &[ProcessRow],
     fresh_record: Option<&SessionRecord>,
 ) -> Recheck {
-    let _ = (candidate, fresh_table, fresh_record);
+    // A zombie is not a live process. It stopped already, and its parent did
+    // not collect its exit status yet, so no signal reaches it.
+    let Some(_process) = fresh_table
+        .iter()
+        .find(|process| process.pid == candidate.row.pid && !process.zombie)
+    else {
+        return Recheck::Exited;
+    };
+    let _ = fresh_record;
     Recheck::Proceed
 }
 
