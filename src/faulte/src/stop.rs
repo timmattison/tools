@@ -286,6 +286,27 @@ mod tests {
         }
     }
 
+    /// A candidate that carries no time of the last status change is never
+    /// signalled, and a record that gives no such time does not make one.
+    ///
+    /// Rule 2 of the plan gives no such candidate: an idle time that no record
+    /// states is not long enough. The check states the rule of its own,
+    /// because two absent times compare as equal and say nothing at all.
+    #[test]
+    fn a_candidate_with_no_time_of_the_change_is_not_signalled() {
+        let candidate = Candidate {
+            status_changed_at: None,
+            ..candidate(30)
+        };
+        let table = [process(30, LAUNCHD_PID)];
+
+        assert_eq!(
+            recheck(&candidate, &table, Some(&record(30, None))),
+            Recheck::StatusChanged,
+            "two absent times are not one time"
+        );
+    }
+
     /// A session that did not change proceeds: its PID holds the same process
     /// that the plan read, the registry still says that it is idle, the time
     /// of the last status change is the same, and it started no process.
