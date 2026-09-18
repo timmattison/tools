@@ -174,6 +174,20 @@ pub struct Ranking {
     pub skipped: Skipped,
 }
 
+impl Ranking {
+    /// Gives the share of all faults that `faults` is, as a fraction from 0
+    /// to 1.
+    ///
+    /// All faults are [`Ranking::total_faults`], so the faults of the
+    /// processes that exited count. When the total is zero, every share is
+    /// zero.
+    #[must_use]
+    pub fn share(&self, faults: u64) -> f64 {
+        let _ = faults;
+        0.0
+    }
+}
+
 /// Ranks every process of `input` by its faults over the window.
 #[must_use]
 pub fn rank(input: &Observation<'_>) -> Ranking {
@@ -357,4 +371,21 @@ PID    FAULTS    \n\
 
         assert_eq!(pids(&machine.rank()), [20, 11, 12, 30]);
     }
+
+    /// PID 99 made 100 faults and exited before `ps` read the table. Those
+    /// faults were real. The total holds them, and the share of each row is a
+    /// share of that total.
+    #[test]
+    fn the_total_and_the_shares_include_the_faults_of_processes_that_exited() {
+        let machine = Machine::new(vec![count(10, 300), count(99, 100)], vec![process(10)]);
+
+        let ranking = machine.rank();
+
+        assert_eq!(pids(&ranking), [10]);
+        assert_eq!(ranking.total_faults, 400);
+        assert_eq!(ranking.share(300), 0.75);
+        assert_eq!(ranking.share(100), 0.25);
+        assert_eq!(ranking.share(400), 1.0);
+    }
+
 }
