@@ -306,6 +306,8 @@ pub fn rank(input: &Observation<'_>) -> Ranking {
 mod tests {
     use super::*;
 
+    use std::collections::BTreeSet;
+
     /// The output of `top` in two samples. PID 10 made 9,000,000 faults since
     /// it started, and 3 over the interval. PID 20 made 5 since it started,
     /// and 4,000 over the interval.
@@ -607,5 +609,70 @@ PID    FAULTS    \n\
         assert_eq!(ranking.skipped.unsampled, 2);
         assert_eq!(ranking.skipped.zombies, 1);
         assert_eq!(ranking.skipped.exited, 0);
+    }
+
+    /// The identity that the issue demands: no process is dropped. Over a
+    /// mixed input, the rows and the three counts hold each PID of the sample
+    /// and of the table exactly once.
+    ///
+    /// The input lists PID 20 twice in the sample and PID 60 twice in the
+    /// table. Neither `top` nor `ps` prints a PID twice, and a ranking that
+    /// counts one process twice breaks this identity as surely as a ranking
+    /// that drops one. Thus each PID is one process here, and the faults of a
+    /// PID that the sample lists twice add up.
+    #[test]
+    fn every_process_of_the_sample_or_the_table_is_a_row_or_one_skip() {
+        let faults = vec![
+            count(0, 1_000),
+            count(10, 300),
+            count(20, 7),
+            count(20, 13),
+            count(51, 7),
+            count(99, 40),
+            count(98, 60),
+        ];
+        let table = vec![
+            process(10),
+            process(20),
+            zombie(50),
+            zombie(51),
+            process(60),
+            process(60),
+            process(61),
+        ];
+        let processes: BTreeSet<u32> = faults
+            .iter()
+            .map(|count| count.pid.get())
+            .chain(table.iter().map(|process| process.pid.get()))
+            .collect();
+
+        let ranking = Machine::new(faults, table).rank();
+
+        assert_eq!(processes.len(), 9);
+        assert_eq!(pids(&ranking), [0, 10, 20, 51]);
+        let skipped = ranking.skipped;
+        assert_eq!(
+            ranking.rows.len() + skipped.exited + skipped.zombies + skipped.unsampled,
+            processes.len(),
+            "each of {processes:?} is a row or one skip: {ranking:?}"
+        );
+        assert_eq!(
+            ranking.rows.iter().find(|row| row.pid == Pid::new(20)),
+            Some(&RankedRow {
+                pid: Pid::new(20),
+                uid: Uid::new(VIEWER_UID),
+                faults: 20,
+                rss_kib: Some(200),
+                started_at_epoch_secs: Some(STARTED),
+                command: "/usr/bin/process-20 --flag".to_owned(),
+                claude: ClaudeView::NotClaude,
+            }),
+            "the faults of a PID that the sample lists twice add up"
+        );
+        assert_eq!(
+            ranking.rows.iter().map(|row| row.faults).sum::<u64>() + skipped.exited_faults,
+            ranking.total_faults,
+            "the rows and the processes that exited hold every fault"
+        );
     }
 }
