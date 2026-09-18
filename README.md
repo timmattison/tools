@@ -1387,6 +1387,13 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     different one, and it goes in as it is written, whole command lines included:
     `export WN_START_COMMAND='gh issue develop'` makes the answer read
     `Start #278 next with 'gh issue develop 278'`. An empty value falls back to `si`.
+  - An open pull request is work that exists already, so the answer names no start command for
+    it, and none for the issue it closes. It tells the reader to finish the pull request instead,
+    and it names the issue that pull request closes when the plan names one:
+    `Finish PR #515 (closes #512) next: review it and merge it`. The summary of a plan writes the
+    same step as `→ PR #515 (closes #512)  review it and merge it`, with its words in the column
+    where the other streams write their start commands. A plan that says `#4 (in flight, PR #15)`
+    thus sends the reader to review and merge `#15`, and not to start `#4` a second time.
   - Every separator means the same thing: the issue on the left comes before the issue on the
     right. `→`, `->`, `∥`, `||`, `─`, `━`, `═`, a comma, and a semicolon all read as "then", so a
     chain pasted out of a plan works whichever way it was typed. The double bar is read as an
@@ -1691,7 +1698,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     reads `The plan holds no work. Nothing to start.` and the run exits `0`, and it asks GitHub
     nothing at all. Every other JSON plan earns the report a picture earns: one row for each step
     in the order of the work, `→` on every ready step and `·` on a blocked one, the work each
-    blocked row waits for, and one start line for each issue somebody can begin now. A JSON plan
+    blocked row waits for, and one line for each step somebody can take now. A JSON plan
     is a graph, a table with a `Waits for` column is the same graph, and one report answers both,
     because two reports of one question drift apart.
   - A run of `claude` is the fourth input, after the argument, standard input, and the clipboard.
