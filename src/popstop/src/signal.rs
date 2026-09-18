@@ -84,6 +84,22 @@ impl KeepaliveSignal {
     }
 }
 
+impl StopHandle {
+    /// Asks the signal to ramp down to silence.
+    ///
+    /// The ramp down starts at the next call to [`KeepaliveSignal::fill`].
+    pub fn start_ramp_down(&self) {}
+
+    /// Tells whether the ramp down is complete.
+    ///
+    /// It is true after the signal wrote its first sample of silence at the
+    /// end of the ramp down. From then on, every sample is 0.0.
+    #[must_use]
+    pub fn is_ramp_down_complete(&self) -> bool {
+        false
+    }
+}
+
 /// Gives the number of whole frames in `duration` at `rate`.
 #[expect(
     clippy::cast_possible_truncation,
@@ -177,5 +193,54 @@ mod tests {
                 index + 1
             );
         }
+    }
+
+    #[test]
+    fn a_ramp_down_falls_to_exactly_zero_stays_there_and_reports_complete() {
+        let (mut signal, stop) = KeepaliveSignal::new(rate());
+        let ramp = ramp_frames();
+
+        let before = fill_frames(&mut signal, ramp * 2, 1);
+        assert_eq!(before.last(), Some(&LEVEL), "the signal is at the level");
+        assert!(
+            !stop.is_ramp_down_complete(),
+            "the ramp down is not complete before the stop"
+        );
+
+        stop.start_ramp_down();
+        assert!(
+            !stop.is_ramp_down_complete(),
+            "the ramp down is not complete before one sample of it plays"
+        );
+
+        // One frame for each fill, so the test reads the report after each sample.
+        let step = ramp_step();
+        let mut previous = LEVEL;
+        let mut first_zero = None;
+        for frame in 0..ramp * 3 {
+            let sample = fill_frames(&mut signal, 1, 1)[0];
+            assert!(
+                (0.0..=previous).contains(&sample),
+                "frame {frame} of the ramp down is {sample}, after {previous}"
+            );
+            assert!(
+                previous - sample <= step,
+                "frame {frame} of the ramp down falls by more than one step of the ramp"
+            );
+            if sample == 0.0 {
+                first_zero.get_or_insert(frame);
+            }
+            assert_eq!(
+                stop.is_ramp_down_complete(),
+                first_zero.is_some(),
+                "the report after frame {frame} ({sample}) is wrong"
+            );
+            previous = sample;
+        }
+        assert_eq!(
+            first_zero,
+            Some(ramp - 1),
+            "the ramp down lasts RAMP_DURATION, then the signal is silent"
+        );
     }
 }
