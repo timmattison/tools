@@ -105,11 +105,7 @@ pub fn parse(output: &str) -> Result<Vec<ProcessRow>, TableParseError> {
         .lines()
         .enumerate()
         .filter(|(_, line)| !line.trim_ascii().is_empty())
-        .filter_map(|(index, line)| {
-            parse_row(line)
-                .map_err(|fault| fault.at(index + 1, line))
-                .transpose()
-        })
+        .map(|(index, line)| parse_row(line).map_err(|fault| fault.at(index + 1, line)))
         .collect()
 }
 
@@ -120,6 +116,8 @@ enum RowFault {
     /// The numeric column of this name holds a value that is not a number of
     /// its type.
     MalformedNumber(&'static str),
+    /// The start time does not parse, or it is before the epoch.
+    MalformedStart,
 }
 
 impl RowFault {
@@ -134,6 +132,7 @@ impl RowFault {
                 number,
                 line,
             },
+            Self::MalformedStart => TableParseError::MalformedStart { number, line },
         }
     }
 }
@@ -150,29 +149,34 @@ const ZOMBIE: char = 'Z';
 const FIELDS: usize = 10;
 
 /// Reads one row.
-fn parse_row(line: &str) -> Result<Option<ProcessRow>, RowFault> {
+fn parse_row(line: &str) -> Result<ProcessRow, RowFault> {
     let ([pid, ppid, uid, rss, stat, weekday, month, day, time, year], command) =
         split_fields::<FIELDS>(line).ok_or(RowFault::TooFewFields)?;
     let pid = Pid::new(number(PID_COLUMN, pid)?);
     let ppid = Pid::new(number(PPID_COLUMN, ppid)?);
     let uid = parse_uid(uid)?;
     let rss_kib = number(RSS_COLUMN, rss)?;
-    let start = [weekday, month, day, time, year].join(" ");
-    let Some(started) = NaiveDateTime::parse_from_str(&start, START_FORMAT)
-        .ok()
-        .and_then(|start| u64::try_from(start.and_utc().timestamp()).ok())
-    else {
-        return Ok(None);
-    };
-    Ok(Some(ProcessRow {
+    Ok(ProcessRow {
         pid,
         ppid,
         uid,
         rss_kib,
         zombie: stat.starts_with(ZOMBIE),
-        started_at_epoch_secs: started,
+        started_at_epoch_secs: start_time([weekday, month, day, time, year])?,
         command: command.to_owned(),
-    }))
+    })
+}
+
+/// Reads the five fields of a start time as a time in UTC, in seconds since
+/// the epoch.
+///
+/// The fields are joined with one space, so the space that pads a day of one
+/// digit is gone. `%d` reads a day of one digit or two.
+fn start_time(fields: [&str; 5]) -> Result<u64, RowFault> {
+    NaiveDateTime::parse_from_str(&fields.join(" "), START_FORMAT)
+        .ok()
+        .and_then(|start| u64::try_from(start.and_utc().timestamp()).ok())
+        .ok_or(RowFault::MalformedStart)
 }
 
 /// Reads the value `token` of the numeric column `column`.
