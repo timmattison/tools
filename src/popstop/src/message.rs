@@ -8,6 +8,9 @@ use std::path::Path;
 /// The command that stops the copy that runs.
 const STOP_COMMAND: &str = "popstop --stop";
 
+/// The flag that names the state directory.
+const STATE_DIR_FLAG: &str = "--state-dir";
+
 /// Gives the command that stops the copy that runs.
 ///
 /// A copy that runs with `--state-dir` holds the lock in that directory, so
@@ -15,8 +18,13 @@ const STOP_COMMAND: &str = "popstop --stop";
 /// the user can copy the command as it is.
 #[must_use]
 pub fn stop_command(state_dir: Option<&Path>) -> String {
-    let _ = state_dir;
-    STOP_COMMAND.to_owned()
+    match state_dir {
+        None => STOP_COMMAND.to_owned(),
+        Some(dir) => format!(
+            "{STOP_COMMAND} {STATE_DIR_FLAG} {}",
+            shellquote::shell_quote(&dir.to_string_lossy())
+        ),
+    }
 }
 
 #[cfg(test)]
