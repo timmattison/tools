@@ -83,10 +83,16 @@ pub fn recheck(
     if process.started_at_epoch_secs != candidate.started_at_epoch_secs {
         return Recheck::PidReused;
     }
-    let still_idle = fresh_record.is_some_and(|record| {
-        matches!(record.status, Some(SessionStatus::Idle))
-            && record.status_changed_at == candidate.status_changed_at
-    });
+    // A time that no record gives is no answer. Two absent times compare as
+    // equal, so the candidate must carry a time for the comparison to say
+    // anything.
+    let still_idle = match (candidate.status_changed_at, fresh_record) {
+        (Some(changed_at), Some(record)) => {
+            matches!(record.status, Some(SessionStatus::Idle))
+                && record.status_changed_at == Some(changed_at)
+        }
+        _ => false,
+    };
     if !still_idle {
         return Recheck::StatusChanged;
     }
