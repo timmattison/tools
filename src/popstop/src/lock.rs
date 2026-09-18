@@ -4,6 +4,7 @@
 //! exclusive advisory lock on the lock file in its [`StateDir`].
 
 use std::fmt;
+use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -90,10 +91,110 @@ impl fmt::Display for Mode {
     }
 }
 
+/// The time at which a process started, in microseconds since the Unix epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartTime(u64);
+
+impl StartTime {
+    /// Makes a start time from a number of microseconds since the Unix epoch.
+    #[must_use]
+    pub const fn from_unix_micros(micros: u64) -> Self {
+        Self(micros)
+    }
+
+    /// Gives the number of microseconds since the Unix epoch.
+    #[must_use]
+    pub const fn unix_micros(self) -> u64 {
+        self.0
+    }
+}
+
+/// The record that the holder of the lock writes into the lock file.
+///
+/// A reader trusts a record only while the lock is held. After a crash, an
+/// old record can stay in a file that nobody locks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HolderRecord {
+    /// The process ID of the holder.
+    pub pid: u32,
+    /// How the holder runs.
+    pub mode: Mode,
+    /// The time at which the kernel started the holder process.
+    pub started_at: StartTime,
+}
+
+/// The proof that this process holds the lock.
+///
+/// A drop of the guard removes the record from the lock file and releases the
+/// lock.
+#[derive(Debug)]
+#[must_use = "the lock is released when the guard drops"]
+pub struct LockGuard {
+    /// The lock file, which this process holds locked.
+    file: File,
+}
+
+/// The reason why [`acquire`] did not get the lock.
+#[derive(Debug, thiserror::Error)]
+pub enum AcquireError {
+    /// Another copy of popstop holds the lock. The record tells which copy.
+    #[error(
+        "another copy of popstop holds the lock (pid {}, {} mode)",
+        .0.pid,
+        .0.mode
+    )]
+    Held(HolderRecord),
+    /// The lock file cannot be made, opened, locked, read, or written.
+    #[error("the lock file cannot be used: {0}")]
+    Io(io::Error),
+}
+
+/// Gets the lock for this process, and writes `record` into the lock file.
+///
+/// # Errors
+///
+/// Returns [`AcquireError::Held`] with the record of the holder when another
+/// copy holds the lock. Returns [`AcquireError::Io`] when the state directory
+/// or the lock file cannot be used.
+pub fn acquire(dir: &StateDir, _record: &HolderRecord) -> Result<LockGuard, AcquireError> {
+    fs::create_dir_all(dir.path()).map_err(AcquireError::Io)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.lock_path())
+        .map_err(AcquireError::Io)?;
+    Ok(LockGuard { file })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Mode, StateDir};
+    use super::{acquire, AcquireError, HolderRecord, Mode, StartTime, StateDir};
     use std::path::{Path, PathBuf};
+    use tempfile::TempDir;
+
+    /// The record of the first holder in a test.
+    const FIRST: HolderRecord = HolderRecord {
+        pid: 4242,
+        mode: Mode::Background,
+        started_at: StartTime::from_unix_micros(1_758_000_000_123_456),
+    };
+
+    /// The record of a second copy that tries to get the lock.
+    const SECOND: HolderRecord = HolderRecord {
+        pid: 5353,
+        mode: Mode::Foreground,
+        started_at: StartTime::from_unix_micros(1_758_000_060_654_321),
+    };
+
+    /// Makes a temporary directory of its own for one test, and a state
+    /// directory in it that does not exist yet.
+    fn state_dir() -> (TempDir, StateDir) {
+        let temp = tempfile::tempdir().expect("a temporary directory");
+        let dir = StateDir::new(temp.path().join("state"));
+        (temp, dir)
+    }
 
     #[test]
     fn a_state_directory_holds_the_lock_file_and_the_log() {
@@ -120,5 +221,20 @@ mod tests {
     fn a_mode_displays_as_one_lowercase_word() {
         assert_eq!(Mode::Foreground.to_string(), "foreground");
         assert_eq!(Mode::Background.to_string(), "background");
+    }
+
+    #[test]
+    fn a_second_acquire_refuses_and_returns_the_record_of_the_first_holder() {
+        let (_temp, dir) = state_dir();
+
+        let first = acquire(&dir, &FIRST).expect("the first acquire gets the lock");
+        let second = acquire(&dir, &SECOND);
+
+        match second {
+            Err(AcquireError::Held(holder)) => assert_eq!(holder, FIRST),
+            Err(AcquireError::Io(error)) => panic!("the second acquire failed: {error}"),
+            Ok(_guard) => panic!("the second acquire got the lock while the first holds it"),
+        }
+        drop(first);
     }
 }
