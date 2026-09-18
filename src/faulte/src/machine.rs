@@ -194,8 +194,9 @@ pub trait Machine {
     /// Waits for `how_long`.
     ///
     /// The stop sequence waits between two reads of the process table. The
-    /// count of the waits is what bounds the grace period, so a machine of a
-    /// test waits for no time and the sequence still ends.
+    /// count of the waits is what bounds the grace period and the wait after
+    /// `SIGKILL`, so a machine of a test waits for no time and the sequence
+    /// still ends.
     fn sleep(&self, how_long: Duration);
 }
 

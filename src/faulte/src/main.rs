@@ -120,11 +120,12 @@ const GRACE: Duration = Duration::from_secs(30);
 #[cfg(target_os = "macos")]
 const AFTER_KILL: Duration = Duration::from_secs(10);
 
-/// The time between two reads of the process table inside [`GRACE`].
+/// The time between two reads of the process table inside [`GRACE`] and inside
+/// [`AFTER_KILL`].
 ///
-/// One second is short against the grace period, so a session that stopped
-/// early ends the wait early. It is long against a read of the table, so the
-/// waiting costs almost nothing.
+/// One second is short against both waits, so a session that stops early ends
+/// the wait early. It is long against a read of the table, so the waiting
+/// costs almost nothing.
 #[cfg(target_os = "macos")]
 const POLL: Duration = Duration::from_secs(1);
 

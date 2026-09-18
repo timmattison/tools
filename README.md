@@ -3929,7 +3929,7 @@ Stop 19 sessions? [y/N]
 
 A person takes minutes to answer, so the plan is old by then. Immediately before it signals a session, `faulte` reads the process table and the registry again. The check drops a session whose status changed, a session that started a process since the plan, a PID that is gone, and a PID that another process took. A session that the person started to use again in those minutes survives, and the report names it and the reason.
 
-`SIGTERM` goes first, so that Claude Code closes its transcript. `SIGKILL` goes 30 seconds later, and only to a target that is still the same process. The grace period is long because of the Mac that this tool is for: a Mac that is short of memory is slow to page a process in, and a process handles no signal until it is in memory.
+`SIGTERM` goes first, so that Claude Code closes its transcript. `SIGKILL` goes 30 seconds later, and only to a target that is still the same process. The grace period is long because of the Mac that this tool is for: a Mac that is short of memory is slow to page a process in, and a process handles no signal until it is in memory. After `SIGKILL`, `faulte` waits up to 10 seconds for the session to go, and the report names a session that is still there then as one that did not stop.
 
 For each session that it stopped, `faulte` prints one line:
 

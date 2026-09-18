@@ -158,10 +158,11 @@ pub struct StopReport {
     pub skipped: Vec<(Candidate, Recheck)>,
     /// The sessions that were gone after `SIGTERM`.
     pub stopped: Vec<Candidate>,
-    /// The sessions that were gone after `SIGKILL`.
+    /// The sessions that went in the wait after `SIGKILL`.
     pub killed: Vec<Candidate>,
-    /// The sessions that were still the same process after `SIGKILL`. One
-    /// session in this list makes a stop that did not do what the plan said.
+    /// The sessions that were still the same process when the wait after
+    /// `SIGKILL` ended. One session in this list makes a stop that did not do
+    /// what the plan said.
     pub survived: Vec<Candidate>,
     /// The candidates that `faulte` could not signal, or could not read
     /// again, each with what the operating system said. One candidate in this
@@ -218,14 +219,17 @@ pub struct Timing {
 /// 3. A wait of `poll`, then a read of the table, until every target is gone
 ///    or `grace` ends. A target is gone when its PID has no row, has a zombie
 ///    row, or has a row of another start time.
-/// 4. `SIGKILL` to each target that is still the same process, then one more
-///    wait and one more read, to learn what that signal did.
+/// 4. `SIGKILL` to each target that is still the same process, then the same
+///    wait, until every target is gone or `after_kill` ends. A target that is
+///    still the same process then is a session that survived.
 ///
-/// `grace` is 30 seconds in a real run, and `poll` is one second. The grace
-/// period is long because of the Mac that this tool is for: a Mac that is
-/// short of memory is slow to page a process in, and a process handles no
-/// signal until it is in memory. A short grace period sends `SIGKILL` to a
-/// session that was on its way to closing its transcript.
+/// [`Timing`] holds the three times. The two waits are long in a real run
+/// because of the Mac that this tool is for: a Mac that is short of memory is
+/// slow to page a process in. A process handles no signal until it is in
+/// memory, and the exit after `SIGKILL` is work that must also get the CPU and
+/// the memory of the process. A short grace period sends `SIGKILL` to a
+/// session that was on its way to closing its transcript, and a short wait
+/// after `SIGKILL` names a session that stopped late as one that did not stop.
 ///
 /// A read of the process table that fails ends the sequence. `faulte` cannot
 /// tell a process that exited from a PID that another process took, so it
@@ -268,7 +272,7 @@ pub fn stop(machine: &dyn Machine, candidates: &[Candidate], timing: Timing) -> 
     let ControlFlow::Continue(targets) = wait_until_gone(
         machine,
         targets,
-        timing.poll,
+        timing.after_kill,
         timing.poll,
         &mut report.killed,
         &mut report.failed,
@@ -372,20 +376,20 @@ fn signal_each<'a>(
         .collect()
 }
 
-/// Gives the count of the waits that the grace period holds.
+/// Gives the count of the waits that `limit` holds.
 ///
-/// The count is `grace` divided by `poll`, rounded up. The sequence has no
+/// The count is `limit` divided by `poll`, rounded up. The sequence has no
 /// clock: it waits, it reads the table, and it counts. Thus a machine of a
 /// test that waits for no time makes the same count of reads as this Mac, and
 /// the sequence ends in every test.
 ///
 /// A `poll` of no time gives one wait, because a division by no time gives no
-/// number. The grace period then ends at the first read of the table.
-fn waits(grace: Duration, poll: Duration) -> u128 {
+/// number. The wait then ends at the first read of the table.
+fn waits(limit: Duration, poll: Duration) -> u128 {
     if poll.is_zero() {
-        return u128::from(!grace.is_zero());
+        return u128::from(!limit.is_zero());
     }
-    grace.as_nanos().div_ceil(poll.as_nanos())
+    limit.as_nanos().div_ceil(poll.as_nanos())
 }
 
 /// Tells whether the process of `candidate` is gone from `table`.
