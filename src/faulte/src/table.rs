@@ -69,6 +69,18 @@ pub enum TableParseError {
         /// The line as `ps` printed it.
         line: String,
     },
+    /// The five fields of the start time are not a time at or after the
+    /// start of the Unix epoch.
+    #[error(
+        "ps printed a start time that faulte cannot read as {START_FORMAT} in UTC, at or after \
+         1970, at line {number}: {line:?}"
+    )]
+    MalformedStart {
+        /// The number of the line in the output, from 1.
+        number: usize,
+        /// The line as `ps` printed it.
+        line: String,
+    },
 }
 
 /// The column of the PID, as `ps -o` names it.
@@ -546,5 +558,63 @@ mod tests {
                 "the UID {bad:?}"
             );
         }
+    }
+
+    /// Gives a row of PID 700 that started at `start`.
+    fn row_started(start: &str) -> String {
+        format!("  700     1   501   2048 S    {start}     /usr/bin/tool")
+    }
+
+    /// Each start time that is not a weekday, a month, a day, a time, and a
+    /// year in the names of the C locale is refused, with the line. A weekday
+    /// that does not match the date is refused too, because `ps` computes
+    /// both from one time. A time before 1970 has no value in seconds since
+    /// the epoch. None of them panics.
+    #[test]
+    fn a_start_time_that_does_not_parse_is_refused_with_its_line() {
+        for bad in [
+            "Tue Foo 25 16:45:30 2026",
+            "Xyz Aug 25 16:45:30 2026",
+            "Mon Aug 25 16:45:30 2026",
+            "Tue Aug 32 16:45:30 2026",
+            "Tue Aug 25 25:00:00 2026",
+            "Tue Aug 25 16:45 2026 x",
+            "Tue Aug 25 16:45:30 20x6",
+            "Tue 25 Aug 16:45:30 2026",
+            "Di Aug 25 16:45:30 2026",
+            "火 8月 25 16:45:30 2026",
+            "Tue Aug ２５ 16:45:30 2026",
+            "Tue Aug 25 16:45:30 🎉",
+            "Wed Dec 31 23:59:59 1969",
+        ] {
+            let line = row_started(bad);
+
+            let error = parse(&with_bad_line_at_3(&line))
+                .expect_err("a start time that does not parse is refused");
+
+            assert_eq!(
+                error,
+                TableParseError::MalformedStart {
+                    number: 3,
+                    line: line.clone()
+                },
+                "the start time {bad:?}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.contains("start time")
+                    && message.contains("at line 3")
+                    && message.contains(&format!("{line:?}")),
+                "the message shows the line and its number: {message}"
+            );
+        }
+    }
+
+    /// The first second of the epoch is zero, not an error.
+    #[test]
+    fn the_start_of_the_epoch_is_zero() {
+        let row = only_row(&row_started("Thu Jan  1 00:00:00 1970"));
+
+        assert_eq!(row.started_at_epoch_secs, 0);
     }
 }
