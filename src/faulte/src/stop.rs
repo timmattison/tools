@@ -206,6 +206,8 @@ pub fn stop(
     for candidate in targets {
         if is_gone(candidate, &table) {
             report.killed.push(candidate.clone());
+        } else {
+            report.survived.push(candidate.clone());
         }
     }
     report
