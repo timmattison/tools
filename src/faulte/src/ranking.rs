@@ -767,4 +767,26 @@ PID    FAULTS    \n\
             Some(&ClaudeView::NotClaude)
         );
     }
+
+    /// A Claude Code process with no record shows no session. The record can
+    /// be absent because the session did not write one yet, or because the
+    /// file is about another process. A guess names the wrong session, and
+    /// nothing in the output says that it is a guess. Both roles of `occ` are
+    /// Claude Code processes here.
+    #[test]
+    fn a_claude_process_with_no_record_shows_no_session() {
+        let machine = Machine::new(
+            vec![count(30, 300), count(31, 200)],
+            [30, 31].map(process).to_vec(),
+        )
+        .with_claude(30, ClaudeRole::Session)
+        .with_claude(31, ClaudeRole::Unreadable);
+
+        let ranking = machine.rank();
+
+        assert_eq!(pids(&ranking), [30, 31]);
+        for row in &ranking.rows {
+            assert_eq!(row.claude, ClaudeView::NoRecord, "the row {row:?}");
+        }
+    }
 }
