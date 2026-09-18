@@ -593,11 +593,42 @@ fn claude_cells(claude: &ClaudeView) -> (String, String, String) {
     }
 }
 
+/// What holds two blocks of the plan apart.
+const BETWEEN_BLOCKS: &str = "\n\n";
+
+/// Gives the first line of the plan: the count of the candidates, and the
+/// rules that each one of them passed.
+///
+/// The count is the count of the sessions that passed the rules, and not the
+/// count of the rows under it. A limit that held some of them back says so on
+/// the same line, so the two counts never disagree without a word.
+fn selected_line(plan: &Plan) -> String {
+    let passed = plan.candidates.len() + plan.held_back_by_max;
+    let mut line = format!(
+        "{} Claude {} {} older than {}, idle for more than {}, and {} no live descendant",
+        count_of(passed),
+        plural(passed, SESSION, SESSIONS),
+        plural(passed, "is", "are"),
+        plan.rules.older_than,
+        plan.rules.idle_for,
+        plural(passed, "has", "have"),
+    );
+    if plan.held_back_by_max > 0 {
+        let kept = count_of(plan.candidates.len());
+        line.push_str(&format!("{DOT}--max {kept} keeps the {kept} oldest"));
+    }
+    line
+}
+
 /// Gives the plan of `faulte kill` as a person reads it, before the question.
 ///
 /// `ranking` gives the window and the total that each rate and each share of
 /// the table divide by. `accounts`, `now` and `width` are the same as for
 /// [`rows`].
+///
+/// The table holds the candidates in the order of the plan, which is oldest
+/// first. A plan with no candidate draws no table: a table of the names of the
+/// columns and no row says nothing that the line above it does not say.
 ///
 /// The text holds no question and no prompt. The caller asks the question,
 /// because only the caller knows whether a person can answer it.
@@ -609,8 +640,16 @@ pub fn plan(
     now: SystemTime,
     width: Option<u16>,
 ) -> String {
-    let _ = (plan, ranking, accounts, now, width);
-    String::new()
+    let mut blocks = vec![selected_line(plan)];
+    if !plan.candidates.is_empty() {
+        let candidates: Vec<RankedRow> = plan
+            .candidates
+            .iter()
+            .map(|candidate| candidate.row.clone())
+            .collect();
+        blocks.push(rows(ranking, &candidates, None, accounts, now, width));
+    }
+    blocks.join(BETWEEN_BLOCKS)
 }
 
 #[cfg(test)]
