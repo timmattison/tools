@@ -52,6 +52,8 @@ impl SessionStatus {
     fn from_recorded(text: &str) -> Self {
         match text {
             "idle" => Self::Idle,
+            "busy" => Self::Busy,
+            "waiting" => Self::Waiting,
             other => Self::Other(other.to_string()),
         }
     }
