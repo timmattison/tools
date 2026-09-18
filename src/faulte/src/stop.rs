@@ -159,19 +159,23 @@ pub struct StopReport {
     pub stopped: Vec<Candidate>,
     /// The sessions that were gone after `SIGKILL`.
     pub killed: Vec<Candidate>,
-    /// The sessions that were still the same process after `SIGKILL`.
+    /// The sessions that were still the same process after `SIGKILL`. One
+    /// session in this list makes a stop that did not do what the plan said.
     pub survived: Vec<Candidate>,
     /// The candidates that `faulte` could not signal, or could not read
-    /// again, each with what the operating system said.
+    /// again, each with what the operating system said. One candidate in this
+    /// list makes a stop that did not do what the plan said.
     pub failed: Vec<(Candidate, MachineError)>,
 }
 
 impl StopReport {
     /// Tells whether the stop did what the plan said that it would do.
     ///
-    /// The answer is no when `faulte` could not signal a candidate or could
-    /// not read it again. The person asked `faulte` to stop that session, and
-    /// it can still be running.
+    /// The answer is no when a session is in [`StopReport::survived`] or in
+    /// [`StopReport::failed`]: a session that is still the same process after
+    /// `SIGKILL`, and a candidate that `faulte` could not signal or could not
+    /// read again. The person asked `faulte` to stop that session, and it can
+    /// still be running.
     ///
     /// A candidate that the check refused does not change the answer. It got
     /// no signal, and the report names the reason.
@@ -179,7 +183,7 @@ impl StopReport {
     /// `faulte kill` exits 2 when the answer is no.
     #[must_use]
     pub fn did_what_the_plan_said(&self) -> bool {
-        self.failed.is_empty()
+        self.survived.is_empty() && self.failed.is_empty()
     }
 }
 

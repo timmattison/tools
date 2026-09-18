@@ -233,9 +233,10 @@ fn rank(interval: Span, limit: usize) -> ExitCode {
 /// The exit code is 0 for a run that stopped every session that it signalled,
 /// and for a run that stopped nothing because the person said so. It is 1 when
 /// the plan names a session and no person can answer the question. It is 2
-/// when a source of this Mac failed, and when the stop left a session that
-/// `faulte` could not signal or could not read again, because such a run did
-/// not do what the plan said that it would do.
+/// when a source of this Mac failed, and when the stop left a session that is
+/// still the same process after `SIGKILL` or that `faulte` could not signal or
+/// could not read again, because such a run did not do what the plan said that
+/// it would do. [`stop::StopReport::did_what_the_plan_said`] holds that rule.
 #[cfg(target_os = "macos")]
 fn kill(interval: Span, rules: Rules) -> ExitCode {
     let machine = Mac::new();
