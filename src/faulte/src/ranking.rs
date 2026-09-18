@@ -583,4 +583,22 @@ PID    FAULTS    \n\
         assert_eq!(ranking.skipped.zombies, 1);
         assert_eq!(ranking.skipped.exited, 0);
     }
+
+    /// A process of the table that is not a zombie and that the sample lacks
+    /// started after `top` took its second sample. It has no fault count, so
+    /// it has no row.
+    #[test]
+    fn a_process_of_the_table_that_the_sample_lacks_counts_as_unsampled() {
+        let machine = Machine::new(
+            vec![count(10, 300)],
+            vec![process(10), process(60), process(61), zombie(50)],
+        );
+
+        let ranking = machine.rank();
+
+        assert_eq!(pids(&ranking), [10]);
+        assert_eq!(ranking.skipped.unsampled, 2);
+        assert_eq!(ranking.skipped.zombies, 1);
+        assert_eq!(ranking.skipped.exited, 0);
+    }
 }
