@@ -458,7 +458,7 @@ pub fn rows(
     now: SystemTime,
     width: Option<u16>,
 ) -> String {
-    let _ = limit;
+    let shown = limit.map_or(rows, |limit| &rows[..limit.min(rows.len())]);
     let mut table = Table::new();
     table
         .load_preset(presets::UTF8_FULL)
@@ -471,7 +471,7 @@ pub fn rows(
     if let Some(width) = width {
         table.set_width(width);
     }
-    for row in rows {
+    for row in shown {
         let (session, state, directory) = claude_cells(&row.claude);
         table.add_row([
             row.pid.to_string(),
@@ -486,7 +486,35 @@ pub fn rows(
             directory,
         ]);
     }
-    table.to_string()
+    let drawn = table.to_string();
+    match more_line(ranking, &rows[shown.len()..]) {
+        Some(line) => format!("{drawn}\n{line}"),
+        None => drawn,
+    }
+}
+
+/// What the line under the table starts with.
+const MORE: char = '…';
+
+/// Gives the line that counts the rows which the limit hid, or nothing when it
+/// hid no row.
+///
+/// The limit hides the small rates, and on 2026-09-18 the sum of the small
+/// rates was the load. A reader must see what the limit took away, so the line
+/// gives the share of all faults that those rows made.
+fn more_line(ranking: &Ranking, hidden: &[RankedRow]) -> Option<String> {
+    if hidden.is_empty() {
+        return None;
+    }
+    let faults = hidden
+        .iter()
+        .fold(0_u64, |total, row| total.saturating_add(row.faults));
+    Some(format!(
+        "{MORE} {} more {} made {} of all faults",
+        count_of(hidden.len()),
+        plural(hidden.len(), PROCESS, PROCESSES),
+        share(ranking.share(faults)),
+    ))
 }
 
 /// Gives the `SESSION`, the `STATE`, and the `DIRECTORY` cells of `claude`.
