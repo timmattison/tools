@@ -527,7 +527,8 @@ unsafe fn first_buffer<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::AudioError;
+    use super::{nominal_sample_rate, AudioError};
+    use crate::signal::SampleRate;
 
     #[test]
     fn an_audio_error_names_the_call_and_shows_a_four_character_code_as_text() {
@@ -583,5 +584,30 @@ mod tests {
                 "the text of status {status:#010X}"
             );
         }
+    }
+
+    #[test]
+    fn a_nominal_rate_that_is_not_a_sample_rate_gives_an_error_that_shows_it() {
+        let cases = [
+            (0.0, "0"),
+            (-48_000.0, "-48000"),
+            (f64::NAN, "NaN"),
+            (f64::INFINITY, "inf"),
+        ];
+        for (hz, shown) in cases {
+            assert_eq!(
+                nominal_sample_rate(hz).map_err(|error| error.to_string()),
+                Err(format!(
+                    "AudioObjectGetPropertyData(kAudioDevicePropertyNominalSampleRate) gave a \
+                     nominal sample rate of {shown} Hz, which is not a valid sample rate"
+                )),
+                "the error for a nominal rate of {hz} Hz"
+            );
+        }
+
+        assert_eq!(
+            nominal_sample_rate(48_000.0),
+            Ok(SampleRate::new(48_000.0).expect("valid"))
+        );
     }
 }
