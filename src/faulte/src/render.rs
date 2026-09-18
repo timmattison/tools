@@ -596,6 +596,9 @@ fn claude_cells(claude: &ClaudeView) -> (String, String, String) {
 /// What holds two blocks of the plan apart.
 const BETWEEN_BLOCKS: &str = "\n\n";
 
+/// What the line of the sessions that the plan refused starts with.
+const NOT_SELECTED: &str = "not selected";
+
 /// Gives the first line of the plan: the count of the candidates, and the
 /// rules that each one of them passed.
 ///
@@ -1540,6 +1543,57 @@ mod tests {
         assert_eq!(
             drawn(&kill_plan(&[])),
             "0 Claude sessions are older than 7d, idle for more than 10m, and have no live descendant"
+        );
+    }
+
+    /// The plan counts the sessions that it did not select, each one under the
+    /// first rule that it fails. A count of zero is not there, and a plan that
+    /// refused no session gives no such line at all. A Mac that hides nothing
+    /// says nothing, the same as the header of the ranking.
+    #[test]
+    fn the_plan_counts_the_sessions_that_it_did_not_select_by_reason() {
+        let ranked = candidate_rows();
+        let ranking = ranking(ranked.clone(), 1_000_000);
+        let drawn = |not_selected| {
+            plan(
+                &Plan {
+                    not_selected,
+                    ..kill_plan(&ranked)
+                },
+                &ranking,
+                &accounts(),
+                now(),
+                None,
+            )
+        };
+
+        let every = drawn(NotSelected {
+            runs_faulte: 1,
+            too_young: 63,
+            not_idle: 5,
+            idle_too_short: 2,
+            live_descendant: 3,
+        });
+        let two = drawn(NotSelected {
+            runs_faulte: 2,
+            live_descendant: 1,
+            ..NotSelected::default()
+        });
+        let none = drawn(NotSelected::default());
+
+        assert_eq!(
+            every.lines().last(),
+            Some(
+                "not selected: 1 runs faulte, 63 younger than 7d, 5 not idle, 2 idle for a shorter time, 3 have a live descendant"
+            )
+        );
+        assert_eq!(
+            two.lines().last(),
+            Some("not selected: 2 run faulte, 1 has a live descendant")
+        );
+        assert!(
+            !none.contains(NOT_SELECTED),
+            "a plan that refused no session says nothing about the sessions that it refused: {none}"
         );
     }
 }
