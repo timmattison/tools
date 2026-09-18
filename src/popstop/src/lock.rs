@@ -3,6 +3,7 @@
 //! Only one copy of popstop runs for each user. A copy that runs holds an
 //! exclusive advisory lock on the lock file in its [`StateDir`].
 
+use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -70,9 +71,24 @@ impl StateDir {
     }
 }
 
+/// How a copy of popstop runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// The copy holds a terminal and stops on Ctrl-C.
+    Foreground,
+    /// The copy has no terminal. `popstop --stop` stops it.
+    Background,
+}
+
+impl fmt::Display for Mode {
+    fn fmt(&self, _formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::StateDir;
+    use super::{Mode, StateDir};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -94,5 +110,11 @@ mod tests {
         let dir = StateDir::for_user().expect("the state directory of this user");
 
         assert_eq!(dir.path(), data.join("popstop"));
+    }
+
+    #[test]
+    fn a_mode_displays_as_one_lowercase_word() {
+        assert_eq!(Mode::Foreground.to_string(), "foreground");
+        assert_eq!(Mode::Background.to_string(), "background");
     }
 }
