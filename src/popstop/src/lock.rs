@@ -8,6 +8,14 @@
 //! the process ends for any cause, `SIGKILL` included, so a stale lock cannot
 //! occur. A record can stay in the file after a crash, thus a reader trusts a
 //! record only while the lock is held.
+//!
+//! Only a holder takes the exclusive lock. A reader ([`current_holder`] and
+//! [`wait_for_release`]) takes a shared lock for a moment. Two shared locks
+//! do not conflict, so a reader that finds the lock held knows that a holder
+//! has it, not another reader. [`acquire`] also meets readers: when its
+//! exclusive try fails, it tries a shared lock too. When it gets the shared
+//! lock, only readers block it, and it tries again after a short sleep. Thus
+//! a reader never makes a start refuse with the old record of a crashed copy.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -27,15 +35,17 @@ const LOCK_FILE_NAME: &str = "popstop.lock";
 /// The name of the log of a background copy in the state directory.
 const LOG_FILE_NAME: &str = "popstop.log";
 
-/// The longest time a reader waits for the record of a holder.
+/// The longest time that [`acquire`] and [`current_holder`] wait for a short
+/// state of the lock to end.
 ///
 /// A holder writes its record directly after it gets the lock, and empties
 /// the file directly before it releases the lock. So a reader can see a held
-/// lock with no record for a very short time.
-const RECORD_WAIT: Duration = Duration::from_secs(2);
+/// lock with no record for a very short time. Readers also hold a shared lock
+/// for a moment, and that blocks the exclusive try of a start.
+const PROBE_WAIT: Duration = Duration::from_secs(2);
 
-/// The time between two reads of a record that is not there yet.
-const RECORD_RETRY_INTERVAL: Duration = Duration::from_millis(10);
+/// The time between two looks at the lock while a short state lasts.
+const PROBE_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
 /// The directory that holds the lock file and the log of popstop.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,29 +208,57 @@ impl Drop for LockGuard {
     }
 }
 
-/// Gets the lock for this process, and writes `record` into the lock file.
+/// Gets the exclusive lock for this process, and writes `record` into the
+/// lock file.
 ///
 /// It makes the state directory and the lock file when they do not exist. It
 /// writes the record before it returns the guard, so a reader that sees the
 /// lock held finds the record at once.
 ///
+/// When the exclusive try fails, a reader or a holder blocks it. A shared try
+/// on a second open of the file tells which. When the shared try works, only
+/// readers block the exclusive lock: it releases the shared lock and tries
+/// again after a short sleep. When the shared try fails too, a holder exists,
+/// and it reads the record of that holder.
+///
 /// # Errors
 ///
 /// Returns [`AcquireError::Held`] with the record of the holder when another
 /// copy holds the lock. Returns [`AcquireError::Io`] when the state directory
-/// or the lock file cannot be used.
+/// or the lock file cannot be used, when readers block the lock for 2 s, or
+/// when the record of the holder cannot be read for 2 s.
 pub fn acquire(dir: &StateDir, record: &HolderRecord) -> Result<LockGuard, AcquireError> {
     fs::create_dir_all(dir.path()).map_err(AcquireError::Io)?;
+    let lock_path = dir.lock_path();
     // No truncation here: the file can hold the record of a copy that runs.
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(dir.lock_path())
+        .open(&lock_path)
         .map_err(AcquireError::Io)?;
+    // The second open of the file, for the shared try.
+    let mut shared = File::open(&lock_path).map_err(AcquireError::Io)?;
 
-    match probe(&mut file, &dir.lock_path(), File::try_lock).map_err(AcquireError::Io)? {
+    let outcome = probe(&lock_path, || {
+        match file.try_lock() {
+            Ok(()) => return Ok(Look::Free),
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(error)) => return Err(error),
+        }
+        match shared.try_lock_shared() {
+            Ok(()) => {
+                shared.unlock()?;
+                Ok(Look::OnlyReaders)
+            }
+            Err(TryLockError::WouldBlock) => look_at_record(&mut shared),
+            Err(TryLockError::Error(error)) => Err(error),
+        }
+    })
+    .map_err(AcquireError::Io)?;
+
+    match outcome {
         Probe::Held(holder) => Err(AcquireError::Held(holder)),
         Probe::Free => {
             let mut guard = LockGuard { file };
@@ -233,27 +271,35 @@ pub fn acquire(dir: &StateDir, record: &HolderRecord) -> Result<LockGuard, Acqui
 /// Gives the record of the copy that holds the lock, or `None` when no copy
 /// holds it.
 ///
-/// The lock is the only source of truth. When this call gets the lock, no
-/// copy runs: it releases the lock at once and gives `None`, even when an old
-/// record stays in the file after a crash. It also gives `None` when the
-/// state directory or the lock file does not exist.
+/// The lock is the only source of truth. This call tries a shared lock. When
+/// it gets the shared lock, no holder has the exclusive lock, so no copy runs:
+/// it releases the lock at once and gives `None`, even when an old record
+/// stays in the file after a crash. It also gives `None` when the state
+/// directory or the lock file does not exist.
+///
+/// The lock is shared because readers do not conflict with each other. Thus a
+/// reader never takes another reader for a holder.
 ///
 /// # Errors
 ///
-/// Returns an error when the lock file cannot be opened, locked, or read.
+/// Returns an error when the lock file cannot be opened, locked, or read, or
+/// when the record of the holder cannot be read for 2 s.
 pub fn current_holder(dir: &StateDir) -> io::Result<Option<HolderRecord>> {
     let Some(mut file) = open_existing_lock_file(dir)? else {
         return Ok(None);
     };
-    // A shared lock: readers do not conflict with each other, so a reader
-    // never takes another reader for a holder.
-    match probe(&mut file, &dir.lock_path(), File::try_lock_shared)? {
-        Probe::Free => {
+    let outcome = probe(&dir.lock_path(), || match file.try_lock_shared() {
+        Ok(()) => {
             file.unlock()?;
-            Ok(None)
+            Ok(Look::Free)
         }
-        Probe::Held(holder) => Ok(Some(holder)),
-    }
+        Err(TryLockError::WouldBlock) => look_at_record(&mut file),
+        Err(TryLockError::Error(error)) => Err(error),
+    })?;
+    Ok(match outcome {
+        Probe::Free => None,
+        Probe::Held(holder) => Some(holder),
+    })
 }
 
 /// How a wait for the release of the lock ended.
@@ -317,51 +363,75 @@ fn open_existing_lock_file(dir: &StateDir) -> io::Result<Option<File>> {
     }
 }
 
-/// What a try of the lock found.
-enum Probe {
-    /// No copy held the lock, and the caller holds it now.
+/// What one look at the lock found.
+enum Look {
+    /// No holder has the lock. [`acquire`] holds the exclusive lock now. A
+    /// reader released its shared lock already.
     Free,
-    /// Another copy holds the lock. This is its record.
+    /// A holder has the lock. This is its record.
+    Held(HolderRecord),
+    /// A holder has the lock, but its record is empty or does not parse.
+    NoRecord(serde_json::Error),
+    /// Only readers block the exclusive lock. Only [`acquire`] sees this.
+    OnlyReaders,
+}
+
+/// What a probe of the lock found at last.
+enum Probe {
+    /// No holder has the lock. [`acquire`] holds the exclusive lock now.
+    Free,
+    /// A holder has the lock. This is its record.
     Held(HolderRecord),
 }
 
-/// Tries the lock on `file`, the lock file at `lock_path`, with `try_lock`.
-/// When another copy holds the lock, it reads the record of that copy.
+/// Looks at the lock file at `lock_path` with `look` until the answer is
+/// [`Look::Free`] or [`Look::Held`].
 ///
-/// A holder writes its record directly after it gets the lock, and empties
-/// the file directly before it releases the lock. A reader also holds the
-/// lock for a moment. So a held lock with an empty record is normal for a
-/// short time. When the record is empty or does not parse, it sleeps for a
-/// short time, then tries the lock and reads the record again, for
-/// [`RECORD_WAIT`] at most. Then it returns an error of kind
-/// [`io::ErrorKind::InvalidData`].
-fn probe(
-    file: &mut File,
-    lock_path: &Path,
-    try_lock: fn(&File) -> Result<(), TryLockError>,
-) -> io::Result<Probe> {
-    let deadline = Instant::now() + RECORD_WAIT;
+/// A held lock with no record, and readers that block a start, are normal for
+/// a short time. While one of them lasts, it sleeps for a short time and looks
+/// again, for [`PROBE_WAIT`] at most. Then it returns an error that tells which
+/// state lasted: of kind [`io::ErrorKind::InvalidData`] for a record that
+/// cannot be read, and of kind [`io::ErrorKind::TimedOut`] for readers that
+/// block a start.
+fn probe(lock_path: &Path, mut look: impl FnMut() -> io::Result<Look>) -> io::Result<Probe> {
+    let deadline = Instant::now() + PROBE_WAIT;
     loop {
-        match try_lock(file) {
-            Ok(()) => return Ok(Probe::Free),
-            Err(TryLockError::WouldBlock) => {}
-            Err(TryLockError::Error(error)) => return Err(error),
-        }
-        match read_record(file)? {
-            Ok(record) => return Ok(Probe::Held(record)),
-            Err(problem) if Instant::now() >= deadline => {
+        match look()? {
+            Look::Free => return Ok(Probe::Free),
+            Look::Held(record) => return Ok(Probe::Held(record)),
+            Look::NoRecord(_) | Look::OnlyReaders if Instant::now() < deadline => {
+                thread::sleep(PROBE_RETRY_INTERVAL);
+            }
+            Look::NoRecord(problem) => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
                         "a copy of popstop holds the lock in {}, but its record cannot be read \
-                         after {RECORD_WAIT:?}: {problem}",
+                         after {PROBE_WAIT:?}: {problem}",
                         lock_path.display()
                     ),
                 ));
             }
-            Err(_) => thread::sleep(RECORD_RETRY_INTERVAL),
+            Look::OnlyReaders => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "readers held a shared lock on {} for {PROBE_WAIT:?}, so this copy of \
+                         popstop cannot get the lock",
+                        lock_path.display()
+                    ),
+                ));
+            }
         }
     }
+}
+
+/// Reads the record of the holder that blocks a shared try on `file`.
+fn look_at_record(file: &mut File) -> io::Result<Look> {
+    Ok(match read_record(file)? {
+        Ok(record) => Look::Held(record),
+        Err(problem) => Look::NoRecord(problem),
+    })
 }
 
 /// Reads the record in the lock file once.
@@ -379,7 +449,7 @@ fn read_record(file: &mut File) -> io::Result<Result<HolderRecord, serde_json::E
 mod tests {
     use super::{
         acquire, current_holder, wait_for_release, AcquireError, HolderRecord, Mode, Release,
-        StartTime, StateDir, RECORD_WAIT,
+        StartTime, StateDir, PROBE_WAIT,
     };
     use std::fs::{self, File};
     use std::io;
@@ -602,8 +672,8 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
         assert!(
-            waited >= RECORD_WAIT,
-            "the reader gave up after {waited:?}, before the bound of {RECORD_WAIT:?}"
+            waited >= PROBE_WAIT,
+            "the reader gave up after {waited:?}, before the bound of {PROBE_WAIT:?}"
         );
         assert!(
             error
