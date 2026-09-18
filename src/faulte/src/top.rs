@@ -32,8 +32,22 @@ const STATS: &str = "pid,faults";
 /// drops no process.
 #[must_use]
 pub fn arguments(interval: Span, max_processes: u32) -> Vec<String> {
-    let _ = (interval, max_processes, Duration::ZERO, SAMPLES, STATS);
-    Vec::new()
+    let seconds = Duration::from(interval).as_secs();
+    vec![
+        // Logging mode: print this count of samples, then stop.
+        "-l".to_owned(),
+        SAMPLES.to_string(),
+        // The delay between the samples, in whole seconds.
+        "-s".to_owned(),
+        seconds.to_string(),
+        // Delta mode: the second sample gives the change of each counter.
+        "-c".to_owned(),
+        "d".to_owned(),
+        "-n".to_owned(),
+        max_processes.to_string(),
+        "-stats".to_owned(),
+        STATS.to_owned(),
+    ]
 }
 
 #[cfg(test)]
