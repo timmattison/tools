@@ -255,6 +255,24 @@ fn a_termination_signal_stops_a_foreground_copy() {
 }
 
 #[test]
+fn a_copy_with_a_time_limit_stops_by_itself() {
+    let temp = tempfile::tempdir().expect("a temporary directory");
+    let dir = temp.path().join("state");
+    let mut copy = Copy::start(&dir, &["--exit-after", "1"]);
+
+    device_of_the_ready_lines(&mut copy);
+    let (status, stderr) = copy.finish();
+
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a copy that reaches its time limit stops with success: {status}. Its stderr:\n{stderr}"
+    );
+    assert_eq!(stderr, "", "a copy that stops says nothing on stderr");
+    assert_eq!(holder(&dir), None, "the copy released the lock");
+}
+
+#[test]
 fn a_second_start_refuses_and_names_the_copy_that_runs() {
     let temp = tempfile::tempdir().expect("a temporary directory");
     let dir = temp.path().join("state");
