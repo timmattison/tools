@@ -30,6 +30,12 @@ use crate::top::FaultCount;
 /// name.
 pub const KERNEL_TASK: &str = "kernel_task";
 
+/// The PID of the kernel.
+const KERNEL_PID: Pid = Pid::new(0);
+
+/// The account that owns the kernel: root.
+const KERNEL_UID: Uid = Uid::new(0);
+
 /// The role that `occ` gives a Claude Code process.
 ///
 /// The caller makes this from `occ::Role`. `Role::Session` gives
@@ -214,9 +220,8 @@ pub fn rank(input: &Observation<'_>) -> Ranking {
     let mut rows: Vec<RankedRow> = input
         .faults
         .iter()
-        .filter_map(|count| {
-            let process = table.get(&count.pid)?;
-            Some(RankedRow {
+        .filter_map(|count| match table.get(&count.pid) {
+            Some(process) => Some(RankedRow {
                 pid: count.pid,
                 uid: process.uid,
                 faults: count.faults,
@@ -224,7 +229,20 @@ pub fn rank(input: &Observation<'_>) -> Ranking {
                 started_at_epoch_secs: Some(process.started_at_epoch_secs),
                 command: process.command.clone(),
                 claude: ClaudeView::NotClaude,
-            })
+            }),
+            // `ps` does not list the kernel, and the kernel does the work of
+            // a Mac that is short of memory. Thus its row says what `top`
+            // gives, and no more.
+            None if count.pid == KERNEL_PID => Some(RankedRow {
+                pid: KERNEL_PID,
+                uid: KERNEL_UID,
+                faults: count.faults,
+                rss_kib: None,
+                started_at_epoch_secs: None,
+                command: KERNEL_TASK.to_owned(),
+                claude: ClaudeView::NotClaude,
+            }),
+            None => None,
         })
         .collect();
     // The PID breaks a tie, so two runs over the same sources agree on the
