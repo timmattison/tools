@@ -188,4 +188,42 @@ mod tests {
             assert_eq!(row.zombie, zombie, "the state {stat:?}");
         }
     }
+
+    /// The command is the rest of the line after the start time. `ps` joins
+    /// the arguments with one space, and an argument can hold spaces, so the
+    /// spaces in the command are part of it. The parser removes only the
+    /// separator before the command and the spaces after it.
+    #[test]
+    fn the_command_keeps_its_spaces_and_its_text_exactly() {
+        for command in [
+            "claude --name \"日本語 🎉 café\"",
+            "/usr/bin/tool  --flag   value",
+            "sh -c sleep\t 5",
+            "cafM-CM-) x\\012y",
+            "🎉",
+            "(node)",
+        ] {
+            let row = only_row(&row_with("S", command));
+
+            assert_eq!(row.command, command, "the command {command:?}");
+        }
+
+        let trailing = only_row(&row_with("S", "/sbin/launchd  \t "));
+        assert_eq!(trailing.command, "/sbin/launchd");
+    }
+
+    /// A process with no readable arguments gives a line that ends after the
+    /// start time. That line is a row with an empty command.
+    #[test]
+    fn a_line_that_ends_after_the_start_time_has_an_empty_command() {
+        for line in [
+            "  700     1   501      0 S    Tue Aug 25 16:45:30 2026",
+            "  700     1   501      0 S    Tue Aug 25 16:45:30 2026     ",
+        ] {
+            let row = only_row(line);
+
+            assert_eq!(row.command, "", "the line {line:?}");
+            assert_eq!(row.started_at_epoch_secs, LAUNCHD_START);
+        }
+    }
 }
