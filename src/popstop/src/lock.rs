@@ -202,6 +202,16 @@ pub fn acquire(dir: &StateDir, record: &HolderRecord) -> Result<LockGuard, Acqui
     Ok(guard)
 }
 
+/// Gives the record of the copy that holds the lock, or `None` when no copy
+/// holds it.
+///
+/// # Errors
+///
+/// Returns an error when the lock file cannot be opened, locked, or read.
+pub fn current_holder(_dir: &StateDir) -> io::Result<Option<HolderRecord>> {
+    Ok(None)
+}
+
 /// Reads the record in the lock file.
 ///
 /// Returns an error of kind [`io::ErrorKind::InvalidData`] when the file does
@@ -216,7 +226,7 @@ fn read_record(file: &mut File) -> io::Result<HolderRecord> {
 
 #[cfg(test)]
 mod tests {
-    use super::{acquire, AcquireError, HolderRecord, Mode, StartTime, StateDir};
+    use super::{acquire, current_holder, AcquireError, HolderRecord, Mode, StartTime, StateDir};
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
@@ -282,5 +292,16 @@ mod tests {
             Ok(_guard) => panic!("the second acquire got the lock while the first holds it"),
         }
         drop(first);
+    }
+
+    #[test]
+    fn the_record_that_the_holder_writes_is_the_record_that_a_reader_gets() {
+        let (_temp, dir) = state_dir();
+        let guard = acquire(&dir, &FIRST).expect("the holder gets the lock");
+
+        let holder = current_holder(&dir).expect("the reader reads the lock file");
+
+        assert_eq!(holder, Some(FIRST));
+        drop(guard);
     }
 }
