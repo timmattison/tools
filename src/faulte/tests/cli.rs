@@ -125,6 +125,52 @@ fn the_ranking_states_a_header_and_a_table_of_this_mac() {
     }
 }
 
+/// An age that no process of any Mac reaches. The oldest process of a Mac
+/// started when the Mac started, and no Mac runs for 27 years.
+const NO_PROCESS_IS_THIS_OLD: &str = "9999d";
+
+/// The second test that reads this Mac.
+///
+/// `--older-than 9999d` selects nothing on any Mac, so the plan names no
+/// session and `faulte` asks nothing. The test states no number, because every
+/// count under the plan is what this Mac runs while the test runs. It signals
+/// nothing: a run with no candidate reaches no signal at all.
+#[test]
+fn a_kill_that_selects_nothing_prints_the_plan_and_exits_zero() {
+    let output = run(&[
+        "kill",
+        "--interval",
+        "1s",
+        "--older-than",
+        NO_PROCESS_IS_THIS_OLD,
+    ]);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "a plan with no candidate exits 0, it ended with {:?} and wrote {stderr:?}",
+        output.status
+    );
+    let one_line = one_line(&output.stdout);
+    let older_than = format!("older than {NO_PROCESS_IS_THIS_OLD}");
+    for phrase in [
+        older_than.as_str(),
+        "idle for more than 10m",
+        "no live descendant",
+        "faulte stops nothing.",
+    ] {
+        assert!(
+            one_line.contains(phrase),
+            "the plan states {phrase:?}: {stdout}"
+        );
+    }
+    assert!(
+        !stdout.contains("[y/N]"),
+        "a plan with no candidate asks nothing: {stdout}"
+    );
+}
+
 /// `--help` gives each flag and its default, so the defaults of the issue are
 /// held here: a 5 s sample, 25 rows, sessions older than 7 days, and idle for
 /// more than 10 minutes.
