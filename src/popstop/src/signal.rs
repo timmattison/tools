@@ -79,6 +79,14 @@ mod tests {
             .expect("one ramp fits in usize")
     }
 
+    /// The largest change from one frame to the next that a linear ramp makes.
+    ///
+    /// The margin covers the rounding of `f32`. A larger change is a step.
+    fn ramp_step() -> f32 {
+        const ROUNDING_MARGIN: f32 = 1.001;
+        LEVEL / ramp_frames() as f32 * ROUNDING_MARGIN
+    }
+
     /// Fills a new buffer of `frames` frames and gives its samples.
     ///
     /// The buffer starts as NaN, so a sample that `fill` does not write shows.
@@ -102,6 +110,36 @@ mod tests {
             assert_eq!(
                 *sample, LEVEL,
                 "sample {index} after the ramp up is {sample}, not the level"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ramp_up_rises_linearly_from_zero_to_the_level_and_never_decreases() {
+        let (mut signal, _stop) = KeepaliveSignal::new(rate());
+        let ramp = ramp_frames();
+
+        let samples = fill_frames(&mut signal, ramp + 1, 1);
+
+        assert_eq!(samples[0], 0.0, "the first sample is exactly zero");
+        assert_eq!(
+            samples[ramp], LEVEL,
+            "the ramp reaches the level after RAMP_DURATION"
+        );
+        for (index, sample) in samples[..ramp].iter().enumerate() {
+            assert!(
+                *sample < LEVEL,
+                "sample {index} is {sample}, so the level came before the end of the ramp"
+            );
+        }
+        let step = ramp_step();
+        for (index, pair) in samples.windows(2).enumerate() {
+            let rise = pair[1] - pair[0];
+            assert!(rise >= 0.0, "sample {} decreases by {}", index + 1, -rise);
+            assert!(
+                rise <= step,
+                "sample {} rises by {rise}, which is more than one step of the ramp",
+                index + 1
             );
         }
     }
