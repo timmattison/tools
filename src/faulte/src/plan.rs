@@ -351,4 +351,45 @@ mod tests {
             Some(&session_id(30))
         );
     }
+
+    /// Gives the table of the tests: one row for each PID of `pids`, and one
+    /// row for `faulte`. Every process is a child of `launchd`.
+    fn table_of(pids: [u32; 8]) -> Vec<ProcessRow> {
+        pids.iter()
+            .chain([FAULTE_PID].iter())
+            .map(|pid| process(*pid, LAUNCHD_PID))
+            .collect()
+    }
+
+    /// Rule 2: a session is a candidate only when its status is `idle`, and it
+    /// became idle more than the limit ago. An idle time equal to the limit is
+    /// not more than it, and an idle time that the record does not give is not
+    /// long enough. Every status other than `idle` is active.
+    ///
+    /// The candidate carries the time of the last status change, which the
+    /// check before the signal compares against a fresh record.
+    #[test]
+    fn only_a_session_that_is_idle_for_longer_than_the_limit_is_a_candidate() {
+        let ranking = ranking(vec![
+            session(30, OLD, idle(3_600)),
+            session(40, OLD, idle(60)),
+            session(50, OLD, idle(600)),
+            session(60, OLD, SessionState::Idle { for_: None }),
+            session(70, OLD, SessionState::Busy),
+            session(80, OLD, SessionState::Waiting),
+            session(90, OLD, SessionState::Other("shell".to_owned())),
+            session(100, OLD, SessionState::Unknown),
+        ]);
+        let table = table_of([30, 40, 50, 60, 70, 80, 90, 100]);
+
+        let plan = plan(&input(&ranking, &table, rules()));
+
+        assert_eq!(selected(&plan), vec![30]);
+        assert_eq!(
+            plan.candidates
+                .first()
+                .map(|candidate| candidate.status_changed_at),
+            Some(Some(now() - Duration::from_secs(3_600)))
+        );
+    }
 }
