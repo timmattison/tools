@@ -81,6 +81,20 @@ pub enum MachineError {
     },
 }
 
+/// The signal that `faulte kill` sends to a session.
+///
+/// `faulte` sends these two, in this order, and nothing else. A session that
+/// gets [`Signal::Terminate`] closes its transcript, so [`Signal::Kill`] goes
+/// only to a session that did not stop in the grace period.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signal {
+    /// `SIGTERM`. The process can handle it and stop in order.
+    Terminate,
+    /// `SIGKILL`. The kernel stops the process, and the process handles
+    /// nothing.
+    Kill,
+}
+
 /// Everything that `faulte` reads from the operating system.
 ///
 /// The trait is the whole boundary between the rules of `faulte` and this Mac.
@@ -152,6 +166,24 @@ pub trait Machine {
 
     /// Gives the time now.
     fn now(&self) -> SystemTime;
+
+    /// Sends `signal` to the process `pid`.
+    ///
+    /// The caller decides which process gets a signal. This function sends the
+    /// one signal that it was given, and it reads nothing.
+    ///
+    /// # Errors
+    ///
+    /// Gives an error when the operating system refuses the signal, for
+    /// example because another account owns the process.
+    fn signal(&self, pid: Pid, signal: Signal) -> Result<(), MachineError>;
+
+    /// Waits for `how_long`.
+    ///
+    /// The stop sequence waits between two reads of the process table. The
+    /// count of the waits is what bounds the grace period, so a machine of a
+    /// test waits for no time and the sequence still ends.
+    fn sleep(&self, how_long: Duration);
 }
 
 /// What one run of [`observe`] read from the machine.

@@ -6,8 +6,11 @@
 //! values, and the sequence reads this Mac through one trait. No unit test
 //! signals a real process.
 
+use std::time::Duration;
+
 use occ::{SessionRecord, SessionStatus};
 
+use crate::machine::{Machine, MachineError, Signal};
 use crate::plan::{pids_with_a_live_descendant, Candidate};
 use crate::table::ProcessRow;
 
@@ -104,18 +107,81 @@ pub fn recheck(
     Recheck::Proceed
 }
 
+/// What one run of [`stop`] did.
+///
+/// Every candidate that the caller gave is in exactly one of these lists. A
+/// stop is not reversible, and the person must read what happened to each
+/// session that the plan named.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StopReport {
+    /// The candidates that the check refused, each with its reason. None of
+    /// them got a signal.
+    pub skipped: Vec<(Candidate, Recheck)>,
+    /// The sessions that were gone after `SIGTERM`.
+    pub stopped: Vec<Candidate>,
+    /// The sessions that were gone after `SIGKILL`.
+    pub killed: Vec<Candidate>,
+    /// The sessions that were still the same process after `SIGKILL`.
+    pub survived: Vec<Candidate>,
+    /// The candidates that `faulte` could not signal, or could not read
+    /// again, each with what the operating system said.
+    pub failed: Vec<(Candidate, MachineError)>,
+}
+
+/// Stops each session of `candidates`, and reports what happened to each one.
+///
+/// The sequence is one function, because each step reads what the step before
+/// it learned and no caller can take one of them away:
+///
+/// 1. A fresh process table and a fresh record of each session. Every
+///    candidate that [`recheck`] refuses goes to [`StopReport::skipped`], and
+///    it gets no signal.
+/// 2. `SIGTERM` to every target that proceeds. Claude Code closes its
+///    transcript when it gets that signal.
+/// 3. A wait of `poll`, then a read of the table, until every target is gone
+///    or `grace` ends. A target is gone when its PID has no row, has a zombie
+///    row, or has a row of another start time.
+/// 4. `SIGKILL` to each target that is still the same process, then one more
+///    wait and one more read, to learn what that signal did.
+///
+/// `grace` is 30 seconds in a real run, and `poll` is one second. The grace
+/// period is long because of the Mac that this tool is for: a Mac that is
+/// short of memory is slow to page a process in, and a process handles no
+/// signal until it is in memory. A short grace period sends `SIGKILL` to a
+/// session that was on its way to closing its transcript.
+///
+/// A read of the process table that fails ends the sequence. `faulte` cannot
+/// tell a process that exited from a PID that another process took, so it
+/// signals nothing more, and each target that is left goes to
+/// [`StopReport::failed`] with the reason.
+#[must_use]
+pub fn stop(
+    machine: &dyn Machine,
+    candidates: &[Candidate],
+    grace: Duration,
+    poll: Duration,
+) -> StopReport {
+    let _ = (machine, candidates, grace, poll);
+    StopReport::default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use std::cell::RefCell;
+    use std::collections::{HashMap, VecDeque};
     use std::path::PathBuf;
-    use std::time::{Duration, SystemTime};
+    use std::time::SystemTime;
 
     use occ::{SessionId, SessionStatus};
 
+    use crate::duration::Span;
     use crate::pid::{Pid, Uid};
-    use crate::ranking::{ClaudeView, RankedRow};
+    use crate::ranking::{ClaudeRole, ClaudeView, RankedRow, Viewer};
     use crate::state::SessionState;
+    use crate::top::TopSample;
+    use crate::vm::{SwapUsage, VmCounters};
 
     /// The time now in the tests, in seconds since the Unix epoch.
     const NOW: u64 = 1_780_000_000;
@@ -371,6 +437,164 @@ mod tests {
             recheck(&candidate, &table, Some(&record)),
             Recheck::Proceed,
             "nothing about the session changed"
+        );
+    }
+
+    /// The grace period of a test that wants one read of the table before
+    /// `SIGKILL`, and the time between two reads of the table.
+    const ONE_POLL: Duration = Duration::from_secs(1);
+
+    /// The machine of the stop tests. It answers each read that the sequence
+    /// makes, and it records every signal and every wait.
+    ///
+    /// A test states one process table for each read that it cares about. The
+    /// last table of the list answers every read after it, so a sequence that
+    /// reads the table more times than the test states gives an assertion and
+    /// not a panic.
+    struct FakeMachine {
+        /// What each read of the process table gives, in order.
+        tables: RefCell<VecDeque<Result<Vec<ProcessRow>, MachineError>>>,
+        /// The registry record under each PID.
+        records: HashMap<Pid, SessionRecord>,
+        /// The reason why a signal to a PID fails.
+        refusals: HashMap<Pid, MachineError>,
+        /// Each signal that the sequence sent, in order.
+        signals: RefCell<Vec<(Pid, Signal)>>,
+        /// The count of the waits that the sequence made.
+        sleeps: RefCell<usize>,
+    }
+
+    impl FakeMachine {
+        /// Gives a machine whose reads of the process table give `tables`, in
+        /// order, and whose reads never fail.
+        fn reading(tables: Vec<Vec<ProcessRow>>) -> Self {
+            Self {
+                tables: RefCell::new(tables.into_iter().map(Ok).collect()),
+                records: HashMap::new(),
+                refusals: HashMap::new(),
+                signals: RefCell::new(Vec::new()),
+                sleeps: RefCell::new(0),
+            }
+        }
+
+        /// Gives this machine, with `record` under `pid` in the registry.
+        fn with_record(mut self, pid: u32, record: SessionRecord) -> Self {
+            self.records.insert(Pid::new(pid), record);
+            self
+        }
+
+        /// Gives each signal that the sequence sent, in order.
+        fn signals(&self) -> Vec<(Pid, Signal)> {
+            self.signals.borrow().clone()
+        }
+
+        /// Gives the count of the waits that the sequence made.
+        fn sleeps(&self) -> usize {
+            *self.sleeps.borrow()
+        }
+    }
+
+    impl Machine for FakeMachine {
+        fn process_table(&self) -> Result<Vec<ProcessRow>, MachineError> {
+            let mut tables = self.tables.borrow_mut();
+            if tables.len() > 1 {
+                tables.pop_front()
+            } else {
+                tables.front().cloned()
+            }
+            .expect("the test states a process table for each read")
+        }
+
+        fn record_for(
+            &self,
+            pid: Pid,
+            _owner: Uid,
+            _started_at_epoch_secs: u64,
+        ) -> Option<SessionRecord> {
+            self.records.get(&pid).cloned()
+        }
+
+        fn signal(&self, pid: Pid, signal: Signal) -> Result<(), MachineError> {
+            self.signals.borrow_mut().push((pid, signal));
+            match self.refusals.get(&pid) {
+                Some(error) => Err(error.clone()),
+                None => Ok(()),
+            }
+        }
+
+        fn sleep(&self, _how_long: Duration) {
+            *self.sleeps.borrow_mut() += 1;
+        }
+
+        fn sample_faults(&self, _interval: Span) -> Result<(TopSample, Duration), MachineError> {
+            unreachable!("the stop sequence samples no faults");
+        }
+
+        fn claude_roles(&self) -> HashMap<Pid, ClaudeRole> {
+            unreachable!("the stop sequence reads no role of Claude Code");
+        }
+
+        fn vm_counters(&self) -> Result<VmCounters, MachineError> {
+            unreachable!("the stop sequence reads no counter of the virtual memory");
+        }
+
+        fn swap_usage(&self) -> Result<SwapUsage, MachineError> {
+            unreachable!("the stop sequence reads no swap file");
+        }
+
+        fn page_size(&self) -> u64 {
+            unreachable!("the stop sequence reads no size of a page");
+        }
+
+        fn viewer(&self) -> Viewer {
+            unreachable!("the stop sequence reads no account of a viewer");
+        }
+
+        fn account_name(&self, uid: Uid) -> Option<String> {
+            unreachable!("the stop sequence asked for the name of the account {uid}");
+        }
+
+        fn now(&self) -> SystemTime {
+            unreachable!("the stop sequence reads no clock");
+        }
+    }
+
+    /// Gives the machine of a stop test: it reads `tables`, and its registry
+    /// holds an idle record of each session of `sessions`.
+    fn machine_of(sessions: &[u32], tables: Vec<Vec<ProcessRow>>) -> FakeMachine {
+        sessions.iter().fold(
+            FakeMachine::reading(tables),
+            |machine: FakeMachine, pid: &u32| {
+                machine.with_record(*pid, record(*pid, Some(changed_at())))
+            },
+        )
+    }
+
+    /// A session that is gone after `SIGTERM` is a session that `faulte`
+    /// stopped, and it gets no `SIGKILL`.
+    ///
+    /// `SIGTERM` is the first signal, because Claude Code closes its
+    /// transcript when it gets that signal. A process that is gone holds
+    /// nothing, so a second signal has nothing to reach.
+    #[test]
+    fn a_session_that_goes_after_sigterm_is_stopped() {
+        let candidate = candidate(30);
+        let machine = machine_of(&[30], vec![vec![process(30, LAUNCHD_PID)], Vec::new()]);
+
+        let report = stop(&machine, &[candidate.clone()], ONE_POLL, ONE_POLL);
+
+        assert_eq!(
+            report,
+            StopReport {
+                stopped: vec![candidate],
+                ..StopReport::default()
+            },
+            "the session was gone at the first read after SIGTERM"
+        );
+        assert_eq!(
+            machine.signals(),
+            vec![(Pid::new(30), Signal::Terminate)],
+            "SIGTERM goes once, and SIGKILL does not go at all"
         );
     }
 

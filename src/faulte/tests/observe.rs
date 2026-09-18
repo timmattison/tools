@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use faulte::duration::Span;
-use faulte::machine::{observe, Machine, MachineError};
+use faulte::machine::{observe, Machine, MachineError, Signal};
 use faulte::pid::{Pid, Uid};
 use faulte::ranking::{ClaudeRole, ClaudeView, Viewer};
 use faulte::state::SessionState;
@@ -224,6 +224,16 @@ impl Machine for FakeMachine {
 
     fn now(&self) -> SystemTime {
         now()
+    }
+
+    /// A read of the machine signals nothing and waits for nothing. Each one
+    /// of these ends the test, so a read that grew a signal says so here.
+    fn signal(&self, pid: Pid, signal: Signal) -> Result<(), MachineError> {
+        unreachable!("a read of the machine sent {signal:?} to {pid}");
+    }
+
+    fn sleep(&self, how_long: Duration) {
+        unreachable!("a read of the machine waited for {how_long:?}");
     }
 }
 

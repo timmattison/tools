@@ -30,12 +30,13 @@ use std::mem::{size_of, MaybeUninit};
 use std::path::PathBuf;
 use std::process::Command;
 use std::ptr;
+use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use occ::{classify, gather_processes, Role, SessionRecord, SessionRegistry};
 
 use crate::duration::Span;
-use crate::machine::{Machine, MachineError};
+use crate::machine::{Machine, MachineError, Signal};
 use crate::pid::{Pid, Uid};
 use crate::ranking::{ClaudeRole, Viewer};
 use crate::table::{self, ProcessRow};
@@ -67,6 +68,15 @@ const SMALLEST_PAGE: u64 = 4096;
 /// The text that an error states when a command wrote nothing to explain
 /// itself.
 const NO_MESSAGE: &str = "the command wrote no message";
+
+/// The call that sends a signal to a process.
+const KILL_CALL: &str = "kill";
+
+/// The name of `SIGTERM`, for the message of an error.
+const TERMINATE: &str = "SIGTERM";
+
+/// The name of `SIGKILL`, for the message of an error.
+const KILL: &str = "SIGKILL";
 
 /// The first size of the buffer that `getpwuid_r` fills, in bytes.
 const ACCOUNT_BUFFER: usize = 4096;
@@ -222,6 +232,36 @@ impl Machine for Mac {
 
     fn now(&self) -> SystemTime {
         SystemTime::now()
+    }
+
+    fn signal(&self, pid: Pid, signal: Signal) -> Result<(), MachineError> {
+        let (number, name) = match signal {
+            Signal::Terminate => (libc::SIGTERM, TERMINATE),
+            Signal::Kill => (libc::SIGKILL, KILL),
+        };
+        let call = || format!("{KILL_CALL}({pid}, {name})");
+        // The kernel counts a PID as a signed number, and a PID of a Mac is
+        // far below the largest one. A number that does not fit is not a PID
+        // at all, and a negative first argument of `kill` names a group of
+        // processes.
+        let target = libc::pid_t::try_from(pid.get()).map_err(|_| MachineError::KernelRead {
+            call: call(),
+            reason: format!("the number {pid} is not a PID"),
+        })?;
+        // SAFETY: `kill` takes two numbers of the C language. It takes no
+        // pointer and writes no memory of this process.
+        let answer = unsafe { libc::kill(target, number) };
+        if answer != 0 {
+            return Err(MachineError::KernelRead {
+                call: call(),
+                reason: io::Error::last_os_error().to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn sleep(&self, how_long: Duration) {
+        thread::sleep(how_long);
     }
 }
 
