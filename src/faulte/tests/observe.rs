@@ -438,6 +438,40 @@ fn the_run_names_the_account_of_each_row() {
     );
 }
 
+/// The registry folder of another account has the mode `0700`. A read of it
+/// fails whatever the folder holds, so a missing record there means nothing.
+/// The run therefore never asks, and the row states `other account` instead of
+/// a state that no read could give.
+#[test]
+fn the_run_never_asks_the_registry_about_another_account() {
+    let machine = machine_of_the_capture();
+
+    observe(&machine, interval()).expect("every source answers");
+
+    assert_eq!(
+        machine.asked(),
+        vec![Pid::new(SESSION_PID)],
+        "the run asks about the session of the viewer, and about no other PID"
+    );
+}
+
+/// Root reads the home directory of every account, so it asks about every
+/// Claude Code process. `faulte` never runs `sudo` itself, the same as `crap`.
+#[test]
+fn root_asks_the_registry_about_every_account() {
+    let machine = machine_of_the_capture().as_root();
+
+    observe(&machine, interval()).expect("every source answers");
+
+    let mut asked = machine.asked();
+    asked.sort();
+    assert_eq!(
+        asked,
+        vec![Pid::new(SESSION_PID), Pid::new(OTHER_PID)],
+        "root asks about the session of each account"
+    );
+}
+
 /// Gives the error of a read of the kernel that failed.
 fn kernel_error(call: &str) -> MachineError {
     MachineError::KernelRead {
