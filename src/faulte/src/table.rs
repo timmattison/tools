@@ -17,6 +17,18 @@ use chrono::NaiveDateTime;
 
 use crate::pid::{Pid, Uid};
 
+/// The path of the process table.
+pub const PROGRAM: &str = "/bin/ps";
+
+/// Gives the arguments of [`PROGRAM`].
+#[must_use]
+pub fn arguments() -> Vec<String> {
+    Vec::new()
+}
+
+/// The environment that the caller sets on the child.
+pub const ENVIRONMENT: [(&str, &str); 2] = [("", ""), ("", "")];
+
 /// One process, as one line of the output of `ps`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessRow {
@@ -661,6 +673,29 @@ mod tests {
                 "the message says that the table is empty: {error}"
             );
         }
+    }
+
+    /// The list is exact: every process of every account, no limit on the
+    /// width, and the seven columns of a row in the order that the parser
+    /// reads them, each with an empty header.
+    #[test]
+    fn the_arguments_ask_for_every_process_with_the_columns_of_a_row() {
+        assert_eq!(
+            arguments(),
+            [
+                "-A",
+                "-ww",
+                "-o",
+                "pid=,ppid=,uid=,rss=,stat=,lstart=,args="
+            ]
+        );
+    }
+
+    /// `ps` prints the start time in the zone `TZ` and with the names of the
+    /// locale. The parser reads UTC and the names of the C locale.
+    #[test]
+    fn the_environment_gives_utc_and_the_c_locale() {
+        assert_eq!(ENVIRONMENT, [("TZ", "UTC"), ("LC_ALL", "C")]);
     }
 
     /// The first second of the epoch is zero, not an error.
