@@ -182,8 +182,7 @@ impl Ranking {
     /// does now.
     #[must_use]
     pub fn faults_per_second(&self, faults: u64) -> f64 {
-        let _ = faults;
-        0.0
+        faults as f64 / self.window.as_secs_f64()
     }
 
     /// Gives the share of all faults that `faults` is, as a fraction from 0
