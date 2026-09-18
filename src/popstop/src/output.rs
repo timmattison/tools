@@ -311,6 +311,8 @@ const RENDER_CALLBACK_SIZE: u32 = byte_size::<AURenderCallbackStruct>();
 pub struct OutputUnit {
     /// The instance of the default output unit. It is not null.
     unit: AudioUnit,
+    /// The renderer that the render callback of `unit` calls.
+    renderer: RendererBox,
 }
 
 impl OutputUnit {
@@ -368,10 +370,10 @@ impl OutputUnit {
             )
         }?;
 
-        let renderer = NonNull::from(Box::leak(Box::new(renderer)));
+        let renderer = RendererBox::new(renderer);
         let callback = AURenderCallbackStruct {
             inputProc: Some(render_callback::<R>),
-            inputProcRefCon: renderer.as_ptr().cast::<c_void>(),
+            inputProcRefCon: renderer.pointer.as_ptr(),
         };
         // SAFETY: `unit` is a live instance, and `callback` is a callback
         // registration of the size that the call gets. The refCon points to
@@ -394,7 +396,7 @@ impl OutputUnit {
             AudioOutputUnitStart(unit)
         })?;
 
-        Ok(Self { unit })
+        Ok(Self { unit, renderer })
     }
 
     /// Stops the output unit, uninitializes it, and disposes of it.
@@ -417,8 +419,62 @@ impl OutputUnit {
         let disposed = check(call::INSTANCE_DISPOSE, unsafe {
             AudioComponentInstanceDispose(self.unit)
         });
+        // A unit that is not disposed can still call the render callback, so
+        // its renderer stays. A leak is better than a use after free.
+        if disposed.is_ok() {
+            // SAFETY: the unit is disposed, so nothing calls the render
+            // callback with this renderer again.
+            unsafe { self.renderer.free() };
+        }
         stopped.and(uninitialized).and(disposed)
     }
+}
+
+/// The renderer of an output unit, in a box that the unit reaches through a
+/// raw pointer.
+///
+/// The box stays raw while the unit lives. The audio thread writes to the
+/// renderer through the pointer, and a live `Box` claims that no other
+/// pointer reaches its value.
+struct RendererBox {
+    /// The pointer to the renderer. The unit gets it as its refCon.
+    pointer: NonNull<c_void>,
+    /// Drops the renderer and frees the box. It knows the type of the
+    /// renderer, which `pointer` does not.
+    free: unsafe fn(NonNull<c_void>),
+}
+
+impl RendererBox {
+    /// Moves `renderer` into a new box.
+    fn new<R: Render>(renderer: R) -> Self {
+        Self {
+            pointer: NonNull::from(Box::leak(Box::new(renderer))).cast::<c_void>(),
+            free: free_renderer::<R>,
+        }
+    }
+
+    /// Drops the renderer and frees the box.
+    ///
+    /// # Safety
+    ///
+    /// No output unit calls the render callback with this renderer again.
+    unsafe fn free(self) {
+        // SAFETY: `self.free` is the function for the type of the renderer,
+        // and the caller makes sure that nothing uses the renderer again.
+        unsafe { (self.free)(self.pointer) }
+    }
+}
+
+/// Drops a renderer of type `R` and frees its box.
+///
+/// # Safety
+///
+/// `pointer` came from [`RendererBox::new`] for an `R`, and nothing uses it
+/// after this call.
+unsafe fn free_renderer<R: Render>(pointer: NonNull<c_void>) {
+    // SAFETY: `pointer` came from a leaked `Box<R>`, and the caller makes
+    // sure that nothing uses it again.
+    drop(unsafe { Box::from_raw(pointer.cast::<R>().as_ptr()) });
 }
 
 /// Gives the stream format of the output unit at `rate`.
