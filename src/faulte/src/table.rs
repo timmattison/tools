@@ -105,6 +105,9 @@ pub fn parse(output: &str) -> Result<Vec<ProcessRow>, TableParseError> {
 enum RowFault {
     /// The line holds fewer than [`FIELDS`] tokens.
     TooFewFields,
+    /// The numeric column of this name holds a value that is not a number of
+    /// its type.
+    MalformedNumber(&'static str),
 }
 
 impl RowFault {
@@ -114,6 +117,11 @@ impl RowFault {
         let line = line.to_owned();
         match self {
             Self::TooFewFields => TableParseError::TooFewFields { number, line },
+            Self::MalformedNumber(column) => TableParseError::MalformedNumber {
+                column,
+                number,
+                line,
+            },
         }
     }
 }
@@ -131,29 +139,33 @@ const FIELDS: usize = 10;
 
 /// Reads one row.
 fn parse_row(line: &str) -> Result<Option<ProcessRow>, RowFault> {
-    let (fields, command) = split_fields::<FIELDS>(line).ok_or(RowFault::TooFewFields)?;
-    Ok(read_row(fields, command))
+    let ([pid, ppid, uid, rss, stat, weekday, month, day, time, year], command) =
+        split_fields::<FIELDS>(line).ok_or(RowFault::TooFewFields)?;
+    let pid = Pid::new(number(PID_COLUMN, pid)?);
+    let ppid = Pid::new(number(PPID_COLUMN, ppid)?);
+    let uid = Uid::new(number(UID_COLUMN, uid)?);
+    let rss_kib = number(RSS_COLUMN, rss)?;
+    let start = [weekday, month, day, time, year].join(" ");
+    let Some(started) = NaiveDateTime::parse_from_str(&start, START_FORMAT)
+        .ok()
+        .and_then(|start| u64::try_from(start.and_utc().timestamp()).ok())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ProcessRow {
+        pid,
+        ppid,
+        uid,
+        rss_kib,
+        zombie: stat.starts_with(ZOMBIE),
+        started_at_epoch_secs: started,
+        command: command.to_owned(),
+    }))
 }
 
-/// Reads the values of one row from its fields and its command.
-fn read_row(
-    [pid, ppid, uid, rss, stat, weekday, month, day, time, year]: [&str; FIELDS],
-    command: &str,
-) -> Option<ProcessRow> {
-    let start = [weekday, month, day, time, year].join(" ");
-    let started = NaiveDateTime::parse_from_str(&start, START_FORMAT)
-        .ok()?
-        .and_utc()
-        .timestamp();
-    Some(ProcessRow {
-        pid: Pid::new(unsigned(pid)?),
-        ppid: Pid::new(unsigned(ppid)?),
-        uid: Uid::new(unsigned(uid)?),
-        rss_kib: unsigned(rss)?,
-        zombie: stat.starts_with(ZOMBIE),
-        started_at_epoch_secs: u64::try_from(started).ok()?,
-        command: command.to_owned(),
-    })
+/// Reads the value `token` of the numeric column `column`.
+fn number<T: FromStr>(column: &'static str, token: &str) -> Result<T, RowFault> {
+    unsigned(token).ok_or(RowFault::MalformedNumber(column))
 }
 
 /// Splits the first `N` tokens off `line`, and gives them with the rest of the
