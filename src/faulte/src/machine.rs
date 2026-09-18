@@ -10,7 +10,7 @@
 //! calls the kernel.
 
 use std::collections::HashMap;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use occ::SessionRecord;
 
@@ -209,6 +209,16 @@ impl Observed {
 /// Gives the error of the first source that failed. A source that fails stops
 /// the run, because a ranking that is missing a source is not a ranking.
 pub fn observe(machine: &dyn Machine, interval: Span) -> Result<Observed, MachineError> {
+    // A monotonic clock measures the swap window. The clock of the wall can
+    // move back between the two reads, and a window that is negative is no
+    // measure of anything.
+    let started = Instant::now();
+    let before = machine.vm_counters()?;
+    let (_sample, _wall) = machine.sample_faults(interval)?;
+    let after = machine.vm_counters()?;
+    let swap_window = started.elapsed();
+    let usage = machine.swap_usage()?;
+    let _table = machine.process_table()?;
     Ok(Observed {
         ranking: Ranking {
             rows: Vec::new(),
@@ -217,10 +227,12 @@ pub fn observe(machine: &dyn Machine, interval: Span) -> Result<Observed, Machin
             claude: ClaudeTotal::default(),
             skipped: Skipped::default(),
         },
-        swap: VmDelta::default(),
-        usage: SwapUsage::default(),
-        compressor_bytes: 0,
-        swap_window: Duration::ZERO,
+        swap: VmDelta::between(before, after),
+        usage,
+        // The compressor holds what it holds now, so the count after the
+        // sample is the one that says what this Mac is doing.
+        compressor_bytes: after.compressor_bytes(machine.page_size()),
+        swap_window,
         accounts: Accounts::new(),
         now: machine.now(),
         interval,
