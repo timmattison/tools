@@ -51,6 +51,13 @@ pub enum ParseSpanError {
         /// The part of the text after the number.
         unit: String,
     },
+    /// The text does not start with a whole number of ASCII digits. A sign,
+    /// a decimal point, and an exponent are refused here.
+    #[error("{text:?} is not a whole number with a unit: {HINT}")]
+    NotAWholeNumber {
+        /// The text as the person gave it.
+        text: String,
+    },
     /// The text is not a duration.
     #[error("{text:?} is not a duration")]
     Invalid {
@@ -220,6 +227,29 @@ mod tests {
             assert!(
                 message.contains(&format!("{text:?}")) && message.contains(&format!("{unit:?}")),
                 "the message names the text {text:?} and the unit {unit:?}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_text_that_is_not_a_whole_number_is_refused_and_named() {
+        let cases = [
+            "-5s", "-5", "-0s", "+5s", "1.5h", "0.5", "1e3", "5s5", " 5s", "s", "m", "日本語",
+            "🎉s", "café", "五s", "٥s", "5日5",
+        ];
+        for text in cases {
+            let error = seconds(text).expect_err("the text is not a whole number");
+
+            assert_eq!(
+                error,
+                ParseSpanError::NotAWholeNumber {
+                    text: text.to_owned()
+                },
+                "the text {text:?}"
+            );
+            assert!(
+                error.to_string().contains(&format!("{text:?}")),
+                "the message names the text {text:?}: {error}"
             );
         }
     }
