@@ -12,6 +12,8 @@
 //! - [`message`] builds the texts that popstop shows to the user.
 //! - `keepalive` plays the signal on the default output device. It compiles
 //!   on macOS only.
+//! - `life_cycle` runs a copy from its start to its stop. It compiles on
+//!   macOS only.
 //! - [`signal`] makes the samples of the keepalive signal. It is pure and it
 //!   compiles on every platform.
 //! - [`lock`] makes sure that only one copy runs for each user. It uses the
@@ -24,6 +26,8 @@
 pub mod exit_status;
 #[cfg(target_os = "macos")]
 pub mod keepalive;
+#[cfg(target_os = "macos")]
+pub mod life_cycle;
 pub mod lock;
 pub mod message;
 #[cfg(target_os = "macos")]
