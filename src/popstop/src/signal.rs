@@ -36,8 +36,18 @@ impl SampleRate {
 }
 
 /// The keepalive signal. The audio render thread owns it.
+///
+/// The signal keeps its position in the ramp across calls to
+/// [`KeepaliveSignal::fill`], so the size of the buffers does not change the
+/// samples.
 #[derive(Debug)]
-pub struct KeepaliveSignal {}
+pub struct KeepaliveSignal {
+    /// The number of frames from silence to the level.
+    ramp_frames: u32,
+    /// The position of the next frame in the ramp, from 0 to `ramp_frames`.
+    /// The value of a frame is `LEVEL * position / ramp_frames`.
+    position: u32,
+}
 
 /// The handle that stops the signal. The main thread holds it.
 #[derive(Debug, Clone)]
@@ -46,17 +56,42 @@ pub struct StopHandle {}
 impl KeepaliveSignal {
     /// Makes a signal for the given sample rate, and the handle that stops it.
     #[must_use]
-    pub fn new(_rate: SampleRate) -> (Self, StopHandle) {
-        (Self {}, StopHandle {})
+    pub fn new(rate: SampleRate) -> (Self, StopHandle) {
+        let signal = Self {
+            ramp_frames: frames_in(RAMP_DURATION, rate),
+            position: 0,
+        };
+        (signal, StopHandle {})
     }
 
     /// Writes the next samples of the signal into an interleaved buffer.
     ///
     /// The buffer holds `buffer.len() / channels` frames. Every channel of a
     /// frame gets the same value.
-    pub fn fill(&mut self, buffer: &mut [f32], _channels: usize) {
-        buffer.fill(LEVEL);
+    pub fn fill(&mut self, buffer: &mut [f32], channels: usize) {
+        for frame in buffer.chunks_exact_mut(channels) {
+            frame.fill(self.next_sample());
+        }
     }
+
+    /// Gives the value of the next frame and moves the ramp on by one frame.
+    fn next_sample(&mut self) -> f32 {
+        let sample = LEVEL * (self.position as f32 / self.ramp_frames as f32);
+        if self.position < self.ramp_frames {
+            self.position += 1;
+        }
+        sample
+    }
+}
+
+/// Gives the number of whole frames in `duration` at `rate`.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a cast from f64 to u32 saturates, and a ramp longer than u32::MAX frames is not a real case"
+)]
+fn frames_in(duration: Duration, rate: SampleRate) -> u32 {
+    (duration.as_secs_f64() * rate.hz()).round() as u32
 }
 
 #[cfg(test)]
