@@ -123,9 +123,26 @@ pub fn ready_lines(device_name: &str, pid: u32) -> String {
     )
 }
 
+/// Gives one line that reports a problem, for example
+/// `popstop: the lock file cannot be used: permission denied`.
+#[must_use]
+pub fn problem_line(problem: &dyn fmt::Display) -> String {
+    let _ = problem;
+    String::new()
+}
+
+/// Gives one line that reports a problem which popstop continues after, for
+/// example `popstop: warning: ...`.
+#[must_use]
+pub fn warning_line(problem: &dyn fmt::Display) -> String {
+    let _ = problem;
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ready_lines, refusal_in, start_time_text_in, stop_command};
+    use super::{problem_line, ready_lines, refusal_in, start_time_text_in, stop_command};
+    use super::{warning_line, PREFIX};
     use crate::lock::{HolderRecord, Mode, StartTime};
     use chrono::{FixedOffset, Utc};
     use std::path::Path;
@@ -204,6 +221,23 @@ mod tests {
             "popstop: \"Klipsch R-51PM\" stays awake while popstop runs (pid 4242)\n\
              popstop: this Mac does not idle sleep while popstop runs\n\
              popstop: press Ctrl-C to stop"
+        );
+    }
+
+    #[test]
+    fn every_line_that_popstop_writes_carries_its_name() {
+        let problem = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "no entrance");
+
+        assert_eq!(problem_line(&problem), "popstop: no entrance");
+        assert_eq!(
+            warning_line(&problem),
+            "popstop: warning: no entrance. popstop continues"
+        );
+        assert!(
+            ready_lines("A Device", 1)
+                .lines()
+                .all(|line| line.starts_with(PREFIX)),
+            "each ready line carries the name"
         );
     }
 
