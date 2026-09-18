@@ -6,6 +6,8 @@
 //! CLI parsing, validation, and output formatting together — the glue that the
 //! in-crate unit tests cannot reach because `run_here` calls `exit`.
 
+mod common;
+
 use std::fs;
 use std::process::{Command, Output};
 
@@ -18,7 +20,6 @@ const NEW: &str = "99999999-8888-7777-6666-555555555555";
 // in `main.rs`); an integration test deliberately re-states the contract it is
 // pinning rather than reaching into private constants.
 const HERE_SENTINEL: &str = "__CRAP_HERE__";
-const NO_NEW_ID_SENTINEL: &str = "__CRAP_NO_NEW_ID__";
 
 /// A temp directory of its own for one run. It removes itself on drop, also
 /// when a test panics.
@@ -93,9 +94,10 @@ fn here_pins_supplied_new_session_id() {
     assert_eq!(lines.get(2).copied(), Some(NEW));
 }
 
-#[test]
-fn here_without_new_id_uses_sentinel() {
-    let out = run_here("plain", &[]);
+/// Runs `crap --here ORIG` with no new id and returns the third field of the
+/// here-mode output: the fork id.
+fn generated_fork_id(tag: &str) -> String {
+    let out = run_here(tag, &[]);
     assert!(
         out.status.success(),
         "exit status was {:?}, stderr: {}",
@@ -104,9 +106,30 @@ fn here_without_new_id_uses_sentinel() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let lines: Vec<&str> = stdout.lines().collect();
-    // Without a forced id the third field is the sentinel, so the shell lets
-    // Claude mint a fresh random id.
-    assert_eq!(lines.get(2).copied(), Some(NO_NEW_ID_SENTINEL));
+    assert_eq!(lines.first().copied(), Some(HERE_SENTINEL));
+    assert_eq!(lines.get(1).copied(), Some(ORIG));
+    lines.get(2).copied().expect("a fork-id field").to_string()
+}
+
+#[test]
+fn here_without_new_id_pins_a_generated_uuid() {
+    // Without a supplied id, the binary generates the fork id. The shell
+    // function pins the fork to it with `--session-id`, so it knows the id and
+    // can tell it to the user after Claude exits.
+    let first = generated_fork_id("plain-1");
+    assert!(
+        common::is_generated_fork_id(&first),
+        "the third field must be a generated UUID v4, got {first:?}"
+    );
+    assert_ne!(first, ORIG, "the fork must not reuse the original id");
+
+    // Each run generates a new id.
+    let second = generated_fork_id("plain-2");
+    assert!(
+        common::is_generated_fork_id(&second),
+        "the third field must be a generated UUID v4, got {second:?}"
+    );
+    assert_ne!(first, second, "two runs must not give the same fork id");
 }
 
 #[test]

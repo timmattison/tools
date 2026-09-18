@@ -1095,6 +1095,93 @@ fn new_session_id_collides(projects_dir: &Path, new_session_id: Option<&str>) ->
     }
 }
 
+/// The id of the fork that `--here` and the cross-user resume make.
+///
+/// This module holds [`ForkId`] and the one function that makes it. The field
+/// of `ForkId` is private to this module, so no other code can make a
+/// `ForkId` that did not pass the checks.
+mod fork_id {
+    use std::path::Path;
+
+    use super::{find_session_file, is_valid_session_id};
+
+    /// A session id that `crap` pins a fork to with `claude --session-id`.
+    ///
+    /// Invariant: the id is a valid session id, and it named no transcript in
+    /// the current user's projects tree when [`choose_fork_id`] chose it.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ForkId(String);
+
+    impl ForkId {
+        /// Returns the id as text.
+        pub fn as_str(&self) -> &str {
+            &self.0
+        }
+    }
+
+    /// Where a fork id came from.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ForkIdOrigin {
+        /// The user gave the id as the second `--here` argument.
+        Supplied,
+        /// `crap` generated the id, because the user gave none.
+        Generated,
+    }
+
+    /// Why [`choose_fork_id`] refused an id.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum ForkIdError {
+        /// The id is not a valid session id.
+        Invalid {
+            /// The refused id.
+            id: String,
+            /// Where the refused id came from.
+            origin: ForkIdOrigin,
+        },
+        /// The id already names a transcript in the current user's projects
+        /// tree.
+        Exists {
+            /// The refused id.
+            id: String,
+            /// Where the refused id came from.
+            origin: ForkIdOrigin,
+        },
+    }
+
+    /// Chooses the id of a fork.
+    ///
+    /// Stub: it checks only a supplied id, as the code before it did.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ForkIdError`] when the id fails a check.
+    pub fn choose_fork_id(
+        projects_dir: &Path,
+        supplied: Option<&str>,
+        generate: impl FnOnce() -> String,
+    ) -> Result<ForkId, ForkIdError> {
+        let Some(id) = supplied else {
+            return Ok(ForkId(generate()));
+        };
+        let origin = ForkIdOrigin::Supplied;
+        if !is_valid_session_id(id) {
+            return Err(ForkIdError::Invalid {
+                id: id.to_string(),
+                origin,
+            });
+        }
+        if find_session_file(projects_dir, id).is_some() {
+            return Err(ForkIdError::Exists {
+                id: id.to_string(),
+                origin,
+            });
+        }
+        Ok(ForkId(id.to_string()))
+    }
+}
+
+use fork_id::{choose_fork_id, ForkId, ForkIdError, ForkIdOrigin};
+
 /// Returns the `~/.claude/sessions` directory, or `None` if the home directory
 /// cannot be determined.
 ///
@@ -2113,6 +2200,25 @@ fn describe_resolve_error(session_id: &str, err: &ResolveError) -> ResolveFailur
     }
 }
 
+/// Maps a [`ForkIdError`] to the failure that `crap` prints and exits with.
+///
+/// Stub: it gives every id the messages of a supplied id, as the code before it
+/// did.
+fn describe_fork_id_error(err: &ForkIdError) -> ResolveFailure {
+    match err {
+        ForkIdError::Invalid { id, .. } => ResolveFailure {
+            headline: format!("'{id}' is not a valid session id"),
+            detail: String::new(),
+            code: exit_codes::INVALID_SESSION_ID,
+        },
+        ForkIdError::Exists { id, .. } => ResolveFailure {
+            headline: format!("a session with id '{id}' already exists"),
+            detail: "       choose a fresh id so the fork does not overwrite it\n".to_string(),
+            code: exit_codes::NEW_SESSION_ID_EXISTS,
+        },
+    }
+}
+
 /// Handles the default resume (`crap <id> [--user X]`): locate the session
 /// across `roots`, then resume it and exit.
 ///
@@ -2384,6 +2490,156 @@ mod tests {
         // An id no transcript uses is free, and "no forced id" never collides.
         assert!(!new_session_id_collides(projects.path(), Some(ID_B)));
         assert!(!new_session_id_collides(projects.path(), None));
+    }
+
+    /// Makes a projects tree that holds one transcript for each id in `ids`.
+    fn projects_with_transcripts(ids: &[&str]) -> tempfile::TempDir {
+        let projects = tempdir().unwrap();
+        let folder = projects.path().join("some-project");
+        fs::create_dir_all(&folder).unwrap();
+        for id in ids {
+            fs::write(folder.join(format!("{id}.jsonl")), "{}\n").unwrap();
+        }
+        projects
+    }
+
+    /// A generator for [`choose_fork_id`] that must not run, because the user
+    /// supplied an id.
+    fn no_generation() -> String {
+        panic!("choose_fork_id must not generate an id when the user supplied one")
+    }
+
+    #[test]
+    fn choose_fork_id_accepts_a_supplied_valid_id() {
+        // A transcript with another id is not a collision.
+        let projects = projects_with_transcripts(&[ID_A]);
+        let id = choose_fork_id(projects.path(), Some(ID_B), no_generation).unwrap();
+        assert_eq!(id.as_str(), ID_B);
+    }
+
+    #[test]
+    fn choose_fork_id_refuses_a_supplied_invalid_id() {
+        // A malformed id must stop before it gets to `claude --session-id`.
+        let projects = projects_with_transcripts(&[]);
+        assert_eq!(
+            choose_fork_id(projects.path(), Some("not-a-uuid"), no_generation),
+            Err(ForkIdError::Invalid {
+                id: "not-a-uuid".to_string(),
+                origin: ForkIdOrigin::Supplied,
+            })
+        );
+    }
+
+    #[test]
+    fn choose_fork_id_refuses_a_supplied_id_that_names_a_transcript() {
+        // `claude --session-id <id>` writes `<id>.jsonl`. A fork with the id of
+        // a transcript that exists thus overwrites that conversation.
+        let projects = projects_with_transcripts(&[ID_B]);
+        assert_eq!(
+            choose_fork_id(projects.path(), Some(ID_B), no_generation),
+            Err(ForkIdError::Exists {
+                id: ID_B.to_string(),
+                origin: ForkIdOrigin::Supplied,
+            })
+        );
+    }
+
+    #[test]
+    fn choose_fork_id_generates_an_id_when_none_is_supplied() {
+        // With no second argument, crap makes the id itself. Then the shell
+        // function knows the fork id before Claude starts.
+        let projects = projects_with_transcripts(&[ID_A]);
+        let id = choose_fork_id(projects.path(), None, || ID_B.to_string()).unwrap();
+        assert_eq!(id.as_str(), ID_B);
+    }
+
+    #[test]
+    fn choose_fork_id_refuses_a_generated_id_that_names_a_transcript() {
+        // A generated id gets the same collision check as a supplied id. The
+        // injected generator gives the id of a transcript that exists.
+        let projects = projects_with_transcripts(&[ID_B]);
+        assert_eq!(
+            choose_fork_id(projects.path(), None, || ID_B.to_string()),
+            Err(ForkIdError::Exists {
+                id: ID_B.to_string(),
+                origin: ForkIdOrigin::Generated,
+            })
+        );
+    }
+
+    #[test]
+    fn choose_fork_id_refuses_a_generated_invalid_id() {
+        // A generated id gets the same validity check as a supplied id, so a
+        // broken generator cannot send a bad id to `claude --session-id`.
+        let projects = projects_with_transcripts(&[]);
+        assert_eq!(
+            choose_fork_id(projects.path(), None, || "not-a-uuid".to_string()),
+            Err(ForkIdError::Invalid {
+                id: "not-a-uuid".to_string(),
+                origin: ForkIdOrigin::Generated,
+            })
+        );
+    }
+
+    #[test]
+    fn describe_fork_id_error_keeps_the_messages_for_a_supplied_id() {
+        // The messages and exit codes of a supplied id do not change. The
+        // integration tests in `here_new_id.rs` read these words.
+        let invalid = describe_fork_id_error(&ForkIdError::Invalid {
+            id: "not-a-uuid".to_string(),
+            origin: ForkIdOrigin::Supplied,
+        });
+        assert_eq!(invalid.headline, "'not-a-uuid' is not a valid session id");
+        assert!(invalid.detail.is_empty(), "detail: {:?}", invalid.detail);
+        assert_eq!(invalid.code, exit_codes::INVALID_SESSION_ID);
+
+        let exists = describe_fork_id_error(&ForkIdError::Exists {
+            id: ID_B.to_string(),
+            origin: ForkIdOrigin::Supplied,
+        });
+        assert_eq!(
+            exists.headline,
+            format!("a session with id '{ID_B}' already exists")
+        );
+        assert_eq!(
+            exists.detail,
+            "       choose a fresh id so the fork does not overwrite it\n"
+        );
+        assert_eq!(exists.code, exit_codes::NEW_SESSION_ID_EXISTS);
+    }
+
+    #[test]
+    fn describe_fork_id_error_for_a_generated_collision_does_not_ask_for_an_id() {
+        // The user chose no id, so "choose a fresh id" is wrong advice. A new
+        // run generates a new id, so that is the advice.
+        let failure = describe_fork_id_error(&ForkIdError::Exists {
+            id: ID_B.to_string(),
+            origin: ForkIdOrigin::Generated,
+        });
+        assert_eq!(
+            failure.headline,
+            format!("the generated fork id '{ID_B}' already names a session")
+        );
+        assert_eq!(
+            failure.detail,
+            "       run the command again to get a new id\n"
+        );
+        assert_eq!(failure.code, exit_codes::NEW_SESSION_ID_EXISTS);
+    }
+
+    #[test]
+    fn describe_fork_id_error_for_a_generated_invalid_id_says_it_was_generated() {
+        // The user typed no id, so a message that blames "'<id>'" alone points
+        // the user at an argument that does not exist.
+        let failure = describe_fork_id_error(&ForkIdError::Invalid {
+            id: "not-a-uuid".to_string(),
+            origin: ForkIdOrigin::Generated,
+        });
+        assert_eq!(
+            failure.headline,
+            "the generated fork id 'not-a-uuid' is not a valid session id"
+        );
+        assert_eq!(failure.code, exit_codes::INVALID_SESSION_ID);
     }
 
     #[test]

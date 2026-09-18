@@ -9,6 +9,8 @@
 //! `__CRAP_FORK_AT__` wire protocol together, which the in-crate unit tests
 //! cannot reach because `run_resume` calls `exit`.
 
+mod common;
+
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -302,7 +304,17 @@ fn here_user_cross_user_copies_into_current_tree() {
         "--here must not cd into the original directory: {stdout}"
     );
     assert_eq!(lines.get(1).copied(), Some(FOREIGN_ID));
-    assert_eq!(lines.get(2).copied(), Some(NO_NEW_ID_SENTINEL));
+    // The binary generated the fork id, so the shell function can pin the fork
+    // to it and report it after Claude exits.
+    let fork_id = lines.get(2).copied().expect("a fork-id field");
+    assert!(
+        common::is_generated_fork_id(fork_id),
+        "the fork-id field must be a generated UUID v4, got {fork_id:?}"
+    );
+    assert_ne!(
+        fork_id, FOREIGN_ID,
+        "the fork must not reuse the original id"
+    );
     // The link field is a real copy under the CURRENT user's tree (never a
     // symlink into the foreign home), snapshotting the foreign transcript.
     let link = Path::new(lines.get(3).copied().expect("a link field"));
