@@ -1222,4 +1222,55 @@ mod tests {
             Some("… 5 more processes made 100% of all faults")
         );
     }
+
+    /// The place of the `COMMAND` column in a row.
+    const COMMAND_CELL: usize = 6;
+
+    /// A command of many bytes for one character, and a command of many
+    /// characters, stay whole. A cut by bytes inside one character panics, and
+    /// a cut by characters loses part of the command.
+    ///
+    /// `ps` escapes every byte outside printable ASCII under `LC_ALL=C`, so
+    /// this text is not what the sampler reads today. The command comes from
+    /// another process, and a tool that panics on the text of another process
+    /// stops at the first such process on the Mac.
+    #[test]
+    fn a_command_of_many_bytes_or_many_characters_stays_whole() {
+        let japanese = "/Applications/日本語.app/Contents/MacOS/日本語 --flag 🎉 café";
+        let long = format!("/usr/bin/node {}", "--a-very-long-flag ".repeat(60));
+        let ranked = vec![
+            RankedRow {
+                command: japanese.to_owned(),
+                ..row(10, 500_000)
+            },
+            RankedRow {
+                command: long.clone(),
+                ..row(11, 500_000)
+            },
+        ];
+        let ranking = ranking(ranked, 1_000_000);
+
+        let wide = rows(&ranking, &ranking.rows, None, &accounts(), now(), None);
+        let commands: Vec<String> = cells(&wide)
+            .iter()
+            .skip(1)
+            .filter_map(|row| row.get(COMMAND_CELL).cloned())
+            .collect();
+        assert_eq!(commands, [japanese.to_owned(), long.trim_end().to_owned()]);
+
+        // A narrow terminal wraps the command over several lines. Each line
+        // holds whole characters, so every character of the command is still
+        // there.
+        let narrow = rows(&ranking, &ranking.rows, None, &accounts(), now(), Some(60));
+        let drawn: String = narrow
+            .chars()
+            .filter(|glyph| !glyph.is_whitespace())
+            .collect();
+        for glyph in japanese.chars().filter(|glyph| !glyph.is_whitespace()) {
+            assert!(
+                drawn.contains(glyph),
+                "the character {glyph:?} of {japanese}"
+            );
+        }
+    }
 }
