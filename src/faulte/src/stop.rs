@@ -174,6 +174,35 @@ mod tests {
         }
     }
 
+    /// A process that is gone is never signalled. Its PID has no row of the
+    /// fresh table, or its row is a zombie. A zombie stopped already, and its
+    /// parent did not collect its exit status yet.
+    ///
+    /// The table decides, and never the signal. A signal to a PID that no
+    /// process holds does nothing, but the operating system gives that number
+    /// to a new process, and a signal then stops the wrong one.
+    #[test]
+    fn a_process_that_is_gone_is_not_signalled() {
+        let candidate = candidate(30);
+        let zombie = ProcessRow {
+            zombie: true,
+            ..process(30, LAUNCHD_PID)
+        };
+        let record = record(30, Some(changed_at()));
+        let cases = [
+            ("no row of the PID", vec![process(31, LAUNCHD_PID)]),
+            ("a zombie row of the PID", vec![zombie]),
+        ];
+
+        for (table_holds, table) in cases {
+            assert_eq!(
+                recheck(&candidate, &table, Some(&record)),
+                Recheck::Exited,
+                "the table holds {table_holds}"
+            );
+        }
+    }
+
     /// A session that did not change proceeds: its PID holds the same process
     /// that the plan read, the registry still says that it is idle, the time
     /// of the last status change is the same, and it started no process.
