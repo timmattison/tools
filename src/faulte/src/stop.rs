@@ -22,8 +22,10 @@ const LONG_YES: &str = "yes";
 /// `yes` is not `yes`, and a stop is not reversible.
 #[must_use]
 pub fn confirms(answer: Option<&str>) -> bool {
-    let _ = (answer, SHORT_YES, LONG_YES);
-    false
+    answer.is_some_and(|text| {
+        let answer = text.trim();
+        answer.eq_ignore_ascii_case(SHORT_YES) || answer.eq_ignore_ascii_case(LONG_YES)
+    })
 }
 
 #[cfg(test)]
