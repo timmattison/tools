@@ -468,6 +468,15 @@ PID    FAULTS    \n\
             self
         }
 
+        /// Gives this machine, with root as the viewer.
+        fn as_root(mut self) -> Self {
+            self.viewer = Viewer {
+                uid: Uid::new(0),
+                is_root: true,
+            };
+            self
+        }
+
         /// Ranks the processes of this machine over [`WINDOW`].
         fn rank(&self) -> Ranking {
             self.rank_over(WINDOW)
@@ -828,5 +837,38 @@ PID    FAULTS    \n\
         for row in &ranking.rows {
             assert_eq!(row.claude, ClaudeView::OtherAccount, "the row {row:?}");
         }
+    }
+
+    /// Root reads the registry of every account, so the same process shows
+    /// its session under `sudo`. A Claude Code process of another account
+    /// that root holds no record for shows no session, the same as one of the
+    /// account of the viewer.
+    #[test]
+    fn root_sees_the_session_of_a_process_of_another_account() {
+        let machine = Machine::new(
+            vec![count(40, 300), count(41, 200)],
+            vec![other_account(40), other_account(41)],
+        )
+        .with_claude(40, ClaudeRole::Session)
+        .with_claude(41, ClaudeRole::Session)
+        .with_record(40, idle_record(Duration::from_secs(600)))
+        .as_root();
+
+        let ranking = machine.rank();
+
+        assert_eq!(
+            ranking.rows.first().map(|row| &row.claude),
+            Some(&ClaudeView::Session {
+                id: session(),
+                state: SessionState::Idle {
+                    for_: Some(Duration::from_secs(600))
+                },
+                directory: Some(PathBuf::from(DIRECTORY)),
+            })
+        );
+        assert_eq!(
+            ranking.rows.get(1).map(|row| &row.claude),
+            Some(&ClaudeView::NoRecord)
+        );
     }
 }
