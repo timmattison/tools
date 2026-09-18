@@ -447,6 +447,32 @@ const JSON_ANSWER_ONE_DONE: &str = concat!(
     "Start #91 next with 'si 91'\n",
 );
 
+/// A JSON plan of three streams that wait for nothing, two of which hold an
+/// open pull request.
+///
+/// The reproduction of issue #516. `S1` holds the pull request `#515`, which
+/// closes `#512`, and `S2` holds `#514`, which closes `#510`. `S3` holds the
+/// plain issue `#6`, so one answer line still names a start command.
+const JSON_PLAN_OF_PULL_REQUESTS: &str = r#"{
+  "version": 1,
+  "streams": [
+    { "id": "S1", "order": [{ "issue": 512, "pr": 515 }] },
+    { "id": "S2", "order": [{ "issue": 510, "pr": 514 }] },
+    { "id": "S3", "order": [{ "issue": 6 }] }
+  ]
+}"#;
+
+/// What GitHub says about every number of [`JSON_PLAN_OF_PULL_REQUESTS`]:
+/// two open pull requests, the two open issues they close, and one more open
+/// issue.
+const PULL_REQUEST_ISSUES: &str = r#"{"data":{"repository":{
+"i515":{"__typename":"PullRequest","number":515,"title":"The finished work","state":"OPEN"},
+"i512":{"__typename":"Issue","number":512,"title":"The work it closes","state":"OPEN","stateReason":null},
+"i514":{"__typename":"PullRequest","number":514,"title":"The other finished work","state":"OPEN"},
+"i510":{"__typename":"Issue","number":510,"title":"The other work it closes","state":"OPEN","stateReason":null},
+"i6":{"__typename":"Issue","number":6,"title":"The work nobody began","state":"OPEN","stateReason":null}
+}}}"#;
+
 /// A JSON plan whose two streams wait for each other.
 ///
 /// Neither of the two starts, so the plan names no work at all.
@@ -1996,6 +2022,32 @@ fn a_pull_request_of_a_json_step_is_the_pair_the_row_writes() {
         answer.contains("#102 (#94)  The shell init"),
         "the row writes the pair and the title of the work, in {answer}"
     );
+}
+
+#[test]
+fn an_open_pull_request_of_a_picture_is_work_to_finish_and_not_to_start() {
+    // A JSON plan is a graph, and the answer of a graph writes one line for
+    // each ready step. A ready open pull request is work that exists already,
+    // so its line tells the reader to finish it, and names the issue it
+    // closes. No line names the start command for either number of a pair.
+    let gh = FakeGh::new(PULL_REQUEST_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", JSON_PLAN_OF_PULL_REQUESTS);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.ends_with(concat!(
+            "Finish PR #515 (closes #512) next: review it and merge it\n",
+            "Finish PR #514 (closes #510) next: review it and merge it\n",
+            "Start #6 next with 'si 6'\n",
+        )),
+        "each ready pull request is work to finish and the issue is work to start, in {text}"
+    );
+    for command in ["si 515", "si 512", "si 514", "si 510"] {
+        assert!(
+            !text.contains(command),
+            "no line names the command {command:?}, in {text}"
+        );
+    }
 }
 
 #[test]
