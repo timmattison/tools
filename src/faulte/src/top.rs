@@ -102,10 +102,46 @@ pub enum TopParseError {
 /// Gives a [`TopParseError`] when the output is not two samples of the columns
 /// `PID FAULTS`, or when the second sample holds no row or a malformed row.
 pub fn parse(output: &str) -> Result<TopSample, TopParseError> {
-    let _ = output;
+    let lines: Vec<&str> = output.lines().collect();
+    let first_row = lines
+        .iter()
+        .rposition(|line| is_header_row(line))
+        .map_or(lines.len(), |header| header + 1);
+    let rows = lines
+        .iter()
+        .enumerate()
+        .skip(first_row)
+        .map(|(index, line)| {
+            parse_row(line).ok_or_else(|| TopParseError::MalformedRow {
+                number: index + 1,
+                line: (*line).to_owned(),
+            })
+        })
+        .collect::<Result<_, _>>()?;
     Ok(TopSample {
-        rows: Vec::new(),
+        rows,
         elapsed: None,
+    })
+}
+
+/// The first token of the header row of each sample.
+const PID_HEADER: &str = "PID";
+
+/// Tells whether `line` is a header row: its first token is `PID`. No other
+/// line of the output starts with that token.
+fn is_header_row(line: &str) -> bool {
+    line.split_whitespace().next() == Some(PID_HEADER)
+}
+
+/// Reads a row: a PID, then a fault count, and no other token.
+fn parse_row(line: &str) -> Option<FaultCount> {
+    let mut tokens = line.split_whitespace();
+    let (Some(pid), Some(faults), None) = (tokens.next(), tokens.next(), tokens.next()) else {
+        return None;
+    };
+    Some(FaultCount {
+        pid: Pid::new(pid.parse().ok()?),
+        faults: faults.parse().ok()?,
     })
 }
 
