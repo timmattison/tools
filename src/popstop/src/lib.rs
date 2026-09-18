@@ -14,8 +14,12 @@
 //!   standard library only and it compiles on every platform.
 //! - `output` plays the signal through the default output unit of Core Audio.
 //!   It compiles on macOS only.
+//! - `process` reads the kernel start time of a process. It compiles on macOS
+//!   only.
 
 pub mod lock;
 #[cfg(target_os = "macos")]
 pub mod output;
+#[cfg(target_os = "macos")]
+pub mod process;
 pub mod signal;
