@@ -143,7 +143,7 @@ fn parse_row(line: &str) -> Result<Option<ProcessRow>, RowFault> {
         split_fields::<FIELDS>(line).ok_or(RowFault::TooFewFields)?;
     let pid = Pid::new(number(PID_COLUMN, pid)?);
     let ppid = Pid::new(number(PPID_COLUMN, ppid)?);
-    let uid = Uid::new(number(UID_COLUMN, uid)?);
+    let uid = parse_uid(uid)?;
     let rss_kib = number(RSS_COLUMN, rss)?;
     let start = [weekday, month, day, time, year].join(" ");
     let Some(started) = NaiveDateTime::parse_from_str(&start, START_FORMAT)
@@ -193,12 +193,43 @@ fn split_fields<const N: usize>(line: &str) -> Option<([&str; N], &str)> {
     Some((fields, rest.trim_ascii()))
 }
 
-/// Reads a number of ASCII digits from `token`.
+/// The sign that `ps` prints before a negative UID.
+const MINUS: char = '-';
+
+/// Reads the UID `token`.
+///
+/// `ps` prints the UID as a signed 32-bit number, so the UID of `nobody`,
+/// 4294967294, prints as `-2`. A minus and ASCII digits give the UID with the
+/// same 32 bits as that negative value. ASCII digits alone give the UID
+/// itself. `-0` is not a UID, because `ps` never prints it.
+fn parse_uid(token: &str) -> Result<Uid, RowFault> {
+    let value = match token.strip_prefix(MINUS) {
+        // The check of the digits comes first, because the parse of an `i32`
+        // also accepts a sign after the minus.
+        Some(digits) => ascii_digits(digits)
+            .then(|| token.parse::<i32>().ok())
+            .flatten()
+            .filter(|value| value.is_negative())
+            .map(i32::cast_unsigned),
+        None => unsigned(token),
+    };
+    value
+        .map(Uid::new)
+        .ok_or(RowFault::MalformedNumber(UID_COLUMN))
+}
+
+/// Tells whether `text` holds ASCII digits only.
+///
+/// The parse of a Rust integer also accepts a leading `+`, and `ps` never
+/// prints one.
+fn ascii_digits(text: &str) -> bool {
+    text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Reads a number of ASCII digits from `token`. An empty text fails the
+/// parse, and so does a value too large for `T`.
 fn unsigned<T: FromStr>(token: &str) -> Option<T> {
-    if !token.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    token.parse().ok()
+    ascii_digits(token).then(|| token.parse().ok()).flatten()
 }
 
 #[cfg(test)]
