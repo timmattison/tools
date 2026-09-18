@@ -314,7 +314,7 @@ pub struct Measurement<'a> {
 pub fn header(measurement: &Measurement<'_>) -> Vec<String> {
     let ranking = measurement.ranking;
     let processes = ranking.rows.len();
-    vec![
+    let mut lines = vec![
         format!(
             "{} {} over a {} window (interval {}) {DASH} {} faults, {}/s",
             count_of(processes),
@@ -334,7 +334,47 @@ pub fn header(measurement: &Measurement<'_>) -> Vec<String> {
             bytes(measurement.usage.total_bytes),
         ),
         claude_line(ranking),
-    ]
+    ];
+    lines.extend(skipped_line(ranking));
+    lines
+}
+
+/// Gives the line of the processes that the ranking left out, or nothing when
+/// it left nothing out.
+///
+/// The issue demands that each process is a row or a count. A tool that drops
+/// a process without a word reports a clean Mac that is not clean, so each
+/// count is here. A count of zero adds no part, and a Mac that hides nothing
+/// says nothing, the same as `occ`.
+fn skipped_line(ranking: &Ranking) -> Option<String> {
+    let skipped = ranking.skipped;
+    let mut parts: Vec<String> = Vec::new();
+    if skipped.exited > 0 {
+        parts.push(format!(
+            "{} exited before faulte read {} ({} of the faults)",
+            count_of(skipped.exited),
+            plural(skipped.exited, "it", "them"),
+            share(ranking.share(skipped.exited_faults)),
+        ));
+    }
+    if skipped.zombies > 0 {
+        parts.push(format!(
+            "{} {}",
+            count_of(skipped.zombies),
+            plural(skipped.zombies, "zombie", "zombies"),
+        ));
+    }
+    if skipped.unsampled > 0 {
+        parts.push(format!(
+            "{} {} not in the top sample",
+            count_of(skipped.unsampled),
+            plural(skipped.unsampled, "was", "were"),
+        ));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!("skipped: {}", parts.join(", ")))
 }
 
 /// The singular of the word for one Claude Code process of the ranking.
