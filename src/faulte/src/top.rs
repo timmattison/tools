@@ -430,6 +430,71 @@ mod tests {
         }
     }
 
+    /// Each row that is not exactly a `u32` and a `u64` is refused, with its
+    /// line and its number. A sign in front, a text of other digits, and a
+    /// number too large for its type are malformed. Multi-byte text gives the
+    /// same error, and no panic.
+    #[test]
+    fn a_malformed_row_is_refused_with_its_line() {
+        let malformed = [
+            "abc    12        ",
+            "12               ",
+            "12     34     56 ",
+            "-5     12        ",
+            "12     -5        ",
+            "+12    34        ",
+            "12     +34       ",
+            "12     +         ",
+            "12     -         ",
+            "12     3.5       ",
+            "12     1e3       ",
+            "0x1F   3         ",
+            "4294967296 5     ",
+            "12     18446744073709551616",
+            "日本語 12        ",
+            "12     🎉        ",
+            "café   3         ",
+            "12     34🎉      ",
+            "１２   3         ",
+            "12\u{a0}3         ",
+        ];
+        for bad in malformed {
+            let text = two_samples(
+                "10     9000000   \n",
+                &format!("10     3         \n{bad}\n20     4000      \n"),
+            );
+
+            let error = parse(&text).expect_err("a malformed row is refused");
+
+            assert_eq!(
+                error,
+                TopParseError::MalformedRow {
+                    number: 13,
+                    line: bad.to_owned()
+                },
+                "the row {bad:?}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.contains("at line 13") && message.contains(&format!("{bad:?}")),
+                "the message shows the line and its number: {message}"
+            );
+        }
+    }
+
+    /// The largest values of each type are rows, not errors.
+    #[test]
+    fn the_largest_pid_and_the_largest_count_parse() {
+        let text = two_samples(
+            "10     9000000   \n",
+            "4294967295 18446744073709551615\n0      0         \n",
+        );
+
+        let sample = parse(&text).expect("the largest values parse");
+
+        assert_eq!(sample.rows, [row(u32::MAX, u64::MAX), row(0, 0)]);
+    }
+
     /// Parses `text` as a [`Span`] for a test.
     fn span(text: &str) -> Span {
         text.parse().expect("the test gives a valid duration")
