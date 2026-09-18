@@ -258,6 +258,25 @@ mod tests {
     }
 
     #[test]
+    fn each_recorded_status_gives_its_own_value() {
+        // The value `shell` is on a live machine and this crate does not know
+        // it. It keeps its text, so that no reader takes it for `idle`.
+        for (recorded, expected) in [
+            ("idle", SessionStatus::Idle),
+            ("busy", SessionStatus::Busy),
+            ("waiting", SessionStatus::Waiting),
+            ("shell", SessionStatus::Other("shell".to_string())),
+        ] {
+            let file = file_in_status(recorded, (PROCESS_START + 1) * 1_000);
+            assert_eq!(
+                record_in(&file, PID, PROCESS_START).and_then(|record| record.status),
+                Some(expected),
+                "the status {recorded:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_file_left_by_a_process_that_died_names_no_session() {
         // The identifier was reused. The file records a session that started
         // when the dead process did, which is not when this process started.
