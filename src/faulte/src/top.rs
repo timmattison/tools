@@ -239,14 +239,25 @@ mod tests {
     /// Gives one sample as `top` prints it: the header block with the clock
     /// line `2026/09/18 <time>`, a blank line, `header`, then `rows`.
     fn sample(time: &str, header: &str, rows: &str) -> String {
+        sample_at(&format!("2026/09/18 {time}"), header, rows)
+    }
+
+    /// Gives one sample with the clock line `clock`.
+    fn sample_at(clock: &str, header: &str, rows: &str) -> String {
         format!(
             "Processes: 3 total, 1 running, 2 sleeping, 9 threads \n\
-             2026/09/18 {time}\n\
+             {clock}\n\
              Load Avg: 1.00, 1.00, 1.00 \n\
              \n\
              {header}\n\
              {rows}"
         )
+    }
+
+    /// Gives two samples with the clock lines `first` and `second`.
+    fn two_samples_at(first: &str, second: &str) -> String {
+        sample_at(first, HEADER_ROW, "10     9000000   \n")
+            + &sample_at(second, HEADER_ROW, "10     3         \n")
     }
 
     /// Gives two samples with the header row of `-stats pid,faults`.
@@ -500,6 +511,66 @@ mod tests {
         let sample = parse(&text).expect("the largest values parse");
 
         assert_eq!(sample.rows, [row(u32::MAX, u64::MAX), row(0, 0)]);
+    }
+
+    /// The clock lines of the real capture are `12:31:20` and `12:31:24`. The
+    /// delay was 2 s, and the load of the machine made the samples 4 s apart.
+    #[test]
+    fn the_real_capture_gives_the_time_between_its_clock_lines() {
+        let sample = parse(REAL_CAPTURE).expect("the real capture parses");
+
+        assert_eq!(sample.elapsed, Some(Duration::from_secs(4)));
+    }
+
+    /// The difference is between two dates and times, so it holds across
+    /// midnight. Spaces after the clock line are not part of the time.
+    #[test]
+    fn the_time_between_the_clock_lines_is_their_difference() {
+        let cases = [
+            ("2026/09/18 12:00:00", "2026/09/18 12:00:02", 2),
+            ("2026/09/18 23:59:59", "2026/09/19 00:00:03", 4),
+            ("2026/12/31 23:59:58  ", "2027/01/01 00:00:08 ", 10),
+        ];
+        for (first, second, seconds) in cases {
+            let sample = parse(&two_samples_at(first, second)).expect("the samples parse");
+
+            assert_eq!(
+                sample.elapsed,
+                Some(Duration::from_secs(seconds)),
+                "the clock lines {first:?} and {second:?}"
+            );
+        }
+    }
+
+    /// A clock line that is absent or bad is not an error. The sample has no
+    /// elapsed time, and `faulte` uses the interval. A difference of zero or
+    /// less is no time either.
+    #[test]
+    fn a_missing_bad_or_backward_clock_gives_no_elapsed_time() {
+        let cases = [
+            ("2026/09/18 12:00:05".to_owned(), "2026/09/18 12:00:02".to_owned()),
+            ("2026/09/18 12:00:02".to_owned(), "2026/09/18 12:00:02".to_owned()),
+            ("not a time".to_owned(), "2026/09/18 12:00:02".to_owned()),
+            ("2026/09/18 12:00:02".to_owned(), String::new()),
+            ("2026/09/18 12:00".to_owned(), "2026/09/18 12:00:02".to_owned()),
+            ("2026/09/18 25:00:00".to_owned(), "2026/09/18 12:00:02".to_owned()),
+            ("２０２６/09/18 12:00:00".to_owned(), "2026/09/18 12:00:02".to_owned()),
+        ];
+        for (first, second) in cases {
+            let sample = parse(&two_samples_at(&first, &second)).expect("a bad clock is no error");
+
+            assert_eq!(sample.elapsed, None, "the clock lines {first:?} and {second:?}");
+            assert_eq!(sample.rows, [row(10, 3)]);
+        }
+
+        let no_block = format!("{HEADER_ROW}\n10     9000000   \n{HEADER_ROW}\n10     3         \n");
+        let one_block = format!("{HEADER_ROW}\n10     9000000   \n")
+            + &sample("12:00:02", HEADER_ROW, "10     3         \n");
+        for text in [no_block, one_block] {
+            let sample = parse(&text).expect("an output without clock lines parses");
+
+            assert_eq!(sample.elapsed, None, "the text {text:?}");
+        }
     }
 
     /// Parses `text` as a [`Span`] for a test.
