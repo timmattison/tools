@@ -84,4 +84,25 @@ mod tests {
             }
         );
     }
+
+    /// A counter that goes down gives no traffic. The counters count from the
+    /// time that the system started, so they only go down when the system
+    /// starts again between the two reads. A subtraction panics in a build
+    /// with the checks on, and gives a very large number in a build without
+    /// them.
+    #[test]
+    fn a_counter_that_goes_down_gives_no_traffic() {
+        let before = VmCounters {
+            swapins: 46_564,
+            swapouts: 40_156,
+            compressor_pages: 0,
+        };
+        let after = VmCounters {
+            swapins: 3,
+            swapouts: 0,
+            compressor_pages: 0,
+        };
+
+        assert_eq!(VmDelta::between(before, after), VmDelta::default());
+    }
 }
