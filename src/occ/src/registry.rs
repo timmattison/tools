@@ -11,6 +11,7 @@
 use crate::process::ProcessFact;
 use crate::SessionId;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 /// How far the recorded session start can lie from the process start.
 ///
@@ -26,6 +27,45 @@ use std::path::{Path, PathBuf};
 /// it, the machine would have to issue every process identifier it has and come
 /// back to the same one inside two minutes.
 const REGISTRATION_WINDOW_SECS: u64 = 120;
+
+/// The status that a session recorded, from the `status` field of its file.
+///
+/// Only an idle session is safe to stop, so the exact value decides whether a
+/// session is active. An unknown value keeps its text. Thus a status that
+/// Claude Code adds later never becomes [`SessionStatus::Idle`] by mistake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionStatus {
+    /// The session runs no turn. It waits for its next prompt.
+    Idle,
+    /// The session runs a turn.
+    Busy,
+    /// The session waits for an answer from its user.
+    Waiting,
+    /// A value that this crate does not know, exactly as the file records it.
+    ///
+    /// The value `shell` is one such value on a live machine.
+    Other(String),
+}
+
+/// What one registry file records about a live session.
+///
+/// Only the session is necessary. The other fields are the facts that `faulte`
+/// uses to decide whether a session is active. A field that is absent, or that
+/// holds a value of the wrong type, gives `None`. It never removes the session
+/// from the record, because `occ` reports a session without these facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRecord {
+    /// The session that the process belongs to.
+    pub session: SessionId,
+    /// The status of the session, from the `status` field.
+    pub status: Option<SessionStatus>,
+    /// When the status last changed, from the `statusUpdatedAt` field.
+    ///
+    /// The file gives this time in milliseconds since the Unix epoch.
+    pub status_changed_at: Option<SystemTime>,
+    /// The working directory of the session, from the `cwd` field.
+    pub directory: Option<PathBuf>,
+}
 
 /// Where the session recorded for a running process is read from.
 ///
@@ -61,17 +101,18 @@ impl Registry for SessionRegistry {
     fn session_of(&self, process: &ProcessFact) -> Option<SessionId> {
         let file = self.root.join(format!("{}.json", process.pid));
         let contents = std::fs::read_to_string(file).ok()?;
-        session_in(&contents, process.pid, process.start_time_epoch_secs)
+        record_in(&contents, process.pid, process.start_time_epoch_secs)
+            .map(|record| record.session)
     }
 }
 
-/// Reads the session out of one registry file.
+/// Reads the record out of one registry file.
 ///
 /// Returns `None` unless the file is about this process and names a session.
 /// Every check here fails closed, because naming the wrong session is the worst
 /// answer available: nothing in the output would say the name is wrong.
 #[must_use]
-fn session_in(contents: &str, pid: u32, start_time_epoch_secs: u64) -> Option<SessionId> {
+fn record_in(contents: &str, pid: u32, start_time_epoch_secs: u64) -> Option<SessionRecord> {
     /// Milliseconds in a second, the unit the recorded start is written in.
     const MILLIS: u64 = 1_000;
 
@@ -91,28 +132,40 @@ fn session_in(contents: &str, pid: u32, start_time_epoch_secs: u64) -> Option<Se
         return None;
     }
 
-    SessionId::parse(
+    let session = SessionId::parse(
         record
             .get("sessionId")
             .and_then(serde_json::Value::as_str)?,
-    )
+    )?;
+
+    Some(SessionRecord {
+        session,
+        status: None,
+        status_changed_at: None,
+        directory: None,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{session_in, Registry, SessionRegistry, REGISTRATION_WINDOW_SECS};
+    use super::{
+        record_in, Registry, SessionRecord, SessionRegistry, SessionStatus,
+        REGISTRATION_WINDOW_SECS,
+    };
     use crate::process::ProcessFact;
     use crate::SessionId;
     use std::path::PathBuf;
+    use std::time::{Duration, UNIX_EPOCH};
 
     const SESSION: &str = "ed84c8c7-0117-4670-936c-98e0f0d2c80b";
     const PID: u32 = 13319;
     const PROCESS_START: u64 = 1_782_902_997;
+    const DIRECTORY: &str = "/Volumes/HDDRAID/Downloads/temp";
 
     /// A registry file in the shape Claude Code writes, taken from a live one.
     fn file(pid: u32, session: &str, started_millis: u64) -> String {
         format!(
-            r#"{{"pid":{pid},"sessionId":"{session}","cwd":"/Volumes/HDDRAID/Downloads/temp",
+            r#"{{"pid":{pid},"sessionId":"{session}","cwd":"{DIRECTORY}",
                "startedAt":{started_millis},"procStart":"Wed Jul  1 10:49:57 2026",
                "version":"2.1.197","peerProtocol":1,"kind":"bg","entrypoint":"cli",
                "name":"Identify missing data points","jobId":"ed84c8c7","status":"idle",
@@ -120,8 +173,30 @@ mod tests {
         )
     }
 
+    /// A registry file of `SESSION` for `PID` in `status`, taken from a live one.
+    ///
+    /// The status changed at `status_changed_millis`. The start and the last
+    /// update of the file are at other times, so a test sees which field the
+    /// reader takes.
+    fn file_in_status(status: &str, status_changed_millis: u64) -> String {
+        let started_millis = (PROCESS_START + 1) * 1_000;
+        let updated_millis = status_changed_millis + 5_000;
+        format!(
+            r#"{{"pid":{PID},"sessionId":"{SESSION}","cwd":"{DIRECTORY}",
+               "startedAt":{started_millis},"procStart":"Wed Jul  1 10:49:57 2026",
+               "version":"2.1.276","peerProtocol":1,"kind":"interactive","entrypoint":"cli",
+               "status":"{status}","updatedAt":{updated_millis},
+               "statusUpdatedAt":{status_changed_millis}}}"#
+        )
+    }
+
     fn id(text: &str) -> SessionId {
         SessionId::parse(text).expect("test id should parse")
+    }
+
+    /// The session of the record in `contents`, which is all that `occ` reports.
+    fn session_in(contents: &str, pid: u32, start_time_epoch_secs: u64) -> Option<SessionId> {
+        record_in(contents, pid, start_time_epoch_secs).map(|record| record.session)
     }
 
     /// A process that started at `PROCESS_START`.
@@ -133,7 +208,7 @@ mod tests {
                 "/Users/u/.local/share/claude/versions/2.1.197",
             )),
             argv: vec!["claude".to_string()],
-            cwd: Some(PathBuf::from("/Volumes/HDDRAID/Downloads/temp")),
+            cwd: Some(PathBuf::from(DIRECTORY)),
             uptime_secs: 3_600,
             start_time_epoch_secs: PROCESS_START,
         }
@@ -143,6 +218,21 @@ mod tests {
     fn reads_the_session_a_process_recorded() {
         let recorded = file(PID, SESSION, (PROCESS_START + 1) * 1_000);
         assert_eq!(session_in(&recorded, PID, PROCESS_START), Some(id(SESSION)));
+    }
+
+    #[test]
+    fn the_record_gives_the_status_its_time_and_the_directory() {
+        let changed_millis = (PROCESS_START + 600) * 1_000 + 250;
+        let recorded = file_in_status("idle", changed_millis);
+        assert_eq!(
+            record_in(&recorded, PID, PROCESS_START),
+            Some(SessionRecord {
+                session: id(SESSION),
+                status: Some(SessionStatus::Idle),
+                status_changed_at: Some(UNIX_EPOCH + Duration::from_millis(changed_millis)),
+                directory: Some(PathBuf::from(DIRECTORY)),
+            })
+        );
     }
 
     #[test]
