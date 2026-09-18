@@ -62,11 +62,29 @@ impl Keepalive {
 
     /// Ramps the signal down to silence, then stops the output unit.
     ///
+    /// The wait for silence has the bound [`RAMP_DOWN_BOUND`]. A device that
+    /// plays nothing never reaches silence, and a stop must still end.
+    ///
     /// # Errors
     ///
     /// Returns an [`AudioError`] that names the Core Audio call that failed.
     pub fn stop(self) -> Result<(), AudioError> {
+        self.stop.start_ramp_down();
+        wait_for_silence(&self.stop);
         self.unit.stop()
+    }
+}
+
+/// Waits until the ramp down of `stop` reached silence, for
+/// [`RAMP_DOWN_BOUND`] at most.
+///
+/// This wait runs once, at the end of a run, so it looks at the state of the
+/// ramp again and again. The audio thread sets that state, and it must not
+/// take a lock, thus it cannot tell the main thread through a channel.
+fn wait_for_silence(stop: &StopHandle) {
+    let deadline = Instant::now() + RAMP_DOWN_BOUND;
+    while !stop.is_ramp_down_complete() && Instant::now() < deadline {
+        thread::sleep(RAMP_DOWN_POLL);
     }
 }
 
