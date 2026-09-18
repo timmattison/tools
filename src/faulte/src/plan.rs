@@ -119,11 +119,74 @@ pub struct Plan {
     pub rules: Rules,
 }
 
+/// Gives the time `now` in seconds since the Unix epoch.
+///
+/// A time before the epoch gives zero. Every process of a Mac started after
+/// the epoch, so a clock that far back makes every process look young, and the
+/// plan then selects nothing.
+fn epoch_seconds(now: SystemTime) -> u64 {
+    now.duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
+/// Gives the age of a process that started at `started_at_epoch_secs`, at the
+/// time `now_secs`.
+///
+/// A process with no start time has no age, and rule 1 refuses it. `ps` gives
+/// the start time of every process that it lists, so only the row of the
+/// kernel has none. A process that started after `now_secs` has no age either:
+/// the clock of this Mac can move back between the read of the table and the
+/// read of the time.
+fn age_of(started_at_epoch_secs: Option<u64>, now_secs: u64) -> Option<Duration> {
+    started_at_epoch_secs
+        .filter(|started| *started <= now_secs)
+        .map(|started| Duration::from_secs(now_secs - started))
+}
+
+/// Gives the time when the status of `state` last changed.
+///
+/// The state carries the time since the change, and the ranking measured it
+/// against the same `now`. Thus this subtraction gives the time of the change
+/// back exactly, and the check before the signal compares it with the time
+/// that a fresh record gives.
+fn status_changed_at(state: &SessionState, now: SystemTime) -> Option<SystemTime> {
+    match state {
+        SessionState::Idle { for_: Some(for_) } => now.checked_sub(*for_),
+        _ => None,
+    }
+}
+
 /// Gives the plan of `faulte kill` over `input`.
 #[must_use]
 pub fn plan(input: &PlanInput<'_>) -> Plan {
+    let older_than = Duration::from(input.rules.older_than);
+    let now_secs = epoch_seconds(input.now);
+    let mut candidates = Vec::new();
+    for row in &input.ranking.rows {
+        // Only a session that `faulte` read a registry record for can be a
+        // candidate. A row with no record shows no session, so a stop of that
+        // row names a session that nothing proved.
+        let ClaudeView::Session { id, state, .. } = &row.claude else {
+            continue;
+        };
+        let (Some(age), Some(started_at_epoch_secs)) = (
+            age_of(row.started_at_epoch_secs, now_secs),
+            row.started_at_epoch_secs,
+        ) else {
+            continue;
+        };
+        if age <= older_than {
+            continue;
+        }
+        candidates.push(Candidate {
+            row: row.clone(),
+            session: id.clone(),
+            started_at_epoch_secs,
+            status_changed_at: status_changed_at(state, input.now),
+        });
+    }
     Plan {
-        candidates: Vec::new(),
+        candidates,
         held_back_by_max: 0,
         not_selected: NotSelected::default(),
         other_account: Vec::new(),
