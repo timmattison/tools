@@ -110,14 +110,23 @@ impl KeepaliveSignal {
     ///
     /// The buffer holds `buffer.len() / channels` frames. Every channel of a
     /// frame gets the same value.
+    ///
+    /// The samples after the last whole frame get 0.0, and so does the whole
+    /// buffer when `channels` is 0. Those samples do not move the ramp.
     pub fn fill(&mut self, buffer: &mut [f32], channels: usize) {
         if self.phase == Phase::Playing && self.shared.stop_requested.load(Ordering::Acquire) {
             self.phase = Phase::RampingDown;
         }
         let was_silent = self.phase == Phase::Silent;
 
-        for frame in buffer.chunks_exact_mut(channels) {
-            frame.fill(self.next_sample());
+        if channels == 0 {
+            buffer.fill(0.0);
+        } else {
+            let mut frames = buffer.chunks_exact_mut(channels);
+            for frame in &mut frames {
+                frame.fill(self.next_sample());
+            }
+            frames.into_remainder().fill(0.0);
         }
 
         if !was_silent && self.phase == Phase::Silent {
