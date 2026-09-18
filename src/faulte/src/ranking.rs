@@ -312,11 +312,22 @@ pub fn rank(input: &Observation<'_>) -> Ranking {
             (zombies, unsampled + 1)
         }
     });
+    // One line of the header holds what no single row shows: what Claude
+    // Code does to this Mac.
+    let claude = rows
+        .iter()
+        .filter(|row| row.claude != ClaudeView::NotClaude)
+        .fold(ClaudeTotal::default(), |total, row| ClaudeTotal {
+            processes: total.processes + 1,
+            other_account: total.other_account
+                + usize::from(row.claude == ClaudeView::OtherAccount),
+            faults: total.faults.saturating_add(row.faults),
+        });
     Ranking {
         rows,
         window: input.window,
         total_faults,
-        claude: ClaudeTotal::default(),
+        claude,
         skipped: Skipped {
             exited,
             exited_faults,
