@@ -379,7 +379,7 @@ mod tests {
     use std::io;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
     use std::thread;
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
@@ -411,6 +411,14 @@ mod tests {
         let temp = tempfile::tempdir().expect("a temporary directory");
         let dir = StateDir::new(temp.path().join("state"));
         (temp, dir)
+    }
+
+    /// Writes `record` into the lock file and holds no lock, as a copy that
+    /// crashed leaves it. Makes the state directory when necessary.
+    fn leave_an_old_record(dir: &StateDir, record: HolderRecord) {
+        fs::create_dir_all(dir.path()).expect("make the state directory");
+        let line = serde_json::to_string(&record).expect("the record serializes") + "\n";
+        fs::write(dir.lock_path(), line).expect("write an old record");
     }
 
     #[test]
@@ -485,8 +493,7 @@ mod tests {
 
         // A copy that crashed leaves its record, and the kernel releases its
         // lock.
-        let old_record = serde_json::to_string(&FIRST).expect("the record serializes") + "\n";
-        fs::write(dir.lock_path(), old_record).expect("write an old record");
+        leave_an_old_record(&dir, FIRST);
         assert_eq!(
             current_holder(&dir).expect("the reader reads the lock file"),
             None,
@@ -683,5 +690,43 @@ mod tests {
             "the lock was released during the wait, so no copy holds it"
         );
         releaser.join().expect("the releasing thread ends");
+    }
+
+    #[test]
+    fn readers_at_the_same_time_all_get_none_when_only_an_old_record_stays() {
+        // Each reader holds the lock for a moment. The number of looks makes
+        // an overlap of two readers certain.
+        const READERS: usize = 4;
+        const LOOKS: usize = 2_000;
+        let (_temp, dir) = state_dir();
+        leave_an_old_record(&dir, FIRST);
+        let start = Barrier::new(READERS);
+
+        let wrong_answers: Vec<String> = thread::scope(|scope| {
+            let readers: Vec<_> = (0..READERS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        start.wait();
+                        (0..LOOKS)
+                            .map(|_| current_holder(&dir))
+                            .filter(|answer| !matches!(answer, Ok(None)))
+                            .map(|answer| format!("{answer:?}"))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            readers
+                .into_iter()
+                .flat_map(|reader| reader.join().expect("the reader thread ends"))
+                .collect()
+        });
+
+        assert!(
+            wrong_answers.is_empty(),
+            "no copy holds the lock, but {} of {} looks said otherwise, for example {}",
+            wrong_answers.len(),
+            READERS * LOOKS,
+            wrong_answers[0]
+        );
     }
 }
