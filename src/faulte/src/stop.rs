@@ -565,6 +565,13 @@ mod tests {
             self
         }
 
+        /// Gives this machine, with `error` as the answer to every signal to
+        /// `pid`.
+        fn refusing(mut self, pid: u32, error: MachineError) -> Self {
+            self.refusals.insert(Pid::new(pid), error);
+            self
+        }
+
         /// Gives each signal that the sequence sent, in order.
         fn signals(&self) -> Vec<(Pid, Signal)> {
             self.signals.borrow().clone()
@@ -855,6 +862,65 @@ mod tests {
                 (Pid::new(30), Signal::Kill)
             ],
             "both signals went, and neither one stopped the process"
+        );
+    }
+
+    /// What the operating system says when the account of the viewer does not
+    /// own the process.
+    const NOT_PERMITTED: &str = "Operation not permitted (os error 1)";
+
+    /// Gives the error of a signal to `pid` that the operating system refused.
+    fn refused(pid: u32) -> MachineError {
+        MachineError::KernelRead {
+            call: format!("kill({pid}, SIGTERM)"),
+            reason: NOT_PERMITTED.to_owned(),
+        }
+    }
+
+    /// A signal that fails puts its target in the report with the reason, and
+    /// the other targets still get their signal.
+    ///
+    /// Two accounts share this Mac, and `faulte` under `sudo` stops the
+    /// sessions of every account. A signal that the operating system refuses
+    /// says nothing about the other targets of the same run, so the run goes
+    /// on. The target that got no signal gets no second one either: the
+    /// sequence never sends `SIGKILL` to a process that refused `SIGTERM`.
+    #[test]
+    fn a_signal_that_fails_does_not_stop_the_rest() {
+        let refused_target = candidate(30);
+        let target = candidate(40);
+        let machine = machine_of(
+            &[30, 40],
+            vec![
+                vec![process(30, LAUNCHD_PID), process(40, LAUNCHD_PID)],
+                vec![process(30, LAUNCHD_PID)],
+            ],
+        )
+        .refusing(30, refused(30));
+
+        let report = stop(
+            &machine,
+            &[refused_target.clone(), target.clone()],
+            ONE_POLL,
+            ONE_POLL,
+        );
+
+        assert_eq!(
+            report,
+            StopReport {
+                stopped: vec![target],
+                failed: vec![(refused_target, refused(30))],
+                ..StopReport::default()
+            },
+            "the run names the target that got no signal, and it stops the other one"
+        );
+        assert_eq!(
+            machine.signals(),
+            vec![
+                (Pid::new(30), Signal::Terminate),
+                (Pid::new(40), Signal::Terminate)
+            ],
+            "the target that refused SIGTERM gets no SIGKILL"
         );
     }
 
