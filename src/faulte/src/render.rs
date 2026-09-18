@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::duration::Span;
 use crate::pid::Uid;
-use crate::ranking::Ranking;
+use crate::ranking::{RankedRow, Ranking};
 use crate::vm::{SwapUsage, VmDelta};
 
 /// The text in place of a value that `faulte` could not read.
@@ -409,12 +409,59 @@ fn claude_line(ranking: &Ranking) -> String {
     )
 }
 
+/// The name of each column of the table, in the order that the issue lists
+/// them.
+const COLUMNS: [&str; 10] = [
+    "PID",
+    "OWNER",
+    "FAULTS/S",
+    "SHARE",
+    "RSS",
+    "AGE",
+    "COMMAND",
+    "SESSION",
+    "STATE",
+    "DIRECTORY",
+];
+
+/// What the `SESSION` column gives for a Claude Code process of another
+/// account.
+const OTHER_ACCOUNT: &str = "other account — run with sudo";
+
+/// Gives the table of `rows`, and the line that counts the rows past `limit`.
+///
+/// `rows` is the order that the caller wants. The ranking sorts its rows, and
+/// the plan of `faulte kill` gives its own order, so nothing here sorts
+/// anything. `ranking` gives the window and the total that each rate and each
+/// share divide by, and it can hold rows that `rows` does not.
+///
+/// `limit` keeps the first N rows. One line under the table then counts the
+/// rest and gives their share of all faults, so a reader learns what the
+/// limit hid. `None` shows every row.
+///
+/// `width` wraps the table at that many columns. `None` makes each column as
+/// wide as its widest cell, which is what a test wants and what a pipe wants.
+/// The caller reads the width of the terminal, because a read of the terminal
+/// here would make the text of this function depend on where it runs.
+#[must_use]
+pub fn rows(
+    ranking: &Ranking,
+    rows: &[RankedRow],
+    limit: Option<usize>,
+    accounts: &Accounts,
+    now: SystemTime,
+    width: Option<u16>,
+) -> String {
+    let _ = (ranking, rows, limit, accounts, now, width);
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use crate::pid::Pid;
-    use crate::ranking::{ClaudeTotal, ClaudeView, RankedRow, Skipped};
+    use crate::ranking::{ClaudeTotal, ClaudeView, Skipped};
 
     /// A count carries a separator between each group of three digits, from
     /// the right. A count below a thousand carries none.
@@ -824,6 +871,88 @@ mod tests {
             header(&measurement(&base)).len(),
             3,
             "a Mac that left nothing out says nothing about what it left out"
+        );
+    }
+
+    /// The outer border of one row of the table.
+    const EDGE: char = '│';
+
+    /// What holds two cells of one row apart.
+    const BETWEEN_CELLS: char = '┆';
+
+    /// Gives the cells of each row of `table`, the row of the names first.
+    ///
+    /// The frame and the padding say nothing about the ranking, and their
+    /// width follows the widest cell of each column. The cells are what a
+    /// reader reads.
+    fn cells(table: &str) -> Vec<Vec<String>> {
+        table
+            .lines()
+            .filter(|line| line.starts_with(EDGE))
+            .map(|line| {
+                line.trim_matches(EDGE)
+                    .split(BETWEEN_CELLS)
+                    .map(|cell| cell.trim().to_owned())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Gives the cells of one row as the assertions write them.
+    fn row_of(cells: [&str; 10]) -> Vec<String> {
+        cells.map(str::to_owned).to_vec()
+    }
+
+    /// Gives the time now in the tests: two days and five hours after each
+    /// process of the tests started.
+    fn now() -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(STARTED + 2 * 86_400 + 5 * 3_600)
+    }
+
+    /// Gives the accounts of the tests: the viewer, and no other.
+    fn accounts() -> Accounts {
+        Accounts::new().with(Uid::new(VIEWER_UID), "tim")
+    }
+
+    /// The table names each column in the order that the issue lists them, and
+    /// each row gives the facts of one process. The three columns of Claude
+    /// Code are empty for a process that is not Claude Code.
+    #[test]
+    fn each_row_gives_the_facts_of_one_process_under_the_names_of_the_columns() {
+        let ranking = ranking(vec![row(45_646, 500_000), row(20, 3)], 1_000_000);
+
+        let drawn = rows(&ranking, &ranking.rows, None, &accounts(), now(), None);
+
+        assert_eq!(cells(&drawn).first(), Some(&row_of(COLUMNS)));
+        assert_eq!(
+            cells(&drawn).get(1),
+            Some(&row_of([
+                "45646",
+                "tim",
+                "125,000",
+                "50.0%",
+                "812 MB",
+                "2d 5h",
+                "/usr/bin/process-45646 --flag",
+                "",
+                "",
+                "",
+            ]))
+        );
+        assert_eq!(
+            cells(&drawn).get(2),
+            Some(&row_of([
+                "20",
+                "tim",
+                "0.8",
+                "<0.1%",
+                "812 MB",
+                "2d 5h",
+                "/usr/bin/process-20 --flag",
+                "",
+                "",
+                "",
+            ]))
         );
     }
 }
