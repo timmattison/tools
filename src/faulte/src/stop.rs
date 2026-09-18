@@ -36,6 +36,38 @@ pub fn confirms(answer: Option<&str>) -> bool {
     })
 }
 
+/// What `faulte kill` does after it prints the plan.
+///
+/// The three answers are the three ends of the command that the issue states.
+/// A caller that reads the input decides nothing of its own: it prints the
+/// line of the answer and exits with the code of the answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    /// The plan names no session. `faulte` asks nothing and it stops nothing.
+    NothingToStop,
+    /// The plan names a session, and no person can answer a question. `faulte`
+    /// stops nothing, and the run is not the run that the person asked for.
+    NotATerminal,
+    /// The plan names a session and a person can answer. `faulte` asks the
+    /// question.
+    Ask,
+}
+
+/// Tells what `faulte kill` does with `candidates` sessions.
+///
+/// `stdin_is_terminal` says whether a person can answer a question. A run
+/// through a pipe, a run of a script, and a run of a hook all answer nothing,
+/// and a stop is not reversible. Thus such a run prints the plan and stops
+/// nothing.
+///
+/// A plan of no session asks nothing, whatever the input is. There is nothing
+/// to stop, so a run through a pipe did everything that it could do and the
+/// run is a success.
+#[must_use]
+pub fn decide(_candidates: usize, _stdin_is_terminal: bool) -> Decision {
+    Decision::Ask
+}
+
 /// What the check immediately before a signal decided about one candidate.
 ///
 /// The plan can be minutes old when the person answers the question. Each
@@ -1179,6 +1211,47 @@ mod tests {
 
         for (answer, confirmed) in cases {
             assert_eq!(confirms(answer), confirmed, "the answer {answer:?}");
+        }
+    }
+
+    /// A plan of no session asks nothing, and the input makes no difference.
+    ///
+    /// `faulte` has nothing to stop, so a run on a terminal and a run through
+    /// a pipe do the same thing. A question of `Stop 0 sessions?` asks a
+    /// person to answer for nothing.
+    #[test]
+    fn a_plan_of_no_session_asks_nothing_on_any_input() {
+        assert_eq!(decide(0, true), Decision::NothingToStop, "on a terminal");
+        assert_eq!(decide(0, false), Decision::NothingToStop, "through a pipe");
+    }
+
+    /// A plan of one or more sessions, and an input that is not a terminal,
+    /// stops nothing.
+    ///
+    /// The issue states this rule. No person reads a question that goes into a
+    /// pipe, and no flag skips the question, so a script that runs
+    /// `faulte kill` gets the plan and nothing else.
+    #[test]
+    fn an_input_that_is_not_a_terminal_stops_nothing() {
+        for candidates in [1, 2, 19] {
+            assert_eq!(
+                decide(candidates, false),
+                Decision::NotATerminal,
+                "the plan names {candidates} sessions"
+            );
+        }
+    }
+
+    /// A plan of one or more sessions, and a person who can answer, makes the
+    /// question.
+    #[test]
+    fn a_terminal_and_a_candidate_make_the_question() {
+        for candidates in [1, 2, 19] {
+            assert_eq!(
+                decide(candidates, true),
+                Decision::Ask,
+                "the plan names {candidates} sessions"
+            );
         }
     }
 }
