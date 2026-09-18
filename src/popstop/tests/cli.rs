@@ -37,6 +37,10 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// The number of `SIGINT`. POSIX sets it to 2.
 const SIGINT: libc::c_int = 2;
 
+/// The number of `SIGHUP`. POSIX sets it to 1. A terminal that closes sends
+/// it to the copy that it holds.
+const SIGHUP: libc::c_int = 1;
+
 /// The line that tells the user about the sleep of the Mac.
 const NO_IDLE_SLEEP_LINE: &str = "popstop: this Mac does not idle sleep while popstop runs";
 
@@ -191,6 +195,34 @@ fn device_of_the_ready_lines(copy: &Copy) -> String {
     assert_eq!(copy.next_line(), NO_IDLE_SLEEP_LINE);
     assert_eq!(copy.next_line(), PRESS_CTRL_C_LINE);
     device
+}
+
+/// Starts a foreground copy, waits until it plays, and sends `signal` to it.
+/// The copy must stop with success and release the lock.
+///
+/// The default action of each of these signals ends a process where it
+/// stands, thus a copy that ends with a signal status registered no handler.
+fn a_signal_stops_a_foreground_copy(signal: libc::c_int) {
+    let temp = tempfile::tempdir().expect("a temporary directory");
+    let dir = temp.path().join("state");
+    let mut copy = Copy::start_in_the_foreground(&dir);
+    device_of_the_ready_lines(&copy);
+
+    copy.send(signal);
+    let (status, stderr) = copy.finish();
+
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "the signal {signal} ends a copy with success: {status}. Its stderr:\n{stderr}"
+    );
+    assert_eq!(stderr, "", "a copy that stops says nothing on stderr");
+    assert_eq!(holder(&dir), None, "the copy released the lock");
+}
+
+#[test]
+fn a_hangup_stops_a_foreground_copy() {
+    a_signal_stops_a_foreground_copy(SIGHUP);
 }
 
 #[test]
