@@ -19,4 +19,5 @@
 
 pub mod duration;
 pub mod pid;
+pub mod table;
 pub mod top;
