@@ -380,3 +380,64 @@ unsafe fn first_buffer<'a>(
     let samples = unsafe { slice::from_raw_parts_mut(samples, by_frames.min(by_bytes)) };
     Some((samples, channels))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::AudioError;
+
+    #[test]
+    fn an_audio_error_names_the_call_and_shows_a_four_character_code_as_text() {
+        let cases = [
+            // kAudioHardwareBadObjectError, '!obj'.
+            (
+                "AudioOutputUnitStart",
+                0x216F_626A,
+                "AudioOutputUnitStart failed with status 560947818 ('!obj')",
+            ),
+            // kAudioFormatUnsupportedDataFormatError, 'fmt?'. A space and
+            // punctuation are printable too.
+            (
+                "AudioUnitInitialize",
+                0x666D_743F,
+                "AudioUnitInitialize failed with status 1718449215 ('fmt?')",
+            ),
+            (
+                "AudioUnitInitialize",
+                0x6465_6620,
+                "AudioUnitInitialize failed with status 1684366880 ('def ')",
+            ),
+            // paramErr. Its bytes are not text.
+            (
+                "AudioUnitSetProperty(kAudioUnitProperty_StreamFormat)",
+                -50,
+                "AudioUnitSetProperty(kAudioUnitProperty_StreamFormat) failed with status -50",
+            ),
+            // kAudioUnitErr_FormatNotSupported.
+            (
+                "AudioUnitSetProperty(kAudioUnitProperty_StreamFormat)",
+                -10868,
+                "AudioUnitSetProperty(kAudioUnitProperty_StreamFormat) failed with status -10868",
+            ),
+            // Three printable bytes and a NUL are not a code.
+            (
+                "AudioOutputUnitStop",
+                0x216F_6200,
+                "AudioOutputUnitStop failed with status 560947712",
+            ),
+            // A DEL byte is not printable.
+            (
+                "AudioOutputUnitStop",
+                0x216F_627F,
+                "AudioOutputUnitStop failed with status 560947839",
+            ),
+        ];
+
+        for (call, status, expected) in cases {
+            assert_eq!(
+                AudioError::from_status(call, status).to_string(),
+                expected,
+                "the text of status {status:#010X}"
+            );
+        }
+    }
+}
