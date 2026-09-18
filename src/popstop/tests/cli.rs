@@ -312,6 +312,45 @@ fn a_stop_with_no_copy_says_that_nothing_runs() {
 }
 
 #[test]
+fn a_status_names_the_copy_that_runs_its_mode_and_its_device() {
+    let temp = tempfile::tempdir().expect("a temporary directory");
+    let dir = temp.path().join("state");
+    let mut copy = Copy::start_in_the_foreground(&dir);
+    let device = device_of_the_ready_lines(&mut copy);
+    let record = holder(&dir).expect("the copy holds the lock");
+
+    let (status, report, errors) = ask_in(&dir, &["--status"]);
+
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a status with a copy that runs is a success: {status}. Its stderr:\n{errors}"
+    );
+    assert_eq!(errors, "", "a status that finds a copy says nothing on stderr");
+    for named in [
+        format!("pid {}", copy.pid()),
+        "foreground".to_owned(),
+        start_time_text(record.started_at),
+        format!("\"{device}\""),
+    ] {
+        assert!(
+            report.contains(&named),
+            "the status does not name {named:?}:\n{report}"
+        );
+    }
+
+    // A status looks and changes nothing, thus the copy still plays.
+    copy.send(SIGINT);
+    let (status, stderr) = copy.finish();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "the copy stops with success after the status: {status}. Its stderr:\n{stderr}"
+    );
+    assert_eq!(holder(&dir), None, "the copy released the lock");
+}
+
+#[test]
 fn the_help_lists_the_five_exit_statuses_and_hides_the_flags_of_the_tests() {
     let (status, help) = ask(&["--help"]);
 

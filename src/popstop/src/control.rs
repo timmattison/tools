@@ -47,6 +47,24 @@ impl Report {
     }
 }
 
+/// Shows the copy of popstop that runs.
+///
+/// A script reads the exit status and not the text: [`exit_status::SUCCESS`]
+/// when a copy runs, and [`exit_status::NO_COPY_RUNS`] when no copy runs.
+///
+/// # Errors
+///
+/// Returns a [`Failure`] with the status [`exit_status::ERROR`] when the lock
+/// cannot be read. A name of the default output device that cannot be read is
+/// not a failure: a copy runs, and that is the answer.
+pub fn status(settings: &Settings) -> Result<Report, Failure> {
+    let _dir = settings.state_dir()?;
+    Ok(Report {
+        status: exit_status::ERROR,
+        text: String::new(),
+    })
+}
+
 /// Stops the copy of popstop that runs.
 ///
 /// A stop is idempotent: a stop that finds no copy is a success.

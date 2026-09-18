@@ -24,6 +24,9 @@ struct Cli {
     /// Stop the copy that runs
     #[arg(long, group = ACTION_GROUP)]
     stop: bool,
+    /// Show the copy that runs
+    #[arg(long, group = ACTION_GROUP)]
+    status: bool,
     /// The directory that holds the lock file and the log. The tests give
     /// each copy a directory of its own.
     #[arg(long, hide = true, value_name = "PATH")]
@@ -77,6 +80,9 @@ fn run(cli: &Cli) -> ExitCode {
     if cli.stop {
         return report(control::stop(&settings));
     }
+    if cli.status {
+        return report(control::status(&settings));
+    }
     match run_foreground(&settings) {
         Ok(()) => ExitCode::from(popstop::exit_status::SUCCESS),
         Err(failure) => {
@@ -92,7 +98,7 @@ fn run(cli: &Cli) -> ExitCode {
 fn run(cli: &Cli) -> ExitCode {
     use std::io::Write;
 
-    let _ = (&cli.stop, &cli.state_dir, &cli.exit_after);
+    let _ = (&cli.stop, &cli.status, &cli.state_dir, &cli.exit_after);
     let _ = writeln!(
         std::io::stderr(),
         "{}",
