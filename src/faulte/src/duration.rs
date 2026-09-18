@@ -75,13 +75,16 @@ const SECONDS_PER_HOUR: u64 = 3_600;
 /// The seconds in one minute.
 const SECONDS_PER_MINUTE: u64 = 60;
 
+/// The smallest unit, and its length in seconds. It divides every span.
+const SECOND: (&str, u64) = ("s", 1);
+
 /// Each unit that the parser accepts, and its length in seconds, largest
-/// first.
+/// first. The formatter reads this order to find the largest unit.
 const UNITS: [(&str, u64); 4] = [
     ("d", SECONDS_PER_DAY),
     ("h", SECONDS_PER_HOUR),
     ("m", SECONDS_PER_MINUTE),
-    ("s", 1),
+    SECOND,
 ];
 
 /// Gives the length in seconds of `unit`. A text with no unit is a number of
@@ -135,8 +138,19 @@ impl FromStr for Span {
 }
 
 impl fmt::Display for Span {
+    /// Writes the span in the largest unit that divides it exactly, for
+    /// example `7d` for 604,800 seconds and `90s` for 90 seconds.
+    ///
+    /// A larger unit gives a smaller number, so this text is the shortest one
+    /// that gives the same span. The unit is always written, and the text
+    /// always parses back to the same span.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}s", self.0)
+        let seconds = self.0.get();
+        let (name, per_unit) = UNITS
+            .into_iter()
+            .find(|(_, per_unit)| seconds % per_unit == 0)
+            .unwrap_or(SECOND);
+        write!(formatter, "{}{name}", seconds / per_unit)
     }
 }
 
