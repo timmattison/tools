@@ -268,6 +268,8 @@ full path, `shellquote::shell_quote(...)`, where the call site sits behind a
 - `aws2env` - the value of each credential it prints, when the value needs
   quotes. A value that holds only letters, digits, `_`, `-`, `.` and `/`
   prints bare, because a person reads that output before they paste it
+- `crap` - the paths that the tests of the shell function put into the fake
+  scripts
 - `gsw` - the command it asks an interactive shell to run
 - `nwt` - the shell and the command it hands to tmux
 - `swt` - the path of a `.swt-check` override, and the command lines it prints

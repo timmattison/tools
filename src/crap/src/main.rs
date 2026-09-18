@@ -4407,7 +4407,8 @@ mod tests {
             printf 'session-xyz\\n/tmp/crap-resume-dir\\n'\n";
 
         // Fake `claude`/`clauded`: record that a resume was attempted.
-        let fake_claude = format!("#!/bin/sh\n: > {:?}\n", claude_marker);
+        let marker_q = shellquote::shell_quote(&claude_marker.to_string_lossy());
+        let fake_claude = format!("#!/bin/sh\n: > {marker_q}\n");
 
         for (name, body) in [
             ("crap", fake_crap.to_string()),
@@ -4514,19 +4515,26 @@ mod tests {
         let pwd_file = dir.join("claude_pwd");
         fs::write(&wire_file, wire).unwrap();
 
+        // Each path goes into a `/bin/sh` script, so each one is one quoted
+        // word. `dir` can hold `$`, a backtick, or a quote.
+        let wire_q = shellquote::shell_quote(&wire_file.to_string_lossy());
+        let saved_q = shellquote::shell_quote(&saved_fork.to_string_lossy());
+        let args_q = shellquote::shell_quote(&args_file.to_string_lossy());
+        let pwd_q = shellquote::shell_quote(&pwd_file.to_string_lossy());
+
         // Fake `crap`: `--status <id>` finds only the fork that the fake
         // `claude` saved. Any other call prints the wire output.
         let fake_crap = format!(
             "#!/bin/sh\n\
              if [ \"$1\" = \"--status\" ]; then\n\
-             \x20   if [ -f {saved_fork:?} ] && [ \"$2\" = \"$(cat {saved_fork:?})\" ]; then\n\
+             \x20   if [ -f {saved_q} ] && [ \"$2\" = \"$(cat {saved_q})\" ]; then\n\
              \x20       echo waiting-for-user\n\
              \x20       exit 0\n\
              \x20   fi\n\
              \x20   echo \"Error: no Claude session found with id '$2'\" >&2\n\
              \x20   exit 1\n\
              fi\n\
-             cat {wire_file:?}\n"
+             cat {wire_q}\n"
         );
 
         // Fake `claude`/`clauded`: record the argv and the cwd. When the fork
@@ -4536,7 +4544,7 @@ mod tests {
                 "prev=\n\
                  for arg in \"$@\"; do\n\
                  \x20   if [ \"$prev\" = \"--session-id\" ]; then\n\
-                 \x20       printf '%s\\n' \"$arg\" > {saved_fork:?}\n\
+                 \x20       printf '%s\\n' \"$arg\" > {saved_q}\n\
                  \x20   fi\n\
                  \x20   prev=$arg\n\
                  done\n"
@@ -4544,9 +4552,8 @@ mod tests {
         } else {
             String::new()
         };
-        let fake_claude = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {args_file:?}\npwd > {pwd_file:?}\n{save_step}"
-        );
+        let fake_claude =
+            format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {args_q}\npwd > {pwd_q}\n{save_step}");
 
         let mut tools = vec![("crap", fake_crap), ("claude", fake_claude.clone())];
         if provide_clauded {

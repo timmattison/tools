@@ -20,6 +20,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+shellquote.workspace = true
 tempfile.workspace = true
 
 [lints]
