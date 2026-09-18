@@ -119,7 +119,29 @@ pub fn start(settings: &Settings) -> Result<Report, Failure> {
 /// [`exit_status::ANOTHER_COPY_RUNS`] when another copy holds the lock, and
 /// the status [`exit_status::ERROR`] for every other problem.
 pub fn run_child(settings: &Settings) -> Result<(), Failure> {
+    start_a_session()?;
     life_cycle::run(Mode::Background, settings, report_ready).map(|_stopped| ())
+}
+
+/// Puts this process into a session of its own, before it does anything else.
+///
+/// The copy then has no controlling terminal and leads its own process group.
+/// Thus the terminal of the user cannot signal it, and a window that closes
+/// leaves it playing (story 7 and story 8).
+///
+/// A start makes the copy with `spawn`, so the copy leads no process group
+/// yet and `setsid` always works for it.
+fn start_a_session() -> Result<(), Failure> {
+    // SAFETY: `setsid` takes nothing by value and changes only the session,
+    // the process group, and the controlling terminal of this process.
+    let session = unsafe { libc::setsid() };
+    if session == -1 {
+        return Err(Failure::error(&format!(
+            "the copy cannot start a session of its own: {}",
+            io::Error::last_os_error()
+        )));
+    }
+    Ok(())
 }
 
 /// Tells the start that the copy plays, and then sends the later output of
