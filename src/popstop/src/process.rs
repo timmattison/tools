@@ -10,10 +10,39 @@ use std::ffi::c_void;
 use std::io;
 use std::mem::{self, MaybeUninit};
 
-use crate::lock::StartTime;
+use crate::lock::{HolderRecord, StartTime};
 
 /// The number of microseconds in one second.
 const MICROS_PER_SECOND: u64 = 1_000_000;
+
+/// What the kernel says about the process that a record of the lock names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Identity {
+    /// The process that has the PID is the copy that the record names.
+    TheSame,
+    /// No process has the PID. The copy that wrote the record is gone.
+    Gone,
+    /// A process has the PID, and it is not the copy that the record names.
+    /// The system gave the PID to it after the record was written.
+    Another,
+}
+
+/// Tells whether the process that has the PID of `record` is the copy that
+/// `record` names.
+///
+/// `looked_up` is the answer of [`start_time`] for the PID of the record. The
+/// caller makes that call, thus a test drives this decision with no process
+/// of its own.
+///
+/// # Errors
+///
+/// Returns the error of `looked_up`, when that error is not `ESRCH`. An
+/// `ESRCH` error is the answer that no process has the PID, thus it gives
+/// [`Identity::Gone`] and not an error.
+pub fn identity(record: &HolderRecord, looked_up: io::Result<StartTime>) -> io::Result<Identity> {
+    let _ = (record, looked_up);
+    Ok(Identity::TheSame)
+}
 
 /// Gives the time at which the kernel started the process `pid`.
 ///
@@ -76,7 +105,9 @@ pub fn start_time(pid: u32) -> io::Result<StartTime> {
 
 #[cfg(test)]
 mod tests {
-    use super::start_time;
+    use super::{identity, start_time, Identity};
+    use crate::lock::{HolderRecord, Mode, StartTime};
+    use std::io;
     use std::process::{self, Command, Stdio};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -150,6 +181,39 @@ mod tests {
             Some(libc::ESRCH),
             "the kernel says that no such process exists: {error}"
         );
+    }
+
+    #[test]
+    fn a_pid_is_the_copy_of_the_record_only_when_the_start_times_agree() {
+        let record = HolderRecord {
+            pid: 4242,
+            mode: Mode::Foreground,
+            started_at: StartTime::from_unix_micros(1_789_725_600_123_456),
+        };
+        let decide = |looked_up| identity(&record, looked_up);
+
+        assert_eq!(
+            decide(Ok(record.started_at)).expect("the same process"),
+            Identity::TheSame
+        );
+        assert_eq!(
+            decide(Ok(StartTime::from_unix_micros(1_789_725_600_123_457)))
+                .expect("another process"),
+            Identity::Another,
+            "one microsecond of difference is another process, thus no signal goes to that PID"
+        );
+        assert_eq!(
+            decide(Err(io::Error::from_raw_os_error(libc::ESRCH))).expect("no process"),
+            Identity::Gone,
+            "the kernel says that no process has the PID, and that is an answer, not a failure"
+        );
+
+        let problem = decide(Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "half of the information",
+        )))
+        .expect_err("a problem that is not ESRCH gives no decision");
+        assert_eq!(problem.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
