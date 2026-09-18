@@ -111,6 +111,9 @@ enum Problem {
     Status(OSStatus),
     /// The call succeeded but gave no result. The text says what is missing.
     NoResult(&'static str),
+    /// The call gave a nominal sample rate, in hertz, that is not a valid
+    /// [`SampleRate`].
+    InvalidSampleRate(f64),
 }
 
 impl fmt::Display for Problem {
@@ -124,6 +127,10 @@ impl fmt::Display for Problem {
                 }
             }
             Self::NoResult(missing) => f.write_str(missing),
+            Self::InvalidSampleRate(hz) => write!(
+                f,
+                "gave a nominal sample rate of {hz} Hz, which is not a valid sample rate"
+            ),
         }
     }
 }
@@ -206,8 +213,9 @@ pub fn default_output_sample_rate() -> Result<SampleRate, AudioError> {
 
 /// Makes a sample rate from the nominal rate that a device gave, in hertz.
 fn nominal_sample_rate(hz: f64) -> Result<SampleRate, AudioError> {
-    SampleRate::new(hz).ok_or_else(|| {
-        AudioError::no_result(call::GET_NOMINAL_SAMPLE_RATE, "gave no valid sample rate")
+    SampleRate::new(hz).ok_or(AudioError {
+        call: call::GET_NOMINAL_SAMPLE_RATE,
+        problem: Problem::InvalidSampleRate(hz),
     })
 }
 
