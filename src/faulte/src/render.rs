@@ -49,6 +49,24 @@ pub fn count(value: u64) -> String {
     separate(&value.to_string())
 }
 
+/// The rate below which a rate carries one decimal.
+const SMALLEST_WHOLE_RATE: f64 = 10.0;
+
+/// Gives `per_second` as a rate of page faults, for example `0.4` or
+/// `239,953`.
+///
+/// A rate below ten carries one decimal, because the whole part of such a rate
+/// says almost nothing. A rate of ten or more is a whole number with a
+/// separator between each group of three digits, because the decimal of a
+/// large rate says nothing at all.
+///
+/// A rate that is not a number gives [`ABSENT`]. The window of the ranking can
+/// be no time, and a division by no time gives no number.
+#[must_use]
+pub fn rate(per_second: f64) -> String {
+    format!("{per_second:.1}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,6 +89,30 @@ mod tests {
 
         for (value, text) in cases {
             assert_eq!(count(value), text, "the count {value}");
+        }
+    }
+
+    /// A rate below ten carries one decimal. A rate of ten or more is a whole
+    /// number in groups of three digits. A rate that is not a number gives the
+    /// text of an absent value.
+    #[test]
+    fn a_rate_below_ten_carries_one_decimal_and_a_larger_rate_is_whole() {
+        let cases = [
+            (0.0, "0.0"),
+            (0.4, "0.4"),
+            (0.75, "0.8"),
+            (9.7, "9.7"),
+            (10.0, "10"),
+            (10.4, "10"),
+            (999.0, "999"),
+            (1_000.0, "1,000"),
+            (239_952.6, "239,953"),
+            (f64::INFINITY, ABSENT),
+            (f64::NAN, ABSENT),
+        ];
+
+        for (value, text) in cases {
+            assert_eq!(rate(value), text, "the rate {value}");
         }
     }
 }
