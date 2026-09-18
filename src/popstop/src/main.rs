@@ -21,6 +21,14 @@ const ACTION_GROUP: &str = "action";
     after_help = popstop::exit_status::help_section()
 )]
 struct Cli {
+    /// Start a copy that has no terminal, and then return
+    #[arg(long, group = ACTION_GROUP)]
+    background: bool,
+    /// Run the life cycle as the copy that `--background` started, and report
+    /// to that command through stdout. `--background` passes this flag to the
+    /// copy that it starts, and a user never needs it.
+    #[arg(long, hide = true, group = ACTION_GROUP)]
+    background_child: bool,
     /// Stop the copy that runs
     #[arg(long, group = ACTION_GROUP)]
     stop: bool,
@@ -77,6 +85,11 @@ fn run(cli: &Cli) -> ExitCode {
         state_dir: cli.state_dir.clone(),
         exit_after: cli.exit_after.map(Duration::from_secs),
     };
+    if cli.background || cli.background_child {
+        // A start with no terminal comes later. For now the flags exist and
+        // start no copy.
+        return ExitCode::from(popstop::exit_status::SUCCESS);
+    }
     if cli.stop {
         return report(control::stop(&settings));
     }
@@ -98,7 +111,14 @@ fn run(cli: &Cli) -> ExitCode {
 fn run(cli: &Cli) -> ExitCode {
     use std::io::Write;
 
-    let _ = (&cli.stop, &cli.status, &cli.state_dir, &cli.exit_after);
+    let _ = (
+        &cli.background,
+        &cli.background_child,
+        &cli.stop,
+        &cli.status,
+        &cli.state_dir,
+        &cli.exit_after,
+    );
     let _ = writeln!(
         std::io::stderr(),
         "{}",

@@ -222,6 +222,108 @@ impl Copy {
     }
 }
 
+/// A copy of popstop that `popstop --background` started.
+///
+/// The command that started the copy ended already, and the copy runs on. A
+/// drop stops it the way that a user stops it. The copy is no child of this
+/// test, thus the stop is the only way to end it, and `--exit-after` is what
+/// bounds a copy that the stop did not reach.
+struct BackgroundStart {
+    /// The state directory of the copy, for the stop of the drop.
+    dir: PathBuf,
+    /// The process ID of the command that started the copy. The copy itself
+    /// runs in another process.
+    command_pid: u32,
+    /// The exit status of that command.
+    status: ExitStatus,
+    /// What that command wrote to stdout.
+    report: String,
+    /// What that command wrote to stderr.
+    errors: String,
+}
+
+impl Drop for BackgroundStart {
+    fn drop(&mut self) {
+        let _ = Command::new(env!("CARGO_BIN_EXE_popstop"))
+            .arg("--stop")
+            .arg("--state-dir")
+            .arg(&self.dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+impl BackgroundStart {
+    /// Runs `popstop --background` with the state directory `dir`, and waits
+    /// for that command to end.
+    ///
+    /// The copy that the command started holds no pipe of this test: its
+    /// stdout goes to the command that started it, and its stderr goes to the
+    /// log. Thus the wait for the output of the command ends when the command
+    /// ends, and not when the copy ends.
+    fn make(dir: &Path) -> Self {
+        let child = Command::new(env!("CARGO_BIN_EXE_popstop"))
+            .arg("--state-dir")
+            .arg(dir)
+            .arg("--background")
+            .args(["--exit-after", EXIT_AFTER_SECONDS])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start popstop");
+        let command_pid = child.id();
+        let output = child.wait_with_output().expect("wait for the start");
+        Self {
+            dir: dir.to_path_buf(),
+            command_pid,
+            status: output.status,
+            report: String::from_utf8(output.stdout).expect("the output of popstop is UTF-8"),
+            errors: String::from_utf8(output.stderr).expect("the errors of popstop are UTF-8"),
+        }
+    }
+}
+
+/// Reads the three lines of a background start, and gives the name of the
+/// device that the first line names.
+///
+/// The lines name the copy that plays, the effect on the sleep of the Mac, and
+/// the command that stops the copy in the state directory `dir`.
+fn device_of_the_background_lines(report: &str, pid: u32, dir: &Path) -> String {
+    let mut lines = report.lines();
+    let first = lines
+        .next()
+        .unwrap_or_else(|| panic!("the start wrote no line:\n{report}"));
+    let opening = "popstop: \"";
+    let closing = format!("\" stays awake while popstop runs (pid {pid}, background)");
+    let device = first
+        .strip_prefix(opening)
+        .and_then(|rest| rest.strip_suffix(&closing))
+        .unwrap_or_else(|| {
+            panic!("the first line is {first:?}, and not {opening}<device>{closing}")
+        })
+        .to_owned();
+    assert!(!device.trim().is_empty(), "the first line names no device");
+    assert_eq!(lines.next(), Some(NO_IDLE_SLEEP_LINE));
+    let hint = format!(
+        "popstop: to stop the copy that runs, use this command: popstop --stop --state-dir '{}'",
+        dir.display()
+    );
+    assert_eq!(
+        lines.next(),
+        Some(hint.as_str()),
+        "story 16: the start says how to stop the copy that it made"
+    );
+    assert_eq!(
+        lines.next(),
+        None,
+        "the start writes three lines:\n{report}"
+    );
+    device
+}
+
 /// Runs popstop with `arguments` and gives its exit status and its stdout.
 ///
 /// The arguments of these runs end before popstop takes a lock or opens a
@@ -367,6 +469,50 @@ fn a_signal_stops_a_foreground_copy(signal: libc::c_int) {
     );
     assert_eq!(stderr, "", "a copy that stops says nothing on stderr");
     assert_eq!(holder(&dir), None, "the copy released the lock");
+}
+
+#[test]
+fn a_background_start_returns_only_after_the_copy_holds_the_lock() {
+    let temp = tempfile::tempdir().expect("a temporary directory");
+    let dir = temp.path().join("state");
+
+    let start = BackgroundStart::make(&dir);
+
+    assert_eq!(
+        start.status.code(),
+        Some(0),
+        "a background start that worked is a success: {}. Its stderr:\n{}",
+        start.status,
+        start.errors
+    );
+    assert_eq!(
+        start.errors, "",
+        "a background start that worked says nothing on stderr"
+    );
+
+    // Story 9: the moment the command returns, the copy plays and holds the
+    // lock. The lock is the proof, because a copy takes it before it reports.
+    let record = holder(&dir).expect("the copy holds the lock the moment the start returns");
+    assert_eq!(
+        record.mode,
+        Mode::Background,
+        "the copy that holds the lock runs in the background"
+    );
+    assert_ne!(
+        record.pid, start.command_pid,
+        "the copy runs in another process than the command that started it"
+    );
+    assert_eq!(
+        record.started_at,
+        start_time(record.pid).expect("the start time of the copy"),
+        "the record names a process that runs now"
+    );
+
+    let device = device_of_the_background_lines(&start.report, record.pid, &dir);
+    assert!(
+        !device.trim().is_empty(),
+        "story 4: the start names the device that stays awake"
+    );
 }
 
 #[test]
@@ -583,7 +729,7 @@ fn the_help_lists_the_five_exit_statuses_and_hides_the_flags_of_the_tests() {
         ["0", "1", "2", "3", "4"],
         "the help lists each exit status, in order:\n{help}"
     );
-    for hidden in ["--state-dir", "--exit-after"] {
+    for hidden in ["--state-dir", "--exit-after", "--background-child"] {
         assert!(
             !help.contains(hidden),
             "the help shows {hidden}, which exists for the tests:\n{help}"
