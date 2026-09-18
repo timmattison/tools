@@ -55,6 +55,18 @@ impl SessionState {
             None => Self::Unknown,
         }
     }
+
+    /// Tells whether the session is idle, and became idle more than
+    /// `threshold` ago.
+    ///
+    /// This is rule 2 of `faulte kill`. An idle time that the record does not
+    /// give is not idle long enough, because a stop is safe only when the
+    /// time is known.
+    #[must_use]
+    pub fn is_idle_for_more_than(&self, threshold: Duration) -> bool {
+        let _ = threshold;
+        false
+    }
 }
 
 /// The text of [`SessionState::Busy`].
@@ -219,5 +231,35 @@ mod tests {
             format!("{:^9}|", SessionState::Other("shell".to_owned())),
             "  shell  |"
         );
+    }
+
+    /// Only an idle session with a known idle time above the threshold
+    /// passes. An idle time equal to the threshold is not more than it. An
+    /// unknown idle time fails, and so does every state other than idle.
+    #[test]
+    fn only_a_known_idle_time_above_the_threshold_is_idle_long_enough() {
+        let ten_minutes = Duration::from_secs(600);
+        let idle = |seconds| SessionState::Idle {
+            for_: Some(Duration::from_secs(seconds)),
+        };
+        let cases = [
+            (idle(601), true),
+            (idle(7 * 86_400), true),
+            (idle(600), false),
+            (idle(0), false),
+            (SessionState::Idle { for_: None }, false),
+            (SessionState::Busy, false),
+            (SessionState::Waiting, false),
+            (SessionState::Other("shell".to_owned()), false),
+            (SessionState::Unknown, false),
+        ];
+
+        for (state, idle_long_enough) in cases {
+            assert_eq!(
+                state.is_idle_for_more_than(ten_minutes),
+                idle_long_enough,
+                "the state {state:?}"
+            );
+        }
     }
 }
