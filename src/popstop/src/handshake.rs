@@ -37,9 +37,20 @@ pub enum Handshake {
 
 impl Handshake {
     /// Gives the report as one line, with a newline at its end.
+    ///
+    /// JSON writes a tab and a newline of a text as two letters, thus the
+    /// line holds one newline and that newline is its end.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the report cannot be written as JSON. Every field of a
+    /// report is a number or a string, and JSON holds both, thus this panic
+    /// cannot happen.
     #[must_use]
     pub fn line(&self) -> String {
-        String::new()
+        let mut line = serde_json::to_string(self).expect("a report of popstop is JSON");
+        line.push('\n');
+        line
     }
 
     /// Reads a report from one line, with or without the newline at its end.
@@ -47,8 +58,7 @@ impl Handshake {
     /// Gives `None` for a line that is not a report of popstop.
     #[must_use]
     pub fn parse(line: &str) -> Option<Self> {
-        let _ = line;
-        None
+        serde_json::from_str(line).ok()
     }
 }
 
