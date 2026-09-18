@@ -84,6 +84,16 @@ pub struct TopSample {
 /// correct one.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TopParseError {
+    /// The output does not hold exactly one header row for each sample that
+    /// `faulte` asked for.
+    #[error(
+        "top printed {found} header rows, and faulte asked for {SAMPLES} samples with one header \
+         row each: the output ended early, or this top prints a format that faulte does not know"
+    )]
+    SampleCount {
+        /// The count of header rows in the output.
+        found: usize,
+    },
     /// A row of the second sample is not a PID and a fault count.
     #[error("top printed a row that is not a PID and a fault count, at line {number}: {line:?}")]
     MalformedRow {
@@ -222,6 +232,27 @@ mod tests {
             .find(|count| count.pid == Pid::new(20_997))
             .expect("PID 20997 is in the second sample");
         assert_eq!(busy.faults, 165, "not 24,034,993, its count since it started");
+    }
+
+    /// One sample, three samples, and no sample are each refused. The count
+    /// of samples is the count of header rows.
+    #[test]
+    fn an_output_that_is_not_two_samples_is_refused_with_its_count() {
+        let one = sample("12:00:00", HEADER_ROW, "10     3         \n");
+        let three = two_samples("10     9000000   \n", "10     3         \n")
+            + &sample("12:00:04", HEADER_ROW, "10     5         \n");
+        let header_block_only = "Processes: 3 total \n2026/09/18 12:00:00\n\n";
+        let cases = [(one.as_str(), 1), (three.as_str(), 3), (header_block_only, 0), ("", 0)];
+
+        for (text, found) in cases {
+            let error = parse(text).expect_err("an output that is not two samples is refused");
+
+            assert_eq!(error, TopParseError::SampleCount { found }, "the text {text:?}");
+            assert!(
+                error.to_string().starts_with(&format!("top printed {found} header rows")),
+                "the message gives the count: {error}"
+            );
+        }
     }
 
     /// Parses `text` as a [`Span`] for a test.
