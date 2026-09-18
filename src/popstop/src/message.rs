@@ -123,6 +123,55 @@ pub fn ready_lines(device_name: &str, pid: u32) -> String {
     )
 }
 
+/// Gives the lines that `popstop --status` writes for the copy that runs:
+/// the copy itself, and the device that it keeps awake.
+///
+/// The text has no newline at its end.
+#[must_use]
+pub fn status_lines(holder: &HolderRecord, device_name: &str) -> String {
+    status_lines_in(holder, device_name, &Local)
+}
+
+/// Gives the lines of `popstop --status`, with the start time in `zone`.
+fn status_lines_in<Tz>(holder: &HolderRecord, device_name: &str, zone: &Tz) -> String
+where
+    Tz: TimeZone,
+    Tz::Offset: fmt::Display,
+{
+    let _ = (holder, device_name, zone);
+    String::new()
+}
+
+/// Gives the lines that `popstop --status` writes when the name of the
+/// default output device cannot be read.
+///
+/// A copy runs, and that is the answer that the user asked for. So the text
+/// reports the copy, and it says why the name of the device is not there.
+///
+/// The text has no newline at its end.
+#[must_use]
+pub fn status_lines_without_device_name(
+    holder: &HolderRecord,
+    problem: &dyn fmt::Display,
+) -> String {
+    status_lines_without_device_name_in(holder, problem, &Local)
+}
+
+/// Gives the lines of `popstop --status` without a device name, with the
+/// start time in `zone`.
+fn status_lines_without_device_name_in<Tz>(
+    holder: &HolderRecord,
+    problem: &dyn fmt::Display,
+    zone: &Tz,
+) -> String
+where
+    Tz: TimeZone,
+    Tz::Offset: fmt::Display,
+{
+    let _ = (holder, problem, zone);
+    String::new()
+}
+
 /// Gives one line that reports a problem, for example
 /// `popstop: the lock file cannot be used: permission denied`.
 #[must_use]
@@ -140,7 +189,7 @@ pub fn warning_line(problem: &dyn fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::{problem_line, ready_lines, refusal_in, start_time_text_in, stop_command};
-    use super::{warning_line, PREFIX};
+    use super::{status_lines_in, status_lines_without_device_name_in, warning_line, PREFIX};
     use crate::lock::{HolderRecord, Mode, StartTime};
     use chrono::{FixedOffset, Utc};
     use std::path::Path;
@@ -219,6 +268,34 @@ mod tests {
             "popstop: \"Klipsch R-51PM\" stays awake while popstop runs (pid 4242)\n\
              popstop: this Mac does not idle sleep while popstop runs\n\
              popstop: press Ctrl-C to stop"
+        );
+    }
+
+    #[test]
+    fn the_status_text_names_the_copy_that_runs_and_the_device_that_it_holds() {
+        let holder = HolderRecord {
+            pid: 4242,
+            mode: Mode::Foreground,
+            started_at: TEN_O_CLOCK_UTC,
+        };
+
+        assert_eq!(
+            status_lines_in(&holder, "Klipsch R-51PM", &Utc),
+            "popstop: a copy runs (pid 4242, foreground, started 2026-09-18 10:00:00)\n\
+             popstop: \"Klipsch R-51PM\" is the default output device"
+        );
+
+        // The mode comes from the record, thus a background copy reports the
+        // mode that it runs in.
+        let background = HolderRecord {
+            pid: 5353,
+            mode: Mode::Background,
+            started_at: TEN_O_CLOCK_UTC,
+        };
+        assert_eq!(
+            status_lines_without_device_name_in(&background, &"the device gave no name", &Utc),
+            "popstop: a copy runs (pid 5353, background, started 2026-09-18 10:00:00)\n\
+             popstop: the name of the default output device cannot be read: the device gave no name"
         );
     }
 
