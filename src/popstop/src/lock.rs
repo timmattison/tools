@@ -359,4 +359,30 @@ mod tests {
             "nobody holds the lock, so the old record means nothing"
         );
     }
+
+    #[test]
+    fn a_dropped_guard_releases_the_lock_and_leaves_no_record() {
+        let (_temp, dir) = state_dir();
+        let first = acquire(&dir, &FIRST).expect("the first holder gets the lock");
+
+        drop(first);
+
+        assert_eq!(
+            current_holder(&dir).expect("the reader reads the lock file"),
+            None,
+            "the lock is free after the drop"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.lock_path()).expect("read the lock file"),
+            "",
+            "a clean release leaves no record, so an old record stays only after a crash"
+        );
+
+        let second = acquire(&dir, &SECOND).expect("a new acquire gets the lock");
+        assert_eq!(
+            current_holder(&dir).expect("the reader reads the lock file"),
+            Some(SECOND)
+        );
+        drop(second);
+    }
 }
