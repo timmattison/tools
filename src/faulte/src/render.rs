@@ -268,7 +268,11 @@ const PROCESSES: &str = "processes";
 
 /// Chooses the singular or the plural form for `count`.
 fn plural<'a>(count: usize, singular: &'a str, many: &'a str) -> &'a str {
-    if count == 1 { singular } else { many }
+    if count == 1 {
+        singular
+    } else {
+        many
+    }
 }
 
 /// Gives `span` in seconds with one decimal, for example `4.0 s`.
@@ -918,7 +922,9 @@ mod tests {
             ]
         );
         assert_eq!(
-            header(&measurement(&zombies_only)).get(3).map(String::as_str),
+            header(&measurement(&zombies_only))
+                .get(3)
+                .map(String::as_str),
             Some("skipped: 72 zombies")
         );
         assert_eq!(
@@ -1138,6 +1144,54 @@ mod tests {
                 "idle 3h 12m",
                 ABSENT,
             ]))
+        );
+    }
+
+    /// Gives the five rows that the tests of the limit share. Their faults add
+    /// up to a million.
+    fn five_rows() -> Vec<RankedRow> {
+        vec![
+            row(10, 500_000),
+            row(11, 300_000),
+            row(12, 100_000),
+            row(13, 60_000),
+            row(14, 40_000),
+        ]
+    }
+
+    /// A limit keeps the first rows, and one line under the table counts the
+    /// rows that it hid and gives their share of all faults. A limit that no
+    /// row passes adds no line, and neither does no limit at all.
+    #[test]
+    fn the_limit_keeps_the_first_rows_and_counts_what_it_hid() {
+        let ranking = ranking(five_rows(), 1_000_000);
+        let drawn = |limit| rows(&ranking, &ranking.rows, limit, &accounts(), now(), None);
+
+        let two = drawn(Some(2));
+        assert_eq!(cells(&two).len(), 3, "the names and two rows");
+        assert_eq!(
+            two.lines().next_back(),
+            Some("… 3 more processes made 20.0% of all faults")
+        );
+
+        let four = drawn(Some(4));
+        assert_eq!(cells(&four).len(), 5, "the names and four rows");
+        assert_eq!(
+            four.lines().next_back(),
+            Some("… 1 more process made 4.0% of all faults")
+        );
+
+        let every = drawn(None);
+        assert_eq!(cells(&every).len(), 6, "the names and five rows");
+        assert_eq!(drawn(Some(5)), every, "a limit of every row hides nothing");
+        assert_eq!(
+            drawn(Some(9)),
+            every,
+            "a limit above every row hides nothing"
+        );
+        assert_eq!(
+            drawn(Some(0)).lines().next_back(),
+            Some("… 5 more processes made 100% of all faults")
         );
     }
 }
