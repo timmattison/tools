@@ -674,6 +674,68 @@ fn a_background_copy_has_no_terminal_and_outlives_the_command_that_started_it() 
 }
 
 #[test]
+fn a_background_start_refuses_with_the_words_of_a_foreground_start() {
+    let temp = tempfile::tempdir().expect("a temporary directory");
+    let dir = temp.path().join("state");
+    let mut first = Copy::start_in_the_foreground(&dir);
+    device_of_the_ready_lines(&mut first);
+    let record = holder(&dir).expect("the first copy holds the lock");
+
+    // Neither start takes the lock, thus neither one plays and neither one
+    // stays. The time limit of each is the backstop of a start that works.
+    let (foreground, foreground_report, foreground_refusal) =
+        ask_in(&dir, &["--exit-after", EXIT_AFTER_SECONDS]);
+    let (background, background_report, background_refusal) =
+        ask_in(&dir, &["--background", "--exit-after", EXIT_AFTER_SECONDS]);
+
+    assert_eq!(
+        background.code(),
+        Some(3),
+        "story 10 and story 15: a background start that found a copy ends with the status of a \
+         copy that runs: {background}. Its stderr:\n{background_refusal}"
+    );
+    assert_eq!(
+        foreground.code(),
+        Some(3),
+        "the foreground start of the same moment refuses too: {foreground}. Its \
+         stderr:\n{foreground_refusal}"
+    );
+    assert_eq!(
+        background_refusal, foreground_refusal,
+        "story 10: the refusal of the copy reaches the user with the words of a foreground \
+         refusal"
+    );
+    assert_eq!(
+        (background_report.as_str(), foreground_report.as_str()),
+        ("", ""),
+        "a refusal goes to stderr, thus a script that reads stdout sees nothing"
+    );
+    assert!(
+        background_refusal.contains(&format!("pid {}", first.pid())),
+        "story 15: the refusal names the copy that runs:\n{background_refusal}"
+    );
+
+    assert!(
+        first.still_runs(),
+        "the refusal of the background start ended the first copy"
+    );
+    assert_eq!(
+        holder(&dir),
+        Some(record),
+        "the first copy still holds the lock"
+    );
+
+    first.send(SIGINT);
+    let (status, stderr) = first.finish();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "the first copy stops with success: {status}. Its stderr:\n{stderr}"
+    );
+    assert_eq!(holder(&dir), None, "the first copy released the lock");
+}
+
+#[test]
 fn a_hangup_stops_a_foreground_copy() {
     a_signal_stops_a_foreground_copy(SIGHUP);
 }
