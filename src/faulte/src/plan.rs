@@ -189,6 +189,17 @@ fn pids_with_a_live_descendant(table: &[ProcessRow]) -> HashSet<Pid> {
     ancestors
 }
 
+/// Gives the PID of `faulte` and the PID of each of its ancestors.
+///
+/// A session that runs `faulte kill` is never a candidate. Rule 3 refuses
+/// every ancestor of `faulte` as well, because `faulte` is a live descendant
+/// of each one. This rule states the reason, and it holds when rule 3 changes.
+fn faulte_and_its_ancestors(table: &[ProcessRow], faulte: Pid) -> HashSet<Pid> {
+    let mut chain = HashSet::new();
+    walk_up(faulte, &parents_of(table), &mut chain);
+    chain
+}
+
 /// Gives the time when the status of `state` last changed.
 ///
 /// The state carries the time since the change, and the ranking measured it
@@ -209,6 +220,7 @@ pub fn plan(input: &PlanInput<'_>) -> Plan {
     let idle_for = Duration::from(input.rules.idle_for);
     let now_secs = epoch_seconds(input.now);
     let live_descendants = pids_with_a_live_descendant(input.table);
+    let runs_faulte = faulte_and_its_ancestors(input.table, input.faulte);
     let mut candidates = Vec::new();
     for row in &input.ranking.rows {
         // Only a session that `faulte` read a registry record for can be a
@@ -217,6 +229,9 @@ pub fn plan(input: &PlanInput<'_>) -> Plan {
         let ClaudeView::Session { id, state, .. } = &row.claude else {
             continue;
         };
+        if runs_faulte.contains(&row.pid) {
+            continue;
+        }
         let (Some(age), Some(started_at_epoch_secs)) = (
             age_of(row.started_at_epoch_secs, now_secs),
             row.started_at_epoch_secs,
