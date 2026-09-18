@@ -166,6 +166,23 @@ pub struct StopReport {
     pub failed: Vec<(Candidate, MachineError)>,
 }
 
+impl StopReport {
+    /// Tells whether the stop did what the plan said that it would do.
+    ///
+    /// The answer is no when `faulte` could not signal a candidate or could
+    /// not read it again. The person asked `faulte` to stop that session, and
+    /// it can still be running.
+    ///
+    /// A candidate that the check refused does not change the answer. It got
+    /// no signal, and the report names the reason.
+    ///
+    /// `faulte kill` exits 2 when the answer is no.
+    #[must_use]
+    pub fn did_what_the_plan_said(&self) -> bool {
+        self.failed.is_empty()
+    }
+}
+
 /// Stops each session of `candidates`, and reports what happened to each one.
 ///
 /// The sequence is one function, because each step reads what the step before
@@ -1181,6 +1198,122 @@ mod tests {
             2,
             "the table of the check, and the table that found the target gone"
         );
+    }
+
+    /// A session that is still the same process after `SIGKILL` makes a stop
+    /// that did not do what the plan said.
+    ///
+    /// The person asked `faulte` to stop that session, and it is still
+    /// running. `faulte kill` must then exit 2, also when every other session
+    /// stopped.
+    #[test]
+    fn a_session_that_survived_sigkill_fails_the_stop() {
+        let cases = [
+            (
+                "one session that survived",
+                StopReport {
+                    survived: vec![candidate(30)],
+                    ..StopReport::default()
+                },
+            ),
+            (
+                "one session that survived, and one of each other kind",
+                StopReport {
+                    skipped: vec![(candidate(20), Recheck::StatusChanged)],
+                    stopped: vec![candidate(40)],
+                    killed: vec![candidate(50)],
+                    survived: vec![candidate(30)],
+                    ..StopReport::default()
+                },
+            ),
+        ];
+
+        for (holds, report) in cases {
+            assert!(
+                !report.did_what_the_plan_said(),
+                "the report holds {holds}: {report:?}"
+            );
+        }
+    }
+
+    /// A candidate that `faulte` could not signal, or could not read again,
+    /// makes a stop that did not do what the plan said.
+    #[test]
+    fn a_session_that_faulte_could_not_signal_fails_the_stop() {
+        let cases = [
+            (
+                "one session that faulte could not signal",
+                StopReport {
+                    failed: vec![(candidate(30), refused(30))],
+                    ..StopReport::default()
+                },
+            ),
+            (
+                "one session that faulte could not read again, and one that stopped",
+                StopReport {
+                    stopped: vec![candidate(40)],
+                    failed: vec![(candidate(30), unreadable_table())],
+                    ..StopReport::default()
+                },
+            ),
+        ];
+
+        for (holds, report) in cases {
+            assert!(
+                !report.did_what_the_plan_said(),
+                "the report holds {holds}: {report:?}"
+            );
+        }
+    }
+
+    /// A stop that stopped every session that it signalled did what the plan
+    /// said, also when the check refused some candidates.
+    ///
+    /// A candidate that the check refused got no signal. The check keeps a
+    /// session that the person started to use again, so a skip is not a
+    /// failure of the stop.
+    #[test]
+    fn a_stop_that_stopped_every_signalled_session_did_what_the_plan_said() {
+        let cases = [
+            ("no session", StopReport::default()),
+            (
+                "one session that stopped after SIGTERM",
+                StopReport {
+                    stopped: vec![candidate(30)],
+                    ..StopReport::default()
+                },
+            ),
+            (
+                "one session that stopped after SIGKILL",
+                StopReport {
+                    killed: vec![candidate(30)],
+                    ..StopReport::default()
+                },
+            ),
+            (
+                "one session that the check refused",
+                StopReport {
+                    skipped: vec![(candidate(30), Recheck::DescendantStarted)],
+                    ..StopReport::default()
+                },
+            ),
+            (
+                "one session of each of these kinds",
+                StopReport {
+                    skipped: vec![(candidate(20), Recheck::PidReused)],
+                    stopped: vec![candidate(30)],
+                    killed: vec![candidate(40)],
+                    ..StopReport::default()
+                },
+            ),
+        ];
+
+        for (holds, report) in cases {
+            assert!(
+                report.did_what_the_plan_said(),
+                "the report holds {holds}: {report:?}"
+            );
+        }
     }
 
     /// Only `y` and `yes` confirm, in any case, after the spaces come off.

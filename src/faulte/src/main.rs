@@ -301,7 +301,7 @@ fn ask_and_stop(machine: &Mac, candidates: &[Candidate]) -> ExitCode {
     }
     let report = stop::stop(machine, candidates, GRACE, POLL);
     println!("{}", render::stopped(&report));
-    if report.failed.is_empty() {
+    if report.did_what_the_plan_said() {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(EXIT_ERROR)
