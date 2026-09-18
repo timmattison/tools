@@ -138,8 +138,10 @@ where
     Tz: TimeZone,
     Tz::Offset: fmt::Display,
 {
-    let _ = (holder, device_name, zone);
-    String::new()
+    format!(
+        "{}\n{PREFIX}\"{device_name}\" is the default output device",
+        copy_runs_line_in(holder, zone)
+    )
 }
 
 /// Gives the lines that `popstop --status` writes when the name of the
@@ -168,8 +170,26 @@ where
     Tz: TimeZone,
     Tz::Offset: fmt::Display,
 {
-    let _ = (holder, problem, zone);
-    String::new()
+    format!(
+        "{}\n{PREFIX}the name of the default output device cannot be read: {problem}",
+        copy_runs_line_in(holder, zone)
+    )
+}
+
+/// Gives the line that names the copy that runs: its PID, its mode, and its
+/// start time in `zone`.
+fn copy_runs_line_in<Tz>(holder: &HolderRecord, zone: &Tz) -> String
+where
+    Tz: TimeZone,
+    Tz::Offset: fmt::Display,
+{
+    let HolderRecord {
+        pid,
+        mode,
+        started_at,
+    } = holder;
+    let started = start_time_text_in(*started_at, zone);
+    format!("{PREFIX}a copy runs (pid {pid}, {mode}, started {started})")
 }
 
 /// Gives one line that reports a problem, for example
