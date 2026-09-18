@@ -6,6 +6,10 @@
 
 use std::io;
 
+/// The priority inside the quality of service class. Zero is the priority of
+/// the class itself, which is what popstop wants.
+const RELATIVE_QOS: libc::c_int = 0;
+
 /// Puts the calling thread into the background quality of service class.
 ///
 /// popstop plays a signal that nobody hears, thus it never needs the
@@ -15,7 +19,16 @@ use std::io;
 ///
 /// Returns the error of the system when the class cannot be set.
 fn set_background_qos() -> io::Result<()> {
-    Ok(())
+    // SAFETY: the call takes its class and its relative priority by value,
+    // and it changes only the thread that calls it.
+    let status = unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_BACKGROUND, RELATIVE_QOS)
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(status))
+    }
 }
 
 #[cfg(test)]
