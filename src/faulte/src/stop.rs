@@ -662,6 +662,56 @@ mod tests {
         );
     }
 
+    /// A candidate that the check refuses gets no signal at all, and the
+    /// report names it with the reason that the check gave.
+    ///
+    /// The plan can be minutes old when the person answers the question. A
+    /// session that the person started to use again in that time must survive,
+    /// and the person must read which sessions `faulte` left alone and why.
+    ///
+    /// Each refused candidate carries its own reason, and a candidate that
+    /// proceeds beside them is still signalled.
+    #[test]
+    fn a_candidate_that_the_check_refuses_is_skipped_and_never_signalled() {
+        let exited = candidate(30);
+        let target = candidate(40);
+        let busy = candidate(50);
+        let machine = FakeMachine::reading(vec![
+            vec![process(40, LAUNCHD_PID), process(50, LAUNCHD_PID)],
+            Vec::new(),
+        ])
+        .with_record(40, record(40, Some(changed_at())))
+        .with_record(
+            50,
+            SessionRecord {
+                status: Some(SessionStatus::Busy),
+                ..record(50, Some(changed_at()))
+            },
+        );
+
+        let report = stop(
+            &machine,
+            &[exited.clone(), target.clone(), busy.clone()],
+            ONE_POLL,
+            ONE_POLL,
+        );
+
+        assert_eq!(
+            report,
+            StopReport {
+                skipped: vec![(exited, Recheck::Exited), (busy, Recheck::StatusChanged)],
+                stopped: vec![target],
+                ..StopReport::default()
+            },
+            "each refused candidate carries the reason of the check"
+        );
+        assert_eq!(
+            machine.signals(),
+            vec![(Pid::new(40), Signal::Terminate)],
+            "no signal reaches a candidate that the check refused"
+        );
+    }
+
     /// Only `y` and `yes` confirm, in any case, after the spaces come off.
     ///
     /// Every other answer stops nothing: the end of the input, no text, a
