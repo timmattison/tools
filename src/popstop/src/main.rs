@@ -35,8 +35,23 @@ fn main() -> ExitCode {
 /// Runs the command line on macOS.
 #[cfg(target_os = "macos")]
 fn run(cli: &Cli) -> ExitCode {
-    let _ = (&cli.state_dir, &cli.exit_after);
-    ExitCode::from(popstop::exit_status::SUCCESS)
+    use std::io::Write;
+    use std::time::Duration;
+
+    use popstop::life_cycle::{run_foreground, Settings};
+
+    let settings = Settings {
+        state_dir: cli.state_dir.clone(),
+        exit_after: cli.exit_after.map(Duration::from_secs),
+    };
+    match run_foreground(&settings) {
+        Ok(()) => ExitCode::from(popstop::exit_status::SUCCESS),
+        Err(failure) => {
+            // A write to stderr that fails has no other place to report.
+            let _ = writeln!(std::io::stderr(), "{}", failure.message());
+            ExitCode::from(failure.status())
+        }
+    }
 }
 
 /// Says that popstop runs on macOS only.

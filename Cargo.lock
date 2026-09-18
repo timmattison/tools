@@ -6170,6 +6170,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shellquote",
+ "signal-hook 0.3.18",
  "tempfile",
  "thiserror 2.0.20",
 ]
