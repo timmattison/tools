@@ -105,7 +105,23 @@ const ROUNDED_EVERYTHING: &str = "100.0";
 /// A share that is not a number gives [`ABSENT`].
 #[must_use]
 pub fn share(fraction: f64) -> String {
-    format!("{:.1}%", fraction * 100.0)
+    if !fraction.is_finite() {
+        return ABSENT.to_owned();
+    }
+    if fraction <= 0.0 {
+        return NO_SHARE.to_owned();
+    }
+    if fraction >= 1.0 {
+        return WHOLE_SHARE.to_owned();
+    }
+    let percent = format!("{:.1}", fraction * 100.0);
+    if percent == ROUNDED_NOTHING {
+        return BELOW_SMALLEST_SHARE.to_owned();
+    }
+    if percent == ROUNDED_EVERYTHING {
+        return ABOVE_LARGEST_SHARE.to_owned();
+    }
+    format!("{percent}%")
 }
 
 #[cfg(test)]
