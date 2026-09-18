@@ -22,8 +22,8 @@
 //!   macOS only.
 //! - [`signal`] makes the samples of the keepalive signal. It is pure and it
 //!   compiles on every platform.
-//! - [`lock`] makes sure that only one copy runs for each user. It uses the
-//!   standard library only and it compiles on every platform.
+//! - [`lock`] makes sure that only one copy runs for each user. It uses no
+//!   platform API, thus it compiles on every platform.
 //! - `output` plays the signal through the default output unit of Core Audio.
 //!   It compiles on macOS only.
 //! - `process` reads the kernel start time of a process. It compiles on macOS
