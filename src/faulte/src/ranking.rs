@@ -211,6 +211,12 @@ impl Ranking {
 
 /// Gives what the row of `pid` shows about Claude Code.
 fn view_of(pid: Pid, input: &Observation<'_>) -> ClaudeView {
+    // `occ` decides what a process is. A registry file that a dead session
+    // left behind can stay under the PID of another process, so a record
+    // alone never makes a Claude Code row.
+    if !input.claude.contains_key(&pid) {
+        return ClaudeView::NotClaude;
+    }
     match input.records.get(&pid) {
         Some(record) => ClaudeView::Session {
             id: record.session.clone(),
