@@ -3813,11 +3813,11 @@ faulte kill --older-than 3d --idle-for 1h --max 5
 ### Options
 
 - `--interval <DURATION>`: The time to sample the page faults of each process, for example `5s`, `10m`, `2h`, or `7d`. A bare number is a number of seconds. Defaults to `5s`. Zero is refused, because a sample of no time measures nothing.
-- `--limit <N>`: The number of rows that the table shows. Defaults to 25. One line under the table counts the rows that the limit hid, and gives their share of all faults, because the limit hides the small rates and the small rates were the load.
+- `--limit <N>`: The number of rows that the table shows. Defaults to 25. One line under the table counts the rows that the limit hid, and gives their share of all faults, because the limit hides the small rates and the small rates were the load. The flag belongs to the ranking alone: `faulte kill` shows every candidate of its plan, and refuses `--limit` rather than take it and ignore it.
 - `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
 - `-h`, `--help`: Print the usage.
 
-`faulte kill` takes three more:
+`faulte kill` samples the page faults as well, so it takes `--interval`, and three flags of its own:
 
 - `--older-than <DURATION>`: Select a session only when it is older than this time. Defaults to `7d`.
 - `--idle-for <DURATION>`: Select a session only when it became idle more than this time ago. Defaults to `10m`.
