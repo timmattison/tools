@@ -711,8 +711,156 @@ unsafe fn first_buffer<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{nominal_sample_rate, AudioError};
+    use std::ffi::c_void;
+    use std::ptr::{self, NonNull};
+
+    use objc2_core_audio_types::{AudioBuffer, AudioBufferList};
+
+    use super::{
+        nominal_sample_rate, render_callback, AudioError, OSStatus, Render, NO_ERR, OUTPUT_ELEMENT,
+    };
     use crate::signal::SampleRate;
+
+    /// The value that the probe writes into each sample that it gets.
+    const WRITTEN: f32 = 0.5;
+
+    /// A renderer that records what the render callback lends it.
+    #[derive(Debug, Default)]
+    struct Probe {
+        /// The number of calls.
+        calls: usize,
+        /// The number of samples in the last call.
+        samples: usize,
+        /// The number of channels in the last call.
+        channels: usize,
+    }
+
+    impl Render for Probe {
+        fn render(&mut self, interleaved: &mut [f32], channels: usize) {
+            interleaved.fill(WRITTEN);
+            self.calls += 1;
+            self.samples = interleaved.len();
+            self.channels = channels;
+        }
+    }
+
+    /// Calls the render callback as Core Audio calls it, for `frames` frames
+    /// of `list`. Gives what the probe saw, and the status.
+    fn call_back(list: *mut AudioBufferList, frames: u32) -> (Probe, OSStatus) {
+        let mut probe = Probe::default();
+        // SAFETY: the refCon points to a live `Probe` that nothing else uses
+        // during the call. `list` is null or points to a buffer list whose
+        // memory the caller owns. The callback reads neither the flags nor
+        // the time stamp, so dangling pointers stand in for them.
+        let status = unsafe {
+            render_callback::<Probe>(
+                NonNull::from(&mut probe).cast::<c_void>(),
+                NonNull::dangling(),
+                NonNull::dangling(),
+                OUTPUT_ELEMENT,
+                frames,
+                list,
+            )
+        };
+        (probe, status)
+    }
+
+    /// Makes a list of one buffer.
+    fn one_buffer(channels: u32, bytes: u32, data: *mut c_void) -> AudioBufferList {
+        AudioBufferList {
+            mNumberBuffers: 1,
+            mBuffers: [AudioBuffer {
+                mNumberChannels: channels,
+                mDataByteSize: bytes,
+                mData: data,
+            }],
+        }
+    }
+
+    /// Gives the number of bytes in `samples` samples.
+    fn bytes_of(samples: usize) -> u32 {
+        u32::try_from(samples * size_of::<f32>()).expect("the size fits in a u32")
+    }
+
+    #[test]
+    fn the_render_callback_lends_frames_times_channels_samples_of_a_larger_buffer() {
+        let mut memory = vec![f32::NAN; 16];
+        let mut list = one_buffer(2, bytes_of(16), memory.as_mut_ptr().cast::<c_void>());
+
+        let (probe, status) = call_back(ptr::from_mut(&mut list), 4);
+
+        assert_eq!(status, NO_ERR);
+        assert_eq!(probe.calls, 1, "the renderer gets one call");
+        assert_eq!(probe.samples, 8, "4 frames of 2 channels are 8 samples");
+        assert_eq!(probe.channels, 2, "the channels come from the buffer");
+        assert!(
+            memory[..8].iter().all(|sample| *sample == WRITTEN),
+            "the renderer wrote the 8 samples: {memory:?}"
+        );
+        assert!(
+            memory[8..].iter().all(|sample| sample.is_nan()),
+            "the renderer got no sample after the 4 frames: {memory:?}"
+        );
+    }
+
+    #[test]
+    fn the_render_callback_lends_only_the_whole_samples_that_the_buffer_holds() {
+        // The buffer says it holds 6 samples and 3 bytes, fewer than the
+        // 1024 samples of 512 frames of 2 channels.
+        let mut memory = vec![f32::NAN; 8];
+        let bytes = bytes_of(6) + 3;
+        let mut list = one_buffer(2, bytes, memory.as_mut_ptr().cast::<c_void>());
+
+        let (probe, status) = call_back(ptr::from_mut(&mut list), 512);
+
+        assert_eq!(status, NO_ERR);
+        assert_eq!(probe.calls, 1, "the renderer gets one call");
+        assert_eq!(probe.samples, 6, "the buffer holds 6 whole samples");
+        assert!(
+            memory[..6].iter().all(|sample| *sample == WRITTEN),
+            "the renderer wrote the 6 samples: {memory:?}"
+        );
+        assert!(
+            memory[6..].iter().all(|sample| sample.is_nan()),
+            "the renderer got no sample past the size of the buffer: {memory:?}"
+        );
+    }
+
+    #[test]
+    fn the_render_callback_does_not_call_the_renderer_without_usable_memory() {
+        let mut memory = vec![f32::NAN; 8];
+        let base = memory.as_mut_ptr().cast::<c_void>();
+
+        let (probe, status) = call_back(ptr::null_mut(), 4);
+        assert_eq!((probe.calls, status), (0, NO_ERR), "a null buffer list");
+
+        let mut no_buffers = one_buffer(2, bytes_of(8), base);
+        no_buffers.mNumberBuffers = 0;
+        let (probe, status) = call_back(ptr::from_mut(&mut no_buffers), 4);
+        assert_eq!((probe.calls, status), (0, NO_ERR), "a list of no buffers");
+
+        let mut no_memory = one_buffer(2, bytes_of(8), ptr::null_mut());
+        let (probe, status) = call_back(ptr::from_mut(&mut no_memory), 4);
+        assert_eq!(
+            (probe.calls, status),
+            (0, NO_ERR),
+            "a buffer with no memory"
+        );
+
+        let unaligned = base.cast::<u8>().wrapping_add(1).cast::<c_void>();
+        let mut misaligned = one_buffer(2, bytes_of(4), unaligned);
+        let (probe, status) = call_back(ptr::from_mut(&mut misaligned), 2);
+        assert_eq!(
+            (probe.calls, status),
+            (0, NO_ERR),
+            "a buffer whose memory is not aligned for f32"
+        );
+
+        assert!(
+            memory.iter().all(|sample| sample.is_nan()),
+            "nothing wrote to the memory: {memory:?}"
+        );
+    }
 
     #[test]
     fn an_audio_error_names_the_call_and_shows_a_four_character_code_as_text() {
