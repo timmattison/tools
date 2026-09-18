@@ -426,6 +426,19 @@ mod tests {
         )
     }
 
+    /// The UID of the other account of the tests.
+    const OTHER_UID: u32 = 502;
+
+    /// Gives the ranked row of a Claude Code process of another account,
+    /// which started `age` seconds ago. `faulte` cannot read the registry
+    /// record of that account without root.
+    fn foreign(pid: u32, age: u64) -> RankedRow {
+        RankedRow {
+            uid: Uid::new(OTHER_UID),
+            ..row(pid, age, ClaudeView::OtherAccount)
+        }
+    }
+
     /// Gives a ranking of `rows`.
     fn ranking(rows: Vec<RankedRow>) -> Ranking {
         let total_faults = rows.iter().map(|row| row.faults).sum();
@@ -694,6 +707,52 @@ mod tests {
                 live_descendant: 1,
             }
         );
+    }
+
+    /// A Claude Code process of another account is never a candidate, and
+    /// `faulte` never signals one. The registry folder of another account has
+    /// the mode `0700`, so nothing can read rule 2 without root.
+    ///
+    /// The plan lists such a process under the rules that it can read: the
+    /// age, the live descendants, and `faulte` itself. The person then runs
+    /// the same command under `sudo`, which reads the records of every
+    /// account. The count of the refused sessions holds none of these rows,
+    /// because the plan refused none of them.
+    #[test]
+    fn a_process_of_another_account_is_listed_and_never_a_candidate() {
+        let ranking = ranking(vec![
+            foreign(30, OLD),
+            foreign(40, YOUNG),
+            foreign(50, OLD),
+            foreign(60, OLD),
+            foreign(70, 10 * 86_400),
+            session(80, OLD, idle(3_600)),
+        ]);
+        let table = [
+            process(30, LAUNCHD_PID),
+            process(40, LAUNCHD_PID),
+            process(50, LAUNCHD_PID),
+            process(51, 50),
+            // The process 60 started `faulte`, which no account can do. A
+            // session of another account that holds `faulte` is still out of
+            // reach of every rule, so the plan leaves it out of the list.
+            process(60, LAUNCHD_PID),
+            process(FAULTE_PID, 60),
+            process(70, LAUNCHD_PID),
+            process(80, LAUNCHD_PID),
+        ];
+
+        let plan = plan(&input(&ranking, &table, rules()));
+
+        assert_eq!(selected(&plan), vec![80]);
+        assert_eq!(
+            plan.other_account
+                .iter()
+                .map(|row| row.pid.get())
+                .collect::<Vec<u32>>(),
+            vec![70, 30]
+        );
+        assert_eq!(plan.not_selected, NotSelected::default());
     }
 
     /// Rule 4: the `faulte` process is never a candidate. The session of this
