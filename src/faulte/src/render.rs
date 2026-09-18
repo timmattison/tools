@@ -314,8 +314,8 @@ pub struct Measurement<'a> {
 /// row of the table says it. On 2026-09-18, 213 Claude Code sessions made 90%
 /// of all page faults, and the largest single row made a small part of that.
 ///
-/// A line, or a part of a line, that would give a count of zero is not there.
-/// A Mac that hides nothing says nothing, the same as `occ`.
+/// A line, or a part of a line, with a count of zero is not there. A Mac that
+/// hides nothing says nothing, the same as `occ`.
 #[must_use]
 pub fn header(measurement: &Measurement<'_>) -> Vec<String> {
     let ranking = measurement.ranking;
@@ -447,8 +447,9 @@ const OTHER_ACCOUNT: &str = "other account — run with sudo";
 ///
 /// `width` wraps the table at that many columns. `None` makes each column as
 /// wide as its widest cell, which is what a test wants and what a pipe wants.
-/// The caller reads the width of the terminal, because a read of the terminal
-/// here would make the text of this function depend on where it runs.
+/// The caller reads the width of the terminal. A read of the terminal here
+/// makes the text of this function depend on where the tool runs, and a test
+/// that compares text then passes through a pipe and fails on a terminal.
 #[must_use]
 pub fn rows(
     ranking: &Ranking,
@@ -463,9 +464,9 @@ pub fn rows(
     table
         .load_preset(presets::UTF8_FULL)
         .set_content_arrangement(ContentArrangement::Dynamic)
-        // The table must not read the terminal itself. A read here would make
-        // the text depend on where the tool runs, and a test that compares
-        // text would pass through a pipe and fail on a terminal.
+        // The table must not read the terminal itself. `comfy_table` reads it
+        // through `crossterm::terminal::size`, which this workspace bans: a
+        // terminal that carries no window answers that call with zero columns.
         .force_no_tty()
         .set_header(COLUMNS);
     if let Some(width) = width {
