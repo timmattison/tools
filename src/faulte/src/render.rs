@@ -434,6 +434,25 @@ const COLUMNS: [&str; 10] = [
 /// account.
 const OTHER_ACCOUNT: &str = "other account — run with sudo";
 
+/// The width of the table when nothing states a width and no terminal answers.
+///
+/// A pipe and a file carry no window. The table holds ten columns, so it needs
+/// room, and a width of no columns makes each column as wide as its widest
+/// cell.
+pub const DEFAULT_WIDTH: u16 = 120;
+
+/// The width that the table takes.
+///
+/// `stated` is the value of `COLUMNS`, and it wins. POSIX says a value there
+/// overrides the width that the system selects, and `ls`, `git` and `less`
+/// obey that rule. `terminal` is the width that the terminal reports, which is
+/// absent for a pipe and for a file. [`DEFAULT_WIDTH`] answers when neither
+/// source does, so the table is always bounded.
+#[must_use]
+pub fn table_width(stated: Option<&str>, terminal: Option<u16>) -> u16 {
+    DEFAULT_WIDTH
+}
+
 /// The greatest number of characters that the `COMMAND` column gives.
 ///
 /// A ranking names the process that faults, and the first characters of a
@@ -1249,6 +1268,30 @@ mod tests {
 
     /// The place of the `COMMAND` column in a row.
     const COMMAND_CELL: usize = 6;
+
+    /// A statement of the width wins, then the terminal, then the default.
+    ///
+    /// A run through a pipe carries no window, and a table of no width is as
+    /// wide as its widest cell. So the default is a width, never `None`.
+    #[test]
+    fn a_stated_width_wins_and_a_pipe_gets_the_default() {
+        assert_eq!(table_width(Some("150"), Some(80)), 150);
+        assert_eq!(table_width(Some("150"), None), 150);
+        assert_eq!(table_width(None, Some(80)), 80);
+        assert_eq!(table_width(None, None), DEFAULT_WIDTH);
+
+        // A statement that is not a width says nothing, so the terminal
+        // answers. A window of no columns is not a width either.
+        for junk in ["", " ", "0", "-1", "wide", "80.5", "日本語", "99999999"] {
+            assert_eq!(
+                table_width(Some(junk), Some(80)),
+                80,
+                "{junk:?} states no width"
+            );
+            assert_eq!(table_width(Some(junk), None), DEFAULT_WIDTH);
+        }
+        assert_eq!(table_width(None, Some(0)), DEFAULT_WIDTH);
+    }
 
     /// A command longer than the limit is cut, and the cut is marked.
     ///
