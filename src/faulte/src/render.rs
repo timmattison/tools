@@ -434,6 +434,25 @@ const COLUMNS: [&str; 10] = [
 /// account.
 const OTHER_ACCOUNT: &str = "other account — run with sudo";
 
+/// The greatest number of characters that the `COMMAND` column gives.
+///
+/// A ranking names the process that faults, and the first characters of a
+/// command name it. A command line can be very long: one process of this Mac
+/// carries more than 3,000 characters, and a table that gives such a command
+/// whole is as wide as that command.
+pub const COMMAND_LIMIT: usize = 120;
+
+/// Gives the command of a row, cut at [`COMMAND_LIMIT`] characters.
+///
+/// The cut counts characters, never bytes. A cut inside one character panics,
+/// and the command comes from another process, so a cut by bytes stops
+/// `faulte` at the first such process on the Mac. A command that the cut made
+/// shorter ends with [`MORE`], so a reader sees that the row gives a part.
+#[must_use]
+pub fn command(text: &str) -> String {
+    text.to_owned()
+}
+
 /// Gives the table of `rows`, and the line that counts the rows past `limit`.
 ///
 /// `rows` is the order that the caller wants. The ranking sorts its rows, and
@@ -1227,6 +1246,34 @@ mod tests {
     /// The place of the `COMMAND` column in a row.
     const COMMAND_CELL: usize = 6;
 
+    /// A command longer than the limit is cut, and the cut is marked.
+    ///
+    /// One process of this Mac carries a command line of more than 3,000
+    /// characters. A table that gives such a command whole is as wide as that
+    /// command, and one run of `faulte` through a pipe printed 178 kilobytes
+    /// for that one row. A ranking names the process that faults, and the
+    /// first characters of a command name it.
+    #[test]
+    fn a_command_longer_than_the_limit_is_cut_and_marked() {
+        let long: String = "/usr/bin/node --a-very-long-flag ".repeat(200);
+        let cut = command(&long);
+
+        assert_eq!(cut.chars().count(), COMMAND_LIMIT + 1);
+        assert!(cut.ends_with(MORE), "the cut must be marked: {cut}");
+        assert!(long.starts_with(cut.trim_end_matches(MORE)));
+
+        // A command of many bytes for one character keeps whole characters,
+        // and a cut by bytes inside one character panics.
+        let japanese: String = "日本語🎉café ".repeat(200);
+        let cut = command(&japanese);
+        assert_eq!(cut.chars().count(), COMMAND_LIMIT + 1);
+
+        // A command at the limit, and a command below it, stay whole.
+        let short: String = "a".repeat(COMMAND_LIMIT);
+        assert_eq!(command(&short), short);
+        assert_eq!(command("claude"), "claude");
+    }
+
     /// A command of many bytes for one character, and a command of many
     /// characters, stay whole. A cut by bytes inside one character panics, and
     /// a cut by characters loses part of the command.
@@ -1257,7 +1304,7 @@ mod tests {
             .skip(1)
             .filter_map(|row| row.get(COMMAND_CELL).cloned())
             .collect();
-        assert_eq!(commands, [japanese.to_owned(), long.trim_end().to_owned()]);
+        assert_eq!(commands, [japanese.to_owned(), command(&long)]);
 
         // A narrow terminal wraps the command over several lines. Each line
         // holds whole characters, so every character of the command is still
