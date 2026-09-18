@@ -11,6 +11,10 @@
 //! start time to check a registry record, and to find a PID that a new process
 //! uses again.
 
+use std::str::FromStr;
+
+use chrono::NaiveDateTime;
+
 use crate::pid::{Pid, Uid};
 
 /// One process, as one line of the output of `ps`.
@@ -48,8 +52,41 @@ pub enum TableParseError {
 ///
 /// None yet.
 pub fn parse(output: &str) -> Result<Vec<ProcessRow>, TableParseError> {
-    let _ = output;
-    Ok(Vec::new())
+    Ok(output.lines().filter_map(parse_row).collect())
+}
+
+/// The format of the start time, after the parser joins its five tokens with
+/// one space.
+const START_FORMAT: &str = "%a %b %d %H:%M:%S %Y";
+
+/// Reads one row.
+fn parse_row(line: &str) -> Option<ProcessRow> {
+    let mut tokens = line.split_ascii_whitespace();
+    let mut next = || tokens.next();
+    let (pid, ppid, uid, rss, _stat) = (next()?, next()?, next()?, next()?, next()?);
+    let start = [next()?, next()?, next()?, next()?, next()?].join(" ");
+    let command = tokens.collect::<Vec<&str>>().join(" ");
+    let started = NaiveDateTime::parse_from_str(&start, START_FORMAT)
+        .ok()?
+        .and_utc()
+        .timestamp();
+    Some(ProcessRow {
+        pid: Pid::new(unsigned(pid)?),
+        ppid: Pid::new(unsigned(ppid)?),
+        uid: Uid::new(unsigned(uid)?),
+        rss_kib: unsigned(rss)?,
+        zombie: false,
+        started_at_epoch_secs: u64::try_from(started).ok()?,
+        command,
+    })
+}
+
+/// Reads a number of ASCII digits from `token`.
+fn unsigned<T: FromStr>(token: &str) -> Option<T> {
+    if !token.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    token.parse().ok()
 }
 
 #[cfg(test)]
