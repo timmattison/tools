@@ -239,6 +239,7 @@ fn read_record(file: &mut File) -> io::Result<HolderRecord> {
 #[cfg(test)]
 mod tests {
     use super::{acquire, current_holder, AcquireError, HolderRecord, Mode, StartTime, StateDir};
+    use std::fs;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
@@ -315,5 +316,33 @@ mod tests {
 
         assert_eq!(holder, Some(FIRST));
         drop(guard);
+    }
+
+    #[test]
+    fn a_reader_gets_none_when_no_copy_holds_the_lock_even_with_an_old_record() {
+        let (_temp, dir) = state_dir();
+
+        assert_eq!(
+            current_holder(&dir).expect("the reader handles a missing state directory"),
+            None,
+            "no copy ran yet, so the state directory does not exist"
+        );
+
+        fs::create_dir_all(dir.path()).expect("make the state directory");
+        assert_eq!(
+            current_holder(&dir).expect("the reader handles a missing lock file"),
+            None,
+            "the state directory holds no lock file"
+        );
+
+        // A copy that crashed leaves its record, and the kernel releases its
+        // lock.
+        let old_record = serde_json::to_string(&FIRST).expect("the record serializes") + "\n";
+        fs::write(dir.lock_path(), old_record).expect("write an old record");
+        assert_eq!(
+            current_holder(&dir).expect("the reader reads the lock file"),
+            None,
+            "nobody holds the lock, so the old record means nothing"
+        );
     }
 }
