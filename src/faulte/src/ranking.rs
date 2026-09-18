@@ -195,7 +195,14 @@ pub fn rank(input: &Observation<'_>) -> Ranking {
             })
         })
         .collect();
-    rows.sort_by(|left, right| right.faults.cmp(&left.faults));
+    // The PID breaks a tie, so two runs over the same sources agree on the
+    // order, whatever order `top` printed.
+    rows.sort_by(|left, right| {
+        right
+            .faults
+            .cmp(&left.faults)
+            .then_with(|| left.pid.cmp(&right.pid))
+    });
     Ranking {
         rows,
         window: input.window,
