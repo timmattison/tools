@@ -326,7 +326,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
     /// A bound that a wait which passes never comes near, even on a loaded
@@ -496,5 +496,27 @@ mod tests {
             Release::Released,
             "no lock file exists, so no copy holds the lock"
         );
+    }
+
+    #[test]
+    fn a_wait_gives_timed_out_when_the_holder_keeps_the_lock() {
+        let (_temp, dir) = state_dir();
+        let guard = acquire(&dir, &FIRST).expect("the holder gets the lock");
+
+        let started = Instant::now();
+        let release = wait_for_release(&dir, HOLD).expect("the wait works");
+
+        assert_eq!(release, Release::TimedOut);
+        assert!(
+            started.elapsed() >= HOLD,
+            "the wait gave up after {:?}, before its timeout of {HOLD:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            current_holder(&dir).expect("the reader reads the lock file"),
+            Some(FIRST),
+            "the wait does not take the lock from the holder"
+        );
+        drop(guard);
     }
 }
