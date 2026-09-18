@@ -871,4 +871,37 @@ PID    FAULTS    \n\
             Some(&ClaudeView::NoRecord)
         );
     }
+
+    /// The total line of the header counts every row of Claude Code: a
+    /// session, a session with no record, and a process of another account.
+    /// On 2026-09-18, 213 such processes made 90% of all faults, and no
+    /// single row showed it.
+    #[test]
+    fn the_claude_total_counts_every_claude_row_and_its_faults() {
+        let machine = Machine::new(
+            vec![
+                count(10, 100),
+                count(20, 300),
+                count(30, 200),
+                count(40, 400),
+            ],
+            vec![process(10), process(20), process(30), other_account(40)],
+        )
+        .with_claude(20, ClaudeRole::Session)
+        .with_claude(30, ClaudeRole::Session)
+        .with_claude(40, ClaudeRole::Unreadable)
+        .with_record(20, idle_record(Duration::from_secs(600)));
+
+        let ranking = machine.rank();
+
+        assert_eq!(
+            ranking.claude,
+            ClaudeTotal {
+                processes: 3,
+                other_account: 1,
+                faults: 900,
+            }
+        );
+        assert_eq!(ranking.share(ranking.claude.faults), 0.9);
+    }
 }
