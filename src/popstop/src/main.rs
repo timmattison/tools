@@ -85,10 +85,14 @@ fn run(cli: &Cli) -> ExitCode {
         state_dir: cli.state_dir.clone(),
         exit_after: cli.exit_after.map(Duration::from_secs),
     };
-    if cli.background || cli.background_child {
-        // A start with no terminal comes later. For now the flags exist and
-        // start no copy.
-        return ExitCode::from(popstop::exit_status::SUCCESS);
+    if cli.background {
+        return report(popstop::background::start(&settings));
+    }
+    if cli.background_child {
+        return match popstop::background::run_child(&settings) {
+            Ok(()) => ExitCode::from(popstop::exit_status::SUCCESS),
+            Err(failure) => ExitCode::from(failure.status()),
+        };
     }
     if cli.stop {
         return report(control::stop(&settings));

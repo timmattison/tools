@@ -64,8 +64,8 @@ impl Settings {
     }
 
     /// Gives the path that `--state-dir` named, for the command that stops
-    /// the copy that runs.
-    fn state_dir_argument(&self) -> Option<&Path> {
+    /// the copy that runs and for the copy that a background start makes.
+    pub(crate) fn state_dir_argument(&self) -> Option<&Path> {
         self.state_dir.as_deref()
     }
 }

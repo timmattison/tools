@@ -35,6 +35,12 @@ pub struct Report {
 }
 
 impl Report {
+    /// Makes a report with the status `status` and the whole text for the
+    /// user. The text carries the name of popstop already.
+    pub(crate) fn new(status: u8, text: String) -> Self {
+        Self { status, text }
+    }
+
     /// Gives the exit status of popstop.
     #[must_use]
     pub fn status(&self) -> u8 {

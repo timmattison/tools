@@ -18,8 +18,9 @@ const PREFIX: &str = "popstop: ";
 /// The command that stops the copy that runs.
 const STOP_COMMAND: &str = "popstop --stop";
 
-/// The flag that names the state directory.
-const STATE_DIR_FLAG: &str = "--state-dir";
+/// The flag that names the state directory. A background start gives it to
+/// the copy that it makes, thus the name lives here and nowhere else.
+pub(crate) const STATE_DIR_FLAG: &str = "--state-dir";
 
 /// The line that tells the user about the effect on the sleep of the Mac.
 ///
