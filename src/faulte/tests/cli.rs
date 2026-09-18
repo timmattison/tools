@@ -210,3 +210,286 @@ fn help_gives_each_flag_and_its_default() {
         );
     }
 }
+
+/// The tests of the real signals of this Mac.
+///
+/// These are the one place where `faulte` signals a process for real, and each
+/// one of them signals a child that the test itself started. No test here runs
+/// `faulte kill` against this Mac: that command stops a Claude Code session,
+/// and the sessions of this Mac belong to a person.
+#[cfg(target_os = "macos")]
+mod signals {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{Child, Command, ExitStatus, Stdio};
+    use std::thread;
+    use std::time::{Duration, SystemTime};
+
+    use faulte::machine::macos::Mac;
+    use faulte::machine::{Machine, MachineError, Signal};
+    use faulte::pid::Pid;
+
+    /// The program that each child of these tests runs.
+    const SLEEP: &str = "/bin/sleep";
+
+    /// How long that program sleeps for, in seconds.
+    ///
+    /// It is far longer than any test here takes, so a child that a test finds
+    /// alive is a child that the signal did not stop. It is short enough that
+    /// a child which escapes a test is gone one minute later.
+    const SLEEP_SECONDS: &str = "60";
+
+    /// The shell that makes a child which ignores `SIGTERM`.
+    const SHELL: &str = "/bin/sh";
+
+    /// The process that every account of this Mac can name and no account
+    /// other than root can signal.
+    const LAUNCHD: Pid = Pid::new(1);
+
+    /// The longest time that a test waits for a child to stop.
+    ///
+    /// A child of these tests stops in milliseconds. This bound is what makes
+    /// the wait end on a Mac that is short of memory, which is the Mac that
+    /// `faulte` is for.
+    const DEADLINE: Duration = Duration::from_secs(10);
+
+    /// The time between two asks about a child that is stopping.
+    const STEP: Duration = Duration::from_millis(20);
+
+    /// The greatest age that a child of a test can have, in seconds.
+    ///
+    /// The process table states the start time to the second. A child that a
+    /// test started moments ago is younger than this, on a Mac of any speed.
+    const YOUNGEST_MINUTES: u64 = 10;
+
+    /// Starts a child that sleeps and stops on `SIGTERM`.
+    ///
+    /// The command is the sleeping program itself, and no shell stands between
+    /// the test and it. Thus the number that [`Child::id`] gives is the number
+    /// of the process that the test signals.
+    fn sleeping_child() -> Child {
+        Command::new(SLEEP)
+            .arg(SLEEP_SECONDS)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the sleeping program starts")
+    }
+
+    /// Starts a child that sleeps and ignores `SIGTERM`.
+    ///
+    /// The shell sets `SIGTERM` to be ignored, and then it replaces itself
+    /// with the sleeping program. A signal that a process ignores stays
+    /// ignored over that replacement, which POSIX states. Thus this child is
+    /// one process, the same as [`sleeping_child`], and it answers no
+    /// `SIGTERM`.
+    fn deaf_child() -> Child {
+        Command::new(SHELL)
+            .arg("-c")
+            .arg(format!("trap '' TERM; exec {SLEEP} {SLEEP_SECONDS}"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the shell starts")
+    }
+
+    /// Waits until the child `pid` replaced itself with the sleeping program.
+    ///
+    /// A shell that did not reach the `exec` yet is a shell that did not set
+    /// the trap yet, and a `SIGTERM` in that moment stops it in the usual way.
+    /// The process table tells the two states apart: before the `exec` the row
+    /// gives the whole command line of the shell, and after it the row gives
+    /// the sleeping program and its one argument.
+    ///
+    /// The wait is bounded by [`DEADLINE`], the same as [`exit_of`].
+    fn wait_until_deaf(mac: &Mac, pid: Pid) -> bool {
+        let deaf = format!("{SLEEP} {SLEEP_SECONDS}");
+        for _ in 0..asks() {
+            let replaced = mac.process_table().is_ok_and(|table| {
+                table
+                    .iter()
+                    .any(|row| row.pid == pid && !row.zombie && row.command == deaf)
+            });
+            if replaced {
+                return true;
+            }
+            thread::sleep(STEP);
+        }
+        false
+    }
+
+    /// Gives the number of asks that [`DEADLINE`] holds, one every [`STEP`].
+    fn asks() -> u128 {
+        DEADLINE.as_millis() / STEP.as_millis()
+    }
+
+    /// Waits for `child` to stop, and gives how it stopped.
+    ///
+    /// The wait is bounded by [`DEADLINE`]. A test that waits without a bound
+    /// holds its whole run when the behavior under test is broken, which is
+    /// the one time that a test must fail fast.
+    ///
+    /// A child that stopped is collected here, so it leaves no zombie behind.
+    fn exit_of(child: &mut Child) -> Option<ExitStatus> {
+        for _ in 0..asks() {
+            match child.try_wait() {
+                Ok(Some(status)) => return Some(status),
+                Ok(None) => thread::sleep(STEP),
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
+    /// Stops `child` and collects it, whatever the test found.
+    ///
+    /// A child that stopped already is collected already, and this function
+    /// then does nothing. A child that survived the test gets `SIGKILL`, so a
+    /// test that failed leaves no process of its own behind.
+    fn clean_up(child: &mut Child) {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// Gives the time now in seconds since the Unix epoch.
+    fn epoch_seconds() -> u64 {
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("the clock of this Mac is after 1970")
+            .as_secs()
+    }
+
+    /// `SIGTERM` reaches a child of this test, and `SIGTERM` is what stops it.
+    ///
+    /// `faulte kill` sends this signal first, so that Claude Code closes its
+    /// transcript. The exit status names the signal, so the test proves that
+    /// the child stopped for this reason and not for another one.
+    #[test]
+    fn sigterm_stops_a_child_of_this_test() {
+        let mac = Mac::new();
+        let mut child = sleeping_child();
+
+        let sent = mac.signal(Pid::new(child.id()), Signal::Terminate);
+        let stopped = exit_of(&mut child);
+        clean_up(&mut child);
+
+        assert!(
+            sent.is_ok(),
+            "the signal reaches a child of this test: {sent:?}"
+        );
+        let status = stopped.expect("the child stops inside the deadline of the test");
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGTERM),
+            "SIGTERM is what stopped the child: {status:?}"
+        );
+    }
+
+    /// `SIGKILL` stops a child that ignores `SIGTERM`.
+    ///
+    /// `faulte kill` sends this signal after the grace period, to each target
+    /// that is still the same process. A session that handles no signal is the
+    /// reason why that step exists, and this child is such a process.
+    #[test]
+    fn sigkill_stops_a_child_that_ignores_sigterm() {
+        let mac = Mac::new();
+        let mut child = deaf_child();
+        let pid = Pid::new(child.id());
+
+        let deaf = wait_until_deaf(&mac, pid);
+        let terminate = mac.signal(pid, Signal::Terminate);
+        // The child ignores the first signal, so it is alive here. A child
+        // that stopped would make the second signal fail, and the test would
+        // then report the wrong fault.
+        let ignored = matches!(child.try_wait(), Ok(None));
+        let kill = mac.signal(pid, Signal::Kill);
+        let stopped = exit_of(&mut child);
+        clean_up(&mut child);
+
+        assert!(deaf, "the child sets the trap and replaces itself in time");
+        assert!(
+            terminate.is_ok(),
+            "SIGTERM reaches the child: {terminate:?}"
+        );
+        assert!(ignored, "the child ignores SIGTERM and keeps running");
+        assert!(kill.is_ok(), "SIGKILL reaches the child: {kill:?}");
+        let status = stopped.expect("the child stops inside the deadline of the test");
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGKILL),
+            "SIGKILL is what stopped the child: {status:?}"
+        );
+    }
+
+    /// The process table of this Mac holds a child of this test, with the time
+    /// that it started.
+    ///
+    /// Every rule of `faulte kill` reads that time. The plan selects a session
+    /// by its age, and the check before each signal compares the time again,
+    /// because a PID alone is not an identity: the number comes back for
+    /// another process.
+    #[test]
+    fn the_process_table_holds_a_child_of_this_test_with_its_start_time() {
+        let mac = Mac::new();
+        let mut child = sleeping_child();
+        let pid = Pid::new(child.id());
+
+        let table = mac.process_table();
+        let now = epoch_seconds();
+        clean_up(&mut child);
+
+        let table = table.expect("ps gives the process table of this Mac");
+        let row = table
+            .iter()
+            .find(|row| row.pid == pid)
+            .unwrap_or_else(|| panic!("the table holds the child {pid} of this test"));
+        assert!(!row.zombie, "the child of the test is alive: {row:?}");
+        assert!(
+            row.command.contains(SLEEP),
+            "the row names the command of the child: {row:?}"
+        );
+        assert!(
+            row.started_at_epoch_secs <= now,
+            "the child started before the table was read: {row:?}, and now is {now}"
+        );
+        assert!(
+            row.started_at_epoch_secs + YOUNGEST_MINUTES * 60 >= now,
+            "the child started moments ago: {row:?}, and now is {now}"
+        );
+    }
+
+    /// A signal to a process of another account gives an error, and never a
+    /// panic.
+    ///
+    /// Two accounts share the Mac that `faulte` is for, and the report of a
+    /// stop names each session that `faulte` could not signal. A run that
+    /// panicked instead would leave the person with no report at all.
+    ///
+    /// The test skips itself under root. Root signals every process of this
+    /// Mac, so there is no process for the test to be refused by.
+    #[test]
+    fn a_signal_to_a_process_of_another_account_is_an_error() {
+        let mac = Mac::new();
+        if mac.viewer().is_root {
+            return;
+        }
+
+        let refused = mac.signal(LAUNCHD, Signal::Terminate);
+
+        let error = refused.expect_err("a plain account cannot signal the first process");
+        assert!(
+            matches!(error, MachineError::SignalFailed { .. }),
+            "the error is a signal that failed: {error:?}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("kill({LAUNCHD}, SIGTERM)")),
+            "the message names the call that failed: {error}"
+        );
+    }
+}
