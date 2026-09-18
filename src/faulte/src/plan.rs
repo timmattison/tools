@@ -310,19 +310,30 @@ pub fn plan(input: &PlanInput<'_>) -> Plan {
         runs_faulte: faulte_and_its_ancestors(input.table, input.faulte),
     };
     let mut candidates = Vec::new();
+    let mut other_account = Vec::new();
     let mut not_selected = NotSelected::default();
     for row in &input.ranking.rows {
-        let ClaudeView::Session { id, state, .. } = &row.claude else {
-            continue;
-        };
-        match candidate_of(row, Some(state), &limits) {
-            Ok(started_at_epoch_secs) => candidates.push(Candidate {
-                row: row.clone(),
-                session: id.clone(),
-                started_at_epoch_secs,
-                status_changed_at: status_changed_at(state, input.now),
-            }),
-            Err(refusal) => *count_of(&mut not_selected, refusal) += 1,
+        match &row.claude {
+            ClaudeView::Session { id, state, .. } => {
+                match candidate_of(row, Some(state), &limits) {
+                    Ok(started_at_epoch_secs) => candidates.push(Candidate {
+                        row: row.clone(),
+                        session: id.clone(),
+                        started_at_epoch_secs,
+                        status_changed_at: status_changed_at(state, input.now),
+                    }),
+                    Err(refusal) => *count_of(&mut not_selected, refusal) += 1,
+                }
+            }
+            // A process of another account passes the rules that `faulte` can
+            // read, or it does not. Neither answer is a refusal of a session,
+            // because no rule of the registry was read at all.
+            ClaudeView::OtherAccount => {
+                if candidate_of(row, None, &limits).is_ok() {
+                    other_account.push(row.clone());
+                }
+            }
+            ClaudeView::NotClaude | ClaudeView::NoRecord => {}
         }
     }
     // The person reads this order to decide. The PID breaks a tie, so two
@@ -331,6 +342,11 @@ pub fn plan(input: &PlanInput<'_>) -> Plan {
         left.started_at_epoch_secs
             .cmp(&right.started_at_epoch_secs)
             .then_with(|| left.row.pid.cmp(&right.row.pid))
+    });
+    other_account.sort_by(|left, right| {
+        left.started_at_epoch_secs
+            .cmp(&right.started_at_epoch_secs)
+            .then_with(|| left.pid.cmp(&right.pid))
     });
     let held_back_by_max = match input.rules.max {
         Some(max) if max < candidates.len() => {
@@ -344,7 +360,7 @@ pub fn plan(input: &PlanInput<'_>) -> Plan {
         candidates,
         held_back_by_max,
         not_selected,
-        other_account: Vec::new(),
+        other_account,
         rules: input.rules,
     }
 }
