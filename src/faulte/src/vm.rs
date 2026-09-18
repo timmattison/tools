@@ -33,8 +33,7 @@ impl VmCounters {
     /// The page size of this Mac is 16,384 bytes, from `vm_page_size`.
     #[must_use]
     pub fn compressor_bytes(&self, page_size: u64) -> u64 {
-        let _ = page_size;
-        0
+        self.compressor_pages * page_size
     }
 }
 
