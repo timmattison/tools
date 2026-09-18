@@ -107,6 +107,19 @@ impl SessionRegistry {
     pub fn for_home(home: &Path) -> Self {
         Self::new(home.join(".claude").join("sessions"))
     }
+
+    /// The record of process `pid`, which started at `start_time_epoch_secs`.
+    ///
+    /// This is the entrance for a caller that knows a process from a source
+    /// other than a [`ProcessFact`], for example from `ps`. The file must pass
+    /// the same checks as for [`Registry::session_of`]. Thus this gives `None`
+    /// when no file exists for `pid`, when the file cannot be read or parsed,
+    /// or when the file is about a different process.
+    #[must_use]
+    pub fn record_for(&self, pid: u32, start_time_epoch_secs: u64) -> Option<SessionRecord> {
+        let _ = (&self.root, pid, start_time_epoch_secs);
+        None
+    }
 }
 
 impl Registry for SessionRegistry {
@@ -384,5 +397,49 @@ mod tests {
         let folder = tempfile::tempdir().expect("temporary folder");
         let registry = SessionRegistry::new(folder.path().to_path_buf());
         assert_eq!(registry.session_of(&process(PID)), None);
+    }
+
+    /// A folder that holds `contents` as the registry file of `PID`.
+    fn folder_with(contents: &str) -> tempfile::TempDir {
+        let folder = tempfile::tempdir().expect("temporary folder");
+        std::fs::write(folder.path().join(format!("{PID}.json")), contents).expect("registry file");
+        folder
+    }
+
+    #[test]
+    fn record_for_reads_the_record_of_a_process_from_a_folder() {
+        let changed_millis = (PROCESS_START + 600) * 1_000;
+        let folder = folder_with(&file_in_status("waiting", changed_millis));
+        let registry = SessionRegistry::new(folder.path().to_path_buf());
+        assert_eq!(
+            registry.record_for(PID, PROCESS_START),
+            Some(SessionRecord {
+                session: id(SESSION),
+                status: Some(SessionStatus::Waiting),
+                status_changed_at: Some(UNIX_EPOCH + Duration::from_millis(changed_millis)),
+                directory: Some(PathBuf::from(DIRECTORY)),
+            })
+        );
+    }
+
+    #[test]
+    fn record_for_gives_no_record_for_a_file_that_a_dead_process_left() {
+        // The process asked about started 25 hours after the one that wrote
+        // the file, so the file is about the dead process.
+        let folder = folder_with(&file(PID, SESSION, (PROCESS_START - 90_000) * 1_000));
+        let registry = SessionRegistry::new(folder.path().to_path_buf());
+        assert_eq!(registry.record_for(PID, PROCESS_START), None);
+    }
+
+    #[test]
+    fn record_for_gives_no_record_for_a_process_that_registered_nothing() {
+        let folder = folder_with(&file_in_status("idle", (PROCESS_START + 1) * 1_000));
+        let registry = SessionRegistry::new(folder.path().to_path_buf());
+        assert_eq!(registry.record_for(PID + 1, PROCESS_START), None);
+
+        // A folder that does not exist, or that this account cannot read,
+        // holds no record either.
+        let absent = SessionRegistry::new(folder.path().join("absent"));
+        assert_eq!(absent.record_for(PID, PROCESS_START), None);
     }
 }
