@@ -424,4 +424,44 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn a_ragged_buffer_fills_its_whole_frames_and_zeroes_the_remainder() {
+        const CHANNELS: usize = 3;
+        const WHOLE_FRAMES: usize = 3;
+        const REMAINDER: usize = 2;
+        let ramp = ramp_frames();
+
+        // Two signals at the level, so that a whole frame is not 0.0.
+        let (mut reference, _reference_stop) = KeepaliveSignal::new(rate());
+        let (mut ragged, _ragged_stop) = KeepaliveSignal::new(rate());
+        fill_frames(&mut reference, ramp, CHANNELS);
+        fill_frames(&mut ragged, ramp, CHANNELS);
+
+        let whole = fill_frames(&mut reference, WHOLE_FRAMES, CHANNELS);
+        let mut buffer = vec![f32::NAN; WHOLE_FRAMES * CHANNELS + REMAINDER];
+        ragged.fill(&mut buffer, CHANNELS);
+
+        let (frames, remainder) = buffer.split_at(WHOLE_FRAMES * CHANNELS);
+        assert_eq!(frames, whole.as_slice(), "the whole frames hold the signal");
+        assert_eq!(remainder, [0.0; REMAINDER], "the remainder is silent");
+        assert_eq!(
+            fill_frames(&mut ragged, 1, CHANNELS),
+            fill_frames(&mut reference, 1, CHANNELS),
+            "the remainder does not move the ramp"
+        );
+    }
+
+    #[test]
+    fn zero_channels_do_not_panic_and_give_silence() {
+        let (mut signal, _stop) = KeepaliveSignal::new(rate());
+        fill_frames(&mut signal, ramp_frames(), 2);
+
+        let mut buffer = [f32::NAN; 16];
+        signal.fill(&mut buffer, 0);
+        assert_eq!(buffer, [0.0; 16], "a buffer with no channels is silent");
+
+        signal.fill(&mut [], 0);
+        signal.fill(&mut [], 2);
+    }
 }
