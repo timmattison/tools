@@ -21,6 +21,12 @@ const LOCK_FILE_NAME: &str = "popstop.lock";
 /// The name of the log of a background copy in the state directory.
 const LOG_FILE_NAME: &str = "popstop.log";
 
+/// The longest time a reader waits for the record of a holder.
+///
+/// A holder writes its record directly after it gets the lock, so a reader
+/// can see a held lock with no record for a very short time.
+const RECORD_WAIT: Duration = Duration::from_secs(2);
+
 /// The directory that holds the lock file and the log of popstop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateDir(PathBuf);
@@ -319,9 +325,10 @@ fn read_record(file: &mut File) -> io::Result<HolderRecord> {
 mod tests {
     use super::{
         acquire, current_holder, wait_for_release, AcquireError, HolderRecord, Mode, Release,
-        StartTime, StateDir,
+        StartTime, StateDir, RECORD_WAIT,
     };
-    use std::fs;
+    use std::fs::{self, File};
+    use std::io;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -518,5 +525,31 @@ mod tests {
             "the wait does not take the lock from the holder"
         );
         drop(guard);
+    }
+
+    #[test]
+    fn a_held_lock_whose_record_never_appears_gives_invalid_data_after_the_bound() {
+        let (_temp, dir) = state_dir();
+        fs::create_dir_all(dir.path()).expect("make the state directory");
+        // A holder that never writes its record.
+        let holder = File::create(dir.lock_path()).expect("make the lock file");
+        holder.lock().expect("the holder gets the lock");
+
+        let started = Instant::now();
+        let error = current_holder(&dir).expect_err("a held lock with no record is an error");
+        let waited = started.elapsed();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert!(
+            waited >= RECORD_WAIT,
+            "the reader gave up after {waited:?}, before the bound of {RECORD_WAIT:?}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains(&dir.lock_path().display().to_string()),
+            "the error names the lock file: {error}"
+        );
+        drop(holder);
     }
 }
