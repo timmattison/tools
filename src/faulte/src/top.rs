@@ -137,7 +137,7 @@ pub fn parse(output: &str) -> Result<TopSample, TopParseError> {
         .enumerate()
         .filter(|(_, line)| is_header_row(line))
         .map(|(index, line)| {
-            if line.split_whitespace().eq(HEADER) {
+            if line.split_ascii_whitespace().eq(HEADER) {
                 Ok(index)
             } else {
                 Err(TopParseError::UnexpectedHeader {
@@ -156,7 +156,7 @@ pub fn parse(output: &str) -> Result<TopSample, TopParseError> {
         .iter()
         .enumerate()
         .skip(second_header + 1)
-        .filter(|(_, line)| !line.trim().is_empty())
+        .filter(|(_, line)| !line.trim_ascii().is_empty())
         .map(|(index, line)| {
             parse_row(line).ok_or_else(|| TopParseError::MalformedRow {
                 number: index + 1,
@@ -185,13 +185,16 @@ const HEADER: [&str; 2] = [PID_HEADER, FAULTS_HEADER];
 
 /// Tells whether `line` is a header row: its first token is `PID`. No other
 /// line of the output starts with that token.
+///
+/// The parser splits each line on ASCII white space only. `top` prints ASCII,
+/// so a line that another separator splits is not a line of `top`.
 fn is_header_row(line: &str) -> bool {
-    line.split_whitespace().next() == Some(PID_HEADER)
+    line.split_ascii_whitespace().next() == Some(PID_HEADER)
 }
 
 /// Reads a row: a PID, then a fault count, and no other token.
 fn parse_row(line: &str) -> Option<FaultCount> {
-    let mut tokens = line.split_whitespace();
+    let mut tokens = line.split_ascii_whitespace();
     let (Some(pid), Some(faults), None) = (tokens.next(), tokens.next(), tokens.next()) else {
         return None;
     };
@@ -205,12 +208,16 @@ fn parse_row(line: &str) -> Option<FaultCount> {
 const TRAILING_MARKS: [char; 2] = ['+', '-'];
 
 /// Reads a number from `token`, after one trailing `+` or `-` is removed.
+///
+/// The rest must be ASCII digits only. The parse of a Rust integer also
+/// accepts a leading `+`, and `top` never prints one.
 fn number<T: FromStr>(token: &str) -> Option<T> {
-    token
-        .strip_suffix(TRAILING_MARKS)
-        .unwrap_or(token)
-        .parse()
-        .ok()
+    let digits = token.strip_suffix(TRAILING_MARKS).unwrap_or(token);
+    if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    // An empty text fails the parse, and so does a value too large for `T`.
+    digits.parse().ok()
 }
 
 #[cfg(test)]
