@@ -77,6 +77,7 @@ pub fn start_time(pid: u32) -> io::Result<StartTime> {
 #[cfg(test)]
 mod tests {
     use super::start_time;
+    use std::process::{self, Command, Stdio};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     /// A bound that the age of this test process never comes near.
@@ -88,6 +89,47 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("the time is after 1970");
         u64::try_from(since_epoch.as_micros()).expect("the time fits in 64 bits")
+    }
+
+    /// A child process. A drop kills and reaps it, so a test that fails early
+    /// leaves no process.
+    struct Child(process::Child);
+
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// Starts a child that sleeps until a drop kills it, for 60 s at most.
+    fn sleeping_child() -> Child {
+        Child(
+            Command::new("sleep")
+                .arg("60")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("start a child that sleeps"),
+        )
+    }
+
+    #[test]
+    fn the_start_time_of_a_child_is_between_the_start_and_the_end_of_its_spawn() {
+        // The kernel keeps microseconds, so the bounds do too.
+        let before = unix_micros(SystemTime::now());
+        let child = sleeping_child();
+        let after = unix_micros(SystemTime::now());
+
+        let started = start_time(child.0.id())
+            .expect("the kernel gives the start time of the child")
+            .unix_micros();
+
+        assert!(
+            (before..=after).contains(&started),
+            "the child started at {started}, outside its spawn from {before} to {after}"
+        );
     }
 
     #[test]
