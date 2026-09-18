@@ -335,3 +335,42 @@ fn wait_for_the_end(copy: &mut Child) {
         thread::sleep(END_POLL);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs::{self, OpenOptions};
+    use std::io::Write;
+
+    use super::open_the_log;
+    use crate::lock::StateDir;
+
+    #[test]
+    fn a_write_of_the_copy_lands_after_the_text_that_another_process_wrote() {
+        let temp = tempfile::tempdir().expect("a temporary directory");
+        let dir = StateDir::new(temp.path().join("state"));
+        let first_line = "the first line of the copy\n";
+        let other_line = "a line of another process\n";
+        let second_line = "the second line of the copy\n";
+
+        let mut copy = open_the_log(&dir).expect("open the log for the copy");
+        copy.write_all(first_line.as_bytes())
+            .expect("write the first line of the copy");
+        // Another process writes through a descriptor of its own, as a copy
+        // that a later start made does.
+        let mut other = OpenOptions::new()
+            .append(true)
+            .open(dir.log_path())
+            .expect("open the log for another process");
+        other
+            .write_all(other_line.as_bytes())
+            .expect("write the line of another process");
+        copy.write_all(second_line.as_bytes())
+            .expect("write the second line of the copy");
+
+        assert_eq!(
+            fs::read_to_string(dir.log_path()).expect("read the log"),
+            format!("{first_line}{other_line}{second_line}"),
+            "a write of the copy landed inside the text of another process"
+        );
+    }
+}

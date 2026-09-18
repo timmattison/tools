@@ -11,8 +11,8 @@
 // popstop plays audio on macOS only.
 #![cfg(target_os = "macos")]
 
-use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -775,6 +775,74 @@ fn a_background_start_truncates_the_log_of_the_copy_before_it() {
         !text.contains(old_line),
         "the log still holds {} bytes of the copy before it",
         text.len()
+    );
+}
+
+#[test]
+fn a_refused_background_start_leaves_the_log_of_the_copy_that_runs_alone() {
+    let temp = tempfile::tempdir().expect("a temporary directory");
+    let dir = temp.path().join("state");
+    let log = StateDir::new(dir.clone()).log_path();
+    let first = BackgroundStart::make(&dir);
+    assert_eq!(
+        first.status.code(),
+        Some(0),
+        "the first background start worked: {}. Its stderr:\n{}",
+        first.status,
+        first.errors
+    );
+    let record = holder(&dir).expect("the first copy holds the lock");
+
+    // A line that stands for the output of the copy that runs. The log
+    // belongs to that copy while it holds the lock.
+    let own_line = "a line of the copy that runs";
+    let mut writer = OpenOptions::new()
+        .append(true)
+        .open(&log)
+        .expect("open the log of the copy that runs");
+    writeln!(writer, "{own_line}").expect("write into the log of the copy that runs");
+    drop(writer);
+    let before = fs::read_to_string(&log).expect("read the log");
+
+    // The second start does not take the lock, thus it does not play and it
+    // does not stay. Its time limit is the backstop of a start that works.
+    let (status, report, refusal) =
+        ask_in(&dir, &["--background", "--exit-after", EXIT_AFTER_SECONDS]);
+
+    assert_eq!(
+        status.code(),
+        Some(3),
+        "a background start that found a copy ends with the status of a copy that runs: \
+         {status}. Its stderr:\n{refusal}"
+    );
+    assert_eq!(
+        report, "",
+        "a refusal goes to stderr, thus a script that reads stdout sees nothing"
+    );
+    assert!(
+        refusal.contains(&format!("pid {}", record.pid)),
+        "the refusal still reaches the user, and it names the copy that runs:\n{refusal}"
+    );
+
+    let after = fs::read_to_string(&log).expect("read the log");
+    assert!(
+        after.contains(own_line),
+        "the refused start emptied the log of the copy that runs. The log is:\n{after}"
+    );
+    let first_line_of_the_refusal = refusal.lines().next().expect("the refusal has a line");
+    assert!(
+        !after.contains(first_line_of_the_refusal),
+        "the refused copy wrote its refusal into the log of the copy that runs. The log \
+         is:\n{after}"
+    );
+    assert_eq!(
+        after, before,
+        "the refused start changed the log of the copy that runs"
+    );
+    assert_eq!(
+        holder(&dir),
+        Some(record),
+        "the first copy still holds the lock"
     );
 }
 
