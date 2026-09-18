@@ -57,6 +57,13 @@ const EXIT_ERROR: u8 = 2;
 #[cfg(target_os = "macos")]
 const TOOL: &str = "faulte";
 
+/// The variable that states the width of the terminal, in columns.
+///
+/// POSIX says a value here overrides the width that the system selects, and
+/// `ls`, `git` and `less` obey that rule.
+#[cfg(target_os = "macos")]
+const WIDTH_VARIABLE: &str = "COLUMNS";
+
 /// The command line.
 #[derive(Parser)]
 #[command(name = "faulte", version = version_string!(), about = ABOUT)]
@@ -129,9 +136,10 @@ fn run(cli: Cli) -> ExitCode {
 /// Ranks the processes of this Mac and prints the ranking.
 ///
 /// The header comes first, then a blank line, then the table. The table takes
-/// the width of the window that it prints into, and no width at all when the
-/// output is a file or a pipe. A window of no columns is not a width, so the
-/// one reader of the terminal size answers `None` for it.
+/// the width that `COLUMNS` states, or the width of the window that it prints
+/// into, or a default. A run through a pipe therefore stays bounded: a table
+/// of no width is as wide as its widest cell, and one command line of this Mac
+/// carries more than 3,000 characters.
 #[cfg(target_os = "macos")]
 fn rank(interval: Span, limit: usize) -> ExitCode {
     let observed = match observe(&Mac::new(), interval) {
@@ -153,7 +161,10 @@ fn rank(interval: Span, limit: usize) -> ExitCode {
             Some(limit),
             &observed.accounts,
             observed.now,
-            termsize::stdout_columns(),
+            Some(render::table_width(
+                std::env::var(WIDTH_VARIABLE).ok().as_deref(),
+                termsize::controlling_columns(),
+            )),
         )
     );
     ExitCode::SUCCESS

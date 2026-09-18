@@ -450,7 +450,11 @@ pub const DEFAULT_WIDTH: u16 = 120;
 /// source does, so the table is always bounded.
 #[must_use]
 pub fn table_width(stated: Option<&str>, terminal: Option<u16>) -> u16 {
-    DEFAULT_WIDTH
+    stated
+        .and_then(|text| text.trim().parse::<u16>().ok())
+        .filter(|width| *width > 0)
+        .or_else(|| terminal.filter(|width| *width > 0))
+        .unwrap_or(DEFAULT_WIDTH)
 }
 
 /// The greatest number of characters that the `COMMAND` column gives.
