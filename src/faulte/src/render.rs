@@ -678,6 +678,38 @@ fn not_selected_line(plan: &Plan) -> Option<String> {
     Some(format!("{NOT_SELECTED}: {}", parts.join(", ")))
 }
 
+/// Gives the block of the Claude Code processes of another account, or nothing
+/// when the plan lists none.
+///
+/// The block counts them, says why `faulte` cannot judge them, and gives the
+/// command that reads the registry of every account. That command carries the
+/// limits that the person gave, so the person reads back the same rules under
+/// `sudo`.
+fn other_account_block(plan: &Plan) -> Option<String> {
+    let listed = plan.other_account.len();
+    if listed == 0 {
+        return None;
+    }
+    let max = plan
+        .rules
+        .max
+        .map(|max| format!(" --max {max}"))
+        .unwrap_or_default();
+    Some(format!(
+        "{} Claude {} of another account {} older than {} and {} no live descendant.\n\
+         faulte cannot read the registry of another account without root. \
+         To include that account, run:\n\
+         {SUDO_KILL} --older-than {} --idle-for {}{max}",
+        count_of(listed),
+        plural(listed, PROCESS, PROCESSES),
+        plural(listed, "is", "are"),
+        plan.rules.older_than,
+        plural(listed, "has", "have"),
+        plan.rules.older_than,
+        plan.rules.idle_for,
+    ))
+}
+
 /// Gives the plan of `faulte kill` as a person reads it, before the question.
 ///
 /// `ranking` gives the window and the total that each rate and each share of
@@ -708,6 +740,7 @@ pub fn plan(
         blocks.push(rows(ranking, &candidates, None, accounts, now, width));
     }
     blocks.extend(not_selected_line(plan));
+    blocks.extend(other_account_block(plan));
     blocks.join(BETWEEN_BLOCKS)
 }
 
