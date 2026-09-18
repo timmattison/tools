@@ -5,6 +5,7 @@
 
 use std::fmt;
 use std::path::Path;
+use std::time::Duration;
 
 use chrono::{DateTime, Local, TimeZone};
 
@@ -192,6 +193,45 @@ where
     format!("{PREFIX}a copy runs (pid {pid}, {mode}, started {started})")
 }
 
+/// Gives the line that says that no copy of popstop runs.
+///
+/// `popstop --status` and `popstop --stop` both write it. A stop that finds
+/// nothing is a success, thus the line reports and does not complain.
+#[must_use]
+pub fn no_copy_runs() -> String {
+    String::new()
+}
+
+/// Gives the line that reports the copy that a stop ended.
+#[must_use]
+pub fn stopped(pid: u32) -> String {
+    let _ = pid;
+    String::new()
+}
+
+/// Gives the text of a stop that did not end the copy within `bound`.
+///
+/// popstop never sends `SIGKILL` by itself, thus the text names the PID and
+/// the user decides what to do next.
+#[must_use]
+pub fn did_not_stop(pid: u32, bound: Duration) -> String {
+    let _ = (pid, bound);
+    String::new()
+}
+
+/// Gives the text of a stop that found a record which names a process that
+/// the system gave the PID to after the record was written.
+///
+/// A copy writes its record a moment after it takes the lock, thus a reader
+/// can see the record of a copy that crashed for a very short time. popstop
+/// sends no signal then, because the signal goes to a process of somebody
+/// else.
+#[must_use]
+pub fn stale_record(pid: u32) -> String {
+    let _ = pid;
+    String::new()
+}
+
 /// Gives one line that reports a problem, for example
 /// `popstop: the lock file cannot be used: permission denied`.
 #[must_use]
@@ -208,11 +248,13 @@ pub fn warning_line(problem: &dyn fmt::Display) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{did_not_stop, no_copy_runs, stale_record, stopped};
     use super::{problem_line, ready_lines, refusal_in, start_time_text_in, stop_command};
     use super::{status_lines_in, status_lines_without_device_name_in, warning_line, PREFIX};
     use crate::lock::{HolderRecord, Mode, StartTime};
     use chrono::{FixedOffset, Utc};
     use std::path::Path;
+    use std::time::Duration;
 
     /// 2026-09-18 10:00:00.123456 UTC.
     const TEN_O_CLOCK_UTC: StartTime = StartTime::from_unix_micros(1_789_725_600_123_456);
@@ -316,6 +358,22 @@ mod tests {
             status_lines_without_device_name_in(&background, &"the device gave no name", &Utc),
             "popstop: a copy runs (pid 5353, background, started 2026-09-18 10:00:00)\n\
              popstop: the name of the default output device cannot be read: the device gave no name"
+        );
+    }
+
+    #[test]
+    fn the_stop_texts_say_what_happened_to_the_copy_and_name_its_pid() {
+        assert_eq!(no_copy_runs(), "popstop: no copy runs");
+        assert_eq!(stopped(4242), "popstop: the copy stopped (pid 4242)");
+        assert_eq!(
+            did_not_stop(4242, Duration::from_secs(5)),
+            "popstop: the copy did not stop within 5 seconds (pid 4242)"
+        );
+        assert_eq!(
+            stale_record(4242),
+            "popstop: the record in the lock file names pid 4242, and another process has that PID \
+             now\n\
+             popstop: no signal went to that process. Do the command again"
         );
     }
 
