@@ -288,8 +288,8 @@ fn check(call: &'static str, status: OSStatus) -> Result<(), AudioError> {
 
 /// Gives the size of `T` in bytes, as the `u32` that Core Audio takes.
 ///
-/// Call it in a constant, so that a size too large for a `u32` stops the
-/// build.
+/// Call it in a `const` block, so that a size too large for a `u32` stops
+/// the build.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "the assert above the cast refuses a size that a u32 does not hold"
@@ -298,12 +298,6 @@ const fn byte_size<T>() -> u32 {
     assert!(size_of::<T>() <= u32::MAX as usize);
     size_of::<T>() as u32
 }
-
-/// The size of a stream format, in bytes.
-const STREAM_FORMAT_SIZE: u32 = byte_size::<AudioStreamBasicDescription>();
-
-/// The size of a render callback registration, in bytes.
-const RENDER_CALLBACK_SIZE: u32 = byte_size::<AURenderCallbackStruct>();
 
 /// The default output unit, which plays the samples of a renderer.
 ///
@@ -422,16 +416,15 @@ impl Instance {
             inputProc: Some(render_callback::<R>),
             inputProcRefCon: renderer.pointer.as_ptr(),
         };
-        // SAFETY: `self.unit` is a live instance, and `callback` is a
-        // callback registration of the size that the call gets. The refCon
-        // points to an `R`, which is what `render_callback::<R>` reads, and
-        // the renderer lives until the teardown disposes of the instance.
+        // SAFETY: `self.unit` is a live instance, and the data of the
+        // property is a callback registration. The refCon points to an `R`,
+        // which is what `render_callback::<R>` reads, and the renderer lives
+        // until the teardown disposes of the instance.
         unsafe {
             set_property(
                 self.unit,
                 kAudioUnitProperty_SetRenderCallback,
                 &callback,
-                RENDER_CALLBACK_SIZE,
                 call::SET_RENDER_CALLBACK,
             )
         }
@@ -440,14 +433,13 @@ impl Instance {
     /// Sets the stream format that the renderer writes, at `rate`.
     fn set_stream_format(&mut self, rate: SampleRate) -> Result<(), AudioError> {
         let format = stream_format(rate);
-        // SAFETY: `self.unit` is a live instance, and `format` is a stream
-        // format of the size that the call gets.
+        // SAFETY: `self.unit` is a live instance, and the data of the
+        // property is a stream format.
         unsafe {
             set_property(
                 self.unit,
                 kAudioUnitProperty_StreamFormat,
                 &format,
-                STREAM_FORMAT_SIZE,
                 call::SET_STREAM_FORMAT,
             )
         }
@@ -591,17 +583,15 @@ fn stream_format(rate: SampleRate) -> AudioStreamBasicDescription {
 ///
 /// # Safety
 ///
-/// `unit` is a live instance. `value` is the data of `property`, and `size`
-/// is its size in bytes.
+/// `unit` is a live instance, and `T` is the type of the data of `property`.
 unsafe fn set_property<T>(
     unit: AudioUnit,
     property: AudioUnitPropertyID,
     value: &T,
-    size: u32,
     call: &'static str,
 ) -> Result<(), AudioError> {
-    // SAFETY: the caller keeps the contract of this function, and `value`
-    // lives for the whole call.
+    // SAFETY: the caller keeps the contract of this function. `value` lives
+    // for the whole call, and the size is the size of `T`.
     let status = unsafe {
         AudioUnitSetProperty(
             unit,
@@ -609,7 +599,7 @@ unsafe fn set_property<T>(
             kAudioUnitScope_Input,
             OUTPUT_ELEMENT,
             ptr::from_ref(value).cast::<c_void>(),
-            size,
+            const { byte_size::<T>() },
         )
     };
     check(call, status)
