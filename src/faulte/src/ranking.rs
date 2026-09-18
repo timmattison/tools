@@ -209,13 +209,19 @@ impl Ranking {
     }
 }
 
-/// Gives what the row of `pid` shows about Claude Code.
-fn view_of(pid: Pid, input: &Observation<'_>) -> ClaudeView {
+/// Gives what the row of `pid`, owned by `uid`, shows about Claude Code.
+fn view_of(pid: Pid, uid: Uid, input: &Observation<'_>) -> ClaudeView {
     // `occ` decides what a process is. A registry file that a dead session
     // left behind can stay under the PID of another process, so a record
     // alone never makes a Claude Code row.
     if !input.claude.contains_key(&pid) {
         return ClaudeView::NotClaude;
+    }
+    // The account comes before the record. The registry folder of another
+    // account has the mode `0700`, so a record that the caller holds under
+    // this PID is about a process of the viewer, or about a dead session.
+    if uid != input.viewer.uid {
+        return ClaudeView::OtherAccount;
     }
     match input.records.get(&pid) {
         Some(record) => ClaudeView::Session {
@@ -254,7 +260,7 @@ pub fn rank(input: &Observation<'_>) -> Ranking {
                 rss_kib: Some(process.rss_kib),
                 started_at_epoch_secs: Some(process.started_at_epoch_secs),
                 command: process.command.clone(),
-                claude: view_of(pid, input),
+                claude: view_of(pid, process.uid, input),
             }),
             // `ps` does not list the kernel, and the kernel does the work of
             // a Mac that is short of memory. Thus its row says what `top`
