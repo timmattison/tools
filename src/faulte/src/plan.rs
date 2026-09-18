@@ -430,7 +430,31 @@ mod tests {
 
     /// Gives the ranked row of a Claude Code session in `state`, which started
     /// `age` seconds ago.
+    ///
+    /// The record of the session states the time of the last status change,
+    /// and the ranking measured `state` against that same time. Thus the row
+    /// here states both, the same as a row of a real run.
     fn session(pid: u32, age: u64, state: SessionState) -> RankedRow {
+        let status_changed_at = match &state {
+            SessionState::Idle { for_: Some(for_) } => now().checked_sub(*for_),
+            _ => None,
+        };
+        session_changed_at(pid, age, state, status_changed_at)
+    }
+
+    /// Gives the ranked row of a Claude Code session in `state`, whose record
+    /// states `status_changed_at` as the time of the last status change.
+    ///
+    /// The two values are apart, because the ranking and the plan read the
+    /// clock at different times. Only this helper can hold a state that the
+    /// ranking measured against one time, and the exact time that the record
+    /// gave.
+    fn session_changed_at(
+        pid: u32,
+        age: u64,
+        state: SessionState,
+        status_changed_at: Option<SystemTime>,
+    ) -> RankedRow {
         row(
             pid,
             age,
@@ -438,6 +462,7 @@ mod tests {
                 id: session_id(pid),
                 state,
                 directory: Some(PathBuf::from(DIRECTORY)),
+                status_changed_at,
             },
         )
     }
@@ -583,6 +608,36 @@ mod tests {
                 .first()
                 .map(|candidate| candidate.status_changed_at),
             Some(Some(now() - Duration::from_secs(3_600)))
+        );
+    }
+
+    /// The candidate carries the time of the last status change that the
+    /// record gave, and not a time that the plan computed from the idle time.
+    ///
+    /// The ranking reads the clock, and the plan reads it again. A
+    /// subtraction of the idle time from the `now` of the plan therefore
+    /// gives a different time. The check before the signal compares the time
+    /// of the candidate against the time of a fresh record, so a difference of
+    /// one nanosecond makes `faulte kill` skip every session and stop nothing.
+    #[test]
+    fn the_candidate_carries_the_time_of_the_status_change_of_the_record() {
+        let changed_at = now() - Duration::from_secs(7_200);
+        let ranking = ranking(vec![session_changed_at(
+            30,
+            OLD,
+            idle(3_600),
+            Some(changed_at),
+        )]);
+        let table = table_of(&[30]);
+
+        let plan = plan(&input(&ranking, &table, rules()));
+
+        assert_eq!(
+            plan.candidates
+                .first()
+                .map(|candidate| candidate.status_changed_at),
+            Some(Some(changed_at)),
+            "the candidate states the time that the record gave"
         );
     }
 

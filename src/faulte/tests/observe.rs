@@ -365,6 +365,9 @@ fn a_claude_row_states_what_the_account_of_the_viewer_can_read() {
                 for_: Some(Duration::from_secs(IDLE_SECONDS)),
             },
             directory: Some(PathBuf::from("/Volumes/SamsungSSDs/code/tools")),
+            status_changed_at: Some(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(NOW - IDLE_SECONDS),
+            ),
         },
         "the session of the viewer states its record"
     );

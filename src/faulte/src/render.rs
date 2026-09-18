@@ -583,6 +583,7 @@ fn claude_cells(claude: &ClaudeView) -> (String, String, String) {
             id,
             state,
             directory,
+            ..
         } => (
             id.to_string(),
             state.to_string(),
@@ -1281,9 +1282,11 @@ mod tests {
     /// command to run under `sudo`, and no state and no directory.
     #[test]
     fn a_row_of_claude_code_gives_its_session_its_state_and_its_directory() {
+        let idle_for = Duration::from_secs(3 * 3_600 + 12 * 60);
         let idle = SessionState::Idle {
-            for_: Some(Duration::from_secs(3 * 3_600 + 12 * 60)),
+            for_: Some(idle_for),
         };
+        let changed_at = Some(now() - idle_for);
         let ranked = vec![
             claude_row(
                 30,
@@ -1293,6 +1296,7 @@ mod tests {
                     id: session(),
                     state: idle.clone(),
                     directory: Some(PathBuf::from(DIRECTORY)),
+                    status_changed_at: changed_at,
                 },
             ),
             claude_row(31, 300_000, VIEWER_UID, ClaudeView::NoRecord),
@@ -1305,6 +1309,7 @@ mod tests {
                     id: session(),
                     state: idle,
                     directory: None,
+                    status_changed_at: changed_at,
                 },
             ),
         ];
@@ -1559,8 +1564,9 @@ mod tests {
 
     /// Gives two rows of Claude Code sessions that a plan selects.
     fn candidate_rows() -> Vec<RankedRow> {
+        let idle_for = Duration::from_secs(3 * 3_600 + 12 * 60);
         let idle = SessionState::Idle {
-            for_: Some(Duration::from_secs(3 * 3_600 + 12 * 60)),
+            for_: Some(idle_for),
         };
         [30, 31]
             .into_iter()
@@ -1573,6 +1579,7 @@ mod tests {
                         id: session(),
                         state: idle.clone(),
                         directory: Some(PathBuf::from(DIRECTORY)),
+                        status_changed_at: Some(now() - idle_for),
                     },
                 )
             })

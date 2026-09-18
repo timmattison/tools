@@ -98,6 +98,15 @@ pub enum ClaudeView {
         state: SessionState,
         /// The working directory of the session, when the record gives it.
         directory: Option<PathBuf>,
+        /// The time of the last status change, as the record gave it.
+        ///
+        /// [`SessionState::Idle`] carries the time SINCE that change, which
+        /// is exact only against the `now` of this ranking. The check before
+        /// a signal compares the time of the change with the time that a
+        /// fresh record gives, so it needs the value of the record itself. A
+        /// difference of one nanosecond there makes `faulte kill` skip every
+        /// session.
+        status_changed_at: Option<SystemTime>,
     },
     /// A Claude Code session with no registry record that the caller could
     /// read. The row shows no session, because a guess can name the wrong
@@ -228,6 +237,7 @@ fn view_of(pid: Pid, uid: Uid, input: &Observation<'_>) -> ClaudeView {
             id: record.session.clone(),
             state: SessionState::from_record(record, input.now),
             directory: record.directory.clone(),
+            status_changed_at: record.status_changed_at,
         },
         None => ClaudeView::NoRecord,
     }
@@ -785,6 +795,7 @@ PID    FAULTS    \n\
                     for_: Some(idle_for)
                 },
                 directory: Some(PathBuf::from(DIRECTORY)),
+                status_changed_at: Some(now() - idle_for),
             })
         );
     }
@@ -875,6 +886,7 @@ PID    FAULTS    \n\
                     for_: Some(Duration::from_secs(600))
                 },
                 directory: Some(PathBuf::from(DIRECTORY)),
+                status_changed_at: Some(now() - Duration::from_secs(600)),
             })
         );
         assert_eq!(
