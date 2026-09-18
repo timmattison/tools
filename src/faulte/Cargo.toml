@@ -1,0 +1,21 @@
+[package]
+name = "faulte"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Fault rate: rank the processes of a Mac by page faults per second, and stop old idle Claude Code sessions"
+
+[lib]
+name = "faulte"
+path = "src/lib.rs"
+
+[[bin]]
+name = "faulte"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+
+[lints]
+workspace = true
