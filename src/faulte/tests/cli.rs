@@ -53,9 +53,17 @@ fn kill_refuses_the_limit_of_the_ranking() {
 
     // The ranking takes it, before the name of a command as well.
     assert!(
-        run(&["--limit", "3", "kill", "--older-than", "9999d"])
-            .status
-            .success(),
+        run(&[
+            "--limit",
+            "3",
+            "kill",
+            "--interval",
+            "1s",
+            "--older-than",
+            "9999d"
+        ])
+        .status
+        .success(),
         "the ranking flag stands before the name of the command"
     );
 }
