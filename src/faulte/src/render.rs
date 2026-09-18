@@ -180,8 +180,13 @@ pub fn kibibytes(value: u64) -> String {
 /// move back between the read of the table and the read of `now`.
 #[must_use]
 pub fn age(started_at_epoch_secs: Option<u64>, now: SystemTime) -> String {
-    let _ = (started_at_epoch_secs, now);
-    ABSENT.to_owned()
+    let Some(started) = started_at_epoch_secs else {
+        return ABSENT.to_owned();
+    };
+    let now_secs = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    occ::format_uptime(now_secs.saturating_sub(started))
 }
 
 #[cfg(test)]
