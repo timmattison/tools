@@ -100,7 +100,11 @@ impl FromStr for Span {
         let per_unit = seconds_per(unit).ok_or_else(invalid)?;
         let count: u64 = number.parse().map_err(|_| invalid())?;
         let seconds = count.checked_mul(per_unit).ok_or_else(invalid)?;
-        NonZeroU64::new(seconds).map(Self).ok_or_else(invalid)
+        NonZeroU64::new(seconds)
+            .map(Self)
+            .ok_or_else(|| ParseSpanError::Zero {
+                text: text.to_owned(),
+            })
     }
 }
 
