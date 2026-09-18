@@ -496,4 +496,42 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn every_valid_sample_rate_gives_a_finite_ramp_from_zero_to_the_level_and_back() {
+        // At 1 Hz, RAMP_DURATION is 0.05 of a frame. At f64::MAX Hz, it is
+        // more frames than a u32 holds.
+        for hz in [f64::MIN_POSITIVE, 1.0, f64::MAX] {
+            let rate = SampleRate::new(hz).expect("the rate is valid");
+            let (mut signal, stop) = KeepaliveSignal::new(rate);
+
+            let up = fill_frames(&mut signal, 8, 1);
+            stop.start_ramp_down();
+            let down = fill_frames(&mut signal, 8, 1);
+
+            for sample in up.iter().chain(&down) {
+                assert!(
+                    (0.0..=LEVEL).contains(sample),
+                    "at {hz:e} Hz a sample is {sample}, outside 0.0 to the level"
+                );
+            }
+            assert_eq!(up[0], 0.0, "at {hz:e} Hz the ramp up starts at 0.0");
+            assert!(
+                up.windows(2).all(|pair| pair[0] <= pair[1]),
+                "at {hz:e} Hz the ramp up never decreases: {up:?}"
+            );
+            assert!(
+                down.windows(2).all(|pair| pair[0] >= pair[1]),
+                "at {hz:e} Hz the ramp down never increases: {down:?}"
+            );
+        }
+
+        // A ramp shorter than one frame still takes one frame each way.
+        let rate = SampleRate::new(1.0).expect("1 Hz is valid");
+        let (mut signal, stop) = KeepaliveSignal::new(rate);
+        assert_eq!(fill_frames(&mut signal, 3, 1), [0.0, LEVEL, LEVEL]);
+        stop.start_ramp_down();
+        assert_eq!(fill_frames(&mut signal, 2, 1), [0.0, 0.0]);
+        assert!(stop.is_ramp_down_complete());
+    }
 }
