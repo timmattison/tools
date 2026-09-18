@@ -100,10 +100,29 @@ enum Problem {
 impl fmt::Display for Problem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Status(status) => write!(f, "failed with status {status}"),
+            Self::Status(status) => {
+                write!(f, "failed with status {status}")?;
+                match four_character_code(*status) {
+                    Some(code) => write!(f, " ('{code}')"),
+                    None => Ok(()),
+                }
+            }
             Self::NoResult(missing) => f.write_str(missing),
         }
     }
+}
+
+/// Gives the four bytes of `status` as text, when each byte is printable
+/// ASCII.
+///
+/// Many Core Audio statuses are four-character codes, for example `'!obj'`.
+/// The text is easier to find in the headers than the number.
+fn four_character_code(status: OSStatus) -> Option<String> {
+    let bytes = status.to_be_bytes();
+    bytes
+        .iter()
+        .all(|byte| byte.is_ascii_graphic() || *byte == b' ')
+        .then(|| bytes.iter().copied().map(char::from).collect())
 }
 
 impl AudioError {
