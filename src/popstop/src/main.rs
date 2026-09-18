@@ -89,8 +89,8 @@ fn run(cli: &Cli) -> ExitCode {
         return report(popstop::background::start(&settings));
     }
     if cli.background_child {
-        // The copy tells the start about a failure, and it decides what goes
-        // into its log. Thus nothing is left to write here.
+        // The copy sends a failure to the start, into its log, or to both.
+        // Thus nothing is left to write here.
         return ExitCode::from(popstop::background::run_child(&settings));
     }
     if cli.stop {

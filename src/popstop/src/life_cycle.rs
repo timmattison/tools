@@ -76,7 +76,7 @@ impl Settings {
 ///
 /// The failure carries the exit status and the text for the user. It does not
 /// write that text: a foreground copy writes it to stderr, and a background
-/// copy sends it to the parent that started it.
+/// copy sends it to the parent that started it, to its log, or to both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Failure {
     /// The exit status of the copy.

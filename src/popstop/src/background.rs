@@ -134,8 +134,9 @@ pub fn start(settings: &Settings) -> Result<Report, Failure> {
 /// and a write cannot fail after the start ended.
 ///
 /// The copy empties the log once it holds the lock (see [`empty_the_log`]).
-/// It tells the start about a failure, and it decides which failure goes
-/// into the log (see [`send_the_failure`]). Thus the caller writes nothing.
+/// It tells the start about a failure until it reported that it plays, and it
+/// decides which failure goes into the log (see [`send_the_failure`]). Thus
+/// the caller writes nothing.
 ///
 /// The status is [`exit_status::SUCCESS`] when the copy stopped as it must,
 /// [`exit_status::ANOTHER_COPY_RUNS`] when another copy holds the lock, and
@@ -160,22 +161,36 @@ pub fn run_child(settings: &Settings) -> u8 {
 
 /// The stdout of a copy, which is the pipe to the start that made it.
 ///
-/// The start reads one [`Handshake`] from it and then ends.
+/// The start reads one [`Handshake`] from it and then ends, thus the pipe
+/// carries one report and no more. After the copy reported that it plays,
+/// its stdout is the log (see [`send_the_later_output_to_the_log`]). A second
+/// report then puts a line of JSON into the log and reaches no start.
 struct PipeToTheStart<W> {
     /// The stdout of the copy.
     stdout: W,
+    /// True when a report went out.
+    reported: bool,
 }
 
 impl<W: Write> PipeToTheStart<W> {
     /// Makes the pipe of a copy that sent no report yet.
     fn new(stdout: W) -> Self {
-        Self { stdout }
+        Self {
+            stdout,
+            reported: false,
+        }
     }
 
-    /// Sends `report` to the start.
+    /// Sends `report` to the start, when no report went out before it. After
+    /// the first report, this call writes nothing.
     fn send(&mut self, report: &Handshake) -> io::Result<()> {
+        if self.reported {
+            return Ok(());
+        }
         self.stdout.write_all(report.line().as_bytes())?;
-        self.stdout.flush()
+        self.stdout.flush()?;
+        self.reported = true;
+        Ok(())
     }
 }
 
@@ -192,8 +207,9 @@ impl<W: Write> PipeToTheStart<W> {
 /// report to the start. Every other failure goes to the end of the log, thus
 /// the log of a copy that reported nothing holds the reason too.
 ///
-/// A failure after the report of a copy that plays goes to the log, because
-/// the stdout of the copy is the log from that moment on.
+/// A failure after the copy reported that it plays sends no report, because
+/// the start read its one report already (see [`PipeToTheStart`]). The
+/// reason of that failure reaches the log once, as text.
 fn send_the_failure(
     failure: &Failure,
     start: &mut PipeToTheStart<impl Write>,
