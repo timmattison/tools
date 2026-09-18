@@ -1453,20 +1453,21 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     the first step of another stream of that same plan. The digits alone cannot part a count of
     lines from the number of an issue. Only the field they stand in can.
   - A pull request and the issue it closes are one step, not two. `PR#344 (#341)` gets one row,
-    `#344 (#341)`, and the state of that row is the state of the pull request, because the pull
-    request is the work. `wn` asks GitHub about both numbers, and a pair whose two states disagree
-    earns a note — a merged pull request whose issue is still open is a real condition, and
-    nothing else reports it.
+    and the row writes the pair the same way, so the reader sees which number is the work. A pull
+    request alone writes `PR#344`, and an issue writes the bare `#344`. The state of that row is
+    the state of the pull request, because the pull request is the work. `wn` asks GitHub about
+    both numbers, and a pair whose two states disagree earns a note — a merged pull request whose
+    issue is still open is a real condition, and nothing else reports it.
   - A plan writes that pair the other way round as well, and it writes prose beside it: `#4 (in
     flight, PR #15)` is the issue `#4` whose work is the pull request `#15`, and `#12 (human)` is
     one issue with a note about who does it. So a group in parentheses annotates the step to its
     left and never opens one. Inside a group, only a word carrying the `#` is a number, and a `PR`
     in front of one marks that number as the work — which is why `#4 (in flight, PR #15)` gives the
-    row `#15 (#4)`, the same step `PR#344 (#341)` gives. Every other word is prose that `wn` drops,
-    so `#4 (30-line window)` holds one number: the `30` carries no hash. That prose holds a
+    row `PR#15 (#4)`, the same step `PR#344 (#341)` gives. Every other word is prose that `wn`
+    drops, so `#4 (30-line window)` holds one number: the `30` carries no hash. That prose holds a
     parenthesis as readily as a word, so a group counts its depth and the parenthesis that brings
     the depth to zero is the one that closes it: `#4 (a note (see the docs)) → #7` is two steps,
-    and `#4 (in flight (rebasing), PR #15)` still gives the row `#15 (#4)`. A group that never
+    and `#4 (in flight (rebasing), PR #15)` still gives the row `PR#15 (#4)`. A group that never
     closes is refused, because where it ends is a guess — and a nested parenthesis closes the group
     it opened and no other, so `#4 (a (b) c` is refused as well.
   - One GraphQL query answers every number of the plan, as it does for one chain. A plan of seven
@@ -1654,7 +1655,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - `wn` reads `streams` for the answer. The `order` array of a stream is a chain, so each step
     of it comes before the step after it. In one step, `issue` is the issue number, `pr` is the
     pull request that does the work of that issue — the same pair `PR#344 (#341)` writes, and it
-    reaches the report as the row `#102 (#94)` — and `waitsFor` is the set of numbers that come
+    reaches the report as the row `PR#102 (#94)` — and `waitsFor` is the set of numbers that come
     before that step. `waitsFor` is the JSON spelling of the `Waits for` cell, and it reaches the
     same graph. A cell writes the pair as `PR#102 (#94)` and a `waitsFor` holds bare numbers, so
     a `waitsFor` that names the issue of a pair reaches that pair. One piece of work is one row
