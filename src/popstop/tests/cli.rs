@@ -312,6 +312,26 @@ fn a_stop_with_no_copy_says_that_nothing_runs() {
 }
 
 #[test]
+fn a_status_with_no_copy_ends_with_the_status_of_no_copy() {
+    let temp = tempfile::tempdir().expect("a temporary directory");
+    let dir = temp.path().join("state");
+
+    let (status, report, errors) = ask_in(&dir, &["--status"]);
+
+    assert_eq!(
+        status.code(),
+        Some(4),
+        "story 14: a script reads the exit status and not the text, thus no copy gives 4: \
+         {status}. Its stderr:\n{errors}"
+    );
+    assert_eq!(report, "popstop: no copy runs\n");
+    assert_eq!(
+        errors, "",
+        "a status that finds nothing says nothing on stderr"
+    );
+}
+
+#[test]
 fn a_status_names_the_copy_that_runs_its_mode_and_its_device() {
     let temp = tempfile::tempdir().expect("a temporary directory");
     let dir = temp.path().join("state");
