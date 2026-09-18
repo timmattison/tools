@@ -222,7 +222,7 @@ pub fn observe(machine: &dyn Machine, interval: Span) -> Result<Observed, Machin
     let claude = machine.claude_roles();
     let viewer = machine.viewer();
     let now = machine.now();
-    let records = records_of(machine, &table, &claude);
+    let records = records_of(machine, &table, &claude, viewer);
     let ranking = rank(&Observation {
         window: sample_window(interval, sample.elapsed, wall),
         faults: &sample.rows,
@@ -260,19 +260,28 @@ fn accounts_of(machine: &dyn Machine, ranking: &Ranking) -> Accounts {
         .collect()
 }
 
-/// Reads the registry record of each Claude Code process of `table`.
+/// Reads the registry record of each Claude Code process of `table` that the
+/// viewer is allowed to read.
 ///
 /// A record under a PID that is not a Claude Code process says nothing: a
 /// session that died leaves its file behind, and another process takes the
 /// same PID later. Thus the roles decide which PIDs the registry answers for.
+///
+/// The account decides the rest. The registry folder of another account has
+/// the mode `0700`, so a read of it fails whatever the folder holds. A missing
+/// record there is no fact about the session, and the row of such a process
+/// says `other account` in place of a state. Root reads the home directory of
+/// every account, so root asks about every one of them.
 fn records_of(
     machine: &dyn Machine,
     table: &[ProcessRow],
     claude: &HashMap<Pid, ClaudeRole>,
+    viewer: Viewer,
 ) -> HashMap<Pid, SessionRecord> {
     table
         .iter()
         .filter(|process| claude.contains_key(&process.pid))
+        .filter(|process| viewer.is_root || process.uid == viewer.uid)
         .filter_map(|process| {
             machine
                 .record_for(process.pid, process.uid, process.started_at_epoch_secs)
