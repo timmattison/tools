@@ -48,6 +48,16 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// signal.
 const A_SIGNAL_ARRIVES_WITHIN: Duration = Duration::from_secs(1);
 
+/// The longest time that a test waits for the system to give a copy to the
+/// process that adopts a process whose parent ended.
+const ADOPTION_BOUND: Duration = Duration::from_secs(10);
+
+/// The process ID of the process that adopts a process whose parent ended.
+const ADOPTS_THE_ORPHANS: u32 = 1;
+
+/// What `ps` writes for a process that has no controlling terminal.
+const NO_TERMINAL: &str = "??";
+
 /// The number of `SIGINT`. POSIX sets it to 2.
 const SIGINT: libc::c_int = 2;
 
@@ -324,6 +334,55 @@ fn device_of_the_background_lines(report: &str, pid: u32, dir: &Path) -> String 
     device
 }
 
+/// What the system says about a process that this test did not start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Facts {
+    /// The process ID of the parent of the process.
+    ppid: u32,
+    /// The process group that the process belongs to.
+    pgid: u32,
+    /// The controlling terminal of the process. `??` means no terminal.
+    tty: String,
+}
+
+/// Reads the facts of the process `pid`, or gives `None` when no process has
+/// that PID.
+///
+/// It asks `ps`, because a background copy is no child of this test and the
+/// standard library says nothing about a process that it did not start. Each
+/// field takes an `-o` of its own: one `-o` with commas makes the text after
+/// the first `=` the heading of one column.
+fn facts_of(pid: u32) -> Option<Facts> {
+    let output = Command::new("ps")
+        .args(["-o", "ppid=", "-o", "pgid=", "-o", "tty=", "-p"])
+        .arg(pid.to_string())
+        .stdin(Stdio::null())
+        .output()
+        .expect("ask ps about the copy");
+    let answer = String::from_utf8(output.stdout).expect("the output of ps is UTF-8");
+    let mut fields = answer.split_whitespace();
+    Some(Facts {
+        ppid: fields.next()?.parse().ok()?,
+        pgid: fields.next()?.parse().ok()?,
+        tty: fields.next()?.to_owned(),
+    })
+}
+
+/// Waits until `ready` gives true, for [`ADOPTION_BOUND`] at most. Gives what
+/// `ready` gave at the end.
+fn wait_until(mut ready: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + ADOPTION_BOUND;
+    loop {
+        if ready() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
 /// Runs popstop with `arguments` and gives its exit status and its stdout.
 ///
 /// The arguments of these runs end before popstop takes a lock or opens a
@@ -569,6 +628,49 @@ fn a_status_names_the_background_copy_and_a_stop_ends_it() {
         "no copy runs after the stop: {status}. Its stderr:\n{errors}"
     );
     assert_eq!(report, "popstop: no copy runs\n");
+}
+
+#[test]
+fn a_background_copy_has_no_terminal_and_outlives_the_command_that_started_it() {
+    let temp = tempfile::tempdir().expect("a temporary directory");
+    let dir = temp.path().join("state");
+    let start = BackgroundStart::make(&dir);
+    assert_eq!(
+        start.status.code(),
+        Some(0),
+        "the background start worked: {}. Its stderr:\n{}",
+        start.status,
+        start.errors
+    );
+    let record = holder(&dir).expect("the copy holds the lock");
+
+    // The command that started the copy ended already, and the system gives a
+    // process whose parent ended to the process that adopts the orphans. That
+    // adoption comes a moment after the end, thus the test waits for it.
+    let adopted =
+        wait_until(|| facts_of(record.pid).is_some_and(|facts| facts.ppid == ADOPTS_THE_ORPHANS));
+    let facts = facts_of(record.pid).expect("the copy still runs");
+    assert!(
+        adopted,
+        "story 8: the copy outlives the command that started it, and it ran on as {facts:?}"
+    );
+
+    assert_eq!(
+        facts.tty, NO_TERMINAL,
+        "story 7: the copy has no controlling terminal, thus a terminal that closes cannot signal \
+         it. ps says {facts:?}"
+    );
+    assert_eq!(
+        facts.pgid, record.pid,
+        "the copy leads a session of its own, thus it is in no process group of a terminal. ps \
+         says {facts:?}"
+    );
+
+    assert_eq!(
+        holder(&dir),
+        Some(record),
+        "the copy still holds the lock, thus it still plays"
+    );
 }
 
 #[test]
