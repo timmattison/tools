@@ -232,7 +232,9 @@ fn acquire(
                 &message::stop_command(settings.state_dir_argument()),
             ),
         },
-        AcquireError::Io(problem) => Failure::error(&problem),
+        // The whole error and not the problem inside it: the text must say
+        // that the lock file is what popstop could not use.
+        problem @ AcquireError::Io(_) => Failure::error(&problem),
     })
 }
 
