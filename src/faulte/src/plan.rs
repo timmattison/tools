@@ -8,6 +8,7 @@
 //! The plan never signals anything. It names the targets, and the caller shows
 //! them to the person before it asks the question.
 
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime};
 
 use occ::SessionId;
@@ -143,6 +144,51 @@ fn age_of(started_at_epoch_secs: Option<u64>, now_secs: u64) -> Option<Duration>
         .map(|started| Duration::from_secs(now_secs - started))
 }
 
+/// Gives the parent of each process of `table`.
+///
+/// The first row of a PID wins. `ps` never prints a PID twice, and a source
+/// that breaks that rule cannot give one process two parents here.
+fn parents_of(table: &[ProcessRow]) -> HashMap<Pid, Pid> {
+    let mut parents = HashMap::with_capacity(table.len());
+    for process in table {
+        parents.entry(process.pid).or_insert(process.ppid);
+    }
+    parents
+}
+
+/// Puts `pid` and each ancestor of `pid` into `seen`.
+///
+/// The walk stops at a PID that `seen` holds already. That one rule ends three
+/// walks. A cycle in the parent links comes back to a PID of the same walk. A
+/// process that is its own parent is such a cycle of one step. And a walk that
+/// reaches a chain of an earlier walk stops, because `seen` holds every
+/// ancestor above that PID already.
+fn walk_up(pid: Pid, parents: &HashMap<Pid, Pid>, seen: &mut HashSet<Pid>) {
+    let mut pid = pid;
+    while seen.insert(pid) {
+        let Some(&parent) = parents.get(&pid) else {
+            break;
+        };
+        pid = parent;
+    }
+}
+
+/// Gives the PID of every process of `table` that has a live descendant.
+///
+/// The walk starts at the parent of each process that is not a zombie, so a
+/// process is never a descendant of itself. A zombie stopped already, and its
+/// parent did not collect its exit status yet, so it does nothing and it is
+/// not a live descendant. The walk still climbs through a zombie, because the
+/// table can hold a live process under one.
+fn pids_with_a_live_descendant(table: &[ProcessRow]) -> HashSet<Pid> {
+    let parents = parents_of(table);
+    let mut ancestors = HashSet::with_capacity(table.len());
+    for process in table.iter().filter(|process| !process.zombie) {
+        walk_up(process.ppid, &parents, &mut ancestors);
+    }
+    ancestors
+}
+
 /// Gives the time when the status of `state` last changed.
 ///
 /// The state carries the time since the change, and the ranking measured it
@@ -162,6 +208,7 @@ pub fn plan(input: &PlanInput<'_>) -> Plan {
     let older_than = Duration::from(input.rules.older_than);
     let idle_for = Duration::from(input.rules.idle_for);
     let now_secs = epoch_seconds(input.now);
+    let live_descendants = pids_with_a_live_descendant(input.table);
     let mut candidates = Vec::new();
     for row in &input.ranking.rows {
         // Only a session that `faulte` read a registry record for can be a
@@ -180,6 +227,9 @@ pub fn plan(input: &PlanInput<'_>) -> Plan {
             continue;
         }
         if !state.is_idle_for_more_than(idle_for) {
+            continue;
+        }
+        if live_descendants.contains(&row.pid) {
             continue;
         }
         candidates.push(Candidate {
