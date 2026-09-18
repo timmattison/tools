@@ -450,7 +450,11 @@ pub const COMMAND_LIMIT: usize = 120;
 /// shorter ends with [`MORE`], so a reader sees that the row gives a part.
 #[must_use]
 pub fn command(text: &str) -> String {
-    text.to_owned()
+    let mut cut: String = text.chars().take(COMMAND_LIMIT).collect();
+    if text.chars().nth(COMMAND_LIMIT).is_some() {
+        cut.push(MORE);
+    }
+    cut
 }
 
 /// Gives the table of `rows`, and the line that counts the rows past `limit`.
@@ -500,7 +504,7 @@ pub fn rows(
             share(ranking.share(row.faults)),
             row.rss_kib.map_or_else(|| ABSENT.to_owned(), kibibytes),
             age(row.started_at_epoch_secs, now),
-            row.command.clone(),
+            command(&row.command),
             session,
             state,
             directory,
