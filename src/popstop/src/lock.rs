@@ -735,4 +735,50 @@ mod tests {
             wrong_answers[0]
         );
     }
+
+    #[test]
+    fn readers_never_make_acquire_refuse_when_only_an_old_record_stays() {
+        // Each reader holds the lock for a moment. The number of starts makes
+        // an overlap of a start and a reader certain.
+        const READERS: usize = 4;
+        const STARTS: usize = 500;
+        let (_temp, dir) = state_dir();
+        leave_an_old_record(&dir, FIRST);
+        let done = AtomicBool::new(false);
+        // A backstop for the reader loops, in case the starts panic.
+        let deadline = Instant::now() + GENEROUS_TIMEOUT;
+
+        let wrong_answers: Vec<String> = thread::scope(|scope| {
+            for _ in 0..READERS {
+                scope.spawn(|| {
+                    while !done.load(Ordering::SeqCst) && Instant::now() < deadline {
+                        // The answers of the readers are not under test here.
+                        let _ = current_holder(&dir);
+                    }
+                });
+            }
+            let wrong_answers = (0..STARTS)
+                .filter_map(|_| {
+                    // Each start finds the old record of a crashed copy.
+                    leave_an_old_record(&dir, FIRST);
+                    match acquire(&dir, &SECOND) {
+                        Ok(guard) => {
+                            drop(guard);
+                            None
+                        }
+                        Err(error) => Some(format!("{error:?}")),
+                    }
+                })
+                .collect();
+            done.store(true, Ordering::SeqCst);
+            wrong_answers
+        });
+
+        assert!(
+            wrong_answers.is_empty(),
+            "no copy holds the lock, but {} of {STARTS} starts failed, for example {}",
+            wrong_answers.len(),
+            wrong_answers[0]
+        );
+    }
 }
