@@ -151,7 +151,7 @@ pub fn parse(output: &str) -> Result<TopSample, TopParseError> {
             found: headers.len(),
         });
     };
-    let rows = lines
+    let rows: Vec<FaultCount> = lines
         .iter()
         .enumerate()
         .skip(second_header + 1)
@@ -162,6 +162,9 @@ pub fn parse(output: &str) -> Result<TopSample, TopParseError> {
             })
         })
         .collect::<Result<_, _>>()?;
+    if rows.is_empty() {
+        return Err(TopParseError::NoRows);
+    }
     Ok(TopSample {
         rows,
         elapsed: None,
