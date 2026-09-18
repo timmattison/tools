@@ -1890,6 +1890,12 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     `WN_PLAN_MODEL=opus wn`
   - To install: `cargo install --git https://github.com/timmattison/tools wn`
 
+- faulte (fault rate)
+  - Ranks the processes of a Mac by page faults per second over an interval, and gives a total
+    line for the Claude Code sessions. `faulte kill` stops the old idle Claude Code sessions after
+    a question. It supports macOS only.
+  - To install: `cargo install --git https://github.com/timmattison/tools faulte`
+
 ## dirhash
 
 Calculate a SHA256 hash of a directory tree that's deterministic based on file contents. Skips hidden files and the files that .gitignore and the other standard ignore files name.
