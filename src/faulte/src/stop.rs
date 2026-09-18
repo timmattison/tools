@@ -6,6 +6,7 @@
 //! values, and the sequence reads this Mac through one trait. No unit test
 //! signals a real process.
 
+use std::ops::ControlFlow;
 use std::time::Duration;
 
 use occ::{SessionRecord, SessionStatus};
@@ -187,6 +188,23 @@ impl StopReport {
     }
 }
 
+/// The three times of the stop sequence.
+///
+/// Each time has a name, because three values of one type in a list of
+/// arguments are easy to put in the wrong order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timing {
+    /// The longest time between `SIGTERM` and `SIGKILL`. A target that is
+    /// still the same process when this time ends gets `SIGKILL`.
+    pub grace: Duration,
+    /// The longest time that the sequence waits for a target to go after
+    /// `SIGKILL`. A target that is still the same process when this time ends
+    /// is a session that survived.
+    pub after_kill: Duration,
+    /// The time between two reads of the process table, in both waits.
+    pub poll: Duration,
+}
+
 /// Stops each session of `candidates`, and reports what happened to each one.
 ///
 /// The sequence is one function, because each step reads what the step before
@@ -214,17 +232,12 @@ impl StopReport {
 /// signals nothing more, and each target that is left goes to
 /// [`StopReport::failed`] with the reason.
 #[must_use]
-pub fn stop(
-    machine: &dyn Machine,
-    candidates: &[Candidate],
-    grace: Duration,
-    poll: Duration,
-) -> StopReport {
+pub fn stop(machine: &dyn Machine, candidates: &[Candidate], timing: Timing) -> StopReport {
     let mut report = StopReport::default();
     let table = match machine.process_table() {
         Ok(table) => table,
         Err(error) => {
-            all_failed(candidates, &error, &mut report);
+            all_failed(candidates, &error, &mut report.failed);
             return report;
         }
     };
@@ -240,11 +253,55 @@ pub fn stop(
             refusal => report.skipped.push((candidate.clone(), refusal)),
         }
     }
-    let mut targets = signal_each(machine, targets, Signal::Terminate, &mut report);
-    for _ in 0..waits(grace, poll) {
-        // Every target is gone, so the grace period has nothing left to wait
-        // for. A run that waits it out anyway holds the person for thirty
-        // seconds and reads the same answer at the end of them.
+    let targets = signal_each(machine, targets, Signal::Terminate, &mut report);
+    let ControlFlow::Continue(targets) = wait_until_gone(
+        machine,
+        targets,
+        timing.grace,
+        timing.poll,
+        &mut report.stopped,
+        &mut report.failed,
+    ) else {
+        return report;
+    };
+    let targets = signal_each(machine, targets, Signal::Kill, &mut report);
+    let ControlFlow::Continue(targets) = wait_until_gone(
+        machine,
+        targets,
+        timing.poll,
+        timing.poll,
+        &mut report.killed,
+        &mut report.failed,
+    ) else {
+        return report;
+    };
+    report.survived.extend(targets.into_iter().cloned());
+    report
+}
+
+/// Waits for each target of `targets` to go, for no longer than `limit`, and
+/// gives back the targets that are still the same process when it ends.
+///
+/// Each step waits `poll`, reads the process table, and moves each target that
+/// is gone into `gone`. The wait ends early when no target is left. The grace
+/// period after `SIGTERM` and the wait after `SIGKILL` are both this wait, each
+/// with its own limit and its own list.
+///
+/// A read of the table that fails ends the sequence. Each target that is left
+/// goes into `failed` with the reason, and the answer is
+/// [`ControlFlow::Break`].
+fn wait_until_gone<'a>(
+    machine: &dyn Machine,
+    mut targets: Vec<&'a Candidate>,
+    limit: Duration,
+    poll: Duration,
+    gone: &mut Vec<Candidate>,
+    failed: &mut Vec<(Candidate, MachineError)>,
+) -> ControlFlow<(), Vec<&'a Candidate>> {
+    for _ in 0..waits(limit, poll) {
+        // Every target is gone, so the wait has nothing left to wait for. A
+        // run that waits it out anyway holds the person for the rest of the
+        // limit and reads the same answer at the end of it.
         if targets.is_empty() {
             break;
         }
@@ -252,44 +309,22 @@ pub fn stop(
         let table = match machine.process_table() {
             Ok(table) => table,
             Err(error) => {
-                all_failed(targets, &error, &mut report);
-                return report;
+                all_failed(targets, &error, failed);
+                return ControlFlow::Break(());
             }
         };
         targets.retain(|candidate| {
-            let gone = is_gone(candidate, &table);
-            if gone {
-                report.stopped.push((*candidate).clone());
+            let went = is_gone(candidate, &table);
+            if went {
+                gone.push((*candidate).clone());
             }
-            !gone
+            !went
         });
     }
-    if targets.is_empty() {
-        return report;
-    }
-    let targets = signal_each(machine, targets, Signal::Kill, &mut report);
-    if targets.is_empty() {
-        return report;
-    }
-    machine.sleep(poll);
-    let table = match machine.process_table() {
-        Ok(table) => table,
-        Err(error) => {
-            all_failed(targets, &error, &mut report);
-            return report;
-        }
-    };
-    for candidate in targets {
-        if is_gone(candidate, &table) {
-            report.killed.push(candidate.clone());
-        } else {
-            report.survived.push(candidate.clone());
-        }
-    }
-    report
+    ControlFlow::Continue(targets)
 }
 
-/// Puts each target of `targets` into [`StopReport::failed`] with `error`.
+/// Puts each target of `targets` into `failed` with `error`.
 ///
 /// A read of the process table that fails ends the sequence, and each target
 /// that is left got no answer. The person asked `faulte` to stop those
@@ -297,9 +332,9 @@ pub fn stop(
 fn all_failed<'a>(
     targets: impl IntoIterator<Item = &'a Candidate>,
     error: &MachineError,
-    report: &mut StopReport,
+    failed: &mut Vec<(Candidate, MachineError)>,
 ) {
-    report.failed.extend(
+    failed.extend(
         targets
             .into_iter()
             .map(|candidate| (candidate.clone(), error.clone())),
@@ -646,9 +681,16 @@ mod tests {
         );
     }
 
-    /// The grace period of a test that wants one read of the table before
-    /// `SIGKILL`, and the time between two reads of the table.
+    /// The time between two reads of the table in the stop tests.
     const ONE_POLL: Duration = Duration::from_secs(1);
+
+    /// The times of a stop test that wants one read of the table before
+    /// `SIGKILL` and one read after it.
+    const ONE_READ_EACH: Timing = Timing {
+        grace: ONE_POLL,
+        after_kill: ONE_POLL,
+        poll: ONE_POLL,
+    };
 
     /// The machine of the stop tests. It answers each read that the sequence
     /// makes, and it records every signal and every wait.
@@ -811,12 +853,7 @@ mod tests {
         let candidate = candidate(30);
         let machine = machine_of(&[30], vec![vec![process(30, LAUNCHD_PID)], Vec::new()]);
 
-        let report = stop(
-            &machine,
-            std::slice::from_ref(&candidate),
-            ONE_POLL,
-            ONE_POLL,
-        );
+        let report = stop(&machine, std::slice::from_ref(&candidate), ONE_READ_EACH);
 
         assert_eq!(
             report,
@@ -863,8 +900,7 @@ mod tests {
         let report = stop(
             &machine,
             &[exited.clone(), target.clone(), busy.clone()],
-            ONE_POLL,
-            ONE_POLL,
+            ONE_READ_EACH,
         );
 
         assert_eq!(
@@ -883,8 +919,8 @@ mod tests {
         );
     }
 
-    /// The grace period of a test that wants three reads of the table before
-    /// `SIGKILL`.
+    /// The length of a wait of a test that wants three reads of the table in
+    /// that wait.
     const THREE_POLLS: Duration = Duration::from_secs(3);
 
     /// A target that is still the same process at the end of the grace period
@@ -913,8 +949,10 @@ mod tests {
         let report = stop(
             &machine,
             std::slice::from_ref(&candidate),
-            THREE_POLLS,
-            ONE_POLL,
+            Timing {
+                grace: THREE_POLLS,
+                ..ONE_READ_EACH
+            },
         );
 
         assert_eq!(
@@ -968,8 +1006,10 @@ mod tests {
             let report = stop(
                 &machine,
                 std::slice::from_ref(&candidate),
-                THREE_POLLS,
-                ONE_POLL,
+                Timing {
+                    grace: THREE_POLLS,
+                    ..ONE_READ_EACH
+                },
             );
 
             assert_eq!(
@@ -988,14 +1028,18 @@ mod tests {
         }
     }
 
-    /// A target that is still the same process after `SIGKILL` is a session
-    /// that survived, and the report says so.
+    /// A target that is still the same process when the wait after `SIGKILL`
+    /// ends is a session that survived, and the report says so.
     ///
     /// The kernel stops a process that gets `SIGKILL`, so this answer is rare.
     /// A process that is in an uninterruptible call of the kernel is one, and
     /// a Mac that pages a process in from swap is slow at every step. The
     /// person asked `faulte` to stop that session, so a report that says
     /// nothing about it is a report that lies.
+    ///
+    /// The wait after `SIGKILL` has a limit, and the sequence ends when the
+    /// limit ends. A process that does not stop at all holds the person for
+    /// that time and no longer.
     #[test]
     fn a_target_that_is_the_same_process_after_sigkill_survived() {
         let candidate = candidate(30);
@@ -1004,8 +1048,10 @@ mod tests {
         let report = stop(
             &machine,
             std::slice::from_ref(&candidate),
-            ONE_POLL,
-            ONE_POLL,
+            Timing {
+                after_kill: THREE_POLLS,
+                ..ONE_READ_EACH
+            },
         );
 
         assert_eq!(
@@ -1023,6 +1069,63 @@ mod tests {
                 (Pid::new(30), Signal::Kill)
             ],
             "both signals went, and neither one stopped the process"
+        );
+        assert_eq!(
+            machine.sleeps(),
+            4,
+            "one wait of the grace period, and three waits after SIGKILL"
+        );
+        assert_eq!(
+            machine.reads(),
+            5,
+            "the table of the check, one read in the grace period, and three reads after SIGKILL"
+        );
+    }
+
+    /// A target that goes at a later read after `SIGKILL` is a session that
+    /// `faulte` killed, and not a session that survived.
+    ///
+    /// A process cannot catch `SIGKILL`, and it runs no handler. The kernel
+    /// ends the process, but that exit is still work that must get the CPU and
+    /// the memory of the process. On a Mac that is short of memory, both arrive
+    /// late. A report that names such a session as one that did not stop takes
+    /// away its `crap` line, and `faulte kill` then exits 2 for a stop that did
+    /// what the plan said.
+    ///
+    /// The wait stops at the read that finds the target gone, and it does not
+    /// wait out the rest of its limit.
+    #[test]
+    fn a_target_that_goes_at_a_later_read_after_sigkill_was_killed() {
+        let candidate = candidate(30);
+        let alive = vec![process(30, LAUNCHD_PID)];
+        let machine = machine_of(&[30], vec![alive.clone(), alive.clone(), alive, Vec::new()]);
+
+        let report = stop(
+            &machine,
+            std::slice::from_ref(&candidate),
+            Timing {
+                after_kill: THREE_POLLS,
+                ..ONE_READ_EACH
+            },
+        );
+
+        assert_eq!(
+            report,
+            StopReport {
+                killed: vec![candidate],
+                ..StopReport::default()
+            },
+            "the session was there at the first read after SIGKILL, and gone at the second"
+        );
+        assert_eq!(
+            machine.sleeps(),
+            3,
+            "one wait of the grace period, and two waits after SIGKILL"
+        );
+        assert_eq!(
+            machine.reads(),
+            4,
+            "the table of the check, one read in the grace period, and two reads after SIGKILL"
         );
     }
 
@@ -1062,8 +1165,7 @@ mod tests {
         let report = stop(
             &machine,
             &[refused_target.clone(), target.clone()],
-            ONE_POLL,
-            ONE_POLL,
+            ONE_READ_EACH,
         );
 
         assert_eq!(
@@ -1115,7 +1217,7 @@ mod tests {
         ];
 
         let before = machine_of(&[30, 40], Vec::new()).then_failing(unreadable_table());
-        let report = stop(&before, &both, ONE_POLL, ONE_POLL);
+        let report = stop(&before, &both, ONE_READ_EACH);
         assert_eq!(
             report,
             StopReport {
@@ -1131,7 +1233,14 @@ mod tests {
         assert_eq!(before.sleeps(), 0, "the sequence waits for nothing");
 
         let inside = machine_of(&[30, 40], vec![alive]).then_failing(unreadable_table());
-        let report = stop(&inside, &both, THREE_POLLS, ONE_POLL);
+        let report = stop(
+            &inside,
+            &both,
+            Timing {
+                grace: THREE_POLLS,
+                ..ONE_READ_EACH
+            },
+        );
         assert_eq!(
             report,
             StopReport {
@@ -1147,7 +1256,7 @@ mod tests {
 
         let after = machine_of(&[30], vec![vec![process(30, LAUNCHD_PID)]; 2])
             .then_failing(unreadable_table());
-        let report = stop(&after, &both[..1], ONE_POLL, ONE_POLL);
+        let report = stop(&after, &both[..1], ONE_READ_EACH);
         assert_eq!(
             report,
             StopReport {
@@ -1184,8 +1293,10 @@ mod tests {
         let report = stop(
             &machine,
             std::slice::from_ref(&candidate),
-            FULL_GRACE,
-            ONE_POLL,
+            Timing {
+                grace: FULL_GRACE,
+                ..ONE_READ_EACH
+            },
         );
 
         assert_eq!(

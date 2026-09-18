@@ -15,7 +15,7 @@ use faulte::plan::{self, Candidate, PlanInput, Rules};
 #[cfg(target_os = "macos")]
 use faulte::render;
 #[cfg(target_os = "macos")]
-use faulte::stop::{self, Decision};
+use faulte::stop::{self, Decision, Timing};
 #[cfg(target_os = "macos")]
 use std::io::{self, BufRead, IsTerminal, Write};
 #[cfg(target_os = "macos")]
@@ -106,6 +106,19 @@ const NO_QUESTION: &str = "the question did not reach the output, so faulte stop
 /// sends `SIGKILL` to a session that was on its way to closing its transcript.
 #[cfg(target_os = "macos")]
 const GRACE: Duration = Duration::from_secs(30);
+
+/// The longest time that `faulte kill` waits for a session to go after
+/// `SIGKILL`.
+///
+/// A process cannot catch `SIGKILL`, and it runs no handler. The kernel ends
+/// the process, but that exit is still work that must get the CPU and the
+/// memory of the process. On a Mac that is short of memory, both arrive late,
+/// and a session that stops two seconds after `SIGKILL` stopped all the same.
+/// The limit keeps the person from a wait with no end on a process that does
+/// not stop at all, and the report names such a session as one that did not
+/// stop.
+#[cfg(target_os = "macos")]
+const AFTER_KILL: Duration = Duration::from_secs(10);
 
 /// The time between two reads of the process table inside [`GRACE`].
 ///
@@ -300,7 +313,15 @@ fn ask_and_stop(machine: &Mac, candidates: &[Candidate]) -> ExitCode {
         println!("{STOPPED_NOTHING}");
         return ExitCode::SUCCESS;
     }
-    let report = stop::stop(machine, candidates, GRACE, POLL);
+    let report = stop::stop(
+        machine,
+        candidates,
+        Timing {
+            grace: GRACE,
+            after_kill: AFTER_KILL,
+            poll: POLL,
+        },
+    );
     println!("{}", render::stopped(&report));
     if report.did_what_the_plan_said() {
         ExitCode::SUCCESS
