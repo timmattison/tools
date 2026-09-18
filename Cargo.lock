@@ -6161,6 +6161,7 @@ dependencies = [
  "buildinfo",
  "clap",
  "dirs",
+ "libc",
  "objc2-audio-toolbox",
  "objc2-core-audio",
  "objc2-core-audio-types",

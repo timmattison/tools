@@ -6,19 +6,72 @@
 //! and `popstop --stop` compares that time with the start time of the PID
 //! before it sends a signal.
 
+use std::ffi::c_void;
 use std::io;
+use std::mem::{self, MaybeUninit};
 
 use crate::lock::StartTime;
 
+/// The number of microseconds in one second.
+const MICROS_PER_SECOND: u64 = 1_000_000;
+
 /// Gives the time at which the kernel started the process `pid`.
+///
+/// It reads the BSD information of the process with `proc_pidinfo`. The
+/// kernel keeps the start time in seconds and microseconds since the Unix
+/// epoch.
 ///
 /// # Errors
 ///
-/// Returns an error when no process has the PID `pid`, or when the kernel
-/// does not give the information of the process.
+/// Returns an error when no process has the PID `pid` (the error of the
+/// kernel, usually `ESRCH`), when `pid` is too large to be a PID (kind
+/// [`io::ErrorKind::InvalidInput`]), or when the kernel gives less than the
+/// whole information (kind [`io::ErrorKind::InvalidData`]).
 pub fn start_time(pid: u32) -> io::Result<StartTime> {
-    let _ = pid;
-    Ok(StartTime::from_unix_micros(0))
+    let pid = libc::pid_t::try_from(pid).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{pid} is too large to be a process ID"),
+        )
+    })?;
+    let mut info = MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let wanted = mem::size_of::<libc::proc_bsdinfo>();
+    let wanted_c = libc::c_int::try_from(wanted)
+        .map_err(|_| io::Error::other("the process information is too large for proc_pidinfo"))?;
+
+    // SAFETY: `proc_pidinfo` writes at most `wanted_c` bytes into the buffer,
+    // and that is the size of the buffer. The call only reads information of
+    // the process. The code below reads the buffer only after the call
+    // reports that it filled all of it.
+    let filled = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast::<c_void>(),
+            wanted_c,
+        )
+    };
+    if filled <= 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if usize::try_from(filled).ok() != Some(wanted) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "proc_pidinfo gave {filled} of the {wanted} bytes of the information of process \
+                 {pid}"
+            ),
+        ));
+    }
+
+    // SAFETY: the call above reported that it filled the whole structure.
+    let info = unsafe { info.assume_init() };
+    Ok(StartTime::from_unix_micros(
+        info.pbi_start_tvsec
+            .saturating_mul(MICROS_PER_SECOND)
+            .saturating_add(info.pbi_start_tvusec),
+    ))
 }
 
 #[cfg(test)]
