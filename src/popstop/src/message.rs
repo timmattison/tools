@@ -124,6 +124,43 @@ pub fn ready_lines(device_name: &str, pid: u32) -> String {
     )
 }
 
+/// Gives the lines that `popstop --background` writes when the copy that it
+/// started plays: the device that the copy keeps awake, the effect on the
+/// sleep of the Mac, and the command that stops the copy. `stop_command`
+/// comes from [`stop_command`].
+///
+/// A background copy has no terminal, thus the lines name its process ID and
+/// its mode, and they give a command and not a key.
+///
+/// The text has no newline at its end.
+#[must_use]
+pub fn background_ready_lines(device_name: &str, pid: u32, stop_command: &str) -> String {
+    let _ = (device_name, pid, stop_command);
+    String::new()
+}
+
+/// Gives the text of a background start whose copy wrote no report.
+///
+/// The parent knows nothing about the copy then, and the log of that copy
+/// holds what it wrote. Thus the text names the log.
+///
+/// The text has no newline at its end.
+#[must_use]
+pub fn did_not_report(log_path: &Path) -> String {
+    let _ = log_path;
+    String::new()
+}
+
+/// Gives the text of a background start whose copy wrote no report within
+/// `bound`.
+///
+/// The text has no newline at its end.
+#[must_use]
+pub fn did_not_report_within(bound: Duration, log_path: &Path) -> String {
+    let _ = (bound, log_path);
+    String::new()
+}
+
 /// Gives the lines that `popstop --status` writes for the copy that runs:
 /// the copy itself, and the device that it keeps awake.
 ///
@@ -252,6 +289,7 @@ pub fn warning_line(problem: &dyn fmt::Display) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{background_ready_lines, did_not_report, did_not_report_within};
     use super::{did_not_stop, no_copy_runs, stale_record, stopped};
     use super::{problem_line, ready_lines, refusal_in, start_time_text_in, stop_command};
     use super::{status_lines_in, status_lines_without_device_name_in, warning_line, PREFIX};
@@ -334,6 +372,42 @@ mod tests {
             "popstop: \"Klipsch R-51PM\" stays awake while popstop runs (pid 4242)\n\
              popstop: this Mac does not idle sleep while popstop runs\n\
              popstop: press Ctrl-C to stop"
+        );
+    }
+
+    #[test]
+    fn the_background_lines_name_the_device_the_mode_and_the_command_that_stops_the_copy() {
+        assert_eq!(
+            background_ready_lines("Klipsch R-51PM", 4242, "popstop --stop"),
+            "popstop: \"Klipsch R-51PM\" stays awake while popstop runs (pid 4242, background)\n\
+             popstop: this Mac does not idle sleep while popstop runs\n\
+             popstop: to stop the copy that runs, use this command: popstop --stop"
+        );
+
+        // A copy that runs with a state directory of its own needs the same
+        // directory in the command that stops it.
+        assert_eq!(
+            background_ready_lines("A Device", 7, "popstop --stop --state-dir '/tmp/state'"),
+            "popstop: \"A Device\" stays awake while popstop runs (pid 7, background)\n\
+             popstop: this Mac does not idle sleep while popstop runs\n\
+             popstop: to stop the copy that runs, use this command: popstop --stop --state-dir \
+             '/tmp/state'"
+        );
+    }
+
+    #[test]
+    fn a_background_copy_that_wrote_no_report_leaves_its_log_for_the_user() {
+        let log = Path::new("/tmp/state/popstop.log");
+
+        assert_eq!(
+            did_not_report(log),
+            "popstop: the background copy did not report that it plays\n\
+             popstop: the log of that copy says why: /tmp/state/popstop.log"
+        );
+        assert_eq!(
+            did_not_report_within(Duration::from_secs(10), log),
+            "popstop: the background copy did not report that it plays within 10 seconds\n\
+             popstop: the log of that copy says why: /tmp/state/popstop.log"
         );
     }
 
