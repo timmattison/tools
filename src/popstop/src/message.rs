@@ -199,14 +199,13 @@ where
 /// nothing is a success, thus the line reports and does not complain.
 #[must_use]
 pub fn no_copy_runs() -> String {
-    String::new()
+    format!("{PREFIX}no copy runs")
 }
 
 /// Gives the line that reports the copy that a stop ended.
 #[must_use]
 pub fn stopped(pid: u32) -> String {
-    let _ = pid;
-    String::new()
+    format!("{PREFIX}the copy stopped (pid {pid})")
 }
 
 /// Gives the text of a stop that did not end the copy within `bound`.
@@ -215,8 +214,10 @@ pub fn stopped(pid: u32) -> String {
 /// the user decides what to do next.
 #[must_use]
 pub fn did_not_stop(pid: u32, bound: Duration) -> String {
-    let _ = (pid, bound);
-    String::new()
+    format!(
+        "{PREFIX}the copy did not stop within {} seconds (pid {pid})",
+        bound.as_secs()
+    )
 }
 
 /// Gives the text of a stop that found a record which names a process that
@@ -228,8 +229,11 @@ pub fn did_not_stop(pid: u32, bound: Duration) -> String {
 /// else.
 #[must_use]
 pub fn stale_record(pid: u32) -> String {
-    let _ = pid;
-    String::new()
+    format!(
+        "{PREFIX}the record in the lock file names pid {pid}, and another process has that PID \
+         now\n\
+         {PREFIX}no signal went to that process. Do the command again"
+    )
 }
 
 /// Gives one line that reports a problem, for example
