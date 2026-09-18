@@ -10,6 +10,10 @@ use chrono::{DateTime, Local, TimeZone};
 
 use crate::lock::{HolderRecord, StartTime};
 
+/// The start of each line that popstop writes, so a reader of a full
+/// terminal sees which program speaks.
+const PREFIX: &str = "popstop: ";
+
 /// The command that stops the copy that runs.
 const STOP_COMMAND: &str = "popstop --stop";
 
@@ -82,8 +86,17 @@ where
     Tz: TimeZone,
     Tz::Offset: fmt::Display,
 {
-    let _ = (holder, stop_command, zone);
-    String::new()
+    let HolderRecord {
+        pid,
+        mode,
+        started_at,
+    } = holder;
+    let started = start_time_text_in(*started_at, zone);
+    format!(
+        "{PREFIX}another copy runs (pid {pid}, {mode}, started {started}), so this copy did not \
+         start\n\
+         {PREFIX}to stop the copy that runs, use this command: {stop_command}"
+    )
 }
 
 #[cfg(test)]
