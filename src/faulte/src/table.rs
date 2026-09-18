@@ -64,7 +64,33 @@ pub enum TableParseError {
 ///
 /// None yet.
 pub fn parse(output: &str) -> Result<Vec<ProcessRow>, TableParseError> {
-    Ok(output.lines().filter_map(parse_row).collect())
+    output
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim_ascii().is_empty())
+        .filter_map(|(index, line)| {
+            parse_row(line)
+                .map_err(|fault| fault.at(index + 1, line))
+                .transpose()
+        })
+        .collect()
+}
+
+/// The reason why one line is not a row.
+enum RowFault {
+    /// The line holds fewer than [`FIELDS`] tokens.
+    TooFewFields,
+}
+
+impl RowFault {
+    /// Gives the error of this fault at the line `line`, whose number is
+    /// `number`.
+    fn at(self, number: usize, line: &str) -> TableParseError {
+        let line = line.to_owned();
+        match self {
+            Self::TooFewFields => TableParseError::TooFewFields { number, line },
+        }
+    }
 }
 
 /// The format of the start time, after the parser joins its five tokens with
@@ -79,9 +105,16 @@ const ZOMBIE: char = 'Z';
 const FIELDS: usize = 10;
 
 /// Reads one row.
-fn parse_row(line: &str) -> Option<ProcessRow> {
-    let ([pid, ppid, uid, rss, stat, weekday, month, day, time, year], command) =
-        split_fields::<FIELDS>(line)?;
+fn parse_row(line: &str) -> Result<Option<ProcessRow>, RowFault> {
+    let (fields, command) = split_fields::<FIELDS>(line).ok_or(RowFault::TooFewFields)?;
+    Ok(read_row(fields, command))
+}
+
+/// Reads the values of one row from its fields and its command.
+fn read_row(
+    [pid, ppid, uid, rss, stat, weekday, month, day, time, year]: [&str; FIELDS],
+    command: &str,
+) -> Option<ProcessRow> {
     let start = [weekday, month, day, time, year].join(" ");
     let started = NaiveDateTime::parse_from_str(&start, START_FORMAT)
         .ok()?
@@ -283,7 +316,9 @@ mod tests {
             "  700",
             "Tue Aug 25 16:45:30 2026",
             "日本語 🎉 café",
-            "  700\u{a0}    1   501      0 S    Tue Aug 25 16:45:30 2026",
+            // A no-break space is not a separator, so `700` and `1` are one
+            // token, and the line holds nine.
+            "  700\u{a0}1   501      0 S    Tue Aug 25 16:45:30 2026",
         ] {
             let error = parse(&with_bad_line_at_3(bad)).expect_err("a short line is refused");
 
