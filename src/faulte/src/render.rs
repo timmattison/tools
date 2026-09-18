@@ -17,6 +17,7 @@ use crate::duration::Span;
 use crate::pid::Uid;
 use crate::plan::Plan;
 use crate::ranking::{ClaudeView, RankedRow, Ranking};
+use crate::stop::{Recheck, StopReport};
 use crate::vm::{SwapUsage, VmDelta};
 
 /// The text in place of a value that `faulte` could not read.
@@ -711,6 +712,33 @@ fn other_account_block(plan: &Plan) -> Option<String> {
     ))
 }
 
+/// The question that `faulte kill` asks before it signals anything.
+///
+/// The answer in the brackets is the answer that an empty answer gives. Only
+/// `y` and `yes` confirm, and [`crate::stop::confirms`] holds that rule.
+///
+/// The text ends with a space and no line break, because the person answers on
+/// the same line. The caller flushes the output before it reads the answer.
+#[must_use]
+pub fn question(count: usize) -> String {
+    String::new()
+}
+
+/// Gives what one run of the stop sequence did, as a person reads it.
+///
+/// The first line counts the sessions that stopped. Each line under it names
+/// one session that did not stop, with the PID first and the reason after it,
+/// because a person who asked for a stop must learn which session is still
+/// running and why.
+///
+/// The last block gives one `crap <session-id>` line for each session that
+/// stopped. The transcript of a session stays on disk after the session stops,
+/// so that command takes the session up again.
+#[must_use]
+pub fn stopped(report: &StopReport) -> String {
+    String::new()
+}
+
 /// Gives the plan of `faulte kill` as a person reads it, before the question.
 ///
 /// `ranking` gives the window and the total that each rate and each share of
@@ -753,6 +781,7 @@ mod tests {
 
     use occ::SessionId;
 
+    use crate::machine::MachineError;
     use crate::pid::Pid;
     use crate::plan::{Candidate, NotSelected, Rules};
     use crate::ranking::{ClaudeTotal, ClaudeView, Skipped};
@@ -1746,6 +1775,96 @@ mod tests {
         assert!(
             !none.contains(SUDO_KILL),
             "a plan with no process of another account gives no command: {none}"
+        );
+    }
+
+    /// The question names the count of sessions, and it ends with the answer
+    /// that an empty answer gives.
+    #[test]
+    fn the_question_names_the_count_of_sessions() {
+        assert_eq!(question(19), "Stop 19 sessions? [y/N] ");
+        assert_eq!(question(1), "Stop 1 session? [y/N] ");
+        assert_eq!(question(1_000), "Stop 1,000 sessions? [y/N] ");
+    }
+
+    /// Gives a candidate of `pid` that names `session`.
+    fn stopped_candidate(pid: u32, session: &str) -> Candidate {
+        Candidate {
+            session: SessionId::parse(session).expect("the test ID is a UUID"),
+            ..candidate(&row(pid, 0))
+        }
+    }
+
+    /// The report names each session that stopped with the command that
+    /// resumes it, and it names each session that kept running with the reason.
+    ///
+    /// A stop is not reversible. The transcript of a session that stopped stays
+    /// on disk, so the person can take any of them up again.
+    #[test]
+    fn the_report_names_each_session_that_stopped_and_each_one_that_did_not() {
+        let first = "11111111-1111-4111-8111-111111111111";
+        let second = "22222222-2222-4222-8222-222222222222";
+        let report = StopReport {
+            skipped: vec![(
+                stopped_candidate(105, "55555555-5555-4555-8555-555555555555"),
+                Recheck::StatusChanged,
+            )],
+            stopped: vec![stopped_candidate(101, first)],
+            killed: vec![stopped_candidate(102, second)],
+            survived: vec![stopped_candidate(103, "33333333-3333-4333-8333-333333333333")],
+            failed: vec![(
+                stopped_candidate(104, "44444444-4444-4444-8444-444444444444"),
+                MachineError::KernelRead {
+                    call: "kill(104, SIGTERM)".to_owned(),
+                    reason: "Operation not permitted".to_owned(),
+                },
+            )],
+        };
+
+        assert_eq!(
+            stopped(&report).lines().collect::<Vec<&str>>(),
+            [
+                "faulte stopped 2 of 5 sessions: 1 after SIGTERM, and 1 after SIGKILL.",
+                "105: faulte left it alone, because its status changed.",
+                "103: it did not stop, even after SIGKILL.",
+                "104: kill(104, SIGTERM) failed: Operation not permitted.",
+                "",
+                "The transcript of each session that stopped stays on disk:",
+                &format!("crap {first}"),
+                &format!("crap {second}"),
+            ]
+        );
+
+        // A run that stopped every session it signalled says so in one line,
+        // and it names no reason, because there is none to name.
+        let clean = StopReport {
+            stopped: vec![stopped_candidate(101, first)],
+            ..StopReport::default()
+        };
+        assert_eq!(
+            stopped(&clean).lines().collect::<Vec<&str>>(),
+            [
+                "faulte stopped 1 of 1 session.",
+                "",
+                "The transcript of each session that stopped stays on disk:",
+                &format!("crap {first}"),
+            ]
+        );
+
+        // A run that stopped nothing names no transcript.
+        let nothing = StopReport {
+            skipped: vec![(
+                stopped_candidate(105, "55555555-5555-4555-8555-555555555555"),
+                Recheck::Exited,
+            )],
+            ..StopReport::default()
+        };
+        assert_eq!(
+            stopped(&nothing).lines().collect::<Vec<&str>>(),
+            [
+                "faulte stopped 0 of 1 session.",
+                "105: it was gone before faulte signalled it.",
+            ]
         );
     }
 }
