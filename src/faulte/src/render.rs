@@ -64,7 +64,13 @@ const SMALLEST_WHOLE_RATE: f64 = 10.0;
 /// be no time, and a division by no time gives no number.
 #[must_use]
 pub fn rate(per_second: f64) -> String {
-    format!("{per_second:.1}")
+    if !per_second.is_finite() {
+        return ABSENT.to_owned();
+    }
+    if per_second < SMALLEST_WHOLE_RATE {
+        return format!("{per_second:.1}");
+    }
+    separate(&format!("{per_second:.0}"))
 }
 
 #[cfg(test)]
