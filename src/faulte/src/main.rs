@@ -114,7 +114,9 @@ fn run(cli: Cli) -> ExitCode {
             idle_for,
             max,
         }) => {
-            let max = max.map(|count| format!(" --max {count}")).unwrap_or_default();
+            let max = max
+                .map(|count| format!(" --max {count}"))
+                .unwrap_or_default();
             not_implemented(&format!(
                 "faulte kill --older-than {older_than} --idle-for {idle_for}{max} {sample}"
             ))

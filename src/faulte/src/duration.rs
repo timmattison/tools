@@ -148,7 +148,7 @@ impl fmt::Display for Span {
         let seconds = self.0.get();
         let (name, per_unit) = UNITS
             .into_iter()
-            .find(|(_, per_unit)| seconds % per_unit == 0)
+            .find(|(_, per_unit)| seconds.is_multiple_of(*per_unit))
             .unwrap_or(SECOND);
         write!(formatter, "{}{name}", seconds / per_unit)
     }
@@ -252,8 +252,23 @@ mod tests {
     #[test]
     fn a_text_that_is_not_a_whole_number_is_refused_and_named() {
         let cases = [
-            "-5s", "-5", "-0s", "+5s", "1.5h", "0.5", "1e3", "5s5", " 5s", "s", "m", "日本語",
-            "🎉s", "café", "五s", "٥s", "5日5",
+            "-5s",
+            "-5",
+            "-0s",
+            "+5s",
+            "1.5h",
+            "0.5",
+            "1e3",
+            "5s5",
+            " 5s",
+            "s",
+            "m",
+            "日本語",
+            "🎉s",
+            "café",
+            "五s",
+            "٥s",
+            "5日5",
         ];
         for text in cases {
             let error = seconds(text).expect_err("the text is not a whole number");
