@@ -707,4 +707,83 @@ mod tests {
             Some("Claude: no session is running")
         );
     }
+
+    /// Gives `ranking`, with `skipped` as the processes that it left out.
+    fn with_skipped(mut ranking: Ranking, skipped: Skipped) -> Ranking {
+        ranking.skipped = skipped;
+        ranking
+    }
+
+    /// The fourth line names each process that the ranking left out, and the
+    /// share of the faults that the processes which exited made. A count of
+    /// zero is not there, and a Mac that left nothing out has no such line.
+    ///
+    /// The whole header is four lines here, in the order that a reader reads
+    /// them.
+    #[test]
+    fn the_fourth_line_names_each_skipped_count_and_leaves_out_a_count_of_zero() {
+        let base = ranking(
+            vec![row(10, 500_000), row(20, 300_000), row(30, 155_973)],
+            959_812,
+        );
+        let loaded = with_skipped(
+            with_claude(
+                base.clone(),
+                ClaudeTotal {
+                    processes: 213,
+                    other_account: 100,
+                    faults: 865_752,
+                },
+            ),
+            Skipped {
+                exited: 3,
+                exited_faults: 3_839,
+                zombies: 72,
+                unsampled: 5,
+            },
+        );
+        let zombies_only = with_skipped(
+            base.clone(),
+            Skipped {
+                zombies: 72,
+                ..Skipped::default()
+            },
+        );
+        let one_of_each = with_skipped(
+            base.clone(),
+            Skipped {
+                exited: 1,
+                exited_faults: 3_839,
+                zombies: 1,
+                unsampled: 1,
+            },
+        );
+
+        assert_eq!(
+            header(&measurement(&loaded)),
+            [
+                "3 processes over a 4.0 s window (interval 5s) — 959,812 faults, 239,953/s",
+                "swap: 46,564 in, 40,156 out in 5.2 s · compressor 27.0 GB · swap in use 9.3 GB of 11.0 GB",
+                "Claude: 213 sessions made 90.2% of all faults (100 of another account)",
+                "skipped: 3 exited before faulte read them (0.4% of the faults), 72 zombies, 5 were not in the top sample",
+            ]
+        );
+        assert_eq!(
+            header(&measurement(&zombies_only)).get(3).map(String::as_str),
+            Some("skipped: 72 zombies")
+        );
+        assert_eq!(
+            header(&measurement(&one_of_each))
+                .get(3)
+                .map(String::as_str),
+            Some(
+                "skipped: 1 exited before faulte read it (0.4% of the faults), 1 zombie, 1 was not in the top sample"
+            )
+        );
+        assert_eq!(
+            header(&measurement(&base)).len(),
+            3,
+            "a Mac that left nothing out says nothing about what it left out"
+        );
+    }
 }
