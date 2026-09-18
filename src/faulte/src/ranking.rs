@@ -446,4 +446,17 @@ PID    FAULTS    \n\
             2.0
         );
     }
+
+    /// A window of no time measures nothing, so every rate over it is zero. A
+    /// division by zero gives no number, and the ranking prints that as `inf`
+    /// or `NaN`.
+    #[test]
+    fn a_window_of_no_time_gives_a_rate_of_zero() {
+        let machine = Machine::new(vec![count(10, 4_000)], vec![process(10)]);
+
+        let ranking = machine.rank_over(Duration::ZERO);
+
+        assert_eq!(ranking.faults_per_second(4_000), 0.0);
+        assert_eq!(ranking.faults_per_second(0), 0.0);
+    }
 }
