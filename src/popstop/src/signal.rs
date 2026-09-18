@@ -359,4 +359,69 @@ mod tests {
             "the ramp down reports complete"
         );
     }
+
+    /// Plays `total` frames in buffers of at most `buffer_frames` frames, and
+    /// starts the ramp down after `stop_at` frames. Gives all the samples.
+    ///
+    /// No buffer crosses the stop, so every buffer size sees the stop at the
+    /// same frame.
+    fn play_in_buffers(
+        total: usize,
+        stop_at: usize,
+        buffer_frames: usize,
+        channels: usize,
+    ) -> Vec<f32> {
+        let (mut signal, stop) = KeepaliveSignal::new(rate());
+        let mut samples = Vec::with_capacity(total * channels);
+        for (start, end) in [(0, stop_at), (stop_at, total)] {
+            if start == stop_at {
+                stop.start_ramp_down();
+            }
+            for buffer_start in (start..end).step_by(buffer_frames) {
+                let frames = buffer_frames.min(end - buffer_start);
+                samples.extend(fill_frames(&mut signal, frames, channels));
+            }
+        }
+        samples
+    }
+
+    #[test]
+    fn the_ramp_continues_across_buffers_of_any_size() {
+        let ramp = ramp_frames();
+        let total = ramp * 4 + 123;
+        // One stop during the ramp up and one stop at the level.
+        let stops = [ramp / 3, ramp + 777];
+
+        for channels in [1, 2] {
+            for stop_at in stops {
+                let one_buffer = play_in_buffers(total, stop_at, total, channels);
+                assert_eq!(one_buffer.len(), total * channels);
+                assert_eq!(
+                    one_buffer.last(),
+                    Some(&0.0),
+                    "the run ends in the silence after the ramp down"
+                );
+                for (index, frame) in one_buffer.chunks_exact(channels).enumerate() {
+                    assert!(
+                        frame.iter().all(|sample| *sample == frame[0]),
+                        "the channels of frame {index} differ: {frame:?}"
+                    );
+                }
+
+                for buffer_frames in [1, 7, 333, 4096] {
+                    let many_buffers = play_in_buffers(total, stop_at, buffer_frames, channels);
+                    assert!(
+                        many_buffers == one_buffer,
+                        "buffers of {buffer_frames} frames, {channels} channels, stop at \
+                         frame {stop_at}: the samples differ from one large buffer, first at \
+                         sample {:?}",
+                        many_buffers
+                            .iter()
+                            .zip(&one_buffer)
+                            .position(|(many, one)| many != one)
+                    );
+                }
+            }
+        }
+    }
 }
