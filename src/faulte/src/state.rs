@@ -8,6 +8,7 @@
 //! The state is a pure function of the record and of the time now. Thus a
 //! test gives both values, and no test reads a clock.
 
+use std::fmt;
 use std::time::{Duration, SystemTime};
 
 use occ::{SessionRecord, SessionStatus};
@@ -53,6 +54,14 @@ impl SessionState {
             Some(SessionStatus::Other(text)) => Self::Other(text.clone()),
             None => Self::Unknown,
         }
+    }
+}
+
+impl fmt::Display for SessionState {
+    /// Writes the state as the ranking shows it.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let _ = formatter;
+        Ok(())
     }
 }
 
@@ -121,6 +130,42 @@ mod tests {
                 SessionState::Idle { for_ },
                 "changed at {changed_at:?}"
             );
+        }
+    }
+
+    /// The text of each state: the name of the status, the idle time as `occ`
+    /// prints an age, `?` for an unknown idle time, and the text of a status
+    /// that `occ` does not know, as is.
+    #[test]
+    fn each_state_prints_as_the_ranking_shows_it() {
+        let cases = [
+            (SessionState::Busy, "busy"),
+            (SessionState::Waiting, "waiting"),
+            (
+                SessionState::Idle {
+                    for_: Some(Duration::from_secs(3 * 3_600 + 12 * 60 + 59)),
+                },
+                "idle 3h 12m",
+            ),
+            (
+                SessionState::Idle {
+                    for_: Some(Duration::from_secs(2 * 86_400 + 5 * 3_600)),
+                },
+                "idle 2d 5h",
+            ),
+            (
+                SessionState::Idle {
+                    for_: Some(Duration::from_millis(45_900)),
+                },
+                "idle 45s",
+            ),
+            (SessionState::Idle { for_: None }, "idle ?"),
+            (SessionState::Other("shell".to_owned()), "shell"),
+            (SessionState::Unknown, "unknown"),
+        ];
+
+        for (state, text) in cases {
+            assert_eq!(state.to_string(), text, "the state {state:?}");
         }
     }
 }
