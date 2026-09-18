@@ -57,6 +57,15 @@ pub fn count(value: u64) -> String {
     separate(&value.to_string())
 }
 
+/// Gives `value`, a count of things, in groups of three digits.
+///
+/// A count of processes is a `usize`. The text of the number is the same
+/// whatever the width of a `usize` on the platform, so nothing here casts one
+/// number to another.
+fn count_of(value: usize) -> String {
+    separate(&value.to_string())
+}
+
 /// The rate below which a rate carries one decimal.
 const SMALLEST_WHOLE_RATE: f64 = 10.0;
 
@@ -308,7 +317,7 @@ pub fn header(measurement: &Measurement<'_>) -> Vec<String> {
     vec![
         format!(
             "{} {} over a {} window (interval {}) {DASH} {} faults, {}/s",
-            separate(&processes.to_string()),
+            count_of(processes),
             plural(processes, PROCESS, PROCESSES),
             seconds(ranking.window),
             measurement.interval,
@@ -324,7 +333,40 @@ pub fn header(measurement: &Measurement<'_>) -> Vec<String> {
             bytes(measurement.usage.used_bytes),
             bytes(measurement.usage.total_bytes),
         ),
+        claude_line(ranking),
     ]
+}
+
+/// The singular of the word for one Claude Code process of the ranking.
+const SESSION: &str = "session";
+
+/// The plural of the word for one Claude Code process of the ranking.
+const SESSIONS: &str = "sessions";
+
+/// Gives the line of the total of Claude Code.
+///
+/// The issue demands this line. On 2026-09-18, 213 sessions made 90% of all
+/// page faults on this Mac, the median one of them made 23,000 faults in 20
+/// seconds, and no single row said what the 213 of them did together.
+fn claude_line(ranking: &Ranking) -> String {
+    let total = ranking.claude;
+    if total.processes == 0 {
+        return format!("Claude: no {SESSION} is running");
+    }
+    // A count of zero adds nothing. The parenthesis is there to say that some
+    // of the sessions are out of reach, and `(none of another account)` says
+    // that about no session at all.
+    let other_account = if total.other_account == 0 {
+        String::new()
+    } else {
+        format!(" ({} of another account)", count_of(total.other_account))
+    };
+    format!(
+        "Claude: {} {} made {} of all faults{other_account}",
+        count_of(total.processes),
+        plural(total.processes, SESSION, SESSIONS),
+        share(ranking.share(total.faults)),
+    )
 }
 
 #[cfg(test)]
