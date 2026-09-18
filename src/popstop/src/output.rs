@@ -21,10 +21,18 @@ use objc2_audio_toolbox::{
     AudioOutputUnitStart, AudioOutputUnitStop, AudioUnit, AudioUnitInitialize, AudioUnitPropertyID,
     AudioUnitRenderActionFlags, AudioUnitSetProperty, AudioUnitUninitialize,
 };
+use objc2_core_audio::{
+    kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyElementMain,
+    kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
+    kAudioObjectUnknown, AudioObjectGetPropertyData, AudioObjectID, AudioObjectPropertyAddress,
+    AudioObjectPropertySelector,
+};
 use objc2_core_audio_types::{
     kAudioFormatFlagsNativeFloatPacked, kAudioFormatLinearPCM, AudioBuffer, AudioBufferList,
     AudioStreamBasicDescription, AudioTimeStamp,
 };
+
+use objc2_core_foundation::{CFRetained, CFString};
 
 use crate::signal::SampleRate;
 
@@ -66,7 +74,13 @@ mod call {
     pub(super) const UNINITIALIZE: &str = "AudioUnitUninitialize";
     pub(super) const OUTPUT_UNIT_START: &str = "AudioOutputUnitStart";
     pub(super) const OUTPUT_UNIT_STOP: &str = "AudioOutputUnitStop";
+    pub(super) const GET_DEFAULT_OUTPUT_DEVICE: &str =
+        "AudioObjectGetPropertyData(kAudioHardwarePropertyDefaultOutputDevice)";
+    pub(super) const GET_NAME: &str = "AudioObjectGetPropertyData(kAudioObjectPropertyName)";
 }
+
+/// The audio object of the whole audio system.
+const SYSTEM_OBJECT: AudioObjectID = kAudioObjectSystemObject.cast_unsigned();
 
 /// Writes the samples that the output unit plays.
 pub trait Render: Send + 'static {
@@ -151,7 +165,80 @@ impl AudioError {
 ///
 /// Returns an [`AudioError`] that names the call that failed.
 pub fn default_output_device_name() -> Result<String, AudioError> {
-    Ok(String::new())
+    let device = default_output_device()?;
+    // SAFETY: the data of the name property is a `CFStringRef`.
+    let name: *const CFString = unsafe {
+        object_property(
+            device,
+            kAudioObjectPropertyName,
+            call::GET_NAME,
+            ptr::null(),
+        )
+    }?;
+    let name = NonNull::new(name.cast_mut())
+        .ok_or_else(|| AudioError::no_result(call::GET_NAME, "gave no name"))?;
+    // SAFETY: the name property gives a string with a retain count of +1,
+    // and the caller must release it. `CFRetained` releases it at drop.
+    let name = unsafe { CFRetained::from_raw(name) };
+    Ok(name.to_string())
+}
+
+/// Gives the default output device, which the default output unit plays to.
+fn default_output_device() -> Result<AudioObjectID, AudioError> {
+    // SAFETY: the data of the default output device property is an
+    // `AudioObjectID`.
+    let device = unsafe {
+        object_property(
+            SYSTEM_OBJECT,
+            kAudioHardwarePropertyDefaultOutputDevice,
+            call::GET_DEFAULT_OUTPUT_DEVICE,
+            kAudioObjectUnknown,
+        )
+    }?;
+    if device == kAudioObjectUnknown {
+        return Err(AudioError::no_result(
+            call::GET_DEFAULT_OUTPUT_DEVICE,
+            "found no default output device",
+        ));
+    }
+    Ok(device)
+}
+
+/// Gives the value of a property in the global scope of the main element of
+/// `object`. `initial` stays the value when the call writes nothing.
+///
+/// # Safety
+///
+/// `T` is the type of the data of the property `selector`.
+unsafe fn object_property<T>(
+    object: AudioObjectID,
+    selector: AudioObjectPropertySelector,
+    call: &'static str,
+    initial: T,
+) -> Result<T, AudioError> {
+    let address = AudioObjectPropertyAddress {
+        mSelector: selector,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain,
+    };
+    let mut value = initial;
+    let mut size = const { byte_size::<T>() };
+    // SAFETY: `address` and `size` live for the whole call, and `size` is
+    // the size of `value`. The caller makes sure that `T` is the type of the
+    // data of the property, so the call writes a valid `T`. There is no
+    // qualifier.
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            object,
+            NonNull::from(&address),
+            0,
+            ptr::null(),
+            NonNull::from(&mut size),
+            NonNull::from(&mut value).cast::<c_void>(),
+        )
+    };
+    check(call, status)?;
+    Ok(value)
 }
 
 /// Gives an error that names `call` when `status` is not [`NO_ERR`].
