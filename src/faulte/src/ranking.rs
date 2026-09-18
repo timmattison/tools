@@ -462,4 +462,29 @@ PID    FAULTS    \n\
         assert_eq!(ranking.faults_per_second(4_000), 0.0);
         assert_eq!(ranking.faults_per_second(0), 0.0);
     }
+
+    /// `top` lists PID 0, and `ps` does not. The kernel does the work of a
+    /// Mac that is short of memory, so PID 0 is a row, and never a process
+    /// that exited. The row names the kernel, and gives no memory and no
+    /// start time, because `ps` gives neither.
+    #[test]
+    fn pid_zero_is_a_row_of_the_kernel() {
+        let machine = Machine::new(vec![count(0, 1_329), count(10, 3)], vec![process(10)]);
+
+        let ranking = machine.rank();
+
+        assert_eq!(pids(&ranking), [0, 10]);
+        assert_eq!(
+            ranking.rows.first(),
+            Some(&RankedRow {
+                pid: Pid::new(0),
+                uid: Uid::new(0),
+                faults: 1_329,
+                rss_kib: None,
+                started_at_epoch_secs: None,
+                command: KERNEL_TASK.to_owned(),
+                claude: ClaudeView::NotClaude,
+            })
+        );
+    }
 }
