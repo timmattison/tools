@@ -165,17 +165,18 @@ pub fn stop(
     let Ok(table) = machine.process_table() else {
         return report;
     };
-    let mut targets: Vec<&Candidate> = candidates
-        .iter()
-        .filter(|candidate| {
-            let record = machine.record_for(
-                candidate.row.pid,
-                candidate.row.uid,
-                candidate.started_at_epoch_secs,
-            );
-            recheck(candidate, &table, record.as_ref()) == Recheck::Proceed
-        })
-        .collect();
+    let mut targets: Vec<&Candidate> = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let record = machine.record_for(
+            candidate.row.pid,
+            candidate.row.uid,
+            candidate.started_at_epoch_secs,
+        );
+        match recheck(candidate, &table, record.as_ref()) {
+            Recheck::Proceed => targets.push(candidate),
+            refusal => report.skipped.push((candidate.clone(), refusal)),
+        }
+    }
     for candidate in &targets {
         let _ = machine.signal(candidate.row.pid, Signal::Terminate);
     }
