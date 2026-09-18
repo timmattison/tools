@@ -614,6 +614,21 @@ mod tests {
         }
     }
 
+    /// An output with no row is refused. A Mac always runs processes, and an
+    /// empty table makes every process of a sample look as if it exited.
+    #[test]
+    fn an_output_with_no_row_is_refused() {
+        for text in ["", "\n", "   \n\t\n\n"] {
+            let error = parse(text).expect_err("an output with no row is refused");
+
+            assert_eq!(error, TableParseError::NoRows, "the text {text:?}");
+            assert!(
+                error.to_string().starts_with("ps listed no process"),
+                "the message says that the table is empty: {error}"
+            );
+        }
+    }
+
     /// The first second of the epoch is zero, not an error.
     #[test]
     fn the_start_of_the_epoch_is_zero() {
