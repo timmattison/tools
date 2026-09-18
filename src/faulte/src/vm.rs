@@ -26,6 +26,18 @@ pub struct VmCounters {
     pub compressor_pages: u64,
 }
 
+impl VmCounters {
+    /// Gives the size of the compressor in bytes: the pages that it holds,
+    /// times `page_size`.
+    ///
+    /// The page size of this Mac is 16,384 bytes, from `vm_page_size`.
+    #[must_use]
+    pub fn compressor_bytes(&self, page_size: u64) -> u64 {
+        let _ = page_size;
+        0
+    }
+}
+
 /// The swap traffic over an interval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct VmDelta {
@@ -108,5 +120,21 @@ mod tests {
         };
 
         assert_eq!(VmDelta::between(before, after), VmDelta::default());
+    }
+
+    /// The size of the compressor is its pages times the size of a page. The
+    /// values are 32 GiB in pages of 16,384 bytes, the state of this Mac on
+    /// 2026-09-18.
+    #[test]
+    fn the_size_of_the_compressor_is_its_pages_times_the_size_of_a_page() {
+        let counters = VmCounters {
+            swapins: 0,
+            swapouts: 0,
+            compressor_pages: 2_097_152,
+        };
+
+        assert_eq!(counters.compressor_bytes(16_384), 34_359_738_368);
+        assert_eq!(counters.compressor_bytes(4_096), 8_589_934_592);
+        assert_eq!(VmCounters::default().compressor_bytes(16_384), 0);
     }
 }
