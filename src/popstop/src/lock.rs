@@ -205,11 +205,23 @@ pub fn acquire(dir: &StateDir, record: &HolderRecord) -> Result<LockGuard, Acqui
 /// Gives the record of the copy that holds the lock, or `None` when no copy
 /// holds it.
 ///
+/// The lock is the only source of truth. When this call gets the lock, no
+/// copy runs: it releases the lock at once and gives `None`, even when an old
+/// record stays in the file after a crash.
+///
 /// # Errors
 ///
 /// Returns an error when the lock file cannot be opened, locked, or read.
-pub fn current_holder(_dir: &StateDir) -> io::Result<Option<HolderRecord>> {
-    Ok(None)
+pub fn current_holder(dir: &StateDir) -> io::Result<Option<HolderRecord>> {
+    let mut file = File::open(dir.lock_path())?;
+    match file.try_lock() {
+        Ok(()) => {
+            file.unlock()?;
+            Ok(None)
+        }
+        Err(TryLockError::WouldBlock) => read_record(&mut file).map(Some),
+        Err(TryLockError::Error(error)) => Err(error),
+    }
 }
 
 /// Reads the record in the lock file.
