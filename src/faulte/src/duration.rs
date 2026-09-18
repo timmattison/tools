@@ -64,12 +64,6 @@ pub enum ParseSpanError {
         /// The text as the person gave it.
         text: String,
     },
-    /// The text is not a duration.
-    #[error("{text:?} is not a duration")]
-    Invalid {
-        /// The text as the person gave it.
-        text: String,
-    },
 }
 
 /// The seconds in one day.
@@ -114,7 +108,7 @@ impl FromStr for Span {
         if text.is_empty() {
             return Err(ParseSpanError::Empty);
         }
-        let invalid = || ParseSpanError::Invalid {
+        let too_long = || ParseSpanError::TooLong {
             text: text.to_owned(),
         };
         let number = text.trim_end_matches(|character: char| !character.is_ascii_digit());
@@ -128,8 +122,10 @@ impl FromStr for Span {
             text: text.to_owned(),
             unit: unit.to_owned(),
         })?;
-        let count: u64 = number.parse().map_err(|_| invalid())?;
-        let seconds = count.checked_mul(per_unit).ok_or_else(invalid)?;
+        // The number holds ASCII digits only, so the parse fails only when the
+        // value does not fit in 64 bits.
+        let count: u64 = number.parse().map_err(|_| too_long())?;
+        let seconds = count.checked_mul(per_unit).ok_or_else(too_long)?;
         NonZeroU64::new(seconds)
             .map(Self)
             .ok_or_else(|| ParseSpanError::Zero {
