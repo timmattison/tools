@@ -359,7 +359,7 @@ mod tests {
     use super::*;
     use crate::graph::of_parts;
     use crate::plan::Step;
-    use crate::report::Status;
+    use crate::report::{Kind, Status};
 
     fn issue(number: u64) -> IssueNumber {
         IssueNumber::new(number).expect("the test number is an issue number")
@@ -374,6 +374,7 @@ mod tests {
             number: issue(number),
             title: format!("title of {number}"),
             status,
+            kind: Some(Kind::Issue),
             closes: None,
             blocked_by: numbers(blocked_by),
         }

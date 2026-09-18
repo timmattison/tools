@@ -147,6 +147,12 @@ const GRAPH_NOT_READY: &str = concat!(
     "Every open issue waits for work that is not finished.",
 );
 
+/// The words that tell the reader what to do with an open pull request.
+///
+/// They stand where the start command of an issue stands, because a pull
+/// request is work that exists already: nobody starts it a second time.
+const FINISH_WORDS: &str = "review it and merge it";
+
 /// Paint the chain, the notes it earns, and the answer.
 ///
 /// `repo` names the repository the states came from, and appears only in the
@@ -384,7 +390,8 @@ fn word(status: Status) -> &'static str {
     }
 }
 
-/// The answer: the issue to start and the command that starts it.
+/// The answer: the step to take next and what to do with it. See
+/// [`next_line`].
 fn answer(report: &Report, start: &StartCommand) -> String {
     let Some(entry) = report.next_entry() else {
         return if report
@@ -402,7 +409,56 @@ fn answer(report: &Report, start: &StartCommand) -> String {
             "No issue in the chain is open.".dimmed().to_string()
         };
     };
-    start_line(entry.number, start)
+    next_line(entry, start)
+}
+
+/// What the answer tells the reader to do with one step somebody can take now.
+enum Action {
+    /// An issue: start it with the start command.
+    Start(IssueNumber),
+    /// An open pull request: the work exists, so review it and merge it.
+    Finish {
+        /// The number of the pull request.
+        pull_request: IssueNumber,
+    },
+}
+
+impl Action {
+    /// What to do with `entry`.
+    ///
+    /// An open pull request is work to finish, not work to start, and this is
+    /// where that rule lives.
+    fn of(entry: &Entry) -> Self {
+        if entry.is_pull_request() {
+            Self::Finish {
+                pull_request: entry.number,
+            }
+        } else {
+            Self::Start(entry.number)
+        }
+    }
+}
+
+/// `PR #515`: the name an answer writes for a pull request.
+fn pull_request_name(number: IssueNumber) -> String {
+    format!("PR {number}")
+}
+
+/// The sentence that names one step somebody can take now, and what to do
+/// with it.
+///
+/// An issue gets the start command. An open pull request gets the words that
+/// tell the reader to finish it, and no start command, because its work
+/// exists already.
+fn next_line(entry: &Entry, start: &StartCommand) -> String {
+    match Action::of(entry) {
+        Action::Start(number) => start_line(number, start),
+        Action::Finish { pull_request } => format!(
+            "Finish {} next: {}",
+            pull_request_name(pull_request).bold(),
+            FINISH_WORDS.cyan().bold()
+        ),
+    }
 }
 
 /// The sentence that names one issue to start, and the command that starts it.
@@ -765,7 +821,7 @@ fn summary(streams: &[StreamReport], width: usize, start: &StartCommand) -> Vec<
 mod tests {
     use super::*;
 
-    use crate::report::{Closes, States};
+    use crate::report::{Closes, Kind, States};
 
     /// The repository the test states come from.
     const REPO: &str = "timmattison/tools";
@@ -794,6 +850,7 @@ mod tests {
             number: IssueNumber::new(number).expect("the test number is an issue number"),
             title: title.to_string(),
             status,
+            kind: Some(Kind::Issue),
             closes: None,
             blocked_by: Vec::new(),
         }

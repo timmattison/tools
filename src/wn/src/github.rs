@@ -47,7 +47,7 @@ use thiserror::Error;
 
 use crate::blocked_by;
 use crate::chain::{IssueNumber, Snippet};
-use crate::report::{Entry, Status};
+use crate::report::{Entry, Kind, Status};
 
 /// The GitHub CLI, which carries the credential and the host.
 const GH: &str = "gh";
@@ -405,6 +405,7 @@ fn entry_of(
             number,
             title: String::new(),
             status: Status::Missing,
+            kind: None,
             closes: None,
             blocked_by: Vec::new(),
         });
@@ -427,6 +428,7 @@ fn entry_of(
         status: status_of(state, kind, reason).ok_or_else(|| {
             anyhow!("GitHub gave {number} the state {state}, which wn cannot read")
         })?,
+        kind: kind_of(kind),
         closes: None,
         // Only an issue carries a body in the answer, because the query asks
         // an issue for one and a pull request for none. An issue does not
@@ -442,9 +444,22 @@ fn entry_of(
     })
 }
 
+/// The `__typename` of an issue.
+const ISSUE: &str = "Issue";
+
 /// The `__typename` of a pull request, which is the one kind whose closed
 /// state does not say the work was done.
 const PULL_REQUEST: &str = "PullRequest";
+
+/// What kind of work one `__typename` of GitHub names, or `None` for a kind
+/// this tool has never been taught.
+fn kind_of(typename: &str) -> Option<Kind> {
+    match typename {
+        ISSUE => Some(Kind::Issue),
+        PULL_REQUEST => Some(Kind::PullRequest),
+        _ => None,
+    }
+}
 
 /// What one state of GitHub means for a chain, or `None` for a state this
 /// tool has never been taught.

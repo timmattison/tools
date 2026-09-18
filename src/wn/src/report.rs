@@ -94,6 +94,16 @@ impl Status {
     }
 }
 
+/// What GitHub says a number names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// An issue: work somebody starts.
+    Issue,
+    /// A pull request: work that already exists, which somebody reviews and
+    /// merges.
+    PullRequest,
+}
+
 /// The issue the pull request of a step closes, with what GitHub says about
 /// it.
 ///
@@ -119,6 +129,9 @@ pub struct Entry {
     pub title: String,
     /// What GitHub says about it.
     pub status: Status,
+    /// What GitHub says the number names. `None` for a number GitHub gave no
+    /// kind for, which is every [`Status::Missing`] entry.
+    pub kind: Option<Kind>,
     /// The issue this work closes, when the step names one. `None` for every
     /// step of a chain, because a chain writes one number for each step.
     pub closes: Option<Closes>,
@@ -144,6 +157,16 @@ impl Entry {
             Some(closes) => format!("{} ({})", self.number, closes.number),
             None => self.number.to_string(),
         }
+    }
+
+    /// Is this work a pull request?
+    ///
+    /// The work of a pull request exists already, so the answer tells the
+    /// reader to finish it and not to start it. Callers ask this, and do not
+    /// read [`kind`](Self::kind) themselves.
+    #[must_use]
+    pub fn is_pull_request(&self) -> bool {
+        self.kind == Some(Kind::PullRequest)
     }
 }
 
@@ -187,6 +210,7 @@ impl States {
             number,
             title: String::new(),
             status: Status::Missing,
+            kind: None,
             closes: None,
             blocked_by: Vec::new(),
         })
@@ -497,6 +521,7 @@ mod tests {
             number: issue(number),
             title: format!("title of {number}"),
             status,
+            kind: Some(Kind::Issue),
             closes: None,
             blocked_by: Vec::new(),
         }
