@@ -46,7 +46,7 @@ fn separate(digits: &str) -> String {
 /// memory. The groups let a reader compare two such counts at a glance.
 #[must_use]
 pub fn count(value: u64) -> String {
-    value.to_string()
+    separate(&value.to_string())
 }
 
 #[cfg(test)]
