@@ -1924,7 +1924,8 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - Usage: `popstop` (runs in the foreground until Ctrl-C, and stops when the terminal closes),
     `popstop --background` (starts a copy that has no terminal and returns only after that copy
     plays), `popstop --stop`, `popstop --status`. A background copy writes its output to
-    `popstop.log` beside the lock file, and each background start empties that log.
+    `popstop.log` beside the lock file. Each copy that takes the lock empties that log, and a
+    background start that another copy refused leaves the log of that copy as it is.
   - The idea comes from [eamq/mac-audio-keepalive](https://github.com/eamq/mac-audio-keepalive)
     (MIT), which solves the same problem with a clone, a shell script, and a `launchd` service.
     popstop is new code with the same purpose, and it installs with `cargo install`.

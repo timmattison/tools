@@ -17,9 +17,15 @@
 //! start. The copy writes one [`Handshake`] into it and the start reads that
 //! one line. Then the start writes the answer for the user and ends, and the
 //! copy sends its later output to the log.
+//!
+//! The log belongs to the copy that holds the lock. The start opens the log
+//! to append, and it gives the log to the copy as its stderr. The copy
+//! empties the log only after it takes the lock, and a copy that another copy
+//! refused writes nothing into it.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
+use std::os::fd::AsFd;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
@@ -120,25 +126,49 @@ pub fn start(settings: &Settings) -> Result<Report, Failure> {
     }
 }
 
-/// Runs the life cycle as the copy that a background start made.
+/// Runs the life cycle as the copy that a background start made, and gives
+/// the exit status of the copy.
 ///
 /// The copy reports through its stdout, which is the pipe to the start. After
 /// the report it sends its stdout to the log, so its later output goes there
 /// and a write cannot fail after the start ended.
 ///
-/// # Errors
+/// The copy empties the log once it holds the lock (see [`empty_the_log`]).
+/// It tells the start about a failure, and it decides which failure goes
+/// into the log (see [`write_into_the_log`]). Thus the caller writes nothing.
 ///
-/// Returns the [`Failure`] of the life cycle: the status
+/// The status is [`exit_status::SUCCESS`] when the copy stopped as it must,
 /// [`exit_status::ANOTHER_COPY_RUNS`] when another copy holds the lock, and
-/// the status [`exit_status::ERROR`] for every other problem.
-pub fn run_child(settings: &Settings) -> Result<(), Failure> {
+/// [`exit_status::ERROR`] for every other problem.
+#[must_use]
+pub fn run_child(settings: &Settings) -> u8 {
     let outcome = start_a_session().and_then(|()| {
-        life_cycle::run(Mode::Background, settings, report_ready).map(|_stopped| ())
+        life_cycle::run(Mode::Background, settings, empty_the_log, report_ready).map(|_stopped| ())
     });
-    if let Err(failure) = &outcome {
-        tell_the_start_about(failure);
+    match outcome {
+        Ok(()) => exit_status::SUCCESS,
+        Err(failure) => {
+            tell_the_start_about(&failure);
+            write_into_the_log(&failure);
+            failure.status()
+        }
     }
-    outcome
+}
+
+/// Writes the reason of a failure into the log, so the reason stays for the
+/// user to read after the start ended.
+///
+/// A refusal stays out of the log. Another copy holds the lock then, thus the
+/// log belongs to that copy, and the refusal reaches the user through the
+/// report to the start. Every other failure goes to the end of the log, thus
+/// the log of a copy that reported nothing holds the reason too.
+fn write_into_the_log(failure: &Failure) {
+    if failure.status() == exit_status::ANOTHER_COPY_RUNS {
+        return;
+    }
+    // The stderr of this copy is its log. A write to it that fails has no
+    // other place to report.
+    let _ = writeln!(io::stderr(), "{}", failure.message());
 }
 
 /// Tells the start that made this copy why the copy did not play.
@@ -217,17 +247,56 @@ fn send_the_later_output_to_the_log() -> io::Result<()> {
     }
 }
 
-/// Opens the log of the background copies in `dir`, and makes the directory
-/// when it does not exist.
+/// Empties the log, once this copy holds the lock.
 ///
-/// The open empties the log, thus the log holds the copy that runs and
-/// nothing older, and it cannot grow without limit.
+/// The copy that holds the lock owns the log. Thus the log holds the output
+/// of that copy and nothing older, and it does not grow with each copy that
+/// plays. A copy that another copy refused never gets here, thus it never
+/// empties the log of the copy that runs.
+///
+/// A log that cannot be emptied gets a warning, and the copy plays on. Old
+/// text in the log is no reason to let the device sleep.
+fn empty_the_log() {
+    let emptied = io::stderr()
+        .as_fd()
+        .try_clone_to_owned()
+        .map(File::from)
+        .and_then(|log| empty(&log));
+    if let Err(problem) = emptied {
+        let _ = writeln!(
+            io::stderr(),
+            "{}",
+            message::warning_line(&format!("the log cannot be emptied: {problem}"))
+        );
+    }
+}
+
+/// Empties `log` when it is a regular file, and does nothing to it when it is
+/// not.
+///
+/// The stderr of a copy that a person started by hand can be a terminal, a
+/// pipe, or `/dev/null`. None of these is a log, thus such a copy has nothing
+/// to empty. A terminal and a pipe also refuse the call that empties a file.
+fn empty(log: &File) -> io::Result<()> {
+    if log.metadata()?.is_file() {
+        log.set_len(0)
+    } else {
+        Ok(())
+    }
+}
+
+/// Opens the log of the background copies in `dir` for the copy that a start
+/// makes, and makes the directory when it does not exist.
+///
+/// The open keeps the text in the log, because another copy can hold the
+/// lock, and that text is its output. The copy that takes the lock empties
+/// the log (see [`empty_the_log`]). Each write goes to the end of the log,
+/// thus a write never lands inside text that another process wrote.
 fn open_the_log(dir: &StateDir) -> io::Result<File> {
     fs::create_dir_all(dir.path())?;
     OpenOptions::new()
         .create(true)
-        .write(true)
-        .truncate(true)
+        .append(true)
         .open(dir.log_path())
 }
 
@@ -338,11 +407,62 @@ fn wait_for_the_end(copy: &mut Child) {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{self, OpenOptions};
-    use std::io::Write;
+    use std::fs::{self, File, OpenOptions};
+    use std::io::{self, Write};
+    use std::os::fd::OwnedFd;
 
-    use super::open_the_log;
+    use super::{empty, open_the_log};
     use crate::lock::StateDir;
+
+    /// The text of a copy that ran before.
+    const OLD_TEXT: &str = "an old line of a copy that ran before\n";
+
+    #[test]
+    fn the_copy_that_holds_the_lock_empties_a_log_that_is_a_file() {
+        let temp = tempfile::tempdir().expect("a temporary directory");
+        let dir = StateDir::new(temp.path().join("state"));
+        let log = open_the_log(&dir).expect("open the log for the copy");
+        fs::write(dir.log_path(), OLD_TEXT).expect("write the old log");
+
+        empty(&log).expect("empty the log");
+
+        assert_eq!(
+            fs::read_to_string(dir.log_path()).expect("read the log"),
+            "",
+            "the log still holds the text of the copy before it"
+        );
+    }
+
+    #[test]
+    fn a_stderr_that_is_no_regular_file_is_no_reason_to_fail() {
+        // A pipe cannot be emptied: `ftruncate` refuses it. The reader stays
+        // open, so the pipe is the pipe of a copy that a person watches.
+        let (_reader, writer) = io::pipe().expect("make a pipe");
+        let pipe = File::from(OwnedFd::from(writer));
+
+        empty(&pipe).expect("a copy whose stderr is no log has nothing to empty");
+    }
+
+    #[test]
+    fn a_log_that_cannot_be_emptied_gives_the_problem_and_keeps_its_text() {
+        let temp = tempfile::tempdir().expect("a temporary directory");
+        let path = temp.path().join("popstop.log");
+        fs::write(&path, OLD_TEXT).expect("write the old log");
+        // A descriptor that cannot write cannot empty the file either.
+        let read_only = File::open(&path).expect("open the log to read");
+
+        let emptied = empty(&read_only);
+
+        assert!(
+            emptied.is_err(),
+            "a log that cannot be emptied gave no problem"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("read the log"),
+            OLD_TEXT,
+            "the log lost its text"
+        );
+    }
 
     #[test]
     fn a_write_of_the_copy_lands_after_the_text_that_another_process_wrote() {

@@ -6,7 +6,9 @@
 //!
 //! [`run`] holds that life cycle for every mode. The mode and the way to
 //! report a ready copy are its parameters, because a background copy tells
-//! its parent through a pipe and a foreground copy writes to its terminal.
+//! its parent through a pipe and a foreground copy writes to its terminal. A
+//! step that runs once the copy holds the lock is a parameter too, because a
+//! background copy owns its log only from that moment on.
 
 use std::fmt;
 use std::io::{self, Write};
@@ -139,22 +141,36 @@ pub enum StopReason {
 /// when another copy holds the lock, and a failure with the status
 /// [`exit_status::ERROR`] for every other problem.
 pub fn run_foreground(settings: &Settings) -> Result<(), Failure> {
-    run(Mode::Foreground, settings, |ready| {
-        let mut stdout = io::stdout().lock();
-        writeln!(
-            stdout,
-            "{}",
-            message::ready_lines(ready.device_name, ready.pid)
-        )?;
-        stdout.flush()
-    })
+    // A foreground copy writes to its terminal and has no log, thus it has
+    // nothing to do once it holds the lock.
+    run(
+        Mode::Foreground,
+        settings,
+        || {},
+        |ready| {
+            let mut stdout = io::stdout().lock();
+            writeln!(
+                stdout,
+                "{}",
+                message::ready_lines(ready.device_name, ready.pid)
+            )?;
+            stdout.flush()
+        },
+    )
     .map(|_stopped| ())
 }
 
 /// Runs a copy of popstop in `mode`, until a signal stops it. Gives the
 /// reason of the stop.
 ///
-/// `report_ready` tells the user, or the parent process, that the copy plays.
+/// `lock_held` runs once, directly after the copy takes the lock and before
+/// it opens the device. `report_ready` tells the user, or the parent process,
+/// that the copy plays.
+///
+/// The run writes nothing to stderr before the copy holds the lock. Thus a
+/// copy that another copy refused writes nothing into output that belongs to
+/// that other copy. What the caller does with the [`Failure`] is for the
+/// caller to decide.
 ///
 /// # Errors
 ///
@@ -164,13 +180,10 @@ pub fn run_foreground(settings: &Settings) -> Result<(), Failure> {
 pub fn run(
     mode: Mode,
     settings: &Settings,
+    lock_held: impl FnOnce(),
     report_ready: impl FnOnce(&Ready<'_>) -> io::Result<()>,
 ) -> Result<StopReason, Failure> {
-    if let Err(problem) = set_background_qos() {
-        // A class that the scheduler refused costs a little power, and
-        // nothing else. The run continues.
-        let _ = writeln!(io::stderr(), "{}", message::warning_line(&problem));
-    }
+    let qos = set_background_qos();
 
     // The signals come first. From here on, a signal stops this copy in the
     // way that this module says, and never in the way of the system, which
@@ -180,6 +193,14 @@ pub fn run(
     let dir = settings.state_dir()?;
     let record = own_record(mode)?;
     let guard = acquire(&dir, &record, settings)?;
+    lock_held();
+
+    if let Err(problem) = qos {
+        // A class that the scheduler refused costs a little power, and
+        // nothing else. The run continues. The warning comes only after
+        // `lock_held`, because it is about a copy that plays.
+        let _ = writeln!(io::stderr(), "{}", message::warning_line(&problem));
+    }
 
     let keepalive = Keepalive::start().map_err(|problem| Failure::error(&problem))?;
     let ready = Ready {

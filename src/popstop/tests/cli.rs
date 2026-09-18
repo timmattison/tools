@@ -19,6 +19,8 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use popstop::background::CHILD_FLAG;
+use popstop::handshake::Handshake;
 use popstop::lock::{current_holder, HolderRecord, Mode, StartTime, StateDir};
 use popstop::message::start_time_text;
 use popstop::process::start_time;
@@ -736,7 +738,7 @@ fn a_background_start_refuses_with_the_words_of_a_foreground_start() {
 }
 
 #[test]
-fn a_background_start_truncates_the_log_of_the_copy_before_it() {
+fn the_copy_that_takes_the_lock_empties_the_log_of_the_copy_before_it() {
     let temp = tempfile::tempdir().expect("a temporary directory");
     let dir = temp.path().join("state");
     let log = StateDir::new(dir.clone()).log_path();
@@ -844,6 +846,34 @@ fn a_refused_background_start_leaves_the_log_of_the_copy_that_runs_alone() {
         Some(record),
         "the first copy still holds the lock"
     );
+}
+
+#[test]
+fn a_background_copy_whose_stderr_is_no_log_plays_and_warns_about_nothing() {
+    let temp = tempfile::tempdir().expect("a temporary directory");
+    let dir = temp.path().join("state");
+    // A person who gives the hidden flag by hand gives the copy a terminal or
+    // a pipe as its stderr, and not a log. Neither one can be emptied.
+    let mut copy = Copy::start(&dir, &[CHILD_FLAG, "--exit-after", EXIT_AFTER_SECONDS]);
+
+    let line = copy.next_line();
+    let Some(Handshake::Ready { pid, .. }) = Handshake::parse(&line) else {
+        panic!("the copy did not report that it plays: {line:?}");
+    };
+    assert_eq!(pid, copy.pid(), "the report names the copy that plays");
+
+    copy.send(SIGTERM);
+    let (status, stderr) = copy.finish();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a stderr that is no log is no reason to fail: {status}. Its stderr:\n{stderr}"
+    );
+    assert_eq!(
+        stderr, "",
+        "a copy whose stderr is no log has nothing to empty and nothing to warn about"
+    );
+    assert_eq!(holder(&dir), None, "the copy released the lock");
 }
 
 #[test]

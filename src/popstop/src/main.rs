@@ -89,16 +89,9 @@ fn run(cli: &Cli) -> ExitCode {
         return report(popstop::background::start(&settings));
     }
     if cli.background_child {
-        // The stderr of this copy is its log, thus the reason of a failure
-        // stays for the user to read after the start that made the copy ended.
-        return match popstop::background::run_child(&settings) {
-            Ok(()) => ExitCode::from(popstop::exit_status::SUCCESS),
-            Err(failure) => {
-                // A write to stderr that fails has no other place to report.
-                let _ = writeln!(std::io::stderr(), "{}", failure.message());
-                ExitCode::from(failure.status())
-            }
-        };
+        // The copy tells the start about a failure, and it decides what goes
+        // into its log. Thus nothing is left to write here.
+        return ExitCode::from(popstop::background::run_child(&settings));
     }
     if cli.stop {
         return report(control::stop(&settings));
