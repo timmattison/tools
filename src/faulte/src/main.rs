@@ -46,14 +46,9 @@ const NOT_IMPLEMENTED: &str = "this command is not implemented yet.";
 #[cfg(target_os = "macos")]
 const EXIT_NOT_IMPLEMENTED: u8 = 2;
 
-/// The command line. Only macOS reads the options, so another platform does
-/// not read the fields.
+/// The command line.
 #[derive(Parser)]
 #[command(name = "faulte", version = version_string!(), about = ABOUT)]
-#[cfg_attr(
-    not(target_os = "macos"),
-    allow(dead_code, reason = "only the macOS build reads the options")
-)]
 struct Cli {
     /// The time to sample the page faults of each process, for example 5s, 10m,
     /// or 2h. A bare number is a number of seconds.
@@ -72,10 +67,6 @@ struct Cli {
 
 /// The commands other than the ranking.
 #[derive(Subcommand)]
-#[cfg_attr(
-    not(target_os = "macos"),
-    allow(dead_code, reason = "only the macOS build reads the options")
-)]
 enum Command {
     /// Stop the old idle Claude Code sessions. faulte shows the plan and asks
     /// before it stops a session.
