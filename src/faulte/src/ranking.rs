@@ -395,4 +395,17 @@ PID    FAULTS    \n\
         assert_eq!(ranking.share(100), 0.25);
         assert_eq!(ranking.share(400), 1.0);
     }
+
+    /// A sample in which no process made a fault gives a total of zero. Each
+    /// share is then zero. A division of zero by zero gives no number, and
+    /// the header prints that as `NaN%`.
+    #[test]
+    fn a_total_of_zero_gives_a_share_of_zero() {
+        let machine = Machine::new(vec![count(10, 0), count(20, 0)], vec![process(10)]);
+
+        let ranking = machine.rank();
+
+        assert_eq!(ranking.total_faults, 0);
+        assert_eq!(ranking.share(0), 0.0);
+    }
 }
