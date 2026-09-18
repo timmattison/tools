@@ -34,7 +34,7 @@ use objc2_core_audio_types::{
 
 use objc2_core_foundation::{CFRetained, CFString};
 
-use crate::signal::SampleRate;
+use crate::signal::{KeepaliveSignal, SampleRate};
 
 /// The number of channels of the stream.
 const CHANNELS: u32 = 2;
@@ -92,6 +92,10 @@ pub trait Render: Send + 'static {
     /// The output unit calls this on the real-time audio thread. It must not
     /// allocate, lock, or panic.
     fn render(&mut self, interleaved: &mut [f32], channels: usize);
+}
+
+impl Render for KeepaliveSignal {
+    fn render(&mut self, _interleaved: &mut [f32], _channels: usize) {}
 }
 
 /// A Core Audio call that failed. The error names the call.

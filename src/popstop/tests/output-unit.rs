@@ -13,7 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use popstop::output::{default_output_device_name, default_output_sample_rate, OutputUnit, Render};
-use popstop::signal::SampleRate;
+use popstop::signal::{KeepaliveSignal, SampleRate, RAMP_DURATION};
 
 /// The sample rate of the stream in these tests, in hertz. The output unit
 /// converts it to the rate of the device.
@@ -28,6 +28,11 @@ const POLL_INTERVAL: Duration = Duration::from_millis(5);
 /// The number of calls that show that the audio thread calls the renderer
 /// again and again, not only once.
 const CALLS_THAT_SHOW_A_STREAM: usize = 3;
+
+/// The longest time that the ramp down of the keepalive signal takes through
+/// a real unit. The ramp lasts `RAMP_DURATION`, and the audio thread renders
+/// a few buffers ahead.
+const RAMP_DOWN_BOUND: Duration = Duration::from_millis(500);
 
 /// The time that a test waits after a stop to see that no call comes.
 const QUIET_AFTER_STOP: Duration = Duration::from_millis(100);
@@ -70,7 +75,13 @@ fn start(renderer: impl Render) -> OutputUnit {
 /// Waits until `condition` is true, for `RENDER_BOUND` at most. Tells whether
 /// it became true.
 fn wait_until(condition: impl Fn() -> bool) -> bool {
-    let deadline = Instant::now() + RENDER_BOUND;
+    wait_within(RENDER_BOUND, condition)
+}
+
+/// Waits until `condition` is true, for `bound` at most. Tells whether it
+/// became true.
+fn wait_within(bound: Duration, condition: impl Fn() -> bool) -> bool {
+    let deadline = Instant::now() + bound;
     loop {
         if condition() {
             return true;
@@ -230,4 +241,27 @@ fn a_start_that_fails_names_the_call_and_frees_the_renderer() {
         0,
         "a unit that did not start called the renderer"
     );
+}
+
+#[test]
+fn the_audio_thread_plays_the_keepalive_signal_through_its_ramp_down() {
+    let rate = SampleRate::new(RATE_HZ).expect("48000 Hz is a valid sample rate");
+    let (signal, stop) = KeepaliveSignal::new(rate);
+    let unit = start(signal);
+
+    // The signal ramps up and plays at the level before the stop.
+    thread::sleep(RAMP_DURATION * 2);
+    assert!(
+        !stop.is_ramp_down_complete(),
+        "the ramp down is complete before the stop"
+    );
+
+    stop.start_ramp_down();
+    assert!(
+        wait_within(RAMP_DOWN_BOUND, || stop.is_ramp_down_complete()),
+        "the ramp down of {RAMP_DURATION:?} is not complete after {RAMP_DOWN_BOUND:?}, so the \
+         audio thread does not play the signal"
+    );
+
+    unit.stop().expect("the output unit stops");
 }
