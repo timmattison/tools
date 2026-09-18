@@ -625,4 +625,44 @@ mod tests {
         writer.join().expect("the writer thread ends");
         drop(holder);
     }
+
+    /// Holds the lock with no record for `HOLD`, then releases it.
+    ///
+    /// That is what a reader does for a moment, and what a holder does
+    /// between the moment it empties the lock file and its release. Gives the
+    /// thread that releases the lock.
+    fn hold_for_a_moment_with_no_record(dir: &StateDir) -> thread::JoinHandle<()> {
+        fs::create_dir_all(dir.path()).expect("make the state directory");
+        let holder = File::create(dir.lock_path()).expect("make the lock file");
+        holder.lock().expect("the holder gets the lock");
+        thread::spawn(move || {
+            thread::sleep(HOLD);
+            drop(holder);
+        })
+    }
+
+    #[test]
+    fn a_lock_that_is_released_during_the_wait_for_the_record_is_free() {
+        let (_temp, dir) = state_dir();
+        let releaser = hold_for_a_moment_with_no_record(&dir);
+
+        let guard = acquire(&dir, &SECOND).expect("the acquire gets the lock after the release");
+
+        assert_eq!(
+            current_holder(&dir).expect("the reader reads the lock file"),
+            Some(SECOND)
+        );
+        releaser.join().expect("the releasing thread ends");
+        drop(guard);
+
+        let (_other_temp, other) = state_dir();
+        let releaser = hold_for_a_moment_with_no_record(&other);
+
+        assert_eq!(
+            current_holder(&other).expect("the reader sees the release"),
+            None,
+            "the lock was released during the wait, so no copy holds it"
+        );
+        releaser.join().expect("the releasing thread ends");
+    }
 }
