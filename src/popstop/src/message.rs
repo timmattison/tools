@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Local, TimeZone};
 
-use crate::lock::{HolderRecord, StartTime};
+use crate::lock::{HolderRecord, Mode, StartTime};
 
 /// The start of each line that popstop writes, so a reader of a full
 /// terminal sees which program speaks.
@@ -30,6 +30,11 @@ const NO_IDLE_SLEEP_LINE: &str = "popstop: this Mac does not idle sleep while po
 
 /// The line that tells the user how to stop a foreground copy.
 const PRESS_CTRL_C_LINE: &str = "popstop: press Ctrl-C to stop";
+
+/// The part of a line that says that a background copy told its parent
+/// nothing. [`did_not_report`] and [`did_not_report_within`] both start with
+/// it.
+const NO_REPORT: &str = "the background copy did not report that it plays";
 
 /// Gives the command that stops the copy that runs.
 ///
@@ -106,8 +111,18 @@ where
     format!(
         "{PREFIX}another copy runs (pid {pid}, {mode}, started {started}), so this copy did not \
          start\n\
-         {PREFIX}to stop the copy that runs, use this command: {stop_command}"
+         {}",
+        stop_hint_line(stop_command)
     )
+}
+
+/// Gives the line that tells the user which command stops the copy that runs.
+/// `stop_command` comes from [`stop_command`].
+///
+/// A refusal and a background start both write it, thus the two say the same
+/// thing.
+fn stop_hint_line(stop_command: &str) -> String {
+    format!("{PREFIX}to stop the copy that runs, use this command: {stop_command}")
 }
 
 /// Gives the lines that a foreground copy writes when it plays: the device
@@ -135,8 +150,13 @@ pub fn ready_lines(device_name: &str, pid: u32) -> String {
 /// The text has no newline at its end.
 #[must_use]
 pub fn background_ready_lines(device_name: &str, pid: u32, stop_command: &str) -> String {
-    let _ = (device_name, pid, stop_command);
-    String::new()
+    let mode = Mode::Background;
+    let hint = stop_hint_line(stop_command);
+    format!(
+        "{PREFIX}\"{device_name}\" stays awake while popstop runs (pid {pid}, {mode})\n\
+         {NO_IDLE_SLEEP_LINE}\n\
+         {hint}"
+    )
 }
 
 /// Gives the text of a background start whose copy wrote no report.
@@ -147,8 +167,7 @@ pub fn background_ready_lines(device_name: &str, pid: u32, stop_command: &str) -
 /// The text has no newline at its end.
 #[must_use]
 pub fn did_not_report(log_path: &Path) -> String {
-    let _ = log_path;
-    String::new()
+    format!("{PREFIX}{NO_REPORT}\n{}", log_line(log_path))
 }
 
 /// Gives the text of a background start whose copy wrote no report within
@@ -157,8 +176,19 @@ pub fn did_not_report(log_path: &Path) -> String {
 /// The text has no newline at its end.
 #[must_use]
 pub fn did_not_report_within(bound: Duration, log_path: &Path) -> String {
-    let _ = (bound, log_path);
-    String::new()
+    format!(
+        "{PREFIX}{NO_REPORT} within {} seconds\n{}",
+        bound.as_secs(),
+        log_line(log_path)
+    )
+}
+
+/// Gives the line that names the log of a background copy.
+fn log_line(log_path: &Path) -> String {
+    format!(
+        "{PREFIX}the log of that copy says why: {}",
+        log_path.display()
+    )
 }
 
 /// Gives the lines that `popstop --status` writes for the copy that runs:
