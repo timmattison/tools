@@ -184,8 +184,9 @@ const BOX_TABLE: &str = include_str!("../fixtures/plan-parallel-work.txt");
 
 /// What GitHub says about every number of [`BOX_TABLE`].
 ///
-/// Three of the ten are done, so each of the four streams has one issue to
-/// start and none of them is the first step of its stream in every case.
+/// Three of the ten are done, so each of the four streams has one step
+/// somebody can take now and none of them is the first step of its stream in
+/// every case. The step of stream A is the open pull request `#15`.
 const BOX_ISSUES: &str = r#"{"data":{"repository":{
 "i15":{"__typename":"PullRequest","number":15,"title":"The visualizer branch","state":"OPEN"},
 "i4":{"__typename":"Issue","number":4,"title":"The visualizers","state":"OPEN","stateReason":null},
@@ -200,7 +201,13 @@ const BOX_ISSUES: &str = r#"{"data":{"repository":{
 }}}"#;
 
 /// The answer [`BOX_TABLE`] earns: one block for each of the four streams,
-/// and one summary that names an issue to start in each of them.
+/// and one summary that names the next step of each of them.
+///
+/// The next step of stream A is the open pull request `#15`, which closes
+/// `#4`. Its work exists already, so the tail of A tells the reader to review
+/// it and merge it, and names no start command. The other three tails name an
+/// issue to start. The words of A and the command of each issue start in one
+/// column.
 const BOX_ANSWER: &str = concat!(
     "A — visualizers\n",
     "  → #15 (#4)  The visualizer branch\n",
@@ -220,10 +227,10 @@ const BOX_ANSWER: &str = concat!(
     "  → #6  The manifest\n",
     "\n",
     "Take one from each stream:\n",
-    "  A — visualizers   → #15  si 15\n",
-    "  B — audio engine  → #5   si 5\n",
-    "  C — MIDI array    → #12  si 12\n",
-    "  D — manifest      → #6   si 6\n",
+    "  A — visualizers   → PR #15 (closes #4)  review it and merge it\n",
+    "  B — audio engine  → #5                  si 5\n",
+    "  C — MIDI array    → #12                 si 12\n",
+    "  D — manifest      → #6                  si 6\n",
 );
 
 /// A plan drawn as a picture: two streams that join.
@@ -1519,10 +1526,13 @@ fn a_pull_request_and_the_issue_it_closes_are_one_row() {
 #[test]
 fn answers_the_paste_of_the_plan_parallel_work_skill() {
     // The whole point of the feature: copy the report of the skill out of a
-    // terminal, type `wn`, and read the issue to start in each stream. The
-    // paste draws its table with `│` and `┌─┬─┐`, it wraps two of its rows
-    // onto a second line, and its Order fields annotate two steps in
-    // parentheses.
+    // terminal, type `wn`, and read what to do next in each stream. The paste
+    // draws its table with `│` and `┌─┬─┐`, it wraps two of its rows onto a
+    // second line, and its Order fields annotate two steps in parentheses.
+    //
+    // The plan says the work of stream A is in flight as the pull request
+    // #15. So the tail of A tells the reader to finish that work, and does
+    // not tell them to start it a second time with `si 15`.
     let gh = FakeGh::new(BOX_ISSUES);
     let output = run_with_stdin(&gh, &["--repo", REPO], "80", BOX_TABLE);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
