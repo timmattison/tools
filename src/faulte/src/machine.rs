@@ -16,7 +16,7 @@ use occ::SessionRecord;
 
 use crate::duration::Span;
 use crate::pid::{Pid, Uid};
-use crate::ranking::{ClaudeRole, ClaudeTotal, Ranking, Skipped, Viewer};
+use crate::ranking::{rank, ClaudeRole, Observation, Ranking, Viewer};
 use crate::render::{Accounts, Measurement};
 use crate::table::{ProcessRow, TableParseError};
 use crate::top::{TopParseError, TopSample};
@@ -214,19 +214,26 @@ pub fn observe(machine: &dyn Machine, interval: Span) -> Result<Observed, Machin
     // measure of anything.
     let started = Instant::now();
     let before = machine.vm_counters()?;
-    let (_sample, _wall) = machine.sample_faults(interval)?;
+    let (sample, wall) = machine.sample_faults(interval)?;
     let after = machine.vm_counters()?;
     let swap_window = started.elapsed();
     let usage = machine.swap_usage()?;
-    let _table = machine.process_table()?;
+    let table = machine.process_table()?;
+    let claude = machine.claude_roles();
+    let viewer = machine.viewer();
+    let now = machine.now();
+    let records = records_of(machine, &table, &claude);
+    let ranking = rank(&Observation {
+        window: sample_window(interval, sample.elapsed, wall),
+        faults: &sample.rows,
+        table: &table,
+        claude: &claude,
+        records: &records,
+        viewer,
+        now,
+    });
     Ok(Observed {
-        ranking: Ranking {
-            rows: Vec::new(),
-            window: Duration::from(interval),
-            total_faults: 0,
-            claude: ClaudeTotal::default(),
-            skipped: Skipped::default(),
-        },
+        ranking,
         swap: VmDelta::between(before, after),
         usage,
         // The compressor holds what it holds now, so the count after the
@@ -234,9 +241,30 @@ pub fn observe(machine: &dyn Machine, interval: Span) -> Result<Observed, Machin
         compressor_bytes: after.compressor_bytes(machine.page_size()),
         swap_window,
         accounts: Accounts::new(),
-        now: machine.now(),
+        now,
         interval,
     })
+}
+
+/// Reads the registry record of each Claude Code process of `table`.
+///
+/// A record under a PID that is not a Claude Code process says nothing: a
+/// session that died leaves its file behind, and another process takes the
+/// same PID later. Thus the roles decide which PIDs the registry answers for.
+fn records_of(
+    machine: &dyn Machine,
+    table: &[ProcessRow],
+    claude: &HashMap<Pid, ClaudeRole>,
+) -> HashMap<Pid, SessionRecord> {
+    table
+        .iter()
+        .filter(|process| claude.contains_key(&process.pid))
+        .filter_map(|process| {
+            machine
+                .record_for(process.pid, process.uid, process.started_at_epoch_secs)
+                .map(|record| (process.pid, record))
+        })
+        .collect()
 }
 
 /// Gives the time that the ranking divides the faults of the sample by.
