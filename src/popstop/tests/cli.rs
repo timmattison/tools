@@ -302,6 +302,32 @@ fn the_help_lists_the_five_exit_statuses_and_hides_the_flags_of_the_tests() {
 }
 
 #[test]
+fn the_version_names_the_build_that_runs() {
+    let (status, version) = ask(&["--version"]);
+
+    assert!(status.success(), "popstop --version failed: {status}");
+    let opening = format!("popstop {} (", env!("CARGO_PKG_VERSION"));
+    let build = version
+        .trim_end()
+        .strip_prefix(&opening)
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or_else(|| {
+            panic!("the version is {version:?}, and not {opening}<hash>, <clean|dirty>)")
+        });
+    let (hash, state) = build
+        .split_once(", ")
+        .unwrap_or_else(|| panic!("the version shows no state of the tree: {version:?}"));
+    assert!(
+        hash == "unknown" || hash.chars().all(|letter| letter.is_ascii_hexdigit()),
+        "the version shows the commit {hash:?}, which is no commit hash"
+    );
+    assert!(
+        ["clean", "dirty", "unknown"].contains(&state),
+        "the version shows the state {state:?} of the tree"
+    );
+}
+
+#[test]
 fn a_copy_with_a_time_limit_stops_by_itself() {
     let temp = tempfile::tempdir().expect("a temporary directory");
     let dir = temp.path().join("state");
