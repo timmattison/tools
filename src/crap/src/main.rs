@@ -4331,6 +4331,49 @@ mod tests {
         assert!(SHELL_CODE.contains(r#"command crap "$@"; return $?"#));
     }
 
+    /// The `#### Manual Setup` block of the crap entry in the README is a copy
+    /// of [`SHELL_CODE`] for a user who pastes the function by hand. That copy
+    /// fell behind the binary twice, and a stale copy breaks every fork: it
+    /// misreads the wire shapes, so the import stays behind. So the copy must
+    /// equal the function exactly.
+    #[test]
+    fn readme_manual_setup_copy_equals_shell_code() {
+        let readme: Vec<&str> = include_str!("../../../README.md").lines().collect();
+        let start = readme
+            .iter()
+            .position(|line| line.starts_with("## crap ("))
+            .expect(
+                "README.md has no '## crap (' section; this test finds the copy by that heading",
+            );
+        let end = readme[start + 1..]
+            .iter()
+            .position(|line| line.starts_with("## "))
+            .map_or(readme.len(), |offset| start + 1 + offset);
+        let section = &readme[start..end];
+        let setup = section
+            .iter()
+            .position(|line| *line == "#### Manual Setup")
+            .expect("the crap section of README.md has no '#### Manual Setup' heading");
+        let open = section[setup..]
+            .iter()
+            .position(|line| *line == "```bash")
+            .map(|offset| setup + offset)
+            .expect("no ```bash fence follows the crap '#### Manual Setup' heading");
+        let close = section[open + 1..]
+            .iter()
+            .position(|line| *line == "```")
+            .map(|offset| open + 1 + offset)
+            .expect("the ```bash fence under the crap '#### Manual Setup' heading never closes");
+
+        assert_eq!(
+            section[open + 1..close].join("\n"),
+            SHELL_CODE.trim(),
+            "the README copy of the crap shell function differs from SHELL_CODE; \
+             paste SHELL_CODE (without its first and last newline) into the \
+             ```bash block under the crap '#### Manual Setup' heading"
+        );
+    }
+
     /// Sources `SHELL_CODE` in a real `bash`, with a fake `crap` binary (and
     /// fake `claude`/`clauded`) ahead of it on `PATH`, then runs `crap <args>`.
     ///
