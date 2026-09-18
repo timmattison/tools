@@ -57,11 +57,39 @@ impl SessionState {
     }
 }
 
+/// The text of [`SessionState::Busy`].
+const BUSY: &str = "busy";
+
+/// The text of [`SessionState::Waiting`].
+const WAITING: &str = "waiting";
+
+/// The first word of the text of [`SessionState::Idle`].
+const IDLE: &str = "idle";
+
+/// The text in place of an idle time that the record does not give.
+const UNKNOWN_IDLE_TIME: &str = "?";
+
+/// The text of [`SessionState::Unknown`].
+const UNKNOWN: &str = "unknown";
+
 impl fmt::Display for SessionState {
-    /// Writes the state as the ranking shows it.
+    /// Writes the state as the ranking shows it: `busy`, `waiting`,
+    /// `idle 3h 12m`, `idle ?`, the text of another status as is, or
+    /// `unknown`.
+    ///
+    /// The idle time is in the format of `occ`, so the two tools print an age
+    /// the same way. That format drops the part of a second.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = formatter;
-        Ok(())
+        match self {
+            Self::Busy => formatter.write_str(BUSY),
+            Self::Waiting => formatter.write_str(WAITING),
+            Self::Idle { for_: Some(for_) } => {
+                write!(formatter, "{IDLE} {}", occ::format_uptime(for_.as_secs()))
+            }
+            Self::Idle { for_: None } => write!(formatter, "{IDLE} {UNKNOWN_IDLE_TIME}"),
+            Self::Other(text) => formatter.write_str(text),
+            Self::Unknown => formatter.write_str(UNKNOWN),
+        }
     }
 }
 
