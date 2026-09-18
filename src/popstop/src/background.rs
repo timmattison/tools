@@ -423,6 +423,15 @@ fn read_the_report(copy: &mut Child) -> Result<Answer, Failure> {
 ///
 /// It sends `SIGTERM`, which is the signal that stops a copy of popstop, and
 /// never `SIGKILL`. A copy that already plays then ramps its signal down.
+///
+/// Such a copy can still hold the lock, because it takes the lock before it
+/// opens the device. That open can last longer than [`HANDSHAKE_BOUND`]. The
+/// copy registered the stop signals before it took the lock, thus the
+/// `SIGTERM` waits in the copy, and the open continues. When the device opens
+/// while the start runs, the copy reports, stops on the `SIGTERM`, and
+/// releases the lock. When the device opens after the start ended, the report
+/// meets a closed pipe. The copy then fails, releases the lock, and writes the
+/// reason into its log.
 fn end_the_copy(copy: &mut Child) {
     if let Ok(pid) = libc::pid_t::try_from(copy.id()) {
         // SAFETY: `kill` takes two numbers by value. The PID is the PID of a
@@ -433,11 +442,13 @@ fn end_the_copy(copy: &mut Child) {
     wait_for_the_end(copy);
 }
 
-/// Waits for the copy to end, for [`END_BOUND`] at most.
+/// Waits for the copy to end, for [`END_BOUND`] at most, and reaps it when it
+/// ends.
 ///
-/// The wait reaps the copy, so the start leaves no process behind. A copy that
-/// stays gets no more attention: the start reports and ends, and the copy
-/// holds no lock, because a copy takes the lock before it reports.
+/// A copy that stays gets no more attention: the start reports and ends. A
+/// copy that reported a failure holds no lock: it released the lock before it
+/// reported, or it never took it. A copy that reported nothing can still hold
+/// the lock when the start ends (see [`end_the_copy`]).
 fn wait_for_the_end(copy: &mut Child) {
     let deadline = Instant::now() + END_BOUND;
     loop {
