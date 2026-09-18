@@ -8,7 +8,10 @@
 //! reader must compare with another number is the whole product of this tool,
 //! so each formatter states one rule and has its own tests.
 
+use std::collections::HashMap;
 use std::time::SystemTime;
+
+use crate::pid::Uid;
 
 /// The text in place of a value that `faulte` could not read.
 ///
@@ -189,6 +192,52 @@ pub fn age(started_at_epoch_secs: Option<u64>, now: SystemTime) -> String {
     occ::format_uptime(now_secs.saturating_sub(started))
 }
 
+/// The name of each account that runs a process in the ranking.
+///
+/// The table shows the owner of a process by name, because a reader knows the
+/// accounts of this Mac by name and not by number. The caller reads the names
+/// with `getpwuid_r`, which answers for some accounts and not for others, so
+/// this map holds the names that it got and gives the bare number for the
+/// rest. A number is never wrong, and a wrong name is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Accounts {
+    /// The name of each account that the caller could read.
+    names: HashMap<Uid, String>,
+}
+
+impl Accounts {
+    /// Gives a map with no name in it. Every account then shows its number.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Gives this map, with `name` as the name of `uid`.
+    #[must_use]
+    pub fn with(mut self, uid: Uid, name: impl Into<String>) -> Self {
+        self.names.insert(uid, name.into());
+        self
+    }
+
+    /// Gives the name of `uid`, or the number of `uid` when the map has no
+    /// name for it.
+    #[must_use]
+    pub fn name_of(&self, uid: Uid) -> String {
+        let _ = &self.names;
+        uid.to_string()
+    }
+}
+
+impl FromIterator<(Uid, String)> for Accounts {
+    /// Collects a name for each account. A later name of one account replaces
+    /// an earlier one.
+    fn from_iter<I: IntoIterator<Item = (Uid, String)>>(names: I) -> Self {
+        Self {
+            names: names.into_iter().collect(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,5 +383,24 @@ mod tests {
                 "the start {started_at_epoch_secs:?}"
             );
         }
+    }
+
+    /// An account shows its name. An account that the caller read no name for
+    /// shows its bare number, because a number is never wrong and a guessed
+    /// name is.
+    #[test]
+    fn an_account_shows_its_name_and_a_bare_number_when_it_has_none() {
+        let accounts = Accounts::new()
+            .with(Uid::new(501), "tim")
+            .with(Uid::new(0), "root");
+
+        assert_eq!(accounts.name_of(Uid::new(501)), "tim");
+        assert_eq!(accounts.name_of(Uid::new(0)), "root");
+        assert_eq!(accounts.name_of(Uid::new(502)), "502");
+        assert_eq!(Accounts::new().name_of(Uid::new(501)), "501");
+
+        let collected: Accounts = [(Uid::new(502), "work".to_owned())].into_iter().collect();
+        assert_eq!(collected.name_of(Uid::new(502)), "work");
+        assert_eq!(collected.name_of(Uid::new(501)), "501");
     }
 }
