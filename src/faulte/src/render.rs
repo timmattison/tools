@@ -623,6 +623,55 @@ fn selected_line(plan: &Plan) -> String {
     line
 }
 
+/// Gives the line that counts the sessions which the plan did not select, or
+/// nothing when it refused no session.
+///
+/// Each count is under the first rule that the session fails, and the parts
+/// are in the order that the plan tests the rules in. `faulte` is first,
+/// because `faulte` is a live descendant of every ancestor of it, and every
+/// such session would otherwise report a live descendant.
+///
+/// A count of zero adds no part. A Mac that hides nothing says nothing, the
+/// same as the header of the ranking.
+fn not_selected_line(plan: &Plan) -> Option<String> {
+    let not_selected = plan.not_selected;
+    let mut parts: Vec<String> = Vec::new();
+    if not_selected.runs_faulte > 0 {
+        parts.push(format!(
+            "{} {} faulte",
+            count_of(not_selected.runs_faulte),
+            plural(not_selected.runs_faulte, "runs", "run"),
+        ));
+    }
+    if not_selected.too_young > 0 {
+        parts.push(format!(
+            "{} younger than {}",
+            count_of(not_selected.too_young),
+            plan.rules.older_than,
+        ));
+    }
+    if not_selected.not_idle > 0 {
+        parts.push(format!("{} not idle", count_of(not_selected.not_idle)));
+    }
+    if not_selected.idle_too_short > 0 {
+        parts.push(format!(
+            "{} idle for a shorter time",
+            count_of(not_selected.idle_too_short),
+        ));
+    }
+    if not_selected.live_descendant > 0 {
+        parts.push(format!(
+            "{} {} a live descendant",
+            count_of(not_selected.live_descendant),
+            plural(not_selected.live_descendant, "has", "have"),
+        ));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!("{NOT_SELECTED}: {}", parts.join(", ")))
+}
+
 /// Gives the plan of `faulte kill` as a person reads it, before the question.
 ///
 /// `ranking` gives the window and the total that each rate and each share of
@@ -652,6 +701,7 @@ pub fn plan(
             .collect();
         blocks.push(rows(ranking, &candidates, None, accounts, now, width));
     }
+    blocks.extend(not_selected_line(plan));
     blocks.join(BETWEEN_BLOCKS)
 }
 
