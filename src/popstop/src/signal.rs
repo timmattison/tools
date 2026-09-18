@@ -184,14 +184,17 @@ impl StopHandle {
     }
 }
 
-/// Gives the number of whole frames in `duration` at `rate`.
+/// Gives the number of whole frames in `duration` at `rate`, at least 1.
+///
+/// A ramp of 0 frames would make the value of a frame 0/0, which is NaN.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     reason = "a cast from f64 to u32 saturates, and a ramp longer than u32::MAX frames is not a real case"
 )]
 fn frames_in(duration: Duration, rate: SampleRate) -> u32 {
-    (duration.as_secs_f64() * rate.hz()).round() as u32
+    let frames = (duration.as_secs_f64() * rate.hz()).round() as u32;
+    frames.max(1)
 }
 
 #[cfg(test)]
