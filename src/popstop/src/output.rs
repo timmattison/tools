@@ -307,8 +307,16 @@ const RENDER_CALLBACK_SIZE: u32 = byte_size::<AURenderCallbackStruct>();
 
 /// The default output unit, which plays the samples of a renderer.
 ///
-/// The unit plays until [`OutputUnit::stop`].
+/// The unit plays until [`OutputUnit::stop`]. A drop without a stop does the
+/// same teardown and ignores its errors.
 pub struct OutputUnit {
+    /// The unit that plays. It is `None` after the teardown, so the teardown
+    /// runs once.
+    playing: Option<Playing>,
+}
+
+/// An output unit that plays, and the renderer that it calls.
+struct Playing {
     /// The instance of the default output unit. It is not null.
     unit: AudioUnit,
     /// The renderer that the render callback of `unit` calls.
@@ -396,7 +404,9 @@ impl OutputUnit {
             AudioOutputUnitStart(unit)
         })?;
 
-        Ok(Self { unit, renderer })
+        Ok(Self {
+            playing: Some(Playing { unit, renderer }),
+        })
     }
 
     /// Stops the output unit, uninitializes it, and disposes of it.
@@ -405,7 +415,27 @@ impl OutputUnit {
     ///
     /// Returns an [`AudioError`] that names the first call that failed. The
     /// calls after a failed call still run.
-    pub fn stop(self) -> Result<(), AudioError> {
+    pub fn stop(mut self) -> Result<(), AudioError> {
+        self.playing.take().map_or(Ok(()), Playing::tear_down)
+    }
+}
+
+impl Drop for OutputUnit {
+    fn drop(&mut self) {
+        if let Some(playing) = self.playing.take() {
+            // A drop has no caller to tell. `stop` reports the same errors.
+            let _ = playing.tear_down();
+        }
+    }
+}
+
+impl Playing {
+    /// Stops the unit, uninitializes it, and disposes of it. Then frees the
+    /// renderer.
+    ///
+    /// Gives the error of the first call that failed. The calls after a
+    /// failed call still run.
+    fn tear_down(self) -> Result<(), AudioError> {
         // SAFETY: `self.unit` is a live instance that `start` started.
         let stopped = check(call::OUTPUT_UNIT_STOP, unsafe {
             AudioOutputUnitStop(self.unit)
