@@ -41,17 +41,55 @@ const STOP_SIGNALS: [libc::c_int; 3] = [SIGINT, SIGHUP, SIGTERM];
 /// The name of the thread that waits for a signal.
 const SIGNAL_THREAD_NAME: &str = "popstop-signals";
 
-/// What a copy of popstop got on its command line.
+/// What a copy of popstop got on its command line, with the state directory
+/// as a full path.
 #[derive(Debug, Clone, Default)]
 pub struct Settings {
-    /// The directory of the lock file and the log, from `--state-dir`. The
-    /// state directory of the user, when it is `None`.
-    pub state_dir: Option<PathBuf>,
+    /// The full path of the directory of the lock file and the log, from
+    /// `--state-dir`. The state directory of the user, when it is `None`.
+    ///
+    /// Only [`Settings::new`] puts a path here, thus it is never a relative
+    /// path.
+    state_dir: Option<PathBuf>,
     /// The time after which the copy stops by itself, from `--exit-after`.
     pub exit_after: Option<Duration>,
 }
 
 impl Settings {
+    /// Makes the settings of a copy from the values of its command line.
+    ///
+    /// A relative `state_dir` becomes a full path here, with the working
+    /// directory of this process. This is the one place that does it. Thus
+    /// the copy that a background start makes finds the same directory in
+    /// the root directory, where it runs. Each message that names the
+    /// directory names that full path too, so a refusal of each mode has the
+    /// same words, and a stop command that the user copies works in every
+    /// directory.
+    ///
+    /// A full path stays as it is. The path keeps its symbolic links.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`Failure`] with the status [`exit_status::ERROR`] when the
+    /// full path cannot be found, for example because the working directory
+    /// is gone.
+    pub fn new(state_dir: Option<&Path>, exit_after: Option<Duration>) -> Result<Self, Failure> {
+        let state_dir = state_dir
+            .map(|path| {
+                std::path::absolute(path).map_err(|problem| {
+                    Failure::error(&format!(
+                        "the full path of the state directory {} cannot be found: {problem}",
+                        path.display()
+                    ))
+                })
+            })
+            .transpose()?;
+        Ok(Self {
+            state_dir,
+            exit_after,
+        })
+    }
+
     /// Gives the state directory that these settings name.
     ///
     /// # Errors
@@ -65,8 +103,10 @@ impl Settings {
         }
     }
 
-    /// Gives the path that `--state-dir` named, for the command that stops
-    /// the copy that runs and for the copy that a background start makes.
+    /// Gives the full path of the directory that `--state-dir` named, for the
+    /// command that stops the copy that runs and for the copy that a
+    /// background start makes. The path is full, thus it names the same
+    /// directory in every working directory.
     pub(crate) fn state_dir_argument(&self) -> Option<&Path> {
         self.state_dir.as_deref()
     }
@@ -362,9 +402,41 @@ fn set_background_qos() -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::set_background_qos;
+    use super::{set_background_qos, Settings};
+    use std::path::Path;
     use std::ptr;
     use std::thread;
+
+    #[test]
+    fn a_relative_state_directory_becomes_a_full_path_and_a_full_path_stays() {
+        // The test reads the working directory and never changes it: the
+        // tests of this binary run on many threads, and they share it.
+        let working_dir = std::env::current_dir().expect("the working directory of this test");
+
+        let relative = Settings::new(Some(Path::new("state")), None)
+            .expect("settings with a relative state directory");
+        assert_eq!(
+            relative.state_dir_argument(),
+            Some(working_dir.join("state").as_path()),
+            "a relative state directory names a directory in the working directory"
+        );
+
+        let full = Path::new("/tmp/state dir");
+        let settings =
+            Settings::new(Some(full), None).expect("settings with a full state directory");
+        assert_eq!(
+            settings.state_dir_argument(),
+            Some(full),
+            "a full path stays as it is"
+        );
+
+        let none = Settings::new(None, None).expect("settings with no state directory");
+        assert_eq!(
+            none.state_dir_argument(),
+            None,
+            "no --state-dir names the state directory of the user"
+        );
+    }
 
     /// The number of the background class, as `sys/qos.h` gives it.
     const QOS_CLASS_BACKGROUND: u32 = 0x09;

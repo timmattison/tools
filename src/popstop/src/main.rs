@@ -81,9 +81,12 @@ fn run(cli: &Cli) -> ExitCode {
     use popstop::control;
     use popstop::life_cycle::{run_foreground, Settings};
 
-    let settings = Settings {
-        state_dir: cli.state_dir.clone(),
-        exit_after: cli.exit_after.map(Duration::from_secs),
+    let settings = match Settings::new(
+        cli.state_dir.as_deref(),
+        cli.exit_after.map(Duration::from_secs),
+    ) {
+        Ok(settings) => settings,
+        Err(failure) => return report(Err(failure)),
     };
     if cli.background {
         return report(popstop::background::start(&settings));

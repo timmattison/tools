@@ -45,6 +45,13 @@ pub const CHILD_FLAG: &str = "--background-child";
 /// The flag that gives a copy its time limit.
 const EXIT_AFTER_FLAG: &str = "--exit-after";
 
+/// The working directory of the copy.
+///
+/// A copy runs long after its start ended, and a volume cannot unmount while
+/// a process holds a directory on it. The root directory is on no volume
+/// that a user unmounts.
+const ROOT_DIRECTORY: &str = "/";
+
 /// The longest time that a start waits for the report of its copy.
 ///
 /// The copy opens the default output device in that time, and a device that
@@ -338,6 +345,12 @@ fn open_the_log(dir: &StateDir) -> io::Result<File> {
 ///
 /// The copy reads nothing, it reports through the pipe of its stdout, and it
 /// writes everything else into `log`.
+///
+/// The copy runs in [`ROOT_DIRECTORY`] and not in the working directory of
+/// the start, thus it holds no directory of the user, and the volume that
+/// the user started it from can unmount. The state directory of `settings`
+/// is a full path (see [`Settings::new`]), thus it names the same directory
+/// in the copy as in the start.
 fn make_the_copy(settings: &Settings, log: File) -> Result<Child, Failure> {
     let program = std::env::current_exe().map_err(|problem| {
         Failure::error(&format!(
@@ -355,6 +368,7 @@ fn make_the_copy(settings: &Settings, log: File) -> Result<Child, Failure> {
             .arg(limit.as_secs().to_string());
     }
     command
+        .current_dir(ROOT_DIRECTORY)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::from(log));
