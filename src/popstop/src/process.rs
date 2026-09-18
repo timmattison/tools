@@ -133,6 +133,26 @@ mod tests {
     }
 
     #[test]
+    fn a_pid_that_no_process_has_is_an_error() {
+        let mut child = sleeping_child();
+        let pid = child.0.id();
+        child.0.kill().expect("kill the child");
+        child.0.wait().expect("reap the child");
+        // The child is reaped, so the kernel has no process with its PID.
+        // macOS gives PIDs in sequence, so it gives this PID to a new process
+        // only after many other processes start.
+
+        let result = start_time(pid);
+
+        let error = result.expect_err("a PID that no process has gives no start time");
+        assert_eq!(
+            error.raw_os_error(),
+            Some(libc::ESRCH),
+            "the kernel says that no such process exists: {error}"
+        );
+    }
+
+    #[test]
     fn the_start_time_of_this_process_is_a_little_before_now() {
         let now = SystemTime::now();
 
