@@ -211,6 +211,29 @@ mod tests {
         }
     }
 
+    /// A PID that another process holds is never signalled. The operating
+    /// system gives the number of a process that exited to a new process, and
+    /// the plan can be minutes old when the person answers the question.
+    ///
+    /// A PID alone is no identity. The start time of the row says which
+    /// process holds the number now, and the signal goes to the number.
+    #[test]
+    fn a_pid_that_another_process_took_is_not_signalled() {
+        let candidate = candidate(30);
+        let reused = ProcessRow {
+            started_at_epoch_secs: NOW - 60,
+            command: "/usr/bin/vim notes.txt".to_owned(),
+            ..process(30, LAUNCHD_PID)
+        };
+        let record = record(30, Some(changed_at()));
+
+        assert_eq!(
+            recheck(&candidate, &[reused], Some(&record)),
+            Recheck::PidReused,
+            "the row of the PID states another start time"
+        );
+    }
+
     /// A session that did not change proceeds: its PID holds the same process
     /// that the plan read, the registry still says that it is idle, the time
     /// of the last status change is the same, and it started no process.
