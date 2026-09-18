@@ -20,6 +20,16 @@ const STOP_COMMAND: &str = "popstop --stop";
 /// The flag that names the state directory.
 const STATE_DIR_FLAG: &str = "--state-dir";
 
+/// The line that tells the user about the effect on the sleep of the Mac.
+///
+/// An open output stream makes `coreaudiod` hold a power assertion, thus the
+/// Mac does not idle sleep while popstop runs. The display still sleeps, and
+/// a sleep from the Apple menu still works.
+const NO_IDLE_SLEEP_LINE: &str = "popstop: this Mac does not idle sleep while popstop runs";
+
+/// The line that tells the user how to stop a foreground copy.
+const PRESS_CTRL_C_LINE: &str = "popstop: press Ctrl-C to stop";
+
 /// Gives the command that stops the copy that runs.
 ///
 /// A copy that runs with `--state-dir` holds the lock in that directory, so
@@ -106,8 +116,11 @@ where
 /// The text has no newline at its end.
 #[must_use]
 pub fn ready_lines(device_name: &str, pid: u32) -> String {
-    let _ = (device_name, pid);
-    String::new()
+    format!(
+        "{PREFIX}\"{device_name}\" stays awake while popstop runs (pid {pid})\n\
+         {NO_IDLE_SLEEP_LINE}\n\
+         {PRESS_CTRL_C_LINE}"
+    )
 }
 
 #[cfg(test)]
