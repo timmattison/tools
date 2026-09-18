@@ -316,10 +316,13 @@ const WAIT_THREAD_NAME: &str = "popstop-lock-wait";
 
 /// Waits until no copy holds the lock, for `timeout` at most.
 ///
-/// It does not poll. A thread opens the lock file and blocks on the lock.
-/// When the thread gets the lock, it releases the lock at once and tells the
-/// caller. It gives [`Release::Released`] at once when the lock file does not
-/// exist.
+/// It does not poll. A thread opens the lock file and blocks on a shared
+/// lock. When the thread gets the shared lock, no holder has the exclusive
+/// lock: the thread releases the lock at once and tells the caller. It gives
+/// [`Release::Released`] at once when the lock file does not exist.
+///
+/// The lock is shared, so readers do not delay the wait, and the wait does
+/// not make a start take it for a holder.
 ///
 /// After a timeout, the thread stays blocked until the holder releases the
 /// lock or this process ends. Then it releases the lock at once and ends.
@@ -337,7 +340,7 @@ pub fn wait_for_release(dir: &StateDir, timeout: Duration) -> io::Result<Release
     thread::Builder::new()
         .name(WAIT_THREAD_NAME.to_owned())
         .spawn(move || {
-            let result = file.lock().and_then(|()| file.unlock());
+            let result = file.lock_shared().and_then(|()| file.unlock());
             // After a timeout nobody receives, and the result means nothing.
             let _ = sender.send(result);
         })?;
