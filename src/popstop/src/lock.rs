@@ -81,8 +81,12 @@ pub enum Mode {
 }
 
 impl fmt::Display for Mode {
-    fn fmt(&self, _formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        Ok(())
+    /// Writes `foreground` or `background`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Foreground => "foreground",
+            Self::Background => "background",
+        })
     }
 }
 
