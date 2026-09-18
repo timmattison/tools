@@ -780,6 +780,49 @@ mod tests {
         );
     }
 
+    /// A target that is gone during the grace period gets no `SIGKILL`, and it
+    /// counts as a session that `faulte` stopped.
+    ///
+    /// A process is gone in three spellings: its PID has no row, its row is a
+    /// zombie, or its row states another start time. The last one is the one
+    /// that the issue demands by name. The session of the plan exited, the
+    /// operating system gave its number to a new process, and a signal to that
+    /// number stops a process that nobody asked to stop.
+    #[test]
+    fn a_target_that_is_gone_in_the_grace_period_gets_no_sigkill() {
+        let candidate = candidate(30);
+        let reused = ProcessRow {
+            started_at_epoch_secs: NOW - 60,
+            command: "/usr/bin/vim notes.txt".to_owned(),
+            ..process(30, LAUNCHD_PID)
+        };
+        let cases = [
+            ("no row of the PID", Vec::new()),
+            ("a zombie row of the PID", vec![zombie(30, LAUNCHD_PID)]),
+            ("a row of another process", vec![reused]),
+        ];
+
+        for (table_holds, gone) in cases {
+            let machine = machine_of(&[30], vec![vec![process(30, LAUNCHD_PID)], gone]);
+
+            let report = stop(&machine, &[candidate.clone()], THREE_POLLS, ONE_POLL);
+
+            assert_eq!(
+                report,
+                StopReport {
+                    stopped: vec![candidate.clone()],
+                    ..StopReport::default()
+                },
+                "the table holds {table_holds}"
+            );
+            assert_eq!(
+                machine.signals(),
+                vec![(Pid::new(30), Signal::Terminate)],
+                "no SIGKILL goes when the table holds {table_holds}"
+            );
+        }
+    }
+
     /// Only `y` and `yes` confirm, in any case, after the spaces come off.
     ///
     /// Every other answer stops nothing: the end of the input, no text, a
