@@ -8,7 +8,7 @@
 
 use occ::{SessionRecord, SessionStatus};
 
-use crate::plan::Candidate;
+use crate::plan::{pids_with_a_live_descendant, Candidate};
 use crate::table::ProcessRow;
 
 /// The one short answer that confirms.
@@ -95,6 +95,11 @@ pub fn recheck(
     };
     if !still_idle {
         return Recheck::StatusChanged;
+    }
+    // The walk of rule 3, over the fresh table. A session that started a tool
+    // call or a shell since the plan is active now.
+    if pids_with_a_live_descendant(fresh_table).contains(&candidate.row.pid) {
+        return Recheck::DescendantStarted;
     }
     Recheck::Proceed
 }

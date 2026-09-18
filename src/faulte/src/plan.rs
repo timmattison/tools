@@ -180,12 +180,16 @@ fn walk_up(pid: Pid, parents: &HashMap<Pid, Pid>, seen: &mut HashSet<Pid>) {
 
 /// Gives the PID of every process of `table` that has a live descendant.
 ///
+/// The check before a signal reads the same set over a fresh table. Rule 3 and
+/// that check are the same question about two tables, so one walk answers
+/// both.
+///
 /// The walk starts at the parent of each process that is not a zombie, so a
 /// process is never a descendant of itself. A zombie stopped already, and its
 /// parent did not collect its exit status yet, so it does nothing and it is
 /// not a live descendant. The walk still climbs through a zombie, because the
 /// table can hold a live process under one.
-fn pids_with_a_live_descendant(table: &[ProcessRow]) -> HashSet<Pid> {
+pub(crate) fn pids_with_a_live_descendant(table: &[ProcessRow]) -> HashSet<Pid> {
     let parents = parents_of(table);
     let mut ancestors = HashSet::with_capacity(table.len());
     for process in table.iter().filter(|process| !process.zombie) {
