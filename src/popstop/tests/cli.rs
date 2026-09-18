@@ -305,7 +305,10 @@ fn a_stop_with_no_copy_says_that_nothing_runs() {
          stderr:\n{errors}"
     );
     assert_eq!(report, "popstop: no copy runs\n");
-    assert_eq!(errors, "", "a stop that finds nothing says nothing on stderr");
+    assert_eq!(
+        errors, "",
+        "a stop that finds nothing says nothing on stderr"
+    );
 }
 
 #[test]

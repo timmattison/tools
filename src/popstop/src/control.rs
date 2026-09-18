@@ -4,8 +4,21 @@
 //! Both read the instance lock first, because the lock is the only source of
 //! truth about a copy that runs.
 
+use std::io;
+use std::time::Duration;
+
 use crate::exit_status;
 use crate::life_cycle::{Failure, Settings};
+use crate::lock::{self, HolderRecord, Release, StateDir};
+use crate::message;
+use crate::process::{self, Identity};
+
+/// The longest time that a stop waits for the copy to release the lock.
+///
+/// The copy ramps its signal down before it stops, and that takes a moment.
+/// A copy that does not release the lock in this time needs the user, thus
+/// the wait ends here.
+const RELEASE_BOUND: Duration = Duration::from_secs(5);
 
 /// What a command that acts on the copy that runs found.
 ///
@@ -44,9 +57,92 @@ impl Report {
 /// cannot be read, when the signal does not reach the copy, or when the copy
 /// does not release the lock.
 pub fn stop(settings: &Settings) -> Result<Report, Failure> {
-    let _dir = settings.state_dir()?;
-    Ok(Report {
-        status: exit_status::ERROR,
-        text: String::new(),
-    })
+    let dir = settings.state_dir()?;
+    let Some(record) = holder(&dir)? else {
+        return Ok(nothing_runs());
+    };
+
+    // The identity check comes before the signal. A holder writes its record
+    // a moment after it takes the lock, thus a reader can see the record of a
+    // copy that crashed. The system gives the PID of that copy to a new
+    // process, and that process belongs to somebody else.
+    let looked_up = process::start_time(record.pid);
+    let identity = process::identity(&record, looked_up).map_err(|problem| {
+        Failure::error(&format!(
+            "the start time of pid {} cannot be read: {problem}",
+            record.pid
+        ))
+    })?;
+    match identity {
+        Identity::Gone => Ok(nothing_runs()),
+        Identity::Another => Err(Failure::new(
+            exit_status::ERROR,
+            message::stale_record(record.pid),
+        )),
+        Identity::TheSame => end_the_copy(&dir, record.pid),
+    }
+}
+
+/// Gives the report of a command that found no copy of popstop.
+fn nothing_runs() -> Report {
+    Report {
+        status: exit_status::SUCCESS,
+        text: message::no_copy_runs(),
+    }
+}
+
+/// Sends `SIGTERM` to the copy `pid`, and waits until it releases the lock.
+///
+/// The release is the proof that the copy is gone, thus the report comes
+/// after it and not after the signal.
+fn end_the_copy(dir: &StateDir, pid: u32) -> Result<Report, Failure> {
+    send_the_stop_signal(pid).map_err(|problem| {
+        Failure::error(&format!(
+            "the signal did not reach the copy (pid {pid}): {problem}"
+        ))
+    })?;
+    let released = lock::wait_for_release(dir, RELEASE_BOUND).map_err(|problem| {
+        Failure::error(&format!(
+            "the wait for the copy (pid {pid}) cannot be made: {problem}"
+        ))
+    })?;
+    match released {
+        Release::Released => Ok(Report {
+            status: exit_status::SUCCESS,
+            text: message::stopped(pid),
+        }),
+        // popstop never sends SIGKILL by itself. The user decides.
+        Release::TimedOut => Err(Failure::new(
+            exit_status::ERROR,
+            message::did_not_stop(pid, RELEASE_BOUND),
+        )),
+    }
+}
+
+/// Gives the record of the copy that holds the lock in `dir`.
+fn holder(dir: &StateDir) -> Result<Option<HolderRecord>, Failure> {
+    lock::current_holder(dir)
+        .map_err(|problem| Failure::error(&format!("the lock cannot be read: {problem}")))
+}
+
+/// Sends `SIGTERM` to the process `pid`.
+///
+/// `SIGTERM` is one of the signals that stop a copy of popstop, thus the copy
+/// ramps its signal down and releases the lock before it ends.
+fn send_the_stop_signal(pid: u32) -> io::Result<()> {
+    let pid = libc::pid_t::try_from(pid).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{pid} is too large to be a process ID"),
+        )
+    })?;
+    // SAFETY: `kill` takes two numbers by value, and it changes nothing in
+    // this process. The caller compared the start time of the PID with the
+    // record of the holder, thus the PID names the copy that runs.
+    let sent = unsafe { libc::kill(pid, libc::SIGTERM) };
+    if sent == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }

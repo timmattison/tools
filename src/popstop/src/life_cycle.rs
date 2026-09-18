@@ -84,13 +84,17 @@ pub struct Failure {
 }
 
 impl Failure {
+    /// Makes a failure with the status `status` and the whole text for the
+    /// user. The text carries the name of popstop already.
+    pub(crate) fn new(status: u8, message: String) -> Self {
+        Self { status, message }
+    }
+
     /// Makes the failure of a problem that ends a run, with the status
-    /// [`exit_status::ERROR`].
-    fn error(problem: &dyn fmt::Display) -> Self {
-        Self {
-            status: exit_status::ERROR,
-            message: message::problem_line(problem),
-        }
+    /// [`exit_status::ERROR`]. The text of the problem takes the name of
+    /// popstop here.
+    pub(crate) fn error(problem: &dyn fmt::Display) -> Self {
+        Self::new(exit_status::ERROR, message::problem_line(problem))
     }
 
     /// Gives the exit status of the copy.
