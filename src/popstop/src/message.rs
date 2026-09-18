@@ -103,4 +103,12 @@ mod tests {
             "a zone west of UTC can show the day before"
         );
     }
+
+    #[test]
+    fn a_start_time_outside_the_calendar_shows_as_a_number() {
+        assert_eq!(
+            start_time_text_in(StartTime::from_unix_micros(u64::MAX), &Utc),
+            "18446744073709551615 microseconds after the Unix epoch"
+        );
+    }
 }
