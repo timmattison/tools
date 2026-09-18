@@ -29,8 +29,9 @@
 //!
 //! A plan of parallel work holds many streams, and [`render_plan`] paints one
 //! block for each of them. A block carries no answer of its own: the summary
-//! under the last block names the issue to start in every stream, so the
-//! reader reads the answers together and picks the stream they want.
+//! under the last block names the step to take in every stream, so the reader
+//! reads the answers together and picks the stream they want. The step is an
+//! issue to start, or an open pull request to finish.
 //!
 //! # A picture is one block with one column more
 //!
@@ -441,6 +442,30 @@ impl Action {
             Self::Start(entry.number)
         }
     }
+
+    /// The name an answer writes for the step: `#278` for an issue, and
+    /// `PR #515 (closes #512)` for a pull request.
+    fn name(&self) -> String {
+        match self {
+            Self::Start(number) => number.to_string(),
+            Self::Finish {
+                pull_request,
+                closes,
+            } => pull_request_name(*pull_request, *closes),
+        }
+    }
+
+    /// What the reader does with the step: `si 278` starts an issue, and
+    /// [`FINISH_WORDS`] tell the reader to finish a pull request.
+    ///
+    /// Both stand in the same place of an answer and take the same paint, so
+    /// a reader finds the next thing to do in one place whatever the step is.
+    fn instruction(&self, start: &StartCommand) -> String {
+        match self {
+            Self::Start(number) => command(start, *number),
+            Self::Finish { .. } => FINISH_WORDS.to_string(),
+        }
+    }
 }
 
 /// `PR #515`, or `PR #515 (closes #512)`: the name an answer writes for a
@@ -467,20 +492,12 @@ fn pull_request_name(pull_request: IssueNumber, closes: Option<IssueNumber>) -> 
 /// is ready. Both write this sentence, so a reader who learned it on a chain
 /// reads the answer of a picture without learning a second one.
 fn next_line(entry: &Entry, start: &StartCommand) -> String {
-    match Action::of(entry) {
-        Action::Start(number) => format!(
-            "Start {} next with '{}'",
-            number.to_string().bold(),
-            command(start, number).cyan().bold()
-        ),
-        Action::Finish {
-            pull_request,
-            closes,
-        } => format!(
-            "Finish {} next: {}",
-            pull_request_name(pull_request, closes).bold(),
-            FINISH_WORDS.cyan().bold()
-        ),
+    let action = Action::of(entry);
+    let name = action.name().bold();
+    let instruction = action.instruction(start).cyan().bold();
+    match action {
+        Action::Start(_) => format!("Start {name} next with '{instruction}'"),
+        Action::Finish { .. } => format!("Finish {name} next: {instruction}"),
     }
 }
 
@@ -701,9 +718,10 @@ fn indent(line: &str) -> String {
 
 /// The answer of one stream, as the summary writes it.
 enum Tail {
-    /// The stream holds an open issue, and this is the number to start.
-    Next(IssueNumber),
-    /// The stream names nothing to start, and this says why.
+    /// The stream holds a step somebody can take now, and this says what to
+    /// do with it: start an issue, or finish an open pull request.
+    Take(Action),
+    /// The stream names nothing to take, and this says why.
     Nothing(&'static str),
 }
 
@@ -711,7 +729,7 @@ impl Tail {
     /// The answer one stream gives.
     fn of(report: &Report) -> Self {
         match report.next_entry() {
-            Some(entry) => Self::Next(entry.number),
+            Some(entry) => Self::Take(Action::of(entry)),
             None if report
                 .entries()
                 .iter()
@@ -726,43 +744,46 @@ impl Tail {
         }
     }
 
-    /// The columns `→ #344` occupies, for a stream that names an issue.
+    /// The columns the mark part occupies, for a stream that names a step:
+    /// `→ #344` for an issue, and `→ PR #15 (closes #4)` for a pull request.
     ///
     /// The widest of these is what every such tail is padded to, so the
-    /// commands of the summary stand in one column.
+    /// command of each issue and the words of each pull request stand in one
+    /// column.
     fn mark_width(&self) -> Option<usize> {
         match self {
-            Self::Next(number) => Some(UnicodeWidthStr::width(marked(*number).as_str())),
+            Self::Take(action) => Some(UnicodeWidthStr::width(marked(action).as_str())),
             Self::Nothing(_) => None,
         }
     }
 
-    /// The columns the whole tail occupies, once `→ #344` is padded to
+    /// The columns the whole tail occupies, once the mark part is padded to
     /// `mark_width`. This is what the label of a summary line gives way to,
     /// as far as [`MIN_LABEL_WIDTH`].
     fn width(&self, mark_width: usize, start: &StartCommand) -> usize {
         match self {
-            Self::Next(number) => {
-                mark_width + COLUMN_GAP + UnicodeWidthStr::width(command(start, *number).as_str())
+            Self::Take(action) => {
+                mark_width + COLUMN_GAP + UnicodeWidthStr::width(action.instruction(start).as_str())
             }
             Self::Nothing(text) => UnicodeWidthStr::width(*text),
         }
     }
 
     /// The tail, painted the way the answer of a chain is painted: the mark is
-    /// yellow, the number is bold, and the command is cyan.
+    /// yellow, the name of the step is bold, and the command or the words
+    /// that finish a pull request are cyan.
     fn paint(&self, mark_width: usize, start: &StartCommand) -> String {
         match self {
-            Self::Next(number) => {
+            Self::Take(action) => {
                 let pad =
-                    mark_width.saturating_sub(UnicodeWidthStr::width(marked(*number).as_str()));
+                    mark_width.saturating_sub(UnicodeWidthStr::width(marked(action).as_str()));
                 format!(
                     "{} {}{}{}{}",
                     MARK_NEXT.to_string().yellow().bold(),
-                    number.to_string().bold(),
+                    action.name().bold(),
                     " ".repeat(pad),
                     " ".repeat(COLUMN_GAP),
-                    command(start, *number).cyan().bold()
+                    action.instruction(start).cyan().bold()
                 )
             }
             Self::Nothing(text) => text.dimmed().to_string(),
@@ -770,9 +791,10 @@ impl Tail {
     }
 }
 
-/// `→ #344`: the mark of the issue to start, and its number.
-fn marked(number: IssueNumber) -> String {
-    format!("{MARK_NEXT} {number}")
+/// `→ #344` or `→ PR #15 (closes #4)`: the mark of the step to take, and its
+/// name.
+fn marked(action: &Action) -> String {
+    format!("{MARK_NEXT} {}", action.name())
 }
 
 /// `si 344`: the command that starts one issue.
@@ -780,7 +802,10 @@ fn command(start: &StartCommand, number: IssueNumber) -> String {
     format!("{} {}", start.as_str(), number.get())
 }
 
-/// One line for each stream: its label, and the issue to start in it.
+/// One line for each stream: its label, and the step to take in it.
+///
+/// The step is an issue to start, or an open pull request to finish. Its
+/// command or its words stand in one column for every stream.
 ///
 /// The tail is what the reader came for, so it takes its columns first and the
 /// label is cut to what is left. A label that pushed the command off the window
