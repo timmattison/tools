@@ -23,3 +23,4 @@ pub mod ranking;
 pub mod state;
 pub mod table;
 pub mod top;
+pub mod vm;
