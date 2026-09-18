@@ -161,3 +161,29 @@ fn a_stop_frees_the_renderer() {
         "the output unit did not free the renderer at the stop"
     );
 }
+
+#[test]
+fn a_drop_without_a_stop_stops_the_unit_and_frees_the_renderer() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let unit = start(CountingSilence {
+        calls: Arc::clone(&calls),
+    });
+    assert!(
+        wait_until(|| calls.load(Ordering::Relaxed) > 0),
+        "the output unit plays before the drop"
+    );
+
+    drop(unit);
+    assert_eq!(
+        Arc::strong_count(&calls),
+        1,
+        "the drop of the output unit did not free the renderer"
+    );
+    let at_drop = calls.load(Ordering::Relaxed);
+    thread::sleep(QUIET_AFTER_STOP);
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        at_drop,
+        "the output unit called the renderer after the drop"
+    );
+}
