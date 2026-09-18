@@ -113,14 +113,21 @@ pub enum TopParseError {
 /// `PID FAULTS`, or when the second sample holds no row or a malformed row.
 pub fn parse(output: &str) -> Result<TopSample, TopParseError> {
     let lines: Vec<&str> = output.lines().collect();
-    let first_row = lines
+    let headers: Vec<usize> = lines
         .iter()
-        .rposition(|line| is_header_row(line))
-        .map_or(lines.len(), |header| header + 1);
+        .enumerate()
+        .filter(|(_, line)| is_header_row(line))
+        .map(|(index, _)| index)
+        .collect();
+    let [_, second_header] = headers[..] else {
+        return Err(TopParseError::SampleCount {
+            found: headers.len(),
+        });
+    };
     let rows = lines
         .iter()
         .enumerate()
-        .skip(first_row)
+        .skip(second_header + 1)
         .map(|(index, line)| {
             parse_row(line).ok_or_else(|| TopParseError::MalformedRow {
                 number: index + 1,
