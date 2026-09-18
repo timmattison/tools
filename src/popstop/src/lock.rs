@@ -6,6 +6,15 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// The name of the state directory in the data directory of the user.
+const STATE_DIR_NAME: &str = "popstop";
+
+/// The name of the lock file in the state directory.
+const LOCK_FILE_NAME: &str = "popstop.lock";
+
+/// The name of the log of a background copy in the state directory.
+const LOG_FILE_NAME: &str = "popstop.log";
+
 /// The directory that holds the lock file and the log of popstop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateDir(PathBuf);
@@ -18,26 +27,40 @@ impl StateDir {
         Self(path)
     }
 
-    /// Gives the state directory of the current user.
+    /// Gives the state directory of the current user: `popstop` in the data
+    /// directory of the user. On macOS that is
+    /// `~/Library/Application Support/popstop`.
+    ///
+    /// The directory is not a cache directory and not `$TMPDIR`. macOS can
+    /// delete old files in those. When the path of a held lock file goes, the
+    /// next copy makes a new file and locks it, and two copies run.
     ///
     /// # Errors
     ///
     /// Returns an error of kind [`io::ErrorKind::NotFound`] when the data
     /// directory of the user is not known.
     pub fn for_user() -> io::Result<Self> {
-        Ok(Self(PathBuf::new()))
+        dirs::data_dir()
+            .map(|data| Self(data.join(STATE_DIR_NAME)))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "the data directory of this user is not known",
+                )
+            })
     }
 
-    /// Gives the path of the lock file.
+    /// Gives the path of the lock file: `popstop.lock` in the directory.
     #[must_use]
     pub fn lock_path(&self) -> PathBuf {
-        self.0.clone()
+        self.0.join(LOCK_FILE_NAME)
     }
 
-    /// Gives the path of the log of a background copy.
+    /// Gives the path of the log of a background copy: `popstop.log` in the
+    /// directory.
     #[must_use]
     pub fn log_path(&self) -> PathBuf {
-        self.0.clone()
+        self.0.join(LOG_FILE_NAME)
     }
 
     /// Gives the path of the directory.
