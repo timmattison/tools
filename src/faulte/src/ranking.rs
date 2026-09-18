@@ -223,7 +223,7 @@ fn view_of(pid: Pid, input: &Observation<'_>) -> ClaudeView {
             state: SessionState::from_record(record, input.now),
             directory: record.directory.clone(),
         },
-        None => ClaudeView::NotClaude,
+        None => ClaudeView::NoRecord,
     }
 }
 
