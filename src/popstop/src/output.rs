@@ -310,17 +310,8 @@ const RENDER_CALLBACK_SIZE: u32 = byte_size::<AURenderCallbackStruct>();
 /// The unit plays until [`OutputUnit::stop`]. A drop without a stop does the
 /// same teardown and ignores its errors.
 pub struct OutputUnit {
-    /// The unit that plays. It is `None` after the teardown, so the teardown
-    /// runs once.
-    playing: Option<Playing>,
-}
-
-/// An output unit that plays, and the renderer that it calls.
-struct Playing {
-    /// The instance of the default output unit. It is not null.
-    unit: AudioUnit,
-    /// The renderer that the render callback of `unit` calls.
-    renderer: RendererBox,
+    /// The instance that plays.
+    instance: Instance,
 }
 
 impl OutputUnit {
@@ -331,10 +322,60 @@ impl OutputUnit {
     /// channels. The unit converts `rate` to the rate of the device when the
     /// two differ.
     ///
+    /// A start that fails disposes of what it made, and frees the renderer.
+    ///
     /// # Errors
     ///
     /// Returns an [`AudioError`] that names the call that failed.
     pub fn start<R: Render>(rate: SampleRate, renderer: R) -> Result<Self, AudioError> {
+        let mut instance = Instance::new()?;
+        instance.register(renderer)?;
+        instance.set_stream_format(rate)?;
+        instance.initialize()?;
+        instance.start()?;
+        Ok(Self { instance })
+    }
+
+    /// Stops the output unit, uninitializes it, and disposes of it. Then
+    /// frees the renderer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AudioError`] that names the first call that failed. The
+    /// calls after a failed call still run.
+    pub fn stop(mut self) -> Result<(), AudioError> {
+        self.instance.tear_down()
+    }
+}
+
+/// How far an [`Instance`] got. Each stage includes the stages before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Stage {
+    /// The instance exists.
+    Created,
+    /// The instance is initialized.
+    Initialized,
+    /// The instance plays.
+    Started,
+}
+
+/// An instance of the default output unit, and the renderer that it calls.
+///
+/// The teardown undoes each step that the instance took, once: at
+/// [`Instance::tear_down`], or at the drop.
+struct Instance {
+    /// The instance. It is not null.
+    unit: AudioUnit,
+    /// How far the instance got. It is `None` after the teardown.
+    stage: Option<Stage>,
+    /// The renderer that the render callback calls, after
+    /// [`Instance::register`].
+    renderer: Option<RendererBox>,
+}
+
+impl Instance {
+    /// Makes a new instance of the default output unit.
+    fn new() -> Result<Self, AudioError> {
         let description = AudioComponentDescription {
             componentType: kAudioUnitType_Output,
             componentSubType: kAudioUnitSubType_DefaultOutput,
@@ -364,99 +405,123 @@ impl OutputUnit {
                 "gave no instance",
             ));
         }
+        Ok(Self {
+            unit,
+            stage: Some(Stage::Created),
+            renderer: None,
+        })
+    }
 
-        let renderer = RendererBox::new(renderer);
+    /// Moves `renderer` into a box, and registers the render callback that
+    /// calls it.
+    fn register<R: Render>(&mut self, renderer: R) -> Result<(), AudioError> {
+        // The box goes into the instance before the call, so the teardown
+        // frees it when the call fails.
+        let renderer = self.renderer.insert(RendererBox::new(renderer));
         let callback = AURenderCallbackStruct {
             inputProc: Some(render_callback::<R>),
             inputProcRefCon: renderer.pointer.as_ptr(),
         };
-        // SAFETY: `unit` is a live instance, and `callback` is a callback
-        // registration of the size that the call gets. The refCon points to
-        // an `R`, which is what `render_callback::<R>` reads.
+        // SAFETY: `self.unit` is a live instance, and `callback` is a
+        // callback registration of the size that the call gets. The refCon
+        // points to an `R`, which is what `render_callback::<R>` reads, and
+        // the renderer lives until the teardown disposes of the instance.
         unsafe {
             set_property(
-                unit,
+                self.unit,
                 kAudioUnitProperty_SetRenderCallback,
                 &callback,
                 RENDER_CALLBACK_SIZE,
                 call::SET_RENDER_CALLBACK,
             )
-        }?;
+        }
+    }
 
+    /// Sets the stream format that the renderer writes, at `rate`.
+    fn set_stream_format(&mut self, rate: SampleRate) -> Result<(), AudioError> {
         let format = stream_format(rate);
-        // SAFETY: `unit` is a live instance, and `format` is a stream format
-        // of the size that the call gets.
+        // SAFETY: `self.unit` is a live instance, and `format` is a stream
+        // format of the size that the call gets.
         unsafe {
             set_property(
-                unit,
+                self.unit,
                 kAudioUnitProperty_StreamFormat,
                 &format,
                 STREAM_FORMAT_SIZE,
                 call::SET_STREAM_FORMAT,
             )
-        }?;
-
-        // SAFETY: `unit` is a live instance with a stream format and a
-        // render callback.
-        check(call::INITIALIZE, unsafe { AudioUnitInitialize(unit) })?;
-        // SAFETY: `unit` is a live, initialized instance.
-        check(call::OUTPUT_UNIT_START, unsafe {
-            AudioOutputUnitStart(unit)
-        })?;
-
-        Ok(Self {
-            playing: Some(Playing { unit, renderer }),
-        })
-    }
-
-    /// Stops the output unit, uninitializes it, and disposes of it.
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`AudioError`] that names the first call that failed. The
-    /// calls after a failed call still run.
-    pub fn stop(mut self) -> Result<(), AudioError> {
-        self.playing.take().map_or(Ok(()), Playing::tear_down)
-    }
-}
-
-impl Drop for OutputUnit {
-    fn drop(&mut self) {
-        if let Some(playing) = self.playing.take() {
-            // A drop has no caller to tell. `stop` reports the same errors.
-            let _ = playing.tear_down();
         }
     }
-}
 
-impl Playing {
-    /// Stops the unit, uninitializes it, and disposes of it. Then frees the
+    /// Initializes the instance.
+    fn initialize(&mut self) -> Result<(), AudioError> {
+        // SAFETY: `self.unit` is a live instance.
+        check(call::INITIALIZE, unsafe { AudioUnitInitialize(self.unit) })?;
+        self.stage = Some(Stage::Initialized);
+        Ok(())
+    }
+
+    /// Starts the instance. From then on, the audio thread calls the
     /// renderer.
+    fn start(&mut self) -> Result<(), AudioError> {
+        // SAFETY: `self.unit` is a live, initialized instance.
+        check(call::OUTPUT_UNIT_START, unsafe {
+            AudioOutputUnitStart(self.unit)
+        })?;
+        self.stage = Some(Stage::Started);
+        Ok(())
+    }
+
+    /// Undoes each step that the instance took: stops it, uninitializes it,
+    /// and disposes of it. Then frees the renderer.
     ///
     /// Gives the error of the first call that failed. The calls after a
-    /// failed call still run.
-    fn tear_down(self) -> Result<(), AudioError> {
-        // SAFETY: `self.unit` is a live instance that `start` started.
-        let stopped = check(call::OUTPUT_UNIT_STOP, unsafe {
-            AudioOutputUnitStop(self.unit)
-        });
-        // SAFETY: `self.unit` is a live instance that `start` initialized.
-        let uninitialized = check(call::UNINITIALIZE, unsafe {
-            AudioUnitUninitialize(self.unit)
-        });
-        // SAFETY: `self.unit` is a live instance, and nothing uses it after
-        // this call.
+    /// failed call still run. A second teardown does nothing.
+    fn tear_down(&mut self) -> Result<(), AudioError> {
+        let Some(stage) = self.stage.take() else {
+            return Ok(());
+        };
+        let stopped = if stage >= Stage::Started {
+            // SAFETY: `self.unit` is a live instance that plays.
+            check(call::OUTPUT_UNIT_STOP, unsafe {
+                AudioOutputUnitStop(self.unit)
+            })
+        } else {
+            Ok(())
+        };
+        let uninitialized = if stage >= Stage::Initialized {
+            // SAFETY: `self.unit` is a live, initialized instance.
+            check(call::UNINITIALIZE, unsafe {
+                AudioUnitUninitialize(self.unit)
+            })
+        } else {
+            Ok(())
+        };
+        // SAFETY: `self.unit` is a live instance. `stage` is now `None`, so
+        // nothing uses the instance after this call.
         let disposed = check(call::INSTANCE_DISPOSE, unsafe {
             AudioComponentInstanceDispose(self.unit)
         });
-        // A unit that is not disposed can still call the render callback, so
-        // its renderer stays. A leak is better than a use after free.
+        // An instance that is not disposed can still call the render
+        // callback, so its renderer stays. A leak is better than a use after
+        // free.
         if disposed.is_ok() {
-            // SAFETY: the unit is disposed, so nothing calls the render
-            // callback with this renderer again.
-            unsafe { self.renderer.free() };
+            if let Some(renderer) = self.renderer.take() {
+                // SAFETY: the instance is disposed, so nothing calls the
+                // render callback with this renderer again.
+                unsafe { renderer.free() };
+            }
         }
         stopped.and(uninitialized).and(disposed)
+    }
+}
+
+impl Drop for Instance {
+    fn drop(&mut self) {
+        // A drop has no caller to tell. `OutputUnit::stop` reports the same
+        // errors, and `OutputUnit::start` reports the error that caused the
+        // drop.
+        let _ = self.tear_down();
     }
 }
 
