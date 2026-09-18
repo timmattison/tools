@@ -117,16 +117,15 @@ impl SessionRegistry {
     /// or when the file is about a different process.
     #[must_use]
     pub fn record_for(&self, pid: u32, start_time_epoch_secs: u64) -> Option<SessionRecord> {
-        let _ = (&self.root, pid, start_time_epoch_secs);
-        None
+        let file = self.root.join(format!("{pid}.json"));
+        let contents = std::fs::read_to_string(file).ok()?;
+        record_in(&contents, pid, start_time_epoch_secs)
     }
 }
 
 impl Registry for SessionRegistry {
     fn session_of(&self, process: &ProcessFact) -> Option<SessionId> {
-        let file = self.root.join(format!("{}.json", process.pid));
-        let contents = std::fs::read_to_string(file).ok()?;
-        record_in(&contents, process.pid, process.start_time_epoch_secs)
+        self.record_for(process.pid, process.start_time_epoch_secs)
             .map(|record| record.session)
     }
 }
