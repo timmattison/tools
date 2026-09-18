@@ -175,6 +175,17 @@ pub struct Ranking {
 }
 
 impl Ranking {
+    /// Gives the rate of `faults` over the window, in faults per second.
+    ///
+    /// The rate is the signal of this tool. The counter of a process since it
+    /// started is not: an old process ranks high on that counter whatever it
+    /// does now.
+    #[must_use]
+    pub fn faults_per_second(&self, faults: u64) -> f64 {
+        let _ = faults;
+        0.0
+    }
+
     /// Gives the share of all faults that `faults` is, as a fraction from 0
     /// to 1.
     ///
@@ -324,8 +335,13 @@ PID    FAULTS    \n\
 
         /// Ranks the processes of this machine over [`WINDOW`].
         fn rank(&self) -> Ranking {
+            self.rank_over(WINDOW)
+        }
+
+        /// Ranks the processes of this machine over `window`.
+        fn rank_over(&self, window: Duration) -> Ranking {
             rank(&Observation {
-                window: WINDOW,
+                window,
                 faults: &self.faults,
                 table: &self.table,
                 claude: &self.claude,
@@ -410,5 +426,25 @@ PID    FAULTS    \n\
 
         assert_eq!(ranking.total_faults, 0);
         assert_eq!(ranking.share(0), 0.0);
+    }
+
+    /// The rate is the faults over the window. The window of these sources is
+    /// 4 seconds, and `top` asked for 2. On a loaded machine the two samples
+    /// were 4 seconds apart, so the caller gives the longer time.
+    #[test]
+    fn the_rate_is_the_faults_over_the_window() {
+        let machine = Machine::new(vec![count(10, 4_000), count(20, 3)], vec![process(10)]);
+
+        let ranking = machine.rank();
+
+        assert_eq!(ranking.faults_per_second(4_000), 1_000.0);
+        assert_eq!(ranking.faults_per_second(3), 0.75);
+        assert_eq!(ranking.faults_per_second(0), 0.0);
+        assert_eq!(
+            machine
+                .rank_over(Duration::from_millis(2_500))
+                .faults_per_second(5),
+            2.0
+        );
     }
 }
