@@ -432,7 +432,7 @@ mod tests {
 
     /// Gives the table of the tests: one row for each PID of `pids`, and one
     /// row for `faulte`. Every process is a child of `launchd`.
-    fn table_of(pids: [u32; 8]) -> Vec<ProcessRow> {
+    fn table_of(pids: &[u32]) -> Vec<ProcessRow> {
         pids.iter()
             .chain([FAULTE_PID].iter())
             .map(|pid| process(*pid, LAUNCHD_PID))
@@ -458,7 +458,7 @@ mod tests {
             session(90, OLD, SessionState::Other("shell".to_owned())),
             session(100, OLD, SessionState::Unknown),
         ]);
-        let table = table_of([30, 40, 50, 60, 70, 80, 90, 100]);
+        let table = table_of(&[30, 40, 50, 60, 70, 80, 90, 100]);
 
         let plan = plan(&input(&ranking, &table, rules()));
 
@@ -469,6 +469,38 @@ mod tests {
                 .map(|candidate| candidate.status_changed_at),
             Some(Some(now() - Duration::from_secs(3_600)))
         );
+    }
+
+    /// The plan gives the candidates oldest first, whatever order the ranking
+    /// gives its rows in. The ranking sorts by faults, and the person reads
+    /// the plan to decide which sessions to stop. Two sessions that started in
+    /// the same second keep the order of their PIDs, so two runs over the same
+    /// sources agree.
+    ///
+    /// `--max N` keeps the N oldest, and the plan counts the rest. A limit
+    /// that is not below the count of the candidates holds nothing back.
+    #[test]
+    fn the_plan_is_oldest_first_and_max_keeps_the_oldest_of_them() {
+        let ten_days = 10 * 86_400;
+        let ranking = ranking(vec![
+            session(30, OLD, idle(3_600)),
+            session(40, ten_days, idle(3_600)),
+            session(50, ten_days, idle(3_600)),
+            session(60, 9 * 86_400, idle(3_600)),
+        ]);
+        let table = table_of(&[30, 40, 50, 60]);
+        let under = |max| plan(&input(&ranking, &table, Rules { max, ..rules() }));
+
+        let every = under(None);
+        let two = under(Some(2));
+        let plenty = under(Some(10));
+
+        assert_eq!(selected(&every), vec![40, 50, 60, 30]);
+        assert_eq!(every.held_back_by_max, 0);
+        assert_eq!(selected(&two), vec![40, 50]);
+        assert_eq!(two.held_back_by_max, 2);
+        assert_eq!(selected(&plenty), vec![40, 50, 60, 30]);
+        assert_eq!(plenty.held_back_by_max, 0);
     }
 
     /// Rule 3: a session with a live descendant is never a candidate. A
