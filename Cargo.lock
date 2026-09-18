@@ -6129,6 +6129,7 @@ version = "0.1.0"
 dependencies = [
  "buildinfo",
  "clap",
+ "dirs",
 ]
 
 [[package]]

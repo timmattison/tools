@@ -7,6 +7,7 @@ description = "Keeps the default audio output device awake with an inaudible sig
 [dependencies]
 buildinfo.workspace = true
 clap.workspace = true
+dirs.workspace = true
 
 [lints]
 workspace = true

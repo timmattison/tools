@@ -10,5 +10,8 @@
 //!
 //! - [`signal`] makes the samples of the keepalive signal. It is pure and it
 //!   compiles on every platform.
+//! - [`lock`] makes sure that only one copy runs for each user. It uses the
+//!   standard library only and it compiles on every platform.
 
+pub mod lock;
 pub mod signal;
