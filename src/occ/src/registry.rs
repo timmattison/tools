@@ -7,6 +7,14 @@
 //! The file is read here rather than through that command for two reasons. The
 //! command costs a subprocess on every run, and it drops the `version` field,
 //! which is the one fact this tool exists to report.
+//!
+//! The same file also gives the status of the session, the time of its last
+//! status change, and its working directory. [`SessionRecord`] holds these
+//! facts, and [`SessionRegistry::record_for`] reads them for a process that a
+//! caller knows by its PID and its start time. `faulte` uses these facts to
+//! decide whether a session is active. It reads them through this module, so
+//! one reader of the file exists, and both tools reject a stale file by the
+//! same rule.
 
 use crate::process::ProcessFact;
 use crate::SessionId;
