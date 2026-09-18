@@ -16,3 +16,5 @@
 //!
 //! The rules are pure functions over plain values, so a test can check each one
 //! without a real process table.
+
+pub mod duration;
