@@ -18,3 +18,4 @@
 //! without a real process table.
 
 pub mod duration;
+pub mod pid;
