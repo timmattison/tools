@@ -220,7 +220,7 @@ fn view_of(pid: Pid, uid: Uid, input: &Observation<'_>) -> ClaudeView {
     // The account comes before the record. The registry folder of another
     // account has the mode `0700`, so a record that the caller holds under
     // this PID is about a process of the viewer, or about a dead session.
-    if uid != input.viewer.uid {
+    if uid != input.viewer.uid && !input.viewer.is_root {
         return ClaudeView::OtherAccount;
     }
     match input.records.get(&pid) {
