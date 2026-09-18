@@ -92,4 +92,27 @@ mod tests {
             }
         }
     }
+
+    /// The idle time is the time from the last change of the status to now.
+    /// A record with no time of the change, and a change after now, give no
+    /// idle time. A change at now gives zero.
+    #[test]
+    fn the_idle_time_is_the_time_since_the_status_changed() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let three_hours_twelve = Duration::from_secs(3 * 3_600 + 12 * 60);
+        let cases = [
+            (Some(now - three_hours_twelve), Some(three_hours_twelve)),
+            (Some(now), Some(Duration::ZERO)),
+            (Some(now + Duration::from_secs(5)), None),
+            (None, None),
+        ];
+
+        for (changed_at, for_) in cases {
+            assert_eq!(
+                SessionState::from_record(&record(Some(SessionStatus::Idle), changed_at), now),
+                SessionState::Idle { for_ },
+                "changed at {changed_at:?}"
+            );
+        }
+    }
 }
