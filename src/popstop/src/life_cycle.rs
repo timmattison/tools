@@ -15,7 +15,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use signal_hook::consts::SIGINT;
+use signal_hook::consts::{SIGHUP, SIGINT};
 use signal_hook::iterator::{Handle, Signals};
 
 use crate::exit_status;
@@ -30,8 +30,9 @@ const RELATIVE_QOS: libc::c_int = 0;
 
 /// The signals that stop a copy of popstop.
 ///
-/// `SIGINT` is Ctrl-C at a terminal.
-const STOP_SIGNALS: [libc::c_int; 1] = [SIGINT];
+/// `SIGINT` is Ctrl-C at a terminal. `SIGHUP` arrives when the terminal of a
+/// foreground copy closes, and it must stop that copy in the same quiet way.
+const STOP_SIGNALS: [libc::c_int; 2] = [SIGINT, SIGHUP];
 
 /// The name of the thread that waits for a signal.
 const SIGNAL_THREAD_NAME: &str = "popstop-signals";
@@ -118,7 +119,8 @@ pub enum StopReason {
 
 /// Runs a copy of popstop in the foreground, until a signal stops it.
 ///
-/// It writes the status lines to stdout, and it stops on `SIGINT`.
+/// It writes the status lines to stdout, and it stops on the signals of
+/// [`STOP_SIGNALS`].
 ///
 /// # Errors
 ///
