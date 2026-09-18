@@ -36,8 +36,9 @@
 //!
 //! A picture joins two streams, so the row over a row is not the work that row
 //! waits for. [`render_graph`] paints one block with a last column that names
-//! that work, and the answer under it names one command for each step somebody
-//! can start now.
+//! that work, and the answer under it writes one line for each step somebody
+//! can take now: the command that starts an issue, or the words that finish an
+//! open pull request.
 //!
 //! That column takes its columns out of the window before the title does. It
 //! is the one thing a reader of a blocked row came for, and a title is text
@@ -420,6 +421,8 @@ enum Action {
     Finish {
         /// The number of the pull request.
         pull_request: IssueNumber,
+        /// The issue the pull request closes, when the step names one.
+        closes: Option<IssueNumber>,
     },
 }
 
@@ -432,6 +435,7 @@ impl Action {
         if entry.is_pull_request() {
             Self::Finish {
                 pull_request: entry.number,
+                closes: entry.closes.map(|closes| closes.number),
             }
         } else {
             Self::Start(entry.number)
@@ -439,9 +443,17 @@ impl Action {
     }
 }
 
-/// `PR #515`: the name an answer writes for a pull request.
-fn pull_request_name(number: IssueNumber) -> String {
-    format!("PR {number}")
+/// `PR #515`, or `PR #515 (closes #512)`: the name an answer writes for a
+/// pull request.
+///
+/// The name carries the issue the pull request closes, because that is the
+/// number the plan gave the work. A reader who looks for `#512` in the answer
+/// thus finds the pull request that finishes it.
+fn pull_request_name(pull_request: IssueNumber, closes: Option<IssueNumber>) -> String {
+    match closes {
+        Some(closes) => format!("PR {pull_request} (closes {closes})"),
+        None => format!("PR {pull_request}"),
+    }
 }
 
 /// The sentence that names one step somebody can take now, and what to do
@@ -450,28 +462,26 @@ fn pull_request_name(number: IssueNumber) -> String {
 /// An issue gets the start command. An open pull request gets the words that
 /// tell the reader to finish it, and no start command, because its work
 /// exists already.
+///
+/// A chain names one such step, and a picture names one for each stream that
+/// is ready. Both write this sentence, so a reader who learned it on a chain
+/// reads the answer of a picture without learning a second one.
 fn next_line(entry: &Entry, start: &StartCommand) -> String {
     match Action::of(entry) {
-        Action::Start(number) => start_line(number, start),
-        Action::Finish { pull_request } => format!(
+        Action::Start(number) => format!(
+            "Start {} next with '{}'",
+            number.to_string().bold(),
+            command(start, number).cyan().bold()
+        ),
+        Action::Finish {
+            pull_request,
+            closes,
+        } => format!(
             "Finish {} next: {}",
-            pull_request_name(pull_request).bold(),
+            pull_request_name(pull_request, closes).bold(),
             FINISH_WORDS.cyan().bold()
         ),
     }
-}
-
-/// The sentence that names one issue to start, and the command that starts it.
-///
-/// A chain names one such issue, and a picture names one for each stream that
-/// is ready. Both write this sentence, so a reader who learned it on a chain
-/// reads the answer of a picture without learning a second one.
-fn start_line(number: IssueNumber, start: &StartCommand) -> String {
-    format!(
-        "Start {} next with '{}'",
-        number.to_string().bold(),
-        command(start, number).cyan().bold()
-    )
 }
 
 /// Paint a plan drawn as a picture: the rows, the notes they earn, and the
@@ -558,7 +568,8 @@ fn waits_text(numbers: &[IssueNumber]) -> String {
     format!("{WAITS_FOR}{}", written.join(NUMBER_SEPARATOR))
 }
 
-/// The answer of a picture: one line for each step somebody can start now.
+/// The answer of a picture: one line for each step somebody can take now. See
+/// [`next_line`].
 ///
 /// The lines stand in the order of the rows, so a reader who read the rows
 /// reads the answers in the same order and finds the row of each of them.
@@ -568,7 +579,7 @@ fn graph_answer(report: &Report, start: &StartCommand) -> Vec<String> {
         .iter()
         .enumerate()
         .filter(|(position, _)| report.is_ready(*position))
-        .map(|(_, entry)| start_line(entry.number, start))
+        .map(|(_, entry)| next_line(entry, start))
         .collect();
     if ready.is_empty() {
         return vec![nothing_to_start(report)];
