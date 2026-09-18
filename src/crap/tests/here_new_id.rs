@@ -7,9 +7,7 @@
 //! in-crate unit tests cannot reach because `run_here` calls `exit`.
 
 use std::fs;
-use std::path::PathBuf;
 use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A resolvable original session id, created in every throwaway `HOME`.
 const ORIG: &str = "11111111-2222-3333-4444-555555555555";
@@ -22,16 +20,17 @@ const NEW: &str = "99999999-8888-7777-6666-555555555555";
 const HERE_SENTINEL: &str = "__CRAP_HERE__";
 const NO_NEW_ID_SENTINEL: &str = "__CRAP_NO_NEW_ID__";
 
-/// A process-unique temp directory, keyed on pid + nanoseconds so concurrent
-/// runs of this test never share state.
-fn unique_root(tag: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+/// A temp directory of its own for one run. It removes itself on drop, also
+/// when a test panics.
+///
+/// `tempfile` makes the name with `O_EXCL`, so two runs never share a
+/// directory. A pid + nanoseconds name is not sufficient: two threads of one
+/// test process can read the clock in the same tick and get the same name.
+fn unique_root(tag: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("crap-it-{tag}-"))
+        .tempdir()
         .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("crap-it-{tag}-{}-{nanos}", std::process::id()));
-    fs::create_dir_all(&dir).unwrap();
-    dir
 }
 
 /// Sets up a throwaway `HOME` containing the resolvable session [`ORIG`], then
@@ -44,7 +43,8 @@ fn run_here(tag: &str, extra_args: &[&str]) -> Output {
 /// Like [`run_here`], but also plants a transcript for each id in `also_plant`,
 /// so collisions with an existing session can be exercised.
 fn run_here_planting(tag: &str, extra_args: &[&str], also_plant: &[&str]) -> Output {
-    let root = unique_root(tag);
+    let tmp = unique_root(tag);
+    let root = tmp.path();
     let home = root.join("home");
     let projects = home.join(".claude").join("projects");
 
@@ -68,15 +68,12 @@ fn run_here_planting(tag: &str, extra_args: &[&str], also_plant: &[&str]) -> Out
     let mut args = vec!["--here", ORIG];
     args.extend_from_slice(extra_args);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_crap"))
+    Command::new(env!("CARGO_BIN_EXE_crap"))
         .env("HOME", &home)
         .current_dir(&work)
         .args(&args)
         .output()
-        .expect("crap binary should run");
-
-    let _ = fs::remove_dir_all(&root);
-    output
+        .expect("crap binary should run")
 }
 
 #[test]
