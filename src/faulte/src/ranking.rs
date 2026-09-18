@@ -342,6 +342,15 @@ PID    FAULTS    \n\
         }
     }
 
+    /// Gives the table row of a zombie: a process that stopped, and whose
+    /// parent did not collect its exit status yet.
+    fn zombie(pid: u32) -> ProcessRow {
+        ProcessRow {
+            zombie: true,
+            ..process(pid)
+        }
+    }
+
     /// The sources of one test. The viewer is UID 501, not root.
     struct Machine {
         faults: Vec<FaultCount>,
@@ -543,5 +552,22 @@ PID    FAULTS    \n\
         assert_eq!(ranking.skipped.exited, 2);
         assert_eq!(ranking.skipped.exited_faults, 100);
         assert_eq!(ranking.share(ranking.skipped.exited_faults), 0.0625);
+    }
+
+    /// `top` does not list a zombie, so a zombie of the table is a count and
+    /// not a process that `top` missed. A zombie that `top` did list is
+    /// unusual, and it is a row like every other row of the sample.
+    #[test]
+    fn a_zombie_that_the_sample_lacks_counts_as_a_zombie() {
+        let machine = Machine::new(
+            vec![count(10, 300), count(51, 7)],
+            vec![process(10), zombie(50), zombie(51)],
+        );
+
+        let ranking = machine.rank();
+
+        assert_eq!(pids(&ranking), [10, 51]);
+        assert_eq!(ranking.skipped.zombies, 1);
+        assert_eq!(ranking.skipped.exited, 0);
     }
 }
