@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use popstop::output::{default_output_device_name, OutputUnit, Render};
+use popstop::output::{default_output_device_name, default_output_sample_rate, OutputUnit, Render};
 use popstop::signal::SampleRate;
 
 /// The sample rate of the stream in these tests, in hertz. The output unit
@@ -31,6 +31,12 @@ const CALLS_THAT_SHOW_A_STREAM: usize = 3;
 
 /// The time that a test waits after a stop to see that no call comes.
 const QUIET_AFTER_STOP: Duration = Duration::from_millis(100);
+
+/// The lowest nominal rate of a real output device, in hertz.
+const LOWEST_DEVICE_RATE_HZ: f64 = 8_000.0;
+
+/// The highest nominal rate of a real output device, in hertz.
+const HIGHEST_DEVICE_RATE_HZ: f64 = 384_000.0;
 
 /// A renderer that writes silence and counts its calls.
 struct CountingSilence {
@@ -108,5 +114,26 @@ fn the_default_output_device_has_a_name() {
     assert!(
         !name.trim().is_empty(),
         "the default output device has the name {name:?}, which is empty"
+    );
+}
+
+#[test]
+fn the_default_output_device_has_a_nominal_rate_in_the_range_of_real_devices() {
+    let rate = default_output_sample_rate().unwrap_or_else(|error| {
+        panic!(
+            "the nominal sample rate of the default output device is not known: {error}. This \
+             test reads the default output device, so the machine must have one"
+        )
+    });
+    assert_eq!(
+        SampleRate::new(rate.hz()),
+        Some(rate),
+        "the rate is a valid sample rate"
+    );
+    assert!(
+        (LOWEST_DEVICE_RATE_HZ..=HIGHEST_DEVICE_RATE_HZ).contains(&rate.hz()),
+        "the default output device has a nominal rate of {} Hz, outside {LOWEST_DEVICE_RATE_HZ} \
+         Hz to {HIGHEST_DEVICE_RATE_HZ} Hz",
+        rate.hz()
     );
 }

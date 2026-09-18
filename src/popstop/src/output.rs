@@ -183,6 +183,15 @@ pub fn default_output_device_name() -> Result<String, AudioError> {
     Ok(name.to_string())
 }
 
+/// Gives the nominal sample rate of the default output device.
+///
+/// # Errors
+///
+/// Returns an [`AudioError`] that names the call that failed.
+pub fn default_output_sample_rate() -> Result<SampleRate, AudioError> {
+    SampleRate::new(1.0).ok_or_else(|| AudioError::no_result(call::GET_NAME, "stub"))
+}
+
 /// Gives the default output device, which the default output unit plays to.
 fn default_output_device() -> Result<AudioObjectID, AudioError> {
     // SAFETY: the data of the default output device property is an
