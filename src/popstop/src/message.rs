@@ -6,7 +6,7 @@
 use std::fmt;
 use std::path::Path;
 
-use chrono::{Local, TimeZone};
+use chrono::{DateTime, Local, TimeZone};
 
 use crate::lock::StartTime;
 
@@ -39,14 +39,24 @@ pub fn start_time_text(start: StartTime) -> String {
     start_time_text_in(start, &Local)
 }
 
+/// The format of a start time: the date and the time to the second.
+const START_TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
+
 /// Gives the start time of a copy as a date and time in `zone`.
 fn start_time_text_in<Tz>(start: StartTime, zone: &Tz) -> String
 where
     Tz: TimeZone,
     Tz::Offset: fmt::Display,
 {
-    let _ = (start, zone);
-    String::new()
+    i64::try_from(start.unix_micros())
+        .ok()
+        .and_then(DateTime::from_timestamp_micros)
+        .map(|utc| {
+            utc.with_timezone(zone)
+                .format(START_TIME_FORMAT)
+                .to_string()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
