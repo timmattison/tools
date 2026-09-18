@@ -30,10 +30,12 @@ impl VmCounters {
     /// Gives the size of the compressor in bytes: the pages that it holds,
     /// times `page_size`.
     ///
-    /// The page size of this Mac is 16,384 bytes, from `vm_page_size`.
+    /// The page size of this Mac is 16,384 bytes, from `vm_page_size`. A size
+    /// that does not fit in 64 bits gives the largest number, and not a
+    /// panic.
     #[must_use]
     pub fn compressor_bytes(&self, page_size: u64) -> u64 {
-        self.compressor_pages * page_size
+        self.compressor_pages.saturating_mul(page_size)
     }
 }
 
