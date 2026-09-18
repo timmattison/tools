@@ -308,6 +308,8 @@ mod tests {
 
     use std::collections::BTreeSet;
 
+    use occ::SessionStatus;
+
     /// The output of `top` in two samples. PID 10 made 9,000,000 faults since
     /// it started, and 3 over the interval. PID 20 made 5 since it started,
     /// and 4,000 over the interval.
@@ -373,6 +375,27 @@ PID    FAULTS    \n\
         }
     }
 
+    /// The session of a record in the tests.
+    const SESSION: &str = "d3b0d921-f0a1-41fc-b309-c11aa30c1173";
+
+    /// The working directory of a record in the tests.
+    const DIRECTORY: &str = "/Volumes/SamsungSSDs/code/tools";
+
+    /// Gives the record of a session that is idle for `idle_for`.
+    fn idle_record(idle_for: Duration) -> SessionRecord {
+        SessionRecord {
+            session: session(),
+            status: Some(SessionStatus::Idle),
+            status_changed_at: Some(now() - idle_for),
+            directory: Some(PathBuf::from(DIRECTORY)),
+        }
+    }
+
+    /// Gives the session of [`SESSION`].
+    fn session() -> SessionId {
+        SessionId::parse(SESSION).expect("the test ID is a UUID")
+    }
+
     /// The sources of one test. The viewer is UID 501, not root.
     struct Machine {
         faults: Vec<FaultCount>,
@@ -396,6 +419,18 @@ PID    FAULTS    \n\
                     is_root: false,
                 },
             }
+        }
+
+        /// Gives this machine, with `pid` in the role `role` of Claude Code.
+        fn with_claude(mut self, pid: u32, role: ClaudeRole) -> Self {
+            self.claude.insert(Pid::new(pid), role);
+            self
+        }
+
+        /// Gives this machine, with `record` as the registry record of `pid`.
+        fn with_record(mut self, pid: u32, record: SessionRecord) -> Self {
+            self.records.insert(Pid::new(pid), record);
+            self
         }
 
         /// Ranks the processes of this machine over [`WINDOW`].
@@ -673,6 +708,29 @@ PID    FAULTS    \n\
             ranking.rows.iter().map(|row| row.faults).sum::<u64>() + skipped.exited_faults,
             ranking.total_faults,
             "the rows and the processes that exited hold every fault"
+        );
+    }
+
+    /// A row of a Claude Code process that has a registry record gives the
+    /// session, its state at the time now, and its working directory.
+    #[test]
+    fn a_claude_process_with_a_record_shows_its_session() {
+        let idle_for = Duration::from_secs(3 * 3_600 + 12 * 60);
+        let machine = Machine::new(vec![count(10, 300)], vec![process(10)])
+            .with_claude(10, ClaudeRole::Session)
+            .with_record(10, idle_record(idle_for));
+
+        let ranking = machine.rank();
+
+        assert_eq!(
+            ranking.rows.first().map(|row| &row.claude),
+            Some(&ClaudeView::Session {
+                id: session(),
+                state: SessionState::Idle {
+                    for_: Some(idle_for)
+                },
+                directory: Some(PathBuf::from(DIRECTORY)),
+            })
         );
     }
 }
