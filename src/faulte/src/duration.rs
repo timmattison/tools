@@ -23,9 +23,15 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Span(NonZeroU64);
 
+/// What each refusal tells the person to give in place of the bad text.
+const HINT: &str = "give a whole number and a unit, for example 5s, 10m, 2h, or 7d";
+
 /// The reason why a text is not a [`Span`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ParseSpanError {
+    /// The text is empty.
+    #[error("the duration is empty: {HINT}")]
+    Empty,
     /// The text is not a duration.
     #[error("{text:?} is not a duration")]
     Invalid {
@@ -124,5 +130,16 @@ mod tests {
         for (text, expected) in cases {
             assert_eq!(seconds(text), Ok(expected), "the text {text:?}");
         }
+    }
+
+    #[test]
+    fn an_empty_text_is_refused_as_empty() {
+        let error = seconds("").expect_err("an empty text is not a duration");
+
+        assert_eq!(error, ParseSpanError::Empty);
+        assert!(
+            error.to_string().starts_with("the duration is empty: "),
+            "the message says that the text is empty: {error}"
+        );
     }
 }
