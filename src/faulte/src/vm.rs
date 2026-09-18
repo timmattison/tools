@@ -40,8 +40,10 @@ impl VmDelta {
     /// counters `after` it.
     #[must_use]
     pub fn between(before: VmCounters, after: VmCounters) -> Self {
-        let _ = (before, after);
-        Self::default()
+        Self {
+            swapins: after.swapins - before.swapins,
+            swapouts: after.swapouts - before.swapouts,
+        }
     }
 }
 
