@@ -211,11 +211,15 @@ fn send_the_later_output_to_the_log() -> io::Result<()> {
 
 /// Opens the log of the background copies in `dir`, and makes the directory
 /// when it does not exist.
+///
+/// The open empties the log, thus the log holds the copy that runs and
+/// nothing older, and it cannot grow without limit.
 fn open_the_log(dir: &StateDir) -> io::Result<File> {
     fs::create_dir_all(dir.path())?;
     OpenOptions::new()
         .create(true)
-        .append(true)
+        .write(true)
+        .truncate(true)
         .open(dir.log_path())
 }
 
