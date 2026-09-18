@@ -581,4 +581,48 @@ mod tests {
         );
         drop(holder);
     }
+
+    /// Holds the lock like a holder that writes `record` `HOLD` after it gets
+    /// the lock. Gives the locked file and the thread that writes the record.
+    fn hold_and_write_the_record_late(
+        dir: &StateDir,
+        record: HolderRecord,
+    ) -> (File, thread::JoinHandle<()>) {
+        fs::create_dir_all(dir.path()).expect("make the state directory");
+        let holder = File::create(dir.lock_path()).expect("make the lock file");
+        holder.lock().expect("the holder gets the lock");
+        let lock_path = dir.lock_path();
+        let writer = thread::spawn(move || {
+            thread::sleep(HOLD);
+            let line = serde_json::to_string(&record).expect("the record serializes") + "\n";
+            fs::write(lock_path, line).expect("write the record late");
+        });
+        (holder, writer)
+    }
+
+    #[test]
+    fn a_record_that_appears_during_the_wait_is_the_record_that_a_reader_gets() {
+        let (_temp, dir) = state_dir();
+        let (holder, writer) = hold_and_write_the_record_late(&dir, FIRST);
+
+        assert_eq!(
+            current_holder(&dir).expect("the reader waits for the record"),
+            Some(FIRST)
+        );
+        writer.join().expect("the writer thread ends");
+        drop(holder);
+
+        let (_other_temp, other) = state_dir();
+        let (holder, writer) = hold_and_write_the_record_late(&other, FIRST);
+
+        match acquire(&other, &SECOND) {
+            Err(AcquireError::Held(record)) => assert_eq!(record, FIRST),
+            Err(AcquireError::Io(error)) => {
+                panic!("the refusal did not wait for the record: {error}")
+            }
+            Ok(_guard) => panic!("the acquire got the lock while the holder holds it"),
+        }
+        writer.join().expect("the writer thread ends");
+        drop(holder);
+    }
 }
