@@ -59,11 +59,14 @@ pub fn parse(output: &str) -> Result<Vec<ProcessRow>, TableParseError> {
 /// one space.
 const START_FORMAT: &str = "%a %b %d %H:%M:%S %Y";
 
+/// The first letter of the state of a zombie, as `ps` prints it.
+const ZOMBIE: char = 'Z';
+
 /// Reads one row.
 fn parse_row(line: &str) -> Option<ProcessRow> {
     let mut tokens = line.split_ascii_whitespace();
     let mut next = || tokens.next();
-    let (pid, ppid, uid, rss, _stat) = (next()?, next()?, next()?, next()?, next()?);
+    let (pid, ppid, uid, rss, stat) = (next()?, next()?, next()?, next()?, next()?);
     let start = [next()?, next()?, next()?, next()?, next()?].join(" ");
     let command = tokens.collect::<Vec<&str>>().join(" ");
     let started = NaiveDateTime::parse_from_str(&start, START_FORMAT)
@@ -75,7 +78,7 @@ fn parse_row(line: &str) -> Option<ProcessRow> {
         ppid: Pid::new(unsigned(ppid)?),
         uid: Uid::new(unsigned(uid)?),
         rss_kib: unsigned(rss)?,
-        zombie: false,
+        zombie: stat.starts_with(ZOMBIE),
         started_at_epoch_secs: u64::try_from(started).ok()?,
         command,
     })
