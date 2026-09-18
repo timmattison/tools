@@ -213,19 +213,14 @@ pub fn acquire(dir: &StateDir, record: &HolderRecord) -> Result<LockGuard, Acqui
         .open(dir.lock_path())
         .map_err(AcquireError::Io)?;
 
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => {
-            let lock_path = dir.lock_path();
-            return Err(read_held_record(&mut file, &lock_path)
-                .map_or_else(AcquireError::Io, AcquireError::Held));
+    match probe(&mut file, &dir.lock_path()).map_err(AcquireError::Io)? {
+        Probe::Held(holder) => Err(AcquireError::Held(holder)),
+        Probe::Free => {
+            let mut guard = LockGuard { file };
+            guard.write_record(record).map_err(AcquireError::Io)?;
+            Ok(guard)
         }
-        Err(TryLockError::Error(error)) => return Err(AcquireError::Io(error)),
     }
-
-    let mut guard = LockGuard { file };
-    guard.write_record(record).map_err(AcquireError::Io)?;
-    Ok(guard)
 }
 
 /// Gives the record of the copy that holds the lock, or `None` when no copy
@@ -243,13 +238,12 @@ pub fn current_holder(dir: &StateDir) -> io::Result<Option<HolderRecord>> {
     let Some(mut file) = open_existing_lock_file(dir)? else {
         return Ok(None);
     };
-    match file.try_lock() {
-        Ok(()) => {
+    match probe(&mut file, &dir.lock_path())? {
+        Probe::Free => {
             file.unlock()?;
             Ok(None)
         }
-        Err(TryLockError::WouldBlock) => read_held_record(&mut file, &dir.lock_path()).map(Some),
-        Err(TryLockError::Error(error)) => Err(error),
+        Probe::Held(holder) => Ok(Some(holder)),
     }
 }
 
@@ -314,16 +308,34 @@ fn open_existing_lock_file(dir: &StateDir) -> io::Result<Option<File>> {
     }
 }
 
-/// Reads the record of the holder of a held lock at `lock_path`.
+/// What a try of the lock found.
+enum Probe {
+    /// No copy held the lock, and the caller holds it now.
+    Free,
+    /// Another copy holds the lock. This is its record.
+    Held(HolderRecord),
+}
+
+/// Tries the lock on `file`, the lock file at `lock_path`. When another copy
+/// holds the lock, it reads the record of that copy.
 ///
-/// When the record is empty or does not parse, it reads the record again
-/// after a short sleep, for [`RECORD_WAIT`] at most. Then it returns an error
-/// of kind [`io::ErrorKind::InvalidData`].
-fn read_held_record(file: &mut File, lock_path: &Path) -> io::Result<HolderRecord> {
+/// A holder writes its record directly after it gets the lock, and empties
+/// the file directly before it releases the lock. A reader also holds the
+/// lock for a moment. So a held lock with an empty record is normal for a
+/// short time. When the record is empty or does not parse, it sleeps for a
+/// short time, then tries the lock and reads the record again, for
+/// [`RECORD_WAIT`] at most. Then it returns an error of kind
+/// [`io::ErrorKind::InvalidData`].
+fn probe(file: &mut File, lock_path: &Path) -> io::Result<Probe> {
     let deadline = Instant::now() + RECORD_WAIT;
     loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(Probe::Free),
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(error)) => return Err(error),
+        }
         match read_record(file)? {
-            Ok(record) => return Ok(record),
+            Ok(record) => return Ok(Probe::Held(record)),
             Err(problem) if Instant::now() >= deadline => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
