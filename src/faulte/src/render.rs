@@ -493,23 +493,10 @@ pub fn rows(
 /// session and nothing in the text says that it is a guess.
 fn claude_cells(claude: &ClaudeView) -> (String, String, String) {
     match claude {
-        ClaudeView::NotClaude | ClaudeView::NoRecord => {
-            (String::new(), String::new(), String::new())
-        }
-        // The account is the reason why the state and the directory are
-        // absent, so the one cell that says so is the session cell.
-        ClaudeView::OtherAccount => (OTHER_ACCOUNT.to_owned(), String::new(), String::new()),
-        ClaudeView::Session {
-            id,
-            state,
-            directory,
-        } => (
-            id.to_string(),
-            state.to_string(),
-            directory
-                .as_ref()
-                .map_or_else(|| ABSENT.to_owned(), |path| path.display().to_string()),
-        ),
+        ClaudeView::NotClaude
+        | ClaudeView::NoRecord
+        | ClaudeView::OtherAccount
+        | ClaudeView::Session { .. } => (String::new(), String::new(), String::new()),
     }
 }
 
@@ -517,8 +504,13 @@ fn claude_cells(claude: &ClaudeView) -> (String, String, String) {
 mod tests {
     use super::*;
 
+    use std::path::PathBuf;
+
+    use occ::SessionId;
+
     use crate::pid::Pid;
     use crate::ranking::{ClaudeTotal, ClaudeView, Skipped};
+    use crate::state::SessionState;
 
     /// A count carries a separator between each group of three digits, from
     /// the right. A count below a thousand carries none.
@@ -1009,6 +1001,129 @@ mod tests {
                 "",
                 "",
                 "",
+            ]))
+        );
+    }
+
+    /// The session of a record in the tests.
+    const SESSION_ID: &str = "d3b0d921-f0a1-41fc-b309-c11aa30c1173";
+
+    /// The working directory of a record in the tests.
+    const DIRECTORY: &str = "/Volumes/SamsungSSDs/code/tools";
+
+    /// The UID of the other account of the tests.
+    const OTHER_UID: u32 = 502;
+
+    /// Gives the row of a Claude Code process of the account `uid`.
+    fn claude_row(pid: u32, faults: u64, uid: u32, claude: ClaudeView) -> RankedRow {
+        RankedRow {
+            uid: Uid::new(uid),
+            claude,
+            ..row(pid, faults)
+        }
+    }
+
+    /// Gives the session of [`SESSION_ID`].
+    fn session() -> SessionId {
+        SessionId::parse(SESSION_ID).expect("the test ID is a UUID")
+    }
+
+    /// A row of a Claude Code session gives its session, its state, and its
+    /// directory. A session with no record gives none of the three, because a
+    /// guess names the wrong session. A process of another account gives the
+    /// command to run under `sudo`, and no state and no directory.
+    #[test]
+    fn a_row_of_claude_code_gives_its_session_its_state_and_its_directory() {
+        let idle = SessionState::Idle {
+            for_: Some(Duration::from_secs(3 * 3_600 + 12 * 60)),
+        };
+        let ranked = vec![
+            claude_row(
+                30,
+                400_000,
+                VIEWER_UID,
+                ClaudeView::Session {
+                    id: session(),
+                    state: idle.clone(),
+                    directory: Some(PathBuf::from(DIRECTORY)),
+                },
+            ),
+            claude_row(31, 300_000, VIEWER_UID, ClaudeView::NoRecord),
+            claude_row(32, 200_000, OTHER_UID, ClaudeView::OtherAccount),
+            claude_row(
+                33,
+                100_000,
+                VIEWER_UID,
+                ClaudeView::Session {
+                    id: session(),
+                    state: idle,
+                    directory: None,
+                },
+            ),
+        ];
+        let ranking = ranking(ranked, 1_000_000);
+
+        let drawn = rows(&ranking, &ranking.rows, None, &accounts(), now(), None);
+        let cells = cells(&drawn);
+
+        assert_eq!(
+            cells.get(1),
+            Some(&row_of([
+                "30",
+                "tim",
+                "100,000",
+                "40.0%",
+                "812 MB",
+                "2d 5h",
+                "/usr/bin/process-30 --flag",
+                SESSION_ID,
+                "idle 3h 12m",
+                DIRECTORY,
+            ]))
+        );
+        assert_eq!(
+            cells.get(2),
+            Some(&row_of([
+                "31",
+                "tim",
+                "75,000",
+                "30.0%",
+                "812 MB",
+                "2d 5h",
+                "/usr/bin/process-31 --flag",
+                "",
+                "",
+                "",
+            ]))
+        );
+        assert_eq!(
+            cells.get(3),
+            Some(&row_of([
+                "32",
+                "502",
+                "50,000",
+                "20.0%",
+                "812 MB",
+                "2d 5h",
+                "/usr/bin/process-32 --flag",
+                OTHER_ACCOUNT,
+                "",
+                "",
+            ]))
+        );
+        assert_eq!(
+            cells.get(4),
+            Some(&row_of([
+                "33",
+                "tim",
+                "25,000",
+                "10.0%",
+                "812 MB",
+                "2d 5h",
+                "/usr/bin/process-33 --flag",
+                SESSION_ID,
+                "idle 3h 12m",
+                ABSENT,
             ]))
         );
     }
