@@ -495,4 +495,26 @@ mod tests {
 
         assert_eq!(selected(&plan), vec![30, 60, 70]);
     }
+
+    /// Rule 4: the `faulte` process is never a candidate. The session of this
+    /// test passes rules 1, 2 and 3: it is old, it is idle, and it has no
+    /// descendant. Rule 4 alone refuses it.
+    ///
+    /// The other half of rule 4 is the ancestors of `faulte`. Rule 3 refuses
+    /// each one of them as well, because `faulte` is a live descendant of
+    /// every one of its ancestors. Thus the count of each reason pins that
+    /// half, and `the_count_of_each_reason_is_the_first_rule_that_the_session_fails`
+    /// holds it.
+    #[test]
+    fn a_session_that_is_the_faulte_process_is_never_a_candidate() {
+        let ranking = ranking(vec![
+            session(FAULTE_PID, OLD, idle(3_600)),
+            session(30, OLD, idle(3_600)),
+        ]);
+        let table = [process(FAULTE_PID, LAUNCHD_PID), process(30, LAUNCHD_PID)];
+
+        let plan = plan(&input(&ranking, &table, rules()));
+
+        assert_eq!(selected(&plan), vec![30]);
+    }
 }
