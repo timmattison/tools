@@ -745,4 +745,20 @@ PID    FAULTS    \n\
             })
         );
     }
+
+    /// A record alone never makes a Claude Code row. The registry file of a
+    /// dead session can stay under the PID of a new process, and `occ`
+    /// decides what a process is. The role of `occ` decides here too.
+    #[test]
+    fn a_record_without_a_role_of_claude_code_is_not_a_claude_row() {
+        let machine = Machine::new(vec![count(10, 300)], vec![process(10)])
+            .with_record(10, idle_record(Duration::from_secs(600)));
+
+        let ranking = machine.rank();
+
+        assert_eq!(
+            ranking.rows.first().map(|row| &row.claude),
+            Some(&ClaudeView::NotClaude)
+        );
+    }
 }
