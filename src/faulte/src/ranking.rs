@@ -269,6 +269,18 @@ pub fn rank(input: &Observation<'_>) -> Ranking {
     let (exited, exited_faults) = exited.fold((0, 0_u64), |(processes, faults), count| {
         (processes + 1, faults.saturating_add(count.faults))
     });
+    // `top` does not list a zombie, so a zombie of the table is not a
+    // process that `top` missed.
+    let sampled: HashMap<Pid, u64> = input
+        .faults
+        .iter()
+        .map(|count| (count.pid, count.faults))
+        .collect();
+    let zombies = input
+        .table
+        .iter()
+        .filter(|process| process.zombie && !sampled.contains_key(&process.pid))
+        .count();
     Ranking {
         rows,
         window: input.window,
@@ -277,6 +289,7 @@ pub fn rank(input: &Observation<'_>) -> Ranking {
         skipped: Skipped {
             exited,
             exited_faults,
+            zombies,
             ..Skipped::default()
         },
     }
