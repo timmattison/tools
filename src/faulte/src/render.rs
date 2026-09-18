@@ -124,6 +124,35 @@ pub fn share(fraction: f64) -> String {
     format!("{percent}%")
 }
 
+/// The step from one unit of size to the next.
+const SIZE_STEP: u64 = 1_024;
+
+/// The name of each unit of size, from the smallest up.
+const SIZE_UNITS: [&str; 7] = ["B", "KB", "MB", "GB", "TB", "PB", "EB"];
+
+/// The place in [`SIZE_UNITS`] of the first unit that carries one decimal.
+const FIRST_UNIT_WITH_A_DECIMAL: usize = 3;
+
+/// Gives `value` bytes as a size, for example `812 MB` or `9.3 GB`.
+///
+/// The step from one unit to the next is 1,024, the step that a Mac reports.
+/// A size of a gigabyte or more carries one decimal, because a whole number of
+/// gigabytes hides a difference of hundreds of megabytes. A smaller size is a
+/// whole number, because the decimal of a size in kilobytes says nothing.
+#[must_use]
+pub fn bytes(value: u64) -> String {
+    format!("{value} {}", SIZE_UNITS[0])
+}
+
+/// Gives `value` kibibytes as a size, for example `42 KB`.
+///
+/// `ps` gives the resident memory of a process in kibibytes. A size that no
+/// memory can hold gives the largest size, and not a panic.
+#[must_use]
+pub fn kibibytes(value: u64) -> String {
+    bytes(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,6 +223,53 @@ mod tests {
 
         for (fraction, text) in cases {
             assert_eq!(share(fraction), text, "the share {fraction}");
+        }
+    }
+
+    /// A size steps by 1,024. A size of a gigabyte or more carries one
+    /// decimal, and a smaller size is a whole number. The largest size is the
+    /// last unit, and no size gives a panic.
+    #[test]
+    fn a_size_steps_by_1024_and_carries_a_decimal_from_a_gigabyte_up() {
+        let cases = [
+            (0, "0 B"),
+            (1, "1 B"),
+            (1_023, "1023 B"),
+            (1_024, "1 KB"),
+            (43_008, "42 KB"),
+            (1_048_575, "1023 KB"),
+            (1_048_576, "1 MB"),
+            (851_443_712, "812 MB"),
+            (1_073_741_824, "1.0 GB"),
+            (9_985_798_963, "9.3 GB"),
+            (11_811_160_064, "11.0 GB"),
+            (28_991_029_248, "27.0 GB"),
+            (u64::MAX, "16.0 EB"),
+        ];
+
+        for (value, text) in cases {
+            assert_eq!(bytes(value), text, "the size of {value} bytes");
+        }
+    }
+
+    /// A size in kibibytes is the same size, 1,024 times larger. A count of
+    /// kibibytes that no memory can hold gives the largest size, and not a
+    /// panic.
+    #[test]
+    fn a_size_in_kibibytes_is_the_same_size_1024_times_larger() {
+        let cases = [
+            (0, "0 B"),
+            (1, "1 KB"),
+            (42, "42 KB"),
+            (1_023, "1023 KB"),
+            (1_024, "1 MB"),
+            (831_488, "812 MB"),
+            (9_752_733, "9.3 GB"),
+            (u64::MAX, "16.0 EB"),
+        ];
+
+        for (value, text) in cases {
+            assert_eq!(kibibytes(value), text, "the size of {value} kibibytes");
         }
     }
 }
