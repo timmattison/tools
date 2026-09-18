@@ -209,6 +209,18 @@ impl Ranking {
     }
 }
 
+/// Gives what the row of `pid` shows about Claude Code.
+fn view_of(pid: Pid, input: &Observation<'_>) -> ClaudeView {
+    match input.records.get(&pid) {
+        Some(record) => ClaudeView::Session {
+            id: record.session.clone(),
+            state: SessionState::from_record(record, input.now),
+            directory: record.directory.clone(),
+        },
+        None => ClaudeView::NotClaude,
+    }
+}
+
 /// Ranks every process of `input` by its faults over the window.
 ///
 /// Each PID of the sample and of the table is one process: it has a row, or it
@@ -236,7 +248,7 @@ pub fn rank(input: &Observation<'_>) -> Ranking {
                 rss_kib: Some(process.rss_kib),
                 started_at_epoch_secs: Some(process.started_at_epoch_secs),
                 command: process.command.clone(),
-                claude: ClaudeView::NotClaude,
+                claude: view_of(pid, input),
             }),
             // `ps` does not list the kernel, and the kernel does the work of
             // a Mac that is short of memory. Thus its row says what `top`
