@@ -6,6 +6,10 @@ use std::process::ExitCode;
 use buildinfo::version_string;
 use clap::{Parser, Subcommand};
 use faulte::duration::Span;
+#[cfg(target_os = "macos")]
+use faulte::machine::{macos::Mac, observe};
+#[cfg(target_os = "macos")]
+use faulte::render;
 
 /// The one-line description that `--help` shows.
 const ABOUT: &str =
@@ -42,9 +46,16 @@ const EXIT_UNSUPPORTED: u8 = 1;
 #[cfg(target_os = "macos")]
 const NOT_IMPLEMENTED: &str = "this command is not implemented yet.";
 
-/// The exit code of a command that is not implemented yet.
+/// The exit code when `faulte` cannot do what the person asked for.
+///
+/// The issue gives this code to a source that failed and to output that the
+/// parser refused. `faulte` prints the reason and never an empty ranking.
 #[cfg(target_os = "macos")]
-const EXIT_NOT_IMPLEMENTED: u8 = 2;
+const EXIT_ERROR: u8 = 2;
+
+/// The name that each message on the error output starts with.
+#[cfg(target_os = "macos")]
+const TOOL: &str = "faulte";
 
 /// The command line.
 #[derive(Parser)]
@@ -99,7 +110,7 @@ fn run(cli: Cli) -> ExitCode {
     } = cli;
     let sample = format!("--interval {interval} --limit {limit}");
     match command {
-        None => not_implemented(&format!("faulte {sample}")),
+        None => rank(interval, limit),
         Some(Command::Kill {
             older_than,
             idle_for,
@@ -115,6 +126,39 @@ fn run(cli: Cli) -> ExitCode {
     }
 }
 
+/// Ranks the processes of this Mac and prints the ranking.
+///
+/// The header comes first, then a blank line, then the table. The table takes
+/// the width of the window that it prints into, and no width at all when the
+/// output is a file or a pipe. A window of no columns is not a width, so the
+/// one reader of the terminal size answers `None` for it.
+#[cfg(target_os = "macos")]
+fn rank(interval: Span, limit: usize) -> ExitCode {
+    let observed = match observe(&Mac::new(), interval) {
+        Ok(observed) => observed,
+        Err(error) => {
+            eprintln!("{TOOL}: {error}");
+            return ExitCode::from(EXIT_ERROR);
+        }
+    };
+    for line in render::header(&observed.measurement()) {
+        println!("{line}");
+    }
+    println!();
+    println!(
+        "{}",
+        render::rows(
+            &observed.ranking,
+            &observed.ranking.rows,
+            Some(limit),
+            &observed.accounts,
+            observed.now,
+            termsize::stdout_columns(),
+        )
+    );
+    ExitCode::SUCCESS
+}
+
 /// Says that `command_line` names a command that is not implemented yet.
 ///
 /// The command line gives each value that the parser read, so a person can see
@@ -122,7 +166,7 @@ fn run(cli: Cli) -> ExitCode {
 #[cfg(target_os = "macos")]
 fn not_implemented(command_line: &str) -> ExitCode {
     eprintln!("{command_line}: {NOT_IMPLEMENTED}");
-    ExitCode::from(EXIT_NOT_IMPLEMENTED)
+    ExitCode::from(EXIT_ERROR)
 }
 
 /// Says that `faulte` supports macOS only.

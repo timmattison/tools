@@ -162,7 +162,7 @@ impl FakeMachine {
     }
 
     /// Gives this machine, with root as the account that runs `faulte`.
-    fn as_root(mut self) -> Self {
+    fn running_as_root(mut self) -> Self {
         self.viewer = Viewer {
             uid: Uid::new(0),
             is_root: true,
@@ -459,7 +459,7 @@ fn the_run_never_asks_the_registry_about_another_account() {
 /// Claude Code process. `faulte` never runs `sudo` itself, the same as `crap`.
 #[test]
 fn root_asks_the_registry_about_every_account() {
-    let machine = machine_of_the_capture().as_root();
+    let machine = machine_of_the_capture().running_as_root();
 
     observe(&machine, interval()).expect("every source answers");
 

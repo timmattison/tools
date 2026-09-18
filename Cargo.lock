@@ -2335,7 +2335,9 @@ dependencies = [
  "chrono",
  "clap",
  "comfy-table",
+ "libc",
  "occ",
+ "termsize",
  "thiserror 2.0.20",
 ]
 

@@ -6,8 +6,8 @@
 //! the account names, and the clock. One trait holds all of them, so a test
 //! gives each fact as a plain value and no test reads the real machine.
 //!
-//! The real reader of macOS is the one part of `faulte` that runs a command or
-//! calls the kernel.
+//! [`macos`] holds the real reader. It is the one part of `faulte` that runs a
+//! command or calls the kernel.
 
 use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, Instant, SystemTime};
@@ -21,6 +21,9 @@ use crate::render::{Accounts, Measurement};
 use crate::table::{ProcessRow, TableParseError};
 use crate::top::{TopParseError, TopSample};
 use crate::vm::{SwapUsage, VmCounters, VmDelta};
+
+#[cfg(target_os = "macos")]
+pub mod macos;
 
 /// The reason why `faulte` cannot read this Mac.
 ///
@@ -49,14 +52,20 @@ pub enum MachineError {
         message: String,
     },
     /// The output of the fault sampler is not a sample of faults.
-    #[error("the output of {} is not a sample of faults: {source}", crate::top::PROGRAM)]
+    #[error(
+        "the output of {} is not a sample of faults: {source}",
+        crate::top::PROGRAM
+    )]
     TopOutput {
         /// What the parser refused.
         #[from]
         source: TopParseError,
     },
     /// The output of the process table command is not a process table.
-    #[error("the output of {} is not a process table: {source}", crate::table::PROGRAM)]
+    #[error(
+        "the output of {} is not a process table: {source}",
+        crate::table::PROGRAM
+    )]
     TableOutput {
         /// What the parser refused.
         #[from]
@@ -77,8 +86,8 @@ pub enum MachineError {
 /// The trait is the whole boundary between the rules of `faulte` and this Mac.
 /// The rules take the values that these functions give, so a test gives the
 /// values itself and reads no real process, no real command, and no real
-/// clock. One implementation reads the real machine, and macOS is the only
-/// platform that has one.
+/// clock. [`macos::Mac`] reads the real machine, and macOS is the only
+/// platform that has an implementation.
 pub trait Machine {
     /// Samples the page faults of every process over `interval`.
     ///
@@ -112,12 +121,8 @@ pub trait Machine {
     /// refuses a file that a dead session left behind under the same PID.
     /// `started_at_epoch_secs` is the start time from the process table, which
     /// is what makes that refusal possible.
-    fn record_for(
-        &self,
-        pid: Pid,
-        owner: Uid,
-        started_at_epoch_secs: u64,
-    ) -> Option<SessionRecord>;
+    fn record_for(&self, pid: Pid, owner: Uid, started_at_epoch_secs: u64)
+        -> Option<SessionRecord>;
 
     /// Reads the counters of the virtual memory system of this Mac.
     ///
