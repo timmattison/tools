@@ -114,7 +114,9 @@ impl FromStr for Span {
         let number = text.trim_end_matches(|character: char| !character.is_ascii_digit());
         let unit = text.strip_prefix(number).unwrap_or_default();
         if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err(invalid());
+            return Err(ParseSpanError::NotAWholeNumber {
+                text: text.to_owned(),
+            });
         }
         let per_unit = seconds_per(unit).ok_or_else(|| ParseSpanError::UnknownUnit {
             text: text.to_owned(),
