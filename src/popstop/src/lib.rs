@@ -11,6 +11,8 @@
 //! - `control` holds the commands that act on the copy that runs, for
 //!   `--status` and `--stop`. It compiles on macOS only.
 //! - [`exit_status`] names the exit statuses and lists them for `--help`.
+//! - [`handshake`] holds the report that a background copy sends to the
+//!   parent that started it.
 //! - [`message`] builds the texts that popstop shows to the user.
 //! - `keepalive` plays the signal on the default output device. It compiles
 //!   on macOS only.
@@ -28,6 +30,7 @@
 #[cfg(target_os = "macos")]
 pub mod control;
 pub mod exit_status;
+pub mod handshake;
 #[cfg(target_os = "macos")]
 pub mod keepalive;
 #[cfg(target_os = "macos")]
