@@ -1559,11 +1559,6 @@ const HERE_SENTINEL: &str = "__CRAP_HERE__";
 /// function can tell "nothing to clean up" apart from a real path.
 const NO_LINK_SENTINEL: &str = "__CRAP_NO_LINK__";
 
-/// Placeholder used in the forced-new-id field when `--here` was given no
-/// explicit new session id, so the shell function knows to let Claude mint a
-/// fresh random id (`--fork-session`) instead of pinning one (`--session-id`).
-const NO_NEW_ID_SENTINEL: &str = "__CRAP_NO_NEW_ID__";
-
 /// Leading token marking cross-user default-resume output: unlike [`HERE_SENTINEL`]
 /// (which stays in the current directory), this tells the shell function to
 /// `cd` into the session's original recorded directory *and then* fork, so a
@@ -1571,20 +1566,20 @@ const NO_NEW_ID_SENTINEL: &str = "__CRAP_NO_NEW_ID__";
 const FORK_AT_SENTINEL: &str = "__CRAP_FORK_AT__";
 
 /// Formats `--here` output for the shell function: the [`HERE_SENTINEL`], then
-/// the session id, then the caller-supplied forked-session id (or
-/// [`NO_NEW_ID_SENTINEL`] when none was given), then the import to remove once
-/// the session ends (or [`NO_LINK_SENTINEL`] when none was created).
+/// the session id, then the fork id that the shell function pins the fork to
+/// with `--session-id`, then the import to remove once the session ends (or
+/// [`NO_LINK_SENTINEL`] when none was created).
 ///
 /// The cleanup path is emitted last so that — like [`format_output`] — a path
 /// containing a newline survives intact as "everything after the final field
-/// separator". The forced-new-id is a validated UUID (or the sentinel), so it
-/// never contains a newline and is safe in the middle.
+/// separator". The fork id is a valid session id (a [`ForkId`] invariant), so
+/// it never contains a newline and is safe in the middle.
 fn format_here_output(
     session_id: &str,
-    new_session_id: Option<&str>,
+    fork_id: &ForkId,
     link_to_cleanup: Option<&Path>,
 ) -> String {
-    let new_id = new_session_id.unwrap_or(NO_NEW_ID_SENTINEL);
+    let new_id = fork_id.as_str();
     let link = match link_to_cleanup {
         Some(path) => path.display().to_string(),
         None => NO_LINK_SENTINEL.to_string(),
@@ -1593,24 +1588,24 @@ fn format_here_output(
 }
 
 /// Formats cross-user default-resume output for the shell function: the
-/// [`FORK_AT_SENTINEL`], then the session id, then the forked-session id (or
-/// [`NO_NEW_ID_SENTINEL`]), then the imported transcript to remove once the
-/// session ends (or [`NO_LINK_SENTINEL`]), and finally the session's original
-/// directory to `cd` into before forking.
+/// [`FORK_AT_SENTINEL`], then the session id, then the fork id that the shell
+/// function pins the fork to with `--session-id`, then the imported transcript
+/// to remove once the session ends (or [`NO_LINK_SENTINEL`]), and finally the
+/// session's original directory to `cd` into before forking.
 ///
 /// The directory is emitted **last** so — like [`format_output`] — a path
 /// containing a newline survives intact as "everything after the final field
 /// separator". The middle fields are all newline-free: the ids are validated
-/// UUIDs (or sentinels), and the link path lives under
+/// UUIDs, and the link path lives under
 /// `~/.claude/projects/<encoded>`, whose encoding maps every non-alphanumeric
 /// character (including newline) to `-`.
 fn format_fork_at_output(
     session_id: &str,
-    new_session_id: Option<&str>,
+    fork_id: &ForkId,
     link_to_cleanup: Option<&Path>,
     dir: &Path,
 ) -> String {
-    let new_id = new_session_id.unwrap_or(NO_NEW_ID_SENTINEL);
+    let new_id = fork_id.as_str();
     let link = match link_to_cleanup {
         Some(path) => path.display().to_string(),
         None => NO_LINK_SENTINEL.to_string(),
@@ -1636,17 +1631,17 @@ fn format_fork_at_output(
 /// * **default** — `<session-id>\n<dir>`: the function `cd`s into the original
 ///   directory (splitting on the first newline so a path containing newlines
 ///   survives intact) and resumes.
-/// * **`--here`** — `__CRAP_HERE__\n<session-id>\n<new-id-or-sentinel>\n<link-or-sentinel>`:
+/// * **`--here`** — `__CRAP_HERE__\n<session-id>\n<new-id>\n<link-or-sentinel>`:
 ///   the binary has already imported the session into the *current* directory's
 ///   project folder — a symlink for a same-user source, or a copy for a
 ///   cross-user `--user` source — so the function stays put, resumes with
 ///   `--fork-session` (a fresh session id, leaving the original transcript
 ///   untouched), and finally removes that import — unless the link field is
 ///   `__CRAP_NO_LINK__`, meaning none was created because this already is the
-///   session's own directory. When the new-id field is not
-///   `__CRAP_NO_NEW_ID__`, the fork is pinned to that id via `--session-id`
-///   instead of a random one.
-/// * **cross-user** — `__CRAP_FORK_AT__\n<session-id>\n<new-id-or-sentinel>\n<link-or-sentinel>\n<dir>`:
+///   session's own directory. The function always pins the fork to `<new-id>`
+///   with `--session-id`. The binary supplies that id in every run, so the
+///   function knows the fork id after Claude exits.
+/// * **cross-user** — `__CRAP_FORK_AT__\n<session-id>\n<new-id>\n<link-or-sentinel>\n<dir>`:
 ///   the binary has *copied* another user's transcript into our own tree, so the
 ///   function `cd`s into the session's original directory (the trailing `<dir>`,
 ///   emitted last so a newline in the path survives) and then runs the same
@@ -1705,15 +1700,11 @@ function crap() {
             disown 2>/dev/null
         fi
         # Build the resume argv: always --fork-session, so the original
-        # transcript is left untouched. When the binary supplied a forced id
-        # (third field is not the sentinel), pin the fork to it with
-        # --session-id instead of letting Claude mint a random one. The earlier
-        # "command crap" call has already consumed the function's own arguments,
-        # so reusing the positional parameters here is safe.
-        set -- --resume "$__crap_session" --fork-session
-        if [ "$__crap_newid" != "__CRAP_NO_NEW_ID__" ]; then
-            set -- "$@" --session-id "$__crap_newid"
-        fi
+        # transcript is left untouched, and always --session-id with the id
+        # that the binary supplied, so the fork id is known after Claude exits.
+        # The earlier "command crap" call has already consumed the function's
+        # own arguments, so reusing the positional parameters here is safe.
+        set -- --resume "$__crap_session" --fork-session --session-id "$__crap_newid"
         if command -v clauded >/dev/null 2>&1; then
             eval 'clauded "$@"'
         else
@@ -1767,10 +1758,7 @@ function crap() {
             __crap_watcher=$!
             disown 2>/dev/null
         fi
-        set -- --resume "$__crap_session" --fork-session
-        if [ "$__crap_newid" != "__CRAP_NO_NEW_ID__" ]; then
-            set -- "$@" --session-id "$__crap_newid"
-        fi
+        set -- --resume "$__crap_session" --fork-session --session-id "$__crap_newid"
         if command -v clauded >/dev/null 2>&1; then
             eval 'clauded "$@"'
         else
@@ -2026,7 +2014,7 @@ fn run_here(
         Ok(link) => {
             print!(
                 "{}",
-                format_here_output(session_id, Some(fork_id.as_str()), link.as_deref())
+                format_here_output(session_id, &fork_id, link.as_deref())
             );
             exit(0);
         }
@@ -2291,7 +2279,7 @@ fn run_resume(
         Ok(link) => {
             print!(
                 "{}",
-                format_fork_at_output(session_id, Some(fork_id.as_str()), link.as_deref(), &dir)
+                format_fork_at_output(session_id, &fork_id, link.as_deref(), &dir)
             );
             exit(0);
         }
@@ -4251,16 +4239,24 @@ mod tests {
         assert!(SHELL_CODE.contains(r#"kill "$__crap_watcher""#));
     }
 
+    /// A [`ForkId`] for `id`, made by [`choose_fork_id`] against an empty
+    /// projects tree, because no other code can make one.
+    fn fork_id(id: &str) -> ForkId {
+        let projects = projects_with_transcripts(&[]);
+        choose_fork_id(projects.path(), Some(id), no_generation).unwrap()
+    }
+
     #[test]
-    fn here_output_carries_sentinel_session_and_link() {
+    fn here_output_carries_sentinel_session_fork_id_and_link() {
+        // The fork id rides as the third field, so the shell function can pass
+        // it to `claude --session-id`.
         let link = Path::new("/Users/tim/.claude/projects/-x/abc.jsonl");
-        let out = format_here_output(SAMPLE_ID, None, Some(link));
+        let out = format_here_output(SAMPLE_ID, &fork_id(ID_B), Some(link));
 
         let mut lines = out.lines();
         assert_eq!(lines.next(), Some(HERE_SENTINEL));
         assert_eq!(lines.next(), Some(SAMPLE_ID));
-        // No forced id was given, so the third field is the sentinel.
-        assert_eq!(lines.next(), Some(NO_NEW_ID_SENTINEL));
+        assert_eq!(lines.next(), Some(ID_B));
         // Everything after the third newline is the link path, intact.
         let rest = out.splitn(4, '\n').nth(3).unwrap();
         assert_eq!(rest.trim_end_matches('\n'), link.to_str().unwrap());
@@ -4268,7 +4264,7 @@ mod tests {
 
     #[test]
     fn here_output_uses_no_link_sentinel_when_nothing_to_clean() {
-        let out = format_here_output(SAMPLE_ID, None, None);
+        let out = format_here_output(SAMPLE_ID, &fork_id(ID_B), None);
 
         assert_eq!(out.lines().next(), Some(HERE_SENTINEL));
         let link_field = out.splitn(4, '\n').nth(3).unwrap();
@@ -4276,53 +4272,29 @@ mod tests {
     }
 
     #[test]
-    fn here_output_carries_forced_new_session_id() {
-        // When the caller supplies a forked-session id, it rides as the third
-        // field so the shell function can pass it to `claude --session-id`.
-        let link = Path::new("/Users/tim/.claude/projects/-x/abc.jsonl");
-        let out = format_here_output(SAMPLE_ID, Some(ID_B), Some(link));
-
-        let mut lines = out.lines();
-        assert_eq!(lines.next(), Some(HERE_SENTINEL));
-        assert_eq!(lines.next(), Some(SAMPLE_ID));
-        assert_eq!(lines.next(), Some(ID_B));
-        // The link still lives last, after the forced-id field.
-        let rest = out.splitn(4, '\n').nth(3).unwrap();
-        assert_eq!(rest.trim_end_matches('\n'), link.to_str().unwrap());
-    }
-
-    #[test]
-    fn here_output_uses_no_new_id_sentinel_when_absent() {
-        // Without a caller-supplied id, the third field is the sentinel so the
-        // shell function lets Claude mint a fresh random id.
-        let out = format_here_output(SAMPLE_ID, None, None);
-        assert_eq!(out.lines().nth(2), Some(NO_NEW_ID_SENTINEL));
-    }
-
-    #[test]
     fn here_output_preserves_newline_in_link_path() {
         // The link lives last in the output, so a newline inside the path can't
         // be mistaken for a field boundary.
         let link = Path::new("/Users/tim/od\ndd/abc.jsonl");
-        let out = format_here_output(SAMPLE_ID, None, Some(link));
+        let out = format_here_output(SAMPLE_ID, &fork_id(ID_B), Some(link));
 
         let rest = out.splitn(4, '\n').nth(3).unwrap();
         assert_eq!(rest.trim_end_matches('\n'), link.to_str().unwrap());
     }
 
     #[test]
-    fn fork_at_output_emits_dir_last_with_sentinels_in_slots() {
-        // Cross-user default resume: sentinel, session, new-id slot, link slot,
+    fn fork_at_output_emits_dir_last_after_the_fork_id_and_link() {
+        // Cross-user default resume: sentinel, session, fork id, link slot,
         // then the original directory last.
         let link = Path::new("/Users/tim/.claude/projects/-work/abc.jsonl");
         let dir = Path::new("/Volumes/x/work");
-        let out = format_fork_at_output(SAMPLE_ID, None, Some(link), dir);
+        let out = format_fork_at_output(SAMPLE_ID, &fork_id(ID_B), Some(link), dir);
 
         let mut lines = out.lines();
         assert_eq!(lines.next(), Some(FORK_AT_SENTINEL));
         assert_eq!(lines.next(), Some(SAMPLE_ID));
-        // No forced id: the new-id slot is the sentinel.
-        assert_eq!(lines.next(), Some(NO_NEW_ID_SENTINEL));
+        // The fork id rides in the third slot for the shell's `--session-id`.
+        assert_eq!(lines.next(), Some(ID_B));
         assert_eq!(lines.next(), Some(link.to_str().unwrap()));
         // Everything after the fourth newline is the directory, intact.
         let rest = out.splitn(5, '\n').nth(4).unwrap();
@@ -4334,20 +4306,8 @@ mod tests {
         // When the import was a no-op (already resolvable), the link slot is the
         // sentinel so the shell knows there is nothing to remove.
         let dir = Path::new("/Volumes/x/work");
-        let out = format_fork_at_output(SAMPLE_ID, None, None, dir);
+        let out = format_fork_at_output(SAMPLE_ID, &fork_id(ID_B), None, dir);
         assert_eq!(out.lines().nth(3), Some(NO_LINK_SENTINEL));
-    }
-
-    #[test]
-    fn fork_at_output_carries_forced_new_id() {
-        // A caller-supplied forked id rides in the new-id slot for the shell's
-        // `--session-id`, while the directory still comes last.
-        let link = Path::new("/Users/tim/.claude/projects/-work/abc.jsonl");
-        let dir = Path::new("/Volumes/x/work");
-        let out = format_fork_at_output(SAMPLE_ID, Some(ID_B), Some(link), dir);
-        assert_eq!(out.lines().nth(2), Some(ID_B));
-        let rest = out.splitn(5, '\n').nth(4).unwrap();
-        assert_eq!(rest.trim_end_matches('\n'), dir.to_str().unwrap());
     }
 
     #[test]
@@ -4356,7 +4316,7 @@ mod tests {
         // a field boundary — the invariant the whole layout is designed around.
         let link = Path::new("/Users/tim/.claude/projects/-work/abc.jsonl");
         let dir = Path::new("/Volumes/x/od\ndd");
-        let out = format_fork_at_output(SAMPLE_ID, None, Some(link), dir);
+        let out = format_fork_at_output(SAMPLE_ID, &fork_id(ID_B), Some(link), dir);
 
         let rest = out.splitn(5, '\n').nth(4).unwrap();
         assert_eq!(rest.trim_end_matches('\n'), dir.to_str().unwrap());
@@ -4672,31 +4632,11 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
-    fn shell_function_omits_session_id_without_a_forced_new_id() {
-        // The sentinel third field means "let Claude mint a random id": the
-        // resume forks but must not pass --session-id.
-        let run = run_here_shell_function(NO_NEW_ID_SENTINEL, true, false);
-        assert!(
-            run.claude_args.iter().any(|a| a == "--fork-session"),
-            "must still fork: {:?}",
-            run.claude_args
-        );
-        assert_eq!(
-            run.pinned_fork_id(),
-            None,
-            "no forced id => no --session-id: {:?}",
-            run.claude_args
-        );
-    }
-
-    #[test]
-    fn shell_code_parses_new_id_field_and_pins_session_id() {
-        // here-mode reads the third field and, unless it is the sentinel, pins
-        // the fork's id via `claude --session-id`.
-        assert!(SHELL_CODE.contains(NO_NEW_ID_SENTINEL));
-        assert!(SHELL_CODE.contains("--session-id"));
+    fn shell_code_always_pins_the_fork_id() {
+        // The binary supplies a fork id in every run, so the resume argv pins
+        // the fork to it in the same step that forks, with no condition.
+        assert!(SHELL_CODE.contains(r#"--fork-session --session-id "$__crap_newid""#));
     }
 
     #[test]
