@@ -94,8 +94,12 @@ pub trait Render: Send + 'static {
     fn render(&mut self, interleaved: &mut [f32], channels: usize);
 }
 
+/// The output unit plays the keepalive signal. [`KeepaliveSignal::fill`]
+/// allocates nothing and takes no lock.
 impl Render for KeepaliveSignal {
-    fn render(&mut self, _interleaved: &mut [f32], _channels: usize) {}
+    fn render(&mut self, interleaved: &mut [f32], channels: usize) {
+        self.fill(interleaved, channels);
+    }
 }
 
 /// A Core Audio call that failed. The error names the call.
