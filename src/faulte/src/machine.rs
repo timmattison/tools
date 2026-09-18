@@ -208,6 +208,15 @@ pub trait Machine {
 pub struct Observed {
     /// Every process of the sample and of the table, ranked by its faults.
     pub ranking: Ranking,
+    /// The process table that the ranking judged.
+    ///
+    /// The plan of `faulte kill` walks the parent links of this table twice:
+    /// to find a live descendant of a session (rule 3), and to find every
+    /// ancestor of `faulte` (rule 4). The table comes from this run and not
+    /// from a second read, because a second read is a second truth: a process
+    /// that started between the two reads is in one of them alone, and the
+    /// plan then judges a Mac that the ranking above it never saw.
+    pub table: Vec<ProcessRow>,
     /// The swap traffic between the two reads of the counters.
     pub swap: VmDelta,
     /// The swap file of this Mac, and how much of it is in use.
@@ -285,6 +294,7 @@ pub fn observe(machine: &dyn Machine, interval: Span) -> Result<Observed, Machin
     let accounts = accounts_of(machine, &ranking);
     Ok(Observed {
         ranking,
+        table: Vec::new(),
         swap: VmDelta::between(before, after),
         usage,
         // The compressor holds what it holds now, so the count after the

@@ -284,20 +284,25 @@ const SESSION_ID: &str = "34ffff5a-3324-4038-89bb-d5cc5972cfd0";
 /// The time since the session of the tests became idle, in seconds.
 const IDLE_SECONDS: u64 = 600;
 
+/// Gives one process of each kind that the ranking must tell apart.
+fn table_of_the_capture() -> Vec<ProcessRow> {
+    let mut zombie = row(ZOMBIE_PID, VIEWER, "(claude)");
+    zombie.zombie = true;
+    vec![
+        row(SESSION_PID, VIEWER, "claude"),
+        row(OTHER_PID, OTHER, "claude"),
+        row(PLAIN_PID, VIEWER, "/usr/sbin/cfprefsd agent"),
+        row(QUIET_PID, VIEWER, "/bin/sleep 900"),
+        row(UNSAMPLED_PID, VIEWER, "/usr/bin/true"),
+        zombie,
+    ]
+}
+
 /// Gives a machine whose table holds one process of each kind that the ranking
 /// must tell apart.
 fn machine_of_the_capture() -> FakeMachine {
-    let mut zombie = row(ZOMBIE_PID, VIEWER, "(claude)");
-    zombie.zombie = true;
     FakeMachine::new()
-        .with_table(vec![
-            row(SESSION_PID, VIEWER, "claude"),
-            row(OTHER_PID, OTHER, "claude"),
-            row(PLAIN_PID, VIEWER, "/usr/sbin/cfprefsd agent"),
-            row(QUIET_PID, VIEWER, "/bin/sleep 900"),
-            row(UNSAMPLED_PID, VIEWER, "/usr/bin/true"),
-            zombie,
-        ])
+        .with_table(table_of_the_capture())
         .with_claude(SESSION_PID, ClaudeRole::Session)
         .with_claude(OTHER_PID, ClaudeRole::Unreadable)
         .with_record(SESSION_PID, record(SESSION_ID))
@@ -421,6 +426,26 @@ fn the_run_states_the_swap_traffic_over_the_sample() {
     assert_eq!(
         observed.usage.used_bytes, 11_811_160_064,
         "the swap file states how much of it is in use"
+    );
+}
+
+/// The run gives back the process table that it ranked.
+///
+/// The plan of `faulte kill` walks the parent links of the table to find a
+/// live descendant of a session, and to find every ancestor of `faulte`. A
+/// second read of the table is a second truth: a process that started between
+/// the two reads is in one of them alone. Thus the run reads the table once,
+/// and the plan judges the table that the ranking judged.
+#[test]
+fn the_run_gives_back_the_table_that_it_ranked() {
+    let machine = machine_of_the_capture();
+
+    let observed = observe(&machine, interval()).expect("every source answers");
+
+    assert_eq!(
+        observed.table,
+        table_of_the_capture(),
+        "the table of the run is the table that the machine gave"
     );
 }
 
