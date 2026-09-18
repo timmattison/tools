@@ -596,6 +596,12 @@ fn claude_cells(claude: &ClaudeView) -> (String, String, String) {
 /// What holds two blocks of the plan apart.
 const BETWEEN_BLOCKS: &str = "\n\n";
 
+/// The command that reads the registry of every account.
+///
+/// `faulte` never runs `sudo` itself, the same as `crap`. It gives the command
+/// line, and the person decides.
+const SUDO_KILL: &str = "sudo faulte kill";
+
 /// What the line of the sessions that the plan refused starts with.
 const NOT_SELECTED: &str = "not selected";
 
@@ -1644,6 +1650,62 @@ mod tests {
         assert!(
             !none.contains(NOT_SELECTED),
             "a plan that refused no session says nothing about the sessions that it refused: {none}"
+        );
+    }
+
+    /// Gives the last block of `text`, which the blocks of the plan hold apart
+    /// with a blank line.
+    fn last_block(text: &str) -> &str {
+        text.rsplit(BETWEEN_BLOCKS).next().unwrap_or(text)
+    }
+
+    /// The plan lists the Claude Code processes of another account apart, and
+    /// gives the command that reads the registry of that account. `faulte`
+    /// never signals them, and it never runs `sudo` itself.
+    ///
+    /// The command carries the limits that the person gave, so the person
+    /// reads back the same rules under `sudo`.
+    #[test]
+    fn the_plan_gives_the_sudo_command_for_the_processes_of_another_account() {
+        let ranked = candidate_rows();
+        let ranking = ranking(ranked.clone(), 1_000_000);
+        let foreign: Vec<RankedRow> = [40, 41]
+            .into_iter()
+            .map(|pid| claude_row(pid, 200_000, OTHER_UID, ClaudeView::OtherAccount))
+            .collect();
+        let drawn = |other_account: &[RankedRow], max| {
+            plan(
+                &Plan {
+                    other_account: other_account.to_vec(),
+                    rules: kill_rules(max),
+                    ..kill_plan(&ranked)
+                },
+                &ranking,
+                &accounts(),
+                now(),
+                None,
+            )
+        };
+
+        let two = drawn(&foreign, None);
+        let one = drawn(&foreign[..1], Some(5));
+        let none = drawn(&[], None);
+
+        assert_eq!(
+            last_block(&two),
+            "2 Claude processes of another account are older than 7d and have no live descendant.\n\
+             faulte cannot read the registry of another account without root. To include that account, run:\n\
+             sudo faulte kill --older-than 7d --idle-for 10m"
+        );
+        assert_eq!(
+            last_block(&one),
+            "1 Claude process of another account is older than 7d and has no live descendant.\n\
+             faulte cannot read the registry of another account without root. To include that account, run:\n\
+             sudo faulte kill --older-than 7d --idle-for 10m --max 5"
+        );
+        assert!(
+            !none.contains(SUDO_KILL),
+            "a plan with no process of another account gives no command: {none}"
         );
     }
 }
