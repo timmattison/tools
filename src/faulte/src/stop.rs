@@ -193,6 +193,21 @@ pub fn stop(
             !gone
         });
     }
+    if targets.is_empty() {
+        return report;
+    }
+    for candidate in &targets {
+        let _ = machine.signal(candidate.row.pid, Signal::Kill);
+    }
+    machine.sleep(poll);
+    let Ok(table) = machine.process_table() else {
+        return report;
+    };
+    for candidate in targets {
+        if is_gone(candidate, &table) {
+            report.killed.push(candidate.clone());
+        }
+    }
     report
 }
 
