@@ -851,4 +851,23 @@ mod tests {
             wrong_answers[0]
         );
     }
+
+    #[test]
+    fn a_reader_does_not_delay_a_wait_for_the_release() {
+        let (_temp, dir) = state_dir();
+        leave_an_old_record(&dir, FIRST);
+        // A reader holds a shared lock for a moment. Here the moment lasts
+        // for the whole wait.
+        let reader = File::open(dir.lock_path()).expect("open the lock file");
+        reader.lock_shared().expect("the reader gets a shared lock");
+
+        let release = wait_for_release(&dir, HOLD).expect("the wait works");
+
+        assert_eq!(
+            release,
+            Release::Released,
+            "no holder has the lock, so a reader must not delay the wait"
+        );
+        drop(reader);
+    }
 }
