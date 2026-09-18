@@ -480,7 +480,7 @@ PID    FAULTS    \n\
         }
 
         /// Gives this machine, with root as the viewer.
-        fn as_root(mut self) -> Self {
+        fn under_root(mut self) -> Self {
             self.viewer = Viewer {
                 uid: Uid::new(0),
                 is_root: true,
@@ -863,7 +863,7 @@ PID    FAULTS    \n\
         .with_claude(40, ClaudeRole::Session)
         .with_claude(41, ClaudeRole::Session)
         .with_record(40, idle_record(Duration::from_secs(600)))
-        .as_root();
+        .under_root();
 
         let ranking = machine.rank();
 
