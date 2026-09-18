@@ -10,7 +10,7 @@ use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The name of the state directory in the data directory of the user.
 const STATE_DIR_NAME: &str = "popstop";
@@ -26,6 +26,9 @@ const LOG_FILE_NAME: &str = "popstop.log";
 /// A holder writes its record directly after it gets the lock, so a reader
 /// can see a held lock with no record for a very short time.
 const RECORD_WAIT: Duration = Duration::from_secs(2);
+
+/// The time between two reads of a record that is not there yet.
+const RECORD_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
 /// The directory that holds the lock file and the log of popstop.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,7 +216,9 @@ pub fn acquire(dir: &StateDir, record: &HolderRecord) -> Result<LockGuard, Acqui
     match file.try_lock() {
         Ok(()) => {}
         Err(TryLockError::WouldBlock) => {
-            return Err(read_record(&mut file).map_or_else(AcquireError::Io, AcquireError::Held));
+            let lock_path = dir.lock_path();
+            return Err(read_held_record(&mut file, &lock_path)
+                .map_or_else(AcquireError::Io, AcquireError::Held));
         }
         Err(TryLockError::Error(error)) => return Err(AcquireError::Io(error)),
     }
@@ -243,7 +248,7 @@ pub fn current_holder(dir: &StateDir) -> io::Result<Option<HolderRecord>> {
             file.unlock()?;
             Ok(None)
         }
-        Err(TryLockError::WouldBlock) => read_record(&mut file).map(Some),
+        Err(TryLockError::WouldBlock) => read_held_record(&mut file, &dir.lock_path()).map(Some),
         Err(TryLockError::Error(error)) => Err(error),
     }
 }
@@ -309,16 +314,40 @@ fn open_existing_lock_file(dir: &StateDir) -> io::Result<Option<File>> {
     }
 }
 
-/// Reads the record in the lock file.
+/// Reads the record of the holder of a held lock at `lock_path`.
 ///
-/// Returns an error of kind [`io::ErrorKind::InvalidData`] when the file does
-/// not hold a record.
-fn read_record(file: &mut File) -> io::Result<HolderRecord> {
+/// When the record is empty or does not parse, it reads the record again
+/// after a short sleep, for [`RECORD_WAIT`] at most. Then it returns an error
+/// of kind [`io::ErrorKind::InvalidData`].
+fn read_held_record(file: &mut File, lock_path: &Path) -> io::Result<HolderRecord> {
+    let deadline = Instant::now() + RECORD_WAIT;
+    loop {
+        match read_record(file)? {
+            Ok(record) => return Ok(record),
+            Err(problem) if Instant::now() >= deadline => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "a copy of popstop holds the lock in {}, but its record cannot be read \
+                         after {RECORD_WAIT:?}: {problem}",
+                        lock_path.display()
+                    ),
+                ));
+            }
+            Err(_) => thread::sleep(RECORD_RETRY_INTERVAL),
+        }
+    }
+}
+
+/// Reads the record in the lock file once.
+///
+/// The outer result tells whether the read worked. The inner result tells
+/// whether the file holds a record.
+fn read_record(file: &mut File) -> io::Result<Result<HolderRecord, serde_json::Error>> {
     file.rewind()?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
-    serde_json::from_slice(&bytes)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    Ok(serde_json::from_slice(&bytes))
 }
 
 #[cfg(test)]
