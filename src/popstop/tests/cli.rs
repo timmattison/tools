@@ -736,6 +736,49 @@ fn a_background_start_refuses_with_the_words_of_a_foreground_start() {
 }
 
 #[test]
+fn a_background_start_truncates_the_log_of_the_copy_before_it() {
+    let temp = tempfile::tempdir().expect("a temporary directory");
+    let dir = temp.path().join("state");
+    let log = StateDir::new(dir.clone()).log_path();
+
+    {
+        let first = BackgroundStart::make(&dir);
+        assert_eq!(
+            first.status.code(),
+            Some(0),
+            "the first background start worked: {}. Its stderr:\n{}",
+            first.status,
+            first.errors
+        );
+        assert!(log.is_file(), "the start made the log of the copy: {log:?}");
+        // The drop stops the copy, and a stop reports only after the copy
+        // released the lock.
+    }
+    assert_eq!(holder(&dir), None, "the first copy stopped");
+
+    // What many runs of a copy that fails leave behind. A log that only grows
+    // fills the disk of the user.
+    let old_line = "an old line of a copy that ran before";
+    fs::write(&log, format!("{old_line}\n").repeat(500)).expect("write the old log");
+
+    let second = BackgroundStart::make(&dir);
+
+    assert_eq!(
+        second.status.code(),
+        Some(0),
+        "the second background start worked: {}. Its stderr:\n{}",
+        second.status,
+        second.errors
+    );
+    let text = fs::read_to_string(&log).expect("read the log");
+    assert!(
+        !text.contains(old_line),
+        "the log still holds {} bytes of the copy before it",
+        text.len()
+    );
+}
+
+#[test]
 fn a_hangup_stops_a_foreground_copy() {
     a_signal_stops_a_foreground_copy(SIGHUP);
 }
