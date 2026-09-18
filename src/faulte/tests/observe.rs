@@ -13,7 +13,8 @@ use std::time::{Duration, SystemTime};
 use faulte::duration::Span;
 use faulte::machine::{observe, Machine, MachineError};
 use faulte::pid::{Pid, Uid};
-use faulte::ranking::{ClaudeRole, Viewer};
+use faulte::ranking::{ClaudeRole, ClaudeView, Viewer};
+use faulte::state::SessionState;
 use faulte::table::ProcessRow;
 use faulte::top::{self, TopSample};
 use faulte::vm::{SwapUsage, VmCounters};
@@ -218,6 +219,190 @@ impl Machine for FakeMachine {
     fn now(&self) -> SystemTime {
         now()
     }
+}
+
+/// The PID of the Claude Code session of the viewer in the tests, and its
+/// faults in the second sample of the capture.
+const SESSION_PID: u32 = 35455;
+
+/// The faults of [`SESSION_PID`] in the second sample of the capture.
+const SESSION_FAULTS: u64 = 18_510;
+
+/// The PID of the Claude Code process of the other account in the tests.
+const OTHER_PID: u32 = 46733;
+
+/// The faults of [`OTHER_PID`] in the second sample of the capture.
+const OTHER_FAULTS: u64 = 16_910;
+
+/// The PID of a process of the viewer that is not Claude Code.
+const PLAIN_PID: u32 = 659;
+
+/// The faults of [`PLAIN_PID`] in the second sample of the capture.
+const PLAIN_FAULTS: u64 = 2_799;
+
+/// The PID of the kernel, which `top` lists and `ps` does not.
+const KERNEL_PID: u32 = 0;
+
+/// The faults of the kernel in the second sample of the capture.
+const KERNEL_FAULTS: u64 = 1_329;
+
+/// The PID of a process of the viewer that made one fault.
+const QUIET_PID: u32 = 38493;
+
+/// The faults of [`QUIET_PID`] in the second sample of the capture.
+const QUIET_FAULTS: u64 = 1;
+
+/// The PID of a zombie. `top` does not list a zombie, so this PID is in the
+/// table and not in the capture.
+const ZOMBIE_PID: u32 = 99999;
+
+/// The PID of a live process that the capture does not list.
+const UNSAMPLED_PID: u32 = 99998;
+
+/// The number of rows in the second sample of the capture.
+const SAMPLED_PROCESSES: usize = 1549;
+
+/// The session ID that the registry record of the tests names.
+const SESSION_ID: &str = "34ffff5a-3324-4038-89bb-d5cc5972cfd0";
+
+/// The time since the session of the tests became idle, in seconds.
+const IDLE_SECONDS: u64 = 600;
+
+/// Gives a machine whose table holds one process of each kind that the ranking
+/// must tell apart.
+fn machine_of_the_capture() -> FakeMachine {
+    let mut zombie = row(ZOMBIE_PID, VIEWER, "(claude)");
+    zombie.zombie = true;
+    FakeMachine::new()
+        .with_table(vec![
+            row(SESSION_PID, VIEWER, "claude"),
+            row(OTHER_PID, OTHER, "claude"),
+            row(PLAIN_PID, VIEWER, "/usr/sbin/cfprefsd agent"),
+            row(QUIET_PID, VIEWER, "/bin/sleep 900"),
+            row(UNSAMPLED_PID, VIEWER, "/usr/bin/true"),
+            zombie,
+        ])
+        .with_claude(SESSION_PID, ClaudeRole::Session)
+        .with_claude(OTHER_PID, ClaudeRole::Unreadable)
+        .with_record(SESSION_PID, record(SESSION_ID))
+}
+
+/// The run joins the sample, the table, the roles and the records into one
+/// ranking. The rows are the processes that both sources name, and the kernel,
+/// which `top` names and `ps` does not. Every other process of either source
+/// is a count of the skips, because a ranking that drops a process looks the
+/// same as a correct one.
+#[test]
+fn the_run_ranks_the_sample_against_the_table() {
+    let machine = machine_of_the_capture();
+
+    let observed = observe(&machine, interval()).expect("every source answers");
+
+    let ranking = &observed.ranking;
+    let order: Vec<(u32, u64)> = ranking
+        .rows
+        .iter()
+        .map(|row| (row.pid.get(), row.faults))
+        .collect();
+    assert_eq!(
+        order,
+        vec![
+            (SESSION_PID, SESSION_FAULTS),
+            (OTHER_PID, OTHER_FAULTS),
+            (PLAIN_PID, PLAIN_FAULTS),
+            (KERNEL_PID, KERNEL_FAULTS),
+            (QUIET_PID, QUIET_FAULTS),
+        ],
+        "the rows are the processes of both sources, and the kernel, by faults"
+    );
+    assert_eq!(
+        ranking.rows[3].command, "kernel_task",
+        "the kernel is in the sample and not in the table, and keeps its name"
+    );
+    assert_eq!(
+        ranking.window,
+        Duration::from_secs(4),
+        "the two clock lines of the capture are 4 seconds apart"
+    );
+    let total: u64 = sample().rows.iter().map(|count| count.faults).sum();
+    assert_eq!(
+        ranking.total_faults, total,
+        "the total holds every process of the sample, and not the rows alone"
+    );
+    assert_eq!(
+        ranking.skipped.exited,
+        SAMPLED_PROCESSES - 1 - 4,
+        "each sampled process that the table lacks exited, and the kernel is not one"
+    );
+    assert_eq!(ranking.skipped.zombies, 1, "the table holds one zombie");
+    assert_eq!(
+        ranking.skipped.unsampled, 1,
+        "the table holds one live process that the sample lacks"
+    );
+}
+
+/// A row of a Claude Code session states the session, the state and the
+/// directory of its registry record. A row of another account states none of
+/// them, because the registry folder of that account has the mode `0700`.
+#[test]
+fn a_claude_row_states_what_the_account_of_the_viewer_can_read() {
+    let machine = machine_of_the_capture();
+
+    let observed = observe(&machine, interval()).expect("every source answers");
+
+    let ranking = &observed.ranking;
+    assert_eq!(
+        ranking.rows[0].claude,
+        ClaudeView::Session {
+            id: SessionId::parse(SESSION_ID).expect("the text is a session ID"),
+            state: SessionState::Idle {
+                for_: Some(Duration::from_secs(IDLE_SECONDS)),
+            },
+            directory: Some(PathBuf::from("/Volumes/SamsungSSDs/code/tools")),
+        },
+        "the session of the viewer states its record"
+    );
+    assert_eq!(
+        ranking.rows[1].claude,
+        ClaudeView::OtherAccount,
+        "the session of the other account states no record"
+    );
+    assert_eq!(
+        ranking.claude.processes, 2,
+        "both Claude Code processes count in the total"
+    );
+    assert_eq!(
+        ranking.claude.other_account, 1,
+        "one of them belongs to another account"
+    );
+    assert_eq!(
+        ranking.claude.faults,
+        SESSION_FAULTS + OTHER_FAULTS,
+        "the total holds the faults of both of them"
+    );
+}
+
+/// The counters of the kernel come before and after the sample, so the swap
+/// traffic of the run is the difference of the two reads. The compressor holds
+/// what it holds now, so the count after the sample is the one that says what
+/// this Mac is doing.
+#[test]
+fn the_run_states_the_swap_traffic_over_the_sample() {
+    let machine = machine_of_the_capture();
+
+    let observed = observe(&machine, interval()).expect("every source answers");
+
+    assert_eq!(observed.swap.swapins, 36, "1,036 swap-ins less 1,000");
+    assert_eq!(observed.swap.swapouts, 5, "2,005 swap-outs less 2,000");
+    assert_eq!(
+        observed.compressor_bytes,
+        20 * PAGE_SIZE,
+        "20 pages of the compressor after the sample"
+    );
+    assert_eq!(
+        observed.usage.used_bytes, 11_811_160_064,
+        "the swap file states how much of it is in use"
+    );
 }
 
 /// Gives the error of a read of the kernel that failed.
