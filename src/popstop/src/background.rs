@@ -135,60 +135,81 @@ pub fn start(settings: &Settings) -> Result<Report, Failure> {
 ///
 /// The copy empties the log once it holds the lock (see [`empty_the_log`]).
 /// It tells the start about a failure, and it decides which failure goes
-/// into the log (see [`write_into_the_log`]). Thus the caller writes nothing.
+/// into the log (see [`send_the_failure`]). Thus the caller writes nothing.
 ///
 /// The status is [`exit_status::SUCCESS`] when the copy stopped as it must,
 /// [`exit_status::ANOTHER_COPY_RUNS`] when another copy holds the lock, and
 /// [`exit_status::ERROR`] for every other problem.
 #[must_use]
 pub fn run_child(settings: &Settings) -> u8 {
+    let mut start = PipeToTheStart::new(io::stdout());
     let outcome = start_a_session().and_then(|()| {
-        life_cycle::run(Mode::Background, settings, empty_the_log, report_ready).map(|_stopped| ())
+        life_cycle::run(Mode::Background, settings, empty_the_log, |ready| {
+            report_ready(&mut start, ready)
+        })
+        .map(|_stopped| ())
     });
     match outcome {
         Ok(()) => exit_status::SUCCESS,
         Err(failure) => {
-            tell_the_start_about(&failure);
-            write_into_the_log(&failure);
+            send_the_failure(&failure, &mut start, &mut io::stderr());
             failure.status()
         }
     }
 }
 
-/// Writes the reason of a failure into the log, so the reason stays for the
-/// user to read after the start ended.
+/// The stdout of a copy, which is the pipe to the start that made it.
 ///
-/// A refusal stays out of the log. Another copy holds the lock then, thus the
-/// log belongs to that copy, and the refusal reaches the user through the
-/// report to the start. Every other failure goes to the end of the log, thus
-/// the log of a copy that reported nothing holds the reason too.
-fn write_into_the_log(failure: &Failure) {
-    if failure.status() == exit_status::ANOTHER_COPY_RUNS {
-        return;
-    }
-    // The stderr of this copy is its log. A write to it that fails has no
-    // other place to report.
-    let _ = writeln!(io::stderr(), "{}", failure.message());
+/// The start reads one [`Handshake`] from it and then ends.
+struct PipeToTheStart<W> {
+    /// The stdout of the copy.
+    stdout: W,
 }
 
-/// Tells the start that made this copy why the copy did not play.
+impl<W: Write> PipeToTheStart<W> {
+    /// Makes the pipe of a copy that sent no report yet.
+    fn new(stdout: W) -> Self {
+        Self { stdout }
+    }
+
+    /// Sends `report` to the start.
+    fn send(&mut self, report: &Handshake) -> io::Result<()> {
+        self.stdout.write_all(report.line().as_bytes())?;
+        self.stdout.flush()
+    }
+}
+
+/// Tells the start why the copy did not play, through `start`, and writes the
+/// reason into `log`, which is the stderr of the copy.
 ///
 /// The start writes the text for the user and ends with the status of the
 /// copy. Thus a refusal reaches the user with the words of a foreground
 /// refusal, and a failure of the copy is never silent (story 10).
 ///
+/// The log keeps the reason for the user to read after the start ended. A
+/// refusal stays out of the log. Another copy holds the lock then, thus the
+/// log belongs to that copy, and the refusal reaches the user through the
+/// report to the start. Every other failure goes to the end of the log, thus
+/// the log of a copy that reported nothing holds the reason too.
+///
 /// A failure after the report of a copy that plays goes to the log, because
 /// the stdout of the copy is the log from that moment on.
-fn tell_the_start_about(failure: &Failure) {
-    let report = Handshake::Failed {
-        status: failure.status(),
-        message: failure.message().to_owned(),
-    };
-    let mut stdout = io::stdout().lock();
+fn send_the_failure(
+    failure: &Failure,
+    start: &mut PipeToTheStart<impl Write>,
+    log: &mut impl Write,
+) {
     // A write that fails here has no other place to report. The start then
     // finds no report, and it names the log of this copy.
-    let _ = stdout.write_all(report.line().as_bytes());
-    let _ = stdout.flush();
+    let _ = start.send(&Handshake::Failed {
+        status: failure.status(),
+        message: failure.message().to_owned(),
+    });
+    if failure.status() == exit_status::ANOTHER_COPY_RUNS {
+        return;
+    }
+    // A write to the log that fails has no other place to report.
+    let _ = writeln!(log, "{}", failure.message());
 }
 
 /// Puts this process into a session of its own, before it does anything else.
@@ -212,17 +233,13 @@ fn start_a_session() -> Result<(), Failure> {
     Ok(())
 }
 
-/// Tells the start that the copy plays, and then sends the later output of
-/// the copy to the log.
-fn report_ready(ready: &Ready<'_>) -> io::Result<()> {
-    let report = Handshake::Ready {
+/// Tells the start that the copy plays, through `start`, and then sends the
+/// later output of the copy to the log.
+fn report_ready(start: &mut PipeToTheStart<impl Write>, ready: &Ready<'_>) -> io::Result<()> {
+    start.send(&Handshake::Ready {
         device_name: ready.device_name.to_owned(),
         pid: ready.pid,
-    };
-    let mut stdout = io::stdout().lock();
-    stdout.write_all(report.line().as_bytes())?;
-    stdout.flush()?;
-    drop(stdout);
+    })?;
     send_the_later_output_to_the_log()
 }
 
@@ -411,11 +428,106 @@ mod tests {
     use std::io::{self, Write};
     use std::os::fd::OwnedFd;
 
-    use super::{empty, open_the_log};
+    use super::{empty, open_the_log, send_the_failure, PipeToTheStart};
+    use crate::exit_status;
+    use crate::handshake::Handshake;
+    use crate::life_cycle::Failure;
     use crate::lock::StateDir;
 
     /// The text of a copy that ran before.
     const OLD_TEXT: &str = "an old line of a copy that ran before\n";
+
+    /// Gives each line that went through `start`, as the start reads it.
+    fn reports(start: &PipeToTheStart<Vec<u8>>) -> Vec<Option<Handshake>> {
+        std::str::from_utf8(&start.stdout)
+            .expect("the pipe to the start carries text")
+            .lines()
+            .map(Handshake::parse)
+            .collect()
+    }
+
+    /// Gives the text that went into `log`.
+    fn text(log: &[u8]) -> &str {
+        std::str::from_utf8(log).expect("the log holds text")
+    }
+
+    #[test]
+    fn a_failure_after_the_report_reaches_the_log_once_and_sends_no_second_report() {
+        let ready = Handshake::Ready {
+            device_name: "Klipsch R-51PM".to_owned(),
+            pid: 4242,
+        };
+        let failure = Failure::error(&"the signal cannot stop");
+        let mut start = PipeToTheStart::new(Vec::new());
+        let mut log = Vec::new();
+        // The copy reports that it plays. From here on its stdout is the log.
+        start
+            .send(&ready)
+            .expect("send the report that the copy plays");
+
+        send_the_failure(&failure, &mut start, &mut log);
+
+        assert_eq!(
+            reports(&start),
+            [Some(ready)],
+            "a copy that reported that it plays sent a second report, and that \
+             report lands in the log as JSON"
+        );
+        assert_eq!(
+            text(&log),
+            format!("{}\n", failure.message()),
+            "the log does not hold the reason once, as text"
+        );
+    }
+
+    #[test]
+    fn a_failure_before_the_report_goes_to_the_start_and_into_the_log() {
+        let failure = Failure::error(&"the default output device cannot be opened");
+        let mut start = PipeToTheStart::new(Vec::new());
+        let mut log = Vec::new();
+
+        send_the_failure(&failure, &mut start, &mut log);
+
+        assert_eq!(
+            reports(&start),
+            [Some(Handshake::Failed {
+                status: exit_status::ERROR,
+                message: failure.message().to_owned(),
+            })],
+            "the start did not get the one report of the failure"
+        );
+        assert_eq!(
+            text(&log),
+            format!("{}\n", failure.message()),
+            "the log does not hold the reason once, as text"
+        );
+    }
+
+    #[test]
+    fn a_refusal_goes_to_the_start_and_leaves_the_log_of_the_other_copy_alone() {
+        let refusal = Failure::new(
+            exit_status::ANOTHER_COPY_RUNS,
+            "popstop: another copy runs".to_owned(),
+        );
+        let mut start = PipeToTheStart::new(Vec::new());
+        let mut log = Vec::new();
+
+        send_the_failure(&refusal, &mut start, &mut log);
+
+        assert_eq!(
+            reports(&start),
+            [Some(Handshake::Failed {
+                status: exit_status::ANOTHER_COPY_RUNS,
+                message: refusal.message().to_owned(),
+            })],
+            "the start did not get the one report of the refusal"
+        );
+        assert_eq!(
+            text(&log),
+            "",
+            "a refused copy wrote into the log of the copy that runs"
+        );
+    }
 
     #[test]
     fn the_copy_that_holds_the_lock_empties_a_log_that_is_a_file() {
