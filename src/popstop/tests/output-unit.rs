@@ -137,3 +137,27 @@ fn the_default_output_device_has_a_nominal_rate_in_the_range_of_real_devices() {
         rate.hz()
     );
 }
+
+#[test]
+fn a_stop_frees_the_renderer() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let unit = start(CountingSilence {
+        calls: Arc::clone(&calls),
+    });
+    assert!(
+        wait_until(|| calls.load(Ordering::Relaxed) > 0),
+        "the output unit plays before the stop"
+    );
+    assert_eq!(
+        Arc::strong_count(&calls),
+        2,
+        "the output unit holds the renderer while it plays"
+    );
+
+    unit.stop().expect("the output unit stops");
+    assert_eq!(
+        Arc::strong_count(&calls),
+        1,
+        "the output unit did not free the renderer at the stop"
+    );
+}
