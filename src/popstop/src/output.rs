@@ -144,6 +144,16 @@ impl AudioError {
     }
 }
 
+/// Gives the name of the default output device, for example the name that
+/// the Sound settings show.
+///
+/// # Errors
+///
+/// Returns an [`AudioError`] that names the call that failed.
+pub fn default_output_device_name() -> Result<String, AudioError> {
+    Ok(String::new())
+}
+
 /// Gives an error that names `call` when `status` is not [`NO_ERR`].
 fn check(call: &'static str, status: OSStatus) -> Result<(), AudioError> {
     if status == NO_ERR {

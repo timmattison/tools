@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use popstop::output::{OutputUnit, Render};
+use popstop::output::{default_output_device_name, OutputUnit, Render};
 use popstop::signal::SampleRate;
 
 /// The sample rate of the stream in these tests, in hertz. The output unit
@@ -94,5 +94,19 @@ fn a_started_unit_calls_the_renderer_until_it_stops() {
         calls.load(Ordering::Relaxed),
         at_stop,
         "the output unit called the renderer after the stop"
+    );
+}
+
+#[test]
+fn the_default_output_device_has_a_name() {
+    let name = default_output_device_name().unwrap_or_else(|error| {
+        panic!(
+            "the name of the default output device is not known: {error}. This test reads the \
+             default output device, so the machine must have one"
+        )
+    });
+    assert!(
+        !name.trim().is_empty(),
+        "the default output device has the name {name:?}, which is empty"
     );
 }
