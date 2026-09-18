@@ -94,6 +94,17 @@ pub enum TopParseError {
         /// The count of header rows in the output.
         found: usize,
     },
+    /// A header row is not the columns that `faulte` asked for.
+    #[error(
+        "top printed a header row that faulte did not ask for, at line {number}: {line:?}. \
+         faulte asked for the columns {PID_HEADER} {FAULTS_HEADER} (-stats {STATS})"
+    )]
+    UnexpectedHeader {
+        /// The number of the line in the output, from 1.
+        number: usize,
+        /// The line as `top` printed it.
+        line: String,
+    },
     /// A row of the second sample is not a PID and a fault count.
     #[error("top printed a row that is not a PID and a fault count, at line {number}: {line:?}")]
     MalformedRow {
@@ -143,6 +154,9 @@ pub fn parse(output: &str) -> Result<TopSample, TopParseError> {
 
 /// The first token of the header row of each sample.
 const PID_HEADER: &str = "PID";
+
+/// The token that `top` prints in the header row for the column `faults`.
+const FAULTS_HEADER: &str = "FAULTS";
 
 /// Tells whether `line` is a header row: its first token is `PID`. No other
 /// line of the output starts with that token.
@@ -258,6 +272,56 @@ mod tests {
             assert!(
                 error.to_string().starts_with(&format!("top printed {found} header rows")),
                 "the message gives the count: {error}"
+            );
+        }
+    }
+
+    /// A header row that starts with `PID` and does not hold exactly the
+    /// columns `PID FAULTS` is refused, with its line. The last case is right
+    /// in the first sample and wrong in the second.
+    #[test]
+    fn a_header_row_that_faulte_did_not_ask_for_is_refused_with_its_line() {
+        let command = "PID    COMMAND   ";
+        let extra = "PID    FAULTS    COMMAND  ";
+        let bare = "PID";
+        let cases = [
+            (
+                sample("12:00:00", command, "10     launchd   \n")
+                    + &sample("12:00:02", command, "10     launchd   \n"),
+                command,
+                5,
+            ),
+            (
+                sample("12:00:00", extra, "10     3    launchd\n")
+                    + &sample("12:00:02", extra, "10     3    launchd\n"),
+                extra,
+                5,
+            ),
+            (
+                sample("12:00:00", HEADER_ROW, "10     3         \n")
+                    + &sample("12:00:02", bare, "10     3         \n"),
+                bare,
+                11,
+            ),
+        ];
+
+        for (text, header, number) in cases {
+            let error = parse(&text).expect_err("a header row of other columns is refused");
+
+            assert_eq!(
+                error,
+                TopParseError::UnexpectedHeader {
+                    number,
+                    line: header.to_owned()
+                },
+                "the header {header:?}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.starts_with("top printed a header row that faulte did not ask for")
+                    && message.contains(&format!("{header:?}"))
+                    && message.contains("PID FAULTS"),
+                "the message shows the line and the columns that faulte asked for: {message}"
             );
         }
     }
