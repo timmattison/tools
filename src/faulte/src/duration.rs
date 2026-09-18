@@ -26,6 +26,9 @@ pub struct Span(NonZeroU64);
 /// What each refusal tells the person to give in place of the bad text.
 const HINT: &str = "give a whole number and a unit, for example 5s, 10m, 2h, or 7d";
 
+/// The units that the parser accepts, as a refusal names them.
+const UNIT_NAMES: &str = "s, m, h, or d";
+
 /// The reason why a text is not a [`Span`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ParseSpanError {
@@ -38,6 +41,15 @@ pub enum ParseSpanError {
     Zero {
         /// The text as the person gave it.
         text: String,
+    },
+    /// A whole number comes first, and the rest is not a unit that the
+    /// parser accepts.
+    #[error("{text:?} has the unknown unit {unit:?}: use {UNIT_NAMES}")]
+    UnknownUnit {
+        /// The text as the person gave it.
+        text: String,
+        /// The part of the text after the number.
+        unit: String,
     },
     /// The text is not a duration.
     #[error("{text:?} is not a duration")]
@@ -172,6 +184,39 @@ mod tests {
             assert!(
                 error.to_string().contains(&format!("{text:?}")),
                 "the message names the text {text:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_unit_is_refused_and_named() {
+        let cases = [
+            ("5x", "x"),
+            ("5ms", "ms"),
+            ("5S", "S"),
+            ("5M", "M"),
+            ("5 s", " s"),
+            ("5sec", "sec"),
+            ("10mm", "mm"),
+            ("5日", "日"),
+            ("5🎉", "🎉"),
+            ("5é", "é"),
+        ];
+        for (text, unit) in cases {
+            let error = seconds(text).expect_err("an unknown unit is not a duration");
+
+            assert_eq!(
+                error,
+                ParseSpanError::UnknownUnit {
+                    text: text.to_owned(),
+                    unit: unit.to_owned(),
+                },
+                "the text {text:?}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.contains(&format!("{text:?}")) && message.contains(&format!("{unit:?}")),
+                "the message names the text {text:?} and the unit {unit:?}: {message}"
             );
         }
     }
