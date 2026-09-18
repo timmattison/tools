@@ -281,6 +281,13 @@ pub fn rank(input: &Observation<'_>) -> Ranking {
         .iter()
         .filter(|process| process.zombie && !sampled.contains_key(&process.pid))
         .count();
+    // A process of the table that `top` did not list, and that is not a
+    // zombie, started after the second sample. It has no fault count.
+    let unsampled = input
+        .table
+        .iter()
+        .filter(|process| !process.zombie && !sampled.contains_key(&process.pid))
+        .count();
     Ranking {
         rows,
         window: input.window,
@@ -290,7 +297,7 @@ pub fn rank(input: &Observation<'_>) -> Ranking {
             exited,
             exited_faults,
             zombies,
-            ..Skipped::default()
+            unsampled,
         },
     }
 }
