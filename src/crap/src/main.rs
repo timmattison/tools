@@ -1647,6 +1647,10 @@ fn format_fork_at_output(
 ///   emitted last so a newline in the path survives) and then runs the same
 ///   fork + cleanup sequence as `--here`.
 ///
+/// The two fork shapes share one path through the function. It reads the
+/// common fields, `cd`s only for the cross-user shape, and then runs one
+/// sequence: watch the import, fork, clean up, and report.
+///
 /// After a fork, and after the cleanup, the function prints
 /// `Resume this fork with: crap <new-id>` on stdout. Without that line, the
 /// user resumes the old id later and loses the work of the fork. The line
@@ -1670,13 +1674,27 @@ function crap() {
     esac
     local __crap_out
     __crap_out=$(command crap "$@") || return $?
-    if [ "${__crap_out%%$'\n'*}" = "__CRAP_HERE__" ]; then
-        local __crap_rest __crap_session __crap_newid __crap_link __crap_folder __crap_n0 __crap_watcher
+    local __crap_mode
+    __crap_mode=${__crap_out%%$'\n'*}
+    if [ "$__crap_mode" = "__CRAP_HERE__" ] || [ "$__crap_mode" = "__CRAP_FORK_AT__" ]; then
+        # A fork. Both wire shapes start "<mode>\n<session>\n<new-id>\n<link>".
+        # A cross-user resume (__CRAP_FORK_AT__) adds a trailing <dir>: the
+        # session's ORIGINAL directory, where the fork must run. The field that
+        # can hold any text is always last (the link for --here, the dir for a
+        # cross-user fork), so a path that contains newlines survives intact.
+        local __crap_rest __crap_session __crap_newid __crap_link __crap_dir __crap_folder __crap_n0 __crap_watcher
         __crap_rest=${__crap_out#*$'\n'}
         __crap_session=${__crap_rest%%$'\n'*}
         __crap_rest=${__crap_rest#*$'\n'}
         __crap_newid=${__crap_rest%%$'\n'*}
-        __crap_link=${__crap_rest#*$'\n'}
+        __crap_rest=${__crap_rest#*$'\n'}
+        if [ "$__crap_mode" = "__CRAP_FORK_AT__" ]; then
+            __crap_link=${__crap_rest%%$'\n'*}
+            __crap_dir=${__crap_rest#*$'\n'}
+            cd -- "$__crap_dir" || return 1
+        else
+            __crap_link=$__crap_rest
+        fi
         if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
             # Claude only needs the import (a symlink, or a copy for a
             # cross-user source) while it reads the transcript at startup;
@@ -1718,57 +1736,6 @@ function crap() {
         # a fork that the user leaves at once is not saved. --status finds the
         # fork exactly when "crap <new-id>" can resume it, so tell the id only
         # then.
-        if command crap --status "$__crap_newid" >/dev/null 2>&1; then
-            printf 'Resume this fork with: crap %s\n' "$__crap_newid"
-        fi
-        return
-    fi
-    if [ "${__crap_out%%$'\n'*}" = "__CRAP_FORK_AT__" ]; then
-        # Cross-user resume: the binary copied a foreign transcript into our own
-        # tree and wants it forked at the session's ORIGINAL directory. The wire
-        # shape adds a trailing <dir> field to the here-mode layout —
-        # "__CRAP_FORK_AT__\n<session>\n<new-id>\n<link>\n<dir>" — with <dir>
-        # last so a path containing newlines survives as the final field. We cd
-        # there, then run the same fork + cleanup sequence as --here.
-        local __crap_rest __crap_session __crap_newid __crap_link __crap_dir __crap_folder __crap_n0 __crap_watcher
-        __crap_rest=${__crap_out#*$'\n'}
-        __crap_session=${__crap_rest%%$'\n'*}
-        __crap_rest=${__crap_rest#*$'\n'}
-        __crap_newid=${__crap_rest%%$'\n'*}
-        __crap_rest=${__crap_rest#*$'\n'}
-        __crap_link=${__crap_rest%%$'\n'*}
-        __crap_dir=${__crap_rest#*$'\n'}
-        cd -- "$__crap_dir" || return 1
-        if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
-            # As in --here: drop the imported copy the moment Claude writes the
-            # forked session file, rather than letting it linger.
-            __crap_folder=$(dirname -- "$__crap_link")
-            __crap_n0=$(find "$__crap_folder" -maxdepth 1 -name '*.jsonl' 2>/dev/null | wc -l | tr -dc '0-9')
-            (
-                __crap_i=0
-                while [ "$__crap_i" -lt 600 ]; do
-                    if [ "$(find "$__crap_folder" -maxdepth 1 -name '*.jsonl' 2>/dev/null | wc -l | tr -dc '0-9')" -gt "$__crap_n0" ]; then
-                        rm -f -- "$__crap_link"
-                        exit 0
-                    fi
-                    __crap_i=$((__crap_i + 1))
-                    sleep 0.1
-                done
-            ) &
-            __crap_watcher=$!
-            disown 2>/dev/null
-        fi
-        set -- --resume "$__crap_session" --fork-session --session-id "$__crap_newid"
-        if command -v clauded >/dev/null 2>&1; then
-            eval 'clauded "$@"'
-        else
-            claude "$@"
-        fi
-        if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
-            kill "$__crap_watcher" 2>/dev/null
-            rm -f -- "$__crap_link"
-        fi
-        # As in --here: tell the fork id only when Claude saved the fork.
         if command crap --status "$__crap_newid" >/dev/null 2>&1; then
             printf 'Resume this fork with: crap %s\n' "$__crap_newid"
         fi
