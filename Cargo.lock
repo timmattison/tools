@@ -6159,6 +6159,7 @@ name = "popstop"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "chrono",
  "clap",
  "dirs",
  "libc",

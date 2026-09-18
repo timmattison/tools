@@ -3,7 +3,12 @@
 //! The functions here are pure, so the tests reach every text without a
 //! terminal, a lock, or an audio device.
 
+use std::fmt;
 use std::path::Path;
+
+use chrono::{Local, TimeZone};
+
+use crate::lock::StartTime;
 
 /// The command that stops the copy that runs.
 const STOP_COMMAND: &str = "popstop --stop";
@@ -27,10 +32,35 @@ pub fn stop_command(state_dir: Option<&Path>) -> String {
     }
 }
 
+/// Gives the start time of a copy as a local date and time, for example
+/// `2026-09-18 10:00:00`.
+#[must_use]
+pub fn start_time_text(start: StartTime) -> String {
+    start_time_text_in(start, &Local)
+}
+
+/// Gives the start time of a copy as a date and time in `zone`.
+fn start_time_text_in<Tz>(start: StartTime, zone: &Tz) -> String
+where
+    Tz: TimeZone,
+    Tz::Offset: fmt::Display,
+{
+    let _ = (start, zone);
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::stop_command;
+    use super::{start_time_text_in, stop_command};
+    use crate::lock::StartTime;
+    use chrono::{FixedOffset, Utc};
     use std::path::Path;
+
+    /// 2026-09-18 10:00:00.123456 UTC.
+    const TEN_O_CLOCK_UTC: StartTime = StartTime::from_unix_micros(1_789_725_600_123_456);
+
+    /// The number of seconds in one hour.
+    const HOUR: i32 = 60 * 60;
 
     #[test]
     fn the_stop_command_names_a_state_directory_quoted_for_a_shell() {
@@ -42,6 +72,25 @@ mod tests {
         assert_eq!(
             stop_command(Some(Path::new("/tmp/it's here"))),
             r"popstop --stop --state-dir '/tmp/it'\''s here'"
+        );
+    }
+
+    #[test]
+    fn a_start_time_shows_as_a_date_and_a_time_to_the_second_in_the_zone() {
+        assert_eq!(
+            start_time_text_in(TEN_O_CLOCK_UTC, &Utc),
+            "2026-09-18 10:00:00"
+        );
+        let east = FixedOffset::east_opt(2 * HOUR).expect("a valid offset");
+        assert_eq!(
+            start_time_text_in(TEN_O_CLOCK_UTC, &east),
+            "2026-09-18 12:00:00"
+        );
+        let west = FixedOffset::west_opt(11 * HOUR).expect("a valid offset");
+        assert_eq!(
+            start_time_text_in(TEN_O_CLOCK_UTC, &west),
+            "2026-09-17 23:00:00",
+            "a zone west of UTC can show the day before"
         );
     }
 }
