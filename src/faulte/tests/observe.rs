@@ -33,6 +33,9 @@ const OTHER: Uid = Uid::new(502);
 /// The name of the account that runs the tests.
 const VIEWER_NAME: &str = "tim";
 
+/// The name of the other account of this Mac.
+const OTHER_NAME: &str = "ada";
+
 /// The time now in the tests, in seconds since the Unix epoch.
 const NOW: u64 = 1_790_000_000;
 
@@ -133,7 +136,10 @@ impl FakeMachine {
                 uid: VIEWER,
                 is_root: false,
             },
-            names: HashMap::from([(VIEWER, VIEWER_NAME.to_owned())]),
+            names: HashMap::from([
+                (VIEWER, VIEWER_NAME.to_owned()),
+                (OTHER, OTHER_NAME.to_owned()),
+            ]),
         }
     }
 
@@ -402,6 +408,33 @@ fn the_run_states_the_swap_traffic_over_the_sample() {
     assert_eq!(
         observed.usage.used_bytes, 11_811_160_064,
         "the swap file states how much of it is in use"
+    );
+}
+
+/// The output states the name of each account that owns a row, because a
+/// number says nothing about who runs a session. An account with no name
+/// keeps its number, which is the whole answer that the machine gave.
+#[test]
+fn the_run_names_the_account_of_each_row() {
+    let machine = machine_of_the_capture();
+
+    let observed = observe(&machine, interval()).expect("every source answers");
+
+    let accounts = &observed.accounts;
+    assert_eq!(
+        accounts.name_of(VIEWER),
+        VIEWER_NAME,
+        "the account of the viewer has a name"
+    );
+    assert_eq!(
+        accounts.name_of(OTHER),
+        OTHER_NAME,
+        "the other account of this Mac has a name"
+    );
+    assert_eq!(
+        accounts.name_of(Uid::new(0)),
+        "0",
+        "the kernel owns a row, and the machine gave no name for its account"
     );
 }
 
