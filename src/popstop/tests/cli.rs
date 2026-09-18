@@ -11,8 +11,11 @@
 // popstop plays audio on macOS only.
 #![cfg(target_os = "macos")]
 
+use std::ffi::{c_void, OsString};
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::mem::{self, MaybeUninit};
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -76,6 +79,11 @@ const NO_IDLE_SLEEP_LINE: &str = "popstop: this Mac does not idle sleep while po
 
 /// The line that tells the user how to stop a foreground copy.
 const PRESS_CTRL_C_LINE: &str = "popstop: press Ctrl-C to stop";
+
+/// The working directory of a background copy. No volume can unmount while
+/// a process holds a directory on it, and the root directory is on no volume
+/// that a user unmounts.
+const ROOT_DIRECTORY: &str = "/";
 
 /// A copy of popstop that a test started.
 ///
@@ -241,7 +249,9 @@ impl Copy {
 /// test, thus the stop is the only way to end it, and `--exit-after` is what
 /// bounds a copy that the stop did not reach.
 struct BackgroundStart {
-    /// The state directory of the copy, for the stop of the drop.
+    /// The state directory of the copy, for the stop of the drop. The stop
+    /// runs in the working directory of this test, thus this path does not
+    /// depend on the working directory of the start.
     dir: PathBuf,
     /// The process ID of the command that started the copy. The copy itself
     /// runs in another process.
@@ -276,9 +286,29 @@ impl BackgroundStart {
     /// log. Thus the wait for the output of the command ends when the command
     /// ends, and not when the copy ends.
     fn make(dir: &Path) -> Self {
-        let child = Command::new(env!("CARGO_BIN_EXE_popstop"))
+        Self::make_from(None, dir)
+    }
+
+    /// Runs `popstop --background` in the working directory `working_dir`,
+    /// with `state_dir` as the value of `--state-dir`, and waits for that
+    /// command to end. A relative `state_dir` names a directory in
+    /// `working_dir`.
+    fn make_in(working_dir: &Path, state_dir: &Path) -> Self {
+        Self::make_from(Some(working_dir), state_dir)
+    }
+
+    /// Runs `popstop --background` with `state_dir` as the value of
+    /// `--state-dir`, and waits for that command to end. The command runs in
+    /// `working_dir` when it is given, and in the working directory of this
+    /// test when it is not.
+    fn make_from(working_dir: Option<&Path>, state_dir: &Path) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_popstop"));
+        if let Some(working_dir) = working_dir {
+            command.current_dir(working_dir);
+        }
+        let child = command
             .arg("--state-dir")
-            .arg(dir)
+            .arg(state_dir)
             .arg("--background")
             .args(["--exit-after", EXIT_AFTER_SECONDS])
             .stdin(Stdio::null())
@@ -289,7 +319,10 @@ impl BackgroundStart {
         let command_pid = child.id();
         let output = child.wait_with_output().expect("wait for the start");
         Self {
-            dir: dir.to_path_buf(),
+            dir: working_dir.map_or_else(
+                || state_dir.to_path_buf(),
+                |working_dir| working_dir.join(state_dir),
+            ),
             command_pid,
             status: output.status,
             report: String::from_utf8(output.stdout).expect("the output of popstop is UTF-8"),
@@ -370,6 +403,52 @@ fn facts_of(pid: u32) -> Option<Facts> {
     })
 }
 
+/// Gives the working directory of the process `pid`.
+///
+/// It asks the kernel with `proc_pidinfo`, because a background copy is no
+/// child of this test and the standard library says nothing about a process
+/// that it did not start.
+fn working_directory_of(pid: u32) -> PathBuf {
+    let pid = libc::pid_t::try_from(pid).expect("the PID fits in a pid_t");
+    let mut info = MaybeUninit::<libc::proc_vnodepathinfo>::uninit();
+    let wanted = mem::size_of::<libc::proc_vnodepathinfo>();
+    let wanted_c = libc::c_int::try_from(wanted)
+        .expect("the information fits the size that proc_pidinfo takes");
+
+    // SAFETY: `proc_pidinfo` writes at most `wanted_c` bytes into the buffer,
+    // and that is the size of the buffer. The call only reads information of
+    // the process. The code below reads the buffer only after the call
+    // reports that it filled all of it.
+    let filled = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            info.as_mut_ptr().cast::<c_void>(),
+            wanted_c,
+        )
+    };
+    assert_eq!(
+        usize::try_from(filled).ok(),
+        Some(wanted),
+        "proc_pidinfo gave {filled} of the {wanted} bytes of the directories of process {pid}: {}",
+        io::Error::last_os_error()
+    );
+
+    // SAFETY: the call above reported that it filled the whole structure.
+    let info = unsafe { info.assume_init() };
+    // The kernel ends the path with a zero byte.
+    let path: Vec<u8> = info
+        .pvi_cdir
+        .vip_path
+        .as_flattened()
+        .iter()
+        .take_while(|&&letter| letter != 0)
+        .map(|letter| u8::from_ne_bytes(letter.to_ne_bytes()))
+        .collect();
+    PathBuf::from(OsString::from_vec(path))
+}
+
 /// Waits until `ready` gives true, for [`ADOPTION_BOUND`] at most. Gives what
 /// `ready` gave at the end.
 fn wait_until(mut ready: impl FnMut() -> bool) -> bool {
@@ -408,10 +487,27 @@ fn ask(arguments: &[&str]) -> (ExitStatus, String) {
 /// The commands that take this way (`--stop` and `--status`) act on the copy
 /// that runs and end by themselves, thus they need no time limit.
 fn ask_in(dir: &Path, arguments: &[&str]) -> (ExitStatus, String, String) {
-    let output = Command::new(env!("CARGO_BIN_EXE_popstop"))
-        .arg("--state-dir")
-        .arg(dir)
-        .args(arguments)
+    let mut command = Command::new(env!("CARGO_BIN_EXE_popstop"));
+    command.arg("--state-dir").arg(dir).args(arguments);
+    outcome_of(&mut command)
+}
+
+/// Runs popstop in the working directory `working_dir` with the arguments
+/// `arguments`, and waits for it to end. Gives its exit status, its stdout,
+/// and its stderr.
+///
+/// The arguments name the state directory, thus a relative state directory
+/// names a directory in `working_dir`.
+fn ask_from(working_dir: &Path, arguments: &[&str]) -> (ExitStatus, String, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_popstop"));
+    command.current_dir(working_dir).args(arguments);
+    outcome_of(&mut command)
+}
+
+/// Runs `command` with no stdin, and waits for it to end. Gives its exit
+/// status, its stdout, and its stderr.
+fn outcome_of(command: &mut Command) -> (ExitStatus, String, String) {
+    let output = command
         .stdin(Stdio::null())
         .output()
         .expect("start popstop");
@@ -735,6 +831,151 @@ fn a_background_start_refuses_with_the_words_of_a_foreground_start() {
         "the first copy stops with success: {status}. Its stderr:\n{stderr}"
     );
     assert_eq!(holder(&dir), None, "the first copy released the lock");
+}
+
+#[test]
+fn a_background_copy_runs_in_the_root_directory_and_holds_no_directory_of_the_user() {
+    let temp = tempfile::tempdir().expect("a temporary directory");
+    // The directory that the user starts the copy from. It can be on a volume
+    // that the user unmounts later.
+    let working_dir = temp.path().join("start");
+    fs::create_dir(&working_dir).expect("make the directory of the start");
+    let dir = temp.path().join("state");
+
+    let start = BackgroundStart::make_in(&working_dir, &dir);
+
+    assert_eq!(
+        start.status.code(),
+        Some(0),
+        "the background start worked: {}. Its stderr:\n{}",
+        start.status,
+        start.errors
+    );
+    let record = holder(&dir).expect("the copy holds the lock");
+    let held = working_directory_of(record.pid);
+    assert_eq!(
+        held,
+        Path::new(ROOT_DIRECTORY),
+        "the copy holds the directory {held:?} for its whole life, thus a volume that holds that \
+         directory cannot unmount while the copy runs"
+    );
+}
+
+#[test]
+fn a_relative_state_directory_names_one_directory_in_the_start_the_copy_and_each_message() {
+    let temp = tempfile::tempdir().expect("a temporary directory");
+    // popstop makes a relative path full with the working directory that the
+    // system gives, and that path has no symbolic link. On macOS `/var` is a
+    // link to `/private/var`, thus the test compares full paths with no link.
+    let working_dir =
+        fs::canonicalize(temp.path()).expect("the full path of the temporary directory");
+    let relative = "state";
+    let dir = working_dir.join(relative);
+
+    let start = BackgroundStart::make_in(&working_dir, Path::new(relative));
+
+    assert_eq!(
+        start.status.code(),
+        Some(0),
+        "a background start with a relative state directory worked: {}. Its stderr:\n{}",
+        start.status,
+        start.errors
+    );
+    let record = holder(&dir).expect(
+        "the copy holds the lock in the directory that the relative path names for the start",
+    );
+    assert_eq!(
+        record.mode,
+        Mode::Background,
+        "the copy that holds the lock runs in the background"
+    );
+    // The command that stops the copy names the full path, thus it works in
+    // every directory and not only in the directory of the start.
+    device_of_the_background_lines(&start.report, record.pid, &dir);
+
+    // A start of each mode that finds the copy refuses with the same words,
+    // and those words name the full path too. Neither start takes the lock,
+    // thus neither one plays. The time limit of each is the backstop of a
+    // start that works.
+    let (foreground, _, foreground_refusal) = ask_from(
+        &working_dir,
+        &["--state-dir", relative, "--exit-after", EXIT_AFTER_SECONDS],
+    );
+    let (background, _, background_refusal) = ask_from(
+        &working_dir,
+        &[
+            "--state-dir",
+            relative,
+            "--background",
+            "--exit-after",
+            EXIT_AFTER_SECONDS,
+        ],
+    );
+    assert_eq!(
+        (foreground.code(), background.code()),
+        (Some(3), Some(3)),
+        "both starts found the copy that runs. The foreground refusal:\n{foreground_refusal}\nThe \
+         background refusal:\n{background_refusal}"
+    );
+    assert_eq!(
+        background_refusal, foreground_refusal,
+        "story 10: the refusal of a background start has the words of a foreground refusal, also \
+         for a relative state directory"
+    );
+    let stop_command = format!("popstop --stop --state-dir '{}'", dir.display());
+    assert!(
+        foreground_refusal.contains(&stop_command),
+        "the refusal does not name {stop_command:?}:\n{foreground_refusal}"
+    );
+
+    // The command of the hint, from the working directory of this test.
+    let (status, report, errors) = ask_in(&dir, &["--stop"]);
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "the stop that the hint gives ended the copy: {status}. Its stderr:\n{errors}"
+    );
+    assert_eq!(
+        report,
+        format!("popstop: the copy stopped (pid {})\n", record.pid),
+        "the stop ended the copy that the relative path started"
+    );
+    assert_eq!(holder(&dir), None, "the copy released the lock");
+}
+
+#[test]
+fn a_relative_state_directory_in_a_working_directory_that_is_gone_is_an_error() {
+    let temp = tempfile::tempdir().expect("a temporary directory");
+    let gone = temp.path().join("gone");
+    fs::create_dir(&gone).expect("make the directory that goes");
+
+    // The shell goes into the directory, removes it, and then becomes
+    // popstop. The working directory of popstop then has no path, thus a
+    // relative state directory names no directory. A status opens no device
+    // and takes no lock, thus it needs no time limit.
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg(r#"cd -- "$1" && rmdir -- "$1" && exec "$2" --state-dir state --status"#)
+        .arg("sh")
+        .arg(&gone)
+        .arg(env!("CARGO_BIN_EXE_popstop"));
+    let (status, report, errors) = outcome_of(&mut command);
+
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "a state directory that names no directory is an error: {status}. Its stdout:\n{report}\nIts \
+         stderr:\n{errors}"
+    );
+    assert_eq!(
+        report, "",
+        "a problem goes to stderr, thus a script that reads stdout sees nothing"
+    );
+    assert!(
+        errors.starts_with("popstop: the full path of the state directory state cannot be found:"),
+        "the error names the state directory whose full path popstop cannot find:\n{errors}"
+    );
 }
 
 #[test]
