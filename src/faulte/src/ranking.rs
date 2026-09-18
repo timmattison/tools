@@ -177,8 +177,27 @@ pub struct Ranking {
 /// Ranks every process of `input` by its faults over the window.
 #[must_use]
 pub fn rank(input: &Observation<'_>) -> Ranking {
+    let table: HashMap<Pid, &ProcessRow> =
+        input.table.iter().map(|process| (process.pid, process)).collect();
+    let mut rows: Vec<RankedRow> = input
+        .faults
+        .iter()
+        .filter_map(|count| {
+            let process = table.get(&count.pid)?;
+            Some(RankedRow {
+                pid: count.pid,
+                uid: process.uid,
+                faults: count.faults,
+                rss_kib: Some(process.rss_kib),
+                started_at_epoch_secs: Some(process.started_at_epoch_secs),
+                command: process.command.clone(),
+                claude: ClaudeView::NotClaude,
+            })
+        })
+        .collect();
+    rows.sort_by(|left, right| right.faults.cmp(&left.faults));
     Ranking {
-        rows: Vec::new(),
+        rows,
         window: input.window,
         total_faults: 0,
         claude: ClaudeTotal::default(),
