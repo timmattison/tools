@@ -2220,7 +2220,9 @@ fn exit_with_failure(failure: &ResolveFailure) -> ! {
 /// in another user's tree is copied into the current user's tree
 /// (`dest_projects_dir`, always our own) and forked at its original directory:
 /// the foreign transcript is only ever read, and every write lands under the
-/// current user's home. Emits the output the shell function consumes.
+/// current user's home. That fork is pinned to a UUID v4 that `crap` generates
+/// and checks with [`fork_id_or_exit`]. Emits the output the shell function
+/// consumes.
 fn run_resume(
     roots: &[UserProjects],
     dest_projects_dir: &Path,
@@ -2262,11 +2264,15 @@ fn run_resume(
     // Cross-user hit: copy the foreign transcript into our own tree at the
     // original directory's project folder, then fork it there. The fork only
     // reads the copy, so a live original is never blocked and never corrupted.
+    // Choose the fork id before the copy is made, so a refused id leaves no
+    // stray copy. The fork lands in our own tree, so the collision check looks
+    // there.
+    let fork_id = fork_id_or_exit(dest_projects_dir, None);
     match prepare_import(dest_projects_dir, &path, &dir, session_id, ImportMode::Copy) {
         Ok(link) => {
             print!(
                 "{}",
-                format_fork_at_output(session_id, None, link.as_deref(), &dir)
+                format_fork_at_output(session_id, Some(fork_id.as_str()), link.as_deref(), &dir)
             );
             exit(0);
         }
