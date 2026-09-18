@@ -1889,6 +1889,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     `WN_NO_CLAUDE=1 wn`, `WN_PLAN_TIMEOUT=900 wn`, `WN_PLAN_EFFORT=high wn`,
     `WN_PLAN_MODEL=opus wn`
   - To install: `cargo install --git https://github.com/timmattison/tools wn`
+- popstop (pop stop)
+  - Keeps the default audio output device awake with a signal that is too small to hear, so USB speakers do not pop and do not lose the start of a sound.
+  - To install: `cargo install --git https://github.com/timmattison/tools popstop`
 
 ## dirhash
 

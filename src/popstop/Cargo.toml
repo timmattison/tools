@@ -1,0 +1,12 @@
+[package]
+name = "popstop"
+version = "0.1.0"
+edition.workspace = true
+description = "Keeps the default audio output device awake with an inaudible signal, so USB speakers do not pop"
+
+[dependencies]
+buildinfo.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true
