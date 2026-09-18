@@ -167,6 +167,18 @@ impl LockGuard {
     }
 }
 
+impl Drop for LockGuard {
+    /// Removes the record from the lock file, then releases the lock.
+    ///
+    /// A drop cannot report an error. When a call fails here, the kernel still
+    /// releases the lock when the file closes, and an old record means
+    /// nothing to a reader that gets the lock.
+    fn drop(&mut self) {
+        let _ = self.file.set_len(0);
+        let _ = self.file.unlock();
+    }
+}
+
 /// Gets the lock for this process, and writes `record` into the lock file.
 ///
 /// It makes the state directory and the lock file when they do not exist. It
