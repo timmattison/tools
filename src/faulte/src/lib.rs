@@ -20,6 +20,7 @@
 pub mod duration;
 pub mod pid;
 pub mod ranking;
+pub mod render;
 pub mod state;
 pub mod table;
 pub mod top;
