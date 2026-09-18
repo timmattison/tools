@@ -6,7 +6,7 @@
 //! values, and the sequence reads this Mac through one trait. No unit test
 //! signals a real process.
 
-use occ::SessionRecord;
+use occ::{SessionRecord, SessionStatus};
 
 use crate::plan::Candidate;
 use crate::table::ProcessRow;
@@ -83,7 +83,13 @@ pub fn recheck(
     if process.started_at_epoch_secs != candidate.started_at_epoch_secs {
         return Recheck::PidReused;
     }
-    let _ = fresh_record;
+    let still_idle = fresh_record.is_some_and(|record| {
+        matches!(record.status, Some(SessionStatus::Idle))
+            && record.status_changed_at == candidate.status_changed_at
+    });
+    if !still_idle {
+        return Recheck::StatusChanged;
+    }
     Recheck::Proceed
 }
 
