@@ -153,4 +153,36 @@ mod tests {
             ]
         );
     }
+
+    /// Gives a row of PID 700 with the state `stat` and the command `command`.
+    fn row_with(stat: &str, command: &str) -> String {
+        format!("  700     1   501      0 {stat:<4} Tue Aug 25 16:45:30 2026     {command}")
+    }
+
+    /// Parses `line`, which must hold exactly one row, and gives that row.
+    fn only_row(line: &str) -> ProcessRow {
+        let rows = parse(line).expect("the row parses");
+        let [row] = <[ProcessRow; 1]>::try_from(rows).expect("the text holds one row");
+        row
+    }
+
+    /// `ps` gives the state of a zombie as `Z`, with the other flags after it.
+    /// Every other state is a live process.
+    #[test]
+    fn a_state_that_starts_with_z_is_a_zombie() {
+        for (stat, zombie) in [
+            ("Z", true),
+            ("Z+", true),
+            ("Zs", true),
+            ("S", false),
+            ("R+", false),
+            ("Ss", false),
+            ("S+", false),
+            ("U", false),
+        ] {
+            let row = only_row(&row_with(stat, "(node)"));
+
+            assert_eq!(row.zombie, zombie, "the state {stat:?}");
+        }
+    }
 }
