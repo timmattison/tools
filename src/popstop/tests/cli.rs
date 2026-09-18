@@ -2,8 +2,8 @@
 //!
 //! Each test starts the real binary with a state directory of its own, so the
 //! tests never touch the lock of the user and never see each other. Each copy
-//! also gets `--exit-after`, and a drop guard kills a copy that still runs, so
-//! a test that fails leaves no copy that plays for ever.
+//! also gets `--exit-after`, and a drop guard stops a copy that still runs and
+//! kills what stays, so a test that fails leaves no copy that plays for ever.
 //!
 //! These tests open the real default output device and play the inaudible
 //! keepalive signal.
@@ -13,7 +13,7 @@
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
@@ -67,9 +67,11 @@ const PRESS_CTRL_C_LINE: &str = "popstop: press Ctrl-C to stop";
 
 /// A copy of popstop that a test started.
 ///
-/// A drop kills the copy and reaps it, so a test that fails early leaves no
+/// A drop stops the copy and reaps it, so a test that fails early leaves no
 /// copy that plays.
 struct Copy {
+    /// The state directory of the copy, for the stop of the drop.
+    dir: PathBuf,
     /// The child process.
     child: Child,
     /// The lines that the copy wrote to stdout.
@@ -80,7 +82,22 @@ struct Copy {
 }
 
 impl Drop for Copy {
+    /// Stops the copy the way that a user stops it, and then kills what
+    /// stays.
+    ///
+    /// A stop ramps the signal down and frees the device, thus a test that
+    /// fails leaves a machine that is quiet. A copy that does not answer the
+    /// stop gets `SIGKILL` after it, because a test must leave no copy that
+    /// plays.
     fn drop(&mut self) {
+        let _ = Command::new(env!("CARGO_BIN_EXE_popstop"))
+            .arg("--stop")
+            .arg("--state-dir")
+            .arg(&self.dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -119,6 +136,7 @@ impl Copy {
         });
 
         Self {
+            dir: dir.to_path_buf(),
             child,
             stdout: receiver,
             stderr: Some(stderr),
