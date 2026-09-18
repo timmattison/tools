@@ -94,6 +94,13 @@ pub enum TopParseError {
         /// The count of header rows in the output.
         found: usize,
     },
+    /// The second sample holds no row. A Mac always runs processes, so the
+    /// output is incomplete.
+    #[error(
+        "top listed no process in its second sample: a Mac always runs processes, so the \
+         output is incomplete, and faulte does not rank an empty sample"
+    )]
+    NoRows,
     /// A header row is not the columns that `faulte` asked for.
     #[error(
         "top printed a header row that faulte did not ask for, at line {number}: {line:?}. \
@@ -337,6 +344,21 @@ mod tests {
                 "the message shows the line and the columns that faulte asked for: {message}"
             );
         }
+    }
+
+    /// A second sample with no row is refused. An empty ranking looks the
+    /// same as a quiet machine, so `faulte` never prints one.
+    #[test]
+    fn a_second_sample_with_no_row_is_refused() {
+        let text = two_samples("10     9000000   \n20     12        \n", "");
+
+        let error = parse(&text).expect_err("a second sample with no row is refused");
+
+        assert_eq!(error, TopParseError::NoRows);
+        assert!(
+            error.to_string().contains("no process in its second sample"),
+            "the message says which sample is empty: {error}"
+        );
     }
 
     /// Parses `text` as a [`Span`] for a test.
