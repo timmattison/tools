@@ -183,6 +183,12 @@ pub fn stop(
     }
     let mut targets = signal_each(machine, targets, Signal::Terminate, &mut report);
     for _ in 0..waits(grace, poll) {
+        // Every target is gone, so the grace period has nothing left to wait
+        // for. A run that waits it out anyway holds the person for thirty
+        // seconds and reads the same answer at the end of them.
+        if targets.is_empty() {
+            break;
+        }
         machine.sleep(poll);
         let table = match machine.process_table() {
             Ok(table) => table,
