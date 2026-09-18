@@ -31,7 +31,7 @@ impl SampleRate {
     /// Returns `None` when the value is zero, negative, NaN, or infinite.
     #[must_use]
     pub fn new(hz: f64) -> Option<Self> {
-        Some(Self(hz))
+        (hz.is_finite() && hz > 0.0).then_some(Self(hz))
     }
 
     /// Gives the rate in hertz.
