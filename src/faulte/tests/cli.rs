@@ -32,10 +32,24 @@ fn run(args: &[&str]) -> Output {
         .expect("the faulte binary starts")
 }
 
-/// Gives `text` with each run of white space made one space, so that a line
-/// break in the help text does not split a phrase that a test looks for.
+/// Gives the glyphs of what the binary wrote, with the escape codes taken out.
+///
+/// `clap` paints the names of flags, the values, and the headings whenever it
+/// decides that the run wants color, and it reads `CLICOLOR_FORCE` for that
+/// decision, not only the terminal. The pre-commit hook of this repository
+/// sets that variable, and so does [`run`]. Thus a flag arrives as
+/// `\x1b[1m--interval\x1b[0m`, and a test that looks for `--interval` wants
+/// the glyphs. Each read of stdout or stderr in this file goes through here.
+/// See "Colored Output in Tests" in CLAUDE.md.
+fn glyphs(bytes: &[u8]) -> String {
+    testcolor::strip_ansi(&String::from_utf8_lossy(bytes))
+}
+
+/// Gives the glyphs of `text` with each run of white space made one space, so
+/// that a line break in the help text does not split a phrase that a test
+/// looks for.
 fn one_line(text: &[u8]) -> String {
-    String::from_utf8_lossy(text)
+    glyphs(text)
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -84,8 +98,8 @@ fn kill_refuses_the_limit_of_the_ranking() {
 #[test]
 fn version_names_the_tool_the_release_and_the_build() {
     let output = run(&["--version"]);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = glyphs(&output.stdout);
+    let stderr = glyphs(&output.stderr);
 
     assert!(
         output.status.success(),
@@ -117,7 +131,7 @@ fn a_bad_duration_in_any_flag_is_a_usage_error_that_names_the_text() {
     ];
     for (args, flag, text) in cases {
         let output = run(args);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = glyphs(&output.stderr);
 
         assert_eq!(
             output.status.code(),
@@ -145,8 +159,8 @@ fn a_bad_duration_in_any_flag_is_a_usage_error_that_names_the_text() {
 #[test]
 fn the_ranking_states_a_header_and_a_table_of_this_mac() {
     let output = run(&["--interval", "1s", "--limit", "5"]);
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = glyphs(&output.stdout);
+    let stderr = glyphs(&output.stderr);
 
     assert!(
         output.status.success(),
@@ -193,8 +207,8 @@ fn a_kill_that_selects_nothing_prints_the_plan_and_exits_zero() {
         "--older-than",
         NO_PROCESS_IS_THIS_OLD,
     ]);
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = glyphs(&output.stdout);
+    let stderr = glyphs(&output.stderr);
 
     assert!(
         output.status.success(),

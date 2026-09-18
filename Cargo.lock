@@ -2338,6 +2338,7 @@ dependencies = [
  "libc",
  "occ",
  "termsize",
+ "testcolor",
  "thiserror 2.0.20",
 ]
 
