@@ -300,6 +300,15 @@ mod tests {
         }
     }
 
+    /// Gives the table row of a zombie process `pid`, whose parent is `ppid`.
+    /// A zombie stopped already, so it is not a live descendant.
+    fn zombie(pid: u32, ppid: u32) -> ProcessRow {
+        ProcessRow {
+            zombie: true,
+            ..process(pid, ppid)
+        }
+    }
+
     /// Gives the default limits of `faulte kill`: seven days and ten minutes.
     fn rules() -> Rules {
         Rules {
@@ -395,5 +404,45 @@ mod tests {
                 .map(|candidate| candidate.status_changed_at),
             Some(Some(now() - Duration::from_secs(3_600)))
         );
+    }
+
+    /// Rule 3: a session with a live descendant is never a candidate. A
+    /// background shell and a running tool call make a session active,
+    /// whatever its status says.
+    ///
+    /// The walk reads the parent links of the whole table, so a descendant two
+    /// levels down counts. A zombie is not alive, and a zombie between a
+    /// session and a live grandchild does not hide that grandchild.
+    ///
+    /// A cycle in the parent links, and a process that is its own parent, end
+    /// the walk. Neither one can hold the tool.
+    #[test]
+    fn a_session_with_a_live_descendant_is_never_a_candidate() {
+        let ranking = ranking(vec![
+            session(30, OLD, idle(3_600)),
+            session(40, OLD, idle(3_600)),
+            session(50, OLD, idle(3_600)),
+            session(60, OLD, idle(3_600)),
+            session(70, OLD, idle(3_600)),
+        ]);
+        let table = [
+            process(30, LAUNCHD_PID),
+            process(40, LAUNCHD_PID),
+            process(41, 40),
+            process(50, LAUNCHD_PID),
+            zombie(51, 50),
+            process(52, 51),
+            process(60, LAUNCHD_PID),
+            zombie(61, 60),
+            process(70, LAUNCHD_PID),
+            process(71, 72),
+            process(72, 71),
+            process(73, 73),
+            process(FAULTE_PID, LAUNCHD_PID),
+        ];
+
+        let plan = plan(&input(&ranking, &table, rules()));
+
+        assert_eq!(selected(&plan), vec![30, 60, 70]);
     }
 }
