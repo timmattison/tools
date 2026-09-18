@@ -516,6 +516,62 @@ fn a_background_start_returns_only_after_the_copy_holds_the_lock() {
 }
 
 #[test]
+fn a_status_names_the_background_copy_and_a_stop_ends_it() {
+    let temp = tempfile::tempdir().expect("a temporary directory");
+    let dir = temp.path().join("state");
+    let start = BackgroundStart::make(&dir);
+    assert_eq!(
+        start.status.code(),
+        Some(0),
+        "the background start worked: {}. Its stderr:\n{}",
+        start.status,
+        start.errors
+    );
+    let record = holder(&dir).expect("the copy holds the lock");
+
+    // Story 13: a user who forgot a background copy finds it with a status.
+    let (status, report, errors) = ask_in(&dir, &["--status"]);
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a status with a copy that runs is a success: {status}. Its stderr:\n{errors}"
+    );
+    for named in [
+        format!("pid {}", record.pid),
+        "background".to_owned(),
+        start_time_text(record.started_at),
+    ] {
+        assert!(
+            report.contains(&named),
+            "the status does not name {named:?}:\n{report}"
+        );
+    }
+
+    // Story 11: a stop ends the copy, and the user looks for no PID.
+    let (status, report, errors) = ask_in(&dir, &["--stop"]);
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a stop that ended the copy is a success: {status}. Its stderr:\n{errors}"
+    );
+    assert_eq!(
+        report,
+        format!("popstop: the copy stopped (pid {})\n", record.pid),
+        "story 12: the report comes after the copy is gone, and it names the copy"
+    );
+    assert_eq!(errors, "", "a stop that worked says nothing on stderr");
+    assert_eq!(holder(&dir), None, "the copy released the lock");
+
+    let (status, report, errors) = ask_in(&dir, &["--status"]);
+    assert_eq!(
+        status.code(),
+        Some(4),
+        "no copy runs after the stop: {status}. Its stderr:\n{errors}"
+    );
+    assert_eq!(report, "popstop: no copy runs\n");
+}
+
+#[test]
 fn a_hangup_stops_a_foreground_copy() {
     a_signal_stops_a_foreground_copy(SIGHUP);
 }
