@@ -493,10 +493,23 @@ pub fn rows(
 /// session and nothing in the text says that it is a guess.
 fn claude_cells(claude: &ClaudeView) -> (String, String, String) {
     match claude {
-        ClaudeView::NotClaude
-        | ClaudeView::NoRecord
-        | ClaudeView::OtherAccount
-        | ClaudeView::Session { .. } => (String::new(), String::new(), String::new()),
+        ClaudeView::NotClaude | ClaudeView::NoRecord => {
+            (String::new(), String::new(), String::new())
+        }
+        // The account is the reason why the state and the directory are
+        // absent, so the one cell that says so is the session cell.
+        ClaudeView::OtherAccount => (OTHER_ACCOUNT.to_owned(), String::new(), String::new()),
+        ClaudeView::Session {
+            id,
+            state,
+            directory,
+        } => (
+            id.to_string(),
+            state.to_string(),
+            directory
+                .as_ref()
+                .map_or_else(|| ABSENT.to_owned(), |path| path.display().to_string()),
+        ),
     }
 }
 
