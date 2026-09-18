@@ -127,16 +127,14 @@ pub fn ready_lines(device_name: &str, pid: u32) -> String {
 /// `popstop: the lock file cannot be used: permission denied`.
 #[must_use]
 pub fn problem_line(problem: &dyn fmt::Display) -> String {
-    let _ = problem;
-    String::new()
+    format!("{PREFIX}{problem}")
 }
 
 /// Gives one line that reports a problem which popstop continues after, for
 /// example `popstop: warning: ...`.
 #[must_use]
 pub fn warning_line(problem: &dyn fmt::Display) -> String {
-    let _ = problem;
-    String::new()
+    format!("{PREFIX}warning: {problem}. popstop continues")
 }
 
 #[cfg(test)]
