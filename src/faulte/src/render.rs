@@ -11,9 +11,11 @@
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
+use comfy_table::{presets, ContentArrangement, Table};
+
 use crate::duration::Span;
 use crate::pid::Uid;
-use crate::ranking::{RankedRow, Ranking};
+use crate::ranking::{ClaudeView, RankedRow, Ranking};
 use crate::vm::{SwapUsage, VmDelta};
 
 /// The text in place of a value that `faulte` could not read.
@@ -452,8 +454,63 @@ pub fn rows(
     now: SystemTime,
     width: Option<u16>,
 ) -> String {
-    let _ = (ranking, rows, limit, accounts, now, width);
-    String::new()
+    let _ = limit;
+    let mut table = Table::new();
+    table
+        .load_preset(presets::UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        // The table must not read the terminal itself. A read here would make
+        // the text depend on where the tool runs, and a test that compares
+        // text would pass through a pipe and fail on a terminal.
+        .force_no_tty()
+        .set_header(COLUMNS);
+    if let Some(width) = width {
+        table.set_width(width);
+    }
+    for row in rows {
+        let (session, state, directory) = claude_cells(&row.claude);
+        table.add_row([
+            row.pid.to_string(),
+            accounts.name_of(row.uid),
+            rate(ranking.faults_per_second(row.faults)),
+            share(ranking.share(row.faults)),
+            row.rss_kib.map_or_else(|| ABSENT.to_owned(), kibibytes),
+            age(row.started_at_epoch_secs, now),
+            row.command.clone(),
+            session,
+            state,
+            directory,
+        ]);
+    }
+    table.to_string()
+}
+
+/// Gives the `SESSION`, the `STATE`, and the `DIRECTORY` cells of `claude`.
+///
+/// A process that is not a Claude Code session gives three empty cells. A
+/// session with no registry record gives three empty cells too: the issue
+/// demands that such a row shows no session, because a guess names the wrong
+/// session and nothing in the text says that it is a guess.
+fn claude_cells(claude: &ClaudeView) -> (String, String, String) {
+    match claude {
+        ClaudeView::NotClaude | ClaudeView::NoRecord => {
+            (String::new(), String::new(), String::new())
+        }
+        // The account is the reason why the state and the directory are
+        // absent, so the one cell that says so is the session cell.
+        ClaudeView::OtherAccount => (OTHER_ACCOUNT.to_owned(), String::new(), String::new()),
+        ClaudeView::Session {
+            id,
+            state,
+            directory,
+        } => (
+            id.to_string(),
+            state.to_string(),
+            directory
+                .as_ref()
+                .map_or_else(|| ABSENT.to_owned(), |path| path.display().to_string()),
+        ),
+    }
 }
 
 #[cfg(test)]
