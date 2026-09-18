@@ -15,6 +15,7 @@ use comfy_table::{presets, ContentArrangement, Table};
 
 use crate::duration::Span;
 use crate::pid::Uid;
+use crate::plan::Plan;
 use crate::ranking::{ClaudeView, RankedRow, Ranking};
 use crate::vm::{SwapUsage, VmDelta};
 
@@ -592,6 +593,26 @@ fn claude_cells(claude: &ClaudeView) -> (String, String, String) {
     }
 }
 
+/// Gives the plan of `faulte kill` as a person reads it, before the question.
+///
+/// `ranking` gives the window and the total that each rate and each share of
+/// the table divide by. `accounts`, `now` and `width` are the same as for
+/// [`rows`].
+///
+/// The text holds no question and no prompt. The caller asks the question,
+/// because only the caller knows whether a person can answer it.
+#[must_use]
+pub fn plan(
+    plan: &Plan,
+    ranking: &Ranking,
+    accounts: &Accounts,
+    now: SystemTime,
+    width: Option<u16>,
+) -> String {
+    let _ = (plan, ranking, accounts, now, width);
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -601,6 +622,7 @@ mod tests {
     use occ::SessionId;
 
     use crate::pid::Pid;
+    use crate::plan::{Candidate, NotSelected, Rules};
     use crate::ranking::{ClaudeTotal, ClaudeView, Skipped};
     use crate::state::SessionState;
 
@@ -1371,5 +1393,114 @@ mod tests {
                 "the character {glyph:?} of {japanese}"
             );
         }
+    }
+
+    /// Gives the limits that the tests give to `faulte kill`.
+    fn kill_rules(max: Option<usize>) -> Rules {
+        Rules {
+            older_than: "7d".parse().expect("7d is a span"),
+            idle_for: "10m".parse().expect("10m is a span"),
+            max,
+        }
+    }
+
+    /// Gives the candidate of `row`.
+    fn candidate(row: &RankedRow) -> Candidate {
+        Candidate {
+            row: row.clone(),
+            session: session(),
+            started_at_epoch_secs: row.started_at_epoch_secs.unwrap_or(STARTED),
+            status_changed_at: None,
+        }
+    }
+
+    /// Gives a plan that selects `candidates`, refuses nothing, and holds
+    /// nothing back.
+    fn kill_plan(candidates: &[RankedRow]) -> Plan {
+        Plan {
+            candidates: candidates.iter().map(candidate).collect(),
+            held_back_by_max: 0,
+            not_selected: NotSelected::default(),
+            other_account: Vec::new(),
+            rules: kill_rules(None),
+        }
+    }
+
+    /// Gives two rows of Claude Code sessions that a plan selects.
+    fn candidate_rows() -> Vec<RankedRow> {
+        let idle = SessionState::Idle {
+            for_: Some(Duration::from_secs(3 * 3_600 + 12 * 60)),
+        };
+        [30, 31]
+            .into_iter()
+            .map(|pid| {
+                claude_row(
+                    pid,
+                    400_000,
+                    VIEWER_UID,
+                    ClaudeView::Session {
+                        id: session(),
+                        state: idle.clone(),
+                        directory: Some(PathBuf::from(DIRECTORY)),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// The first line of the plan counts the candidates and states the rules
+    /// that each one passed. The table under it gives the same columns as the
+    /// ranking, in the order of the plan.
+    ///
+    /// A limit that held some candidates back says so on the first line. The
+    /// count on that line is the count of the sessions that passed the rules,
+    /// and the limit says how many of them the plan keeps.
+    ///
+    /// A plan with no candidate draws no table. A table of the names of the
+    /// columns and no row says nothing that the line above it does not say.
+    #[test]
+    fn the_plan_counts_the_candidates_states_the_rules_and_draws_their_rows() {
+        let ranked = candidate_rows();
+        let ranking = ranking(ranked.clone(), 1_000_000);
+        let held_back = Plan {
+            held_back_by_max: 19,
+            rules: kill_rules(Some(2)),
+            ..kill_plan(&ranked)
+        };
+        let drawn = |plan: &Plan| self::plan(plan, &ranking, &accounts(), now(), None);
+
+        let two = drawn(&kill_plan(&ranked));
+
+        assert_eq!(
+            two.lines().next(),
+            Some(
+                "2 Claude sessions are older than 7d, idle for more than 10m, and have no live descendant"
+            )
+        );
+        assert_eq!(cells(&two).first(), Some(&row_of(COLUMNS)));
+        assert_eq!(
+            cells(&two)
+                .iter()
+                .skip(1)
+                .map(|row| row.first().cloned().unwrap_or_default())
+                .collect::<Vec<String>>(),
+            vec!["30".to_owned(), "31".to_owned()]
+        );
+        assert_eq!(
+            drawn(&kill_plan(&ranked[..1])).lines().next(),
+            Some(
+                "1 Claude session is older than 7d, idle for more than 10m, and has no live descendant"
+            )
+        );
+        assert_eq!(
+            drawn(&held_back).lines().next(),
+            Some(
+                "21 Claude sessions are older than 7d, idle for more than 10m, and have no live descendant \u{b7} --max 2 keeps the 2 oldest"
+            )
+        );
+        assert_eq!(
+            drawn(&kill_plan(&[])),
+            "0 Claude sessions are older than 7d, idle for more than 10m, and have no live descendant"
+        );
     }
 }
