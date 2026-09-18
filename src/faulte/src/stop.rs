@@ -313,6 +313,46 @@ mod tests {
         );
     }
 
+    /// Gives the table row of a zombie process `pid`, whose parent is `ppid`.
+    /// A zombie stopped already, so it is not a live descendant.
+    fn zombie(pid: u32, ppid: u32) -> ProcessRow {
+        ProcessRow {
+            zombie: true,
+            ..process(pid, ppid)
+        }
+    }
+
+    /// A session that started a process is never signalled. Rule 3 of the plan
+    /// refuses a session with a live descendant, and a session can start a
+    /// tool call or a shell between the plan and the answer.
+    ///
+    /// The walk is the walk of the plan, so a descendant two levels down
+    /// counts, and a zombie between the session and a live grandchild does not
+    /// hide that grandchild. A zombie child on its own stopped already, so it
+    /// holds nothing and the signal goes.
+    #[test]
+    fn a_session_that_started_a_process_is_not_signalled() {
+        let candidate = candidate(30);
+        let record = record(30, Some(changed_at()));
+        let check = |table: &[ProcessRow]| recheck(&candidate, table, Some(&record));
+
+        assert_eq!(
+            check(&[process(30, LAUNCHD_PID), process(31, 30)]),
+            Recheck::DescendantStarted,
+            "the session started one process"
+        );
+        assert_eq!(
+            check(&[process(30, LAUNCHD_PID), zombie(31, 30), process(32, 31)]),
+            Recheck::DescendantStarted,
+            "a zombie child does not hide a live grandchild"
+        );
+        assert_eq!(
+            check(&[process(30, LAUNCHD_PID), zombie(31, 30)]),
+            Recheck::Proceed,
+            "a zombie child stopped already, and it is no descendant that is alive"
+        );
+    }
+
     /// A session that did not change proceeds: its PID holds the same process
     /// that the plan read, the registry still says that it is idle, the time
     /// of the last status change is the same, and it started no process.
