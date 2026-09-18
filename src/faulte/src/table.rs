@@ -474,4 +474,46 @@ mod tests {
             (Pid::new(0), Pid::new(0), Uid::new(0), 0)
         );
     }
+
+    /// The UID of `nobody`. `id -u nobody` prints it, and `ps` prints `-2`.
+    const NOBODY: u32 = 4_294_967_294;
+
+    /// `ps` prints the UID as a signed 32-bit number. On 2026-09-18, three
+    /// processes of `nobody` on this Mac printed the UID `-2`. A negative
+    /// value is the UID with the same 32 bits, so both spellings give the
+    /// same account.
+    #[test]
+    fn a_negative_uid_is_the_uid_with_the_same_bits() {
+        for (printed, uid) in [
+            ("-2", NOBODY),
+            ("4294967294", NOBODY),
+            ("-1", u32::MAX),
+            ("-2147483648", 2_147_483_648),
+            ("2147483647", 2_147_483_647),
+        ] {
+            let row = only_row(&row_of(["700", "1", printed, "2048"]));
+
+            assert_eq!(row.uid, Uid::new(uid), "the UID {printed:?}");
+        }
+    }
+
+    /// A negative UID is a minus and ASCII digits of a value below zero that
+    /// fits in 32 bits. Every other text with a minus is refused. `-0` is
+    /// refused too, because `ps` never prints it.
+    #[test]
+    fn a_uid_with_a_minus_that_is_not_a_negative_number_is_refused() {
+        for bad in ["-", "--2", "-0", "-2147483649", "-+2", "-２", "-2🎉", "-0x2", "2-"] {
+            let line = row_of(["700", "1", bad, "2048"]);
+
+            assert_eq!(
+                parse(&with_bad_line_at_3(&line)),
+                Err(TableParseError::MalformedNumber {
+                    column: UID_COLUMN,
+                    number: 3,
+                    line: line.clone()
+                }),
+                "the UID {bad:?}"
+            );
+        }
+    }
 }
