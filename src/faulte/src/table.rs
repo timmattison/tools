@@ -44,6 +44,18 @@ pub enum TableParseError {
     /// The output holds no row.
     #[error("ps listed no process")]
     NoRows,
+    /// A line holds fewer tokens than the columns before the command.
+    #[error(
+        "ps printed a row of fewer than {FIELDS} fields, at line {number}: {line:?}. A row holds \
+         the PID, the parent, the UID, the RSS, the state, and the five fields of the start \
+         time, then the command"
+    )]
+    TooFewFields {
+        /// The number of the line in the output, from 1.
+        number: usize,
+        /// The line as `ps` printed it.
+        line: String,
+    },
 }
 
 /// Reads the process table from the output of `ps`.
@@ -252,5 +264,53 @@ mod tests {
             assert_eq!(row.command, "", "the line {line:?}");
             assert_eq!(row.started_at_epoch_secs, LAUNCHD_START);
         }
+    }
+
+    /// Gives an output of `ps` that holds `bad` at line 3, between two rows
+    /// and after a blank line.
+    fn with_bad_line_at_3(bad: &str) -> String {
+        format!("{LAUNCHD}\n\n{bad}\n{LAUNCHD}\n")
+    }
+
+    /// A line of fewer than ten fields is not a row. The parser refuses the
+    /// whole output, because a table that lacks a process looks the same as a
+    /// correct one. Multi-byte text gives the same error, and no panic.
+    #[test]
+    fn a_line_of_fewer_than_ten_fields_is_refused_with_its_line() {
+        for bad in [
+            "  700     1   501      0 S    Tue Aug 25 16:45:30",
+            "  700     1   501      0 S",
+            "  700",
+            "Tue Aug 25 16:45:30 2026",
+            "日本語 🎉 café",
+            "  700\u{a0}    1   501      0 S    Tue Aug 25 16:45:30 2026",
+        ] {
+            let error = parse(&with_bad_line_at_3(bad)).expect_err("a short line is refused");
+
+            assert_eq!(
+                error,
+                TableParseError::TooFewFields {
+                    number: 3,
+                    line: bad.to_owned()
+                },
+                "the line {bad:?}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.contains("at line 3") && message.contains(&format!("{bad:?}")),
+                "the message shows the line and its number: {message}"
+            );
+        }
+    }
+
+    /// A blank line and a line of white space are not rows, and they are not
+    /// errors.
+    #[test]
+    fn blank_lines_are_not_rows() {
+        let text = format!("\n{LAUNCHD}\n   \n\t\n{LAUNCHD}\n\n");
+
+        let rows = parse(&text).expect("blank lines are not errors");
+
+        assert_eq!(rows, [launchd(), launchd()]);
     }
 }
