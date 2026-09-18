@@ -4462,38 +4462,92 @@ mod tests {
         }
     }
 
-    /// Sources `SHELL_CODE` in a real `bash` with a fake `crap` that emits
-    /// here-mode output carrying `new_id_field` as its third field (and
-    /// `__CRAP_NO_LINK__`, so the symlink watcher is skipped), plus fake
-    /// `claude`/`clauded` that record the exact arguments they were resumed
-    /// with. Returns those recorded arguments, one per line.
-    ///
-    /// When `provide_clauded` is true the preferred `clauded` is on `PATH` and
-    /// records; otherwise only plain `claude` is available. Each call gets its
-    /// own `tempfile::TempDir` (an `O_EXCL` random name) so concurrent runs
-    /// never share a directory. A pid+nanos name is NOT enough: two threads in
-    /// the same test process can sample the clock in the same tick and collide,
-    /// letting one run read args the other recorded.
+    /// What one run of the shell function in a fork mode left behind.
     #[cfg(unix)]
-    fn run_here_shell_function(new_id_field: &str, provide_clauded: bool) -> String {
+    struct ForkShellRun {
+        /// The arguments that the fake `claude` or `clauded` got, in order.
+        claude_args: Vec<String>,
+        /// The directory that the fake `claude` or `clauded` ran in. It is
+        /// canonicalized while the temp directory still exists.
+        claude_cwd: PathBuf,
+        /// What the shell function wrote to standard output.
+        stdout: String,
+    }
+
+    #[cfg(unix)]
+    impl ForkShellRun {
+        /// The argument that follows `--session-id`, or `None` when Claude got
+        /// no `--session-id`.
+        fn pinned_fork_id(&self) -> Option<&str> {
+            let pos = self.claude_args.iter().position(|a| a == "--session-id")?;
+            self.claude_args.get(pos + 1).map(String::as_str)
+        }
+    }
+
+    /// Sources `SHELL_CODE` in a real `bash` in `dir`, with fakes in `dir`
+    /// ahead of everything else on `PATH`, then runs `crap <args>`.
+    ///
+    /// The fake `crap` prints `wire` as its resume output. For
+    /// `crap --status <id>` it prints a state token and exits 0 only when
+    /// `<id>` is the id that the fake `claude` saved. Otherwise it prints an
+    /// error to stderr and exits 1. The real binary does the same when it
+    /// finds, or does not find, the transcript of `<id>`.
+    ///
+    /// The fake `claude` (and the fake `clauded`, when `provide_clauded` is
+    /// true) records its arguments and the directory it ran in. When
+    /// `save_fork` is true, it also saves the id that follows `--session-id`.
+    /// That is how the fakes show a fork that Claude saved: the real Claude
+    /// writes the fork transcript only after the first new input.
+    #[cfg(unix)]
+    fn run_fork_shell_function(
+        dir: &Path,
+        args: &str,
+        wire: &str,
+        provide_clauded: bool,
+        save_fork: bool,
+    ) -> ForkShellRun {
         use std::os::unix::fs::PermissionsExt;
         use std::process::Command;
 
-        // The session id the fake binary reports as the resumed original.
-        const HERE_SESSION: &str = "33333333-4444-5555-6666-777777777777";
-
-        let temp = tempfile::TempDir::new().unwrap();
-        let dir = temp.path();
-
+        let wire_file = dir.join("crap_wire");
+        let saved_fork = dir.join("saved_fork");
         let args_file = dir.join("claude_args");
+        let pwd_file = dir.join("claude_pwd");
+        fs::write(&wire_file, wire).unwrap();
 
-        // Fake `crap`: emit a here-output whose third field is `new_id_field`.
+        // Fake `crap`: `--status <id>` finds only the fork that the fake
+        // `claude` saved. Any other call prints the wire output.
         let fake_crap = format!(
-            "#!/bin/sh\nprintf '{HERE_SENTINEL}\\n%s\\n%s\\n%s\\n' '{HERE_SESSION}' '{new_id_field}' '{NO_LINK_SENTINEL}'\n"
+            "#!/bin/sh\n\
+             if [ \"$1\" = \"--status\" ]; then\n\
+             \x20   if [ -f {saved_fork:?} ] && [ \"$2\" = \"$(cat {saved_fork:?})\" ]; then\n\
+             \x20       echo waiting-for-user\n\
+             \x20       exit 0\n\
+             \x20   fi\n\
+             \x20   echo \"Error: no Claude session found with id '$2'\" >&2\n\
+             \x20   exit 1\n\
+             fi\n\
+             cat {wire_file:?}\n"
         );
 
-        // Fake `claude`/`clauded`: record the exact argument list, one per line.
-        let fake_claude = format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {:?}\n", args_file);
+        // Fake `claude`/`clauded`: record the argv and the cwd. When the fork
+        // is saved, also save the id that follows `--session-id`.
+        let save_step = if save_fork {
+            format!(
+                "prev=\n\
+                 for arg in \"$@\"; do\n\
+                 \x20   if [ \"$prev\" = \"--session-id\" ]; then\n\
+                 \x20       printf '%s\\n' \"$arg\" > {saved_fork:?}\n\
+                 \x20   fi\n\
+                 \x20   prev=$arg\n\
+                 done\n"
+            )
+        } else {
+            String::new()
+        };
+        let fake_claude = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {args_file:?}\npwd > {pwd_file:?}\n{save_step}"
+        );
 
         let mut tools = vec![("crap", fake_crap), ("claude", fake_claude.clone())];
         if provide_clauded {
@@ -4507,27 +4561,75 @@ mod tests {
 
         let base_path = std::env::var("PATH").unwrap_or_default();
         let new_path = format!("{}:{base_path}", dir.display());
-        let script = format!("{SHELL_CODE}\ncrap --here {HERE_SESSION}\n");
+        let script = format!("{SHELL_CODE}\ncrap {args}\n");
 
         let output = Command::new("bash")
             .env("PATH", new_path)
+            .current_dir(dir)
             .arg("-c")
             .arg(&script)
             .output()
             .expect("bash should be available");
         assert!(
             output.status.success(),
-            "here-mode shell function failed: {}",
+            "the shell function failed for `crap {args}`: {}",
             String::from_utf8_lossy(&output.stderr)
         );
 
-        let recorded = fs::read_to_string(&args_file).unwrap_or_default();
-        // `temp` drops at end of scope, removing the directory.
-        recorded
+        let claude_args = fs::read_to_string(&args_file)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let pwd = fs::read_to_string(&pwd_file).unwrap_or_default();
+        let claude_cwd = std::fs::canonicalize(pwd.trim())
+            .expect("claude should have recorded the directory it ran in");
+        ForkShellRun {
+            claude_args,
+            claude_cwd,
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        }
+    }
+
+    /// The session id the fake binary reports as the resumed original, in both
+    /// fork modes.
+    const FAKE_ORIGINAL_SESSION: &str = "33333333-4444-5555-6666-777777777777";
+
+    /// Runs the shell function on here-mode output from a fake `crap`. The
+    /// third field is `fork_id_field`, and the link field is
+    /// `__CRAP_NO_LINK__`, so the symlink watcher does not start. See
+    /// [`run_fork_shell_function`] for the fakes, `provide_clauded`, and
+    /// `save_fork`.
+    ///
+    /// Each call gets its own `tempfile::TempDir` (an `O_EXCL` random name) so
+    /// concurrent runs never share a directory. A pid+nanos name is NOT enough:
+    /// two threads in the same test process can sample the clock in the same
+    /// tick and collide, letting one run read args the other recorded.
+    #[cfg(unix)]
+    fn run_here_shell_function(
+        fork_id_field: &str,
+        provide_clauded: bool,
+        save_fork: bool,
+    ) -> ForkShellRun {
+        let temp = tempfile::TempDir::new().unwrap();
+        let wire = format!(
+            "{HERE_SENTINEL}\n{FAKE_ORIGINAL_SESSION}\n{fork_id_field}\n{NO_LINK_SENTINEL}\n"
+        );
+        // `temp` drops at the end of this scope, removing the directory.
+        run_fork_shell_function(
+            temp.path(),
+            &format!("--here {FAKE_ORIGINAL_SESSION}"),
+            &wire,
+            provide_clauded,
+            save_fork,
+        )
     }
 
     /// A well-formed forked-session id for the here-mode dispatch tests.
     const FORCED_NEW_ID: &str = "99999999-8888-7777-6666-555555555555";
+
+    /// A UUID v4 that a fake binary sends as the id it generated for a fork.
+    const GENERATED_FORK_ID: &str = "0f5a9c3e-2b7d-4e1a-9c8b-6d4f2a1e3b5c";
 
     #[cfg(unix)]
     #[test]
@@ -4536,22 +4638,17 @@ mod tests {
         // the fork to that id with `--session-id`, on both the `clauded` and the
         // plain `claude` dispatch paths.
         for provide_clauded in [true, false] {
-            let recorded = run_here_shell_function(FORCED_NEW_ID, provide_clauded);
-            let args: Vec<&str> = recorded.lines().collect();
+            let run = run_here_shell_function(FORCED_NEW_ID, provide_clauded, true);
             assert!(
-                args.contains(&"--fork-session"),
-                "must still fork (clauded={provide_clauded}); got {args:?}"
+                run.claude_args.iter().any(|a| a == "--fork-session"),
+                "must still fork (clauded={provide_clauded}); got {:?}",
+                run.claude_args
             );
-            let pos = args
-                .iter()
-                .position(|a| *a == "--session-id")
-                .unwrap_or_else(|| {
-                    panic!("--session-id missing (clauded={provide_clauded}): {args:?}")
-                });
             assert_eq!(
-                args.get(pos + 1).copied(),
+                run.pinned_fork_id(),
                 Some(FORCED_NEW_ID),
-                "the forced id must follow --session-id (clauded={provide_clauded})"
+                "the forced id must follow --session-id (clauded={provide_clauded}); got {:?}",
+                run.claude_args
             );
         }
     }
@@ -4561,15 +4658,17 @@ mod tests {
     fn shell_function_omits_session_id_without_a_forced_new_id() {
         // The sentinel third field means "let Claude mint a random id": the
         // resume forks but must not pass --session-id.
-        let recorded = run_here_shell_function(NO_NEW_ID_SENTINEL, true);
-        let args: Vec<&str> = recorded.lines().collect();
+        let run = run_here_shell_function(NO_NEW_ID_SENTINEL, true, false);
         assert!(
-            args.contains(&"--fork-session"),
-            "must still fork: {args:?}"
+            run.claude_args.iter().any(|a| a == "--fork-session"),
+            "must still fork: {:?}",
+            run.claude_args
         );
-        assert!(
-            !args.contains(&"--session-id"),
-            "no forced id => no --session-id: {args:?}"
+        assert_eq!(
+            run.pinned_fork_id(),
+            None,
+            "no forced id => no --session-id: {:?}",
+            run.claude_args
         );
     }
 
@@ -4588,80 +4687,44 @@ mod tests {
         assert!(SHELL_CODE.contains(FORK_AT_SENTINEL));
     }
 
-    /// Sources `SHELL_CODE` in a real `bash` with a fake `crap` that emits
-    /// cross-user `__CRAP_FORK_AT__` output naming a real `orig-cwd` directory
-    /// (and `__CRAP_NO_LINK__`, so no watcher/cleanup runs), plus a fake
-    /// `claude`/`clauded` that records both the arguments it was resumed with
-    /// and the working directory it ran in. Returns `(recorded_args,
-    /// resumed_in_dir, orig_dir)`, where both directories are canonicalized
-    /// **before** the temp dir is dropped so the caller can compare them without
-    /// touching a filesystem path that no longer exists.
+    /// Runs the shell function on cross-user `__CRAP_FORK_AT__` output from a
+    /// fake `crap`. The third field is `fork_id_field`, the link field is
+    /// `__CRAP_NO_LINK__` (so no watcher or cleanup runs), and the last field
+    /// names a real `orig-cwd` directory. See [`run_fork_shell_function`] for
+    /// the fakes, `provide_clauded`, and `save_fork`.
+    ///
+    /// Returns the run and the canonicalized `orig-cwd`. The helper
+    /// canonicalizes it **before** the temp dir is dropped, so the caller can
+    /// compare it with [`ForkShellRun::claude_cwd`] without touching a
+    /// filesystem path that no longer exists.
     ///
     /// Each call gets its own `tempfile::TempDir` (an `O_EXCL` random name) so
     /// concurrent runs never share a directory.
     #[cfg(unix)]
-    fn run_fork_at_shell_function() -> (String, PathBuf, PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
-        use std::process::Command;
-
-        // The session id the fake binary reports as the foreign original.
-        const FORK_SESSION: &str = "33333333-4444-5555-6666-777777777777";
-
+    fn run_fork_at_shell_function(
+        fork_id_field: &str,
+        provide_clauded: bool,
+        save_fork: bool,
+    ) -> (ForkShellRun, PathBuf) {
         let temp = tempfile::TempDir::new().unwrap();
-        let dir = temp.path();
-
-        let args_file = dir.join("claude_args");
-        let pwd_file = dir.join("claude_pwd");
         // The session's original recorded directory: the fork must land here.
-        let orig = dir.join("orig-cwd");
+        let orig = temp.path().join("orig-cwd");
         fs::create_dir_all(&orig).unwrap();
-
-        // Fake `crap`: emit a fork-at output naming `orig` as the last field.
-        let fake_crap = format!(
-            "#!/bin/sh\nprintf '{FORK_AT_SENTINEL}\\n%s\\n%s\\n%s\\n%s\\n' '{FORK_SESSION}' '{NO_NEW_ID_SENTINEL}' '{NO_LINK_SENTINEL}' '{}'\n",
+        let wire = format!(
+            "{FORK_AT_SENTINEL}\n{FAKE_ORIGINAL_SESSION}\n{fork_id_field}\n{NO_LINK_SENTINEL}\n{}\n",
             orig.display()
         );
-        // Fake `claude`/`clauded`: record the resume argv and the cwd it ran in.
-        let fake_claude = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {:?}\npwd > {:?}\n",
-            args_file, pwd_file
+        let run = run_fork_shell_function(
+            temp.path(),
+            &format!("{FAKE_ORIGINAL_SESSION} --user someone"),
+            &wire,
+            provide_clauded,
+            save_fork,
         );
-
-        for (name, body) in [
-            ("crap", fake_crap),
-            ("claude", fake_claude.clone()),
-            ("clauded", fake_claude),
-        ] {
-            let path = dir.join(name);
-            fs::write(&path, body).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
-        let base_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{base_path}", dir.display());
-        let script = format!("{SHELL_CODE}\ncrap {FORK_SESSION} --user someone\n");
-
-        let output = Command::new("bash")
-            .env("PATH", new_path)
-            .arg("-c")
-            .arg(&script)
-            .output()
-            .expect("bash should be available");
-
-        let args = fs::read_to_string(&args_file).unwrap_or_default();
-        let pwd = fs::read_to_string(&pwd_file).unwrap_or_default();
-        assert!(
-            output.status.success(),
-            "fork-at shell function failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        // Canonicalize both directories while `temp` is still alive — it drops
-        // (removing the tree) at the end of this scope, so the caller must not
-        // depend on either path still existing on disk.
-        let resumed_in = std::fs::canonicalize(pwd.trim())
-            .expect("claude should have recorded the directory it forked in");
+        // Canonicalize while `temp` is still alive — it drops (removing the
+        // tree) at the end of this scope.
         let orig = std::fs::canonicalize(&orig).unwrap();
-        (args, resumed_in, orig)
+        (run, orig)
     }
 
     #[cfg(unix)]
@@ -4670,16 +4733,84 @@ mod tests {
         // Cross-user default resume: the function must `cd` into the session's
         // original directory and then fork it (`--resume <id> --fork-session`),
         // leaving the foreign transcript untouched.
-        let (args, resumed_in, orig) = run_fork_at_shell_function();
-        let args: Vec<&str> = args.lines().collect();
+        let (run, orig) = run_fork_at_shell_function(GENERATED_FORK_ID, true, true);
         assert!(
-            args.contains(&"--resume") && args.contains(&"--fork-session"),
-            "must fork-resume the original id; got {args:?}"
+            run.claude_args.iter().any(|a| a == "--resume")
+                && run.claude_args.iter().any(|a| a == "--fork-session"),
+            "must fork-resume the original id; got {:?}",
+            run.claude_args
         );
         assert_eq!(
-            resumed_in, orig,
+            run.claude_cwd, orig,
             "the fork must run in the session's original directory"
         );
+    }
+
+    /// Asserts that the shell function pinned the fork to the id that the
+    /// binary sent, and then told the user that id, and nothing else.
+    #[cfg(unix)]
+    fn assert_reports_the_pinned_fork_id(run: &ForkShellRun, context: &str) {
+        let pinned = run.pinned_fork_id().unwrap_or_else(|| {
+            panic!(
+                "--session-id missing ({context}); got {:?}",
+                run.claude_args
+            )
+        });
+        assert_eq!(
+            pinned, GENERATED_FORK_ID,
+            "the fork must be pinned to the id the binary sent ({context})"
+        );
+        assert_eq!(
+            run.stdout,
+            format!("Resume this fork with: crap {pinned}\n"),
+            "after Claude exits, the user must get the fork id ({context})"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_function_reports_the_fork_id_after_a_here_fork() {
+        // `crap --here` forks to a new id. Without the report, the user later
+        // resumes the old id and loses the work of the fork (#511).
+        for provide_clauded in [true, false] {
+            let run = run_here_shell_function(GENERATED_FORK_ID, provide_clauded, true);
+            assert_reports_the_pinned_fork_id(&run, &format!("here, clauded={provide_clauded}"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_function_reports_the_fork_id_after_a_cross_user_fork() {
+        // The cross-user default resume forks too, so the user needs the fork
+        // id in the same way.
+        for provide_clauded in [true, false] {
+            let (run, _orig) = run_fork_at_shell_function(GENERATED_FORK_ID, provide_clauded, true);
+            assert_reports_the_pinned_fork_id(&run, &format!("fork-at, clauded={provide_clauded}"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_function_prints_no_resume_line_when_claude_saved_no_fork() {
+        // Claude writes the fork transcript only after the first new input. A
+        // fork that the user leaves at once has no transcript, so
+        // `crap <fork-id>` cannot resume it, and the line must not show.
+        let here = run_here_shell_function(GENERATED_FORK_ID, true, false);
+        let (fork_at, _orig) = run_fork_at_shell_function(GENERATED_FORK_ID, true, false);
+        for (run, mode) in [(&here, "here"), (&fork_at, "fork-at")] {
+            // The fork was still pinned, so only the missing transcript stops
+            // the line.
+            assert_eq!(
+                run.pinned_fork_id(),
+                Some(GENERATED_FORK_ID),
+                "the fork must still be pinned ({mode}); got {:?}",
+                run.claude_args
+            );
+            assert_eq!(
+                run.stdout, "",
+                "no saved fork, so no resume line and no status output ({mode})"
+            );
+        }
     }
 
     // Two distinct session ids for the per-directory listing tests.
