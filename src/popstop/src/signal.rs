@@ -2,7 +2,13 @@
 //!
 //! The signal is a constant offset that is too small to hear. A short linear
 //! ramp starts it and a short linear ramp stops it, because a step is a click.
+//!
+//! [`KeepaliveSignal`] runs on the real-time audio thread. It allocates
+//! nothing and takes no lock. The main thread stops it through a
+//! [`StopHandle`], and the two cross threads only through atomics.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// The level of the signal: 2^-12 of full scale, about -72 dBFS.
@@ -35,6 +41,26 @@ impl SampleRate {
     }
 }
 
+/// The state that the signal and its stop handle share.
+#[derive(Debug, Default)]
+struct Shared {
+    /// The main thread sets it to ask for the ramp down.
+    stop_requested: AtomicBool,
+    /// The render thread sets it after the ramp down reached silence.
+    ramp_down_complete: AtomicBool,
+}
+
+/// The phase of the signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// The ramp up, then the level.
+    Playing,
+    /// The ramp down from the current position to silence.
+    RampingDown,
+    /// Silence, after the ramp down.
+    Silent,
+}
+
 /// The keepalive signal. The audio render thread owns it.
 ///
 /// The signal keeps its position in the ramp across calls to
@@ -44,24 +70,40 @@ impl SampleRate {
 pub struct KeepaliveSignal {
     /// The number of frames from silence to the level.
     ramp_frames: u32,
-    /// The position of the next frame in the ramp, from 0 to `ramp_frames`.
-    /// The value of a frame is `LEVEL * position / ramp_frames`.
+    /// The position in the ramp, from 0 to `ramp_frames`. The value of a
+    /// frame is `LEVEL * position / ramp_frames`.
+    ///
+    /// While the signal plays, it is the position of the next frame. While it
+    /// ramps down, it is the position of the last frame.
     position: u32,
+    /// The phase of the signal.
+    phase: Phase,
+    /// The state that the stop handle shares.
+    shared: Arc<Shared>,
 }
 
 /// The handle that stops the signal. The main thread holds it.
 #[derive(Debug, Clone)]
-pub struct StopHandle {}
+pub struct StopHandle {
+    /// The state that the signal shares.
+    shared: Arc<Shared>,
+}
 
 impl KeepaliveSignal {
     /// Makes a signal for the given sample rate, and the handle that stops it.
+    ///
+    /// This is the only call that allocates. Make the signal before the audio
+    /// starts.
     #[must_use]
     pub fn new(rate: SampleRate) -> (Self, StopHandle) {
+        let shared = Arc::new(Shared::default());
         let signal = Self {
             ramp_frames: frames_in(RAMP_DURATION, rate),
             position: 0,
+            phase: Phase::Playing,
+            shared: Arc::clone(&shared),
         };
-        (signal, StopHandle {})
+        (signal, StopHandle { shared })
     }
 
     /// Writes the next samples of the signal into an interleaved buffer.
@@ -69,18 +111,49 @@ impl KeepaliveSignal {
     /// The buffer holds `buffer.len() / channels` frames. Every channel of a
     /// frame gets the same value.
     pub fn fill(&mut self, buffer: &mut [f32], channels: usize) {
+        if self.phase == Phase::Playing && self.shared.stop_requested.load(Ordering::Acquire) {
+            self.phase = Phase::RampingDown;
+        }
+        let was_silent = self.phase == Phase::Silent;
+
         for frame in buffer.chunks_exact_mut(channels) {
             frame.fill(self.next_sample());
+        }
+
+        if !was_silent && self.phase == Phase::Silent {
+            self.shared
+                .ramp_down_complete
+                .store(true, Ordering::Release);
         }
     }
 
     /// Gives the value of the next frame and moves the ramp on by one frame.
+    ///
+    /// The ramp down starts from the position of the last frame, so a stop
+    /// during the ramp up makes no step.
     fn next_sample(&mut self) -> f32 {
-        let sample = LEVEL * (self.position as f32 / self.ramp_frames as f32);
-        if self.position < self.ramp_frames {
-            self.position += 1;
+        match self.phase {
+            Phase::Playing => {
+                let sample = self.value();
+                if self.position < self.ramp_frames {
+                    self.position += 1;
+                }
+                sample
+            }
+            Phase::RampingDown => {
+                self.position = self.position.saturating_sub(1);
+                if self.position == 0 {
+                    self.phase = Phase::Silent;
+                }
+                self.value()
+            }
+            Phase::Silent => 0.0,
         }
-        sample
+    }
+
+    /// Gives the value at the current position in the ramp.
+    fn value(&self) -> f32 {
+        LEVEL * (self.position as f32 / self.ramp_frames as f32)
     }
 }
 
@@ -88,7 +161,9 @@ impl StopHandle {
     /// Asks the signal to ramp down to silence.
     ///
     /// The ramp down starts at the next call to [`KeepaliveSignal::fill`].
-    pub fn start_ramp_down(&self) {}
+    pub fn start_ramp_down(&self) {
+        self.shared.stop_requested.store(true, Ordering::Release);
+    }
 
     /// Tells whether the ramp down is complete.
     ///
@@ -96,7 +171,7 @@ impl StopHandle {
     /// end of the ramp down. From then on, every sample is 0.0.
     #[must_use]
     pub fn is_ramp_down_complete(&self) -> bool {
-        false
+        self.shared.ramp_down_complete.load(Ordering::Acquire)
     }
 }
 
