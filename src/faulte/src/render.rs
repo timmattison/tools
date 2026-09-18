@@ -141,7 +141,20 @@ const FIRST_UNIT_WITH_A_DECIMAL: usize = 3;
 /// whole number, because the decimal of a size in kilobytes says nothing.
 #[must_use]
 pub fn bytes(value: u64) -> String {
-    format!("{value} {}", SIZE_UNITS[0])
+    let mut unit = 0;
+    let mut scale = 1_u64;
+    while value / scale >= SIZE_STEP && unit + 1 < SIZE_UNITS.len() {
+        scale *= SIZE_STEP;
+        unit += 1;
+    }
+    let name = SIZE_UNITS[unit];
+    if unit < FIRST_UNIT_WITH_A_DECIMAL {
+        // The loop stops at the last unit, so the whole part is below 1,024
+        // under every other unit, and 16 under the last one. No such number
+        // needs a separator.
+        return format!("{} {name}", value / scale);
+    }
+    format!("{:.1} {name}", value as f64 / scale as f64)
 }
 
 /// Gives `value` kibibytes as a size, for example `42 KB`.
@@ -150,7 +163,7 @@ pub fn bytes(value: u64) -> String {
 /// memory can hold gives the largest size, and not a panic.
 #[must_use]
 pub fn kibibytes(value: u64) -> String {
-    bytes(value)
+    bytes(value.saturating_mul(SIZE_STEP))
 }
 
 #[cfg(test)]
