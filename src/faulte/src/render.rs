@@ -9,9 +9,12 @@
 //! so each formatter states one rule and has its own tests.
 
 use std::collections::HashMap;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
+use crate::duration::Span;
 use crate::pid::Uid;
+use crate::ranking::Ranking;
+use crate::vm::{SwapUsage, VmDelta};
 
 /// The text in place of a value that `faulte` could not read.
 ///
@@ -240,11 +243,70 @@ impl FromIterator<(Uid, String)> for Accounts {
     }
 }
 
+/// The singular of the word for one entry of the ranking.
+const PROCESS: &str = "process";
+
+/// The plural of the word for one entry of the ranking.
+const PROCESSES: &str = "processes";
+
+/// Chooses the singular or the plural form for `count`.
+fn plural<'a>(count: usize, singular: &'a str, many: &'a str) -> &'a str {
+    if count == 1 { singular } else { many }
+}
+
+/// Gives `span` in seconds with one decimal, for example `4.0 s`.
+///
+/// The window of a sample is a measured time and not the time that the person
+/// asked for. On a loaded Mac the two samples of `top` were 4 seconds apart
+/// when the interval was 2 seconds, so the decimal is the difference between a
+/// rate and a guess.
+fn seconds(span: Duration) -> String {
+    format!("{:.1} s", span.as_secs_f64())
+}
+
+/// Everything that the header lines give, other than the ranking.
+///
+/// `faulte` reads these numbers from the system, around the run of `top`. The
+/// ranking says which processes made the faults, and these numbers say what
+/// the memory of this Mac did over the same time.
+#[derive(Debug, Clone, Copy)]
+pub struct Measurement<'a> {
+    /// The ranking of the same sample.
+    pub ranking: &'a Ranking,
+    /// The swap traffic over [`Measurement::swap_window`].
+    pub swap: VmDelta,
+    /// The swap file of this Mac, from `vm.swapusage`.
+    pub usage: SwapUsage,
+    /// The size of the compressor in bytes.
+    pub compressor_bytes: u64,
+    /// The time between the two reads of the counters of the system. It is
+    /// longer than the window of the ranking, because `top` starts and stops
+    /// inside it.
+    pub swap_window: Duration,
+    /// The interval that the person asked for.
+    pub interval: Span,
+}
+
+/// Gives the lines above the table.
+///
+/// The header says what the whole Mac did over the sample, because no single
+/// row of the table says it. On 2026-09-18, 213 Claude Code sessions made 90%
+/// of all page faults, and the largest single row made a small part of that.
+///
+/// A line, or a part of a line, that would give a count of zero is not there.
+/// A Mac that hides nothing says nothing, the same as `occ`.
+#[must_use]
+pub fn header(measurement: &Measurement<'_>) -> Vec<String> {
+    let _ = measurement;
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use std::time::Duration;
+    use crate::pid::Pid;
+    use crate::ranking::{ClaudeTotal, ClaudeView, RankedRow, Skipped};
 
     /// A count carries a separator between each group of three digits, from
     /// the right. A count below a thousand carries none.
@@ -404,5 +466,89 @@ mod tests {
         let collected: Accounts = [(Uid::new(502), "work".to_owned())].into_iter().collect();
         assert_eq!(collected.name_of(Uid::new(502)), "work");
         assert_eq!(collected.name_of(Uid::new(501)), "501");
+    }
+
+    /// The window of the ranking in the tests. On 2026-09-18 the two samples
+    /// of `top` were 4 seconds apart.
+    const WINDOW: Duration = Duration::from_secs(4);
+
+    /// The time that the counters of the system cover in the tests. It is
+    /// longer than [`WINDOW`], because `top` starts and stops inside it.
+    const SWAP_WINDOW: Duration = Duration::from_millis(5_200);
+
+    /// The UID of the account that runs the tool in the tests.
+    const VIEWER_UID: u32 = 501;
+
+    /// The time when each process of the tests started, in seconds since the
+    /// Unix epoch.
+    const STARTED: u64 = 1_780_000_000;
+
+    /// Gives the interval that the person asked for in the tests.
+    fn interval() -> Span {
+        "5s".parse().expect("5s is a span")
+    }
+
+    /// Gives the row of a process that is not Claude Code.
+    fn row(pid: u32, faults: u64) -> RankedRow {
+        RankedRow {
+            pid: Pid::new(pid),
+            uid: Uid::new(VIEWER_UID),
+            faults,
+            rss_kib: Some(831_488),
+            started_at_epoch_secs: Some(STARTED),
+            command: format!("/usr/bin/process-{pid} --flag"),
+            claude: ClaudeView::NotClaude,
+        }
+    }
+
+    /// Gives a ranking of `rows` that made `total_faults` over [`WINDOW`].
+    fn ranking(rows: Vec<RankedRow>, total_faults: u64) -> Ranking {
+        Ranking {
+            rows,
+            window: WINDOW,
+            total_faults,
+            claude: ClaudeTotal::default(),
+            skipped: Skipped::default(),
+        }
+    }
+
+    /// Gives the measurement of a Mac whose ranking is `ranking`. The swap
+    /// numbers are the ones that this Mac counted on 2026-09-18.
+    fn measurement(ranking: &Ranking) -> Measurement<'_> {
+        Measurement {
+            ranking,
+            swap: VmDelta {
+                swapins: 46_564,
+                swapouts: 40_156,
+            },
+            usage: SwapUsage {
+                total_bytes: 11_811_160_064,
+                used_bytes: 9_985_798_963,
+            },
+            compressor_bytes: 28_991_029_248,
+            swap_window: SWAP_WINDOW,
+            interval: interval(),
+        }
+    }
+
+    /// The first line gives the processes of the ranking, the window that the
+    /// tool measured, the interval that the person asked for, and the faults
+    /// of every process over that window.
+    #[test]
+    fn the_first_line_gives_the_processes_the_window_and_the_faults() {
+        let many = ranking(
+            vec![row(10, 500_000), row(20, 300_000), row(30, 159_812)],
+            959_812,
+        );
+        let one = ranking(vec![row(10, 3)], 3);
+
+        assert_eq!(
+            header(&measurement(&many)).first().map(String::as_str),
+            Some("3 processes over a 4.0 s window (interval 5s) — 959,812 faults, 239,953/s")
+        );
+        assert_eq!(
+            header(&measurement(&one)).first().map(String::as_str),
+            Some("1 process over a 4.0 s window (interval 5s) — 3 faults, 0.8/s")
+        );
     }
 }
