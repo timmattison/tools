@@ -196,4 +196,19 @@ mod tests {
             assert_eq!(state.to_string(), text, "the state {state:?}");
         }
     }
+
+    /// A table of processes lines up its columns with a width and an
+    /// alignment. The text obeys both, the same as a bare `str`.
+    #[test]
+    fn a_state_obeys_the_width_and_the_alignment() {
+        assert_eq!(format!("{:<9}|", SessionState::Busy), "busy     |");
+        assert_eq!(
+            format!("{:>8}|", SessionState::Idle { for_: None }),
+            "  idle ?|"
+        );
+        assert_eq!(
+            format!("{:^9}|", SessionState::Other("shell".to_owned())),
+            "  shell  |"
+        );
+    }
 }
