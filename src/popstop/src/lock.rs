@@ -8,6 +8,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// The name of the state directory in the data directory of the user.
 const STATE_DIR_NAME: &str = "popstop";
@@ -239,6 +240,24 @@ pub fn current_holder(dir: &StateDir) -> io::Result<Option<HolderRecord>> {
     }
 }
 
+/// How a wait for the release of the lock ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Release {
+    /// No copy holds the lock.
+    Released,
+    /// The holder kept the lock until the timeout.
+    TimedOut,
+}
+
+/// Waits until no copy holds the lock, for `timeout` at most.
+///
+/// # Errors
+///
+/// Returns an error when the lock file cannot be opened or locked.
+pub fn wait_for_release(_dir: &StateDir, _timeout: Duration) -> io::Result<Release> {
+    Ok(Release::TimedOut)
+}
+
 /// Opens the lock file for reading, or gives `None` when it does not exist.
 ///
 /// A missing file is not an error: no copy ever ran in this state directory.
@@ -264,10 +283,24 @@ fn read_record(file: &mut File) -> io::Result<HolderRecord> {
 
 #[cfg(test)]
 mod tests {
-    use super::{acquire, current_holder, AcquireError, HolderRecord, Mode, StartTime, StateDir};
+    use super::{
+        acquire, current_holder, wait_for_release, AcquireError, HolderRecord, Mode, Release,
+        StartTime, StateDir,
+    };
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
     use tempfile::TempDir;
+
+    /// A bound that a wait which passes never comes near, even on a loaded
+    /// machine.
+    const GENEROUS_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// The time for which a holder keeps the lock while another thread waits.
+    const HOLD: Duration = Duration::from_millis(200);
 
     /// The record of the first holder in a test.
     const FIRST: HolderRecord = HolderRecord {
@@ -396,5 +429,38 @@ mod tests {
             Some(SECOND)
         );
         drop(second);
+    }
+
+    #[test]
+    fn a_wait_gives_released_when_the_holder_drops_its_guard() {
+        let (_temp, dir) = state_dir();
+        let guard = acquire(&dir, &FIRST).expect("the holder gets the lock");
+        let about_to_release = Arc::new(AtomicBool::new(false));
+        let holder = {
+            let about_to_release = Arc::clone(&about_to_release);
+            thread::spawn(move || {
+                thread::sleep(HOLD);
+                // The flag goes up before the release, so a wait that ends
+                // after the release always sees it.
+                about_to_release.store(true, Ordering::SeqCst);
+                drop(guard);
+            })
+        };
+
+        let release = wait_for_release(&dir, GENEROUS_TIMEOUT).expect("the wait works");
+
+        assert_eq!(release, Release::Released);
+        assert!(
+            about_to_release.load(Ordering::SeqCst),
+            "the wait ended before the holder released the lock"
+        );
+        holder.join().expect("the holder thread ends");
+
+        let (_other_temp, never_used) = state_dir();
+        assert_eq!(
+            wait_for_release(&never_used, GENEROUS_TIMEOUT).expect("the wait works"),
+            Release::Released,
+            "no lock file exists, so no copy holds the lock"
+        );
     }
 }
