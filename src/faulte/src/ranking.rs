@@ -183,6 +183,9 @@ impl Ranking {
     /// zero.
     #[must_use]
     pub fn share(&self, faults: u64) -> f64 {
+        if self.total_faults == 0 {
+            return 0.0;
+        }
         faults as f64 / self.total_faults as f64
     }
 }
