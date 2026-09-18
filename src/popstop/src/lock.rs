@@ -1,7 +1,13 @@
 //! The instance lock.
 //!
 //! Only one copy of popstop runs for each user. A copy that runs holds an
-//! exclusive advisory lock on the lock file in its [`StateDir`].
+//! exclusive advisory lock on `popstop.lock` in its [`StateDir`], and writes
+//! its [`HolderRecord`] into that file.
+//!
+//! The lock is the only source of truth. The kernel releases the lock when
+//! the process ends for any cause, `SIGKILL` included, so a stale lock cannot
+//! occur. A record can stay in the file after a crash, thus a reader trusts a
+//! record only while the lock is held.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -23,8 +29,9 @@ const LOG_FILE_NAME: &str = "popstop.log";
 
 /// The longest time a reader waits for the record of a holder.
 ///
-/// A holder writes its record directly after it gets the lock, so a reader
-/// can see a held lock with no record for a very short time.
+/// A holder writes its record directly after it gets the lock, and empties
+/// the file directly before it releases the lock. So a reader can see a held
+/// lock with no record for a very short time.
 const RECORD_WAIT: Duration = Duration::from_secs(2);
 
 /// The time between two reads of a record that is not there yet.
