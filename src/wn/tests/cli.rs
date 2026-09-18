@@ -204,14 +204,14 @@ const BOX_ISSUES: &str = r#"{"data":{"repository":{
 /// and one summary that names the next step of each of them.
 ///
 /// The next step of stream A is the open pull request `#15`, which closes
-/// `#4`. Its work exists already, so the tail of A tells the reader to review
-/// it and merge it, and names no start command. The other three tails name an
-/// issue to start. The words of A and the command of each issue start in one
-/// column.
+/// `#4`. Its row writes the pair as the plan writes it, `PR#15 (#4)`. Its work
+/// exists already, so the tail of A tells the reader to review it and merge
+/// it, and names no start command. The other three tails name an issue to
+/// start. The words of A and the command of each issue start in one column.
 const BOX_ANSWER: &str = concat!(
     "A — visualizers\n",
-    "  → #15 (#4)  The visualizer branch\n",
-    "  · #7        Keep or delete\n",
+    "  → PR#15 (#4)  The visualizer branch\n",
+    "  · #7          Keep or delete\n",
     "\n",
     "B — audio engine\n",
     "  ✓ #11  The oscillator\n",
@@ -428,11 +428,12 @@ const JSON_ISSUES: &str = r#"{"data":{"repository":{
 ///
 /// The report of a graph, because a JSON plan is a graph: one row for each
 /// step in the order of the work, and one start line for each issue somebody
-/// can begin now. `#96` is the one of them.
+/// can begin now. `#96` is the one of them. The row of the pull request writes
+/// the pair as the plan writes it, `PR#102 (#94)`.
 const JSON_ANSWER: &str = concat!(
-    "→ #96         The daemon leak\n",
-    "· #91         The lifecycle    waits for #96\n",
-    "· #102 (#94)  The shell init   waits for #91\n",
+    "→ #96           The daemon leak\n",
+    "· #91           The lifecycle    waits for #96\n",
+    "· PR#102 (#94)  The shell init   waits for #91\n",
     "\n",
     "Start #96 next with 'si 96'\n",
 );
@@ -447,9 +448,9 @@ const JSON_ISSUES_ONE_DONE: &str = r#"{"data":{"repository":{
 
 /// The answer [`JSON_PLAN`] earns once `#96` is done: `#91` is free.
 const JSON_ANSWER_ONE_DONE: &str = concat!(
-    "✓ #96         The daemon leak\n",
-    "→ #91         The lifecycle\n",
-    "· #102 (#94)  The shell init   waits for #91\n",
+    "✓ #96           The daemon leak\n",
+    "→ #91           The lifecycle\n",
+    "· PR#102 (#94)  The shell init   waits for #91\n",
     "\n",
     "Start #91 next with 'si 91'\n",
 );
@@ -1492,9 +1493,10 @@ fn a_number_that_stands_in_two_streams_is_asked_about_once() {
 
 #[test]
 fn a_pull_request_and_the_issue_it_closes_are_one_row() {
-    // `PR#344 (#341)` is one step and not two. The state of the row is the
-    // state of the pull request, so a merged 344 is walked past although 341
-    // is still open — and the two states that disagree earn a note.
+    // `PR#344 (#341)` is one step and not two, and the row writes it as the
+    // plan wrote it. The state of the row is the state of the pull request,
+    // so a merged 344 is walked past although 341 is still open — and the two
+    // states that disagree earn a note.
     let body = r#"{"data":{"repository":{
 "i344":{"__typename":"PullRequest","number":344,"title":"First thing","state":"MERGED"},
 "i341":{"__typename":"Issue","number":341,"title":"The bug","state":"OPEN","stateReason":null},
@@ -1512,8 +1514,8 @@ fn a_pull_request_and_the_issue_it_closes_are_one_row() {
         stdout(&output),
         concat!(
             "S1 gitscratch\n",
-            "  ✓ #344 (#341)  First thing\n",
-            "  → #330         Second thing\n",
+            "  ✓ PR#344 (#341)  First thing\n",
+            "  → #330           Second thing\n",
             "\n",
             "  #344 is closed and #341 is open.\n",
             "\n",
@@ -1542,9 +1544,10 @@ fn answers_the_paste_of_the_plan_parallel_work_skill() {
 #[test]
 fn a_pull_request_an_annotation_names_is_the_work_of_its_step() {
     // `#4 (in flight, PR #15)` is the issue #4 whose work is the pull request
-    // #15, so the row is the pull request and the state of the row is the
-    // state of it. A merged pull request over an open issue earns the same
-    // note the `PR#344 (#341)` order earns, because it is the same step.
+    // #15, so the row is the pull request, written `PR#15 (#4)`, and the state
+    // of the row is the state of it. A merged pull request over an open issue
+    // earns the same note the `PR#344 (#341)` order earns, because it is the
+    // same step.
     let body = r#"{"data":{"repository":{
 "i15":{"__typename":"PullRequest","number":15,"title":"The visualizer branch","state":"MERGED"},
 "i4":{"__typename":"Issue","number":4,"title":"The visualizers","state":"OPEN","stateReason":null},
@@ -1562,8 +1565,8 @@ fn a_pull_request_an_annotation_names_is_the_work_of_its_step() {
         stdout(&output),
         concat!(
             "A visualizers\n",
-            "  ✓ #15 (#4)  The visualizer branch\n",
-            "  → #7        Keep or delete\n",
+            "  ✓ PR#15 (#4)  The visualizer branch\n",
+            "  → #7          Keep or delete\n",
             "\n",
             "  #15 is closed and #4 is open.\n",
             "\n",
@@ -2022,14 +2025,14 @@ fn a_finished_step_of_a_json_plan_frees_the_step_that_waited_for_it() {
 #[test]
 fn a_pull_request_of_a_json_step_is_the_pair_the_row_writes() {
     // `"pr": 102` on the step of `#94` is the pair `PR#102 (#94)` writes, and
-    // the state of the row is the state of the pull request, because the pull
-    // request is the work.
+    // the row writes it that way. The state of the row is the state of the
+    // pull request, because the pull request is the work.
     let gh = FakeGh::new(JSON_ISSUES);
     let output = run_with_stdin(&gh, &["--repo", REPO], "80", JSON_PLAN);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     let answer = stdout(&output);
     assert!(
-        answer.contains("#102 (#94)  The shell init"),
+        answer.contains("· PR#102 (#94)  The shell init"),
         "the row writes the pair and the title of the work, in {answer}"
     );
 }

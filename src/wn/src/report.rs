@@ -688,6 +688,34 @@ mod tests {
     }
 
     #[test]
+    fn a_pull_request_writes_the_prefix_the_plan_writes() {
+        let closes = Some(Closes {
+            number: issue(341),
+            status: Status::Open,
+        });
+        let pull_request = Entry {
+            kind: Some(Kind::PullRequest),
+            ..entry(344, Status::Open)
+        };
+        assert_eq!(pull_request.label(), "PR#344");
+        let paired = Entry {
+            closes,
+            ..pull_request
+        };
+        assert_eq!(paired.label(), "PR#344 (#341)");
+
+        // A number GitHub gave no kind for is not known to be a pull request,
+        // so it writes the bare number.
+        let unknown = Entry {
+            kind: None,
+            ..entry(344, Status::Missing)
+        };
+        assert_eq!(unknown.label(), "#344");
+        let unknown_pair = Entry { closes, ..unknown };
+        assert_eq!(unknown_pair.label(), "#344 (#341)");
+    }
+
+    #[test]
     fn states_answer_for_a_number_they_hold() {
         let states = States::of(vec![entry(344, Status::Done)]);
         let answer = states.entry(issue(344));

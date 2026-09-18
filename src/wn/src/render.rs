@@ -1142,6 +1142,31 @@ mod tests {
         }
     }
 
+    /// The entry of a step whose work is the pull request `number`, as GitHub
+    /// answers it.
+    fn pull_request(number: u64, status: Status, title: &str) -> Entry {
+        Entry {
+            kind: Some(Kind::PullRequest),
+            ..entry(number, status, title)
+        }
+    }
+
+    /// The entry of a step that names the pull request `number` and the issue
+    /// it closes, as GitHub answers it. [`paired`] builds the same pair with
+    /// the kind of an issue.
+    fn paired_pull_request(
+        number: u64,
+        status: Status,
+        title: &str,
+        closes: u64,
+        closes_status: Status,
+    ) -> Entry {
+        Entry {
+            kind: Some(Kind::PullRequest),
+            ..paired(number, status, title, closes, closes_status)
+        }
+    }
+
     /// One stream of a plan, from its label and the states of its steps.
     fn stream(label: &str, entries: Vec<Entry>) -> StreamReport {
         StreamReport {
@@ -1358,6 +1383,70 @@ mod tests {
         assert_eq!(
             rows,
             vec!["  → #344 (#341)  First", "  · #330         Second"]
+        );
+    }
+
+    #[test]
+    fn a_row_of_a_pull_request_writes_it_as_the_plan_writes_it() {
+        // A plan writes the work of a pull request as `PR#515`, and the row
+        // writes it the same way. The reader then sees in the row which number
+        // is work that exists already.
+        let report = Report::build(vec![pull_request(515, Status::Open, "The finished work")]);
+        assert_eq!(
+            glyphs(&report, 80),
+            concat!(
+                "→ PR#515  The finished work\n",
+                "\n",
+                "Finish PR #515 next: review it and merge it",
+            )
+        );
+    }
+
+    #[test]
+    fn a_row_of_a_pull_request_and_the_issue_it_closes_writes_the_pair_of_the_plan() {
+        let streams = vec![stream(
+            "S1",
+            vec![paired_pull_request(
+                515,
+                Status::Open,
+                "The finished work",
+                512,
+                Status::Open,
+            )],
+        )];
+        assert_eq!(
+            plan_glyphs(&streams, 80),
+            concat!(
+                "S1\n",
+                "  → PR#515 (#512)  The finished work\n",
+                "\n",
+                "Take one from each stream:\n",
+                "  S1  → PR #515 (closes #512)  review it and merge it",
+            )
+        );
+    }
+
+    #[test]
+    fn the_numbers_line_up_when_one_row_of_a_block_is_a_pull_request() {
+        // The prefix makes the label of the pull request wider than the label
+        // of an issue, and the number column of the block grows with it.
+        let streams = vec![stream(
+            "S1",
+            vec![
+                paired_pull_request(515, Status::Open, "First", 512, Status::Open),
+                entry(330, Status::Open, "Second"),
+                entry(9, Status::Open, "Third"),
+            ],
+        )];
+        let block = plan_glyphs(&streams, 80);
+        let rows: Vec<&str> = block.lines().skip(1).take(3).collect();
+        assert_eq!(
+            rows,
+            vec![
+                "  → PR#515 (#512)  First",
+                "  · #330           Second",
+                "  · #9             Third",
+            ]
         );
     }
 
