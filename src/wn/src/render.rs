@@ -55,7 +55,7 @@ use textfit::{pad_right, truncate_to_budget};
 use unicode_width::UnicodeWidthStr;
 
 use crate::chain::{list, IssueNumber};
-use crate::report::{Entry, Report, Status};
+use crate::report::{Entry, Report, Status, PULL_REQUEST_PREFIX};
 use crate::StartCommand;
 
 /// The mark of an issue whose work is done.
@@ -268,7 +268,8 @@ fn fitted_title(entry: &Entry, budget: usize) -> String {
 /// in the spaces that would have stood before one.
 ///
 /// The number a row writes is [`Entry::label`], so a step of a plan that names
-/// a pull request and the issue it closes writes both. The width of the column
+/// a pull request and the issue it closes writes both, and a pull request
+/// writes them as the plan does: `PR#344 (#341)`. The width of the column
 /// comes out of the same call, and the two can never part company.
 ///
 /// `waits` is the text of the last column, and `title_width` is the columns
@@ -476,8 +477,8 @@ impl Action {
 /// thus finds the pull request that finishes it.
 fn pull_request_name(pull_request: IssueNumber, closes: Option<IssueNumber>) -> String {
     match closes {
-        Some(closes) => format!("PR {pull_request} (closes {closes})"),
-        None => format!("PR {pull_request}"),
+        Some(closes) => format!("{PULL_REQUEST_PREFIX} {pull_request} (closes {closes})"),
+        None => format!("{PULL_REQUEST_PREFIX} {pull_request}"),
     }
 }
 

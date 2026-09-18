@@ -18,11 +18,12 @@
 //! # A step of a plan holds two numbers
 //!
 //! A plan of parallel work writes a step as a pull request and the issue that
-//! pull request closes: `PR#344 (#341)`. Both numbers carry a state, and the
-//! two states can disagree. The state of the step is the state of the pull
-//! request, because the pull request is the work. The state of the issue
-//! stands beside it, because a merged pull request over an open issue is a
-//! link nobody wrote, and nothing else would say so.
+//! pull request closes: `PR#344 (#341)`. The row of the step writes it the
+//! same way, so the reader sees which number is the work. Both numbers carry a
+//! state, and the two states can disagree. The state of the step is the state
+//! of the pull request, because the pull request is the work. The state of the
+//! issue stands beside it, because a merged pull request over an open issue is
+//! a link nobody wrote, and nothing else would say so.
 //!
 //! A plan also names one number in two streams. [`States`] holds the answer
 //! of GitHub for each number once, so one query answers every number the plan
@@ -60,6 +61,13 @@ use crate::plan::Step;
 /// A named constant, because [`Report::waits_for`] gives a slice and an empty
 /// `Vec` of its own would live no longer than the call.
 const NO_NUMBERS: &[IssueNumber] = &[];
+
+/// What `wn` writes in front of the number of a pull request.
+///
+/// A plan writes the work of a pull request as `PR#344`, with no space, and a
+/// row writes it the same way. An answer writes `PR #344`, with a space, in a
+/// sentence.
+pub const PULL_REQUEST_PREFIX: &str = "PR";
 
 /// What GitHub says about one issue of the chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,14 +156,25 @@ impl Entry {
     /// The number a row writes: `#344` for a step of one number, and
     /// `#344 (#341)` for a pair.
     ///
+    /// A pull request writes [`PULL_REQUEST_PREFIX`] in front of its number,
+    /// `PR#344` alone and `PR#344 (#341)` in a pair, which is how a plan writes
+    /// it. The reader then sees in the row which number is work that exists
+    /// already. An issue, and a number GitHub gave no kind for, write the bare
+    /// number.
+    ///
     /// The width of the number column of a block is the width of the widest of
     /// these, so the text of a pair and the width of the column come out of one
     /// place and can never part company.
     #[must_use]
     pub fn label(&self) -> String {
+        let prefix = if self.is_pull_request() {
+            PULL_REQUEST_PREFIX
+        } else {
+            ""
+        };
         match self.closes {
-            Some(closes) => format!("{} ({})", self.number, closes.number),
-            None => self.number.to_string(),
+            Some(closes) => format!("{prefix}{} ({})", self.number, closes.number),
+            None => format!("{prefix}{}", self.number),
         }
     }
 
