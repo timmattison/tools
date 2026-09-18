@@ -558,6 +558,63 @@ mod tests {
         assert_eq!(selected(&plan), vec![30, 60, 70]);
     }
 
+    /// Each session that the plan refused is in exactly one count, under the
+    /// first rule that it fails. A session can fail more than one rule, so the
+    /// order of the rules decides the reason: it runs `faulte`, it is too
+    /// young, it is not idle, it is idle for too short a time, it has a live
+    /// descendant.
+    ///
+    /// `faulte` comes first, and that is the half of rule 4 which rule 3
+    /// cannot show. `faulte` is a live descendant of every ancestor of it, so
+    /// every such session would report the wrong reason under another order.
+    ///
+    /// A process that is not Claude Code, and a Claude Code process with no
+    /// registry record, are in no count. The plan never refused them, because
+    /// they were never sessions that it can stop.
+    #[test]
+    fn the_count_of_each_reason_is_the_first_rule_that_the_session_fails() {
+        let ranking = ranking(vec![
+            session(30, OLD, idle(3_600)),
+            session(40, YOUNG, idle(3_600)),
+            session(50, OLD, SessionState::Busy),
+            session(60, OLD, idle(60)),
+            session(70, OLD, idle(3_600)),
+            session(80, OLD, idle(3_600)),
+            session(90, YOUNG, SessionState::Busy),
+            session(100, OLD, SessionState::Busy),
+            session(110, OLD, idle(60)),
+            session(120, YOUNG, idle(3_600)),
+            row(200, YOUNG, ClaudeView::NotClaude),
+            row(210, YOUNG, ClaudeView::NoRecord),
+        ]);
+        let mut table = table_of(&[30, 40, 50, 60, 70, 90, 100, 110, 200, 210]);
+        table.extend([
+            process(71, 70),
+            process(91, 90),
+            process(101, 100),
+            process(111, 110),
+            // The session 120 started the session 80, and the session 80 ran
+            // `faulte kill`. Both of them are ancestors of `faulte`.
+            process(120, LAUNCHD_PID),
+            process(80, 120),
+            process(FAULTE_PID, 80),
+        ]);
+
+        let plan = plan(&input(&ranking, &table, rules()));
+
+        assert_eq!(selected(&plan), vec![30]);
+        assert_eq!(
+            plan.not_selected,
+            NotSelected {
+                runs_faulte: 2,
+                too_young: 2,
+                not_idle: 2,
+                idle_too_short: 2,
+                live_descendant: 1,
+            }
+        );
+    }
+
     /// Rule 4: the `faulte` process is never a candidate. The session of this
     /// test passes rules 1, 2 and 3: it is old, it is idle, and it has no
     /// descendant. Rule 4 alone refuses it.
