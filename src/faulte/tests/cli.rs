@@ -9,6 +9,16 @@ const BIN: &str = env!("CARGO_BIN_EXE_faulte");
 /// does not change with the window of the person who runs the tests.
 const COLUMNS: &str = "100";
 
+/// The variable that makes `clap` paint its help and its errors on any output.
+///
+/// The pre-commit hook of this repository sets it for `cargo test`. Each run
+/// states it too, so that every run of these tests reads the painted output
+/// that the hook reads, whatever the environment of the person who runs them.
+const CLICOLOR_FORCE: &str = "CLICOLOR_FORCE";
+
+/// The value of [`CLICOLOR_FORCE`] that turns the paint on.
+const PAINT: &str = "1";
+
 /// The exit code that clap gives for a usage error.
 const USAGE_ERROR: i32 = 2;
 
@@ -17,6 +27,7 @@ fn run(args: &[&str]) -> Output {
     Command::new(BIN)
         .args(args)
         .env("COLUMNS", COLUMNS)
+        .env(CLICOLOR_FORCE, PAINT)
         .output()
         .expect("the faulte binary starts")
 }
