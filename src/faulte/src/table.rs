@@ -73,12 +73,7 @@ pub fn arguments() -> Vec<String> {
     let columns = COLUMNS
         .map(|column| format!("{column}{EMPTY_HEADER}"))
         .join(",");
-    vec![
-        "-A".to_owned(),
-        "-ww".to_owned(),
-        "-o".to_owned(),
-        columns,
-    ]
+    vec!["-A".to_owned(), "-ww".to_owned(), "-o".to_owned(), columns]
 }
 
 /// The variables that the caller sets in the environment of [`PROGRAM`].
@@ -561,7 +556,17 @@ mod tests {
     #[test]
     fn a_value_that_is_not_a_number_of_its_column_is_refused_with_its_line() {
         let common = [
-            "abc", "+12", "3.5", "1e3", "0x1F", "日本語", "🎉", "12🎉", "１２", "12\u{a0}", "café",
+            "abc",
+            "+12",
+            "3.5",
+            "1e3",
+            "0x1F",
+            "日本語",
+            "🎉",
+            "12🎉",
+            "１２",
+            "12\u{a0}",
+            "café",
         ];
         let cases = [
             (PID_COLUMN, vec!["-5", "4294967296"]),
@@ -653,7 +658,17 @@ mod tests {
     /// refused too, because `ps` never prints it.
     #[test]
     fn a_uid_with_a_minus_that_is_not_a_negative_number_is_refused() {
-        for bad in ["-", "--2", "-0", "-2147483649", "-+2", "-２", "-2🎉", "-0x2", "2-"] {
+        for bad in [
+            "-",
+            "--2",
+            "-0",
+            "-2147483649",
+            "-+2",
+            "-２",
+            "-2🎉",
+            "-0x2",
+            "2-",
+        ] {
             let line = row_of(["700", "1", bad, "2048"]);
 
             assert_eq!(
