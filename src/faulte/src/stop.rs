@@ -713,6 +713,58 @@ mod tests {
         );
     }
 
+    /// The grace period of a test that wants three reads of the table before
+    /// `SIGKILL`.
+    const THREE_POLLS: Duration = Duration::from_secs(3);
+
+    /// A target that is still the same process at the end of the grace period
+    /// gets `SIGKILL`, and it is a session that `faulte` killed when it then
+    /// goes.
+    ///
+    /// The order of the two signals is the whole point of the grace period.
+    /// Claude Code closes its transcript when it gets `SIGTERM`, and the Mac
+    /// that this tool is for is slow to page a process in. A process handles no
+    /// signal until it is in memory, so `SIGKILL` goes last and it goes late.
+    #[test]
+    fn a_target_that_is_alive_after_the_grace_period_gets_sigkill() {
+        let candidate = candidate(30);
+        let alive = vec![process(30, LAUNCHD_PID)];
+        let machine = machine_of(
+            &[30],
+            vec![
+                alive.clone(),
+                alive.clone(),
+                alive.clone(),
+                alive,
+                Vec::new(),
+            ],
+        );
+
+        let report = stop(&machine, &[candidate.clone()], THREE_POLLS, ONE_POLL);
+
+        assert_eq!(
+            report,
+            StopReport {
+                killed: vec![candidate],
+                ..StopReport::default()
+            },
+            "the session went after SIGKILL and not after SIGTERM"
+        );
+        assert_eq!(
+            machine.signals(),
+            vec![
+                (Pid::new(30), Signal::Terminate),
+                (Pid::new(30), Signal::Kill)
+            ],
+            "SIGTERM goes first, and SIGKILL goes after it"
+        );
+        assert_eq!(
+            machine.sleeps(),
+            4,
+            "three waits of the grace period, and one after SIGKILL"
+        );
+    }
+
     /// Only `y` and `yes` confirm, in any case, after the spaces come off.
     ///
     /// Every other answer stops nothing: the end of the input, no text, a
