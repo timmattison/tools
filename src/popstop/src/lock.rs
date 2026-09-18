@@ -220,7 +220,7 @@ pub fn acquire(dir: &StateDir, record: &HolderRecord) -> Result<LockGuard, Acqui
         .open(dir.lock_path())
         .map_err(AcquireError::Io)?;
 
-    match probe(&mut file, &dir.lock_path()).map_err(AcquireError::Io)? {
+    match probe(&mut file, &dir.lock_path(), File::try_lock).map_err(AcquireError::Io)? {
         Probe::Held(holder) => Err(AcquireError::Held(holder)),
         Probe::Free => {
             let mut guard = LockGuard { file };
@@ -245,7 +245,9 @@ pub fn current_holder(dir: &StateDir) -> io::Result<Option<HolderRecord>> {
     let Some(mut file) = open_existing_lock_file(dir)? else {
         return Ok(None);
     };
-    match probe(&mut file, &dir.lock_path())? {
+    // A shared lock: readers do not conflict with each other, so a reader
+    // never takes another reader for a holder.
+    match probe(&mut file, &dir.lock_path(), File::try_lock_shared)? {
         Probe::Free => {
             file.unlock()?;
             Ok(None)
@@ -323,8 +325,8 @@ enum Probe {
     Held(HolderRecord),
 }
 
-/// Tries the lock on `file`, the lock file at `lock_path`. When another copy
-/// holds the lock, it reads the record of that copy.
+/// Tries the lock on `file`, the lock file at `lock_path`, with `try_lock`.
+/// When another copy holds the lock, it reads the record of that copy.
 ///
 /// A holder writes its record directly after it gets the lock, and empties
 /// the file directly before it releases the lock. A reader also holds the
@@ -333,10 +335,14 @@ enum Probe {
 /// short time, then tries the lock and reads the record again, for
 /// [`RECORD_WAIT`] at most. Then it returns an error of kind
 /// [`io::ErrorKind::InvalidData`].
-fn probe(file: &mut File, lock_path: &Path) -> io::Result<Probe> {
+fn probe(
+    file: &mut File,
+    lock_path: &Path,
+    try_lock: fn(&File) -> Result<(), TryLockError>,
+) -> io::Result<Probe> {
     let deadline = Instant::now() + RECORD_WAIT;
     loop {
-        match file.try_lock() {
+        match try_lock(file) {
             Ok(()) => return Ok(Probe::Free),
             Err(TryLockError::WouldBlock) => {}
             Err(TryLockError::Error(error)) => return Err(error),
