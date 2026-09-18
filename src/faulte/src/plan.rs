@@ -160,6 +160,7 @@ fn status_changed_at(state: &SessionState, now: SystemTime) -> Option<SystemTime
 #[must_use]
 pub fn plan(input: &PlanInput<'_>) -> Plan {
     let older_than = Duration::from(input.rules.older_than);
+    let idle_for = Duration::from(input.rules.idle_for);
     let now_secs = epoch_seconds(input.now);
     let mut candidates = Vec::new();
     for row in &input.ranking.rows {
@@ -176,6 +177,9 @@ pub fn plan(input: &PlanInput<'_>) -> Plan {
             continue;
         };
         if age <= older_than {
+            continue;
+        }
+        if !state.is_idle_for_more_than(idle_for) {
             continue;
         }
         candidates.push(Candidate {
