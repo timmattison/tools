@@ -365,19 +365,6 @@ impl OutputUnit {
             ));
         }
 
-        let format = stream_format(rate);
-        // SAFETY: `unit` is a live instance, and `format` is a stream format
-        // of the size that the call gets.
-        unsafe {
-            set_property(
-                unit,
-                kAudioUnitProperty_StreamFormat,
-                &format,
-                STREAM_FORMAT_SIZE,
-                call::SET_STREAM_FORMAT,
-            )
-        }?;
-
         let renderer = RendererBox::new(renderer);
         let callback = AURenderCallbackStruct {
             inputProc: Some(render_callback::<R>),
@@ -393,6 +380,19 @@ impl OutputUnit {
                 &callback,
                 RENDER_CALLBACK_SIZE,
                 call::SET_RENDER_CALLBACK,
+            )
+        }?;
+
+        let format = stream_format(rate);
+        // SAFETY: `unit` is a live instance, and `format` is a stream format
+        // of the size that the call gets.
+        unsafe {
+            set_property(
+                unit,
+                kAudioUnitProperty_StreamFormat,
+                &format,
+                STREAM_FORMAT_SIZE,
+                call::SET_STREAM_FORMAT,
             )
         }?;
 
