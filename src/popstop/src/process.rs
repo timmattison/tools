@@ -40,8 +40,12 @@ pub enum Identity {
 /// `ESRCH` error is the answer that no process has the PID, thus it gives
 /// [`Identity::Gone`] and not an error.
 pub fn identity(record: &HolderRecord, looked_up: io::Result<StartTime>) -> io::Result<Identity> {
-    let _ = (record, looked_up);
-    Ok(Identity::TheSame)
+    match looked_up {
+        Ok(started_at) if started_at == record.started_at => Ok(Identity::TheSame),
+        Ok(_) => Ok(Identity::Another),
+        Err(problem) if problem.raw_os_error() == Some(libc::ESRCH) => Ok(Identity::Gone),
+        Err(problem) => Err(problem),
+    }
 }
 
 /// Gives the time at which the kernel started the process `pid`.
