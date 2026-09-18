@@ -56,7 +56,32 @@ pub enum TableParseError {
         /// The line as `ps` printed it.
         line: String,
     },
+    /// A numeric column holds a value that is not a number of its type.
+    #[error(
+        "ps printed a value of the column {column} that is not a number of its type, at line \
+         {number}: {line:?}"
+    )]
+    MalformedNumber {
+        /// The name of the column, as `faulte` gives it to `ps -o`.
+        column: &'static str,
+        /// The number of the line in the output, from 1.
+        number: usize,
+        /// The line as `ps` printed it.
+        line: String,
+    },
 }
+
+/// The column of the PID, as `ps -o` names it.
+const PID_COLUMN: &str = "pid";
+
+/// The column of the PID of the parent.
+const PPID_COLUMN: &str = "ppid";
+
+/// The column of the UID of the owner.
+const UID_COLUMN: &str = "uid";
+
+/// The column of the resident memory, in KiB.
+const RSS_COLUMN: &str = "rss";
 
 /// Reads the process table from the output of `ps`.
 ///
@@ -347,5 +372,94 @@ mod tests {
         let rows = parse(&text).expect("blank lines are not errors");
 
         assert_eq!(rows, [launchd(), launchd()]);
+    }
+
+    /// Gives a row with the PID `pid`, the parent `ppid`, the UID `uid`, and
+    /// the RSS `rss`, each aligned to the right as `ps` prints it.
+    fn row_of([pid, ppid, uid, rss]: [&str; 4]) -> String {
+        format!(
+            "{pid:>5} {ppid:>5} {uid:>5} {rss:>6} S    Tue Aug 25 16:45:30 2026     /usr/bin/tool"
+        )
+    }
+
+    /// The four numeric columns, in the order of the row, with a valid value
+    /// of each one.
+    const NUMERIC_COLUMNS: [(&str, &str); 4] = [
+        (PID_COLUMN, "700"),
+        (PPID_COLUMN, "1"),
+        (UID_COLUMN, "501"),
+        (RSS_COLUMN, "2048"),
+    ];
+
+    /// Each numeric column that holds a value other than ASCII digits of its
+    /// type is refused, with the name of the column and the line. A sign, a
+    /// fraction, another base, a value too large for the type, and multi-byte
+    /// text are each refused, and none of them panics.
+    #[test]
+    fn a_value_that_is_not_a_number_of_its_column_is_refused_with_its_line() {
+        let common = [
+            "abc", "+12", "3.5", "1e3", "0x1F", "日本語", "🎉", "12🎉", "１２", "12\u{a0}", "café",
+        ];
+        let cases = [
+            (PID_COLUMN, vec!["-5", "4294967296"]),
+            (PPID_COLUMN, vec!["-5", "4294967296"]),
+            (UID_COLUMN, vec!["4294967296", "+2"]),
+            (RSS_COLUMN, vec!["-5", "18446744073709551616"]),
+        ];
+        for (position, (column, own)) in cases.into_iter().enumerate() {
+            for bad in common.iter().copied().chain(own) {
+                let mut values = NUMERIC_COLUMNS.map(|(_, good)| good);
+                if let Some(value) = values.get_mut(position) {
+                    *value = bad;
+                }
+                let line = row_of(values);
+
+                let error = parse(&with_bad_line_at_3(&line))
+                    .expect_err("a value that is not a number is refused");
+
+                assert_eq!(
+                    error,
+                    TableParseError::MalformedNumber {
+                        column,
+                        number: 3,
+                        line: line.clone()
+                    },
+                    "the value {bad:?} of the column {column}"
+                );
+                let message = error.to_string();
+                assert!(
+                    message.contains(&format!("column {column} "))
+                        && message.contains("at line 3")
+                        && message.contains(&format!("{line:?}")),
+                    "the message names the column and shows the line: {message}"
+                );
+            }
+        }
+    }
+
+    /// The largest value of each type, and zero, are numbers, not errors.
+    #[test]
+    fn the_largest_values_and_zero_parse() {
+        let largest = only_row(&row_of([
+            "4294967295",
+            "4294967295",
+            "4294967295",
+            "18446744073709551615",
+        ]));
+        let zero = only_row(&row_of(["0", "0", "0", "0"]));
+
+        assert_eq!(
+            (largest.pid, largest.ppid, largest.uid, largest.rss_kib),
+            (
+                Pid::new(u32::MAX),
+                Pid::new(u32::MAX),
+                Uid::new(u32::MAX),
+                u64::MAX
+            )
+        );
+        assert_eq!(
+            (zero.pid, zero.ppid, zero.uid, zero.rss_kib),
+            (Pid::new(0), Pid::new(0), Uid::new(0), 0)
+        );
     }
 }
