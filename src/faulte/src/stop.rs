@@ -74,12 +74,15 @@ pub fn recheck(
 ) -> Recheck {
     // A zombie is not a live process. It stopped already, and its parent did
     // not collect its exit status yet, so no signal reaches it.
-    let Some(_process) = fresh_table
+    let Some(process) = fresh_table
         .iter()
         .find(|process| process.pid == candidate.row.pid && !process.zombie)
     else {
         return Recheck::Exited;
     };
+    if process.started_at_epoch_secs != candidate.started_at_epoch_secs {
+        return Recheck::PidReused;
+    }
     let _ = fresh_record;
     Recheck::Proceed
 }
