@@ -20,15 +20,17 @@ impl Pid {
     /// Gives the number of this PID.
     #[must_use]
     pub const fn get(self) -> u32 {
-        let _ = self;
-        0
+        self.0
     }
 }
 
 impl fmt::Display for Pid {
     /// Writes the bare number, for example `45646`.
-    fn fmt(&self, _formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        Ok(())
+    ///
+    /// The number obeys the width and the alignment of the format, the same
+    /// as a bare `u32`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, formatter)
     }
 }
 
@@ -46,15 +48,17 @@ impl Uid {
     /// Gives the number of this UID.
     #[must_use]
     pub const fn get(self) -> u32 {
-        let _ = self;
-        0
+        self.0
     }
 }
 
 impl fmt::Display for Uid {
     /// Writes the bare number, for example `501`.
-    fn fmt(&self, _formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        Ok(())
+    ///
+    /// The number obeys the width and the alignment of the format, the same
+    /// as a bare `u32`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, formatter)
     }
 }
 
