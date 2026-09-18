@@ -79,6 +79,9 @@ impl FromStr for Span {
     /// rest. Thus a sign, a decimal point, or a letter inside the number makes
     /// the number fail, and does not become part of a unit.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
+        if text.is_empty() {
+            return Err(ParseSpanError::Empty);
+        }
         let invalid = || ParseSpanError::Invalid {
             text: text.to_owned(),
         };
