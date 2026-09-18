@@ -237,6 +237,49 @@ mod tests {
         );
     }
 
+    /// A session whose status changed is never signalled. The acceptance
+    /// criteria demand this test by name: a session that the person started to
+    /// use again in the time before the answer must survive.
+    ///
+    /// Each of these facts says that the session is not the idle session that
+    /// the plan read: no record at all, a status that is not idle, and another
+    /// time of the last status change. A time that no record gives is no
+    /// answer, on either side of the comparison, so two absent times are not
+    /// one time.
+    #[test]
+    fn a_session_whose_status_changed_is_not_signalled() {
+        let candidate = candidate(30);
+        let table = [process(30, LAUNCHD_PID)];
+        let idle = record(30, Some(changed_at()));
+        let with_status = |status| SessionRecord {
+            status,
+            ..idle.clone()
+        };
+        let busy = with_status(Some(SessionStatus::Busy));
+        let waiting = with_status(Some(SessionStatus::Waiting));
+        let shell = with_status(Some(SessionStatus::Other("shell".to_owned())));
+        let no_status = with_status(None);
+        let one_second_later = record(30, Some(changed_at() + Duration::from_secs(1)));
+        let no_time = record(30, None);
+        let cases: [(&str, Option<&SessionRecord>); 7] = [
+            ("no record of the session", None),
+            ("the status busy", Some(&busy)),
+            ("the status waiting", Some(&waiting)),
+            ("the status shell", Some(&shell)),
+            ("no status", Some(&no_status)),
+            ("a change one second later", Some(&one_second_later)),
+            ("no time of the change", Some(&no_time)),
+        ];
+
+        for (registry_gives, fresh_record) in cases {
+            assert_eq!(
+                recheck(&candidate, &table, fresh_record),
+                Recheck::StatusChanged,
+                "the registry gives {registry_gives}"
+            );
+        }
+    }
+
     /// A session that did not change proceeds: its PID holds the same process
     /// that the plan read, the registry still says that it is idle, the time
     /// of the last status change is the same, and it started no process.
