@@ -4837,6 +4837,33 @@ mod tests {
         }
     }
 
+    /// The fakes of [`run_fork_shell_function`] get the correct paths when the
+    /// directory name holds a `$`, a backtick pair, and a single quote. The
+    /// fake scripts must quote each path, or `/bin/sh` expands the name and the
+    /// test fails for a reason that is not the behavior of the shell function.
+    #[cfg(unix)]
+    #[test]
+    fn fork_shell_function_fakes_work_in_a_path_that_holds_shell_metacharacters() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = temp
+            .path()
+            .join("dollar $CRAP_UNSET tick `true` quote ' dir");
+        fs::create_dir_all(&dir).unwrap();
+        let wire = format!(
+            "{HERE_SENTINEL}\n{FAKE_ORIGINAL_SESSION}\n{GENERATED_FORK_ID}\n{NO_LINK_SENTINEL}\n"
+        );
+
+        let run = run_fork_shell_function(
+            &dir,
+            &format!("--here {FAKE_ORIGINAL_SESSION}"),
+            &wire,
+            true,
+            true,
+        );
+
+        assert_reports_the_pinned_fork_id(&run, "a path that holds shell metacharacters");
+    }
+
     // Two distinct session ids for the per-directory listing tests.
     const ID_A: &str = "aaaaaaaa-1111-2222-3333-444444444444";
     const ID_B: &str = "bbbbbbbb-1111-2222-3333-444444444444";
