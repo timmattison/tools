@@ -1651,6 +1651,14 @@ fn format_fork_at_output(
 ///   function `cd`s into the session's original directory (the trailing `<dir>`,
 ///   emitted last so a newline in the path survives) and then runs the same
 ///   fork + cleanup sequence as `--here`.
+///
+/// After a fork, and after the cleanup, the function prints
+/// `Resume this fork with: crap <new-id>` on stdout. Without that line, the
+/// user resumes the old id later and loses the work of the fork. The line
+/// shows only when `crap --status <new-id>` finds the fork transcript. Claude
+/// writes that transcript only after the first new input, and `--status` uses
+/// the same lookup as `crap <new-id>`. So the line shows exactly when
+/// `crap <new-id>` can resume the fork.
 const SHELL_CODE: &str = r#"
 function crap() {
     # These flags make the binary print to stdout and exit 0 without mutating
@@ -1715,6 +1723,13 @@ function crap() {
             kill "$__crap_watcher" 2>/dev/null
             rm -f -- "$__crap_link"
         fi
+        # Claude writes the fork transcript only after the first new input, so
+        # a fork that the user leaves at once is not saved. --status finds the
+        # fork exactly when "crap <new-id>" can resume it, so tell the id only
+        # then.
+        if command crap --status "$__crap_newid" >/dev/null 2>&1; then
+            printf 'Resume this fork with: crap %s\n' "$__crap_newid"
+        fi
         return
     fi
     if [ "${__crap_out%%$'\n'*}" = "__CRAP_FORK_AT__" ]; then
@@ -1764,6 +1779,10 @@ function crap() {
         if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
             kill "$__crap_watcher" 2>/dev/null
             rm -f -- "$__crap_link"
+        fi
+        # As in --here: tell the fork id only when Claude saved the fork.
+        if command crap --status "$__crap_newid" >/dev/null 2>&1; then
+            printf 'Resume this fork with: crap %s\n' "$__crap_newid"
         fi
         return
     fi
