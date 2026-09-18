@@ -383,6 +383,40 @@ mod tests {
         assert_eq!(parse(&blank_only), Err(TopParseError::NoRows));
     }
 
+    /// `top` can mark a number with one trailing `+` or `-`. The parser
+    /// removes that one mark from each token.
+    #[test]
+    fn one_trailing_plus_or_minus_is_removed_from_each_number() {
+        let text = two_samples(
+            "10     9000000   \n",
+            "10     12024+    \n20     5-        \n30+    7         \n40-    0+        \n",
+        );
+
+        let sample = parse(&text).expect("a trailing mark is not an error");
+
+        assert_eq!(
+            sample.rows,
+            [row(10, 12_024), row(20, 5), row(30, 7), row(40, 0)]
+        );
+    }
+
+    /// Only one mark comes off. A second mark makes the row malformed.
+    #[test]
+    fn two_trailing_marks_make_a_malformed_row() {
+        for bad in ["10     12+-      ", "10     12--      ", "10     12++      ", "10+-   12        "] {
+            let text = two_samples("10     9000000   \n", &format!("{bad}\n"));
+
+            assert_eq!(
+                parse(&text),
+                Err(TopParseError::MalformedRow {
+                    number: 12,
+                    line: bad.to_owned()
+                }),
+                "the row {bad:?}"
+            );
+        }
+    }
+
     /// Parses `text` as a [`Span`] for a test.
     fn span(text: &str) -> Span {
         text.parse().expect("the test gives a valid duration")
