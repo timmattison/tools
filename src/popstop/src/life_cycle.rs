@@ -11,7 +11,7 @@
 use std::fmt;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -269,14 +269,24 @@ impl SignalWatch {
         })
     }
 
-    /// Waits until a signal arrives.
+    /// Waits until a signal arrives, or until `exit_after` passes.
     ///
-    /// `exit_after` has no effect yet.
+    /// The wait blocks on the channel. The main thread never polls.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`Failure`] when the thread that reads the signals ended. A
+    /// copy that waits for a signal which can no longer arrive waits for
+    /// ever, thus the wait ends here instead.
     fn wait_for_stop(&self, exit_after: Option<Duration>) -> Result<StopReason, Failure> {
-        let _ = exit_after;
-        match self.signals.recv() {
+        let arrived = match exit_after {
+            Some(limit) => self.signals.recv_timeout(limit),
+            None => self.signals.recv().map_err(RecvTimeoutError::from),
+        };
+        match arrived {
             Ok(signal) => Ok(StopReason::Signal(signal)),
-            Err(_) => Err(Failure::error(
+            Err(RecvTimeoutError::Timeout) => Ok(StopReason::TimeLimit),
+            Err(RecvTimeoutError::Disconnected) => Err(Failure::error(
                 &"the thread that waits for a signal ended, and no signal arrived",
             )),
         }
