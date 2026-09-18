@@ -161,8 +161,72 @@ pub fn stop(
     grace: Duration,
     poll: Duration,
 ) -> StopReport {
-    let _ = (machine, candidates, grace, poll);
-    StopReport::default()
+    let mut report = StopReport::default();
+    let Ok(table) = machine.process_table() else {
+        return report;
+    };
+    let mut targets: Vec<&Candidate> = candidates
+        .iter()
+        .filter(|candidate| {
+            let record = machine.record_for(
+                candidate.row.pid,
+                candidate.row.uid,
+                candidate.started_at_epoch_secs,
+            );
+            recheck(candidate, &table, record.as_ref()) == Recheck::Proceed
+        })
+        .collect();
+    for candidate in &targets {
+        let _ = machine.signal(candidate.row.pid, Signal::Terminate);
+    }
+    for _ in 0..waits(grace, poll) {
+        machine.sleep(poll);
+        let Ok(table) = machine.process_table() else {
+            return report;
+        };
+        targets.retain(|candidate| {
+            let gone = is_gone(candidate, &table);
+            if gone {
+                report.stopped.push((*candidate).clone());
+            }
+            !gone
+        });
+    }
+    report
+}
+
+/// Gives the count of the waits that the grace period holds.
+///
+/// The count is `grace` divided by `poll`, rounded up. The sequence has no
+/// clock: it waits, it reads the table, and it counts. Thus a machine of a
+/// test that waits for no time makes the same count of reads as this Mac, and
+/// the sequence ends in every test.
+///
+/// A `poll` of no time gives one wait, because a division by no time gives no
+/// number. The grace period then ends at the first read of the table.
+fn waits(grace: Duration, poll: Duration) -> u128 {
+    if poll.is_zero() {
+        return u128::from(!grace.is_zero());
+    }
+    grace.as_nanos().div_ceil(poll.as_nanos())
+}
+
+/// Tells whether the process of `candidate` is gone from `table`.
+///
+/// A process is gone when its PID has no row, when its row is a zombie, or
+/// when its row states another start time. The last one is a PID that the
+/// operating system gave to a new process, and the session of the candidate is
+/// gone in that case as well.
+///
+/// [`recheck`] asks the same question before the first signal, and it tells
+/// the three answers apart to name the reason. Here one answer is enough: the
+/// sequence signals a process that is still there, and nothing else.
+fn is_gone(candidate: &Candidate, table: &[ProcessRow]) -> bool {
+    !table.iter().any(|process| {
+        process.pid == candidate.row.pid
+            && !process.zombie
+            && process.started_at_epoch_secs == candidate.started_at_epoch_secs
+    })
 }
 
 #[cfg(test)]
