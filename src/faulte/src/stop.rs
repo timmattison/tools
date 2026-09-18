@@ -177,9 +177,7 @@ pub fn stop(
             refusal => report.skipped.push((candidate.clone(), refusal)),
         }
     }
-    for candidate in &targets {
-        let _ = machine.signal(candidate.row.pid, Signal::Terminate);
-    }
+    let mut targets = signal_each(machine, targets, Signal::Terminate, &mut report);
     for _ in 0..waits(grace, poll) {
         machine.sleep(poll);
         let Ok(table) = machine.process_table() else {
@@ -196,8 +194,9 @@ pub fn stop(
     if targets.is_empty() {
         return report;
     }
-    for candidate in &targets {
-        let _ = machine.signal(candidate.row.pid, Signal::Kill);
+    let targets = signal_each(machine, targets, Signal::Kill, &mut report);
+    if targets.is_empty() {
+        return report;
     }
     machine.sleep(poll);
     let Ok(table) = machine.process_table() else {
@@ -211,6 +210,37 @@ pub fn stop(
         }
     }
     report
+}
+
+/// Sends `signal` to each target of `targets`, and gives back the targets that
+/// got it.
+///
+/// A signal that the operating system refuses says nothing about the other
+/// targets of the same run, so the run goes on. Two accounts share this Mac,
+/// and a refusal of one signal is a fact about one process.
+///
+/// The target that got no signal goes into [`StopReport::failed`] with the
+/// reason, and it leaves the run. A process that refused `SIGTERM` refuses
+/// `SIGKILL` for the same reason, and a report that named it a session which
+/// survived would hide the reason that the person needs.
+fn signal_each<'a>(
+    machine: &dyn Machine,
+    targets: Vec<&'a Candidate>,
+    signal: Signal,
+    report: &mut StopReport,
+) -> Vec<&'a Candidate> {
+    targets
+        .into_iter()
+        .filter(
+            |candidate| match machine.signal(candidate.row.pid, signal) {
+                Ok(()) => true,
+                Err(error) => {
+                    report.failed.push(((*candidate).clone(), error));
+                    false
+                }
+            },
+        )
+        .collect()
 }
 
 /// Gives the count of the waits that the grace period holds.
