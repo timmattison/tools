@@ -99,9 +99,20 @@ where
     )
 }
 
+/// Gives the lines that a foreground copy writes when it plays: the device
+/// that it keeps awake, the effect on the sleep of the Mac, and the way to
+/// stop it.
+///
+/// The text has no newline at its end.
+#[must_use]
+pub fn ready_lines(device_name: &str, pid: u32) -> String {
+    let _ = (device_name, pid);
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{refusal_in, start_time_text_in, stop_command};
+    use super::{ready_lines, refusal_in, start_time_text_in, stop_command};
     use crate::lock::{HolderRecord, Mode, StartTime};
     use chrono::{FixedOffset, Utc};
     use std::path::Path;
@@ -170,6 +181,16 @@ mod tests {
              this copy did not start\n\
              popstop: to stop the copy that runs, use this command: popstop --stop --state-dir \
              '/tmp/state'"
+        );
+    }
+
+    #[test]
+    fn the_ready_lines_name_the_device_the_sleep_and_the_way_to_stop() {
+        assert_eq!(
+            ready_lines("Klipsch R-51PM", 4242),
+            "popstop: \"Klipsch R-51PM\" stays awake while popstop runs (pid 4242)\n\
+             popstop: this Mac does not idle sleep while popstop runs\n\
+             popstop: press Ctrl-C to stop"
         );
     }
 
