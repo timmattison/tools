@@ -4772,6 +4772,51 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn shell_function_removes_the_import_that_the_link_field_names() {
+        // After Claude exits, the function removes the import that the link
+        // field names. For --here the link is the last field, so a path that
+        // holds a newline must survive. For a cross-user fork the link comes
+        // before the directory, which is the last field.
+        for (mode, folder_name) in [(HERE_SENTINEL, "od\ndd"), (FORK_AT_SENTINEL, "project")] {
+            let temp = tempfile::TempDir::new().unwrap();
+            let folder = temp.path().join(folder_name);
+            fs::create_dir_all(&folder).unwrap();
+            let link = folder.join(format!("{FAKE_ORIGINAL_SESSION}.jsonl"));
+            fs::write(&link, "{}\n").unwrap();
+            let orig = temp.path().join("orig-cwd");
+            fs::create_dir_all(&orig).unwrap();
+
+            let (wire, args) = if mode == HERE_SENTINEL {
+                (
+                    format!(
+                        "{HERE_SENTINEL}\n{FAKE_ORIGINAL_SESSION}\n{GENERATED_FORK_ID}\n{}\n",
+                        link.display()
+                    ),
+                    format!("--here {FAKE_ORIGINAL_SESSION}"),
+                )
+            } else {
+                (
+                    format!(
+                        "{FORK_AT_SENTINEL}\n{FAKE_ORIGINAL_SESSION}\n{GENERATED_FORK_ID}\n{}\n{}\n",
+                        link.display(),
+                        orig.display()
+                    ),
+                    format!("{FAKE_ORIGINAL_SESSION} --user someone"),
+                )
+            };
+            let run = run_fork_shell_function(temp.path(), &args, &wire, true, true);
+
+            assert!(
+                link.symlink_metadata().is_err(),
+                "the import at {} must be gone after Claude exits ({mode})",
+                link.display()
+            );
+            assert_reports_the_pinned_fork_id(&run, mode);
+        }
+    }
+
     // Two distinct session ids for the per-directory listing tests.
     const ID_A: &str = "aaaaaaaa-1111-2222-3333-444444444444";
     const ID_B: &str = "bbbbbbbb-1111-2222-3333-444444444444";
