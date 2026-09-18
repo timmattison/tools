@@ -43,7 +43,6 @@ const INVALID_USER_EXIT: i32 = 12;
 // in `main.rs`); an integration test re-states the contract it is pinning rather
 // than reaching into private constants.
 const FORK_AT_SENTINEL: &str = "__CRAP_FORK_AT__";
-const NO_NEW_ID_SENTINEL: &str = "__CRAP_NO_NEW_ID__";
 /// The `--here` wire sentinel (see `format_here_output` in `main.rs`). Unlike
 /// `__CRAP_FORK_AT__`, `--here` stays in the current directory, so its output
 /// leads with this and carries no trailing directory field.
@@ -207,8 +206,18 @@ fn user_flag_cross_user_forks_at_original_dir() {
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.first().copied(), Some(FORK_AT_SENTINEL));
     assert_eq!(lines.get(1).copied(), Some(FOREIGN_ID));
-    // No forced id in default cross-user resume.
-    assert_eq!(lines.get(2).copied(), Some(NO_NEW_ID_SENTINEL));
+    // The default cross-user resume forks too, so the binary generates the
+    // fork id. The shell function pins the fork to it and reports it after
+    // Claude exits.
+    let fork_id = lines.get(2).copied().expect("a fork-id field");
+    assert!(
+        common::is_generated_fork_id(fork_id),
+        "the fork-id field must be a generated UUID v4, got {fork_id:?}"
+    );
+    assert_ne!(
+        fork_id, FOREIGN_ID,
+        "the fork must not reuse the original id"
+    );
     // The link field points at a real copy under the CURRENT user's tree.
     let link = Path::new(lines.get(3).copied().expect("a link field"));
     assert!(
@@ -455,7 +464,11 @@ fn no_flag_falls_back_to_sibling_on_self_miss() {
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.first().copied(), Some(FORK_AT_SENTINEL));
     assert_eq!(lines.get(1).copied(), Some(FOREIGN_ID));
-    assert_eq!(lines.get(2).copied(), Some(NO_NEW_ID_SENTINEL));
+    let fork_id = lines.get(2).copied().expect("a fork-id field");
+    assert!(
+        common::is_generated_fork_id(fork_id),
+        "the fork-id field must be a generated UUID v4, got {fork_id:?}"
+    );
     // The copy lives under the CURRENT user's tree, and is a real file.
     let link = Path::new(lines.get(3).copied().expect("a link field"));
     assert!(
