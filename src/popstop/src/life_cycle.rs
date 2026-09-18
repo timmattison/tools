@@ -51,7 +51,12 @@ pub struct Settings {
 
 impl Settings {
     /// Gives the state directory that these settings name.
-    fn state_dir(&self) -> Result<StateDir, Failure> {
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`Failure`] when the state directory of the user cannot be
+    /// found.
+    pub(crate) fn state_dir(&self) -> Result<StateDir, Failure> {
         match &self.state_dir {
             Some(path) => Ok(StateDir::new(path.clone())),
             None => StateDir::for_user().map_err(|error| Failure::error(&error)),

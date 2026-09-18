@@ -212,6 +212,27 @@ fn ask(arguments: &[&str]) -> (ExitStatus, String) {
     )
 }
 
+/// Runs popstop with the state directory `dir` and the arguments
+/// `arguments`, and waits for it to end. Gives its exit status, its stdout,
+/// and its stderr.
+///
+/// The commands that take this way (`--stop` and `--status`) act on the copy
+/// that runs and end by themselves, thus they need no time limit.
+fn ask_in(dir: &Path, arguments: &[&str]) -> (ExitStatus, String, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_popstop"))
+        .arg("--state-dir")
+        .arg(dir)
+        .args(arguments)
+        .stdin(Stdio::null())
+        .output()
+        .expect("start popstop");
+    (
+        output.status,
+        String::from_utf8(output.stdout).expect("the output of popstop is UTF-8"),
+        String::from_utf8(output.stderr).expect("the errors of popstop are UTF-8"),
+    )
+}
+
 /// Gives the record of the copy that holds the lock in `dir`.
 fn holder(dir: &Path) -> Option<HolderRecord> {
     current_holder(&StateDir::new(dir.to_path_buf())).expect("read the lock file")
@@ -268,6 +289,23 @@ fn a_hangup_stops_a_foreground_copy() {
 #[test]
 fn a_termination_signal_stops_a_foreground_copy() {
     a_signal_stops_a_foreground_copy(SIGTERM);
+}
+
+#[test]
+fn a_stop_with_no_copy_says_that_nothing_runs() {
+    let temp = tempfile::tempdir().expect("a temporary directory");
+    let dir = temp.path().join("state");
+
+    let (status, report, errors) = ask_in(&dir, &["--stop"]);
+
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a stop is idempotent, thus a stop with no copy is a success: {status}. Its \
+         stderr:\n{errors}"
+    );
+    assert_eq!(report, "popstop: no copy runs\n");
+    assert_eq!(errors, "", "a stop that finds nothing says nothing on stderr");
 }
 
 #[test]

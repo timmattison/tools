@@ -8,6 +8,10 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+/// The name of the group of flags that act instead of a start. One of them
+/// at most can be there, because each one asks popstop for another thing.
+const ACTION_GROUP: &str = "action";
+
 /// The command line of `popstop`.
 #[derive(Parser)]
 #[command(
@@ -17,6 +21,9 @@ use std::process::ExitCode;
     after_help = popstop::exit_status::help_section()
 )]
 struct Cli {
+    /// Stop the copy that runs
+    #[arg(long, group = ACTION_GROUP)]
+    stop: bool,
     /// The directory that holds the lock file and the log. The tests give
     /// each copy a directory of its own.
     #[arg(long, hide = true, value_name = "PATH")]
@@ -32,18 +39,44 @@ fn main() -> ExitCode {
     run(&Cli::parse())
 }
 
+/// Writes the answer of a command that acts on the copy that runs, and gives
+/// the exit status of popstop.
+///
+/// A report goes to stdout, because it is the answer to the question that the
+/// user asked. A failure goes to stderr.
+#[cfg(target_os = "macos")]
+fn report(answer: Result<popstop::control::Report, popstop::life_cycle::Failure>) -> ExitCode {
+    use std::io::Write;
+
+    match answer {
+        // A write that fails has no other place to report.
+        Ok(report) => {
+            let _ = writeln!(std::io::stdout(), "{}", report.text());
+            ExitCode::from(report.status())
+        }
+        Err(failure) => {
+            let _ = writeln!(std::io::stderr(), "{}", failure.message());
+            ExitCode::from(failure.status())
+        }
+    }
+}
+
 /// Runs the command line on macOS.
 #[cfg(target_os = "macos")]
 fn run(cli: &Cli) -> ExitCode {
     use std::io::Write;
     use std::time::Duration;
 
+    use popstop::control;
     use popstop::life_cycle::{run_foreground, Settings};
 
     let settings = Settings {
         state_dir: cli.state_dir.clone(),
         exit_after: cli.exit_after.map(Duration::from_secs),
     };
+    if cli.stop {
+        return report(control::stop(&settings));
+    }
     match run_foreground(&settings) {
         Ok(()) => ExitCode::from(popstop::exit_status::SUCCESS),
         Err(failure) => {
@@ -59,7 +92,7 @@ fn run(cli: &Cli) -> ExitCode {
 fn run(cli: &Cli) -> ExitCode {
     use std::io::Write;
 
-    let _ = (&cli.state_dir, &cli.exit_after);
+    let _ = (&cli.stop, &cli.state_dir, &cli.exit_after);
     let _ = writeln!(
         std::io::stderr(),
         "{}",

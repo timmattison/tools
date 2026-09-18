@@ -8,6 +8,8 @@
 //!
 //! This library holds the parts of the tool that the tests reach:
 //!
+//! - `control` holds the commands that act on the copy that runs, for
+//!   `--status` and `--stop`. It compiles on macOS only.
 //! - [`exit_status`] names the exit statuses and lists them for `--help`.
 //! - [`message`] builds the texts that popstop shows to the user.
 //! - `keepalive` plays the signal on the default output device. It compiles
@@ -23,6 +25,8 @@
 //! - `process` reads the kernel start time of a process. It compiles on macOS
 //!   only.
 
+#[cfg(target_os = "macos")]
+pub mod control;
 pub mod exit_status;
 #[cfg(target_os = "macos")]
 pub mod keepalive;
