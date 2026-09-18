@@ -126,7 +126,10 @@ struct Cli {
 
     /// The number of processes that the ranking shows. One line gives the count
     /// of the other processes.
-    #[arg(long, global = true, value_name = COUNT_VALUE, default_value_t = DEFAULT_LIMIT)]
+    ///
+    /// The flag belongs to the ranking alone. `faulte kill` shows every
+    /// candidate of its plan, and `--max` is what limits that plan.
+    #[arg(long, value_name = COUNT_VALUE, default_value_t = DEFAULT_LIMIT)]
     limit: usize,
 
     /// With no command, `faulte` ranks the processes.
