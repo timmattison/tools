@@ -5,6 +5,7 @@
 //! platform it says so and exits with status 1.
 
 use clap::Parser;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 /// The command line of `popstop`.
@@ -12,20 +13,42 @@ use std::process::ExitCode;
 #[command(
     name = "popstop",
     version = buildinfo::version_string!(),
-    about = "Keeps the default audio output device awake with a signal that is too small to hear, so USB speakers do not pop"
+    about = "Keeps the default audio output device awake with a signal that is too small to hear, so USB speakers do not pop",
+    after_help = popstop::exit_status::help_section()
 )]
-struct Cli {}
+struct Cli {
+    /// The directory that holds the lock file and the log. The tests give
+    /// each copy a directory of its own.
+    #[arg(long, hide = true, value_name = "PATH")]
+    state_dir: Option<PathBuf>,
+    /// Stop after this number of seconds, as if a signal arrived. The tests
+    /// give each copy a bound, so a test that fails leaves no copy that plays
+    /// for ever.
+    #[arg(long, hide = true, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
+    exit_after: Option<u64>,
+}
 
 fn main() -> ExitCode {
-    let _cli = Cli::parse();
+    run(&Cli::parse())
+}
 
-    #[cfg(target_os = "macos")]
-    {
-        ExitCode::SUCCESS
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        eprintln!("popstop: popstop runs on macOS only");
-        ExitCode::FAILURE
-    }
+/// Runs the command line on macOS.
+#[cfg(target_os = "macos")]
+fn run(cli: &Cli) -> ExitCode {
+    let _ = (&cli.state_dir, &cli.exit_after);
+    ExitCode::from(popstop::exit_status::SUCCESS)
+}
+
+/// Says that popstop runs on macOS only.
+#[cfg(not(target_os = "macos"))]
+fn run(cli: &Cli) -> ExitCode {
+    use std::io::Write;
+
+    let _ = (&cli.state_dir, &cli.exit_after);
+    let _ = writeln!(
+        std::io::stderr(),
+        "{}",
+        popstop::message::problem_line(&"popstop runs on macOS only")
+    );
+    ExitCode::from(popstop::exit_status::ERROR)
 }
