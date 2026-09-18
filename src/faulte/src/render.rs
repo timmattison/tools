@@ -563,4 +563,30 @@ mod tests {
             Some("1 process over a 4.0 s window (interval 5s) — 3 faults, 0.8/s")
         );
     }
+
+    /// The second line gives the swap traffic over the time that the tool
+    /// measured it, the size of the compressor, and the swap in use. Those
+    /// numbers say whether this Mac is short of memory, so the line is there
+    /// even when every number is zero.
+    #[test]
+    fn the_second_line_gives_the_swap_traffic_the_compressor_and_the_swap_in_use() {
+        let ranking = ranking(vec![row(10, 3)], 3);
+        let quiet = Measurement {
+            swap: VmDelta::default(),
+            usage: SwapUsage::default(),
+            compressor_bytes: 0,
+            ..measurement(&ranking)
+        };
+
+        assert_eq!(
+            header(&measurement(&ranking)).get(1).map(String::as_str),
+            Some(
+                "swap: 46,564 in, 40,156 out in 5.2 s · compressor 27.0 GB · swap in use 9.3 GB of 11.0 GB"
+            )
+        );
+        assert_eq!(
+            header(&quiet).get(1).map(String::as_str),
+            Some("swap: 0 in, 0 out in 5.2 s · compressor 0 B · swap in use 0 B of 0 B")
+        );
+    }
 }
