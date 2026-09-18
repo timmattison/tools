@@ -295,4 +295,34 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn a_span_prints_in_the_largest_unit_that_divides_it_exactly() {
+        let cases = [
+            ("604800", "7d"),
+            ("600", "10m"),
+            ("90", "90s"),
+            ("5", "5s"),
+            ("3600", "1h"),
+            ("5400", "90m"),
+            ("86400", "1d"),
+            ("90000", "25h"),
+            ("86401", "86401s"),
+            ("120s", "2m"),
+            ("48h", "2d"),
+            ("18446744073709551615", "18446744073709551615s"),
+            ("213503982334601d", "213503982334601d"),
+        ];
+        for (text, expected) in cases {
+            let span: Span = text.parse().expect("the text is a duration");
+            let printed = span.to_string();
+
+            assert_eq!(printed, expected, "the text {text:?}");
+            assert_eq!(
+                printed.parse::<Span>(),
+                Ok(span),
+                "the printed text {printed:?} parses back to the same span"
+            );
+        }
+    }
 }
