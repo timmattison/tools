@@ -20,10 +20,34 @@ pub const ANOTHER_COPY_RUNS: u8 = 3;
 /// `--status` only: no copy runs.
 pub const NO_COPY_RUNS: u8 = 4;
 
-/// Gives the section of `--help` that lists the exit statuses.
+/// The heading of the section of `--help` that lists the exit statuses.
+const HELP_HEADING: &str = "Exit status:";
+
+/// Each exit status and its meaning, in the order that `--help` lists them.
+const MEANINGS: [(u8, &str); 5] = [
+    (SUCCESS, "success"),
+    (
+        ERROR,
+        "an error, for example an audio unit that did not start",
+    ),
+    (USAGE, "a usage error"),
+    (
+        ANOTHER_COPY_RUNS,
+        "another copy runs, so this copy did not start",
+    ),
+    (NO_COPY_RUNS, "--status only: no copy runs"),
+];
+
+/// Gives the section of `--help` that lists the exit statuses: a heading,
+/// then one line for each status with its number and its meaning.
 #[must_use]
 pub fn help_section() -> String {
-    String::new()
+    MEANINGS
+        .iter()
+        .fold(HELP_HEADING.to_owned(), |mut section, (status, meaning)| {
+            section.push_str(&format!("\n  {status}  {meaning}"));
+            section
+        })
 }
 
 #[cfg(test)]
