@@ -88,7 +88,12 @@ pub fn start(settings: &Settings) -> Result<Report, Failure> {
                 &message::stop_command(settings.state_dir_argument()),
             ),
         )),
-        Answer::Reported(_) | Answer::Nothing => {
+        Answer::Reported(Handshake::Failed { status, message }) => {
+            // The copy ends by itself after it reported. The wait reaps it.
+            wait_for_the_end(&mut copy);
+            Err(Failure::new(status, message))
+        }
+        Answer::Nothing => {
             // The copy ends by itself, or it ended already. The wait reaps it
             // and gives the log time to reach the disk.
             wait_for_the_end(&mut copy);
@@ -119,8 +124,33 @@ pub fn start(settings: &Settings) -> Result<Report, Failure> {
 /// [`exit_status::ANOTHER_COPY_RUNS`] when another copy holds the lock, and
 /// the status [`exit_status::ERROR`] for every other problem.
 pub fn run_child(settings: &Settings) -> Result<(), Failure> {
-    start_a_session()?;
-    life_cycle::run(Mode::Background, settings, report_ready).map(|_stopped| ())
+    let outcome = start_a_session().and_then(|()| {
+        life_cycle::run(Mode::Background, settings, report_ready).map(|_stopped| ())
+    });
+    if let Err(failure) = &outcome {
+        tell_the_start_about(failure);
+    }
+    outcome
+}
+
+/// Tells the start that made this copy why the copy did not play.
+///
+/// The start writes the text for the user and ends with the status of the
+/// copy. Thus a refusal reaches the user with the words of a foreground
+/// refusal, and a failure of the copy is never silent (story 10).
+///
+/// A failure after the report of a copy that plays goes to the log, because
+/// the stdout of the copy is the log from that moment on.
+fn tell_the_start_about(failure: &Failure) {
+    let report = Handshake::Failed {
+        status: failure.status(),
+        message: failure.message().to_owned(),
+    };
+    let mut stdout = io::stdout().lock();
+    // A write that fails here has no other place to report. The start then
+    // finds no report, and it names the log of this copy.
+    let _ = stdout.write_all(report.line().as_bytes());
+    let _ = stdout.flush();
 }
 
 /// Puts this process into a session of its own, before it does anything else.
