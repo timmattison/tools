@@ -1056,45 +1056,6 @@ fn resolve_here_import(
     prepare_import(dest_projects_dir, &path, pwd, session_id, mode).map_err(HereResolveError::Io)
 }
 
-/// A caller-supplied `--here` new-session id that is not a valid UUID.
-#[derive(Debug, PartialEq, Eq)]
-struct InvalidNewSessionId;
-
-/// Validates the optional forked-session id a caller passed as the second
-/// `--here` argument.
-///
-/// Returns `Ok(None)` when none was supplied (so Claude mints a fresh random
-/// id), `Ok(Some(id))` when it is a valid UUID, and `Err(InvalidNewSessionId)`
-/// when one was supplied but is malformed. Validating up front keeps a bad id
-/// from ever reaching the shell function's `claude --session-id`.
-///
-/// # Errors
-///
-/// Returns [`InvalidNewSessionId`] if `new_session_id` is `Some` but not a UUID.
-fn resolve_new_session_id(
-    new_session_id: Option<&str>,
-) -> Result<Option<&str>, InvalidNewSessionId> {
-    match new_session_id {
-        None => Ok(None),
-        Some(id) if is_valid_session_id(id) => Ok(Some(id)),
-        Some(_) => Err(InvalidNewSessionId),
-    }
-}
-
-/// Whether pinning a `--here` fork to `new_session_id` would collide with an
-/// existing transcript.
-///
-/// `claude --session-id <id>` writes to `<id>.jsonl`, so reusing an id that
-/// already names a session would let the fork overwrite an unrelated
-/// conversation — the opposite of `--here`'s "leave the original untouched"
-/// guarantee. `None` (no forced id, Claude mints a random one) never collides.
-fn new_session_id_collides(projects_dir: &Path, new_session_id: Option<&str>) -> bool {
-    match new_session_id {
-        Some(id) => find_session_file(projects_dir, id).is_some(),
-        None => false,
-    }
-}
-
 /// The id of the fork that `--here` and the cross-user resume make.
 ///
 /// This module holds [`ForkId`] and the one function that makes it. The field
@@ -1148,39 +1109,59 @@ mod fork_id {
         },
     }
 
-    /// Chooses the id of a fork.
+    /// Chooses the id that a fork gets with `claude --session-id`.
     ///
-    /// Stub: it checks only a supplied id, as the code before it did.
+    /// The id is `supplied` when the user gave one. Otherwise `generate` makes
+    /// it, one time. Production passes a UUID v4 generator, and tests pass a
+    /// generator that gives a known id.
+    ///
+    /// The same two checks apply to a supplied id and to a generated id. The id
+    /// must be a valid session id, so no bad text gets to the shell function.
+    /// And the id must not name a transcript under `projects_dir`, because
+    /// `claude --session-id <id>` writes `<id>.jsonl` and thus overwrites that
+    /// conversation. The fork always lands in the current user's tree, so
+    /// `projects_dir` is that tree.
+    ///
+    /// The function does not retry a generated id. A UUID v4 collision does
+    /// not occur with a random source that works.
     ///
     /// # Errors
     ///
-    /// Returns [`ForkIdError`] when the id fails a check.
+    /// Returns [`ForkIdError::Invalid`] if the id is not a valid session id,
+    /// and [`ForkIdError::Exists`] if a transcript under `projects_dir` has
+    /// that id. Each tells whether the user supplied the id.
     pub fn choose_fork_id(
         projects_dir: &Path,
         supplied: Option<&str>,
         generate: impl FnOnce() -> String,
     ) -> Result<ForkId, ForkIdError> {
-        let Some(id) = supplied else {
-            return Ok(ForkId(generate()));
+        let (id, origin) = match supplied {
+            Some(id) => (id.to_string(), ForkIdOrigin::Supplied),
+            None => (generate(), ForkIdOrigin::Generated),
         };
-        let origin = ForkIdOrigin::Supplied;
-        if !is_valid_session_id(id) {
-            return Err(ForkIdError::Invalid {
-                id: id.to_string(),
-                origin,
-            });
+        if !is_valid_session_id(&id) {
+            return Err(ForkIdError::Invalid { id, origin });
         }
-        if find_session_file(projects_dir, id).is_some() {
-            return Err(ForkIdError::Exists {
-                id: id.to_string(),
-                origin,
-            });
+        if find_session_file(projects_dir, &id).is_some() {
+            return Err(ForkIdError::Exists { id, origin });
         }
-        Ok(ForkId(id.to_string()))
+        Ok(ForkId(id))
     }
 }
 
 use fork_id::{choose_fork_id, ForkId, ForkIdError, ForkIdOrigin};
+
+/// Chooses the fork id with [`choose_fork_id`] and a UUID v4 generator, or
+/// prints why the id is refused and exits.
+///
+/// `--here` and the cross-user resume both call this before they import
+/// anything, so a refusal leaves no stray symlink or copy.
+fn fork_id_or_exit(projects_dir: &Path, supplied: Option<&str>) -> ForkId {
+    match choose_fork_id(projects_dir, supplied, || uuid::Uuid::new_v4().to_string()) {
+        Ok(id) => id,
+        Err(err) => exit_with_failure(&describe_fork_id_error(&err)),
+    }
+}
 
 /// Returns the `~/.claude/sessions` directory, or `None` if the home directory
 /// cannot be determined.
@@ -1835,9 +1816,9 @@ struct Cli {
     /// Id to assign the forked session created by `--here` (must be a UUID).
     ///
     /// Only valid with `--here`. When given, the resumed fork is created with
-    /// this exact id (`claude --fork-session --session-id <id>`) instead of a
-    /// random one — useful when a caller needs to know the new id in advance.
-    /// Without it, Claude mints a fresh random id as before.
+    /// this exact id (`claude --fork-session --session-id <id>`) — useful when a
+    /// caller needs to know the new id in advance. Without it, `crap` generates
+    /// a random UUID and pins the fork to that id.
     #[arg(value_name = "NEW_SESSION_ID", requires = "here")]
     new_session_id: Option<String>,
 
@@ -1988,8 +1969,11 @@ fn exit_session_not_found(session_id: &str, roots: &[UserProjects], skipped: &[S
 
 /// Handles `crap --here <id> [<new-id>] [--user <name>]`: import the session
 /// into the current directory's project folder and emit the here-mode output
-/// the shell function consumes, optionally pinning the forked session's id to
-/// `new_session_id`.
+/// the shell function consumes.
+///
+/// The output always pins the fork to an id. That id is `new_session_id` when
+/// the user gave one, or else a UUID v4 that `crap` generates. Both go through
+/// [`fork_id_or_exit`], so the same checks apply to both.
 ///
 /// The session is located across `roots` (the current user's own tree, or a
 /// sibling's tree when `--user` was given). A same-user hit is symlinked; a
@@ -2011,32 +1995,10 @@ fn run_here(
         exit(exit_codes::HERE_PWD_UNAVAILABLE);
     };
 
-    // Validate the optional forced id before creating anything, so a bad id
-    // aborts without leaving a stray import behind.
-    let new_id = match resolve_new_session_id(new_session_id) {
-        Ok(id) => id,
-        Err(InvalidNewSessionId) => {
-            eprintln!(
-                "{} '{}' is not a valid session id",
-                "Error:".red().bold(),
-                new_session_id.unwrap_or_default()
-            );
-            exit(exit_codes::INVALID_SESSION_ID);
-        }
-    };
-
-    // Refuse to pin the fork to an id that already names a transcript: that
-    // would let `claude --session-id` overwrite an unrelated session. The fork
-    // lands in our own tree, so the collision is checked there.
-    if new_session_id_collides(dest_projects_dir, new_id) {
-        eprintln!(
-            "{} a session with id '{}' already exists",
-            "Error:".red().bold(),
-            new_id.unwrap_or_default()
-        );
-        eprintln!("       choose a fresh id so the fork does not overwrite it");
-        exit(exit_codes::NEW_SESSION_ID_EXISTS);
-    }
+    // Choose the fork id before anything is imported, so a refused id leaves
+    // no stray import. The fork lands in our own tree, so the collision check
+    // looks there.
+    let fork_id = fork_id_or_exit(dest_projects_dir, new_session_id);
 
     // Guard before creating anything, so an aborted resume leaves no stray link.
     abort_if_session_live(session_id, true, force);
@@ -2045,7 +2007,7 @@ fn run_here(
         Ok(link) => {
             print!(
                 "{}",
-                format_here_output(session_id, new_id, link.as_deref())
+                format_here_output(session_id, Some(fork_id.as_str()), link.as_deref())
             );
             exit(0);
         }
@@ -2129,6 +2091,9 @@ fn run_dir_status(projects_dir: &Path, json: bool) -> ! {
 /// What `crap` should print, and exit with, for a session it located but could
 /// not resolve to a usable working directory.
 ///
+/// A fork id that [`choose_fork_id`] refused uses the same shape, through
+/// [`describe_fork_id_error`].
+///
 /// Bundling the three facets of one answer — headline, detail, exit code — is
 /// what keeps them from drifting: the `--here` hint is only ever true advice
 /// when the *directory* is the problem (the transcript read fine, only its cwd
@@ -2202,21 +2167,49 @@ fn describe_resolve_error(session_id: &str, err: &ResolveError) -> ResolveFailur
 
 /// Maps a [`ForkIdError`] to the failure that `crap` prints and exits with.
 ///
-/// Stub: it gives every id the messages of a supplied id, as the code before it
-/// did.
+/// A supplied id keeps the messages and the exit codes that
+/// `crap --here <id> <new-id>` always had. A generated id gets its own words,
+/// because the user typed no id. So a message about a generated id says that
+/// `crap` generated it, and the advice for a generated collision is to run the
+/// command again, which generates a new id. The exit code depends only on the
+/// check that failed.
 fn describe_fork_id_error(err: &ForkIdError) -> ResolveFailure {
+    /// The hanging indent that aligns a detail line under the `Error:` prefix,
+    /// matching every other multi-line message in this binary.
+    const INDENT: &str = "       ";
+
     match err {
-        ForkIdError::Invalid { id, .. } => ResolveFailure {
-            headline: format!("'{id}' is not a valid session id"),
+        ForkIdError::Invalid { id, origin } => ResolveFailure {
+            headline: match origin {
+                ForkIdOrigin::Supplied => format!("'{id}' is not a valid session id"),
+                ForkIdOrigin::Generated => {
+                    format!("the generated fork id '{id}' is not a valid session id")
+                }
+            },
             detail: String::new(),
             code: exit_codes::INVALID_SESSION_ID,
         },
-        ForkIdError::Exists { id, .. } => ResolveFailure {
-            headline: format!("a session with id '{id}' already exists"),
-            detail: "       choose a fresh id so the fork does not overwrite it\n".to_string(),
-            code: exit_codes::NEW_SESSION_ID_EXISTS,
+        ForkIdError::Exists { id, origin } => match origin {
+            ForkIdOrigin::Supplied => ResolveFailure {
+                headline: format!("a session with id '{id}' already exists"),
+                detail: format!("{INDENT}choose a fresh id so the fork does not overwrite it\n"),
+                code: exit_codes::NEW_SESSION_ID_EXISTS,
+            },
+            ForkIdOrigin::Generated => ResolveFailure {
+                headline: format!("the generated fork id '{id}' already names a session"),
+                detail: format!("{INDENT}run the command again to get a new id\n"),
+                code: exit_codes::NEW_SESSION_ID_EXISTS,
+            },
         },
     }
+}
+
+/// Prints `failure` to stderr, with a red `Error:` prefix on the headline, and
+/// exits with its code.
+fn exit_with_failure(failure: &ResolveFailure) -> ! {
+    eprintln!("{} {}", "Error:".red().bold(), failure.headline);
+    eprint!("{}", failure.detail);
+    exit(failure.code);
 }
 
 /// Handles the default resume (`crap <id> [--user X]`): locate the session
@@ -2256,12 +2249,7 @@ fn run_resume(
         // `Error:` prefix and prints what it is handed. Keeping the mapping out of
         // this `match` is what stops the four cases — and in particular the
         // `--here` hint that only two of them carry — from drifting apart.
-        Err(err) => {
-            let failure = describe_resolve_error(session_id, &err);
-            eprintln!("{} {}", "Error:".red().bold(), failure.headline);
-            eprint!("{}", failure.detail);
-            exit(failure.code);
-        }
+        Err(err) => exit_with_failure(&describe_resolve_error(session_id, &err)),
     };
 
     if root.is_self {
@@ -2438,27 +2426,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_new_session_id_accepts_a_valid_uuid() {
-        // A well-formed UUID is passed through so `--here` can pin the fork.
-        assert_eq!(resolve_new_session_id(Some(ID_B)), Ok(Some(ID_B)));
-    }
-
-    #[test]
-    fn resolve_new_session_id_absent_is_none() {
-        // No second argument means Claude mints a fresh random id, as before.
-        assert_eq!(resolve_new_session_id(None), Ok(None));
-    }
-
-    #[test]
-    fn resolve_new_session_id_rejects_a_non_uuid() {
-        // A malformed id must be caught before it reaches `claude --session-id`.
-        assert_eq!(
-            resolve_new_session_id(Some("not-a-uuid")),
-            Err(InvalidNewSessionId)
-        );
-    }
-
-    #[test]
     fn here_accepts_session_and_new_id_positionals() {
         let cli = Cli::try_parse_from(["crap", "--here", ID_A, ID_B]).expect("should parse");
         assert!(cli.here);
@@ -2470,26 +2437,6 @@ mod tests {
     fn new_session_id_positional_requires_here() {
         // A forked id is meaningless without --here, so clap must reject it.
         assert!(Cli::try_parse_from(["crap", ID_A, ID_B]).is_err());
-    }
-
-    #[test]
-    fn new_session_id_collides_when_the_id_already_exists() {
-        // Pinning a fork to an id that already names a transcript would let it
-        // overwrite that conversation, so it must be reported as a collision.
-        let projects = tempdir().unwrap();
-        let folder = projects.path().join("some-project");
-        fs::create_dir_all(&folder).unwrap();
-        fs::write(folder.join(format!("{ID_B}.jsonl")), "{}\n").unwrap();
-        assert!(new_session_id_collides(projects.path(), Some(ID_B)));
-    }
-
-    #[test]
-    fn new_session_id_does_not_collide_when_unused_or_absent() {
-        let projects = tempdir().unwrap();
-        fs::create_dir_all(projects.path().join("some-project")).unwrap();
-        // An id no transcript uses is free, and "no forced id" never collides.
-        assert!(!new_session_id_collides(projects.path(), Some(ID_B)));
-        assert!(!new_session_id_collides(projects.path(), None));
     }
 
     /// Makes a projects tree that holds one transcript for each id in `ids`.
