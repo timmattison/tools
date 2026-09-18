@@ -364,6 +364,24 @@ mod tests {
         );
     }
 
+    /// A blank line, a line of spaces, and the spaces after a row are not
+    /// rows, and they are not errors. A second sample of blank lines only
+    /// holds no row.
+    #[test]
+    fn blank_lines_and_trailing_spaces_are_not_rows() {
+        let text = two_samples(
+            "10     9000000   \n",
+            "\n10     3         \n   \n\n20     4000\t  \n\n  \n",
+        );
+
+        let sample = parse(&text).expect("blank lines are not errors");
+
+        assert_eq!(sample.rows, [row(10, 3), row(20, 4_000)]);
+
+        let blank_only = two_samples("10     9000000   \n", "\n   \n\n");
+        assert_eq!(parse(&blank_only), Err(TopParseError::NoRows));
+    }
+
     /// Parses `text` as a [`Span`] for a test.
     fn span(text: &str) -> Span {
         text.parse().expect("the test gives a valid duration")
