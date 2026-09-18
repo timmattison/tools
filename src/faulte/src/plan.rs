@@ -91,7 +91,8 @@ pub struct Candidate {
 /// A session can fail more than one rule. Each session is in exactly one count
 /// here, under the first rule that [`plan`] tests and that the session fails.
 /// The order is the order of the fields: it runs `faulte`, it is too young, it
-/// is not idle, it is idle for too short a time, it has a live descendant.
+/// has no registry record, it is not idle, it is idle for too short a time, it
+/// has a live descendant.
 ///
 /// `faulte` comes first because a session that runs `faulte kill` holds
 /// `faulte` as a descendant. Under another order, every such session would
@@ -223,6 +224,9 @@ enum Refusal {
     RunsFaulte,
     /// The process is not older than the limit (rule 1).
     TooYoung,
+    /// The session has no registry record, so nothing proves it idle
+    /// (rule 2).
+    NoRecord,
     /// The status of the session is not `idle` (rule 2).
     NotIdle,
     /// The session became idle inside the limit, or at a time that the record
@@ -249,21 +253,29 @@ struct Limits {
     runs_faulte: HashSet<Pid>,
 }
 
+/// What the registry gives [`candidate_of`] for rule 2.
+#[derive(Debug, Clone, Copy)]
+enum Registry<'a> {
+    /// The record of the session gives this state. Rule 2 tests it.
+    Record(&'a SessionState),
+    /// The caller could read no record of the session. Nothing proves the
+    /// session idle, so it fails rule 2.
+    NoRecord,
+    /// The process belongs to another account, and the registry folder of
+    /// that account has the mode `0700`. Nothing can answer rule 2 without
+    /// root, so rule 2 is not tested.
+    OtherAccount,
+}
+
 /// Tests each rule of `faulte kill` against `row`, and gives the start time of
 /// the process when the row passes every rule.
 ///
-/// `state` is the state of the session. It is `None` for a process of another
-/// account, because the registry folder of that account has the mode `0700`.
-/// Rule 2 is then not tested: nothing can answer it without root.
+/// `registry` is what the registry gives for rule 2.
 ///
 /// The start time comes back because rule 1 proves that the row has one. Only
 /// the row of the kernel has no start time, and rule 1 refuses a row that has
 /// none.
-fn candidate_of(
-    row: &RankedRow,
-    state: Option<&SessionState>,
-    limits: &Limits,
-) -> Result<u64, Refusal> {
+fn candidate_of(row: &RankedRow, registry: Registry<'_>, limits: &Limits) -> Result<u64, Refusal> {
     if limits.runs_faulte.contains(&row.pid) {
         return Err(Refusal::RunsFaulte);
     }
@@ -273,13 +285,17 @@ fn candidate_of(
     if age_of(started_at_epoch_secs, limits.now_secs) <= limits.older_than {
         return Err(Refusal::TooYoung);
     }
-    if let Some(state) = state {
-        if !matches!(state, SessionState::Idle { .. }) {
-            return Err(Refusal::NotIdle);
+    match registry {
+        Registry::Record(state) => {
+            if !matches!(state, SessionState::Idle { .. }) {
+                return Err(Refusal::NotIdle);
+            }
+            if !state.is_idle_for_more_than(limits.idle_for) {
+                return Err(Refusal::IdleTooShort);
+            }
         }
-        if !state.is_idle_for_more_than(limits.idle_for) {
-            return Err(Refusal::IdleTooShort);
-        }
+        Registry::NoRecord => return Err(Refusal::NoRecord),
+        Registry::OtherAccount => {}
     }
     if limits.live_descendants.contains(&row.pid) {
         return Err(Refusal::LiveDescendant);
@@ -292,6 +308,7 @@ fn count_of(not_selected: &mut NotSelected, refusal: Refusal) -> &mut usize {
     match refusal {
         Refusal::RunsFaulte => &mut not_selected.runs_faulte,
         Refusal::TooYoung => &mut not_selected.too_young,
+        Refusal::NoRecord => &mut not_selected.no_record,
         Refusal::NotIdle => &mut not_selected.not_idle,
         Refusal::IdleTooShort => &mut not_selected.idle_too_short,
         Refusal::LiveDescendant => &mut not_selected.live_descendant,
@@ -302,7 +319,8 @@ fn count_of(not_selected: &mut NotSelected, refusal: Refusal) -> &mut usize {
 ///
 /// A row is a candidate only when its view is a session that `faulte` read a
 /// registry record for. A row with no record shows no session, so a stop of
-/// that row names a session that nothing proved.
+/// that row names a session that nothing proved. Rule 2 refuses such a row,
+/// and the plan counts it with the other sessions that it refused.
 #[must_use]
 pub fn plan(input: &PlanInput<'_>) -> Plan {
     let limits = Limits {
@@ -322,7 +340,7 @@ pub fn plan(input: &PlanInput<'_>) -> Plan {
                 state,
                 status_changed_at,
                 ..
-            } => match candidate_of(row, Some(state), &limits) {
+            } => match candidate_of(row, Registry::Record(state), &limits) {
                 Ok(started_at_epoch_secs) => candidates.push(Candidate {
                     row: row.clone(),
                     session: id.clone(),
@@ -331,15 +349,22 @@ pub fn plan(input: &PlanInput<'_>) -> Plan {
                 }),
                 Err(refusal) => *count_of(&mut not_selected, refusal) += 1,
             },
+            // Rule 2 refuses every row with no record, so the row is always
+            // in a count, under the first rule that it fails.
+            ClaudeView::NoRecord => {
+                if let Err(refusal) = candidate_of(row, Registry::NoRecord, &limits) {
+                    *count_of(&mut not_selected, refusal) += 1;
+                }
+            }
             // A process of another account passes the rules that `faulte` can
             // read, or it does not. Neither answer is a refusal of a session,
             // because no rule of the registry was read at all.
             ClaudeView::OtherAccount => {
-                if candidate_of(row, None, &limits).is_ok() {
+                if candidate_of(row, Registry::OtherAccount, &limits).is_ok() {
                     other_account.push(row.clone());
                 }
             }
-            ClaudeView::NotClaude | ClaudeView::NoRecord => {}
+            ClaudeView::NotClaude => {}
         }
     }
     // The person reads this order to decide. The PID breaks a tie, so two
@@ -722,16 +747,17 @@ mod tests {
     /// Each session that the plan refused is in exactly one count, under the
     /// first rule that it fails. A session can fail more than one rule, so the
     /// order of the rules decides the reason: it runs `faulte`, it is too
-    /// young, it is not idle, it is idle for too short a time, it has a live
-    /// descendant.
+    /// young, it has no registry record, it is not idle, it is idle for too
+    /// short a time, it has a live descendant.
     ///
     /// `faulte` comes first, and that is the half of rule 4 which rule 3
     /// cannot show. `faulte` is a live descendant of every ancestor of it, so
     /// every such session would report the wrong reason under another order.
     ///
-    /// A process that is not Claude Code, and a Claude Code process with no
-    /// registry record, are in no count. The plan never refused them, because
-    /// they were never sessions that it can stop.
+    /// A process that is not Claude Code is in no count. The plan never
+    /// refused it, because it was never a session that the plan can stop. A
+    /// young Claude Code process with no registry record is too young, the
+    /// same as a young session with a record.
     #[test]
     fn the_count_of_each_reason_is_the_first_rule_that_the_session_fails() {
         let ranking = ranking(vec![
@@ -778,7 +804,7 @@ mod tests {
             plan.not_selected,
             NotSelected {
                 runs_faulte: 2,
-                too_young: 2,
+                too_young: 3,
                 no_record: 0,
                 not_idle: 2,
                 idle_too_short: 2,

@@ -3901,7 +3901,7 @@ The registry of Claude Code is the one fact that stays out of reach. The `~/.cla
 `faulte kill` stops Claude Code sessions, and it never selects another kind of process. `pk` does that job. A session is a candidate when all four of these rules are true:
 
 1. The process is older than `--older-than` (7 days by default).
-2. The registry status is `idle`, and the session became idle more than `--idle-for` ago (10 minutes by default). A session whose idle time is unknown fails this rule.
+2. The registry status is `idle`, and the session became idle more than `--idle-for` ago (10 minutes by default). A session whose idle time is unknown fails this rule. A session with no registry record fails it too, because nothing proves that it is idle.
 3. No descendant of the session is alive. A background shell or a running tool call makes a session active, whatever its status says.
 4. The session is not the `faulte` process and not an ancestor of it. A session that runs `faulte kill` is never a candidate.
 
