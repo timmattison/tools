@@ -259,12 +259,26 @@ pub fn rank(input: &Observation<'_>) -> Ranking {
         .faults
         .iter()
         .fold(0_u64, |total, count| total.saturating_add(count.faults));
+    // A process of the sample that the table lacks stopped between the two
+    // reads. Its row would give no owner, no memory and no command, so it is
+    // a count and not a row.
+    let exited = input
+        .faults
+        .iter()
+        .filter(|count| count.pid != KERNEL_PID && !table.contains_key(&count.pid));
+    let (exited, exited_faults) = exited.fold((0, 0_u64), |(processes, faults), count| {
+        (processes + 1, faults.saturating_add(count.faults))
+    });
     Ranking {
         rows,
         window: input.window,
         total_faults,
         claude: ClaudeTotal::default(),
-        skipped: Skipped::default(),
+        skipped: Skipped {
+            exited,
+            exited_faults,
+            ..Skipped::default()
+        },
     }
 }
 
@@ -514,7 +528,12 @@ PID    FAULTS    \n\
     #[test]
     fn a_process_of_the_sample_that_the_table_lacks_exited() {
         let machine = Machine::new(
-            vec![count(0, 1_000), count(10, 500), count(99, 40), count(98, 60)],
+            vec![
+                count(0, 1_000),
+                count(10, 500),
+                count(99, 40),
+                count(98, 60),
+            ],
             vec![process(10)],
         );
 
