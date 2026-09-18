@@ -505,4 +505,24 @@ PID    FAULTS    \n\
             })
         );
     }
+
+    /// A process of the sample that the table does not hold stopped between
+    /// the two reads. It has no row, because the table gives its owner, its
+    /// memory and its command. The count says how many such processes there
+    /// were, and their faults say what share of the total they made. PID 0 is
+    /// not one of them.
+    #[test]
+    fn a_process_of_the_sample_that_the_table_lacks_exited() {
+        let machine = Machine::new(
+            vec![count(0, 1_329), count(10, 300), count(99, 40), count(98, 60)],
+            vec![process(10)],
+        );
+
+        let ranking = machine.rank();
+
+        assert_eq!(pids(&ranking), [0, 10]);
+        assert_eq!(ranking.skipped.exited, 2);
+        assert_eq!(ranking.skipped.exited_faults, 100);
+        assert_eq!(ranking.share(ranking.skipped.exited_faults), 0.0625);
+    }
 }
