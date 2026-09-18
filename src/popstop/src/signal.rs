@@ -55,7 +55,7 @@ impl KeepaliveSignal {
     /// The buffer holds `buffer.len() / channels` frames. Every channel of a
     /// frame gets the same value.
     pub fn fill(&mut self, buffer: &mut [f32], _channels: usize) {
-        buffer.fill(0.0);
+        buffer.fill(LEVEL);
     }
 }
 
