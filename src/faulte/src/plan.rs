@@ -133,15 +133,11 @@ fn epoch_seconds(now: SystemTime) -> u64 {
 /// Gives the age of a process that started at `started_at_epoch_secs`, at the
 /// time `now_secs`.
 ///
-/// A process with no start time has no age, and rule 1 refuses it. `ps` gives
-/// the start time of every process that it lists, so only the row of the
-/// kernel has none. A process that started after `now_secs` has no age either:
-/// the clock of this Mac can move back between the read of the table and the
-/// read of the time.
-fn age_of(started_at_epoch_secs: Option<u64>, now_secs: u64) -> Option<Duration> {
-    started_at_epoch_secs
-        .filter(|started| *started <= now_secs)
-        .map(|started| Duration::from_secs(now_secs - started))
+/// A process that started after `now_secs` has no age. The clock of this Mac
+/// can move back between the read of the table and the read of the time, and a
+/// process of no age passes no limit.
+fn age_of(started_at_epoch_secs: u64, now_secs: u64) -> Duration {
+    Duration::from_secs(now_secs.saturating_sub(started_at_epoch_secs))
 }
 
 /// Gives the parent of each process of `table`.
@@ -213,46 +209,121 @@ fn status_changed_at(state: &SessionState, now: SystemTime) -> Option<SystemTime
     }
 }
 
+/// The first rule of `faulte kill` that a session fails.
+///
+/// A session can fail more than one rule, and the plan reports the first one.
+/// The order of the variants is the order that [`candidate_of`] tests the
+/// rules in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refusal {
+    /// The session is `faulte`, or an ancestor of `faulte` (rule 4).
+    RunsFaulte,
+    /// The process is not older than the limit (rule 1).
+    TooYoung,
+    /// The status of the session is not `idle` (rule 2).
+    NotIdle,
+    /// The session became idle inside the limit, or at a time that the record
+    /// does not give (rule 2).
+    IdleTooShort,
+    /// The session has a live descendant (rule 3).
+    LiveDescendant,
+}
+
+/// Everything that [`candidate_of`] tests one row against.
+///
+/// The two sets of PIDs are one walk over the whole table each, so the rules
+/// read them and no rule walks the table again for each row.
+struct Limits {
+    /// The limit of rule 1.
+    older_than: Duration,
+    /// The limit of rule 2.
+    idle_for: Duration,
+    /// The time now, in seconds since the Unix epoch.
+    now_secs: u64,
+    /// The PID of every process that has a live descendant (rule 3).
+    live_descendants: HashSet<Pid>,
+    /// The PID of `faulte` and of each of its ancestors (rule 4).
+    runs_faulte: HashSet<Pid>,
+}
+
+/// Tests each rule of `faulte kill` against `row`, and gives the start time of
+/// the process when the row passes every rule.
+///
+/// `state` is the state of the session. It is `None` for a process of another
+/// account, because the registry folder of that account has the mode `0700`.
+/// Rule 2 is then not tested: nothing can answer it without root.
+///
+/// The start time comes back because rule 1 proves that the row has one. Only
+/// the row of the kernel has no start time, and rule 1 refuses a row that has
+/// none.
+fn candidate_of(
+    row: &RankedRow,
+    state: Option<&SessionState>,
+    limits: &Limits,
+) -> Result<u64, Refusal> {
+    if limits.runs_faulte.contains(&row.pid) {
+        return Err(Refusal::RunsFaulte);
+    }
+    let Some(started_at_epoch_secs) = row.started_at_epoch_secs else {
+        return Err(Refusal::TooYoung);
+    };
+    if age_of(started_at_epoch_secs, limits.now_secs) <= limits.older_than {
+        return Err(Refusal::TooYoung);
+    }
+    if let Some(state) = state {
+        if !matches!(state, SessionState::Idle { .. }) {
+            return Err(Refusal::NotIdle);
+        }
+        if !state.is_idle_for_more_than(limits.idle_for) {
+            return Err(Refusal::IdleTooShort);
+        }
+    }
+    if limits.live_descendants.contains(&row.pid) {
+        return Err(Refusal::LiveDescendant);
+    }
+    Ok(started_at_epoch_secs)
+}
+
+/// Gives the count of `refusal` in `not_selected`.
+fn count_of(not_selected: &mut NotSelected, refusal: Refusal) -> &mut usize {
+    match refusal {
+        Refusal::RunsFaulte => &mut not_selected.runs_faulte,
+        Refusal::TooYoung => &mut not_selected.too_young,
+        Refusal::NotIdle => &mut not_selected.not_idle,
+        Refusal::IdleTooShort => &mut not_selected.idle_too_short,
+        Refusal::LiveDescendant => &mut not_selected.live_descendant,
+    }
+}
+
 /// Gives the plan of `faulte kill` over `input`.
+///
+/// A row is a candidate only when its view is a session that `faulte` read a
+/// registry record for. A row with no record shows no session, so a stop of
+/// that row names a session that nothing proved.
 #[must_use]
 pub fn plan(input: &PlanInput<'_>) -> Plan {
-    let older_than = Duration::from(input.rules.older_than);
-    let idle_for = Duration::from(input.rules.idle_for);
-    let now_secs = epoch_seconds(input.now);
-    let live_descendants = pids_with_a_live_descendant(input.table);
-    let runs_faulte = faulte_and_its_ancestors(input.table, input.faulte);
+    let limits = Limits {
+        older_than: Duration::from(input.rules.older_than),
+        idle_for: Duration::from(input.rules.idle_for),
+        now_secs: epoch_seconds(input.now),
+        live_descendants: pids_with_a_live_descendant(input.table),
+        runs_faulte: faulte_and_its_ancestors(input.table, input.faulte),
+    };
     let mut candidates = Vec::new();
+    let mut not_selected = NotSelected::default();
     for row in &input.ranking.rows {
-        // Only a session that `faulte` read a registry record for can be a
-        // candidate. A row with no record shows no session, so a stop of that
-        // row names a session that nothing proved.
         let ClaudeView::Session { id, state, .. } = &row.claude else {
             continue;
         };
-        if runs_faulte.contains(&row.pid) {
-            continue;
+        match candidate_of(row, Some(state), &limits) {
+            Ok(started_at_epoch_secs) => candidates.push(Candidate {
+                row: row.clone(),
+                session: id.clone(),
+                started_at_epoch_secs,
+                status_changed_at: status_changed_at(state, input.now),
+            }),
+            Err(refusal) => *count_of(&mut not_selected, refusal) += 1,
         }
-        let (Some(age), Some(started_at_epoch_secs)) = (
-            age_of(row.started_at_epoch_secs, now_secs),
-            row.started_at_epoch_secs,
-        ) else {
-            continue;
-        };
-        if age <= older_than {
-            continue;
-        }
-        if !state.is_idle_for_more_than(idle_for) {
-            continue;
-        }
-        if live_descendants.contains(&row.pid) {
-            continue;
-        }
-        candidates.push(Candidate {
-            row: row.clone(),
-            session: id.clone(),
-            started_at_epoch_secs,
-            status_changed_at: status_changed_at(state, input.now),
-        });
     }
     // The person reads this order to decide. The PID breaks a tie, so two
     // runs over the same sources agree on the order.
@@ -272,7 +343,7 @@ pub fn plan(input: &PlanInput<'_>) -> Plan {
     Plan {
         candidates,
         held_back_by_max,
-        not_selected: NotSelected::default(),
+        not_selected,
         other_account: Vec::new(),
         rules: input.rules,
     }
