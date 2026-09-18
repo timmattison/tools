@@ -182,6 +182,9 @@ impl Ranking {
     /// does now.
     #[must_use]
     pub fn faults_per_second(&self, faults: u64) -> f64 {
+        if self.window.is_zero() {
+            return 0.0;
+        }
         faults as f64 / self.window.as_secs_f64()
     }
 
