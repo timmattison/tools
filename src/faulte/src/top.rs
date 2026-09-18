@@ -124,12 +124,21 @@ pub enum TopParseError {
 /// `PID FAULTS`, or when the second sample holds no row or a malformed row.
 pub fn parse(output: &str) -> Result<TopSample, TopParseError> {
     let lines: Vec<&str> = output.lines().collect();
-    let headers: Vec<usize> = lines
+    let headers = lines
         .iter()
         .enumerate()
         .filter(|(_, line)| is_header_row(line))
-        .map(|(index, _)| index)
-        .collect();
+        .map(|(index, line)| {
+            if line.split_whitespace().eq(HEADER) {
+                Ok(index)
+            } else {
+                Err(TopParseError::UnexpectedHeader {
+                    number: index + 1,
+                    line: (*line).to_owned(),
+                })
+            }
+        })
+        .collect::<Result<Vec<usize>, _>>()?;
     let [_, second_header] = headers[..] else {
         return Err(TopParseError::SampleCount {
             found: headers.len(),
@@ -157,6 +166,10 @@ const PID_HEADER: &str = "PID";
 
 /// The token that `top` prints in the header row for the column `faults`.
 const FAULTS_HEADER: &str = "FAULTS";
+
+/// The header row that `top` prints for [`STATS`], as tokens. The parser
+/// compares tokens, so the column widths of `top` do not matter.
+const HEADER: [&str; 2] = [PID_HEADER, FAULTS_HEADER];
 
 /// Tells whether `line` is a header row: its first token is `PID`. No other
 /// line of the output starts with that token.
