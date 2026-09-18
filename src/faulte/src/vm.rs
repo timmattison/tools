@@ -136,4 +136,22 @@ mod tests {
         assert_eq!(counters.compressor_bytes(4_096), 8_589_934_592);
         assert_eq!(VmCounters::default().compressor_bytes(16_384), 0);
     }
+
+    /// A count of pages that no memory can hold gives the largest number, and
+    /// not a panic. `host_statistics64` fills a field of 32 bits, so this
+    /// state needs a caller that gives a page size which is wrong. The
+    /// multiplication panics in a build with the checks on, and gives a small
+    /// number in a build without them.
+    #[test]
+    fn a_size_of_the_compressor_that_does_not_fit_gives_the_largest_number() {
+        let counters = VmCounters {
+            swapins: 0,
+            swapouts: 0,
+            compressor_pages: u64::MAX,
+        };
+
+        assert_eq!(counters.compressor_bytes(16_384), u64::MAX);
+        assert_eq!(counters.compressor_bytes(1), u64::MAX);
+        assert_eq!(counters.compressor_bytes(0), 0);
+    }
 }
