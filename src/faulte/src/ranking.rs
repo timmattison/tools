@@ -384,6 +384,17 @@ PID    FAULTS    \n\
         }
     }
 
+    /// The UID of the other account of the tests.
+    const OTHER_UID: u32 = 502;
+
+    /// Gives the table row of `pid`, owned by the other account.
+    fn other_account(pid: u32) -> ProcessRow {
+        ProcessRow {
+            uid: Uid::new(OTHER_UID),
+            ..process(pid)
+        }
+    }
+
     /// Gives the table row of a zombie: a process that stopped, and whose
     /// parent did not collect its exit status yet.
     fn zombie(pid: u32) -> ProcessRow {
@@ -787,6 +798,29 @@ PID    FAULTS    \n\
         assert_eq!(pids(&ranking), [30, 31]);
         for row in &ranking.rows {
             assert_eq!(row.claude, ClaudeView::NoRecord, "the row {row:?}");
+        }
+    }
+
+    /// A Claude Code process of another account shows that account, and not a
+    /// session. The registry folder of that account has the mode `0700`, so a
+    /// viewer without root reads no record of it. A record that the caller
+    /// did hold is about a process of the viewer under the same PID, or about
+    /// a dead session, so the account comes before the record.
+    #[test]
+    fn a_claude_process_of_another_account_shows_the_account_and_not_a_session() {
+        let machine = Machine::new(
+            vec![count(40, 300), count(41, 200)],
+            vec![other_account(40), other_account(41)],
+        )
+        .with_claude(40, ClaudeRole::Unreadable)
+        .with_claude(41, ClaudeRole::Session)
+        .with_record(41, idle_record(Duration::from_secs(600)));
+
+        let ranking = machine.rank();
+
+        assert_eq!(pids(&ranking), [40, 41]);
+        for row in &ranking.rows {
+            assert_eq!(row.claude, ClaudeView::OtherAccount, "the row {row:?}");
         }
     }
 }
