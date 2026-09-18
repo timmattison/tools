@@ -39,10 +39,19 @@ pub struct ProcessRow {
 
 /// The reason why the output of `ps` is not a process table that `faulte` can
 /// use.
+///
+/// The parser fails closed. An output that it does not know is an error, never
+/// a table that lacks a row. A missing row makes a process of the fault sample
+/// look as if it exited, and a missing parent hides a descendant of a session
+/// that `faulte kill` must keep.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TableParseError {
-    /// The output holds no row.
-    #[error("ps listed no process")]
+    /// The output holds no row. A Mac always runs processes, so the output is
+    /// incomplete.
+    #[error(
+        "ps listed no process: a Mac always runs processes, so the output is incomplete, and \
+         faulte does not use an empty process table"
+    )]
     NoRows,
     /// A line holds fewer tokens than the columns before the command.
     #[error(
@@ -97,16 +106,41 @@ const RSS_COLUMN: &str = "rss";
 
 /// Reads the process table from the output of `ps`.
 ///
+/// Each line that is not blank is one row, in the order of `ps`. A row is ten
+/// tokens, then the command. The tokens are the PID, the parent, the UID, the
+/// RSS, the state, and the five tokens of the start time, for example
+/// `Mon Sep  7 16:30:07 2026`. The parser splits on ASCII white space and
+/// reads tokens, not positions, because `ps` pads a day of one digit with a
+/// space.
+///
+/// The command is the rest of the line, without the white space before and
+/// after it. It keeps the spaces inside it, and it can be empty.
+///
 /// # Errors
 ///
-/// None yet.
+/// The parser reads the lines in order, and the first line that fails gives
+/// the error. In one line, it checks in this order:
+///
+/// 1. [`TableParseError::TooFewFields`]: the line holds fewer than ten tokens.
+/// 2. [`TableParseError::MalformedNumber`]: the PID, the parent, the UID, or
+///    the RSS, in that order, is not ASCII digits of its type. A UID can also
+///    be a minus and the digits of a negative 32-bit value.
+/// 3. [`TableParseError::MalformedStart`]: the start time does not parse, or
+///    it is before 1970.
+///
+/// When every line passes, [`TableParseError::NoRows`] means that the output
+/// holds no row.
 pub fn parse(output: &str) -> Result<Vec<ProcessRow>, TableParseError> {
-    output
+    let rows: Vec<ProcessRow> = output
         .lines()
         .enumerate()
         .filter(|(_, line)| !line.trim_ascii().is_empty())
         .map(|(index, line)| parse_row(line).map_err(|fault| fault.at(index + 1, line)))
-        .collect()
+        .collect::<Result<_, _>>()?;
+    if rows.is_empty() {
+        return Err(TableParseError::NoRows);
+    }
+    Ok(rows)
 }
 
 /// The reason why one line is not a row.
