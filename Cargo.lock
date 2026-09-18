@@ -2334,6 +2334,7 @@ dependencies = [
  "buildinfo",
  "chrono",
  "clap",
+ "comfy-table",
  "occ",
  "thiserror 2.0.20",
 ]
