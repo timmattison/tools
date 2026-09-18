@@ -1,4 +1,5 @@
-//! The process table: the parser of the output of `/bin/ps`.
+//! The process table: the command line of `/bin/ps`, and the parser of its
+//! output.
 //!
 //! `/bin/ps` is setuid root, and it carries the entitlement
 //! `com.apple.system-task-ports.read`. Thus a `ps` that an account without
@@ -17,17 +18,86 @@ use chrono::NaiveDateTime;
 
 use crate::pid::{Pid, Uid};
 
-/// The path of the process table.
+/// The path of the process table. A `ps` found on the `PATH` can be a
+/// different program with a different output, so `faulte` names the one of
+/// macOS. That one is setuid root, and it carries the entitlement.
 pub const PROGRAM: &str = "/bin/ps";
 
+/// The column of the PID, as `ps -o` names it.
+const PID_COLUMN: &str = "pid";
+
+/// The column of the PID of the parent.
+const PPID_COLUMN: &str = "ppid";
+
+/// The column of the UID of the owner.
+const UID_COLUMN: &str = "uid";
+
+/// The column of the resident memory, in KiB.
+const RSS_COLUMN: &str = "rss";
+
+/// The column of the state. A zombie has a state that starts with `Z`.
+const STAT_COLUMN: &str = "stat";
+
+/// The column of the start time, in five tokens.
+const LSTART_COLUMN: &str = "lstart";
+
+/// The column of the arguments. It is the last column, because the arguments
+/// can hold spaces.
+const ARGS_COLUMN: &str = "args";
+
+/// The columns of a row, in the order that [`parse`] reads them.
+const COLUMNS: [&str; 7] = [
+    PID_COLUMN,
+    PPID_COLUMN,
+    UID_COLUMN,
+    RSS_COLUMN,
+    STAT_COLUMN,
+    LSTART_COLUMN,
+    ARGS_COLUMN,
+];
+
+/// The text after the name of a column in `-o` that gives the column an empty
+/// header. When every header is empty, `ps` prints no header line.
+const EMPTY_HEADER: &str = "=";
+
 /// Gives the arguments of [`PROGRAM`].
+///
+/// `-A` asks for every process of every account. `-ww` removes the limit on
+/// the width, so `ps` does not cut the arguments. `-o` asks for the columns
+/// of a row, each with an empty header, in the order that [`parse`] reads
+/// them.
+///
+/// The caller also sets [`ENVIRONMENT`] on the child.
 #[must_use]
 pub fn arguments() -> Vec<String> {
-    Vec::new()
+    let columns = COLUMNS
+        .map(|column| format!("{column}{EMPTY_HEADER}"))
+        .join(",");
+    vec![
+        "-A".to_owned(),
+        "-ww".to_owned(),
+        "-o".to_owned(),
+        columns,
+    ]
 }
 
-/// The environment that the caller sets on the child.
-pub const ENVIRONMENT: [(&str, &str); 2] = [("", ""), ("", "")];
+/// The variables that the caller sets in the environment of [`PROGRAM`].
+///
+/// `ps` prints the start time in the local zone, and names no zone. When
+/// daylight saving time ends, one hour of local times occurs twice, so a
+/// local start time can name two instants. UTC has no such change, so
+/// `TZ=UTC` gives one instant for each start time.
+///
+/// The locale sets the names of the days and the months, and the layout of
+/// the start time. `LC_ALL=C` gives the English names and the layout that the
+/// parser reads, whatever locale the user set. `LC_ALL` has priority over
+/// every other locale variable.
+///
+/// In the C locale, `ps` also writes each byte of the arguments outside
+/// printable ASCII as an escape. A newline is `\012`, and the two bytes of
+/// `é` are `M-CM-)`. Thus a newline in an argument cannot split a row, and
+/// the command is ASCII.
+pub const ENVIRONMENT: [(&str, &str); 2] = [("TZ", "UTC"), ("LC_ALL", "C")];
 
 /// One process, as one line of the output of `ps`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,18 +173,6 @@ pub enum TableParseError {
         line: String,
     },
 }
-
-/// The column of the PID, as `ps -o` names it.
-const PID_COLUMN: &str = "pid";
-
-/// The column of the PID of the parent.
-const PPID_COLUMN: &str = "ppid";
-
-/// The column of the UID of the owner.
-const UID_COLUMN: &str = "uid";
-
-/// The column of the resident memory, in KiB.
-const RSS_COLUMN: &str = "rss";
 
 /// Reads the process table from the output of `ps`.
 ///
