@@ -473,4 +473,27 @@ mod tests {
         signal.fill(&mut [], 0);
         signal.fill(&mut [], 2);
     }
+
+    #[test]
+    fn a_sample_rate_must_be_finite_and_larger_than_zero() {
+        for hz in [
+            0.0,
+            -0.0,
+            -1.0,
+            -48_000.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            assert_eq!(SampleRate::new(hz), None, "{hz} Hz is not a sample rate");
+        }
+
+        for hz in [f64::MIN_POSITIVE, 1.0, 44_100.0, 48_000.0, f64::MAX] {
+            assert_eq!(
+                SampleRate::new(hz).map(SampleRate::hz),
+                Some(hz),
+                "{hz} Hz is a sample rate"
+            );
+        }
+    }
 }
