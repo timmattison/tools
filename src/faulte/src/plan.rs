@@ -254,9 +254,24 @@ pub fn plan(input: &PlanInput<'_>) -> Plan {
             status_changed_at: status_changed_at(state, input.now),
         });
     }
+    // The person reads this order to decide. The PID breaks a tie, so two
+    // runs over the same sources agree on the order.
+    candidates.sort_by(|left, right| {
+        left.started_at_epoch_secs
+            .cmp(&right.started_at_epoch_secs)
+            .then_with(|| left.row.pid.cmp(&right.row.pid))
+    });
+    let held_back_by_max = match input.rules.max {
+        Some(max) if max < candidates.len() => {
+            let held_back = candidates.len() - max;
+            candidates.truncate(max);
+            held_back
+        }
+        _ => 0,
+    };
     Plan {
         candidates,
-        held_back_by_max: 0,
+        held_back_by_max,
         not_selected: NotSelected::default(),
         other_account: Vec::new(),
         rules: input.rules,
