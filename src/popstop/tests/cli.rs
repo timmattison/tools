@@ -196,6 +196,22 @@ impl Copy {
     }
 }
 
+/// Runs popstop with `arguments` and gives its exit status and its stdout.
+///
+/// The arguments of these runs end before popstop takes a lock or opens a
+/// device, thus the run needs no state directory.
+fn ask(arguments: &[&str]) -> (ExitStatus, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_popstop"))
+        .args(arguments)
+        .stdin(Stdio::null())
+        .output()
+        .expect("start popstop");
+    (
+        output.status,
+        String::from_utf8(output.stdout).expect("the output of popstop is UTF-8"),
+    )
+}
+
 /// Gives the record of the copy that holds the lock in `dir`.
 fn holder(dir: &Path) -> Option<HolderRecord> {
     current_holder(&StateDir::new(dir.to_path_buf())).expect("read the lock file")
@@ -252,6 +268,37 @@ fn a_hangup_stops_a_foreground_copy() {
 #[test]
 fn a_termination_signal_stops_a_foreground_copy() {
     a_signal_stops_a_foreground_copy(SIGTERM);
+}
+
+#[test]
+fn the_help_lists_the_five_exit_statuses_and_hides_the_flags_of_the_tests() {
+    let (status, help) = ask(&["--help"]);
+
+    assert!(status.success(), "popstop --help failed: {status}");
+    let statuses: Vec<&str> = help
+        .lines()
+        .skip_while(|line| line.trim() != "Exit status:")
+        .skip(1)
+        .map_while(|line| line.split_whitespace().next())
+        .collect();
+    assert_eq!(
+        statuses,
+        ["0", "1", "2", "3", "4"],
+        "the help lists each exit status, in order:\n{help}"
+    );
+    for hidden in ["--state-dir", "--exit-after"] {
+        assert!(
+            !help.contains(hidden),
+            "the help shows {hidden}, which exists for the tests:\n{help}"
+        );
+    }
+
+    let (status, _) = ask(&["--no-such-flag"]);
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "the help calls 2 a usage error, so an unknown flag ends with 2"
+    );
 }
 
 #[test]
