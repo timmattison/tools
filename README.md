@@ -1890,7 +1890,44 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     `WN_PLAN_MODEL=opus wn`
   - To install: `cargo install --git https://github.com/timmattison/tools wn`
 - popstop (pop stop)
-  - Keeps the default audio output device awake with a signal that is too small to hear, so USB speakers do not pop and do not lose the start of a sound.
+  - Keeps the default audio output device awake with a signal that is too small to hear, so USB
+    speakers do not pop and do not lose the start of a sound. macOS stops the audio stream to an
+    output device a few seconds after the last sound, and the next sound starts the stream again.
+    On USB speakers that restart costs the first 200 ms to 500 ms of the sound, and the speakers
+    make a pop. `popstop` holds one stream open, so the device never goes to sleep and never
+    restarts. macOS only.
+  - The signal is a constant offset at 2^-12 of full scale, which is about -72 dBFS, with a 50 ms
+    ramp at the start and at the stop. The offset is at 0 Hz, which is outside the range of hearing
+    at any level, and a sample-rate converter cannot remove it the way it removes a tone near the
+    Nyquist frequency. The ramps remove the step that a start or a stop makes, because a step is a
+    click, and a click is the failure that popstop exists to remove. The level is not zero, because
+    a device can treat a stream of exact zeros as no signal.
+  - **This Mac does not idle sleep while popstop runs**, and popstop says so at every start. The
+    process holds no power assertion of its own. `coreaudiod` holds one for the open stream:
+    `pmset -g assertions` names it `PreventUserIdleSystemSleep` with the device in the name, and it
+    names popstop as the process it was created for. The display still sleeps, and a sleep from the
+    Apple menu still works. That effect is the reason the foreground run is the default: a copy that
+    holds a terminal is a copy that nobody forgets.
+  - popstop follows the default output device. A change of the device moves the stream, and the
+    power assertion follows it, with no restart. Measured on a Mac mini: 0.0% CPU over 66 s, and
+    17.3 MB resident.
+  - Only one copy runs for each user. The copy holds an exclusive lock on a file in
+    `~/Library/Application Support/popstop/`, and it writes its PID, its mode, and its start time
+    into that file. The kernel releases the lock when the process ends for any cause, `SIGKILL`
+    included, so a crash leaves no lock to clean up by hand. A second start refuses with exit status
+    3, names the copy that runs, and gives the command that stops it. `--stop` compares the start
+    time of that PID before it sends a signal, so a PID that the system gave to another process
+    never gets one.
+  - Exit status: 0 success, 1 an error, 2 a usage error, 3 another copy runs, 4 `--status` with no
+    copy. `--stop` gives 0 when no copy runs, so a stop is idempotent, and a script reads
+    `--status` through its exit status and parses no text.
+  - Usage: `popstop` (runs in the foreground until Ctrl-C, and stops when the terminal closes),
+    `popstop --background` (starts a copy that has no terminal and returns only after that copy
+    plays), `popstop --stop`, `popstop --status`. A background copy writes its output to
+    `popstop.log` beside the lock file, and each background start empties that log.
+  - The idea comes from [eamq/mac-audio-keepalive](https://github.com/eamq/mac-audio-keepalive)
+    (MIT), which solves the same problem with a clone, a shell script, and a `launchd` service.
+    popstop is new code with the same purpose, and it installs with `cargo install`.
   - To install: `cargo install --git https://github.com/timmattison/tools popstop`
 
 ## dirhash
