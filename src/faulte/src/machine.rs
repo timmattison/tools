@@ -27,8 +27,12 @@ use crate::duration::Span;
 /// hour that no process was running for. `elapsed` of `None` gives the
 /// interval, because the output then states no times to subtract.
 #[must_use]
-pub fn sample_window(interval: Span, _elapsed: Option<Duration>, _wall: Duration) -> Duration {
-    Duration::from(interval)
+pub fn sample_window(interval: Span, elapsed: Option<Duration>, wall: Duration) -> Duration {
+    let interval = Duration::from(interval);
+    match elapsed {
+        Some(elapsed) => interval.max(elapsed.min(wall)),
+        None => interval,
+    }
 }
 
 #[cfg(test)]
