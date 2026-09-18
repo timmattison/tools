@@ -64,8 +64,14 @@ pub enum Decision {
 /// to stop, so a run through a pipe did everything that it could do and the
 /// run is a success.
 #[must_use]
-pub fn decide(_candidates: usize, _stdin_is_terminal: bool) -> Decision {
-    Decision::Ask
+pub fn decide(candidates: usize, stdin_is_terminal: bool) -> Decision {
+    if candidates == 0 {
+        Decision::NothingToStop
+    } else if stdin_is_terminal {
+        Decision::Ask
+    } else {
+        Decision::NotATerminal
+    }
 }
 
 /// What the check immediately before a signal decided about one candidate.
