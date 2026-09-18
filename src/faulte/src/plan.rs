@@ -319,17 +319,15 @@ pub fn plan(input: &PlanInput<'_>) -> Plan {
                 state,
                 status_changed_at,
                 ..
-            } => {
-                match candidate_of(row, Some(state), &limits) {
-                    Ok(started_at_epoch_secs) => candidates.push(Candidate {
-                        row: row.clone(),
-                        session: id.clone(),
-                        started_at_epoch_secs,
-                        status_changed_at: *status_changed_at,
-                    }),
-                    Err(refusal) => *count_of(&mut not_selected, refusal) += 1,
-                }
-            }
+            } => match candidate_of(row, Some(state), &limits) {
+                Ok(started_at_epoch_secs) => candidates.push(Candidate {
+                    row: row.clone(),
+                    session: id.clone(),
+                    started_at_epoch_secs,
+                    status_changed_at: *status_changed_at,
+                }),
+                Err(refusal) => *count_of(&mut not_selected, refusal) += 1,
+            },
             // A process of another account passes the rules that `faulte` can
             // read, or it does not. Neither answer is a refusal of a session,
             // because no rule of the registry was read at all.

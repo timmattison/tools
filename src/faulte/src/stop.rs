@@ -752,7 +752,12 @@ mod tests {
         let candidate = candidate(30);
         let machine = machine_of(&[30], vec![vec![process(30, LAUNCHD_PID)], Vec::new()]);
 
-        let report = stop(&machine, &[candidate.clone()], ONE_POLL, ONE_POLL);
+        let report = stop(
+            &machine,
+            std::slice::from_ref(&candidate),
+            ONE_POLL,
+            ONE_POLL,
+        );
 
         assert_eq!(
             report,
@@ -846,7 +851,12 @@ mod tests {
             ],
         );
 
-        let report = stop(&machine, &[candidate.clone()], THREE_POLLS, ONE_POLL);
+        let report = stop(
+            &machine,
+            std::slice::from_ref(&candidate),
+            THREE_POLLS,
+            ONE_POLL,
+        );
 
         assert_eq!(
             report,
@@ -896,7 +906,12 @@ mod tests {
         for (table_holds, gone) in cases {
             let machine = machine_of(&[30], vec![vec![process(30, LAUNCHD_PID)], gone]);
 
-            let report = stop(&machine, &[candidate.clone()], THREE_POLLS, ONE_POLL);
+            let report = stop(
+                &machine,
+                std::slice::from_ref(&candidate),
+                THREE_POLLS,
+                ONE_POLL,
+            );
 
             assert_eq!(
                 report,
@@ -927,7 +942,12 @@ mod tests {
         let candidate = candidate(30);
         let machine = machine_of(&[30], vec![vec![process(30, LAUNCHD_PID)]]);
 
-        let report = stop(&machine, &[candidate.clone()], ONE_POLL, ONE_POLL);
+        let report = stop(
+            &machine,
+            std::slice::from_ref(&candidate),
+            ONE_POLL,
+            ONE_POLL,
+        );
 
         assert_eq!(
             report,
@@ -953,7 +973,7 @@ mod tests {
 
     /// Gives the error of a signal to `pid` that the operating system refused.
     fn refused(pid: u32) -> MachineError {
-        MachineError::KernelRead {
+        MachineError::SignalFailed {
             call: format!("kill({pid}, SIGTERM)"),
             reason: NOT_PERMITTED.to_owned(),
         }
@@ -1051,7 +1071,7 @@ mod tests {
         assert_eq!(before.signals(), Vec::new(), "no signal goes at all");
         assert_eq!(before.sleeps(), 0, "the sequence waits for nothing");
 
-        let inside = machine_of(&[30, 40], vec![alive.clone()]).then_failing(unreadable_table());
+        let inside = machine_of(&[30, 40], vec![alive]).then_failing(unreadable_table());
         let report = stop(&inside, &both, THREE_POLLS, ONE_POLL);
         assert_eq!(
             report,
@@ -1102,7 +1122,12 @@ mod tests {
         let candidate = candidate(30);
         let machine = machine_of(&[30], vec![vec![process(30, LAUNCHD_PID)], Vec::new()]);
 
-        let report = stop(&machine, &[candidate.clone()], FULL_GRACE, ONE_POLL);
+        let report = stop(
+            &machine,
+            std::slice::from_ref(&candidate),
+            FULL_GRACE,
+            ONE_POLL,
+        );
 
         assert_eq!(
             report,

@@ -244,7 +244,7 @@ impl Machine for Mac {
         // far below the largest one. A number that does not fit is not a PID
         // at all, and a negative first argument of `kill` names a group of
         // processes.
-        let target = libc::pid_t::try_from(pid.get()).map_err(|_| MachineError::KernelRead {
+        let target = libc::pid_t::try_from(pid.get()).map_err(|_| MachineError::SignalFailed {
             call: call(),
             reason: format!("the number {pid} is not a PID"),
         })?;
@@ -252,7 +252,7 @@ impl Machine for Mac {
         // pointer and writes no memory of this process.
         let answer = unsafe { libc::kill(target, number) };
         if answer != 0 {
-            return Err(MachineError::KernelRead {
+            return Err(MachineError::SignalFailed {
                 call: call(),
                 reason: io::Error::last_os_error().to_string(),
             });

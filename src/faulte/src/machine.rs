@@ -79,6 +79,19 @@ pub enum MachineError {
         /// What the operating system said.
         reason: String,
     },
+    /// A signal to a process failed.
+    ///
+    /// A signal is not a read, and the message of a failed read names a fact
+    /// that did not happen: `faulte cannot read kill(105, SIGTERM)`. A person
+    /// reads this message in the report of a stop, beside the sessions that
+    /// stopped, so it names the call that failed and nothing else.
+    #[error("{call} failed: {reason}")]
+    SignalFailed {
+        /// The call that `faulte` made, for example `kill(105, SIGTERM)`.
+        call: String,
+        /// What the operating system said.
+        reason: String,
+    },
 }
 
 /// The signal that `faulte kill` sends to a session.

@@ -721,7 +721,11 @@ fn other_account_block(plan: &Plan) -> Option<String> {
 /// the same line. The caller flushes the output before it reads the answer.
 #[must_use]
 pub fn question(count: usize) -> String {
-    String::new()
+    format!(
+        "Stop {} {}? [y/N] ",
+        count_of(count),
+        plural(count, SESSION, SESSIONS)
+    )
 }
 
 /// Gives what one run of the stop sequence did, as a person reads it.
@@ -736,7 +740,75 @@ pub fn question(count: usize) -> String {
 /// so that command takes the session up again.
 #[must_use]
 pub fn stopped(report: &StopReport) -> String {
-    String::new()
+    let after_term = report.stopped.len();
+    let after_kill = report.killed.len();
+    let stopped = after_term + after_kill;
+    let named = stopped + report.skipped.len() + report.survived.len() + report.failed.len();
+
+    let mut lines = vec![if after_kill == 0 {
+        format!(
+            "faulte stopped {} of {} {}.",
+            count_of(stopped),
+            count_of(named),
+            plural(named, SESSION, SESSIONS)
+        )
+    } else {
+        format!(
+            "faulte stopped {} of {} {}: {} after {TERMINATE}, and {} after {KILL}.",
+            count_of(stopped),
+            count_of(named),
+            plural(named, SESSION, SESSIONS),
+            count_of(after_term),
+            count_of(after_kill),
+        )
+    }];
+    for (candidate, refused) in &report.skipped {
+        lines.push(format!("{}: {}.", candidate.row.pid, refusal(*refused)));
+    }
+    for candidate in &report.survived {
+        lines.push(format!("{}: {SURVIVED}.", candidate.row.pid));
+    }
+    for (candidate, error) in &report.failed {
+        lines.push(format!("{}: {error}.", candidate.row.pid));
+    }
+    if stopped > 0 {
+        lines.push(String::new());
+        lines.push(TRANSCRIPTS.to_owned());
+        for candidate in report.stopped.iter().chain(&report.killed) {
+            lines.push(format!("{RESUME} {}", candidate.session));
+        }
+    }
+    lines.join("\n")
+}
+
+/// The name of the signal that `faulte` sends first.
+const TERMINATE: &str = "SIGTERM";
+
+/// The name of the signal that `faulte` sends after the grace period.
+const KILL: &str = "SIGKILL";
+
+/// What the report says about a session that even `SIGKILL` did not stop.
+const SURVIVED: &str = "it did not stop, even after SIGKILL";
+
+/// What the report says above the commands that take a session up again.
+const TRANSCRIPTS: &str = "The transcript of each session that stopped stays on disk:";
+
+/// The command that takes a session up again.
+const RESUME: &str = "crap";
+
+/// Gives the reason that the check before the signal left a session alone.
+///
+/// A person who asked for a stop must learn why a session is still running.
+/// Two of the reasons are facts about the session, and two of them are facts
+/// about the process that carries it.
+fn refusal(refused: Recheck) -> &'static str {
+    match refused {
+        Recheck::Proceed => "faulte signalled it",
+        Recheck::Exited => "it was gone before faulte signalled it",
+        Recheck::PidReused => "another process took the PID",
+        Recheck::StatusChanged => "faulte left it alone, because its status changed",
+        Recheck::DescendantStarted => "faulte left it alone, because it started a process",
+    }
 }
 
 /// Gives the plan of `faulte kill` as a person reads it, before the question.
@@ -1811,10 +1883,13 @@ mod tests {
             )],
             stopped: vec![stopped_candidate(101, first)],
             killed: vec![stopped_candidate(102, second)],
-            survived: vec![stopped_candidate(103, "33333333-3333-4333-8333-333333333333")],
+            survived: vec![stopped_candidate(
+                103,
+                "33333333-3333-4333-8333-333333333333",
+            )],
             failed: vec![(
                 stopped_candidate(104, "44444444-4444-4444-8444-444444444444"),
-                MachineError::KernelRead {
+                MachineError::SignalFailed {
                     call: "kill(104, SIGTERM)".to_owned(),
                     reason: "Operation not permitted".to_owned(),
                 },
