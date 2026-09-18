@@ -19,6 +19,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use popstop::lock::{current_holder, HolderRecord, Mode, StateDir};
+use popstop::message::start_time_text;
 use popstop::process::start_time;
 
 /// The time after which a copy stops by itself, as `--exit-after` takes it.
@@ -26,10 +27,15 @@ use popstop::process::start_time;
 const EXIT_AFTER_SECONDS: &str = "60";
 
 /// The longest time that a test waits for a line of a copy.
-const LINE_TIMEOUT: Duration = Duration::from_secs(10);
+///
+/// A copy that plays writes its first line in about one second. The bound is
+/// much larger, because a build machine that runs many tests together starts
+/// a process slowly, and a bound that measures the machine makes a test that
+/// fails for a reason that is not the code.
+const LINE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The longest time that a test waits for a copy to end.
-const EXIT_TIMEOUT: Duration = Duration::from_secs(10);
+const EXIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The time between two looks at a copy that ends.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -125,15 +131,23 @@ impl Copy {
     /// Gives the next line that the copy wrote to stdout.
     ///
     /// It waits for [`LINE_TIMEOUT`] at most, so a copy that writes nothing
-    /// fails the test instead of holding it.
-    fn next_line(&self) -> String {
+    /// fails the test instead of holding it. A copy that says nothing in that
+    /// time ends here, and its stderr goes into the failure, because a copy
+    /// that cannot start says why on stderr.
+    fn next_line(&mut self) -> String {
         match self.stdout.recv_timeout(LINE_TIMEOUT) {
             Ok(line) => line,
             Err(RecvTimeoutError::Timeout) => {
-                panic!("the copy wrote no line within {LINE_TIMEOUT:?}")
+                let _ = self.child.kill();
+                let (status, stderr) = self.finish();
+                panic!(
+                    "the copy wrote no line within {LINE_TIMEOUT:?} ({status}). Its stderr:\n\
+                     {stderr}"
+                )
             }
             Err(RecvTimeoutError::Disconnected) => {
-                panic!("the copy ended before it wrote the line")
+                let (status, stderr) = self.finish();
+                panic!("the copy ended before it wrote the line ({status}). Its stderr:\n{stderr}")
             }
         }
     }
@@ -151,6 +165,11 @@ impl Copy {
             "the signal {signal} did not reach the copy: {}",
             std::io::Error::last_os_error()
         );
+    }
+
+    /// Tells whether the copy still runs.
+    fn still_runs(&mut self) -> bool {
+        self.child.try_wait().expect("look at the copy").is_none()
     }
 
     /// Waits for the copy to end, for [`EXIT_TIMEOUT`] at most. Gives its
@@ -184,10 +203,11 @@ fn holder(dir: &Path) -> Option<HolderRecord> {
 
 /// Reads the three lines of a foreground start, and gives the name of the
 /// device that the first line names.
-fn device_of_the_ready_lines(copy: &Copy) -> String {
+fn device_of_the_ready_lines(copy: &mut Copy) -> String {
     let first = copy.next_line();
     let opening = "popstop: \"";
-    let closing = format!("\" stays awake while popstop runs (pid {})", copy.pid());
+    let pid = copy.pid();
+    let closing = format!("\" stays awake while popstop runs (pid {pid})");
     let device = first
         .strip_prefix(opening)
         .and_then(|rest| rest.strip_suffix(&closing))
@@ -210,7 +230,7 @@ fn a_signal_stops_a_foreground_copy(signal: libc::c_int) {
     let temp = tempfile::tempdir().expect("a temporary directory");
     let dir = temp.path().join("state");
     let mut copy = Copy::start_in_the_foreground(&dir);
-    device_of_the_ready_lines(&copy);
+    device_of_the_ready_lines(&mut copy);
 
     copy.send(signal);
     let (status, stderr) = copy.finish();
@@ -235,12 +255,60 @@ fn a_termination_signal_stops_a_foreground_copy() {
 }
 
 #[test]
+fn a_second_start_refuses_and_names_the_copy_that_runs() {
+    let temp = tempfile::tempdir().expect("a temporary directory");
+    let dir = temp.path().join("state");
+    let mut first = Copy::start_in_the_foreground(&dir);
+    device_of_the_ready_lines(&mut first);
+    let record = holder(&dir).expect("the first copy holds the lock");
+
+    let mut second = Copy::start_in_the_foreground(&dir);
+    let (status, refusal) = second.finish();
+
+    assert_eq!(
+        status.code(),
+        Some(3),
+        "a second start ends with the status of a copy that runs: {status}. Its stderr:\n{refusal}"
+    );
+    for named in [
+        format!("pid {}", first.pid()),
+        "foreground".to_owned(),
+        start_time_text(record.started_at),
+        format!("popstop --stop --state-dir '{}'", dir.display()),
+    ] {
+        assert!(
+            refusal.contains(&named),
+            "the refusal does not name {named:?}:\n{refusal}"
+        );
+    }
+
+    assert!(
+        first.still_runs(),
+        "the refusal of the second start ended the first copy"
+    );
+    assert_eq!(
+        holder(&dir),
+        Some(record),
+        "the first copy still holds the lock"
+    );
+
+    first.send(SIGINT);
+    let (status, stderr) = first.finish();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "the first copy stops with success: {status}. Its stderr:\n{stderr}"
+    );
+    assert_eq!(holder(&dir), None, "the first copy released the lock");
+}
+
+#[test]
 fn a_foreground_copy_names_its_device_holds_the_lock_and_stops_on_sigint() {
     let temp = tempfile::tempdir().expect("a temporary directory");
     let dir = temp.path().join("state");
     let mut copy = Copy::start_in_the_foreground(&dir);
 
-    device_of_the_ready_lines(&copy);
+    device_of_the_ready_lines(&mut copy);
 
     assert_eq!(
         holder(&dir),
