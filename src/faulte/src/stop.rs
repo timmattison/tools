@@ -595,6 +595,13 @@ mod tests {
             self
         }
 
+        /// Gives this machine, whose read of the process table after the
+        /// tables that it holds gives `error`.
+        fn then_failing(self, error: MachineError) -> Self {
+            self.tables.borrow_mut().push_back(Err(error));
+            self
+        }
+
         /// Gives this machine, with `error` as the answer to every signal to
         /// `pid`.
         fn refusing(mut self, pid: u32, error: MachineError) -> Self {
@@ -951,6 +958,87 @@ mod tests {
                 (Pid::new(40), Signal::Terminate)
             ],
             "the target that refused SIGTERM gets no SIGKILL"
+        );
+    }
+
+    /// Gives the error of a read of the process table that failed.
+    fn unreadable_table() -> MachineError {
+        MachineError::CommandDidNotStart {
+            program: crate::table::PROGRAM.to_owned(),
+            reason: "No such file or directory (os error 2)".to_owned(),
+        }
+    }
+
+    /// A read of the process table that fails ends the sequence, and every
+    /// target that is left goes into the report with the reason.
+    ///
+    /// The table is the only source that tells an exit from a PID that another
+    /// process took. Without it `faulte` knows nothing about its targets, and a
+    /// signal to a PID that it cannot read stops a process that nobody asked to
+    /// stop. So the sequence signals nothing more.
+    ///
+    /// The read fails at three places, and each one ends the sequence: before
+    /// the first signal, inside the grace period, and after `SIGKILL`.
+    #[test]
+    fn a_table_that_faulte_cannot_read_ends_the_sequence() {
+        let first = candidate(30);
+        let second = candidate(40);
+        let both = [first.clone(), second.clone()];
+        let alive = vec![process(30, LAUNCHD_PID), process(40, LAUNCHD_PID)];
+        let terminate = vec![
+            (Pid::new(30), Signal::Terminate),
+            (Pid::new(40), Signal::Terminate),
+        ];
+
+        let before = machine_of(&[30, 40], Vec::new()).then_failing(unreadable_table());
+        let report = stop(&before, &both, ONE_POLL, ONE_POLL);
+        assert_eq!(
+            report,
+            StopReport {
+                failed: vec![
+                    (first.clone(), unreadable_table()),
+                    (second.clone(), unreadable_table())
+                ],
+                ..StopReport::default()
+            },
+            "a table that faulte cannot read before the first signal"
+        );
+        assert_eq!(before.signals(), Vec::new(), "no signal goes at all");
+        assert_eq!(before.sleeps(), 0, "the sequence waits for nothing");
+
+        let inside = machine_of(&[30, 40], vec![alive.clone()]).then_failing(unreadable_table());
+        let report = stop(&inside, &both, THREE_POLLS, ONE_POLL);
+        assert_eq!(
+            report,
+            StopReport {
+                failed: vec![
+                    (first.clone(), unreadable_table()),
+                    (second, unreadable_table())
+                ],
+                ..StopReport::default()
+            },
+            "a table that faulte cannot read inside the grace period"
+        );
+        assert_eq!(inside.signals(), terminate, "SIGTERM went to both targets");
+
+        let after = machine_of(&[30], vec![vec![process(30, LAUNCHD_PID)]; 2])
+            .then_failing(unreadable_table());
+        let report = stop(&after, &both[..1], ONE_POLL, ONE_POLL);
+        assert_eq!(
+            report,
+            StopReport {
+                failed: vec![(first, unreadable_table())],
+                ..StopReport::default()
+            },
+            "a table that faulte cannot read after SIGKILL"
+        );
+        assert_eq!(
+            after.signals(),
+            vec![
+                (Pid::new(30), Signal::Terminate),
+                (Pid::new(30), Signal::Kill)
+            ],
+            "both signals went before the read that failed"
         );
     }
 
