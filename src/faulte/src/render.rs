@@ -542,8 +542,12 @@ pub fn rows(
     }
 }
 
-/// What the line under the table starts with.
-const MORE: char = '…';
+/// The mark of a text that gives a part of something, and not the whole of it.
+///
+/// [`command`] puts it at the end of a command that the cut made shorter, and
+/// the line under the table starts with it, because that line counts the rows
+/// that the limit hid. One mark for both, so a reader learns it once.
+pub const MORE: char = '…';
 
 /// Gives the line that counts the rows which the limit hid, or nothing when it
 /// hid no row.
