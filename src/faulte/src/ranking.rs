@@ -183,16 +183,18 @@ impl Ranking {
     /// zero.
     #[must_use]
     pub fn share(&self, faults: u64) -> f64 {
-        let _ = faults;
-        0.0
+        faults as f64 / self.total_faults as f64
     }
 }
 
 /// Ranks every process of `input` by its faults over the window.
 #[must_use]
 pub fn rank(input: &Observation<'_>) -> Ranking {
-    let table: HashMap<Pid, &ProcessRow> =
-        input.table.iter().map(|process| (process.pid, process)).collect();
+    let table: HashMap<Pid, &ProcessRow> = input
+        .table
+        .iter()
+        .map(|process| (process.pid, process))
+        .collect();
     let mut rows: Vec<RankedRow> = input
         .faults
         .iter()
@@ -217,10 +219,16 @@ pub fn rank(input: &Observation<'_>) -> Ranking {
             .cmp(&left.faults)
             .then_with(|| left.pid.cmp(&right.pid))
     });
+    // The faults of a process that exited were real, so the total holds
+    // them. A share that leaves them out is too large.
+    let total_faults = input
+        .faults
+        .iter()
+        .fold(0_u64, |total, count| total.saturating_add(count.faults));
     Ranking {
         rows,
         window: input.window,
-        total_faults: 0,
+        total_faults,
         claude: ClaudeTotal::default(),
         skipped: Skipped::default(),
     }
@@ -387,5 +395,4 @@ PID    FAULTS    \n\
         assert_eq!(ranking.share(100), 0.25);
         assert_eq!(ranking.share(400), 1.0);
     }
-
 }
