@@ -11,6 +11,7 @@
 // popstop plays audio on macOS only.
 #![cfg(target_os = "macos")]
 
+use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -18,7 +19,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use popstop::lock::{current_holder, HolderRecord, Mode, StateDir};
+use popstop::lock::{current_holder, HolderRecord, Mode, StartTime, StateDir};
 use popstop::message::start_time_text;
 use popstop::process::start_time;
 
@@ -39,6 +40,13 @@ const EXIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The time between two looks at a copy that ends.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// The time in which a process that got a signal ends.
+///
+/// A test that must show that no signal went out looks again for this time
+/// before it decides, because the end of a process comes a moment after the
+/// signal.
+const A_SIGNAL_ARRIVES_WITHIN: Duration = Duration::from_secs(1);
 
 /// The number of `SIGINT`. POSIX sets it to 2.
 const SIGINT: libc::c_int = 2;
@@ -238,6 +246,68 @@ fn holder(dir: &Path) -> Option<HolderRecord> {
     current_holder(&StateDir::new(dir.to_path_buf())).expect("read the lock file")
 }
 
+/// A process that is not a copy of popstop.
+///
+/// A drop kills it and reaps it, thus a test that fails early leaves no
+/// process.
+struct Bystander(Child);
+
+impl Drop for Bystander {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+impl Bystander {
+    /// Starts a process that sleeps until a drop kills it, for
+    /// [`EXIT_AFTER_SECONDS`] at most.
+    fn start() -> Self {
+        Self(
+            Command::new("sleep")
+                .arg(EXIT_AFTER_SECONDS)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("start a process that sleeps"),
+        )
+    }
+
+    /// Gives the process ID of the process.
+    fn pid(&self) -> u32 {
+        self.0.id()
+    }
+
+    /// Tells whether the process still runs.
+    fn still_runs(&mut self) -> bool {
+        self.0.try_wait().expect("look at the process").is_none()
+    }
+}
+
+/// Gives a process ID that no process has.
+///
+/// macOS gives PIDs in sequence, thus it gives this PID to a new process only
+/// after many other processes start.
+fn a_pid_that_no_process_has() -> u32 {
+    let bystander = Bystander::start();
+    let pid = bystander.pid();
+    // The drop kills the process and reaps it, thus the kernel keeps no
+    // process with this PID.
+    drop(bystander);
+    pid
+}
+
+/// Writes `record` into the lock file of `dir`, in the form that a holder
+/// writes. No process holds the lock after this call: a copy that crashed
+/// leaves exactly this.
+fn write_the_record(dir: &Path, record: &HolderRecord) {
+    let mut line = serde_json::to_string(record).expect("the record as JSON");
+    line.push('\n');
+    fs::create_dir_all(dir).expect("make the state directory");
+    fs::write(StateDir::new(dir.to_path_buf()).lock_path(), line).expect("write the lock file");
+}
+
 /// Reads the three lines of a foreground start, and gives the name of the
 /// device that the first line names.
 fn device_of_the_ready_lines(copy: &mut Copy) -> String {
@@ -308,6 +378,73 @@ fn a_stop_with_no_copy_says_that_nothing_runs() {
     assert_eq!(
         errors, "",
         "a stop that finds nothing says nothing on stderr"
+    );
+}
+
+#[test]
+fn a_record_in_a_lock_that_nobody_holds_makes_a_stop_send_no_signal() {
+    let temp = tempfile::tempdir().expect("a temporary directory");
+    let dir = temp.path().join("state");
+
+    // The record of a copy that crashed. The lock file holds it, and no
+    // process holds the lock.
+    write_the_record(
+        &dir,
+        &HolderRecord {
+            pid: a_pid_that_no_process_has(),
+            mode: Mode::Foreground,
+            started_at: StartTime::from_unix_micros(1),
+        },
+    );
+
+    let (status, report, errors) = ask_in(&dir, &["--stop"]);
+
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "the lock is the only source of truth, thus an old record is no copy: {status}. Its \
+         stderr:\n{errors}"
+    );
+    assert_eq!(report, "popstop: no copy runs\n");
+    assert_eq!(
+        errors, "",
+        "a stop that finds nothing says nothing on stderr"
+    );
+
+    // The same lock file, with a record that names a process which is not
+    // popstop. The start time in the record is the start time of that
+    // process, thus only the lock rule stands between the record and a signal
+    // to somebody else.
+    let mut bystander = Bystander::start();
+    write_the_record(
+        &dir,
+        &HolderRecord {
+            pid: bystander.pid(),
+            mode: Mode::Foreground,
+            started_at: start_time(bystander.pid()).expect("the start time of the process"),
+        },
+    );
+
+    let (status, report, errors) = ask_in(&dir, &["--stop"]);
+
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a record that names another process is no copy either: {status}. Its stderr:\n{errors}"
+    );
+    assert_eq!(report, "popstop: no copy runs\n");
+    assert_eq!(
+        errors, "",
+        "a stop that finds nothing says nothing on stderr"
+    );
+
+    let deadline = Instant::now() + A_SIGNAL_ARRIVES_WITHIN;
+    while bystander.still_runs() && Instant::now() < deadline {
+        thread::sleep(POLL_INTERVAL);
+    }
+    assert!(
+        bystander.still_runs(),
+        "the stop sent a signal to a process that is not a copy of popstop"
     );
 }
 
