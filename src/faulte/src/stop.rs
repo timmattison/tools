@@ -162,8 +162,12 @@ pub fn stop(
     poll: Duration,
 ) -> StopReport {
     let mut report = StopReport::default();
-    let Ok(table) = machine.process_table() else {
-        return report;
+    let table = match machine.process_table() {
+        Ok(table) => table,
+        Err(error) => {
+            all_failed(candidates, &error, &mut report);
+            return report;
+        }
     };
     let mut targets: Vec<&Candidate> = Vec::with_capacity(candidates.len());
     for candidate in candidates {
@@ -180,8 +184,12 @@ pub fn stop(
     let mut targets = signal_each(machine, targets, Signal::Terminate, &mut report);
     for _ in 0..waits(grace, poll) {
         machine.sleep(poll);
-        let Ok(table) = machine.process_table() else {
-            return report;
+        let table = match machine.process_table() {
+            Ok(table) => table,
+            Err(error) => {
+                all_failed(targets, &error, &mut report);
+                return report;
+            }
         };
         targets.retain(|candidate| {
             let gone = is_gone(candidate, &table);
@@ -199,8 +207,12 @@ pub fn stop(
         return report;
     }
     machine.sleep(poll);
-    let Ok(table) = machine.process_table() else {
-        return report;
+    let table = match machine.process_table() {
+        Ok(table) => table,
+        Err(error) => {
+            all_failed(targets, &error, &mut report);
+            return report;
+        }
     };
     for candidate in targets {
         if is_gone(candidate, &table) {
@@ -210,6 +222,23 @@ pub fn stop(
         }
     }
     report
+}
+
+/// Puts each target of `targets` into [`StopReport::failed`] with `error`.
+///
+/// A read of the process table that fails ends the sequence, and each target
+/// that is left got no answer. The person asked `faulte` to stop those
+/// sessions, so the report names each one of them with the reason.
+fn all_failed<'a>(
+    targets: impl IntoIterator<Item = &'a Candidate>,
+    error: &MachineError,
+    report: &mut StopReport,
+) {
+    report.failed.extend(
+        targets
+            .into_iter()
+            .map(|candidate| (candidate.clone(), error.clone())),
+    );
 }
 
 /// Sends `signal` to each target of `targets`, and gives back the targets that
