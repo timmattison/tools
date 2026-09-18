@@ -318,4 +318,45 @@ mod tests {
             "the ramp down lasts RAMP_DURATION, then the signal is silent"
         );
     }
+
+    #[test]
+    fn a_stop_during_the_ramp_up_makes_no_step() {
+        let (mut signal, stop) = KeepaliveSignal::new(rate());
+        let ramp = ramp_frames();
+
+        let before = fill_frames(&mut signal, ramp / 3, 1);
+        let last_before = *before.last().expect("the ramp up played");
+        assert!(
+            last_before > 0.0 && last_before < LEVEL,
+            "the stop comes during the ramp up, at {last_before}"
+        );
+
+        stop.start_ramp_down();
+        let after = fill_frames(&mut signal, ramp * 2, 1);
+
+        assert!(
+            after[0] <= last_before,
+            "the first sample of the ramp down ({}) is larger than the last sample before the stop ({last_before})",
+            after[0]
+        );
+        assert!(
+            last_before - after[0] <= ramp_step(),
+            "the ramp down starts with a step from {last_before} to {}",
+            after[0]
+        );
+        for (index, pair) in after.windows(2).enumerate() {
+            assert!(
+                pair[1] <= pair[0],
+                "sample {} after the stop increases from {} to {}",
+                index + 1,
+                pair[0],
+                pair[1]
+            );
+        }
+        assert_eq!(after.last(), Some(&0.0), "the ramp down reaches silence");
+        assert!(
+            stop.is_ramp_down_complete(),
+            "the ramp down reports complete"
+        );
+    }
 }
