@@ -514,7 +514,7 @@ PID    FAULTS    \n\
     #[test]
     fn a_process_of_the_sample_that_the_table_lacks_exited() {
         let machine = Machine::new(
-            vec![count(0, 1_329), count(10, 300), count(99, 40), count(98, 60)],
+            vec![count(0, 1_000), count(10, 500), count(99, 40), count(98, 60)],
             vec![process(10)],
         );
 
