@@ -873,4 +873,41 @@ mod tests {
         );
         drop(reader);
     }
+
+    #[test]
+    fn readers_that_block_a_start_past_the_bound_give_an_error_that_says_so() {
+        let (_temp, dir) = state_dir();
+        leave_an_old_record(&dir, FIRST);
+        // A reader that holds its shared lock for longer than the bound.
+        let reader = File::open(dir.lock_path()).expect("open the lock file");
+        reader.lock_shared().expect("the reader gets a shared lock");
+
+        let started = Instant::now();
+        let result = acquire(&dir, &SECOND);
+        let waited = started.elapsed();
+
+        match result {
+            Err(AcquireError::Io(error)) => {
+                assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
+                let message = error.to_string();
+                assert!(
+                    message.contains("readers"),
+                    "the error names readers: {message}"
+                );
+                assert!(
+                    message.contains(&dir.lock_path().display().to_string()),
+                    "the error names the lock file: {message}"
+                );
+            }
+            Err(AcquireError::Held(holder)) => {
+                panic!("only a reader blocks the start, but it refused with {holder:?}")
+            }
+            Ok(_guard) => panic!("the start got the exclusive lock while a reader holds it"),
+        }
+        assert!(
+            waited >= PROBE_WAIT,
+            "the start gave up after {waited:?}, before the bound of {PROBE_WAIT:?}"
+        );
+        drop(reader);
+    }
 }
