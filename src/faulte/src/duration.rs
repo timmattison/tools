@@ -58,6 +58,12 @@ pub enum ParseSpanError {
         /// The text as the person gave it.
         text: String,
     },
+    /// The number of seconds does not fit in 64 bits.
+    #[error("{text:?} is too long: the number of seconds does not fit in 64 bits")]
+    TooLong {
+        /// The text as the person gave it.
+        text: String,
+    },
     /// The text is not a duration.
     #[error("{text:?} is not a duration")]
     Invalid {
@@ -245,6 +251,44 @@ mod tests {
             assert_eq!(
                 error,
                 ParseSpanError::NotAWholeNumber {
+                    text: text.to_owned()
+                },
+                "the text {text:?}"
+            );
+            assert!(
+                error.to_string().contains(&format!("{text:?}")),
+                "the message names the text {text:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn seconds_that_do_not_fit_in_64_bits_are_refused_and_named() {
+        let largest = [
+            ("18446744073709551615", u64::MAX),
+            ("18446744073709551615s", u64::MAX),
+            ("307445734561825860m", 18_446_744_073_709_551_600),
+            ("5124095576030431h", 18_446_744_073_709_551_600),
+            ("213503982334601d", 18_446_744_073_709_526_400),
+        ];
+        for (text, expected) in largest {
+            assert_eq!(seconds(text), Ok(expected), "the text {text:?}");
+        }
+
+        let too_long = [
+            "18446744073709551616",
+            "18446744073709551616s",
+            "307445734561825861m",
+            "5124095576030432h",
+            "213503982334602d",
+            "99999999999999999999999999999999d",
+        ];
+        for text in too_long {
+            let error = seconds(text).expect_err("the seconds do not fit in 64 bits");
+
+            assert_eq!(
+                error,
+                ParseSpanError::TooLong {
                     text: text.to_owned()
                 },
                 "the text {text:?}"
