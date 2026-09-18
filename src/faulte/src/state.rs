@@ -79,17 +79,26 @@ impl fmt::Display for SessionState {
     ///
     /// The idle time is in the format of `occ`, so the two tools print an age
     /// the same way. That format drops the part of a second.
+    ///
+    /// The text obeys the width and the alignment of the format, the same as
+    /// a bare `str`.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Busy => formatter.write_str(BUSY),
-            Self::Waiting => formatter.write_str(WAITING),
+        let idle;
+        let text = match self {
+            Self::Busy => BUSY,
+            Self::Waiting => WAITING,
             Self::Idle { for_: Some(for_) } => {
-                write!(formatter, "{IDLE} {}", occ::format_uptime(for_.as_secs()))
+                idle = format!("{IDLE} {}", occ::format_uptime(for_.as_secs()));
+                &idle
             }
-            Self::Idle { for_: None } => write!(formatter, "{IDLE} {UNKNOWN_IDLE_TIME}"),
-            Self::Other(text) => formatter.write_str(text),
-            Self::Unknown => formatter.write_str(UNKNOWN),
-        }
+            Self::Idle { for_: None } => {
+                idle = format!("{IDLE} {UNKNOWN_IDLE_TIME}");
+                &idle
+            }
+            Self::Other(text) => text,
+            Self::Unknown => UNKNOWN,
+        };
+        formatter.pad(text)
     }
 }
 
