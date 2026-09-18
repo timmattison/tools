@@ -109,7 +109,10 @@ impl FromStr for Span {
         if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
             return Err(invalid());
         }
-        let per_unit = seconds_per(unit).ok_or_else(invalid)?;
+        let per_unit = seconds_per(unit).ok_or_else(|| ParseSpanError::UnknownUnit {
+            text: text.to_owned(),
+            unit: unit.to_owned(),
+        })?;
         let count: u64 = number.parse().map_err(|_| invalid())?;
         let seconds = count.checked_mul(per_unit).ok_or_else(invalid)?;
         NonZeroU64::new(seconds)
