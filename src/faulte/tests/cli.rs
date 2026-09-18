@@ -86,6 +86,45 @@ fn a_bad_duration_in_any_flag_is_a_usage_error_that_names_the_text() {
     }
 }
 
+/// The one test that reads this Mac.
+///
+/// It runs the built binary with the shortest interval that the parser
+/// accepts, and it holds the shape of the output alone. It states no number,
+/// because every number is what this Mac did while the test ran. A number that
+/// a test states here would fail on a Mac that is quiet, and on a Mac that is
+/// busy.
+#[test]
+fn the_ranking_states_a_header_and_a_table_of_this_mac() {
+    let output = run(&["--interval", "1s", "--limit", "5"]);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "faulte ranks the processes of this Mac and exits 0, it ended with {:?} and wrote {stderr:?}",
+        output.status
+    );
+    let one_line = one_line(&output.stdout);
+    for phrase in [
+        "window (interval 1s)",
+        "faults,",
+        "swap:",
+        "compressor",
+        "Claude:",
+    ] {
+        assert!(
+            one_line.contains(phrase),
+            "the header states {phrase:?}: {stdout}"
+        );
+    }
+    for column in ["PID", "OWNER", "FAULTS/S", "SHARE", "RSS", "AGE", "COMMAND"] {
+        assert!(
+            stdout.contains(column),
+            "the table states the column {column:?}: {stdout}"
+        );
+    }
+}
+
 /// `--help` gives each flag and its default, so the defaults of the issue are
 /// held here: a 5 s sample, 25 rows, sessions older than 7 days, and idle for
 /// more than 10 minutes.
