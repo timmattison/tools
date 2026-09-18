@@ -8,6 +8,8 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
 use std::time::Duration;
 
 /// The name of the state directory in the data directory of the user.
@@ -249,13 +251,45 @@ pub enum Release {
     TimedOut,
 }
 
+/// The name of the thread that waits for the release of the lock.
+const WAIT_THREAD_NAME: &str = "popstop-lock-wait";
+
 /// Waits until no copy holds the lock, for `timeout` at most.
+///
+/// It does not poll. A thread opens the lock file and blocks on the lock.
+/// When the thread gets the lock, it releases the lock at once and tells the
+/// caller. It gives [`Release::Released`] at once when the lock file does not
+/// exist.
+///
+/// After a timeout, the thread stays blocked until the holder releases the
+/// lock or this process ends. Then it releases the lock at once and ends.
 ///
 /// # Errors
 ///
-/// Returns an error when the lock file cannot be opened or locked.
-pub fn wait_for_release(_dir: &StateDir, _timeout: Duration) -> io::Result<Release> {
-    Ok(Release::TimedOut)
+/// Returns an error when the lock file cannot be opened or locked, or when the
+/// thread cannot start.
+pub fn wait_for_release(dir: &StateDir, timeout: Duration) -> io::Result<Release> {
+    let Some(file) = open_existing_lock_file(dir)? else {
+        return Ok(Release::Released);
+    };
+
+    let (sender, receiver) = mpsc::channel();
+    thread::Builder::new()
+        .name(WAIT_THREAD_NAME.to_owned())
+        .spawn(move || {
+            let result = file.lock().and_then(|()| file.unlock());
+            // After a timeout nobody receives, and the result means nothing.
+            let _ = sender.send(result);
+        })?;
+
+    match receiver.recv_timeout(timeout) {
+        Ok(Ok(())) => Ok(Release::Released),
+        Ok(Err(error)) => Err(error),
+        Err(RecvTimeoutError::Timeout) => Ok(Release::TimedOut),
+        Err(RecvTimeoutError::Disconnected) => Err(io::Error::other(
+            "the thread that waits for the lock ended with no result",
+        )),
+    }
 }
 
 /// Opens the lock file for reading, or gives `None` when it does not exist.
