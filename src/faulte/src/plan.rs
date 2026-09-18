@@ -71,8 +71,17 @@ pub struct Candidate {
     /// The time when the process started, in seconds since the Unix epoch.
     /// Rule 1 proves that the row has one.
     pub started_at_epoch_secs: u64,
-    /// The time when the status of the session last changed. `None` only when
-    /// that time is before the Unix epoch, which no clock of a Mac gives.
+    /// The time when the status of the session last changed, exactly as the
+    /// registry record gave it.
+    ///
+    /// The value is never computed from the idle time of the state. The
+    /// ranking and the plan read the clock at different times, so a
+    /// subtraction gives a time that no record holds, and the check before the
+    /// signal then finds a difference in every session.
+    ///
+    /// Rule 2 gives every candidate a known idle time, and only a record with
+    /// a time of the change can give one. Thus this value is `None` for no
+    /// candidate that [`plan`] makes.
     pub status_changed_at: Option<SystemTime>,
 }
 
@@ -196,19 +205,6 @@ fn faulte_and_its_ancestors(table: &[ProcessRow], faulte: Pid) -> HashSet<Pid> {
     chain
 }
 
-/// Gives the time when the status of `state` last changed.
-///
-/// The state carries the time since the change, and the ranking measured it
-/// against the same `now`. Thus this subtraction gives the time of the change
-/// back exactly, and the check before the signal compares it with the time
-/// that a fresh record gives.
-fn status_changed_at(state: &SessionState, now: SystemTime) -> Option<SystemTime> {
-    match state {
-        SessionState::Idle { for_: Some(for_) } => now.checked_sub(*for_),
-        _ => None,
-    }
-}
-
 /// The first rule of `faulte kill` that a session fails.
 ///
 /// A session can fail more than one rule, and the plan reports the first one.
@@ -314,13 +310,18 @@ pub fn plan(input: &PlanInput<'_>) -> Plan {
     let mut not_selected = NotSelected::default();
     for row in &input.ranking.rows {
         match &row.claude {
-            ClaudeView::Session { id, state, .. } => {
+            ClaudeView::Session {
+                id,
+                state,
+                status_changed_at,
+                ..
+            } => {
                 match candidate_of(row, Some(state), &limits) {
                     Ok(started_at_epoch_secs) => candidates.push(Candidate {
                         row: row.clone(),
                         session: id.clone(),
                         started_at_epoch_secs,
-                        status_changed_at: status_changed_at(state, input.now),
+                        status_changed_at: *status_changed_at,
                     }),
                     Err(refusal) => *count_of(&mut not_selected, refusal) += 1,
                 }
