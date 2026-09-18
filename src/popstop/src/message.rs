@@ -43,20 +43,27 @@ pub fn start_time_text(start: StartTime) -> String {
 const START_TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 
 /// Gives the start time of a copy as a date and time in `zone`.
+///
+/// A record holds any `u64`, and the calendar of chrono ends long before
+/// `u64::MAX` microseconds. A time outside the calendar shows as its number,
+/// so the text never hides the value that the record holds.
 fn start_time_text_in<Tz>(start: StartTime, zone: &Tz) -> String
 where
     Tz: TimeZone,
     Tz::Offset: fmt::Display,
 {
-    i64::try_from(start.unix_micros())
+    let micros = start.unix_micros();
+    i64::try_from(micros)
         .ok()
         .and_then(DateTime::from_timestamp_micros)
-        .map(|utc| {
-            utc.with_timezone(zone)
-                .format(START_TIME_FORMAT)
-                .to_string()
-        })
-        .unwrap_or_default()
+        .map_or_else(
+            || format!("{micros} microseconds after the Unix epoch"),
+            |utc| {
+                utc.with_timezone(zone)
+                    .format(START_TIME_FORMAT)
+                    .to_string()
+            },
+        )
 }
 
 #[cfg(test)]
