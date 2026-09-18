@@ -12,7 +12,7 @@
 //! [`rank`] is a pure function over plain values. A test gives it each source,
 //! and no test reads the real process table.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
@@ -210,21 +210,29 @@ impl Ranking {
 }
 
 /// Ranks every process of `input` by its faults over the window.
+///
+/// Each PID of the sample and of the table is one process: it has a row, or it
+/// is in exactly one count of [`Skipped`]. Neither `top` nor `ps` prints a PID
+/// twice, and the faults of a PID that the sample lists twice add up, so a
+/// source that breaks that rule cannot make one process into two.
 #[must_use]
 pub fn rank(input: &Observation<'_>) -> Ranking {
-    let table: HashMap<Pid, &ProcessRow> = input
-        .table
+    let mut sampled: BTreeMap<Pid, u64> = BTreeMap::new();
+    for count in input.faults {
+        let faults = sampled.entry(count.pid).or_insert(0);
+        *faults = faults.saturating_add(count.faults);
+    }
+    let mut table: HashMap<Pid, &ProcessRow> = HashMap::with_capacity(input.table.len());
+    for process in input.table {
+        table.entry(process.pid).or_insert(process);
+    }
+    let mut rows: Vec<RankedRow> = sampled
         .iter()
-        .map(|process| (process.pid, process))
-        .collect();
-    let mut rows: Vec<RankedRow> = input
-        .faults
-        .iter()
-        .filter_map(|count| match table.get(&count.pid) {
+        .filter_map(|(&pid, &faults)| match table.get(&pid) {
             Some(process) => Some(RankedRow {
-                pid: count.pid,
+                pid,
                 uid: process.uid,
-                faults: count.faults,
+                faults,
                 rss_kib: Some(process.rss_kib),
                 started_at_epoch_secs: Some(process.started_at_epoch_secs),
                 command: process.command.clone(),
@@ -233,10 +241,10 @@ pub fn rank(input: &Observation<'_>) -> Ranking {
             // `ps` does not list the kernel, and the kernel does the work of
             // a Mac that is short of memory. Thus its row says what `top`
             // gives, and no more.
-            None if count.pid == KERNEL_PID => Some(RankedRow {
+            None if pid == KERNEL_PID => Some(RankedRow {
                 pid: KERNEL_PID,
                 uid: KERNEL_UID,
-                faults: count.faults,
+                faults,
                 rss_kib: None,
                 started_at_epoch_secs: None,
                 command: KERNEL_TASK.to_owned(),
@@ -255,39 +263,31 @@ pub fn rank(input: &Observation<'_>) -> Ranking {
     });
     // The faults of a process that exited were real, so the total holds
     // them. A share that leaves them out is too large.
-    let total_faults = input
-        .faults
-        .iter()
-        .fold(0_u64, |total, count| total.saturating_add(count.faults));
+    let total_faults = sampled
+        .values()
+        .fold(0_u64, |total, faults| total.saturating_add(*faults));
     // A process of the sample that the table lacks stopped between the two
     // reads. Its row would give no owner, no memory and no command, so it is
     // a count and not a row.
-    let exited = input
-        .faults
+    let (exited, exited_faults) = sampled
         .iter()
-        .filter(|count| count.pid != KERNEL_PID && !table.contains_key(&count.pid));
-    let (exited, exited_faults) = exited.fold((0, 0_u64), |(processes, faults), count| {
-        (processes + 1, faults.saturating_add(count.faults))
-    });
+        .filter(|(pid, _)| **pid != KERNEL_PID && !table.contains_key(pid))
+        .fold((0, 0_u64), |(processes, total), (_, faults)| {
+            (processes + 1, total.saturating_add(*faults))
+        });
     // `top` does not list a zombie, so a zombie of the table is not a
-    // process that `top` missed.
-    let sampled: HashMap<Pid, u64> = input
-        .faults
-        .iter()
-        .map(|count| (count.pid, count.faults))
-        .collect();
-    let zombies = input
-        .table
-        .iter()
-        .filter(|process| process.zombie && !sampled.contains_key(&process.pid))
-        .count();
-    // A process of the table that `top` did not list, and that is not a
-    // zombie, started after the second sample. It has no fault count.
-    let unsampled = input
-        .table
-        .iter()
-        .filter(|process| !process.zombie && !sampled.contains_key(&process.pid))
-        .count();
+    // process that `top` missed. A process of the table that `top` did not
+    // list, and that is not a zombie, started after the second sample.
+    let missing = table
+        .values()
+        .filter(|process| !sampled.contains_key(&process.pid));
+    let (zombies, unsampled) = missing.fold((0, 0), |(zombies, unsampled), process| {
+        if process.zombie {
+            (zombies + 1, unsampled)
+        } else {
+            (zombies, unsampled + 1)
+        }
+    });
     Ranking {
         rows,
         window: input.window,
