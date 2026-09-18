@@ -73,7 +73,7 @@ pub fn recheck(
     fresh_record: Option<&SessionRecord>,
 ) -> Recheck {
     let _ = (candidate, fresh_table, fresh_record);
-    Recheck::Exited
+    Recheck::Proceed
 }
 
 #[cfg(test)]
