@@ -10,6 +10,8 @@
 
 use std::ffi::c_void;
 use std::fmt;
+use std::panic::{self, AssertUnwindSafe};
+use std::process;
 use std::ptr::{self, NonNull};
 use std::slice;
 
@@ -80,6 +82,11 @@ mod call {
     pub(super) const GET_NOMINAL_SAMPLE_RATE: &str =
         "AudioObjectGetPropertyData(kAudioDevicePropertyNominalSampleRate)";
 }
+
+/// The text that popstop writes to stderr before it aborts after a panic on
+/// the audio thread.
+const RENDER_PANIC_MESSAGE: &str = "popstop: a renderer panicked on the audio thread. A panic \
+     must not unwind into Core Audio, so popstop stops here";
 
 /// The audio object of the whole audio system.
 const SYSTEM_OBJECT: AudioObjectID = kAudioObjectSystemObject.cast_unsigned();
@@ -616,7 +623,9 @@ unsafe fn set_property<T>(
 /// The render callback of the output unit. It passes the buffer of the
 /// stream to the renderer.
 ///
-/// It allocates nothing, takes no lock, and does not panic.
+/// It allocates nothing, takes no lock, and does not panic. A panic in the
+/// renderer does not unwind into Core Audio, whose frames call this
+/// function: the callback catches it and aborts the process.
 ///
 /// # Safety
 ///
@@ -632,14 +641,32 @@ unsafe extern "C-unwind" fn render_callback<R: Render>(
     frames: u32,
     data: *mut AudioBufferList,
 ) -> OSStatus {
-    // SAFETY: the caller keeps the contract of this function, so `renderer`
-    // points to a live `R` that only this call uses.
-    let renderer = unsafe { renderer.cast::<R>().as_mut() };
-    // SAFETY: the caller keeps the contract of this function for `data`.
-    if let Some((samples, channels)) = unsafe { first_buffer(data, frames) } {
-        renderer.render(samples, channels);
+    // The process aborts after a panic, so no code sees the renderer or the
+    // buffer in the state that the panic left.
+    let rendered = panic::catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: the caller keeps the contract of this function, so
+        // `renderer` points to a live `R` that only this call uses.
+        let renderer = unsafe { renderer.cast::<R>().as_mut() };
+        // SAFETY: the caller keeps the contract of this function for `data`.
+        if let Some((samples, channels)) = unsafe { first_buffer(data, frames) } {
+            renderer.render(samples, channels);
+        }
+    }));
+    if rendered.is_err() {
+        abort_after_render_panic();
     }
     NO_ERR
+}
+
+/// Says on stderr that a renderer panicked, and aborts the process.
+///
+/// The panic hook already wrote the message of the panic. The write to
+/// stderr takes a lock, which the audio thread must not take while it
+/// plays. That does not matter here, because the process ends.
+#[cold]
+fn abort_after_render_panic() -> ! {
+    eprintln!("{RENDER_PANIC_MESSAGE}");
+    process::abort()
 }
 
 /// Gives the samples of the first buffer of `data`, and its number of
