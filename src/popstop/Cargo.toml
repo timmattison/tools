@@ -1,0 +1,35 @@
+[package]
+name = "popstop"
+version = "0.1.0"
+edition.workspace = true
+description = "Keeps the default audio output device awake with an inaudible signal, so USB speakers do not pop"
+
+[dependencies]
+buildinfo.workspace = true
+chrono.workspace = true
+clap.workspace = true
+dirs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+shellquote.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true
+signal-hook.workspace = true
+objc2-audio-toolbox = { workspace = true, features = [
+    "AUComponent",
+    "AudioComponent",
+    "AudioOutputUnit",
+    "AudioUnitProperties",
+    "objc2-core-audio-types",
+] }
+objc2-core-audio = { workspace = true, features = ["AudioHardware"] }
+objc2-core-audio-types = { workspace = true, features = ["CoreAudioBaseTypes"] }
+objc2-core-foundation = { workspace = true, features = ["CFString"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
