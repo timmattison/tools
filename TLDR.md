@@ -18,6 +18,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `dirc` | Copies the current directory to the clipboard, or emits a `cd` from a clipboard path. |
 | `dirhash` | SHA256 hash of a directory tree's contents to compare directories for equality. |
 | `diskhog` | Live terminal UI of per-process disk I/O on macOS (IOPS with sudo). |
+| `faulte` | Fault rate — ranks every process of a Mac by the page faults it makes per second, with the swap traffic of the sample and one total line for the Claude Code sessions. `faulte kill` shows the old idle Claude Code sessions and stops them after a question. macOS only. |
 | `freeport` | Finds a free TCP port on localhost, cross-platform. |
 | `gitdiggin` | Recursively searches git repos for commits containing a string (messages and diffs). |
 | `gitnuke` | Removes a git worktree and deletes its branch; `--force` is required for worktrees with submodules checked out (which `git worktree remove` refuses outright) or uncommitted changes. |

@@ -1931,6 +1931,13 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     popstop is new code with the same purpose, and it installs with `cargo install`.
   - To install: `cargo install --git https://github.com/timmattison/tools popstop`
 
+- faulte (fault rate)
+  - Ranks the processes of a Mac by page faults per second over an interval, and gives a total
+    line for the Claude Code sessions. The header adds the swap traffic, the size of the
+    compressor, and the swap in use over the same sample. `faulte kill` stops the old idle Claude
+    Code sessions after a question. It supports macOS only. See below for the full entry.
+  - To install: `cargo install --git https://github.com/timmattison/tools faulte`
+
 ## dirhash
 
 Calculate a SHA256 hash of a directory tree that's deterministic based on file contents. Skips hidden files and the files that .gitignore and the other standard ignore files name.
@@ -3826,3 +3833,162 @@ A session that wrote no record is left blank and counted in the footer. Seven of
 - **Support processes.** The background daemon, pty hosts, and spares run the same executable but are not sessions. They are counted in the footer, not listed.
 - **Spawned tools.** A tool a session starts, such as a search, can still be holding the Claude Code executable at the moment the process table is sampled. It reports its own name in `argv[0]`, which is how `occ` tells it apart from a session.
 - **Other accounts' sessions.** They appear in the process table but give up no arguments, no working directory, and no start time without privileges `occ` does not ask for. They are counted in the footer. Reporting a clean machine while sixty unreadable sessions run on it would be worse than saying they cannot be read.
+
+## faulte (fault rate)
+
+Rank every process of this Mac by the page faults that it makes per second, and say what the memory of the Mac did over the same sample. `faulte kill` stops the old idle Claude Code sessions, after it shows the plan and asks.
+
+On 2026-09-17 and 2026-09-18, this Mac spent 78% of its time in the kernel. 34 MB of memory was unused, the compressor held 32 GB, and 20 seconds of that state counted 46,564 swap-ins. The kernel did almost nothing but move pages between memory, the compressor and the swap file.
+
+213 Claude Code processes made 90% of all page faults in that sample. No single one of them was the cause: the median session made 23,000 faults in the 20 seconds, and the `node` and `vitest` processes of a running pre-commit hook made 0.4% together. The answer was the sum of 213 small rates, and no row of a table says a sum. That is why `faulte` prints one total line for the Claude Code sessions, above the table. 86 of the 213 sessions were older than 7 days, and that is why `faulte kill` exists.
+
+### Basic Usage
+
+```bash
+faulte
+faulte --interval 20s --limit 40
+faulte kill
+faulte kill --older-than 3d --idle-for 1h --max 5
+```
+
+### Options
+
+- `--interval <DURATION>`: The time to sample the page faults of each process, for example `5s`, `10m`, `2h`, or `7d`. A bare number is a number of seconds. Defaults to `5s`. Zero is refused, because a sample of no time measures nothing.
+- `--limit <N>`: The number of rows that the table shows. Defaults to 25. One line under the table counts the rows that the limit hid, and gives their share of all faults, because the limit hides the small rates and the small rates were the load. The flag belongs to the ranking alone: `faulte kill` shows every candidate of its plan, and refuses `--limit` rather than take it and ignore it.
+- `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
+- `-h`, `--help`: Print the usage.
+
+`faulte kill` samples the page faults as well, so it takes `--interval`, and three flags of its own:
+
+- `--older-than <DURATION>`: Select a session only when it is older than this time. Defaults to `7d`.
+- `--idle-for <DURATION>`: Select a session only when it became idle more than this time ago. Defaults to `10m`.
+- `--max <N>`: Stop no more than N sessions. `faulte` keeps the N oldest, and the plan counts the rest.
+
+### What it prints
+
+```
+$ COLUMNS=150 faulte --interval 2s --limit 10
+1,744 processes over a 2.0 s window (interval 2s) — 9,158 faults, 4,579/s
+swap: 4 in, 0 out in 3.6 s · compressor 15.0 GB · swap in use 8.4 GB of 10.0 GB
+Claude: 37 sessions made 0.2% of all faults (9 of another account)
+skipped: 1 exited before faulte read it (19.6% of the faults), 77 zombies, 2 were not in the top sample
+
+┌───────┬───────────────┬──────────┬───────┬────────┬─────────┬────────────────────────────────────────────────────────┬─────────┬───────┬───────────┐
+│ PID   ┆ OWNER         ┆ FAULTS/S ┆ SHARE ┆ RSS    ┆ AGE     ┆ COMMAND                                                ┆ SESSION ┆ STATE ┆ DIRECTORY │
+╞═══════╪═══════════════╪══════════╪═══════╪════════╪═════════╪════════════════════════════════════════════════════════╪═════════╪═══════╪═══════════╡
+│ 33899 ┆ root          ┆ 1,271    ┆ 27.8% ┆ 50 MB  ┆ 7h 35m  ┆ /System/Library/PrivateFrameworks/XprotectFramework.fr ┆         ┆       ┆           │
+│       ┆               ┆          ┆       ┆        ┆         ┆ amework/Versions/A/XPCServices/XprotectService.xpc/Con ┆         ┆       ┆           │
+│       ┆               ┆          ┆       ┆        ┆         ┆ tents/MacOS/…                                          ┆         ┆       ┆           │
+├╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
+│ 39450 ┆ timmattison   ┆ 689      ┆ 15.0% ┆ 19 MB  ┆ 3s      ┆ /Volumes/SamsungSSDs/code/tools-worktrees/issue-510/ta ┆         ┆       ┆           │
+│       ┆               ┆          ┆       ┆        ┆         ┆ rget/debug/deps/repository-e0e5ec02b6d5fc96            ┆         ┆       ┆           │
+├╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
+│ 40242 ┆ scyloswork    ┆ 573      ┆ 12.5% ┆ 29 MB  ┆ 5h 3m   ┆ gsw                                                    ┆         ┆       ┆           │
+├╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
+│ 66335 ┆ timmattison   ┆ 296      ┆ 6.5%  ┆ 8 MB   ┆ 5h 52m  ┆ mosh-server new -c 256 -s -l LANG=en_US.UTF-8 -l       ┆         ┆       ┆           │
+│       ┆               ┆          ┆       ┆        ┆         ┆ MOSH_CLIENT_IMAGES=kitty,sixel,iterm2                  ┆         ┆       ┆           │
+├╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
+│ 659   ┆ _windowserver ┆ 129      ┆ 2.8%  ┆ 191 MB ┆ 24d 0h  ┆ /System/Library/PrivateFrameworks/SkyLight.framework/R ┆         ┆       ┆           │
+│       ┆               ┆          ┆       ┆        ┆         ┆ esources/WindowServer -daemon                          ┆         ┆       ┆           │
+├╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
+│ 908   ┆ root          ┆ 88       ┆ 1.9%  ┆ 42 MB  ┆ 24d 0h  ┆ /opt/homebrew/opt/tailscale/bin/tailscaled             ┆         ┆       ┆           │
+├╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
+│ 26222 ┆ scyloswork    ┆ 54       ┆ 1.2%  ┆ 58 MB  ┆ 4h 12m  ┆ /Applications/Stats.app/Contents/MacOS/Stats           ┆         ┆       ┆           │
+├╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
+│ 68603 ┆ scyloswork    ┆ 47       ┆ 1.0%  ┆ 43 MB  ┆ 8h 3m   ┆ /Applications/Wispr Flow.app/Contents/Resources/swift- ┆         ┆       ┆           │
+│       ┆               ┆          ┆       ┆        ┆         ┆ helper-app-dist/Wispr Flow.app/Contents/MacOS/Wispr    ┆         ┆       ┆           │
+│       ┆               ┆          ┆       ┆        ┆         ┆ Flow                                                   ┆         ┆       ┆           │
+├╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
+│ 88885 ┆ _coreaudiod   ┆ 44       ┆ 1.0%  ┆ 43 MB  ┆ 10d 19h ┆ /usr/sbin/coreaudiod                                   ┆         ┆       ┆           │
+├╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
+│ 7205  ┆ timmattison   ┆ 34       ┆ 0.8%  ┆ 11 MB  ┆ 3d 0h   ┆ mosh-server new -c 256 -s -l LANG=en_US.UTF-8 -l       ┆         ┆       ┆           │
+│       ┆               ┆          ┆       ┆        ┆         ┆ MOSH_CLIENT_IMAGES=kitty,sixel,iterm2                  ┆         ┆       ┆           │
+└───────┴───────────────┴──────────┴───────┴────────┴─────────┴────────────────────────────────────────────────────────┴─────────┴───────┴───────────┘
+… 1,734 more processes made 10.0% of all faults
+```
+
+The first line gives the window that `faulte` measured, beside the interval that the command line asked for. The second line gives the swap traffic, the size of the compressor, and the swap in use. The third line is the total for Claude Code. This Mac was not short of memory at that moment, so the Claude Code share is 0.2%. On 2026-09-18 the same line said 90%.
+
+The last header line counts the processes that got no row, and it is there only when there is one to count. Each process of the Mac is a row of the table or a member of one of those counts: a process that exited between the two reads, a zombie, or a process that `top` did not sample. A tool that drops a process without a word reports a clean Mac that is not clean.
+
+Each row gives the PID, the owner, the faults per second, the share of all faults, the resident memory, the age, and the command. A row of a Claude Code session gives the session ID, the state (`busy`, `waiting`, or `idle` with the time since it became idle), and the directory as well.
+
+### Why a rate, and not a counter
+
+`top -o faults` sorts by the counter since each process started. The oldest process of the Mac ranks first on that counter, whatever it does now. The first analysis of the incident read the resident memory of each process, and then those counters, and neither number named the cause.
+
+So `faulte` runs `top -l 2 -s <interval> -c d` and reads the **second** sample only. The first sample holds the counter since each process started. The second holds the change over the interval, which is the live rate.
+
+`faulte` divides that change by the window that it measured, and not by the interval that the person asked for. Under `-s 2`, the two timestamps of a loaded Mac were 4 seconds apart. An interval is what `top` waits for, and a window is what it delivered, so the header prints both.
+
+### Why the swap traffic comes from the system, and not from the processes
+
+The per-process page-in counter does not count swap. In the 20 seconds that measured 46,564 swap-ins, the per-process page-in counters added up to about 1,000. A tool that ranks by that counter reports a quiet Mac while the swap file takes all of the time.
+
+`faulte` reads `host_statistics64(HOST_VM_INFO64)` before the sample and after it. The swap-ins, the swap-outs and the size of the compressor come from those two reads, and the swap in use comes from `vm.swapusage`. The ranking of the processes comes from the fault counters of `top`. The two questions have two sources, and each source answers the question that it can answer.
+
+### Why it runs `/usr/bin/top` and `/bin/ps`
+
+Two accounts share this Mac, and each one ran about 100 Claude Code processes. A third-party binary reads almost nothing about the processes of another account: `proc_pidinfo(PROC_PIDTASKINFO)` and `proc_pid_rusage` return `EPERM`, so a crate such as `sysinfo` gives no owner, no parent, no start time, and no memory for them.
+
+`/usr/bin/top` and `/bin/ps` both carry the entitlement `com.apple.system-task-ports.read`, and `/bin/ps` is setuid root as well. Each one therefore reads the processes of every account, for an account that holds no privileges at all. No third-party binary can get that entitlement. So `faulte` runs the two commands of the system and parses what they print: the fault counters come from `top`, and the owner, the parent, the memory, the start time and the command line come from `ps`.
+
+Both parsers fail closed. A header row that is not the one `faulte` asked for, a sample with no row, and a row that is not a number all print an error and exit 2. An empty ranking looks the same as a Mac that does nothing, so `faulte` never prints one.
+
+The registry of Claude Code is the one fact that stays out of reach. The `~/.claude/sessions` directory of the other account has the mode `0700`. A Claude Code process of another account therefore gives its fault rate, its memory and its age, and `other account — run with sudo` in place of the session, the state and the directory. Under `sudo`, `faulte` reads the registry in the home directory of each owner, and `faulte kill` can stop the sessions of every account. `faulte` never runs `sudo` itself, the same as `crap`.
+
+### `faulte kill`
+
+`faulte kill` stops Claude Code sessions, and it never selects another kind of process. `pk` does that job. A session is a candidate when all four of these rules are true:
+
+1. The process is older than `--older-than` (7 days by default).
+2. The registry status is `idle`, and the session became idle more than `--idle-for` ago (10 minutes by default). A session whose idle time is unknown fails this rule. A session with no registry record fails it too, because nothing proves that it is idle.
+3. No descendant of the session is alive. A background shell or a running tool call makes a session active, whatever its status says.
+4. The session is not the `faulte` process and not an ancestor of it. A session that runs `faulte kill` is never a candidate.
+
+A `busy` session and a `waiting` session fail rule 2. `waiting` means that the session waits for an answer from its user, and a stop discards the question.
+
+The plan comes before the question. It lists the candidates oldest first, in the columns of the ranking, and it counts every session that it refused under the first rule that the session failed:
+
+```
+$ COLUMNS=150 faulte kill --interval 2s
+0 Claude sessions are older than 7d, idle for more than 10m, and have no live descendant
+
+not selected: 1 runs faulte, 26 younger than 7d, 1 not idle
+faulte stops nothing.
+```
+
+That run found nothing to stop, so it asked nothing. When the plan names a session, `faulte` prints the table of the candidates and then asks on the last line:
+
+```
+Stop 19 sessions? [y/N]
+```
+
+- Only `y` and `yes` confirm, in any case, after the spaces come off. An empty answer, any other answer, and the end of the input all stop nothing. **No flag skips the question.**
+- A run whose input is not a terminal prints the plan, stops nothing, and exits 1. A script, a pipe and a hook answer nothing, and a stop is not reversible.
+- `--max N` keeps the N oldest candidates. The plan counts the ones that it held back.
+
+A person takes minutes to answer, so the plan is old by then. Immediately before it signals a session, `faulte` reads the process table and the registry again. The check drops a session whose status changed, a session that started a process since the plan, a PID that is gone, and a PID that another process took. A session that the person started to use again in those minutes survives, and the report names it and the reason.
+
+`SIGTERM` goes first, so that Claude Code closes its transcript. `SIGKILL` goes 30 seconds later, and only to a target that is still the same process. The grace period is long because of the Mac that this tool is for: a Mac that is short of memory is slow to page a process in, and a process handles no signal until it is in memory. After `SIGKILL`, `faulte` waits up to 10 seconds for the session to go, and the report names a session that is still there then as one that did not stop.
+
+For each session that it stopped, `faulte` prints one line:
+
+```
+crap 34ffff5a-3324-4038-89bb-d5cc5972cfd0
+```
+
+The transcript of a session stays on disk after the stop, so `crap` takes that session up again in the directory that it ran in. Nothing that `faulte kill` stops is lost.
+
+### What it leaves out, and says so
+
+- **A scheduled wake-up.** A session can be idle and hold a scheduled wake-up, for example a `/loop`. The registry records no wake-up, so `faulte` cannot see one. This is why the plan shows every candidate before the question: `faulte` gives the facts that it has, and the person decides.
+- **The sessions of another account, without root.** They get a row and a fault rate, and `other account — run with sudo` in place of the session fields. In the plan, they get a block of their own with the `sudo faulte kill` command line that includes them, and `faulte kill` never signals them. A count of unreadable sessions is a better answer than silence about them.
+- **A process that the two sources disagree about.** `top` lists no zombie, and `ps` lists no PID 0. A process can also start or stop between the two reads. `faulte` gives PID 0 a row that names `kernel_task`, and it gives every other such process a count in the header. Nothing falls out of the report.
+- **A live display, and another platform.** `faulte` takes one sample and exits. Nothing refreshes. It supports macOS only, because the fault sampler and the counters of the memory system are those of macOS. On another platform it prints `faulte supports macOS only.` and exits 1.
+
+### Exit codes
+
+- `0`: Success. A question that the person declined is a success as well, because `faulte` did what the answer said.
+- `1`: The platform is not macOS, or `faulte kill` found candidates and its input is not a terminal.
+- `2`: A source of this Mac failed, or its output failed a parser, or a stop did not do what the plan said that it would do. `faulte` prints the reason, and it never prints an empty ranking.

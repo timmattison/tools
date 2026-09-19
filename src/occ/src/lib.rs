@@ -29,7 +29,7 @@ pub mod version;
 pub use scan::gather_processes;
 
 pub use process::{classify, version_of, ProcessFact, Role};
-pub use registry::{Registry, SessionRegistry};
+pub use registry::{Registry, SessionRecord, SessionRegistry, SessionStatus};
 pub use report::{build, format_uptime, Report, SessionReport};
 pub use session::SessionId;
 pub use version::ClaudeVersion;

@@ -223,6 +223,7 @@ allowlist.
 - `cdva` - the long-help test of `--strict`
 - `cwt` - family render tests, and the end-to-end helpers that read the output
   of the binary
+- `faulte` - the help and usage-error tests of the binary
 - `gitscratch` - render and paint tests of the halt diffs
 - `grime` - `--diff` paint tests, through a pipe and on a terminal
 - `grind` - `--diff` paint tests, through a pipe and on a terminal
