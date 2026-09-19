@@ -222,7 +222,9 @@ shell function you supply. Set WN_START_COMMAND to name a different one, for exa
 A step that GitHub gives as an open pull request is work that exists already, so the answer \
 names no start command for it, and none for the issue it closes. It tells the reader to finish \
 the pull request instead: `Finish PR #515 (closes #512) next: review it and merge it`. The \
-summary of a plan writes the same thing as `→ PR #515 (closes #512)  review it and merge it`."
+summary of a plan writes the same thing as `→ PR #515 (closes #512)  review it and merge it`. A \
+step that names only the issue of an open pull request, such as `#512`, gets the same answer, in \
+whichever stream it stands."
 )]
 struct Cli {
     /// The chain, for example "#277 → #278 ∥ #279", or a whole plan of

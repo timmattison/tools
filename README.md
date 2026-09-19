@@ -1393,7 +1393,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     `Finish PR #515 (closes #512) next: review it and merge it`. The summary of a plan writes the
     same step as `→ PR #515 (closes #512)  review it and merge it`, with its words in the column
     where the other streams write their start commands. A plan that says `#4 (in flight, PR #15)`
-    thus sends the reader to review and merge `#15`, and not to start `#4` a second time.
+    thus sends the reader to review and merge `#15`, and not to start `#4` a second time. A step
+    that names only the issue of an open pull request, such as `#512`, gets the same answer, in
+    whichever stream it stands.
   - Every separator means the same thing: the issue on the left comes before the issue on the
     right. `→`, `->`, `∥`, `||`, `─`, `━`, `═`, a comma, and a semicolon all read as "then", so a
     chain pasted out of a plan works whichever way it was typed. The double bar is read as an

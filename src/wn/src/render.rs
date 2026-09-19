@@ -50,6 +50,8 @@
 //! such a row runs past the edge. A row that dropped the column instead would
 //! answer nothing at a width nobody reads at.
 
+use std::collections::BTreeMap;
+
 use colored::{ColoredString, Colorize};
 use textfit::{pad_right, truncate_to_budget};
 use unicode_width::UnicodeWidthStr;
@@ -412,10 +414,42 @@ fn answer(report: &Report, start: &StartCommand) -> String {
             "No issue in the chain is open.".dimmed().to_string()
         };
     };
-    next_line(entry, start)
+    next_line(&Action::of(entry, &InFlight::of(report.entries())), start)
+}
+
+/// The open pull requests a plan names in a pair, keyed by the issue each one
+/// closes.
+///
+/// A step that names only such an issue names work that is in flight, and
+/// [`Action::of`] reads this to give that step the action of the pair.
+struct InFlight(BTreeMap<IssueNumber, IssueNumber>);
+
+impl InFlight {
+    /// The open pull requests of `entries` that close an issue.
+    ///
+    /// When two of them close one issue, the first in plan order owns it. That
+    /// is the rule [`crate::graph::Work::of`] holds.
+    fn of<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> Self {
+        let mut open = BTreeMap::new();
+        for entry in entries {
+            if !entry.is_pull_request() || !entry.status.is_open() {
+                continue;
+            }
+            if let Some(closes) = entry.closes {
+                open.entry(closes.number).or_insert(entry.number);
+            }
+        }
+        Self(open)
+    }
+
+    /// The open pull request that closes `issue`, when the plan names one.
+    fn pull_request(&self, issue: IssueNumber) -> Option<IssueNumber> {
+        self.0.get(&issue).copied()
+    }
 }
 
 /// What the answer tells the reader to do with one step somebody can take now.
+#[derive(Debug, PartialEq, Eq)]
 enum Action {
     /// An issue: start it with the start command.
     Start(IssueNumber),
@@ -429,15 +463,22 @@ enum Action {
 }
 
 impl Action {
-    /// What to do with `entry`.
+    /// What to do with `entry`, in a plan whose open pull requests `in_flight`
+    /// holds.
     ///
     /// An open pull request is work to finish, not work to start, and this is
-    /// where that rule lives.
-    fn of(entry: &Entry) -> Self {
+    /// where that rule lives. A step that names only the issue of such a pull
+    /// request names the same work, so it gets the action of that pull request.
+    fn of(entry: &Entry, in_flight: &InFlight) -> Self {
         if entry.is_pull_request() {
             Self::Finish {
                 pull_request: entry.number,
                 closes: entry.closes.map(|closes| closes.number),
+            }
+        } else if let Some(pull_request) = in_flight.pull_request(entry.number) {
+            Self::Finish {
+                pull_request,
+                closes: Some(entry.number),
             }
         } else {
             Self::Start(entry.number)
@@ -482,8 +523,7 @@ fn pull_request_name(pull_request: IssueNumber, closes: Option<IssueNumber>) -> 
     }
 }
 
-/// The sentence that names one step somebody can take now, and what to do
-/// with it.
+/// The sentence that names one `action` somebody can take now.
 ///
 /// An issue gets the start command. An open pull request gets the words that
 /// tell the reader to finish it, and no start command, because its work
@@ -492,8 +532,7 @@ fn pull_request_name(pull_request: IssueNumber, closes: Option<IssueNumber>) -> 
 /// A chain names one such step, and a picture names one for each stream that
 /// is ready. Both write this sentence, so a reader who learned it on a chain
 /// reads the answer of a picture without learning a second one.
-fn next_line(entry: &Entry, start: &StartCommand) -> String {
-    let action = Action::of(entry);
+fn next_line(action: &Action, start: &StartCommand) -> String {
     let name = action.name().bold();
     let instruction = action.instruction(start).cyan().bold();
     match action {
@@ -590,19 +629,29 @@ fn waits_text(numbers: &[IssueNumber]) -> String {
 /// [`next_line`].
 ///
 /// The lines stand in the order of the rows, so a reader who read the rows
-/// reads the answers in the same order and finds the row of each of them.
+/// reads the answers in the same order and finds the row of each of them. Two
+/// ready rows that give one action give one line, at the place of the first.
 fn graph_answer(report: &Report, start: &StartCommand) -> Vec<String> {
-    let ready: Vec<String> = report
+    let in_flight = InFlight::of(report.entries());
+    let mut actions: Vec<Action> = Vec::new();
+    let ready = report
         .entries()
         .iter()
         .enumerate()
-        .filter(|(position, _)| report.is_ready(*position))
-        .map(|(_, entry)| next_line(entry, start))
-        .collect();
-    if ready.is_empty() {
+        .filter(|(position, _)| report.is_ready(*position));
+    for (_, entry) in ready {
+        let action = Action::of(entry, &in_flight);
+        if !actions.contains(&action) {
+            actions.push(action);
+        }
+    }
+    if actions.is_empty() {
         return vec![nothing_to_start(report)];
     }
-    ready
+    actions
+        .iter()
+        .map(|action| next_line(action, start))
+        .collect()
 }
 
 /// What the answer of a picture says when no step of it is ready.
@@ -727,10 +776,11 @@ enum Tail {
 }
 
 impl Tail {
-    /// The answer one stream gives.
-    fn of(report: &Report) -> Self {
+    /// The answer one stream gives, in a plan whose open pull requests
+    /// `in_flight` holds.
+    fn of(report: &Report, in_flight: &InFlight) -> Self {
         match report.next_entry() {
-            Some(entry) => Self::Take(Action::of(entry)),
+            Some(entry) => Self::Take(Action::of(entry, in_flight)),
             None if report
                 .entries()
                 .iter()
@@ -806,7 +856,9 @@ fn command(start: &StartCommand, number: IssueNumber) -> String {
 /// One line for each stream: its label, and the step to take in it.
 ///
 /// The step is an issue to start, or an open pull request to finish. Its
-/// command or its words stand in one column for every stream.
+/// command or its words stand in one column for every stream. An open pull
+/// request of one stream reaches a step of another stream that names the issue
+/// it closes.
 ///
 /// The tail is what the reader came for, so it takes its columns first and the
 /// label is cut to what is left. A label that pushed the command off the window
@@ -815,9 +867,10 @@ fn command(start: &StartCommand, number: IssueNumber) -> String {
 /// wrapped line that names its stream is worth more than a line that names
 /// none.
 fn summary(streams: &[StreamReport], width: usize, start: &StartCommand) -> Vec<String> {
+    let in_flight = InFlight::of(streams.iter().flat_map(|stream| stream.report.entries()));
     let tails: Vec<Tail> = streams
         .iter()
-        .map(|stream| Tail::of(&stream.report))
+        .map(|stream| Tail::of(&stream.report, &in_flight))
         .collect();
     let mark_width = tails.iter().filter_map(Tail::mark_width).max().unwrap_or(0);
     let tail_width = tails
@@ -1424,6 +1477,54 @@ mod tests {
                 "Take one from each stream:\n",
                 "  S1  → PR #515 (closes #512)  review it and merge it",
             )
+        );
+    }
+
+    /// The issue number `number`, for a test that names one.
+    fn issue(number: u64) -> IssueNumber {
+        IssueNumber::new(number).expect("the test number is an issue number")
+    }
+
+    #[test]
+    fn only_an_open_pull_request_that_closes_an_issue_is_in_flight() {
+        let in_flight = InFlight::of(&[
+            paired_pull_request(515, Status::Open, "Open", 512, Status::Open),
+            paired_pull_request(514, Status::Done, "Merged", 510, Status::Open),
+            paired_pull_request(513, Status::Dropped, "Closed", 509, Status::Open),
+            paired(344, Status::Open, "An issue", 341, Status::Open),
+            pull_request(600, Status::Open, "Closes nothing"),
+        ]);
+        assert_eq!(in_flight.pull_request(issue(512)), Some(issue(515)));
+        for number in [510, 509, 341, 600] {
+            assert_eq!(in_flight.pull_request(issue(number)), None, "for #{number}");
+        }
+    }
+
+    #[test]
+    fn the_first_open_pull_request_that_closes_an_issue_owns_it() {
+        let in_flight = InFlight::of(&[
+            paired_pull_request(515, Status::Open, "First", 512, Status::Open),
+            paired_pull_request(520, Status::Open, "Second", 512, Status::Open),
+        ]);
+        assert_eq!(in_flight.pull_request(issue(512)), Some(issue(515)));
+    }
+
+    #[test]
+    fn a_step_that_names_the_issue_of_an_open_pull_request_gets_the_action_of_the_pair() {
+        let pair = paired_pull_request(515, Status::Open, "The finished work", 512, Status::Open);
+        let in_flight = InFlight::of([&pair]);
+        let finish = Action::Finish {
+            pull_request: issue(515),
+            closes: Some(issue(512)),
+        };
+        assert_eq!(Action::of(&pair, &in_flight), finish);
+        assert_eq!(
+            Action::of(&entry(512, Status::Open, "The work it closes"), &in_flight),
+            finish
+        );
+        assert_eq!(
+            Action::of(&entry(6, Status::Open, "Other work"), &in_flight),
+            Action::Start(issue(6))
         );
     }
 
