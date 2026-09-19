@@ -64,9 +64,9 @@ use crate::StartCommand;
 const MARK_DONE: char = '✓';
 /// The mark of an issue that was closed without the work being done.
 const MARK_DROPPED: char = '⊘';
-/// The mark of the issue to start.
+/// The mark of the step to take.
 const MARK_NEXT: char = '→';
-/// The mark of an issue that is open and stands behind the one to start.
+/// The mark of an issue that is open and stands behind the step to take.
 const MARK_LATER: char = '·';
 /// The mark of a number the repository does not have.
 const MARK_MISSING: char = '?';
@@ -206,8 +206,8 @@ struct Style {
     paint_text: fn(&str) -> ColoredString,
 }
 
-/// The style of one row. `is_next` is what parts the issue to start from the
-/// open issues that stand behind it.
+/// The style of one row. `is_next` is what parts the step to take from the
+/// open steps that stand behind it.
 fn style(status: Status, is_next: bool) -> Style {
     match status {
         Status::Done => Style {

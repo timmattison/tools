@@ -17,7 +17,7 @@
 //!
 //! A plan drawn as a picture is the third shape. It says the one thing a chain
 //! and a table cannot: two streams that join. `wn` follows the wires from left
-//! to right and names every issue that is ready, because two streams are two
+//! to right and names every step that is ready, because two streams are two
 //! people who work at the same time.
 //!
 //! A plan says that same thing in words with a `Waits for` column. A cell of
@@ -146,7 +146,7 @@ Every separator means the same thing: the issue on the left comes before the iss
 A double bar is read as an arrow, because the chain is a plan to walk in order.\n\n\
 A plan of parallel work is a second shape of input. `wn` reads the plan the plan-parallel-work \
 skill writes — the records it prints, the Markdown table it names, and the box-drawn table it \
-arrives on the clipboard as — and names the issue to start in every stream of it. Only the Order \
+arrives on the clipboard as — and names the step to take in every stream of it. Only the Order \
 field of a plan is read as a chain, because the Notes field is prose about code and prose about \
 code is full of numbers.\n\n\
 A pull request and the issue it closes are one step of a stream and not two, written PR#344 \
@@ -158,7 +158,7 @@ last one. A row writes a number GitHub gives as a pull request with PR in front 
 those steps give the rows PR#344 (#341) and PR#15 (#4).\n\n\
 A plan drawn as a picture is a third shape of input. Two streams that join are two people who \
 work at the same time, and no chain and no table says that. `wn` follows the wires from left to \
-right and names every issue that is ready to start now. A picture drawn from right to left is \
+right and names every step that is ready now. A picture drawn from right to left is \
 refused, because a guess at the order sends somebody to the wrong issue.\n\n\
 A plan says that same thing in words, with a `Waits for` column beside its streams. A cell of it \
 names the work of other streams that comes before the first step of that stream. The cell is a \
@@ -753,7 +753,7 @@ fn answer_plan(
     )
 }
 
-/// Print the rows of one chain and the issue to start, and give the status the
+/// Print the rows of one chain and the step to take, and give the status the
 /// run exits with.
 fn answer_chain(
     chain: &[IssueNumber],
@@ -770,10 +770,10 @@ fn answer_chain(
     exit_status(report.missing().is_empty())
 }
 
-/// Print the rows of a graph, the notes they earn, and every issue somebody can
-/// start now, and give the status the run exits with.
+/// Print the rows of a graph, the notes they earn, and every step somebody can
+/// take now, and give the status the run exits with.
 ///
-/// The answer names every step somebody can start now, and not one of them.
+/// The answer names every step somebody can take now, and not one of them.
 /// Two streams that join are two people who work at the same time, which is
 /// the whole reason somebody draws the picture.
 ///

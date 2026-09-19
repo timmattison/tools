@@ -1,7 +1,7 @@
 //! What the chain says once every issue in it carries a state.
 //!
-//! The question the tool answers is one question: which issue do I start now.
-//! The answer is the first issue of the chain that is still open. Everything
+//! The question the tool answers is one question: which step do I take now.
+//! The answer is the first step of the chain that is still open. Everything
 //! else this module holds is there because the real answer has to survive a
 //! chain that is not a clean run of closed issues followed by open ones.
 //!
@@ -11,8 +11,8 @@
 //!   first. The order still holds, so the answer does not change, but the plan
 //!   the reader holds in their head is now wrong and nothing else would say so.
 //! * An issue GitHub does not have. A typo in a number is invisible in the
-//!   answer, because a chain of five issues with one missing still names an
-//!   issue to start. So a missing issue is never the answer, and the tool
+//!   answer, because a chain of five issues with one missing still names a
+//!   step to take. So a missing issue is never the answer, and the tool
 //!   reports it.
 //!
 //! # A step of a plan holds two numbers
@@ -35,7 +35,7 @@
 //!
 //! [`Report`] carries the answer of all three shapes of input, and it carries
 //! it in one shape. A chain and a stream stand in one line, so each of them
-//! names one issue to start. A picture holds two streams that join, so it
+//! names one step to take. A picture holds two streams that join, so it
 //! names a set of them and it says what each blocked step waits for.
 //!
 //! The three must not part company. A stream is a graph whose nodes stand in
@@ -86,7 +86,7 @@ pub enum Status {
 }
 
 impl Status {
-    /// Is this an issue somebody can start now?
+    /// Is this a step somebody can take now?
     #[must_use]
     pub fn is_open(self) -> bool {
         self == Self::Open
@@ -261,10 +261,10 @@ pub struct Report {
     /// a topological order, so every step stands after the steps it waits for
     /// in this list as well.
     entries: Vec<Entry>,
-    /// The positions of the entries somebody can start now.
+    /// The positions of the steps somebody can take now.
     ///
     /// A chain and a stream hold one position here, because one line of work
-    /// has one issue to start. A picture holds one position for each stream
+    /// has one step to take. A picture holds one position for each stream
     /// that is ready, because two streams that join are two people who work at
     /// the same time.
     ready: Vec<usize>,
@@ -283,7 +283,7 @@ pub struct Report {
 impl Report {
     /// Read the answer out of the states of the chain.
     ///
-    /// One line of work has one issue to start: the first open one. Every
+    /// One line of work has one step to take: the first open one. Every
     /// finished step after it is work somebody closed out of order, because
     /// each of them stands after a step that is not finished.
     #[must_use]
@@ -311,7 +311,7 @@ impl Report {
     /// The report of one stream of a plan.
     ///
     /// The state of a step is the state of the number the step names, because
-    /// the pull request of a pair is the work. So the issue to start is the
+    /// the pull request of a pair is the work. So the step to take is the
     /// first step whose pull request is open, and a merged pull request is
     /// walked past even while the issue it names stays open.
     ///
@@ -403,8 +403,8 @@ impl Report {
         &self.entries
     }
 
-    /// The first position in [`entries`](Self::entries) somebody can start, or
-    /// `None` when nothing is ready.
+    /// The position in [`entries`](Self::entries) of the first step somebody
+    /// can take, or `None` when nothing is ready.
     ///
     /// A chain and a stream have one such position, so this is their whole
     /// answer. A picture has one for each ready stream, and a caller that
@@ -414,13 +414,13 @@ impl Report {
         self.ready.first().copied()
     }
 
-    /// The first issue somebody can start, or `None` when nothing is ready.
+    /// The first step somebody can take, or `None` when nothing is ready.
     #[must_use]
     pub fn next_entry(&self) -> Option<&Entry> {
         self.next().map(|position| &self.entries[position])
     }
 
-    /// Can somebody start the entry at `position` now?
+    /// Can somebody take the step at `position` now?
     ///
     /// A row asks this of each entry, because a picture marks one row for each
     /// stream that is ready. A position outside the report gives `false`,

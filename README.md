@@ -1421,13 +1421,13 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     without a merge counts as dropped. An issue closed as not planned or as a duplicate is marked
     `⊘` rather than `✓`, because the chain walked past it rather than through it.
   - Two things earn a note under the answer. A number the repository does not have is reported
-    and never named as the next issue, and the run exits `1` — a typo in a chain of six is
-    otherwise invisible, because the other five still name an issue to start. An issue that is
+    and never named as the next step, and the run exits `1` — a typo in a chain of six is
+    otherwise invisible, because the other five still name a step to take. An issue that is
     closed after the next one is reported as done out of order, because the plan in your head is
     then wrong and nothing else would say so.
   - A plan of parallel work is a second shape of input, and it is not a change to the first one.
     The `plan-parallel-work` skill writes a plan as a set of streams, each with an `Order` field,
-    and the streams run at the same time. `wn` reads the whole plan and names the issue to start
+    and the streams run at the same time. `wn` reads the whole plan and names the step to take
     in every stream, under one summary that carries all of them. All three written forms work: the
     records a terminal prints, the Markdown table a file holds, and the box-drawn table the report
     arrives on the clipboard as. No flag says which shape the text is, because the shape of the
@@ -1515,9 +1515,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     thus draws `#96 → #91`, `#96 → #89`, `#91 → #89`, and `#89 → #94`. That is a graph, and it is
     the graph a picture draws, so a plan that carries such an edge answers the way a picture
     answers and earns no second report: one row for each step in a topological order, `→` on every
-    ready step and `·` on a blocked one, `waits for #96, #91` on the row of `#89`, and one start
-    line for each issue somebody can begin now. The plan above names `#96` and `#86` while every
-    issue is open, and it names `#91` and `#86` once `#96` is closed.
+    ready step and `·` on a blocked one, `waits for #96, #91` on the row of `#89`, and one line
+    for each step somebody can take now. The plan above names `#96` and `#86` while every issue is
+    open, and it names `#91` and `#86` once `#96` is closed.
   - An empty cell is a stream nothing outside it blocks, and it is the common case. An absent
     column is a plan with no cross-stream edge at all, which is every plan written before this
     landed: such a plan still answers as one block for each stream under one summary, and
@@ -1615,9 +1615,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - The answer names a state for every step. A step is ready when it is open and every step before
     it is finished, blocked when it is open and one step before it is not, and finished when it is
     done or dropped. `→` marks every ready step and `·` marks a blocked one, which is what those
-    two marks already mean. Every ready issue gets its own start line — `Start #242 next with 'si
-    242'` and `Start #246 next with 'si 246'` — because two streams that join are two people who
-    work at the same time, and an answer that names one issue loses that. A blocked row names
+    two marks already mean. Every ready step gets its own line — `Start #242 next with 'si 242'`
+    and `Start #246 next with 'si 246'` — because two streams that join are two people who work at
+    the same time, and an answer that names one step loses that. A blocked row names
     every step it waits for and never the first one alone: `waits for #247, #248`. That column
     takes its columns out of the window before the title does, because it is what the reader of a
     blocked row came for. The rows print in a topological order, and a tie goes to the step that
