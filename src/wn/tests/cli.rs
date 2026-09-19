@@ -481,6 +481,39 @@ const PULL_REQUEST_ISSUES: &str = r#"{"data":{"repository":{
 "i6":{"__typename":"Issue","number":6,"title":"The work nobody began","state":"OPEN","stateReason":null}
 }}}"#;
 
+/// A plan of two streams that name one piece of work two ways.
+///
+/// Stream `A` writes the pair `PR#515 (#512)`, and stream `B` writes the bare
+/// `#512`. [`PULL_REQUEST_ISSUES`] says `#515` is open, so both streams name
+/// work that is in flight.
+const PLAN_OF_A_PAIR_AND_ITS_ISSUE: &str = "\
+Stream: A pair
+Order: PR#515 (#512)
+
+Stream: B bare issue
+Order: #512 → #6
+";
+
+/// The same two streams, as a JSON plan.
+const JSON_PLAN_OF_A_PAIR_AND_ITS_ISSUE: &str = r#"{
+  "version": 1,
+  "streams": [
+    { "id": "A", "order": [{ "issue": 512, "pr": 515 }] },
+    { "id": "B", "order": [{ "issue": 512 }, { "issue": 6 }] }
+  ]
+}"#;
+
+/// What GitHub says about [`PLAN_OF_A_PAIR_AND_ITS_ISSUE`] once `#515` is
+/// merged and `#512` is still open.
+///
+/// A merged pull request is no work in flight, so the bare `#512` is work to
+/// start again.
+const MERGED_PULL_REQUEST_ISSUES: &str = r#"{"data":{"repository":{
+"i515":{"__typename":"PullRequest","number":515,"title":"The finished work","state":"MERGED"},
+"i512":{"__typename":"Issue","number":512,"title":"The work it closes","state":"OPEN","stateReason":null},
+"i6":{"__typename":"Issue","number":6,"title":"The work nobody began","state":"OPEN","stateReason":null}
+}}}"#;
+
 /// A JSON plan whose two streams wait for each other.
 ///
 /// Neither of the two starts, so the plan names no work at all.
@@ -2059,6 +2092,82 @@ fn an_open_pull_request_of_a_picture_is_work_to_finish_and_not_to_start() {
         assert!(
             !text.contains(command),
             "no line names the command {command:?}, in {text}"
+        );
+    }
+}
+
+#[test]
+fn the_issue_of_an_open_pull_request_is_work_to_finish_in_every_stream() {
+    // Stream B names only `#512`, and stream A says that the open pull request
+    // #515 does that work. So the tail of B tells the reader to finish #515,
+    // as the tail of A does, and no tail starts the work a second time with
+    // `si 512`. The rows stay as the plan wrote them.
+    let gh = FakeGh::new(PULL_REQUEST_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", PLAN_OF_A_PAIR_AND_ITS_ISSUE);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "A pair\n",
+            "  → PR#515 (#512)  The finished work\n",
+            "\n",
+            "B bare issue\n",
+            "  → #512  The work it closes\n",
+            "  · #6    The work nobody began\n",
+            "\n",
+            "Take one from each stream:\n",
+            "  A pair        → PR #515 (closes #512)  review it and merge it\n",
+            "  B bare issue  → PR #515 (closes #512)  review it and merge it\n",
+        )
+    );
+}
+
+#[test]
+fn the_issue_of_an_open_pull_request_earns_no_start_line_in_a_json_plan() {
+    // A JSON plan is a graph, and both the pair and the bare `#512` are ready
+    // rows. The two rows name one piece of work that is in flight, so the
+    // answer writes one line that tells the reader to finish it, and no line
+    // that starts it.
+    let gh = FakeGh::new(PULL_REQUEST_ISSUES);
+    let output = run_with_stdin(
+        &gh,
+        &["--repo", REPO],
+        "80",
+        JSON_PLAN_OF_A_PAIR_AND_ITS_ISSUE,
+    );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "→ PR#515 (#512)  The finished work\n",
+            "→ #512           The work it closes\n",
+            "· #6             The work nobody began  waits for #512\n",
+            "\n",
+            "Finish PR #515 (closes #512) next: review it and merge it\n",
+        )
+    );
+}
+
+#[test]
+fn the_issue_of_a_merged_pull_request_is_still_work_to_start() {
+    // The boundary of the rule above. A merged pull request is no work in
+    // flight, so the bare `#512` of stream B keeps its start command in each
+    // form of the plan.
+    let gh = FakeGh::new(MERGED_PULL_REQUEST_ISSUES);
+    for plan in [
+        PLAN_OF_A_PAIR_AND_ITS_ISSUE,
+        JSON_PLAN_OF_A_PAIR_AND_ITS_ISSUE,
+    ] {
+        let output = run_with_stdin(&gh, &["--repo", REPO], "80", plan);
+        assert!(output.status.success(), "stderr: {}", stderr(&output));
+        let text = stdout(&output);
+        assert!(
+            text.contains("si 512"),
+            "the bare #512 is work to start, in {text}"
+        );
+        assert!(
+            !text.contains("PR #515"),
+            "no line tells the reader to finish the merged #515, in {text}"
         );
     }
 }
