@@ -1387,6 +1387,15 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     different one, and it goes in as it is written, whole command lines included:
     `export WN_START_COMMAND='gh issue develop'` makes the answer read
     `Start #278 next with 'gh issue develop 278'`. An empty value falls back to `si`.
+  - An open pull request is work that exists already, so the answer names no start command for
+    it, and none for the issue it closes. It tells the reader to finish the pull request instead,
+    and it names the issue that pull request closes when the plan names one:
+    `Finish PR #515 (closes #512) next: review it and merge it`. The summary of a plan writes the
+    same step as `→ PR #515 (closes #512)  review it and merge it`, with its words in the column
+    where the other streams write their start commands. A plan that says `#4 (in flight, PR #15)`
+    thus sends the reader to review and merge `#15`, and not to start `#4` a second time. A step
+    that names only the issue of an open pull request, such as `#512`, gets the same answer, in
+    whichever stream it stands.
   - Every separator means the same thing: the issue on the left comes before the issue on the
     right. `→`, `->`, `∥`, `||`, `─`, `━`, `═`, a comma, and a semicolon all read as "then", so a
     chain pasted out of a plan works whichever way it was typed. The double bar is read as an
@@ -1412,13 +1421,13 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     without a merge counts as dropped. An issue closed as not planned or as a duplicate is marked
     `⊘` rather than `✓`, because the chain walked past it rather than through it.
   - Two things earn a note under the answer. A number the repository does not have is reported
-    and never named as the next issue, and the run exits `1` — a typo in a chain of six is
-    otherwise invisible, because the other five still name an issue to start. An issue that is
+    and never named as the next step, and the run exits `1` — a typo in a chain of six is
+    otherwise invisible, because the other five still name a step to take. An issue that is
     closed after the next one is reported as done out of order, because the plan in your head is
     then wrong and nothing else would say so.
   - A plan of parallel work is a second shape of input, and it is not a change to the first one.
     The `plan-parallel-work` skill writes a plan as a set of streams, each with an `Order` field,
-    and the streams run at the same time. `wn` reads the whole plan and names the issue to start
+    and the streams run at the same time. `wn` reads the whole plan and names the step to take
     in every stream, under one summary that carries all of them. All three written forms work: the
     records a terminal prints, the Markdown table a file holds, and the box-drawn table the report
     arrives on the clipboard as. No flag says which shape the text is, because the shape of the
@@ -1453,20 +1462,21 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     the first step of another stream of that same plan. The digits alone cannot part a count of
     lines from the number of an issue. Only the field they stand in can.
   - A pull request and the issue it closes are one step, not two. `PR#344 (#341)` gets one row,
-    `#344 (#341)`, and the state of that row is the state of the pull request, because the pull
-    request is the work. `wn` asks GitHub about both numbers, and a pair whose two states disagree
-    earns a note — a merged pull request whose issue is still open is a real condition, and
-    nothing else reports it.
+    and the row writes the pair the same way, so the reader sees which number is the work. A pull
+    request alone writes `PR#344`, and an issue writes the bare `#344`. The state of that row is
+    the state of the pull request, because the pull request is the work. `wn` asks GitHub about
+    both numbers, and a pair whose two states disagree earns a note — a merged pull request whose
+    issue is still open is a real condition, and nothing else reports it.
   - A plan writes that pair the other way round as well, and it writes prose beside it: `#4 (in
     flight, PR #15)` is the issue `#4` whose work is the pull request `#15`, and `#12 (human)` is
     one issue with a note about who does it. So a group in parentheses annotates the step to its
     left and never opens one. Inside a group, only a word carrying the `#` is a number, and a `PR`
     in front of one marks that number as the work — which is why `#4 (in flight, PR #15)` gives the
-    row `#15 (#4)`, the same step `PR#344 (#341)` gives. Every other word is prose that `wn` drops,
-    so `#4 (30-line window)` holds one number: the `30` carries no hash. That prose holds a
+    row `PR#15 (#4)`, the same step `PR#344 (#341)` gives. Every other word is prose that `wn`
+    drops, so `#4 (30-line window)` holds one number: the `30` carries no hash. That prose holds a
     parenthesis as readily as a word, so a group counts its depth and the parenthesis that brings
     the depth to zero is the one that closes it: `#4 (a note (see the docs)) → #7` is two steps,
-    and `#4 (in flight (rebasing), PR #15)` still gives the row `#15 (#4)`. A group that never
+    and `#4 (in flight (rebasing), PR #15)` still gives the row `PR#15 (#4)`. A group that never
     closes is refused, because where it ends is a guess — and a nested parenthesis closes the group
     it opened and no other, so `#4 (a (b) c` is refused as well.
   - One GraphQL query answers every number of the plan, as it does for one chain. A plan of seven
@@ -1505,9 +1515,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     thus draws `#96 → #91`, `#96 → #89`, `#91 → #89`, and `#89 → #94`. That is a graph, and it is
     the graph a picture draws, so a plan that carries such an edge answers the way a picture
     answers and earns no second report: one row for each step in a topological order, `→` on every
-    ready step and `·` on a blocked one, `waits for #96, #91` on the row of `#89`, and one start
-    line for each issue somebody can begin now. The plan above names `#96` and `#86` while every
-    issue is open, and it names `#91` and `#86` once `#96` is closed.
+    ready step and `·` on a blocked one, `waits for #96, #91` on the row of `#89`, and one line
+    for each step somebody can take now. The plan above names `#96` and `#86` while every issue is
+    open, and it names `#91` and `#86` once `#96` is closed.
   - An empty cell is a stream nothing outside it blocks, and it is the common case. An absent
     column is a plan with no cross-stream edge at all, which is every plan written before this
     landed: such a plan still answers as one block for each stream under one summary, and
@@ -1605,9 +1615,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - The answer names a state for every step. A step is ready when it is open and every step before
     it is finished, blocked when it is open and one step before it is not, and finished when it is
     done or dropped. `→` marks every ready step and `·` marks a blocked one, which is what those
-    two marks already mean. Every ready issue gets its own start line — `Start #242 next with 'si
-    242'` and `Start #246 next with 'si 246'` — because two streams that join are two people who
-    work at the same time, and an answer that names one issue loses that. A blocked row names
+    two marks already mean. Every ready step gets its own line — `Start #242 next with 'si 242'`
+    and `Start #246 next with 'si 246'` — because two streams that join are two people who work at
+    the same time, and an answer that names one step loses that. A blocked row names
     every step it waits for and never the first one alone: `waits for #247, #248`. That column
     takes its columns out of the window before the title does, because it is what the reader of a
     blocked row came for. The rows print in a topological order, and a tie goes to the step that
@@ -1654,7 +1664,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - `wn` reads `streams` for the answer. The `order` array of a stream is a chain, so each step
     of it comes before the step after it. In one step, `issue` is the issue number, `pr` is the
     pull request that does the work of that issue — the same pair `PR#344 (#341)` writes, and it
-    reaches the report as the row `#102 (#94)` — and `waitsFor` is the set of numbers that come
+    reaches the report as the row `PR#102 (#94)` — and `waitsFor` is the set of numbers that come
     before that step. `waitsFor` is the JSON spelling of the `Waits for` cell, and it reaches the
     same graph. A cell writes the pair as `PR#102 (#94)` and a `waitsFor` holds bare numbers, so
     a `waitsFor` that names the issue of a pair reaches that pair. One piece of work is one row
@@ -1690,7 +1700,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     reads `The plan holds no work. Nothing to start.` and the run exits `0`, and it asks GitHub
     nothing at all. Every other JSON plan earns the report a picture earns: one row for each step
     in the order of the work, `→` on every ready step and `·` on a blocked one, the work each
-    blocked row waits for, and one start line for each issue somebody can begin now. A JSON plan
+    blocked row waits for, and one line for each step somebody can take now. A JSON plan
     is a graph, a table with a `Waits for` column is the same graph, and one report answers both,
     because two reports of one question drift apart.
   - A run of `claude` is the fourth input, after the argument, standard input, and the clipboard.

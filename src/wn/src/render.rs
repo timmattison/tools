@@ -29,15 +29,17 @@
 //!
 //! A plan of parallel work holds many streams, and [`render_plan`] paints one
 //! block for each of them. A block carries no answer of its own: the summary
-//! under the last block names the issue to start in every stream, so the
-//! reader reads the answers together and picks the stream they want.
+//! under the last block names the step to take in every stream, so the reader
+//! reads the answers together and picks the stream they want. The step is an
+//! issue to start, or an open pull request to finish.
 //!
 //! # A picture is one block with one column more
 //!
 //! A picture joins two streams, so the row over a row is not the work that row
 //! waits for. [`render_graph`] paints one block with a last column that names
-//! that work, and the answer under it names one command for each step somebody
-//! can start now.
+//! that work, and the answer under it writes one line for each step somebody
+//! can take now: the command that starts an issue, or the words that finish an
+//! open pull request.
 //!
 //! That column takes its columns out of the window before the title does. It
 //! is the one thing a reader of a blocked row came for, and a title is text
@@ -48,21 +50,23 @@
 //! such a row runs past the edge. A row that dropped the column instead would
 //! answer nothing at a width nobody reads at.
 
+use std::collections::BTreeMap;
+
 use colored::{ColoredString, Colorize};
 use textfit::{pad_right, truncate_to_budget};
 use unicode_width::UnicodeWidthStr;
 
 use crate::chain::{list, IssueNumber};
-use crate::report::{Entry, Report, Status};
+use crate::report::{Entry, Report, Status, PULL_REQUEST_PREFIX};
 use crate::StartCommand;
 
 /// The mark of an issue whose work is done.
 const MARK_DONE: char = '✓';
 /// The mark of an issue that was closed without the work being done.
 const MARK_DROPPED: char = '⊘';
-/// The mark of the issue to start.
+/// The mark of the step to take.
 const MARK_NEXT: char = '→';
-/// The mark of an issue that is open and stands behind the one to start.
+/// The mark of an issue that is open and stands behind the step to take.
 const MARK_LATER: char = '·';
 /// The mark of a number the repository does not have.
 const MARK_MISSING: char = '?';
@@ -147,6 +151,12 @@ const GRAPH_NOT_READY: &str = concat!(
     "Every open issue waits for work that is not finished.",
 );
 
+/// The words that tell the reader what to do with an open pull request.
+///
+/// They stand where the start command of an issue stands, because a pull
+/// request is work that exists already: nobody starts it a second time.
+const FINISH_WORDS: &str = "review it and merge it";
+
 /// Paint the chain, the notes it earns, and the answer.
 ///
 /// `repo` names the repository the states came from, and appears only in the
@@ -196,8 +206,8 @@ struct Style {
     paint_text: fn(&str) -> ColoredString,
 }
 
-/// The style of one row. `is_next` is what parts the issue to start from the
-/// open issues that stand behind it.
+/// The style of one row. `is_next` is what parts the step to take from the
+/// open steps that stand behind it.
 fn style(status: Status, is_next: bool) -> Style {
     match status {
         Status::Done => Style {
@@ -260,7 +270,8 @@ fn fitted_title(entry: &Entry, budget: usize) -> String {
 /// in the spaces that would have stood before one.
 ///
 /// The number a row writes is [`Entry::label`], so a step of a plan that names
-/// a pull request and the issue it closes writes both. The width of the column
+/// a pull request and the issue it closes writes both, and a pull request
+/// writes them as the plan does: `PR#344 (#341)`. The width of the column
 /// comes out of the same call, and the two can never part company.
 ///
 /// `waits` is the text of the last column, and `title_width` is the columns
@@ -384,7 +395,8 @@ fn word(status: Status) -> &'static str {
     }
 }
 
-/// The answer: the issue to start and the command that starts it.
+/// The answer: the step to take next and what to do with it. See
+/// [`next_line`].
 fn answer(report: &Report, start: &StartCommand) -> String {
     let Some(entry) = report.next_entry() else {
         return if report
@@ -402,20 +414,131 @@ fn answer(report: &Report, start: &StartCommand) -> String {
             "No issue in the chain is open.".dimmed().to_string()
         };
     };
-    start_line(entry.number, start)
+    next_line(&Action::of(entry, &InFlight::of(report.entries())), start)
 }
 
-/// The sentence that names one issue to start, and the command that starts it.
+/// The open pull requests a plan names in a pair, keyed by the issue each one
+/// closes.
 ///
-/// A chain names one such issue, and a picture names one for each stream that
+/// A step that names only such an issue names work that is in flight, and
+/// [`Action::of`] reads this to give that step the action of the pair.
+struct InFlight(BTreeMap<IssueNumber, IssueNumber>);
+
+impl InFlight {
+    /// The open pull requests of `entries` that close an issue.
+    ///
+    /// When two of them close one issue, the first in plan order owns it. That
+    /// is the rule [`crate::graph::Work::of`] holds.
+    fn of<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> Self {
+        let mut open = BTreeMap::new();
+        for entry in entries {
+            if !entry.is_pull_request() || !entry.status.is_open() {
+                continue;
+            }
+            if let Some(closes) = entry.closes {
+                open.entry(closes.number).or_insert(entry.number);
+            }
+        }
+        Self(open)
+    }
+
+    /// The open pull request that closes `issue`, when the plan names one.
+    fn pull_request(&self, issue: IssueNumber) -> Option<IssueNumber> {
+        self.0.get(&issue).copied()
+    }
+}
+
+/// What the answer tells the reader to do with one step somebody can take now.
+#[derive(Debug, PartialEq, Eq)]
+enum Action {
+    /// An issue: start it with the start command.
+    Start(IssueNumber),
+    /// An open pull request: the work exists, so review it and merge it.
+    Finish {
+        /// The number of the pull request.
+        pull_request: IssueNumber,
+        /// The issue the pull request closes, when the step names one.
+        closes: Option<IssueNumber>,
+    },
+}
+
+impl Action {
+    /// What to do with `entry`, in a plan whose open pull requests `in_flight`
+    /// holds.
+    ///
+    /// An open pull request is work to finish, not work to start, and this is
+    /// where that rule lives. A step that names only the issue of such a pull
+    /// request names the same work, so it gets the action of that pull request.
+    fn of(entry: &Entry, in_flight: &InFlight) -> Self {
+        if entry.is_pull_request() {
+            Self::Finish {
+                pull_request: entry.number,
+                closes: entry.closes.map(|closes| closes.number),
+            }
+        } else if let Some(pull_request) = in_flight.pull_request(entry.number) {
+            Self::Finish {
+                pull_request,
+                closes: Some(entry.number),
+            }
+        } else {
+            Self::Start(entry.number)
+        }
+    }
+
+    /// The name an answer writes for the step: `#278` for an issue, and
+    /// `PR #515 (closes #512)` for a pull request.
+    fn name(&self) -> String {
+        match self {
+            Self::Start(number) => number.to_string(),
+            Self::Finish {
+                pull_request,
+                closes,
+            } => pull_request_name(*pull_request, *closes),
+        }
+    }
+
+    /// What the reader does with the step: `si 278` starts an issue, and
+    /// [`FINISH_WORDS`] tell the reader to finish a pull request.
+    ///
+    /// Both stand in the same place of an answer and take the same paint, so
+    /// a reader finds the next thing to do in one place whatever the step is.
+    fn instruction(&self, start: &StartCommand) -> String {
+        match self {
+            Self::Start(number) => command(start, *number),
+            Self::Finish { .. } => FINISH_WORDS.to_string(),
+        }
+    }
+}
+
+/// `PR #515`, or `PR #515 (closes #512)`: the name an answer writes for a
+/// pull request.
+///
+/// The name carries the issue the pull request closes, because that is the
+/// number the plan gave the work. A reader who looks for `#512` in the answer
+/// thus finds the pull request that finishes it.
+fn pull_request_name(pull_request: IssueNumber, closes: Option<IssueNumber>) -> String {
+    match closes {
+        Some(closes) => format!("{PULL_REQUEST_PREFIX} {pull_request} (closes {closes})"),
+        None => format!("{PULL_REQUEST_PREFIX} {pull_request}"),
+    }
+}
+
+/// The sentence that names one `action` somebody can take now.
+///
+/// An issue gets the start command. An open pull request gets the words that
+/// tell the reader to finish it, and no start command, because its work
+/// exists already.
+///
+/// A chain names one such step, and a picture names one for each stream that
 /// is ready. Both write this sentence, so a reader who learned it on a chain
 /// reads the answer of a picture without learning a second one.
-fn start_line(number: IssueNumber, start: &StartCommand) -> String {
-    format!(
-        "Start {} next with '{}'",
-        number.to_string().bold(),
-        command(start, number).cyan().bold()
-    )
+fn next_line(action: &Action, start: &StartCommand) -> String {
+    let name = action.name().bold();
+    let instruction = action.instruction(start).cyan().bold();
+    match action {
+        Action::Start(_) => format!("Start {name} next with '{instruction}'"),
+        Action::Finish { .. } => format!("Finish {name} next: {instruction}"),
+    }
 }
 
 /// Paint a plan drawn as a picture: the rows, the notes they earn, and the
@@ -502,22 +625,33 @@ fn waits_text(numbers: &[IssueNumber]) -> String {
     format!("{WAITS_FOR}{}", written.join(NUMBER_SEPARATOR))
 }
 
-/// The answer of a picture: one line for each step somebody can start now.
+/// The answer of a picture: one line for each step somebody can take now. See
+/// [`next_line`].
 ///
 /// The lines stand in the order of the rows, so a reader who read the rows
-/// reads the answers in the same order and finds the row of each of them.
+/// reads the answers in the same order and finds the row of each of them. Two
+/// ready rows that give one action give one line, at the place of the first.
 fn graph_answer(report: &Report, start: &StartCommand) -> Vec<String> {
-    let ready: Vec<String> = report
+    let in_flight = InFlight::of(report.entries());
+    let mut actions: Vec<Action> = Vec::new();
+    let ready = report
         .entries()
         .iter()
         .enumerate()
-        .filter(|(position, _)| report.is_ready(*position))
-        .map(|(_, entry)| start_line(entry.number, start))
-        .collect();
-    if ready.is_empty() {
+        .filter(|(position, _)| report.is_ready(*position));
+    for (_, entry) in ready {
+        let action = Action::of(entry, &in_flight);
+        if !actions.contains(&action) {
+            actions.push(action);
+        }
+    }
+    if actions.is_empty() {
         return vec![nothing_to_start(report)];
     }
-    ready
+    actions
+        .iter()
+        .map(|action| next_line(action, start))
+        .collect()
 }
 
 /// What the answer of a picture says when no step of it is ready.
@@ -634,17 +768,19 @@ fn indent(line: &str) -> String {
 
 /// The answer of one stream, as the summary writes it.
 enum Tail {
-    /// The stream holds an open issue, and this is the number to start.
-    Next(IssueNumber),
-    /// The stream names nothing to start, and this says why.
+    /// The stream holds a step somebody can take now, and this says what to
+    /// do with it: start an issue, or finish an open pull request.
+    Take(Action),
+    /// The stream names nothing to take, and this says why.
     Nothing(&'static str),
 }
 
 impl Tail {
-    /// The answer one stream gives.
-    fn of(report: &Report) -> Self {
+    /// The answer one stream gives, in a plan whose open pull requests
+    /// `in_flight` holds.
+    fn of(report: &Report, in_flight: &InFlight) -> Self {
         match report.next_entry() {
-            Some(entry) => Self::Next(entry.number),
+            Some(entry) => Self::Take(Action::of(entry, in_flight)),
             None if report
                 .entries()
                 .iter()
@@ -659,43 +795,46 @@ impl Tail {
         }
     }
 
-    /// The columns `→ #344` occupies, for a stream that names an issue.
+    /// The columns the mark part occupies, for a stream that names a step:
+    /// `→ #344` for an issue, and `→ PR #15 (closes #4)` for a pull request.
     ///
     /// The widest of these is what every such tail is padded to, so the
-    /// commands of the summary stand in one column.
+    /// command of each issue and the words of each pull request stand in one
+    /// column.
     fn mark_width(&self) -> Option<usize> {
         match self {
-            Self::Next(number) => Some(UnicodeWidthStr::width(marked(*number).as_str())),
+            Self::Take(action) => Some(UnicodeWidthStr::width(marked(action).as_str())),
             Self::Nothing(_) => None,
         }
     }
 
-    /// The columns the whole tail occupies, once `→ #344` is padded to
+    /// The columns the whole tail occupies, once the mark part is padded to
     /// `mark_width`. This is what the label of a summary line gives way to,
     /// as far as [`MIN_LABEL_WIDTH`].
     fn width(&self, mark_width: usize, start: &StartCommand) -> usize {
         match self {
-            Self::Next(number) => {
-                mark_width + COLUMN_GAP + UnicodeWidthStr::width(command(start, *number).as_str())
+            Self::Take(action) => {
+                mark_width + COLUMN_GAP + UnicodeWidthStr::width(action.instruction(start).as_str())
             }
             Self::Nothing(text) => UnicodeWidthStr::width(*text),
         }
     }
 
     /// The tail, painted the way the answer of a chain is painted: the mark is
-    /// yellow, the number is bold, and the command is cyan.
+    /// yellow, the name of the step is bold, and the command or the words
+    /// that finish a pull request are cyan.
     fn paint(&self, mark_width: usize, start: &StartCommand) -> String {
         match self {
-            Self::Next(number) => {
+            Self::Take(action) => {
                 let pad =
-                    mark_width.saturating_sub(UnicodeWidthStr::width(marked(*number).as_str()));
+                    mark_width.saturating_sub(UnicodeWidthStr::width(marked(action).as_str()));
                 format!(
                     "{} {}{}{}{}",
                     MARK_NEXT.to_string().yellow().bold(),
-                    number.to_string().bold(),
+                    action.name().bold(),
                     " ".repeat(pad),
                     " ".repeat(COLUMN_GAP),
-                    command(start, *number).cyan().bold()
+                    action.instruction(start).cyan().bold()
                 )
             }
             Self::Nothing(text) => text.dimmed().to_string(),
@@ -703,9 +842,10 @@ impl Tail {
     }
 }
 
-/// `→ #344`: the mark of the issue to start, and its number.
-fn marked(number: IssueNumber) -> String {
-    format!("{MARK_NEXT} {number}")
+/// `→ #344` or `→ PR #15 (closes #4)`: the mark of the step to take, and its
+/// name.
+fn marked(action: &Action) -> String {
+    format!("{MARK_NEXT} {}", action.name())
 }
 
 /// `si 344`: the command that starts one issue.
@@ -713,7 +853,12 @@ fn command(start: &StartCommand, number: IssueNumber) -> String {
     format!("{} {}", start.as_str(), number.get())
 }
 
-/// One line for each stream: its label, and the issue to start in it.
+/// One line for each stream: its label, and the step to take in it.
+///
+/// The step is an issue to start, or an open pull request to finish. Its
+/// command or its words stand in one column for every stream. An open pull
+/// request of one stream reaches a step of another stream that names the issue
+/// it closes.
 ///
 /// The tail is what the reader came for, so it takes its columns first and the
 /// label is cut to what is left. A label that pushed the command off the window
@@ -722,9 +867,10 @@ fn command(start: &StartCommand, number: IssueNumber) -> String {
 /// wrapped line that names its stream is worth more than a line that names
 /// none.
 fn summary(streams: &[StreamReport], width: usize, start: &StartCommand) -> Vec<String> {
+    let in_flight = InFlight::of(streams.iter().flat_map(|stream| stream.report.entries()));
     let tails: Vec<Tail> = streams
         .iter()
-        .map(|stream| Tail::of(&stream.report))
+        .map(|stream| Tail::of(&stream.report, &in_flight))
         .collect();
     let mark_width = tails.iter().filter_map(Tail::mark_width).max().unwrap_or(0);
     let tail_width = tails
@@ -765,7 +911,7 @@ fn summary(streams: &[StreamReport], width: usize, start: &StartCommand) -> Vec<
 mod tests {
     use super::*;
 
-    use crate::report::{Closes, States};
+    use crate::report::{Closes, Kind, States};
 
     /// The repository the test states come from.
     const REPO: &str = "timmattison/tools";
@@ -794,6 +940,7 @@ mod tests {
             number: IssueNumber::new(number).expect("the test number is an issue number"),
             title: title.to_string(),
             status,
+            kind: Some(Kind::Issue),
             closes: None,
             blocked_by: Vec::new(),
         }
@@ -1049,6 +1196,31 @@ mod tests {
         }
     }
 
+    /// The entry of a step whose work is the pull request `number`, as GitHub
+    /// answers it.
+    fn pull_request(number: u64, status: Status, title: &str) -> Entry {
+        Entry {
+            kind: Some(Kind::PullRequest),
+            ..entry(number, status, title)
+        }
+    }
+
+    /// The entry of a step that names the pull request `number` and the issue
+    /// it closes, as GitHub answers it. [`paired`] builds the same pair with
+    /// the kind of an issue.
+    fn paired_pull_request(
+        number: u64,
+        status: Status,
+        title: &str,
+        closes: u64,
+        closes_status: Status,
+    ) -> Entry {
+        Entry {
+            kind: Some(Kind::PullRequest),
+            ..paired(number, status, title, closes, closes_status)
+        }
+    }
+
     /// One stream of a plan, from its label and the states of its steps.
     fn stream(label: &str, entries: Vec<Entry>) -> StreamReport {
         StreamReport {
@@ -1265,6 +1437,118 @@ mod tests {
         assert_eq!(
             rows,
             vec!["  → #344 (#341)  First", "  · #330         Second"]
+        );
+    }
+
+    #[test]
+    fn a_row_of_a_pull_request_writes_it_as_the_plan_writes_it() {
+        // A plan writes the work of a pull request as `PR#515`, and the row
+        // writes it the same way. The reader then sees in the row which number
+        // is work that exists already.
+        let report = Report::build(vec![pull_request(515, Status::Open, "The finished work")]);
+        assert_eq!(
+            glyphs(&report, 80),
+            concat!(
+                "→ PR#515  The finished work\n",
+                "\n",
+                "Finish PR #515 next: review it and merge it",
+            )
+        );
+    }
+
+    #[test]
+    fn a_row_of_a_pull_request_and_the_issue_it_closes_writes_the_pair_of_the_plan() {
+        let streams = vec![stream(
+            "S1",
+            vec![paired_pull_request(
+                515,
+                Status::Open,
+                "The finished work",
+                512,
+                Status::Open,
+            )],
+        )];
+        assert_eq!(
+            plan_glyphs(&streams, 80),
+            concat!(
+                "S1\n",
+                "  → PR#515 (#512)  The finished work\n",
+                "\n",
+                "Take one from each stream:\n",
+                "  S1  → PR #515 (closes #512)  review it and merge it",
+            )
+        );
+    }
+
+    /// The issue number `number`, for a test that names one.
+    fn issue(number: u64) -> IssueNumber {
+        IssueNumber::new(number).expect("the test number is an issue number")
+    }
+
+    #[test]
+    fn only_an_open_pull_request_that_closes_an_issue_is_in_flight() {
+        let in_flight = InFlight::of(&[
+            paired_pull_request(515, Status::Open, "Open", 512, Status::Open),
+            paired_pull_request(514, Status::Done, "Merged", 510, Status::Open),
+            paired_pull_request(513, Status::Dropped, "Closed", 509, Status::Open),
+            paired(344, Status::Open, "An issue", 341, Status::Open),
+            pull_request(600, Status::Open, "Closes nothing"),
+        ]);
+        assert_eq!(in_flight.pull_request(issue(512)), Some(issue(515)));
+        for number in [510, 509, 341, 600] {
+            assert_eq!(in_flight.pull_request(issue(number)), None, "for #{number}");
+        }
+    }
+
+    #[test]
+    fn the_first_open_pull_request_that_closes_an_issue_owns_it() {
+        let in_flight = InFlight::of(&[
+            paired_pull_request(515, Status::Open, "First", 512, Status::Open),
+            paired_pull_request(520, Status::Open, "Second", 512, Status::Open),
+        ]);
+        assert_eq!(in_flight.pull_request(issue(512)), Some(issue(515)));
+    }
+
+    #[test]
+    fn a_step_that_names_the_issue_of_an_open_pull_request_gets_the_action_of_the_pair() {
+        let pair = paired_pull_request(515, Status::Open, "The finished work", 512, Status::Open);
+        let in_flight = InFlight::of([&pair]);
+        let finish = Action::Finish {
+            pull_request: issue(515),
+            closes: Some(issue(512)),
+        };
+        assert_eq!(Action::of(&pair, &in_flight), finish);
+        assert_eq!(
+            Action::of(&entry(512, Status::Open, "The work it closes"), &in_flight),
+            finish
+        );
+        assert_eq!(
+            Action::of(&entry(6, Status::Open, "Other work"), &in_flight),
+            Action::Start(issue(6))
+        );
+    }
+
+    #[test]
+    fn the_numbers_line_up_when_one_row_of_a_block_is_a_pull_request() {
+        // The prefix makes the label of the pull request wider than the label
+        // of an issue, and the number column of the block grows with it.
+        let streams = vec![stream(
+            "S1",
+            vec![
+                paired_pull_request(515, Status::Open, "First", 512, Status::Open),
+                entry(330, Status::Open, "Second"),
+                entry(9, Status::Open, "Third"),
+            ],
+        )];
+        let block = plan_glyphs(&streams, 80);
+        let rows: Vec<&str> = block.lines().skip(1).take(3).collect();
+        assert_eq!(
+            rows,
+            vec![
+                "  → PR#515 (#512)  First",
+                "  · #330           Second",
+                "  · #9             Third",
+            ]
         );
     }
 

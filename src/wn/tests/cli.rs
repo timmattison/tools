@@ -105,6 +105,14 @@ const THREE_ISSUES: &str = r#"{"data":{"repository":{
 /// answer names #278 whichever command it prints.
 const ONE_OPEN_CHAIN: &str = "#277 → #278";
 
+/// What GitHub says about `#515` when it is an open pull request.
+///
+/// A pull request is work that already exists, so the answer of a chain that
+/// names it tells the reader to finish it and names no command that starts it.
+const ONE_OPEN_PULL_REQUEST: &str = r#"{"data":{"repository":{
+"i515":{"__typename":"PullRequest","number":515,"title":"The finished work","state":"OPEN"}
+}}}"#;
+
 /// A plan of three streams, as a record for each stream.
 ///
 /// The notes carry real prose, because real prose is the trap the plan reader
@@ -176,8 +184,9 @@ const BOX_TABLE: &str = include_str!("../fixtures/plan-parallel-work.txt");
 
 /// What GitHub says about every number of [`BOX_TABLE`].
 ///
-/// Three of the ten are done, so each of the four streams has one issue to
-/// start and none of them is the first step of its stream in every case.
+/// Three of the ten are done, so each of the four streams has one step
+/// somebody can take now and none of them is the first step of its stream in
+/// every case. The step of stream A is the open pull request `#15`.
 const BOX_ISSUES: &str = r#"{"data":{"repository":{
 "i15":{"__typename":"PullRequest","number":15,"title":"The visualizer branch","state":"OPEN"},
 "i4":{"__typename":"Issue","number":4,"title":"The visualizers","state":"OPEN","stateReason":null},
@@ -192,11 +201,17 @@ const BOX_ISSUES: &str = r#"{"data":{"repository":{
 }}}"#;
 
 /// The answer [`BOX_TABLE`] earns: one block for each of the four streams,
-/// and one summary that names an issue to start in each of them.
+/// and one summary that names the next step of each of them.
+///
+/// The next step of stream A is the open pull request `#15`, which closes
+/// `#4`. Its row writes the pair as the plan writes it, `PR#15 (#4)`. Its work
+/// exists already, so the tail of A tells the reader to review it and merge
+/// it, and names no start command. The other three tails name an issue to
+/// start. The words of A and the command of each issue start in one column.
 const BOX_ANSWER: &str = concat!(
     "A — visualizers\n",
-    "  → #15 (#4)  The visualizer branch\n",
-    "  · #7        Keep or delete\n",
+    "  → PR#15 (#4)  The visualizer branch\n",
+    "  · #7          Keep or delete\n",
     "\n",
     "B — audio engine\n",
     "  ✓ #11  The oscillator\n",
@@ -212,10 +227,10 @@ const BOX_ANSWER: &str = concat!(
     "  → #6  The manifest\n",
     "\n",
     "Take one from each stream:\n",
-    "  A — visualizers   → #15  si 15\n",
-    "  B — audio engine  → #5   si 5\n",
-    "  C — MIDI array    → #12  si 12\n",
-    "  D — manifest      → #6   si 6\n",
+    "  A — visualizers   → PR #15 (closes #4)  review it and merge it\n",
+    "  B — audio engine  → #5                  si 5\n",
+    "  C — MIDI array    → #12                 si 12\n",
+    "  D — manifest      → #6                  si 6\n",
 );
 
 /// A plan drawn as a picture: two streams that join.
@@ -413,11 +428,12 @@ const JSON_ISSUES: &str = r#"{"data":{"repository":{
 ///
 /// The report of a graph, because a JSON plan is a graph: one row for each
 /// step in the order of the work, and one start line for each issue somebody
-/// can begin now. `#96` is the one of them.
+/// can begin now. `#96` is the one of them. The row of the pull request writes
+/// the pair as the plan writes it, `PR#102 (#94)`.
 const JSON_ANSWER: &str = concat!(
-    "→ #96         The daemon leak\n",
-    "· #91         The lifecycle    waits for #96\n",
-    "· #102 (#94)  The shell init   waits for #91\n",
+    "→ #96           The daemon leak\n",
+    "· #91           The lifecycle    waits for #96\n",
+    "· PR#102 (#94)  The shell init   waits for #91\n",
     "\n",
     "Start #96 next with 'si 96'\n",
 );
@@ -432,12 +448,71 @@ const JSON_ISSUES_ONE_DONE: &str = r#"{"data":{"repository":{
 
 /// The answer [`JSON_PLAN`] earns once `#96` is done: `#91` is free.
 const JSON_ANSWER_ONE_DONE: &str = concat!(
-    "✓ #96         The daemon leak\n",
-    "→ #91         The lifecycle\n",
-    "· #102 (#94)  The shell init   waits for #91\n",
+    "✓ #96           The daemon leak\n",
+    "→ #91           The lifecycle\n",
+    "· PR#102 (#94)  The shell init   waits for #91\n",
     "\n",
     "Start #91 next with 'si 91'\n",
 );
+
+/// A JSON plan of three streams that wait for nothing, two of which hold an
+/// open pull request.
+///
+/// The reproduction of issue #516. `S1` holds the pull request `#515`, which
+/// closes `#512`, and `S2` holds `#514`, which closes `#510`. `S3` holds the
+/// plain issue `#6`, so one answer line still names a start command.
+const JSON_PLAN_OF_PULL_REQUESTS: &str = r#"{
+  "version": 1,
+  "streams": [
+    { "id": "S1", "order": [{ "issue": 512, "pr": 515 }] },
+    { "id": "S2", "order": [{ "issue": 510, "pr": 514 }] },
+    { "id": "S3", "order": [{ "issue": 6 }] }
+  ]
+}"#;
+
+/// What GitHub says about every number of [`JSON_PLAN_OF_PULL_REQUESTS`]:
+/// two open pull requests, the two open issues they close, and one more open
+/// issue.
+const PULL_REQUEST_ISSUES: &str = r#"{"data":{"repository":{
+"i515":{"__typename":"PullRequest","number":515,"title":"The finished work","state":"OPEN"},
+"i512":{"__typename":"Issue","number":512,"title":"The work it closes","state":"OPEN","stateReason":null},
+"i514":{"__typename":"PullRequest","number":514,"title":"The other finished work","state":"OPEN"},
+"i510":{"__typename":"Issue","number":510,"title":"The other work it closes","state":"OPEN","stateReason":null},
+"i6":{"__typename":"Issue","number":6,"title":"The work nobody began","state":"OPEN","stateReason":null}
+}}}"#;
+
+/// A plan of two streams that name one piece of work two ways.
+///
+/// Stream `A` writes the pair `PR#515 (#512)`, and stream `B` writes the bare
+/// `#512`. [`PULL_REQUEST_ISSUES`] says `#515` is open, so both streams name
+/// work that is in flight.
+const PLAN_OF_A_PAIR_AND_ITS_ISSUE: &str = "\
+Stream: A pair
+Order: PR#515 (#512)
+
+Stream: B bare issue
+Order: #512 → #6
+";
+
+/// The same two streams, as a JSON plan.
+const JSON_PLAN_OF_A_PAIR_AND_ITS_ISSUE: &str = r#"{
+  "version": 1,
+  "streams": [
+    { "id": "A", "order": [{ "issue": 512, "pr": 515 }] },
+    { "id": "B", "order": [{ "issue": 512 }, { "issue": 6 }] }
+  ]
+}"#;
+
+/// What GitHub says about [`PLAN_OF_A_PAIR_AND_ITS_ISSUE`] once `#515` is
+/// merged and `#512` is still open.
+///
+/// A merged pull request is no work in flight, so the bare `#512` is work to
+/// start again.
+const MERGED_PULL_REQUEST_ISSUES: &str = r#"{"data":{"repository":{
+"i515":{"__typename":"PullRequest","number":515,"title":"The finished work","state":"MERGED"},
+"i512":{"__typename":"Issue","number":512,"title":"The work it closes","state":"OPEN","stateReason":null},
+"i6":{"__typename":"Issue","number":6,"title":"The work nobody began","state":"OPEN","stateReason":null}
+}}}"#;
 
 /// A JSON plan whose two streams wait for each other.
 ///
@@ -817,6 +892,25 @@ fn walks_the_chain_and_names_the_issue_to_start() {
             "\n",
             "Start #278 next with 'si 278'\n",
         )
+    );
+}
+
+#[test]
+fn an_open_pull_request_of_a_chain_is_work_to_finish_and_not_to_start() {
+    // The work of an open pull request exists already. A start command for
+    // its number sends the reader to begin that work a second time, so the
+    // answer tells them to review it and merge it instead.
+    let gh = FakeGh::new(ONE_OPEN_PULL_REQUEST);
+    let output = run(&gh, &["--repo", REPO, "#515"], "80", false);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.ends_with("Finish PR #515 next: review it and merge it\n"),
+        "the answer tells the reader to finish the pull request, in {text}"
+    );
+    assert!(
+        !text.contains("si 515"),
+        "the answer names no command that starts the pull request, in {text}"
     );
 }
 
@@ -1432,9 +1526,10 @@ fn a_number_that_stands_in_two_streams_is_asked_about_once() {
 
 #[test]
 fn a_pull_request_and_the_issue_it_closes_are_one_row() {
-    // `PR#344 (#341)` is one step and not two. The state of the row is the
-    // state of the pull request, so a merged 344 is walked past although 341
-    // is still open — and the two states that disagree earn a note.
+    // `PR#344 (#341)` is one step and not two, and the row writes it as the
+    // plan wrote it. The state of the row is the state of the pull request,
+    // so a merged 344 is walked past although 341 is still open — and the two
+    // states that disagree earn a note.
     let body = r#"{"data":{"repository":{
 "i344":{"__typename":"PullRequest","number":344,"title":"First thing","state":"MERGED"},
 "i341":{"__typename":"Issue","number":341,"title":"The bug","state":"OPEN","stateReason":null},
@@ -1452,8 +1547,8 @@ fn a_pull_request_and_the_issue_it_closes_are_one_row() {
         stdout(&output),
         concat!(
             "S1 gitscratch\n",
-            "  ✓ #344 (#341)  First thing\n",
-            "  → #330         Second thing\n",
+            "  ✓ PR#344 (#341)  First thing\n",
+            "  → #330           Second thing\n",
             "\n",
             "  #344 is closed and #341 is open.\n",
             "\n",
@@ -1466,10 +1561,13 @@ fn a_pull_request_and_the_issue_it_closes_are_one_row() {
 #[test]
 fn answers_the_paste_of_the_plan_parallel_work_skill() {
     // The whole point of the feature: copy the report of the skill out of a
-    // terminal, type `wn`, and read the issue to start in each stream. The
-    // paste draws its table with `│` and `┌─┬─┐`, it wraps two of its rows
-    // onto a second line, and its Order fields annotate two steps in
-    // parentheses.
+    // terminal, type `wn`, and read what to do next in each stream. The paste
+    // draws its table with `│` and `┌─┬─┐`, it wraps two of its rows onto a
+    // second line, and its Order fields annotate two steps in parentheses.
+    //
+    // The plan says the work of stream A is in flight as the pull request
+    // #15. So the tail of A tells the reader to finish that work, and does
+    // not tell them to start it a second time with `si 15`.
     let gh = FakeGh::new(BOX_ISSUES);
     let output = run_with_stdin(&gh, &["--repo", REPO], "80", BOX_TABLE);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
@@ -1479,9 +1577,10 @@ fn answers_the_paste_of_the_plan_parallel_work_skill() {
 #[test]
 fn a_pull_request_an_annotation_names_is_the_work_of_its_step() {
     // `#4 (in flight, PR #15)` is the issue #4 whose work is the pull request
-    // #15, so the row is the pull request and the state of the row is the
-    // state of it. A merged pull request over an open issue earns the same
-    // note the `PR#344 (#341)` order earns, because it is the same step.
+    // #15, so the row is the pull request, written `PR#15 (#4)`, and the state
+    // of the row is the state of it. A merged pull request over an open issue
+    // earns the same note the `PR#344 (#341)` order earns, because it is the
+    // same step.
     let body = r#"{"data":{"repository":{
 "i15":{"__typename":"PullRequest","number":15,"title":"The visualizer branch","state":"MERGED"},
 "i4":{"__typename":"Issue","number":4,"title":"The visualizers","state":"OPEN","stateReason":null},
@@ -1499,8 +1598,8 @@ fn a_pull_request_an_annotation_names_is_the_work_of_its_step() {
         stdout(&output),
         concat!(
             "A visualizers\n",
-            "  ✓ #15 (#4)  The visualizer branch\n",
-            "  → #7        Keep or delete\n",
+            "  ✓ PR#15 (#4)  The visualizer branch\n",
+            "  → #7          Keep or delete\n",
             "\n",
             "  #15 is closed and #4 is open.\n",
             "\n",
@@ -1959,16 +2058,118 @@ fn a_finished_step_of_a_json_plan_frees_the_step_that_waited_for_it() {
 #[test]
 fn a_pull_request_of_a_json_step_is_the_pair_the_row_writes() {
     // `"pr": 102` on the step of `#94` is the pair `PR#102 (#94)` writes, and
-    // the state of the row is the state of the pull request, because the pull
-    // request is the work.
+    // the row writes it that way. The state of the row is the state of the
+    // pull request, because the pull request is the work.
     let gh = FakeGh::new(JSON_ISSUES);
     let output = run_with_stdin(&gh, &["--repo", REPO], "80", JSON_PLAN);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     let answer = stdout(&output);
     assert!(
-        answer.contains("#102 (#94)  The shell init"),
+        answer.contains("· PR#102 (#94)  The shell init"),
         "the row writes the pair and the title of the work, in {answer}"
     );
+}
+
+#[test]
+fn an_open_pull_request_of_a_picture_is_work_to_finish_and_not_to_start() {
+    // A JSON plan is a graph, and the answer of a graph writes one line for
+    // each ready step. A ready open pull request is work that exists already,
+    // so its line tells the reader to finish it, and names the issue it
+    // closes. No line names the start command for either number of a pair.
+    let gh = FakeGh::new(PULL_REQUEST_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", JSON_PLAN_OF_PULL_REQUESTS);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.ends_with(concat!(
+            "Finish PR #515 (closes #512) next: review it and merge it\n",
+            "Finish PR #514 (closes #510) next: review it and merge it\n",
+            "Start #6 next with 'si 6'\n",
+        )),
+        "each ready pull request is work to finish and the issue is work to start, in {text}"
+    );
+    for command in ["si 515", "si 512", "si 514", "si 510"] {
+        assert!(
+            !text.contains(command),
+            "no line names the command {command:?}, in {text}"
+        );
+    }
+}
+
+#[test]
+fn the_issue_of_an_open_pull_request_is_work_to_finish_in_every_stream() {
+    // Stream B names only `#512`, and stream A says that the open pull request
+    // #515 does that work. So the tail of B tells the reader to finish #515,
+    // as the tail of A does, and no tail starts the work a second time with
+    // `si 512`. The rows stay as the plan wrote them.
+    let gh = FakeGh::new(PULL_REQUEST_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", PLAN_OF_A_PAIR_AND_ITS_ISSUE);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "A pair\n",
+            "  → PR#515 (#512)  The finished work\n",
+            "\n",
+            "B bare issue\n",
+            "  → #512  The work it closes\n",
+            "  · #6    The work nobody began\n",
+            "\n",
+            "Take one from each stream:\n",
+            "  A pair        → PR #515 (closes #512)  review it and merge it\n",
+            "  B bare issue  → PR #515 (closes #512)  review it and merge it\n",
+        )
+    );
+}
+
+#[test]
+fn the_issue_of_an_open_pull_request_earns_no_start_line_in_a_json_plan() {
+    // A JSON plan is a graph, and both the pair and the bare `#512` are ready
+    // rows. The two rows name one piece of work that is in flight, so the
+    // answer writes one line that tells the reader to finish it, and no line
+    // that starts it.
+    let gh = FakeGh::new(PULL_REQUEST_ISSUES);
+    let output = run_with_stdin(
+        &gh,
+        &["--repo", REPO],
+        "80",
+        JSON_PLAN_OF_A_PAIR_AND_ITS_ISSUE,
+    );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "→ PR#515 (#512)  The finished work\n",
+            "→ #512           The work it closes\n",
+            "· #6             The work nobody began  waits for #512\n",
+            "\n",
+            "Finish PR #515 (closes #512) next: review it and merge it\n",
+        )
+    );
+}
+
+#[test]
+fn the_issue_of_a_merged_pull_request_is_still_work_to_start() {
+    // The boundary of the rule above. A merged pull request is no work in
+    // flight, so the bare `#512` of stream B keeps its start command in each
+    // form of the plan.
+    let gh = FakeGh::new(MERGED_PULL_REQUEST_ISSUES);
+    for plan in [
+        PLAN_OF_A_PAIR_AND_ITS_ISSUE,
+        JSON_PLAN_OF_A_PAIR_AND_ITS_ISSUE,
+    ] {
+        let output = run_with_stdin(&gh, &["--repo", REPO], "80", plan);
+        assert!(output.status.success(), "stderr: {}", stderr(&output));
+        let text = stdout(&output);
+        assert!(
+            text.contains("si 512"),
+            "the bare #512 is work to start, in {text}"
+        );
+        assert!(
+            !text.contains("PR #515"),
+            "no line tells the reader to finish the merged #515, in {text}"
+        );
+    }
 }
 
 #[test]

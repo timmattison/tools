@@ -17,7 +17,7 @@
 //!
 //! A plan drawn as a picture is the third shape. It says the one thing a chain
 //! and a table cannot: two streams that join. `wn` follows the wires from left
-//! to right and names every issue that is ready, because two streams are two
+//! to right and names every step that is ready, because two streams are two
 //! people who work at the same time.
 //!
 //! A plan says that same thing in words with a `Waits for` column. A cell of
@@ -146,7 +146,7 @@ Every separator means the same thing: the issue on the left comes before the iss
 A double bar is read as an arrow, because the chain is a plan to walk in order.\n\n\
 A plan of parallel work is a second shape of input. `wn` reads the plan the plan-parallel-work \
 skill writes — the records it prints, the Markdown table it names, and the box-drawn table it \
-arrives on the clipboard as — and names the issue to start in every stream of it. Only the Order \
+arrives on the clipboard as — and names the step to take in every stream of it. Only the Order \
 field of a plan is read as a chain, because the Notes field is prose about code and prose about \
 code is full of numbers.\n\n\
 A pull request and the issue it closes are one step of a stream and not two, written PR#344 \
@@ -154,17 +154,18 @@ A pull request and the issue it closes are one step of a stream and not two, wri
 step to its left. Inside it, only a word carrying the # is a number, a PR in front of one marks \
 that number as the work, and every other word is prose. The prose of a group holds a parenthesis \
 as well, so #4 (a note (see the docs)) is one group and the parenthesis that closes it is the \
-last one.\n\n\
+last one. A row writes a number GitHub gives as a pull request with PR in front of it, so both of \
+those steps give the rows PR#344 (#341) and PR#15 (#4).\n\n\
 A plan drawn as a picture is a third shape of input. Two streams that join are two people who \
 work at the same time, and no chain and no table says that. `wn` follows the wires from left to \
-right and names every issue that is ready to start now. A picture drawn from right to left is \
+right and names every step that is ready now. A picture drawn from right to left is \
 refused, because a guess at the order sends somebody to the wrong issue.\n\n\
 A plan says that same thing in words, with a `Waits for` column beside its streams. A cell of it \
 names the work of other streams that comes before the first step of that stream. The cell is a \
 set and not a chain, so `#96, #91` names two blockers and says nothing about which of the two \
 comes first. An empty cell and a plan with no such column are the common case and no error. A \
 plan that names one blocker or more is one graph, so its answer is one row for each step, in the \
-order of the work, and one start line for each issue somebody can begin now.\n\n\
+order of the work, and one line for each step somebody can take now.\n\n\
 A plan written as JSON is a fifth shape of input, and it is the shape a program hands back. `wn` \
 reads the `streams` of it for the answer: the order array of a stream is a chain, and the \
 waitsFor of a step names the work that comes before that step. JSON is tried first and claimed on \
@@ -217,7 +218,13 @@ error a run with no chain printed before. Set WN_PLAN_TIMEOUT to a number of sec
 something other than 600 for it.\n\n\
 The answer names the command that starts the work: `si 278`. This tool ships no `si` — it is a \
 shell function you supply. Set WN_START_COMMAND to name a different one, for example \
-`export WN_START_COMMAND='gh issue develop'`."
+`export WN_START_COMMAND='gh issue develop'`.\n\n\
+A step that GitHub gives as an open pull request is work that exists already, so the answer \
+names no start command for it, and none for the issue it closes. It tells the reader to finish \
+the pull request instead: `Finish PR #515 (closes #512) next: review it and merge it`. The \
+summary of a plan writes the same thing as `→ PR #515 (closes #512)  review it and merge it`. A \
+step that names only the issue of an open pull request, such as `#512`, gets the same answer, in \
+whichever stream it stands."
 )]
 struct Cli {
     /// The chain, for example "#277 → #278 ∥ #279", or a whole plan of
@@ -746,7 +753,7 @@ fn answer_plan(
     )
 }
 
-/// Print the rows of one chain and the issue to start, and give the status the
+/// Print the rows of one chain and the step to take, and give the status the
 /// run exits with.
 fn answer_chain(
     chain: &[IssueNumber],
@@ -763,10 +770,10 @@ fn answer_chain(
     exit_status(report.missing().is_empty())
 }
 
-/// Print the rows of a graph, the notes they earn, and every issue somebody can
-/// start now, and give the status the run exits with.
+/// Print the rows of a graph, the notes they earn, and every step somebody can
+/// take now, and give the status the run exits with.
 ///
-/// The answer names every step somebody can start now, and not one of them.
+/// The answer names every step somebody can take now, and not one of them.
 /// Two streams that join are two people who work at the same time, which is
 /// the whole reason somebody draws the picture.
 ///
