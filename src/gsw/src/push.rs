@@ -4796,7 +4796,7 @@ mod ui_tests {
 #[cfg(test)]
 mod run_tests {
     use super::*;
-    use crate::testrepo::{git, init_repo_with_upstream};
+    use crate::testrepo::{git, git_output, git_stdout, init_repo_with_upstream};
 
     /// A clone with a `feature` branch holding one commit, ready to push.
     ///
@@ -4829,14 +4829,18 @@ mod run_tests {
     }
 
     /// Whether `origin` has a `feature` branch, read from the origin itself.
+    ///
+    /// The read goes through the fixture helper, which sheds the whole `GIT_`
+    /// prefix. A read of its own would answer about the repository the
+    /// inherited environment names, and a push that landed would then read as
+    /// a push that never happened.
     fn origin_has_feature(origin: &Path) -> bool {
-        Command::new("git")
-            .args(["rev-parse", "--verify", "--quiet", "refs/heads/feature"])
-            .current_dir(origin)
-            .output()
-            .expect("invoke git")
-            .status
-            .success()
+        git_output(
+            origin,
+            &["rev-parse", "--verify", "--quiet", "refs/heads/feature"],
+        )
+        .status
+        .success()
     }
 
     #[test]
@@ -4861,13 +4865,11 @@ mod run_tests {
             "the branch must exist on the remote after the push",
         );
 
-        let upstream = Command::new("git")
-            .args(["rev-parse", "--abbrev-ref", "feature@{upstream}"])
-            .current_dir(clone.path())
-            .output()
-            .expect("invoke git");
         assert_eq!(
-            String::from_utf8_lossy(&upstream.stdout).trim(),
+            git_stdout(
+                clone.path(),
+                &["rev-parse", "--abbrev-ref", "feature@{upstream}"]
+            ),
             "origin/feature",
             "-u must record the upstream, or the next push asks the same question",
         );
@@ -4886,13 +4888,11 @@ mod run_tests {
         let outcome = run_quiet(&confirmed(&["push"]), p);
         assert!(outcome.success, "push failed: {}", outcome.output);
 
-        let subject = Command::new("git")
-            .args(["log", "-1", "--format=%s", "refs/heads/feature"])
-            .current_dir(origin.path())
-            .output()
-            .expect("invoke git");
         assert_eq!(
-            String::from_utf8_lossy(&subject.stdout).trim(),
+            git_stdout(
+                origin.path(),
+                &["log", "-1", "--format=%s", "refs/heads/feature"]
+            ),
             "more work",
             "the remote branch must carry the new commit",
         );
@@ -5095,16 +5095,15 @@ mod run_tests {
     /// or `""` when there is no such branch. Compared before and after a push
     /// to say whether anything was actually sent.
     fn tip(dir: &Path, branch: &str) -> String {
-        let output = Command::new("git")
-            .args([
+        let output = git_output(
+            dir,
+            &[
                 "rev-parse",
                 "--verify",
                 "--quiet",
                 &format!("refs/heads/{branch}"),
-            ])
-            .current_dir(dir)
-            .output()
-            .expect("invoke git");
+            ],
+        );
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
@@ -5483,7 +5482,6 @@ exit 1"#,
             a_child_of_this_test_passes, test_name, user_intent_lost, user_intent_value, CHILD_RAN,
             HOSTILE_GIT_ENVIRONMENT, HOSTILE_MARKER,
         };
-        use crate::testrepo::git_stdout;
         use std::os::unix::fs::PermissionsExt;
 
         /// The variable the push pins to `0` after the sweep.

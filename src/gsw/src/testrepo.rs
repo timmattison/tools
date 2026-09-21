@@ -11,7 +11,7 @@
 //! parallel-safe: two concurrent runs of the same test never share a path.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
@@ -65,6 +65,26 @@ pub(crate) fn git_stdout(dir: &Path, args: &[&str]) -> String {
     let output = command(dir, args).output().expect("invoke git");
     assert!(output.status.success(), "git {args:?} failed");
     String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// Run a git command in `dir` with the same isolation as [`git`], and give
+/// back everything git said, whatever its exit status.
+///
+/// The read that tolerates a failure. [`git_stdout`] asserts success, and
+/// [`git_allowing_failure`] drops the output, so a fixture that reads a
+/// question whose answer is "no" has neither. `git rev-parse --verify --quiet`
+/// spells "there is no such ref" as a non-zero exit with nothing on standard
+/// output, and that is an answer a fixture reads rather than a failure it
+/// reports.
+///
+/// The read goes through [`command`], so it answers about the fixture and
+/// never about a repository that the inherited environment names.
+///
+/// # Panics
+///
+/// Panics only if git cannot be invoked at all.
+pub(crate) fn git_output(dir: &Path, args: &[&str]) -> Output {
+    command(dir, args).output().expect("invoke git")
 }
 
 /// A git invocation in `dir` that takes its repository, and its configuration,
