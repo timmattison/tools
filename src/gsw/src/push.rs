@@ -5679,5 +5679,74 @@ exit 1"#,
 
             println!("{CHILD_RAN}");
         }
+
+        /// The read-back helpers of these tests answer about the fixture.
+        ///
+        /// **A fixture that reads through an unswept git answers about
+        /// whatever the environment names.** These tests assert what a push
+        /// left on the origin, so a read that went to another repository
+        /// reports a push that never happened, or hides one that did.
+        ///
+        /// The helpers want the blanket sweep rather than the allowlist the
+        /// push child takes. A fixture builds a throwaway repository, so there
+        /// is no user whose intent to honor — see
+        /// [`gitscratch::shed_inherited_git_environment`].
+        ///
+        /// This is measurable, and it was measured. With one hostile variable
+        /// set and nothing else, `GIT_OBJECT_DIRECTORY` aimed at a decoy, five
+        /// of the push tests failed: the fixture wrote its objects into the
+        /// decoy, and then pushed a commit whose objects the repository it
+        /// pushed from did not hold.
+        ///
+        /// **The armed control comes first**, as it does in the test above.
+        #[test]
+        fn the_read_back_helpers_of_these_tests_answer_about_the_fixture() {
+            if std::env::var_os(HOSTILE_MARKER).is_none() {
+                a_child_of_this_test_passes(&test_name(
+                    module_path!(),
+                    "the_read_back_helpers_of_these_tests_answer_about_the_fixture",
+                ));
+                return;
+            }
+
+            for (name, _) in HOSTILE_GIT_ENVIRONMENT {
+                assert!(
+                    std::env::var_os(name).is_some(),
+                    "the child must really hold {name}, or there is nothing here to remove and \
+                     the assertions below are measured against nothing",
+                );
+            }
+
+            let (origin, clone) = clone_with_feature_branch();
+            let p = clone.path();
+
+            assert!(
+                !origin_has_feature(origin.path()),
+                "the fixture must start without the branch, and a read that went elsewhere \
+                 reports the same thing",
+            );
+
+            let outcome = run_quiet(&confirmed(&["push", "-u", "origin", "feature"]), p);
+            assert!(outcome.success, "push failed: {}", outcome.output);
+
+            assert!(
+                origin_has_feature(origin.path()),
+                "the read of the origin answered about the repository the hostile environment \
+                 names, so a push that landed reads as a push that never happened",
+            );
+
+            let pushed = tip(origin.path(), "feature");
+            assert!(
+                !pushed.is_empty(),
+                "the read of the tip answered about the repository the hostile environment names",
+            );
+            assert_eq!(
+                pushed,
+                tip(p, "feature"),
+                "the origin must carry the commit the clone holds",
+            );
+
+            println!("{CHILD_RAN}");
+        }
     }
 }
