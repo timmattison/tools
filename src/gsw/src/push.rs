@@ -430,9 +430,22 @@ const RETRY_ADVICE: &str = "press p again";
 /// own is microseconds rather than seconds; nothing here can close it entirely,
 /// short of a lock git does not offer.
 ///
-/// Three things are forced on the child, and all of them matter because gsw is
-/// holding the alternate screen in raw mode:
+/// Four things are forced on the child. Three of them matter because gsw is
+/// holding the alternate screen in raw mode, and the first one matters because
+/// git obeys the environment before it obeys the directory it was pointed at:
 ///
+/// - **The git environment gsw inherited is shed**
+///   ([`gitscratch::shed_inherited_git_environment_keeping_user_intent`]). A
+///   `gsw` started from inside a pre-commit hook holds `GIT_DIR`,
+///   `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY` and `GIT_CONFIG_PARAMETERS`, and
+///   the user asked for none of them. A child that carried one would send a
+///   branch of the repository being committed to, and the guard above reads
+///   the same environment, so it would agree with itself and refuse nothing.
+///   The rule is the `GIT_` prefix and never a list of names. The six names of
+///   [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`] stay, because this child acts
+///   for the user and nothing states them again: gsw spawns git itself, so no
+///   rc file runs between the sweep and the push. Without `GIT_SSH_COMMAND` a
+///   user who holds a non-default key cannot authenticate at all.
 /// - **The child is detached from the terminal** ([`detach_from_terminal`]) —
 ///   its own session on Unix, no inherited console on Windows — so the terminal
 ///   device cannot be opened by it or by anything it runs. This is the part
@@ -447,7 +460,10 @@ const RETRY_ADVICE: &str = "press p again";
 ///   descendant, credential helpers included, which is why this is done to the
 ///   process rather than to one transport.
 /// - **stdin is closed** and **`GIT_TERMINAL_PROMPT=0`**, which is git's own
-///   half of the same rule: git asks for HTTP usernames and passwords itself,
+///   half of the same rule. The pin comes *after* the sweep, and that order is
+///   the whole of why it survives: `GIT_TERMINAL_PROMPT` is one of the six
+///   names the sweep keeps, so a pin ahead of the sweep would be overwritten by
+///   whatever the user holds. git asks for HTTP usernames and passwords itself,
 ///   and this refuses those before the detachment has to. Disabled, git fails
 ///   immediately and says why, which lands in the status rows like any other
 ///   error. Credential helpers and a GUI `SSH_ASKPASS` are untouched — they do
@@ -476,6 +492,7 @@ fn run_push(
     }
 
     let mut child = Command::new("git");
+    gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut child);
     child
         .args(command.args())
         .current_dir(workdir)
