@@ -5453,4 +5453,214 @@ exit 1"#,
         assert!(outcome.success, "push failed: {}", outcome.output);
         assert!(origin_has_feature(origin.path()));
     }
+
+    /// What the push child carries out of the environment `gsw` was started
+    /// in.
+    ///
+    /// Unix-only, because the hook that records that environment is a shell
+    /// script — as [`terminal_tests`] is unix-only for the terminal it opens.
+    #[cfg(unix)]
+    mod environment_tests {
+        use super::*;
+        use crate::shell::stub_shell::{
+            a_child_of_this_test_passes, test_name, user_intent_lost, user_intent_value, CHILD_RAN,
+            HOSTILE_GIT_ENVIRONMENT, HOSTILE_MARKER,
+        };
+        use crate::testrepo::git_stdout;
+        use std::os::unix::fs::PermissionsExt;
+
+        /// The variable the push pins to `0` after the sweep.
+        const TERMINAL_PROMPT_VAR: &str = "GIT_TERMINAL_PROMPT";
+
+        /// `rwxr-xr-x` — git has to be able to execute the hook it finds, and a
+        /// file written by `std::fs::write` is not executable.
+        const HOOK_EXECUTABLE_MODE: u32 = 0o755;
+
+        /// Give the clone at `p` a `pre-push` hook that writes its own
+        /// environment, and hand back the file that hook writes.
+        ///
+        /// **The hook is the environment of the push child, read from inside
+        /// it.** A test that reads the removals off the [`Command`] proves
+        /// less: a sweep of the `GIT_` prefix records a removal only for a
+        /// variable this process holds, so such a test is empty under a shell
+        /// and full under the pre-commit hook of this repository. The hook runs
+        /// as a child of the push, so it holds what the push held.
+        ///
+        /// The record goes under `.git`, which the work tree does not hold, so
+        /// the push it records does not carry it.
+        ///
+        /// `core.hooksPath` is set rather than assumed. The default is
+        /// `.git/hooks`, and a `core.hooksPath` in the configuration of the
+        /// host moves it. The sweep is what this test measures, so where the
+        /// hook goes must not depend on that sweep.
+        fn recording_the_push_environment(p: &Path) -> PathBuf {
+            let hooks = p.join(".git").join("hooks");
+            std::fs::create_dir_all(&hooks).expect("make the hook directory");
+            let record = p.join(".git").join("push-environment");
+            let hook = hooks.join("pre-push");
+            std::fs::write(
+                &hook,
+                format!(
+                    "#!/bin/sh\nenv > '{record}'\nexit 0\n",
+                    record = record.display(),
+                ),
+            )
+            .expect("write the pre-push hook");
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(HOOK_EXECUTABLE_MODE))
+                .expect("make the pre-push hook executable");
+            git(
+                p,
+                &[
+                    "config",
+                    "core.hooksPath",
+                    hooks.to_str().expect("utf-8 tempdir path"),
+                ],
+            );
+            record
+        }
+
+        /// The `NAME=value` lines of `environment` that carry a value of
+        /// [`HOSTILE_GIT_ENVIRONMENT`].
+        ///
+        /// **The question here is the value and not the name.** git puts
+        /// `GIT_EXEC_PATH`, `GIT_PREFIX` and `GIT_EDITOR` into the environment
+        /// of every hook it runs, so a read of this record that asked about the
+        /// `GIT_` prefix would report three variables git set itself. git
+        /// cannot manufacture a hostile value, so a hostile value in the record
+        /// came through `gsw` and through nothing else.
+        fn hostile_lines(environment: &str) -> Vec<&str> {
+            environment
+                .lines()
+                .filter(|line| {
+                    line.split_once('=').is_some_and(|(key, value)| {
+                        HOSTILE_GIT_ENVIRONMENT
+                            .iter()
+                            .any(|(name, hostile)| key == *name && value == *hostile)
+                    })
+                })
+                .collect()
+        }
+
+        /// The push child sheds the git variables of `gsw` and keeps those of
+        /// the user.
+        ///
+        /// **A `gsw` started from inside a pre-commit hook holds `GIT_DIR`,
+        /// `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY` and
+        /// `GIT_CONFIG_PARAMETERS`, and the user asked for none of them.** git
+        /// obeys the environment before it obeys the directory it was pointed
+        /// at, so a push child that carries one of those sends a branch of a
+        /// repository the user was never looking at. The guard of the push,
+        /// [`current_branch`], reads the same environment, so it agrees with
+        /// itself and refuses nothing.
+        ///
+        /// **The sweep keeps the six names of
+        /// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`], because this child acts
+        /// for the user.** A push is where that matters most: without
+        /// `GIT_SSH_COMMAND` a user who holds a non-default key cannot
+        /// authenticate at all, and nothing states it again — `gsw` spawns git
+        /// itself, so no rc file runs between the sweep and the push.
+        ///
+        /// `GIT_TERMINAL_PROMPT` is a name the user states, and the push sets
+        /// it to `0` after the sweep, so that value must win over the one the
+        /// child holds.
+        ///
+        /// **This test starts this test binary again, and the hostile
+        /// environment goes on that child.** A `GIT_` variable is
+        /// process-global state. A test that set one in this process would
+        /// change what every other test in this binary reads, and many of them
+        /// run real git.
+        ///
+        /// **The armed control comes first.** The child asserts that it really
+        /// holds each hostile variable and each variable of the user. An
+        /// assertion that a variable is absent from the record passes just as
+        /// readily where there was nothing to remove.
+        #[test]
+        fn the_push_child_sheds_the_git_variables_of_gsw_and_keeps_those_of_the_user() {
+            if std::env::var_os(HOSTILE_MARKER).is_none() {
+                a_child_of_this_test_passes(&test_name(
+                    module_path!(),
+                    "the_push_child_sheds_the_git_variables_of_gsw_and_keeps_those_of_the_user",
+                ));
+                return;
+            }
+
+            for (name, _) in HOSTILE_GIT_ENVIRONMENT {
+                assert!(
+                    std::env::var_os(name).is_some(),
+                    "the child must really hold {name}, or there is nothing here to remove and \
+                     the assertion below is measured against nothing",
+                );
+            }
+            for name in gitscratch::USER_INTENT_GIT_ENVIRONMENT {
+                assert_eq!(
+                    std::env::var(name).ok(),
+                    Some(user_intent_value(name)),
+                    "the child must really hold {name}, or there is nothing here to keep",
+                );
+            }
+            assert_ne!(
+                std::env::var(TERMINAL_PROMPT_VAR).ok().as_deref(),
+                Some("0"),
+                "the child must hold a {TERMINAL_PROMPT_VAR} other than 0, or the push's own \
+                 value wins over nothing",
+            );
+
+            let (origin, clone) = clone_with_feature_branch();
+            let p = clone.path();
+            let record = recording_the_push_environment(p);
+
+            let outcome = run_quiet(&confirmed(&["push", "-u", "origin", "feature"]), p);
+            assert!(
+                outcome.success,
+                "the push must reach the origin of the fixture. A hostile variable aims git \
+                 somewhere else, and the guard of the push reads the same variable, so it agrees \
+                 with itself and refuses nothing: {}",
+                outcome.output,
+            );
+            assert_eq!(
+                // Both reads go through the fixture helper, which sheds
+                // everything. A read of its own would answer about the
+                // repository the hostile environment names.
+                git_stdout(origin.path(), &["rev-parse", "refs/heads/feature"]),
+                git_stdout(p, &["rev-parse", "refs/heads/feature"]),
+                "the origin must carry the commit the clone holds",
+            );
+
+            let environment =
+                std::fs::read_to_string(&record).expect("the pre-push hook must have run");
+            assert!(
+                !environment.is_empty(),
+                "the hook must record the environment the push ran in",
+            );
+            let carried = hostile_lines(&environment);
+            assert!(
+                carried.is_empty(),
+                "the push child carried a git variable out of the environment of gsw. Each of \
+                 these aims the push, or configures it, somewhere the user never pointed it: \
+                 {carried:?}",
+            );
+            let lost = user_intent_lost(&environment, Some(TERMINAL_PROMPT_VAR));
+            assert!(
+                lost.is_empty(),
+                "the push child lost a git variable the user states on purpose. Without \
+                 GIT_SSH_COMMAND a user who holds a non-default key cannot authenticate, and \
+                 nothing states it again: {lost:?}",
+            );
+            let prompts: Vec<&str> = environment
+                .lines()
+                .filter(|line| {
+                    line.split_once('=')
+                        .is_some_and(|(key, _)| key == TERMINAL_PROMPT_VAR)
+                })
+                .collect();
+            assert_eq!(
+                prompts,
+                [format!("{TERMINAL_PROMPT_VAR}=0")],
+                "the push sets {TERMINAL_PROMPT_VAR}=0 after the sweep, so that value must win \
+                 over the one the child holds",
+            );
+
+            println!("{CHILD_RAN}");
+        }
+    }
 }
