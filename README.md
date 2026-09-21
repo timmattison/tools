@@ -581,6 +581,19 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       passphrase-protected key with no agent, and an unknown host key all fail fast and say so
       under the frame instead of hanging behind a question gsw never drew. Credential helpers and
       a GUI askpass still work — neither needs the terminal.
+    - **The push goes to the repository on the screen, whatever gsw was started from.** git obeys
+      the environment before it obeys the directory it was pointed at. So a gsw started from
+      inside a pre-commit hook would otherwise push the repository being committed to. The push
+      gets no `GIT_` variable out of gsw's own environment, and neither does the check that reads
+      which branch is checked out. The rule there is the prefix and never a list of names. That
+      check is why the rule matters more here than anywhere else: it refuses a push whose branch
+      changed since the question. A check that reads the same wrong repository as the push agrees
+      with itself, and refuses nothing — which is worse than no check, because it reports
+      success. The six variables you state on purpose stay: `GIT_CONFIG_GLOBAL`,
+      `GIT_CONFIG_SYSTEM`, `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_ASKPASS` and `GIT_TERMINAL_PROMPT`.
+      So your key and your identity still reach the remote. A pre-commit hook exports none of
+      those. Your shell or direnv does. After that sweep gsw sets `GIT_TERMINAL_PROMPT=0`, so its
+      own value wins over yours.
     - Everything gsw says itself goes away on its own: `Pushed 3 commits to origin/my-branch
       (12s ago)` counts up in place, fades toward black as it goes, and takes itself off the
       screen after a minute — the frame gets the row back with no key pressed. Refusals

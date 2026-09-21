@@ -439,13 +439,15 @@ const RETRY_ADVICE: &str = "press p again";
 ///   `gsw` started from inside a pre-commit hook holds `GIT_DIR`,
 ///   `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY` and `GIT_CONFIG_PARAMETERS`, and
 ///   the user asked for none of them. A child that carried one would send a
-///   branch of the repository being committed to, and the guard above reads
-///   the same environment, so it would agree with itself and refuse nothing.
-///   The rule is the `GIT_` prefix and never a list of names. The six names of
+///   branch of the repository being committed to. The guard above reads the
+///   same environment, so it would agree with itself and refuse nothing — a
+///   guard that reads the same wrong place as the thing it guards is worse
+///   than no guard, because it reports success. The rule is the `GIT_` prefix
+///   and never a list of names. The six names of
 ///   [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`] stay, because this child acts
-///   for the user and nothing states them again: gsw spawns git itself, so no
-///   rc file runs between the sweep and the push. Without `GIT_SSH_COMMAND` a
-///   user who holds a non-default key cannot authenticate at all.
+///   for the user and nothing states them again. gsw spawns git itself, so no
+///   rc file runs between the sweep and the push, and a user who holds a
+///   non-default key cannot authenticate without `GIT_SSH_COMMAND`.
 /// - **The child is detached from the terminal** ([`detach_from_terminal`]) —
 ///   its own session on Unix, no inherited console on Windows — so the terminal
 ///   device cannot be opened by it or by anything it runs. This is the part
@@ -460,10 +462,10 @@ const RETRY_ADVICE: &str = "press p again";
 ///   descendant, credential helpers included, which is why this is done to the
 ///   process rather than to one transport.
 /// - **stdin is closed** and **`GIT_TERMINAL_PROMPT=0`**, which is git's own
-///   half of the same rule. The pin comes *after* the sweep, and that order is
-///   the whole of why it survives: `GIT_TERMINAL_PROMPT` is one of the six
-///   names the sweep keeps, so a pin ahead of the sweep would be overwritten by
-///   whatever the user holds. git asks for HTTP usernames and passwords itself,
+///   half of the same rule. **The pin comes after the sweep, and that order is
+///   the whole of why it survives.** `GIT_TERMINAL_PROMPT` is one of the six
+///   names the sweep keeps, so a pin ahead of the sweep leaves with the value
+///   the user holds. git asks for HTTP usernames and passwords itself,
 ///   and this refuses those before the detachment has to. Disabled, git fails
 ///   immediately and says why, which lands in the status rows like any other
 ///   error. Credential helpers and a GUI `SSH_ASKPASS` are untouched — they do
@@ -5496,7 +5498,7 @@ exit 1"#,
         ///
         /// **The hook is the environment of the push child, read from inside
         /// it.** A test that reads the removals off the [`Command`] proves
-        /// less: a sweep of the `GIT_` prefix records a removal only for a
+        /// less. A sweep of the `GIT_` prefix records a removal only for a
         /// variable this process holds, so such a test is empty under a shell
         /// and full under the pre-commit hook of this repository. The hook runs
         /// as a child of the push, so it holds what the push held.
@@ -5539,10 +5541,10 @@ exit 1"#,
         ///
         /// **The question here is the value and not the name.** git puts
         /// `GIT_EXEC_PATH`, `GIT_PREFIX` and `GIT_EDITOR` into the environment
-        /// of every hook it runs, so a read of this record that asked about the
+        /// of every hook it runs. So a read of this record that asked about the
         /// `GIT_` prefix would report three variables git set itself. git
-        /// cannot manufacture a hostile value, so a hostile value in the record
-        /// came through `gsw` and through nothing else.
+        /// cannot manufacture a hostile value, so a hostile value in this
+        /// record came through `gsw` and through nothing else.
         fn hostile_lines(environment: &str) -> Vec<&str> {
             environment
                 .lines()
@@ -5563,17 +5565,17 @@ exit 1"#,
         /// `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY` and
         /// `GIT_CONFIG_PARAMETERS`, and the user asked for none of them.** git
         /// obeys the environment before it obeys the directory it was pointed
-        /// at, so a push child that carries one of those sends a branch of a
+        /// at. So a push child that carries one of those sends a branch of a
         /// repository the user was never looking at. The guard of the push,
         /// [`current_branch`], reads the same environment, so it agrees with
         /// itself and refuses nothing.
         ///
         /// **The sweep keeps the six names of
         /// [`gitscratch::USER_INTENT_GIT_ENVIRONMENT`], because this child acts
-        /// for the user.** A push is where that matters most: without
-        /// `GIT_SSH_COMMAND` a user who holds a non-default key cannot
-        /// authenticate at all, and nothing states it again — `gsw` spawns git
-        /// itself, so no rc file runs between the sweep and the push.
+        /// for the user.** A push is where that matters most. A user who holds
+        /// a non-default key cannot authenticate without `GIT_SSH_COMMAND`, and
+        /// nothing states it again: `gsw` spawns git itself, so no rc file runs
+        /// between the sweep and the push.
         ///
         /// `GIT_TERMINAL_PROMPT` is a name the user states, and the push sets
         /// it to `0` after the sweep, so that value must win over the one the
@@ -5583,7 +5585,9 @@ exit 1"#,
         /// environment goes on that child.** A `GIT_` variable is
         /// process-global state. A test that set one in this process would
         /// change what every other test in this binary reads, and many of them
-        /// run real git.
+        /// run real git. That is also what makes the answer the same under a
+        /// shell and under the pre-commit hook of this repository, which
+        /// exports `GIT_` variables into `cargo test`.
         ///
         /// **The armed control comes first.** The child asserts that it really
         /// holds each hostile variable and each variable of the user. An
@@ -5682,7 +5686,7 @@ exit 1"#,
         ///
         /// **A fixture that reads through an unswept git answers about
         /// whatever the environment names.** These tests assert what a push
-        /// left on the origin, so a read that went to another repository
+        /// left on the origin. So a read that went to another repository
         /// reports a push that never happened, or hides one that did.
         ///
         /// The helpers want the blanket sweep rather than the allowlist the
@@ -5690,11 +5694,11 @@ exit 1"#,
         /// is no user whose intent to honor — see
         /// [`gitscratch::shed_inherited_git_environment`].
         ///
-        /// This is measurable, and it was measured. With one hostile variable
-        /// set and nothing else, `GIT_OBJECT_DIRECTORY` aimed at a decoy, five
-        /// of the push tests failed: the fixture wrote its objects into the
-        /// decoy, and then pushed a commit whose objects the repository it
-        /// pushed from did not hold.
+        /// **This is measurable, and it was measured.** Five of the push tests
+        /// failed with one hostile variable set and nothing else,
+        /// `GIT_OBJECT_DIRECTORY` aimed at a decoy. The fixture wrote its
+        /// objects into the decoy, and then pushed a commit whose objects the
+        /// repository it pushed from did not hold.
         ///
         /// **The armed control comes first**, as it does in the test above.
         #[test]
