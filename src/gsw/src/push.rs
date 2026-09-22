@@ -5502,8 +5502,15 @@ exit 1"#,
         const TERMINAL_PROMPT_VAR: &str = "GIT_TERMINAL_PROMPT";
 
         /// The body of the hook that writes its own environment to `record`.
+        ///
+        /// The path goes through [`shellquote::shell_quote`], so the quoting
+        /// rule lives in one place rather than in each string that spells a
+        /// command line.
         fn recording_hook_body(record: &Path) -> String {
-            format!("env > '{record}'\nexit 0", record = record.display())
+            format!(
+                "env > {}\nexit 0",
+                shellquote::shell_quote(&record.display().to_string()),
+            )
         }
 
         /// Give the clone at `p` a `pre-push` hook that writes its own
