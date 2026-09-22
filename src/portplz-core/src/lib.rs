@@ -222,21 +222,33 @@ fn get_git_branch(repo: &gix::Repository) -> Option<String> {
     }
 }
 
-/// The result of deriving a port: the port, how it was derived, and for whom.
+/// The result of deriving a port: the port, how it was derived, for whom, and
+/// under which name.
 #[derive(Debug, Clone)]
 pub struct Derivation {
     pub port: DerivedPort,
     pub source: PortSource,
     pub user: UserSalt,
+    /// The name that told this application apart from the others in the same
+    /// location, exactly as the caller gave it. It is `None` when the caller
+    /// gave none. This is the name a person typed, not the component that
+    /// reached the hash, so a description echoes what that person wrote.
+    pub name: Option<String>,
 }
 
 impl Derivation {
     /// One-line human-readable description including the user, e.g.
-    /// `Port 51877 for repo 'foo' on branch 'main' (uid 501)`.
+    /// `Port 51877 for repo 'foo' on branch 'main' (uid 501)`, or
+    /// `Port 40122 for repo 'tools' on branch 'main' named 'api' (uid 501)`
+    /// when the derivation carries a name.
     #[must_use]
     pub fn describe(&self) -> String {
+        let named = match &self.name {
+            Some(name) => format!(" named '{name}'"),
+            None => String::new(),
+        };
         format!(
-            "{} ({})",
+            "{}{named} ({})",
             self.source.describe(self.port),
             self.user.label()
         )
@@ -332,6 +344,7 @@ pub fn derive(
         port,
         source,
         user: user.clone(),
+        name: name.map(ToString::to_string),
     })
 }
 
