@@ -600,30 +600,30 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_derive_on_git_init_repo_is_gitrepo_and_stable() {
-        fn run_git(dir: &std::path::Path, args: &[&str]) {
-            // Shed the whole inherited `GIT_` family, then pin the two config
-            // files. The sweep comes first so the pins win, and it is a prefix
-            // rather than the three names this fixture used to list: a list
-            // strips nothing new the day git adds a variable.
-            let mut command = std::process::Command::new("git");
-            gitscratch::shed_inherited_git_environment(&mut command);
+    fn run_git(dir: &std::path::Path, args: &[&str]) {
+        // Shed the whole inherited `GIT_` family, then pin the two config
+        // files. The sweep comes first so the pins win, and it is a prefix
+        // rather than the three names this fixture used to list: a list
+        // strips nothing new the day git adds a variable.
+        let mut command = std::process::Command::new("git");
+        gitscratch::shed_inherited_git_environment(&mut command);
 
-            let status = command
-                .args(args)
-                .current_dir(dir)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .status()
-                .expect("invoke git");
-            assert!(status.success(), "git {args:?} failed");
-        }
+        let status = command
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .expect("invoke git");
+        assert!(status.success(), "git {args:?} failed");
+    }
 
-        let tmp = tempfile::tempdir().expect("create temp dir");
-        let dir = tmp.path();
-        run_git(dir, &["init", "-b", "testbranch"]);
-        // An empty commit so HEAD is born and the branch is reported deterministically.
+    /// Makes `dir` a git repository whose HEAD is born on `branch`.
+    ///
+    /// The empty commit is what makes the branch report deterministically: an
+    /// unborn HEAD has no referent name.
+    fn init_repo(dir: &std::path::Path, branch: &str) {
+        run_git(dir, &["init", "-b", branch]);
         run_git(
             dir,
             &[
@@ -637,6 +637,13 @@ mod tests {
                 "init",
             ],
         );
+    }
+
+    #[test]
+    fn test_derive_on_git_init_repo_is_gitrepo_and_stable() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let dir = tmp.path();
+        init_repo(dir, "testbranch");
 
         let d1 = derive(dir, false, &UserSalt::Uid(501), None).expect("derive should succeed");
         let d2 = derive(dir, false, &UserSalt::Uid(501), None).expect("derive should succeed");
