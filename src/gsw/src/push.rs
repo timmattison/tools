@@ -5740,5 +5740,46 @@ exit 1"#,
 
             println!("{CHILD_RAN}");
         }
+
+        /// The hook writes its record to the path this module hands it,
+        /// whatever characters that path spells.
+        ///
+        /// **The record path goes onto a `/bin/sh` command line, so the shell
+        /// reads every character of it.** A single quote closes the quotation
+        /// early, and the redirect then names a different file — or `sh` reads
+        /// the rest of the script as one unterminated word and runs nothing at
+        /// all. Either way the tests above read the path they asked for, find
+        /// nothing there, and report a hook that never ran.
+        ///
+        /// A temporary directory holds no quote today, so this costs those
+        /// tests nothing. It is here because the quoting rule belongs in
+        /// [`shellquote::shell_quote`] rather than in each string that spells
+        /// a command line.
+        #[test]
+        fn the_recording_hook_writes_to_the_path_it_was_handed() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let record = dir.path().join("it's-here");
+            let body = recording_hook_body(&record);
+
+            let status = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(&body)
+                .current_dir(dir.path())
+                .status()
+                .expect("run the body of the hook");
+
+            assert!(
+                status.success(),
+                "/bin/sh must read the body of the hook: {status}",
+            );
+            let recorded = std::fs::read_to_string(&record).expect(
+                "the hook must write its record to the path it was handed, and a redirect the \
+                 shell read as another word writes somewhere else",
+            );
+            assert!(
+                !recorded.is_empty(),
+                "the hook must record the environment it ran in",
+            );
+        }
     }
 }
