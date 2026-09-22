@@ -257,9 +257,19 @@ pub enum DeriveError {
 /// (detached HEAD falls back to just the repo-root name). `user` is mixed into
 /// the hash so different users derive different ports for the same location.
 ///
+/// `name` names one application apart from another in the same location, so a
+/// repository that holds more than one application can give each of them its
+/// own port. It is accepted but not yet part of the hash: the test in the
+/// commit that follows this one is what puts it there.
+///
 /// # Errors
 /// Returns [`DeriveError::NoBasename`] if `path` has no final path component.
-pub fn derive(path: &Path, no_git: bool, user: &UserSalt) -> Result<Derivation, DeriveError> {
+pub fn derive(
+    path: &Path,
+    no_git: bool,
+    user: &UserSalt,
+    _name: Option<&str>,
+) -> Result<Derivation, DeriveError> {
     let basename = path
         .file_name()
         .ok_or(DeriveError::NoBasename)?
@@ -304,7 +314,7 @@ mod tests {
     /// port for ever. This test pins one such port at the library boundary.
     #[test]
     fn unnamed_derivation_keeps_its_port() {
-        let derivation = derive(Path::new("/tmp"), true, &UserSalt::Uid(0)).expect("derive");
+        let derivation = derive(Path::new("/tmp"), true, &UserSalt::Uid(0), None).expect("derive");
         assert_eq!(
             derivation.port.get(),
             UNNAMED_TMP_PORT_UID0,
@@ -385,8 +395,8 @@ mod tests {
     #[test]
     fn test_different_users_get_different_ports() {
         let path = std::path::Path::new("/example/myrepo");
-        let a = derive(path, true, &UserSalt::Uid(501)).expect("derive");
-        let b = derive(path, true, &UserSalt::Uid(502)).expect("derive");
+        let a = derive(path, true, &UserSalt::Uid(501), None).expect("derive");
+        let b = derive(path, true, &UserSalt::Uid(502), None).expect("derive");
         assert_ne!(
             a.port.get(),
             b.port.get(),
@@ -397,7 +407,7 @@ mod tests {
     #[test]
     fn test_describe_includes_uid_label() {
         let path = std::path::Path::new("/example/myrepo");
-        let d = derive(path, true, &UserSalt::Uid(501)).expect("derive");
+        let d = derive(path, true, &UserSalt::Uid(501), None).expect("derive");
         assert!(
             d.describe().contains("(uid 501)"),
             "verbose description must include the uid, got: {}",
@@ -431,7 +441,7 @@ mod tests {
     #[test]
     fn test_describe_includes_name_label() {
         let path = std::path::Path::new("/example/myrepo");
-        let d = derive(path, true, &UserSalt::Name("alice".into())).expect("derive");
+        let d = derive(path, true, &UserSalt::Name("alice".into()), None).expect("derive");
         assert!(
             d.describe().contains("(user 'alice')"),
             "verbose description must include the login name, got: {}",
@@ -610,8 +620,8 @@ mod tests {
             ],
         );
 
-        let d1 = derive(dir, false, &UserSalt::Uid(501)).expect("derive should succeed");
-        let d2 = derive(dir, false, &UserSalt::Uid(501)).expect("derive should succeed");
+        let d1 = derive(dir, false, &UserSalt::Uid(501), None).expect("derive should succeed");
+        let d2 = derive(dir, false, &UserSalt::Uid(501), None).expect("derive should succeed");
         assert_eq!(
             d1.port.get(),
             d2.port.get(),

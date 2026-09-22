@@ -42,7 +42,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let user = portplz_core::UserSalt::current()?;
-    let derivation = portplz_core::derive(&path, cli.no_git, &user)?;
+    let derivation = portplz_core::derive(&path, cli.no_git, &user, None)?;
 
     if cli.verbose {
         println!("{}", derivation.describe());
