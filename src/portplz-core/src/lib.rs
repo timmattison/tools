@@ -250,6 +250,31 @@ pub enum DeriveError {
     NoBasename,
 }
 
+/// Marks the start and the end of the name at the head of the hash input.
+///
+/// No other component can hold this byte. A path component cannot contain a
+/// NUL, because the kernel forbids it. A git branch name cannot contain one. A
+/// uid renders as decimal digits. A login name arrives from the environment,
+/// which holds C strings. So an input that holds a NUL carries a name, an input
+/// that holds none does not, and the two sets cannot meet — whatever the
+/// repository, the branch, the directory, the user, and the name are. A tag
+/// made of ordinary text gives no such proof: it only holds until somebody's
+/// login name is that text.
+const NAME_FRAME: char = '\0';
+
+/// The component mixed into the port hash to name one application apart from
+/// another in the same location.
+///
+/// [`NAME_FRAME`] marks where the name ends, so the name must not hold one: a
+/// name that did could close its own frame early and read as a different
+/// (name, user, location) triple. Strip it, for the reason
+/// [`UserSalt::hash_component`] strips a newline. A newline needs no stripping
+/// here, because the frame and not the separator is what ends the name, and
+/// stripping one would make two different names share a port.
+fn name_hash_component(name: &str) -> String {
+    name.chars().filter(|c| *c != NAME_FRAME).collect()
+}
+
 /// Derives the port for `path`.
 ///
 /// When `no_git` is true, or `path` is not inside a git repo, the directory
@@ -293,7 +318,13 @@ pub fn derive(
 
     let unnamed = format!("{}\n{}", user.hash_component(), source.hash_input());
     let hash_input = match name {
-        Some(name) => format!("{unnamed}\n{name}"),
+        // The framed name sits at the head of the input, in front of everything
+        // the unnamed derivation hashes. The unnamed input is thus unchanged,
+        // and no named input can read as an unnamed one.
+        Some(name) => format!(
+            "{NAME_FRAME}{}{NAME_FRAME}{unnamed}",
+            name_hash_component(name)
+        ),
         None => unnamed,
     };
     let port = unprivileged_port_from_string(&hash_input);
