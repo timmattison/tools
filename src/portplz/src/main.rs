@@ -6,10 +6,18 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "portplz")]
 #[command(version = version_string!())]
-#[command(about = "Generate a port number from the git repo root, branch, and current user", long_about = None)]
+#[command(about = "Generate a port number from the git repo root, branch, current user, and an optional name", long_about = None)]
 struct Cli {
     #[arg(help = "Directory path (defaults to current directory)")]
     path: Option<String>,
+
+    #[arg(
+        short,
+        long,
+        value_name = "NAME",
+        help = "Name one application apart from the others in the same repo, so each gets its own port"
+    )]
+    name: Option<String>,
 
     #[arg(
         short,
@@ -42,7 +50,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let user = portplz_core::UserSalt::current()?;
-    let derivation = portplz_core::derive(&path, cli.no_git, &user, None)?;
+    let derivation = portplz_core::derive(&path, cli.no_git, &user, cli.name.as_deref())?;
 
     if cli.verbose {
         println!("{}", derivation.describe());
