@@ -503,6 +503,46 @@ mod tests {
         );
     }
 
+    /// Without the name in the description, a user who runs two applications
+    /// out of one repository cannot tell which one a port belongs to.
+    #[test]
+    fn describe_names_the_name() {
+        let derivation = derive(
+            Path::new("/example/myrepo"),
+            true,
+            &UserSalt::Uid(501),
+            Some("api"),
+        )
+        .expect("derive");
+        assert_eq!(
+            derivation.describe(),
+            format!(
+                "Port {} for directory 'myrepo' (no git repo) named 'api' (uid 501)",
+                derivation.port.get()
+            )
+        );
+    }
+
+    /// The description of a derivation that carries no name must not gain a
+    /// word when the named one gains one.
+    #[test]
+    fn describe_says_nothing_about_a_name_there_is_not() {
+        let derivation = derive(
+            Path::new("/example/myrepo"),
+            true,
+            &UserSalt::Uid(501),
+            None,
+        )
+        .expect("derive");
+        assert_eq!(
+            derivation.describe(),
+            format!(
+                "Port {} for directory 'myrepo' (no git repo) (uid 501)",
+                derivation.port.get()
+            )
+        );
+    }
+
     #[test]
     fn parse_uid_override_rejects_non_numeric() {
         assert!(
