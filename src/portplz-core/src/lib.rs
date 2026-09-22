@@ -398,6 +398,111 @@ mod tests {
         );
     }
 
+    /// A port is only useful if it comes back. The same name in the same place
+    /// must give the same port on every call.
+    #[test]
+    fn one_name_in_one_place_always_gives_one_port() {
+        let path = Path::new("/example/myrepo");
+        let first = derive(path, true, &UserSalt::Uid(501), Some("api")).expect("derive");
+        let second = derive(path, true, &UserSalt::Uid(501), Some("api")).expect("derive");
+        assert_eq!(
+            first.port.get(),
+            second.port.get(),
+            "one name in one place must give one port on every call"
+        );
+    }
+
+    /// The name is a third component beside the repository and the branch, and
+    /// it replaces neither. So the same name in two places keeps two ports.
+    #[test]
+    fn one_name_in_two_places_gives_two_ports() {
+        let here = derive(
+            Path::new("/example/project-a"),
+            true,
+            &UserSalt::Uid(501),
+            Some("api"),
+        )
+        .expect("derive");
+        let there = derive(
+            Path::new("/example/project-b"),
+            true,
+            &UserSalt::Uid(501),
+            Some("api"),
+        )
+        .expect("derive");
+        assert_ne!(
+            here.port.get(),
+            there.port.get(),
+            "one name in two places must give two different ports"
+        );
+    }
+
+    /// The user salt continues to apply, so two people on one machine can run
+    /// the same named application side by side.
+    #[test]
+    fn the_user_salt_still_applies_to_a_named_derivation() {
+        let path = Path::new("/example/myrepo");
+        let mine = derive(path, true, &UserSalt::Uid(501), Some("api")).expect("derive");
+        let yours = derive(path, true, &UserSalt::Uid(502), Some("api")).expect("derive");
+        assert_ne!(
+            mine.port.get(),
+            yours.port.get(),
+            "two users must derive two ports for one named application"
+        );
+    }
+
+    /// A newline inside the name must not reach into the user or the location.
+    ///
+    /// Both derivations below spell the same four pieces in the same order —
+    /// `api`, `501`, `foo`, `bar` — and differ only in which component each
+    /// piece belongs to. A framing that ended the name at a newline would hand
+    /// them one port. [`NAME_FRAME`] ends it instead, and a name holds no frame
+    /// byte, so the two stay apart.
+    #[test]
+    fn a_newline_in_the_name_cannot_forge_a_boundary() {
+        let name_is_one_piece = derive(
+            Path::new("/example/foo\nbar"),
+            true,
+            &UserSalt::Name("501".into()),
+            Some("api"),
+        )
+        .expect("derive");
+        let name_is_two_pieces = derive(
+            Path::new("/example/bar"),
+            true,
+            &UserSalt::Name("foo".into()),
+            Some("api\n501"),
+        )
+        .expect("derive");
+        assert_ne!(
+            name_is_one_piece.port.get(),
+            name_is_two_pieces.port.get(),
+            "a newline in the name must not let it read as the user and the location"
+        );
+    }
+
+    /// The frame byte ends the name, so the name must not carry one — and a
+    /// newline must survive, or two names that differ only by one would share a
+    /// port.
+    #[test]
+    fn the_name_component_strips_the_frame_byte_and_keeps_a_newline() {
+        let stripped = name_hash_component("api\u{0}501");
+        assert!(
+            !stripped.contains(NAME_FRAME),
+            "a name must carry no frame byte, got: {stripped:?}"
+        );
+        assert_eq!(
+            name_hash_component("api"),
+            "api",
+            "a name that carries no frame byte must pass through unchanged"
+        );
+        assert_eq!(
+            name_hash_component("a\nb"),
+            "a\nb",
+            "a newline is ordinary text inside a name, and must survive"
+        );
+    }
+
     #[test]
     fn parse_uid_override_rejects_non_numeric() {
         assert!(
