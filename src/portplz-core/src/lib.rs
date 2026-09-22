@@ -340,6 +340,33 @@ mod tests {
         );
     }
 
+    /// A derivation that carries a name must never land on the port of a
+    /// derivation that carries none.
+    ///
+    /// Issue #519 names the exact pair: a directory `foo` with the name `main`
+    /// and no git, beside the repository `foo` on the branch `main`. Append the
+    /// name after the separator and both read `{user}\nfoo\nmain`, so the two
+    /// share a port and each one silently takes the other's service.
+    #[test]
+    fn a_name_cannot_collide_with_a_derivation_that_has_none() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let repo = tmp.path().join("foo");
+        std::fs::create_dir(&repo).expect("create the repository directory");
+        init_repo(&repo, "main");
+
+        let user = UserSalt::Uid(501);
+        let unnamed_repo = derive(&repo, false, &user, None).expect("derive");
+        let named_directory =
+            derive(Path::new("/example/foo"), true, &user, Some("main")).expect("derive");
+
+        assert_ne!(
+            named_directory.port.get(),
+            unnamed_repo.port.get(),
+            "the directory 'foo' named 'main' must not take the port of the repository 'foo' on \
+             the branch 'main'"
+        );
+    }
+
     #[test]
     fn parse_uid_override_rejects_non_numeric() {
         assert!(
