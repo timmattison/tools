@@ -322,6 +322,20 @@ mod tests {
         );
     }
 
+    /// A repository can hold more than one application, and each one needs its
+    /// own port. So two names in one place must not share a port.
+    #[test]
+    fn two_names_in_one_place_give_two_ports() {
+        let path = Path::new("/example/myrepo");
+        let api = derive(path, true, &UserSalt::Uid(501), Some("api")).expect("derive");
+        let site = derive(path, true, &UserSalt::Uid(501), Some("site")).expect("derive");
+        assert_ne!(
+            api.port.get(),
+            site.port.get(),
+            "two names in one place must give two different ports"
+        );
+    }
+
     #[test]
     fn parse_uid_override_rejects_non_numeric() {
         assert!(
