@@ -494,6 +494,25 @@ mod tests {
         );
     }
 
+    /// A login name must not forge the frame of a named derivation.
+    ///
+    /// A caller can build `UserSalt::Name` by hand, so a login name can hold the
+    /// frame byte. If the user component keeps it, the login name `\0api\0501`
+    /// in `foo` hashes the same input as the name `api` for uid 501 in `foo`.
+    /// The two then share a port.
+    #[test]
+    fn a_login_name_cannot_forge_a_named_derivation() {
+        let path = Path::new("/example/foo");
+        let forged =
+            derive(path, true, &UserSalt::Name("\0api\0501".into()), None).expect("derive");
+        let named = derive(path, true, &UserSalt::Uid(501), Some("api")).expect("derive");
+        assert_ne!(
+            forged.port.get(),
+            named.port.get(),
+            "a login name that holds the frame byte must not take the port of a named derivation"
+        );
+    }
+
     /// The frame byte ends the name, so the name must not carry one — and a
     /// newline must survive, or two names that differ only by one would share a
     /// port.
