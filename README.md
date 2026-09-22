@@ -211,7 +211,8 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
           site and an API gives each of them its own port: `portplz --name api` and `portplz --name tim.mattison.org`
           differ from each other and from the plain `portplz`. The name is a third component beside the repo and the
           branch and replaces neither, so the same name in two repos still gives two ports. Every port derived without
-          a name keeps the value it has today.
+          a name keeps the value it has today. An empty name is refused, so `portplz -n "$APP"` with `APP` unset gives
+          an error and not a different port.
     - To install: `cargo install --git https://github.com/timmattison/tools portplz`
 - sirn
     - Serve It Right Now — a tiny, zero-config HTTP file server. Run `sirn <file>...` to serve each file at

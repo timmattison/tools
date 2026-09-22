@@ -15,7 +15,8 @@ struct Cli {
         short,
         long,
         value_name = "NAME",
-        help = "Name one application apart from the others in the same repo, so each gets its own port"
+        value_parser = clap::builder::NonEmptyStringValueParser::new(),
+        help ="Name one application apart from the others in the same repo, so each gets its own port"
     )]
     name: Option<String>,
 
