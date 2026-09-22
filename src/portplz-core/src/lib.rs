@@ -294,6 +294,24 @@ pub fn derive(path: &Path, no_git: bool, user: &UserSalt) -> Result<Derivation, 
 mod tests {
     use super::*;
 
+    /// The port `derive` gives for `/tmp` with `no_git` under uid 0, whose hash
+    /// input is `"0\ntmp"`. The `portplz` CLI test pins the same value through
+    /// the binary.
+    const UNNAMED_TMP_PORT_UID0: u16 = 19_642;
+
+    /// Other tools and running services already depend on the ports that
+    /// `derive` gives today, so a derivation that carries no name must keep its
+    /// port for ever. This test pins one such port at the library boundary.
+    #[test]
+    fn unnamed_derivation_keeps_its_port() {
+        let derivation = derive(Path::new("/tmp"), true, &UserSalt::Uid(0)).expect("derive");
+        assert_eq!(
+            derivation.port.get(),
+            UNNAMED_TMP_PORT_UID0,
+            "the port of a derivation that carries no name must never change"
+        );
+    }
+
     #[test]
     fn parse_uid_override_rejects_non_numeric() {
         assert!(
