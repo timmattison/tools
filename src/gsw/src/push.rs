@@ -4799,6 +4799,8 @@ mod ui_tests {
 mod run_tests {
     use super::*;
     use crate::testrepo::{git, git_output, git_stdout, init_repo_with_upstream};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     /// A clone with a `feature` branch holding one commit, ready to push.
     ///
@@ -4843,6 +4845,33 @@ mod run_tests {
         )
         .status
         .success()
+    }
+
+    /// `rwxr-xr-x` — git has to be able to execute the hook it finds, and a
+    /// file written by `std::fs::write` is not executable.
+    #[cfg(unix)]
+    const HOOK_EXECUTABLE_MODE: u32 = 0o755;
+
+    /// Install `body` as the repository's pre-push hook.
+    ///
+    /// Every test here that needs a hook installs it through this one helper,
+    /// so a fixture that two tests share cannot drift into two fixtures.
+    ///
+    /// `core.hooksPath` is stated rather than inherited: a developer with one
+    /// set globally would otherwise run their own hooks here, and the test
+    /// would pass or fail on a machine's configuration.
+    ///
+    /// Unix-only for the execute bit, which is what makes git run the hook at
+    /// all.
+    #[cfg(unix)]
+    fn write_hook(workdir: &Path, body: &str) {
+        git(workdir, &["config", "core.hooksPath", ".git/hooks"]);
+        let hook = workdir.join(".git").join("hooks").join("pre-push");
+        std::fs::create_dir_all(hook.parent().expect("the hook has a parent"))
+            .expect("create the hooks directory");
+        std::fs::write(&hook, format!("#!/bin/sh\n{body}\n")).expect("write the pre-push hook");
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(HOOK_EXECUTABLE_MODE))
+            .expect("make the hook executable");
     }
 
     #[test]
@@ -5238,7 +5267,6 @@ mod run_tests {
     #[cfg(unix)]
     mod streaming_tests {
         use super::*;
-        use std::os::unix::fs::PermissionsExt;
         use std::sync::{Arc, Mutex};
 
         /// What the hook writes before it waits to hear that the line arrived.
@@ -5247,21 +5275,6 @@ mod run_tests {
         /// What the hook writes only once it has heard, so its presence proves
         /// the runner reported the first line while the child was still alive.
         const SECOND_LINE: &str = "hook-said-this-second";
-
-        /// Install `body` as the repository's pre-push hook.
-        ///
-        /// `core.hooksPath` is stated rather than inherited: a developer with
-        /// one set globally would otherwise run their own hooks here, and the
-        /// test would pass or fail on a machine's configuration.
-        fn write_hook(workdir: &Path, body: &str) {
-            git(workdir, &["config", "core.hooksPath", ".git/hooks"]);
-            let hook = workdir.join(".git").join("hooks").join("pre-push");
-            std::fs::create_dir_all(hook.parent().expect("the hook has a parent"))
-                .expect("create the hooks directory");
-            std::fs::write(&hook, format!("#!/bin/sh\n{body}\n")).expect("write the pre-push hook");
-            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
-                .expect("make the hook executable");
-        }
 
         /// Longest the hook waits to be told, in units of its own poll.
         /// Bounded so a runner that reports nothing until the child exits
@@ -5484,14 +5497,14 @@ exit 1"#,
             a_child_of_this_test_passes, test_name, user_intent_lost, user_intent_value, CHILD_RAN,
             HOSTILE_GIT_ENVIRONMENT, HOSTILE_MARKER,
         };
-        use std::os::unix::fs::PermissionsExt;
 
         /// The variable the push pins to `0` after the sweep.
         const TERMINAL_PROMPT_VAR: &str = "GIT_TERMINAL_PROMPT";
 
-        /// `rwxr-xr-x` — git has to be able to execute the hook it finds, and a
-        /// file written by `std::fs::write` is not executable.
-        const HOOK_EXECUTABLE_MODE: u32 = 0o755;
+        /// The body of the hook that writes its own environment to `record`.
+        fn recording_hook_body(record: &Path) -> String {
+            format!("env > '{record}'\nexit 0", record = record.display())
+        }
 
         /// Give the clone at `p` a `pre-push` hook that writes its own
         /// environment, and hand back the file that hook writes.
@@ -5506,33 +5519,10 @@ exit 1"#,
         /// The record goes under `.git`, which the work tree does not hold, so
         /// the push it records does not carry it.
         ///
-        /// `core.hooksPath` is set rather than assumed. The default is
-        /// `.git/hooks`, and a `core.hooksPath` in the configuration of the
-        /// host moves it. The sweep is what this test measures, so where the
-        /// hook goes must not depend on that sweep.
+        /// [`write_hook`] installs it, and states where the hook goes.
         fn recording_the_push_environment(p: &Path) -> PathBuf {
-            let hooks = p.join(".git").join("hooks");
-            std::fs::create_dir_all(&hooks).expect("make the hook directory");
             let record = p.join(".git").join("push-environment");
-            let hook = hooks.join("pre-push");
-            std::fs::write(
-                &hook,
-                format!(
-                    "#!/bin/sh\nenv > '{record}'\nexit 0\n",
-                    record = record.display(),
-                ),
-            )
-            .expect("write the pre-push hook");
-            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(HOOK_EXECUTABLE_MODE))
-                .expect("make the pre-push hook executable");
-            git(
-                p,
-                &[
-                    "config",
-                    "core.hooksPath",
-                    hooks.to_str().expect("utf-8 tempdir path"),
-                ],
-            );
+            write_hook(p, &recording_hook_body(&record));
             record
         }
 
