@@ -93,6 +93,35 @@ fn name_verbose_prints_the_name() {
     );
 }
 
+/// An empty name is not the absence of a name, because it gives a third port.
+/// A script that runs `portplz -n "$APP"` with `APP` unset must get a usage
+/// error, not a port that plain `portplz` and `sirn` never use.
+#[test]
+fn an_empty_name_is_refused() {
+    for flag in ["--name", "-n"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_portplz"))
+            .env("PORTPLZ_UID", "0")
+            .args(["/tmp", "--no-git", flag, ""])
+            .output()
+            .expect("run portplz binary");
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "portplz {flag} \"\" must exit with the usage-error status"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "portplz {flag} \"\" must print no port, got: {:?}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let stderr = String::from_utf8(output.stderr).expect("portplz stderr is valid UTF-8");
+        assert!(
+            stderr.contains("--name"),
+            "stderr for {flag} \"\" must name --name, got: {stderr:?}"
+        );
+    }
+}
+
 #[test]
 fn portplz_rejects_malformed_uid() {
     // A malformed PORTPLZ_UID must be a hard error, not silently ignored. Set the
