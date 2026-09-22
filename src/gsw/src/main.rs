@@ -67,7 +67,10 @@ mod worktrees;
                   the repository. \
                   A push whose branch stopped being \
                   checked out between the question and the answer is refused, not redirected. \
-                  p never force-pushes.\n\n\
+                  The push gets no GIT_ variable out of gsw's own environment, but for the six \
+                  you state on purpose, and the check that reads the branch gets none either. \
+                  So a gsw started from inside a git hook still pushes the repository on the \
+                  screen. p never force-pushes.\n\n\
                   G runs one command in your own interactive shell, with the work tree as its \
                   current directory. GSW_ISSUE_COMMAND holds that command and it defaults to \
                   `ggs`; set it to an empty string to turn the key off. The value is a whole \
