@@ -14,6 +14,10 @@ use std::process::Command;
 /// `"0\ntmp"`, which always yields this port.
 const TMP_PORT_UID0: &str = "19642";
 
+/// The same run with `--name api` frames the name at the head of that input,
+/// giving `"\0api\00\ntmp"`, which always yields this port.
+const TMP_API_PORT_UID0: &str = "34296";
+
 /// Runs the binary with `PORTPLZ_UID` pinned so the derived port does not depend
 /// on whoever runs the test suite.
 fn run_with_uid(uid: &str, args: &[&str]) -> String {
@@ -43,6 +47,49 @@ fn no_git_verbose_prints_the_directory_description_with_user() {
     assert_eq!(
         run_with_uid("0", &["/tmp", "--no-git", "--verbose"]),
         format!("Port {TMP_PORT_UID0} for directory 'tmp' (no git repo) (uid 0)")
+    );
+}
+
+/// A name gives one application of a project its own port, and the port is as
+/// stable as the one the project gets without a name.
+#[test]
+fn a_name_gives_its_own_stable_port() {
+    assert_eq!(
+        run_with_uid("0", &["/tmp", "--no-git", "--name", "api"]),
+        TMP_API_PORT_UID0
+    );
+    assert_ne!(
+        run_with_uid("0", &["/tmp", "--no-git", "--name", "api"]),
+        TMP_PORT_UID0,
+        "a named run must not take the port of the run that carries no name"
+    );
+}
+
+/// `-n` is the short spelling of `--name`, and nothing else.
+#[test]
+fn the_short_name_flag_is_the_long_one() {
+    assert_eq!(
+        run_with_uid("0", &["/tmp", "--no-git", "-n", "api"]),
+        TMP_API_PORT_UID0
+    );
+}
+
+/// The path keeps the one positional slot, so every command line that works
+/// today still works.
+#[test]
+fn the_path_keeps_the_positional_slot_beside_a_name() {
+    assert_eq!(
+        run_with_uid("0", &["--name", "api", "/tmp", "--no-git"]),
+        TMP_API_PORT_UID0,
+        "the path must still be read as a path when a name is given too"
+    );
+}
+
+#[test]
+fn name_verbose_prints_the_name() {
+    assert_eq!(
+        run_with_uid("0", &["/tmp", "--no-git", "--name", "api", "--verbose"]),
+        format!("Port {TMP_API_PORT_UID0} for directory 'tmp' (no git repo) named 'api' (uid 0)")
     );
 }
 
