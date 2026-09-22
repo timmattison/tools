@@ -146,10 +146,18 @@ impl UserSalt {
     /// user and location components, so a newline inside the name would make
     /// that boundary ambiguous and let two distinct (user, location) pairs
     /// collide onto the same port.
+    ///
+    /// The `Name` arm also strips [`NAME_FRAME`]. If a login name keeps the
+    /// frame byte, it can forge the frame of a named derivation and take its
+    /// port. A caller can build `Name` by hand, so this strip is what makes the
+    /// guarantee hold for every `UserSalt`.
     fn hash_component(&self) -> String {
         match self {
             Self::Uid(uid) => uid.to_string(),
-            Self::Name(name) => name.chars().filter(|c| *c != '\n' && *c != '\r').collect(),
+            Self::Name(name) => name
+                .chars()
+                .filter(|c| *c != '\n' && *c != '\r' && *c != NAME_FRAME)
+                .collect(),
         }
     }
 
@@ -266,12 +274,12 @@ pub enum DeriveError {
 ///
 /// No other component can hold this byte. A path component cannot contain a
 /// NUL, because the kernel forbids it. A git branch name cannot contain one. A
-/// uid renders as decimal digits. A login name arrives from the environment,
-/// which holds C strings. So an input that holds a NUL carries a name, an input
-/// that holds none does not, and the two sets cannot meet — whatever the
-/// repository, the branch, the directory, the user, and the name are. A tag
-/// made of ordinary text gives no such proof: it only holds until somebody's
-/// login name is that text.
+/// uid renders as decimal digits. [`UserSalt::hash_component`] strips the byte
+/// from a login name, also from one that a caller builds by hand. So an input
+/// that holds a NUL carries a name, an input that holds none does not, and the
+/// two sets cannot meet — whatever the repository, the branch, the directory,
+/// the user, and the name are. A tag made of ordinary text gives no such proof:
+/// it only holds until somebody's login name is that text.
 const NAME_FRAME: char = '\0';
 
 /// The component mixed into the port hash to name one application apart from
@@ -503,8 +511,8 @@ mod tests {
     #[test]
     fn a_login_name_cannot_forge_a_named_derivation() {
         let path = Path::new("/example/foo");
-        let forged =
-            derive(path, true, &UserSalt::Name("\0api\0501".into()), None).expect("derive");
+        let login_name = format!("{NAME_FRAME}api{NAME_FRAME}501");
+        let forged = derive(path, true, &UserSalt::Name(login_name), None).expect("derive");
         let named = derive(path, true, &UserSalt::Uid(501), Some("api")).expect("derive");
         assert_ne!(
             forged.port.get(),
