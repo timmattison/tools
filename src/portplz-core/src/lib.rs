@@ -272,14 +272,15 @@ pub enum DeriveError {
 
 /// Marks the start and the end of the name at the head of the hash input.
 ///
-/// No other component can hold this byte. A path component cannot contain a
-/// NUL, because the kernel forbids it. A git branch name cannot contain one. A
-/// uid renders as decimal digits. [`UserSalt::hash_component`] strips the byte
-/// from a login name, also from one that a caller builds by hand. So an input
-/// that holds a NUL carries a name, an input that holds none does not, and the
-/// two sets cannot meet — whatever the repository, the branch, the directory,
-/// the user, and the name are. A tag made of ordinary text gives no such proof:
-/// it only holds until somebody's login name is that text.
+/// A named input always starts with this byte, and an unnamed input never
+/// does. An unnamed input starts with the user component. A uid renders as
+/// decimal digits. [`UserSalt::hash_component`] strips the byte from a login
+/// name, also from one that a caller builds by hand. An empty login name puts
+/// the `\n` separator first. So a named input is never the same as an unnamed
+/// one — whatever the repository, the branch, the directory, the user, and the
+/// name are. The proof reads only the first byte, so it also holds for a path
+/// that a caller builds with a NUL in it. A tag made of ordinary text gives no
+/// such proof: it only holds until somebody's login name is that text.
 const NAME_FRAME: char = '\0';
 
 /// The component mixed into the port hash to name one application apart from

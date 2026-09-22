@@ -35,13 +35,13 @@ A shared Rust library that derives a deterministic, unprivileged TCP port from a
 current branch, and the current user (or, with no git, a directory name plus the user). Mixing in the user means
 two people on the same machine get different ports for the same repo and branch, so they can run the same project
 side by side without colliding. It hides SHA-256 hashing, `gix` repository discovery, and user detection behind a
-single `derive()` entry point. `derive()` also takes an optional name, which tells one application of a project
-apart from another so a repo holding a site and an API gives each its own port; the name is framed by a NUL byte,
-which no repo name, branch, directory, or user can contain, so a named port can never collide with an unnamed one
-and every port derived without a name keeps the value it has today. Used by `portplz` (which prints the port) and
-`sirn` (which serves on it), so both agree on the same port for a given project and user without `portplz` needing
-to be installed. Set `PORTPLZ_UID` to a fixed integer to override the detected user (handy for reproducing a
-teammate's port or pinning one in containers/CI).
+single `derive()` entry point. `derive()` also takes an optional name. The name tells one application of a project
+apart from another, so a repo holding a site and an API gives each its own port. The name sits between two NUL bytes
+at the head of the hash input, and no unnamed input can start with a NUL. So a named derivation never hashes the same
+input as an unnamed one. Every port derived without a name keeps the value it has today. Used by `portplz` (which
+prints the port) and `sirn` (which serves on it), so both agree on the same port for a given project and user without
+`portplz` needing to be installed. Set `PORTPLZ_UID` to a fixed integer to override the detected user (handy for
+reproducing a teammate's port or pinning one in containers/CI).
 
 ### gitscratch
 A shared Rust library that owns the hardened "dry-run a git operation without touching anything real" harness.
