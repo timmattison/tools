@@ -259,8 +259,8 @@ pub enum DeriveError {
 ///
 /// `name` names one application apart from another in the same location, so a
 /// repository that holds more than one application can give each of them its
-/// own port. It is accepted but not yet part of the hash: the test in the
-/// commit that follows this one is what puts it there.
+/// own port. It is a third component beside the repository and the branch, and
+/// it replaces neither.
 ///
 /// # Errors
 /// Returns [`DeriveError::NoBasename`] if `path` has no final path component.
@@ -268,7 +268,7 @@ pub fn derive(
     path: &Path,
     no_git: bool,
     user: &UserSalt,
-    _name: Option<&str>,
+    name: Option<&str>,
 ) -> Result<Derivation, DeriveError> {
     let basename = path
         .file_name()
@@ -291,7 +291,11 @@ pub fn derive(
         }
     };
 
-    let hash_input = format!("{}\n{}", user.hash_component(), source.hash_input());
+    let unnamed = format!("{}\n{}", user.hash_component(), source.hash_input());
+    let hash_input = match name {
+        Some(name) => format!("{unnamed}\n{name}"),
+        None => unnamed,
+    };
     let port = unprivileged_port_from_string(&hash_input);
     Ok(Derivation {
         port,
