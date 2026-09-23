@@ -35,10 +35,13 @@ A shared Rust library that derives a deterministic, unprivileged TCP port from a
 current branch, and the current user (or, with no git, a directory name plus the user). Mixing in the user means
 two people on the same machine get different ports for the same repo and branch, so they can run the same project
 side by side without colliding. It hides SHA-256 hashing, `gix` repository discovery, and user detection behind a
-single `derive()` entry point. Used by `portplz` (which prints the port) and `sirn` (which serves on it), so both
-agree on the same port for a given project and user without `portplz` needing to be installed. Set `PORTPLZ_UID`
-to a fixed integer to override the detected user (handy for reproducing a teammate's port or pinning one in
-containers/CI).
+single `derive()` entry point. `derive()` also takes an optional name. The name tells one application of a project
+apart from another, so a repo holding a site and an API gives each its own port. The name sits between two NUL bytes
+at the head of the hash input, and no unnamed input can start with a NUL. So a named derivation never hashes the same
+input as an unnamed one. Every port derived without a name keeps the value it has today. Used by `portplz` (which
+prints the port) and `sirn` (which serves on it), so both agree on the same port for a given project and user without
+`portplz` needing to be installed. Set `PORTPLZ_UID` to a fixed integer to override the detected user (handy for
+reproducing a teammate's port or pinning one in containers/CI).
 
 ### gitscratch
 A shared Rust library that owns the hardened "dry-run a git operation without touching anything real" harness.
@@ -204,6 +207,12 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       deployments, instances, or VMs run the service under different uids and so land on different ports. To get a port
       that stays consistent across deployments and separate instances/VMs — say, for a service living behind a reverse
       proxy — set `PORTPLZ_UID` to the same fixed integer on each, which overrides the detected user and pins the port.
+        - `-n/--name <NAME>` names one application apart from the others in the same repo, so a project that holds a
+          site and an API gives each of them its own port: `portplz --name api` and `portplz --name tim.mattison.org`
+          differ from each other and from the plain `portplz`. The name is a third component beside the repo and the
+          branch and replaces neither, so the same name in two repos still gives two ports. Every port derived without
+          a name keeps the value it has today. An empty name is refused, so `portplz -n "$APP"` with `APP` unset gives
+          an error and not a different port.
     - To install: `cargo install --git https://github.com/timmattison/tools portplz`
 - sirn
     - Serve It Right Now — a tiny, zero-config HTTP file server. Run `sirn <file>...` to serve each file at

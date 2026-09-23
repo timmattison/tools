@@ -50,7 +50,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `pk` | Process Killer — kills processes (incl. ones `ps`/`pkill` can't see) with dry-run, regex, and signal options. |
 | `polish` | Updates Rust dependencies across all `Cargo.toml` files in a repo. |
 | `popstop` | Keeps the default audio output awake with an inaudible signal, so USB speakers do not pop or cut the start of a sound. |
-| `portplz` | Generates a consistent unprivileged port number from directory name and git branch. |
+| `portplz` | Generates a consistent unprivileged port number from directory name, git branch, and an optional `--name`. |
 | `prcp` | Copies files with a Unicode progress bar; wildcards, multi-file, and verified move mode. |
 | `prgz` | Like `prcp` but gzip-compresses the file, with the same one-line progress bar and a closing report. |
 | `prhash` | Hashes files (MD5/SHA1/SHA256/SHA512/Blake3) with a progress bar, shasum-compatible output. |

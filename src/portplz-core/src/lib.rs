@@ -146,10 +146,18 @@ impl UserSalt {
     /// user and location components, so a newline inside the name would make
     /// that boundary ambiguous and let two distinct (user, location) pairs
     /// collide onto the same port.
+    ///
+    /// The `Name` arm also strips [`NAME_FRAME`]. If a login name keeps the
+    /// frame byte, it can forge the frame of a named derivation and take its
+    /// port. A caller can build `Name` by hand, so this strip is what makes the
+    /// guarantee hold for every `UserSalt`.
     fn hash_component(&self) -> String {
         match self {
             Self::Uid(uid) => uid.to_string(),
-            Self::Name(name) => name.chars().filter(|c| *c != '\n' && *c != '\r').collect(),
+            Self::Name(name) => name
+                .chars()
+                .filter(|c| *c != '\n' && *c != '\r' && *c != NAME_FRAME)
+                .collect(),
         }
     }
 
@@ -222,21 +230,33 @@ fn get_git_branch(repo: &gix::Repository) -> Option<String> {
     }
 }
 
-/// The result of deriving a port: the port, how it was derived, and for whom.
+/// The result of deriving a port: the port, how it was derived, for whom, and
+/// under which name.
 #[derive(Debug, Clone)]
 pub struct Derivation {
     pub port: DerivedPort,
     pub source: PortSource,
     pub user: UserSalt,
+    /// The name that told this application apart from the others in the same
+    /// location, exactly as the caller gave it. It is `None` when the caller
+    /// gave none. This is the name a person typed, not the component that
+    /// reached the hash, so a description echoes what that person wrote.
+    pub name: Option<String>,
 }
 
 impl Derivation {
     /// One-line human-readable description including the user, e.g.
-    /// `Port 51877 for repo 'foo' on branch 'main' (uid 501)`.
+    /// `Port 51877 for repo 'foo' on branch 'main' (uid 501)`, or
+    /// `Port 40122 for repo 'tools' on branch 'main' named 'api' (uid 501)`
+    /// when the derivation carries a name.
     #[must_use]
     pub fn describe(&self) -> String {
+        let named = match &self.name {
+            Some(name) => format!(" named '{name}'"),
+            None => String::new(),
+        };
         format!(
-            "{} ({})",
+            "{}{named} ({})",
             self.source.describe(self.port),
             self.user.label()
         )
@@ -250,6 +270,32 @@ pub enum DeriveError {
     NoBasename,
 }
 
+/// Marks the start and the end of the name at the head of the hash input.
+///
+/// A named input always starts with this byte, and an unnamed input never
+/// does. An unnamed input starts with the user component. A uid renders as
+/// decimal digits. [`UserSalt::hash_component`] strips the byte from a login
+/// name, also from one that a caller builds by hand. An empty login name puts
+/// the `\n` separator first. So a named input is never the same as an unnamed
+/// one — whatever the repository, the branch, the directory, the user, and the
+/// name are. The proof reads only the first byte, so it also holds for a path
+/// that a caller builds with a NUL in it. A tag made of ordinary text gives no
+/// such proof: it only holds until somebody's login name is that text.
+const NAME_FRAME: char = '\0';
+
+/// The component mixed into the port hash to name one application apart from
+/// another in the same location.
+///
+/// [`NAME_FRAME`] marks where the name ends, so the name must not hold one: a
+/// name that did could close its own frame early and read as a different
+/// (name, user, location) triple. Strip it, for the reason
+/// [`UserSalt::hash_component`] strips a newline. A newline needs no stripping
+/// here, because the frame and not the separator is what ends the name, and
+/// stripping one would make two different names share a port.
+fn name_hash_component(name: &str) -> String {
+    name.chars().filter(|c| *c != NAME_FRAME).collect()
+}
+
 /// Derives the port for `path`.
 ///
 /// When `no_git` is true, or `path` is not inside a git repo, the directory
@@ -257,9 +303,19 @@ pub enum DeriveError {
 /// (detached HEAD falls back to just the repo-root name). `user` is mixed into
 /// the hash so different users derive different ports for the same location.
 ///
+/// `name` names one application apart from another in the same location, so a
+/// repository that holds more than one application can give each of them its
+/// own port. It is a third component beside the repository and the branch, and
+/// it replaces neither.
+///
 /// # Errors
 /// Returns [`DeriveError::NoBasename`] if `path` has no final path component.
-pub fn derive(path: &Path, no_git: bool, user: &UserSalt) -> Result<Derivation, DeriveError> {
+pub fn derive(
+    path: &Path,
+    no_git: bool,
+    user: &UserSalt,
+    name: Option<&str>,
+) -> Result<Derivation, DeriveError> {
     let basename = path
         .file_name()
         .ok_or(DeriveError::NoBasename)?
@@ -281,18 +337,252 @@ pub fn derive(path: &Path, no_git: bool, user: &UserSalt) -> Result<Derivation, 
         }
     };
 
-    let hash_input = format!("{}\n{}", user.hash_component(), source.hash_input());
+    let unnamed = format!("{}\n{}", user.hash_component(), source.hash_input());
+    let hash_input = match name {
+        // The framed name sits at the head of the input, in front of everything
+        // the unnamed derivation hashes. The unnamed input is thus unchanged,
+        // and no named input can read as an unnamed one.
+        Some(name) => format!(
+            "{NAME_FRAME}{}{NAME_FRAME}{unnamed}",
+            name_hash_component(name)
+        ),
+        None => unnamed,
+    };
     let port = unprivileged_port_from_string(&hash_input);
     Ok(Derivation {
         port,
         source,
         user: user.clone(),
+        name: name.map(ToString::to_string),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The port `derive` gives for `/tmp` with `no_git` under uid 0, whose hash
+    /// input is `"0\ntmp"`. The `portplz` CLI test pins the same value through
+    /// the binary.
+    const UNNAMED_TMP_PORT_UID0: u16 = 19_642;
+
+    /// Other tools and running services already depend on the ports that
+    /// `derive` gives today, so a derivation that carries no name must keep its
+    /// port for ever. This test pins one such port at the library boundary.
+    #[test]
+    fn unnamed_derivation_keeps_its_port() {
+        let derivation = derive(Path::new("/tmp"), true, &UserSalt::Uid(0), None).expect("derive");
+        assert_eq!(
+            derivation.port.get(),
+            UNNAMED_TMP_PORT_UID0,
+            "the port of a derivation that carries no name must never change"
+        );
+    }
+
+    /// A repository can hold more than one application, and each one needs its
+    /// own port. So two names in one place must not share a port.
+    #[test]
+    fn two_names_in_one_place_give_two_ports() {
+        let path = Path::new("/example/myrepo");
+        let api = derive(path, true, &UserSalt::Uid(501), Some("api")).expect("derive");
+        let site = derive(path, true, &UserSalt::Uid(501), Some("site")).expect("derive");
+        assert_ne!(
+            api.port.get(),
+            site.port.get(),
+            "two names in one place must give two different ports"
+        );
+    }
+
+    /// A derivation that carries a name must never land on the port of a
+    /// derivation that carries none.
+    ///
+    /// Issue #519 names the exact pair: a directory `foo` with the name `main`
+    /// and no git, beside the repository `foo` on the branch `main`. Append the
+    /// name after the separator and both read `{user}\nfoo\nmain`, so the two
+    /// share a port and each one silently takes the other's service.
+    #[test]
+    fn a_name_cannot_collide_with_a_derivation_that_has_none() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let repo = tmp.path().join("foo");
+        std::fs::create_dir(&repo).expect("create the repository directory");
+        init_repo(&repo, "main");
+
+        let user = UserSalt::Uid(501);
+        let unnamed_repo = derive(&repo, false, &user, None).expect("derive");
+        let named_directory =
+            derive(Path::new("/example/foo"), true, &user, Some("main")).expect("derive");
+
+        assert_ne!(
+            named_directory.port.get(),
+            unnamed_repo.port.get(),
+            "the directory 'foo' named 'main' must not take the port of the repository 'foo' on \
+             the branch 'main'"
+        );
+    }
+
+    /// A port is only useful if it comes back. The same name in the same place
+    /// must give the same port on every call.
+    #[test]
+    fn one_name_in_one_place_always_gives_one_port() {
+        let path = Path::new("/example/myrepo");
+        let first = derive(path, true, &UserSalt::Uid(501), Some("api")).expect("derive");
+        let second = derive(path, true, &UserSalt::Uid(501), Some("api")).expect("derive");
+        assert_eq!(
+            first.port.get(),
+            second.port.get(),
+            "one name in one place must give one port on every call"
+        );
+    }
+
+    /// The name is a third component beside the repository and the branch, and
+    /// it replaces neither. So the same name in two places keeps two ports.
+    #[test]
+    fn one_name_in_two_places_gives_two_ports() {
+        let here = derive(
+            Path::new("/example/project-a"),
+            true,
+            &UserSalt::Uid(501),
+            Some("api"),
+        )
+        .expect("derive");
+        let there = derive(
+            Path::new("/example/project-b"),
+            true,
+            &UserSalt::Uid(501),
+            Some("api"),
+        )
+        .expect("derive");
+        assert_ne!(
+            here.port.get(),
+            there.port.get(),
+            "one name in two places must give two different ports"
+        );
+    }
+
+    /// The user salt continues to apply, so two people on one machine can run
+    /// the same named application side by side.
+    #[test]
+    fn the_user_salt_still_applies_to_a_named_derivation() {
+        let path = Path::new("/example/myrepo");
+        let mine = derive(path, true, &UserSalt::Uid(501), Some("api")).expect("derive");
+        let yours = derive(path, true, &UserSalt::Uid(502), Some("api")).expect("derive");
+        assert_ne!(
+            mine.port.get(),
+            yours.port.get(),
+            "two users must derive two ports for one named application"
+        );
+    }
+
+    /// A newline inside the name must not reach into the user or the location.
+    ///
+    /// Both derivations below spell the same four pieces in the same order —
+    /// `api`, `501`, `foo`, `bar` — and differ only in which component each
+    /// piece belongs to. A framing that ended the name at a newline would hand
+    /// them one port. [`NAME_FRAME`] ends it instead, and a name holds no frame
+    /// byte, so the two stay apart.
+    #[test]
+    fn a_newline_in_the_name_cannot_forge_a_boundary() {
+        let name_is_one_piece = derive(
+            Path::new("/example/foo\nbar"),
+            true,
+            &UserSalt::Name("501".into()),
+            Some("api"),
+        )
+        .expect("derive");
+        let name_is_two_pieces = derive(
+            Path::new("/example/bar"),
+            true,
+            &UserSalt::Name("foo".into()),
+            Some("api\n501"),
+        )
+        .expect("derive");
+        assert_ne!(
+            name_is_one_piece.port.get(),
+            name_is_two_pieces.port.get(),
+            "a newline in the name must not let it read as the user and the location"
+        );
+    }
+
+    /// A login name must not forge the frame of a named derivation.
+    ///
+    /// A caller can build `UserSalt::Name` by hand, so a login name can hold the
+    /// frame byte. If the user component keeps it, the login name `\0api\0501`
+    /// in `foo` hashes the same input as the name `api` for uid 501 in `foo`.
+    /// The two then share a port.
+    #[test]
+    fn a_login_name_cannot_forge_a_named_derivation() {
+        let path = Path::new("/example/foo");
+        let login_name = format!("{NAME_FRAME}api{NAME_FRAME}501");
+        let forged = derive(path, true, &UserSalt::Name(login_name), None).expect("derive");
+        let named = derive(path, true, &UserSalt::Uid(501), Some("api")).expect("derive");
+        assert_ne!(
+            forged.port.get(),
+            named.port.get(),
+            "a login name that holds the frame byte must not take the port of a named derivation"
+        );
+    }
+
+    /// The frame byte ends the name, so the name must not carry one — and a
+    /// newline must survive, or two names that differ only by one would share a
+    /// port.
+    #[test]
+    fn the_name_component_strips_the_frame_byte_and_keeps_a_newline() {
+        let stripped = name_hash_component("api\u{0}501");
+        assert!(
+            !stripped.contains(NAME_FRAME),
+            "a name must carry no frame byte, got: {stripped:?}"
+        );
+        assert_eq!(
+            name_hash_component("api"),
+            "api",
+            "a name that carries no frame byte must pass through unchanged"
+        );
+        assert_eq!(
+            name_hash_component("a\nb"),
+            "a\nb",
+            "a newline is ordinary text inside a name, and must survive"
+        );
+    }
+
+    /// Without the name in the description, a user who runs two applications
+    /// out of one repository cannot tell which one a port belongs to.
+    #[test]
+    fn describe_names_the_name() {
+        let derivation = derive(
+            Path::new("/example/myrepo"),
+            true,
+            &UserSalt::Uid(501),
+            Some("api"),
+        )
+        .expect("derive");
+        assert_eq!(
+            derivation.describe(),
+            format!(
+                "Port {} for directory 'myrepo' (no git repo) named 'api' (uid 501)",
+                derivation.port.get()
+            )
+        );
+    }
+
+    /// The description of a derivation that carries no name must not gain a
+    /// word when the named one gains one.
+    #[test]
+    fn describe_says_nothing_about_a_name_there_is_not() {
+        let derivation = derive(
+            Path::new("/example/myrepo"),
+            true,
+            &UserSalt::Uid(501),
+            None,
+        )
+        .expect("derive");
+        assert_eq!(
+            derivation.describe(),
+            format!(
+                "Port {} for directory 'myrepo' (no git repo) (uid 501)",
+                derivation.port.get()
+            )
+        );
+    }
 
     #[test]
     fn parse_uid_override_rejects_non_numeric() {
@@ -367,8 +657,8 @@ mod tests {
     #[test]
     fn test_different_users_get_different_ports() {
         let path = std::path::Path::new("/example/myrepo");
-        let a = derive(path, true, &UserSalt::Uid(501)).expect("derive");
-        let b = derive(path, true, &UserSalt::Uid(502)).expect("derive");
+        let a = derive(path, true, &UserSalt::Uid(501), None).expect("derive");
+        let b = derive(path, true, &UserSalt::Uid(502), None).expect("derive");
         assert_ne!(
             a.port.get(),
             b.port.get(),
@@ -379,7 +669,7 @@ mod tests {
     #[test]
     fn test_describe_includes_uid_label() {
         let path = std::path::Path::new("/example/myrepo");
-        let d = derive(path, true, &UserSalt::Uid(501)).expect("derive");
+        let d = derive(path, true, &UserSalt::Uid(501), None).expect("derive");
         assert!(
             d.describe().contains("(uid 501)"),
             "verbose description must include the uid, got: {}",
@@ -413,7 +703,7 @@ mod tests {
     #[test]
     fn test_describe_includes_name_label() {
         let path = std::path::Path::new("/example/myrepo");
-        let d = derive(path, true, &UserSalt::Name("alice".into())).expect("derive");
+        let d = derive(path, true, &UserSalt::Name("alice".into()), None).expect("derive");
         assert!(
             d.describe().contains("(user 'alice')"),
             "verbose description must include the login name, got: {}",
@@ -554,30 +844,30 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_derive_on_git_init_repo_is_gitrepo_and_stable() {
-        fn run_git(dir: &std::path::Path, args: &[&str]) {
-            // Shed the whole inherited `GIT_` family, then pin the two config
-            // files. The sweep comes first so the pins win, and it is a prefix
-            // rather than the three names this fixture used to list: a list
-            // strips nothing new the day git adds a variable.
-            let mut command = std::process::Command::new("git");
-            gitscratch::shed_inherited_git_environment(&mut command);
+    fn run_git(dir: &std::path::Path, args: &[&str]) {
+        // Shed the whole inherited `GIT_` family, then pin the two config
+        // files. The sweep comes first so the pins win, and it is a prefix
+        // rather than the three names this fixture used to list: a list
+        // strips nothing new the day git adds a variable.
+        let mut command = std::process::Command::new("git");
+        gitscratch::shed_inherited_git_environment(&mut command);
 
-            let status = command
-                .args(args)
-                .current_dir(dir)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .status()
-                .expect("invoke git");
-            assert!(status.success(), "git {args:?} failed");
-        }
+        let status = command
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .expect("invoke git");
+        assert!(status.success(), "git {args:?} failed");
+    }
 
-        let tmp = tempfile::tempdir().expect("create temp dir");
-        let dir = tmp.path();
-        run_git(dir, &["init", "-b", "testbranch"]);
-        // An empty commit so HEAD is born and the branch is reported deterministically.
+    /// Makes `dir` a git repository whose HEAD is born on `branch`.
+    ///
+    /// The empty commit is what makes the branch report deterministically: an
+    /// unborn HEAD has no referent name.
+    fn init_repo(dir: &std::path::Path, branch: &str) {
+        run_git(dir, &["init", "-b", branch]);
         run_git(
             dir,
             &[
@@ -591,9 +881,16 @@ mod tests {
                 "init",
             ],
         );
+    }
 
-        let d1 = derive(dir, false, &UserSalt::Uid(501)).expect("derive should succeed");
-        let d2 = derive(dir, false, &UserSalt::Uid(501)).expect("derive should succeed");
+    #[test]
+    fn test_derive_on_git_init_repo_is_gitrepo_and_stable() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let dir = tmp.path();
+        init_repo(dir, "testbranch");
+
+        let d1 = derive(dir, false, &UserSalt::Uid(501), None).expect("derive should succeed");
+        let d2 = derive(dir, false, &UserSalt::Uid(501), None).expect("derive should succeed");
         assert_eq!(
             d1.port.get(),
             d2.port.get(),

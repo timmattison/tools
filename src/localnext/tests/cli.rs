@@ -413,7 +413,8 @@ fn a_missing_port_flag_uses_the_derived_port() {
         .parent()
         .expect("a canonicalized temp-dir path has a parent");
     let user = portplz_core::UserSalt::current().expect("read the current user salt");
-    let derivation = portplz_core::derive(basis, false, &user).expect("derive the expected port");
+    let derivation =
+        portplz_core::derive(basis, false, &user, None).expect("derive the expected port");
     let expected_port = derivation.port.get();
 
     match run_with_derived_port(dir.path()) {
