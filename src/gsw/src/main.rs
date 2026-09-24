@@ -577,7 +577,9 @@ pub(crate) fn build_output(
 /// `log_limit` is the number of recent commits to fetch for the log. The
 /// caller takes it from [`LogDemand::fetch_limit`] at the height of the pane
 /// that it renders for. The snapshot has no terminal size of its own, so the
-/// caller, which has one, sets the limit.
+/// caller, which has one, sets the limit. The walk also records whether it
+/// reached the end of the history at or before that limit
+/// ([`Snapshot::log_complete`]).
 pub(crate) fn collect_snapshot(
     repo: &gix::Repository,
     cfg: &RenderConfig,
@@ -816,6 +818,11 @@ pub(crate) struct FetchedLog {
 /// Fetch the `n` most recent commits as [`LogEntry`] records via gix.
 ///
 /// Returns an empty list when `n == 0` or the repo has no commits.
+///
+/// [`FetchedLog::complete`] tells whether the walk reached the end of the
+/// history, as [`repo::recent_log`] finds it. A history of exactly `n` commits
+/// and a repository with no commit are complete. A limit of zero and every
+/// failure are not.
 ///
 /// A commit whose timestamp does not resolve into an elapsed duration — a
 /// negative epoch second, or a time ahead of the local clock through skew or a

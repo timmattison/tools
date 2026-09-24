@@ -174,12 +174,32 @@ pub struct RecentLog {
     /// The commits, newest first, as `(short_hash, unix_secs, summary)`.
     pub commits: Vec<(String, i64, String)>,
     /// The walk of the history reached its end at or before the limit, so
-    /// `commits` holds every commit that HEAD reaches.
+    /// `commits` holds every commit that HEAD reaches. A read with a higher
+    /// limit then finds no more commits.
     pub complete: bool,
 }
 
-/// The `n` most recent commits from HEAD as `(short_hash, unix_secs, summary)`.
-/// Empty when `n == 0` or there are no commits.
+/// The `n` most recent commits from HEAD as `(short_hash, unix_secs, summary)`,
+/// and whether the walk reached the end of the history.
+///
+/// The commits are empty when `n == 0` or there are no commits.
+///
+/// The walk takes `n` commits, then asks for one more. When there is no next
+/// commit, the history ended, so a history of exactly `n` commits is
+/// complete. An unborn HEAD reaches no commit, so its empty log is complete
+/// too. A limit of zero reads no commit, so it sees no end.
+///
+/// Every failure of the walk counts as not complete: a HEAD that does not
+/// resolve to a commit, a walk that does not start, and a step of the walk
+/// that fails, whether the step comes before the limit or after it. A failed
+/// step can stop the walk before the history ends, and then no next commit
+/// comes, although more commits follow. A complete log stops the reads of the
+/// log on a resize in watch mode, so a doubt costs one read of the log and
+/// never a row of the log.
+///
+/// A commit that the walk passed, but whose object, time, or message does not
+/// read, leaves no row. It does not change the flag, because a read with a
+/// higher limit cannot read that commit either.
 pub fn recent_log(repo: &gix::Repository, n: usize) -> RecentLog {
     let incomplete = || RecentLog {
         commits: Vec::new(),
@@ -189,15 +209,24 @@ pub fn recent_log(repo: &gix::Repository, n: usize) -> RecentLog {
         return incomplete();
     }
     let Ok(head) = repo.head_commit() else {
+        // An unborn HEAD is not a failure. It is a history of no commit.
+        return RecentLog {
+            commits: Vec::new(),
+            complete: repo.head().is_ok_and(|head| head.is_unborn()),
+        };
+    };
+    let Ok(mut walk) = head.ancestors().all() else {
         return incomplete();
     };
-    let Ok(walk) = head.ancestors().all() else {
-        return incomplete();
-    };
+    let mut step_failed = false;
     let commits = walk
+        .by_ref()
         .take(n)
         .filter_map(|info| {
-            let info = info.ok()?;
+            let Ok(info) = info else {
+                step_failed = true;
+                return None;
+            };
             let commit = info.object().ok()?;
             let hash = info.id().shorten_or_id().to_string();
             let secs = commit.time().ok()?.seconds;
@@ -205,10 +234,8 @@ pub fn recent_log(repo: &gix::Repository, n: usize) -> RecentLog {
             Some((hash, secs, summary))
         })
         .collect();
-    RecentLog {
-        commits,
-        complete: false,
-    }
+    let complete = !step_failed && walk.next().is_none();
+    RecentLog { commits, complete }
 }
 
 /// How HEAD relates to its base ref, as a pair of commit counts. See
