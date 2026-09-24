@@ -1301,6 +1301,64 @@ mod run_tests {
         }
     }
 
+    /// A pane wider than every line here and taller than every overlay, so a
+    /// test about the words of the row is not also a test about clipping.
+    const ROOMY_PANE: crate::watch::Dimensions = crate::watch::Dimensions {
+        width: 200,
+        height: 20,
+    };
+
+    /// The outcome of a run of `update` through `stub` in the work tree at
+    /// `dir`, and the rows that the row under the frame then shows.
+    ///
+    /// The chain that a user drives, from end to end. A walk of the work tree
+    /// gives the snapshot, the key asks its question, `y` confirms it, the run
+    /// acts on the work tree, and the outcome goes to the row. The rows are the
+    /// glyphs that a user reads: the escapes are forced on and then taken out
+    /// again, as the tests of the row do it.
+    ///
+    /// # Panics
+    ///
+    /// Panics where the key refuses the work tree. A test that reads the rows
+    /// of a run needs a run.
+    fn run_through_the_row(
+        stub: &StubShell,
+        update: BaseUpdate,
+        dir: &Path,
+    ) -> (PushOutcome, String) {
+        let walked = gix::open(dir).expect("open the work tree");
+        let snapshot =
+            crate::collect_snapshot(&walked, &walk_config()).expect("walk the work tree");
+        let command = ShellCommand::new(None, update.default_command()).expect("a name");
+        let now = Instant::now();
+        let mut ui = crate::push::PushUi::new(false);
+        ui.request_base_update(&snapshot, update, &command, ROOMY_PANE, now);
+        let Some(Confirmed::BaseUpdate(confirmed)) = ui.confirm(now) else {
+            panic!(
+                "the {} key must ask about this work tree, and not refuse it",
+                update.key(),
+            );
+        };
+        let outcome = run_quiet(stub.as_shell(), &confirmed, dir);
+        ui.finished(outcome.clone(), now);
+        let rows = testcolor::strip_ansi(&testcolor::with_forced_ansi(|| {
+            ui.overlay(ROOMY_PANE, now).text()
+        }));
+        (outcome, rows)
+    }
+
+    /// The last line of `output`, and every line above it.
+    fn last_line_of(output: &str) -> (&str, &str) {
+        output.rsplit_once('\n').unwrap_or(("", output))
+    }
+
+    /// What git writes when a rebase or a merge of the conflict fixture stops.
+    const CONFLICT_LINE: &str = "CONFLICT (content): Merge conflict in a.txt";
+
+    /// The sentence of gsw under a rebase that stopped on one conflict, which
+    /// gsw then aborted.
+    const REBASE_ABORTED: &str = "rebase stopped on 1 conflict — gsw aborted it";
+
     #[test]
     fn the_run_hands_the_whole_script_to_an_interactive_shell() {
         // The command is a shell function, so only a shell that read the rc
@@ -1867,6 +1925,46 @@ mod run_tests {
                 outcome.output,
             );
         }
+    }
+
+    #[test]
+    fn a_rebase_that_gsw_aborted_is_named_in_the_last_line_and_in_the_last_row() {
+        // The command wrote why it stopped, and then gsw aborted the rebase.
+        // The words of the command alone describe a rebase that is still in
+        // progress, and the `⚠` row of that rebase is gone. So gsw says what
+        // it did, in a sentence of its own, as the last line.
+        //
+        // **Last, so that it survives the cut to three rows.** The row shows
+        // the last lines of a failure, and git writes the file that conflicted
+        // above its own verdict. The `CONFLICT` line stays in the text, so the
+        // name of the file is not lost.
+        let workdir = init_repo();
+        conflicting_branches(workdir.path());
+        let stub = StubShell::new(&real_git(&format!("rebase {BASE}")));
+
+        let (outcome, rows) = run_through_the_row(&stub, BaseUpdate::Rebase, workdir.path());
+
+        assert!(
+            !rebase_in_progress(workdir.path()),
+            "the fixture must leave a rebase that gsw aborted: {:?}",
+            outcome.output,
+        );
+        let (above, last) = last_line_of(&outcome.output);
+        assert_eq!(
+            last, REBASE_ABORTED,
+            "the sentence of gsw must be the last line of the outcome: {:?}",
+            outcome.output,
+        );
+        assert!(
+            above.lines().any(|line| line == CONFLICT_LINE),
+            "the line of git that names the file must stay above the sentence: {:?}",
+            outcome.output,
+        );
+        assert_eq!(
+            rows.lines().last(),
+            Some(REBASE_ABORTED),
+            "the sentence must be the last row, so that the cut to three rows keeps it: {rows:?}",
+        );
     }
 
     #[test]
