@@ -6255,6 +6255,50 @@ mod tests {
     }
 
     #[test]
+    fn a_read_of_the_log_on_a_resize_shows_each_commit_at_its_true_age() {
+        // The frame adds the time since the walk to every age of the cache,
+        // because the walk measured those ages. A read of the log measures its
+        // ages at the read, here 50 s after the walk. If those ages go into the
+        // cache as they are, the frame adds the 50 s a second time.
+        //
+        // The newest commit was 50 s old at the walk, and it is 100 s old at
+        // the read and at the frame. The frame must show it at 1m40s, and not
+        // at 2m30s. Each other commit must show its true age too.
+        let walked_at = Instant::now();
+        let now = walked_at + Duration::from_secs(50);
+        let at_walk = fake_history(100, Duration::from_secs(50));
+        let at_read = fake_history(100, Duration::from_secs(100));
+        let cache = SnapshotCache {
+            snapshot: Snapshot {
+                log: newest(&at_walk, 18),
+                ..empty_snapshot()
+            },
+            collected_at: walked_at,
+            dims: pane(20),
+        };
+
+        let run = run_resize(cache, 60, now, &at_read);
+
+        assert_eq!(run.commit_rows(), 58, "the log fills the pane:\n{}", run.glyphs);
+        for commit in newest(&at_read, 58) {
+            let row = run
+                .glyphs
+                .lines()
+                .find(|line| line.starts_with(&commit.hash))
+                .unwrap_or_else(|| panic!("no row for {}:\n{}", commit.hash, run.glyphs));
+            let true_age = crate::age::format_age_detailed(
+                commit.age.expect("each commit of the fake history has an age"),
+            );
+            assert_eq!(
+                row.split_whitespace().last(),
+                Some(true_age.as_str()),
+                "the commit {} shows its age at the frame: {row}",
+                commit.hash,
+            );
+        }
+    }
+
+    #[test]
     fn event_loop_fs_change_reseeds_collected_at() {
         // After a filesystem change re-collects the snapshot, a later decay tick
         // must measure its age offset from the NEW collection time, not the stale
