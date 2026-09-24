@@ -2059,6 +2059,49 @@ mod run_tests {
     }
 
     #[test]
+    fn a_command_that_stops_a_rebase_and_exits_zero_is_aborted_and_fails() {
+        // A command can stop a rebase and then exit 0. A shell function
+        // returns the status of its last command, and a `grp` that ends with
+        // an `echo` or a `true` exits 0 after any rebase. The row would then
+        // say `Rebased issue-12 onto main with grp`, and nothing was rebased
+        // and nothing was pushed.
+        //
+        // So the repository after the run decides the outcome, and not the
+        // exit status alone.
+        let workdir = init_repo();
+        conflicting_branches(workdir.path());
+        let stub = StubShell::new(&format!("{}; true", real_git(&format!("rebase {BASE}"))));
+
+        let (outcome, rows) = run_through_the_row(&stub, BaseUpdate::Rebase, workdir.path());
+
+        assert!(
+            !rebase_in_progress(workdir.path()),
+            "a rebase that the run left stopped must be aborted whatever the exit status: {:?}",
+            outcome.output,
+        );
+        assert!(
+            !outcome.success,
+            "a run that gsw had to abort must not report success: {:?}",
+            outcome.output,
+        );
+        assert_eq!(
+            last_line_of(&outcome.output).1,
+            REBASE_ABORTED,
+            "the last line must say that gsw aborted the rebase: {:?}",
+            outcome.output,
+        );
+        assert!(
+            !rows.contains("Rebased issue-12 onto main with grp"),
+            "the row must not say that the rebase worked: {rows:?}",
+        );
+        assert_eq!(
+            rows.lines().last(),
+            Some(REBASE_ABORTED),
+            "the row must end with the sentence of the abort: {rows:?}",
+        );
+    }
+
+    #[test]
     fn a_refused_run_names_the_key_of_its_own_act() {
         // The advice belongs to the act, and not to a constant the push owns:
         // `p` says `press p again`, and a refused merge must say `press M
