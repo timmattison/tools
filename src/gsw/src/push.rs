@@ -3401,12 +3401,11 @@ mod ui_tests {
 
     #[test]
     fn a_base_update_that_failed_keeps_the_words_of_the_command_until_a_key() {
-        // A rebase that stopped on a conflict leaves a repository the user has
-        // to repair, and what the command wrote is what says how. So it waits
-        // for a key exactly as a failed push does: the clock must not take a
-        // remedy away while the user is looking at another pane. gsw aborts
-        // nothing, and the `⚠ rebase` row of the header goes on saying that
-        // git is holding the rebase.
+        // A rebase that stopped on a conflict is a rebase that gsw aborts, and
+        // what the command wrote is what names the file that conflicted. The
+        // user needs that name to do the rebase by hand. So it waits for a key
+        // exactly as a failed push does: the clock must not take it away while
+        // the user is looking at another pane.
         let now = t0();
         let mut ui = asking_base_update(BaseUpdate::Rebase, now);
         ui.confirm(now).expect("the question must confirm");
