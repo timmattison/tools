@@ -462,6 +462,282 @@ fn log_lines_flag_caps_visible_commits() {
     );
 }
 
+/// The start of the subject of each commit that [`add_history`] makes. A line
+/// that holds it is a log row, so a test counts the log rows with no parse of
+/// the frame.
+const HISTORY_PREFIX: &str = "history-commit-";
+
+/// The commits that a long history adds to the [`setup_repo`] commit. The
+/// number is larger than the rows of [`PANE_ROWS`], so the history is longer
+/// than the pane.
+const LONG_HISTORY_COMMITS: usize = 60;
+
+/// The rows of the pane that the tests of the log height state.
+const PANE_ROWS: usize = 40;
+
+/// The columns of the pane that the tests of the log height state.
+const PANE_COLUMNS: usize = 80;
+
+/// The rows above the log of a frame with no merge or rebase in progress: the
+/// header and the separator. The tests state this number apart from the code
+/// under test, as an oracle.
+const HEADER_ROWS: usize = 2;
+
+/// Add `count` empty commits to the repository at `dir`. Each subject starts
+/// with [`HISTORY_PREFIX`].
+fn add_history(dir: &Path, count: usize) {
+    for i in 0..count {
+        run_git(
+            dir,
+            &[
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                &format!("{HISTORY_PREFIX}{i:02}"),
+            ],
+        );
+    }
+}
+
+/// Run `gsw --no-color <extra…>` in `dir` in a pane of [`PANE_ROWS`] rows and
+/// [`PANE_COLUMNS`] columns, and give its stdout.
+///
+/// The output goes to a pipe, as under a watch wrapper. A wrapper states the
+/// full height of its terminal in `LINES`, and gsw takes
+/// [`termwindow::WRAPPER_CHROME_ROWS`] off that height for the chrome of the
+/// wrapper. So `LINES` holds the pane and that chrome. The test states both
+/// sizes, so the result does not change with the terminal of the person who
+/// runs the test.
+fn run_gsw_in_pane(dir: &Path, extra: &[&str]) -> String {
+    let output = gsw_command(dir)
+        .arg("--no-color")
+        .args(extra)
+        .env("COLUMNS", PANE_COLUMNS.to_string())
+        .env(
+            "LINES",
+            (PANE_ROWS + termwindow::WRAPPER_CHROME_ROWS).to_string(),
+        )
+        .output()
+        .expect("failed to invoke gsw");
+    assert!(
+        output.status.success(),
+        "gsw exited non-zero: stderr = {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+/// The log rows of `out` whose commits [`add_history`] made.
+fn history_rows(out: &str) -> usize {
+    out.lines()
+        .filter(|line| line.contains(HISTORY_PREFIX))
+        .count()
+}
+
+/// The start of the name of each file that [`add_changed_files`] writes. A
+/// line that holds it is a file row.
+const CHANGED_FILE_PREFIX: &str = "changed-file-";
+
+/// The rows of the rule between the log and the file list.
+const SECTION_SEPARATOR_ROWS: usize = 1;
+
+/// Write `count` untracked files into the worktree at `dir`. Each name starts
+/// with [`CHANGED_FILE_PREFIX`].
+fn add_changed_files(dir: &Path, count: usize) {
+    for i in 0..count {
+        fs::write(
+            dir.join(format!("{CHANGED_FILE_PREFIX}{i}.txt")),
+            "changed\n",
+        )
+        .expect("write a changed file");
+    }
+}
+
+/// The file rows of `out` whose files [`add_changed_files`] wrote.
+fn changed_file_rows(out: &str) -> usize {
+    out.lines()
+        .filter(|line| line.contains(CHANGED_FILE_PREFIX))
+        .count()
+}
+
+#[test]
+fn a_clean_worktree_fills_the_pane_with_the_log() {
+    // Issue #521: the log showed 20 commits at most, and the rest of a tall
+    // pane stayed empty. With no changed file, the log takes every row under
+    // the header, so the frame is as tall as the pane.
+    let dir = setup_repo();
+    add_history(dir.path(), LONG_HISTORY_COMMITS);
+
+    let out = run_gsw_in_pane(dir.path(), &[]);
+
+    assert_eq!(
+        history_rows(&out),
+        PANE_ROWS - HEADER_ROWS,
+        "the log takes every row under the header:\n{out}",
+    );
+    assert_eq!(
+        out.lines().count(),
+        PANE_ROWS,
+        "the frame is as tall as the pane:\n{out}",
+    );
+}
+
+#[test]
+fn the_log_fills_the_rows_that_a_short_file_list_leaves() {
+    // A file list that fits shows every row and prints no `+N more files`
+    // footer. So the frame keeps no row for that footer, and the log takes
+    // the row. The log fills what the header, the rule, and the file rows
+    // leave, and the frame is as tall as the pane.
+    const CHANGED_FILES: usize = 3;
+    let dir = setup_repo();
+    add_history(dir.path(), LONG_HISTORY_COMMITS);
+    add_changed_files(dir.path(), CHANGED_FILES);
+
+    let out = run_gsw_in_pane(dir.path(), &[]);
+
+    assert_eq!(
+        changed_file_rows(&out),
+        CHANGED_FILES,
+        "every file row shows:\n{out}",
+    );
+    assert!(
+        !out.contains("more file"),
+        "a file list that fits shows no footer:\n{out}",
+    );
+    assert_eq!(
+        out.lines().count(),
+        PANE_ROWS,
+        "the frame is as tall as the pane:\n{out}",
+    );
+    assert_eq!(
+        history_rows(&out),
+        PANE_ROWS - HEADER_ROWS - SECTION_SEPARATOR_ROWS - CHANGED_FILES,
+        "the log takes every row that the header, the rule, and the file rows leave:\n{out}",
+    );
+}
+
+/// The rows of the `+N more files` footer.
+const FOOTER_ROWS: usize = 1;
+
+#[test]
+fn a_max_files_cap_keeps_the_footer_row_and_the_log_fills_the_rest() {
+    // `--max-files 2` hides 3 of 5 file rows, so the footer prints and keeps
+    // its row. The log fills what the header, the rule, the file rows, and
+    // the footer leave.
+    const CHANGED_FILES: usize = 5;
+    const MAX_FILES: usize = 2;
+    let dir = setup_repo();
+    add_history(dir.path(), LONG_HISTORY_COMMITS);
+    add_changed_files(dir.path(), CHANGED_FILES);
+
+    let out = run_gsw_in_pane(dir.path(), &["--max-files", &MAX_FILES.to_string()]);
+
+    assert_eq!(
+        changed_file_rows(&out),
+        MAX_FILES,
+        "the cap sets the file rows:\n{out}",
+    );
+    let footer = format!("+{} more files", CHANGED_FILES - MAX_FILES);
+    assert!(
+        out.lines().any(|line| line.trim() == footer),
+        "the footer {footer:?} prints:\n{out}",
+    );
+    assert_eq!(
+        out.lines().count(),
+        PANE_ROWS,
+        "the frame is as tall as the pane:\n{out}",
+    );
+    assert_eq!(
+        history_rows(&out),
+        PANE_ROWS - HEADER_ROWS - SECTION_SEPARATOR_ROWS - MAX_FILES - FOOTER_ROWS,
+        "the log takes every row that the file rows and the footer leave:\n{out}",
+    );
+}
+
+#[test]
+fn log_lines_caps_the_log_in_a_pane_with_more_rows() {
+    // An explicit `--log-lines N` stays a cap. The pane has rows for more
+    // commits, and the log shows N.
+    const LOG_LINES: usize = 30;
+    const {
+        assert!(
+            LOG_LINES < PANE_ROWS - HEADER_ROWS,
+            "the cap must be under the rows of the pane, or the test proves nothing",
+        );
+    }
+    let dir = setup_repo();
+    add_history(dir.path(), LONG_HISTORY_COMMITS);
+
+    let out = run_gsw_in_pane(dir.path(), &["--log-lines", &LOG_LINES.to_string()]);
+
+    assert_eq!(
+        history_rows(&out),
+        LOG_LINES,
+        "--log-lines {LOG_LINES} caps the log:\n{out}",
+    );
+}
+
+#[test]
+fn piped_output_with_no_stated_size_stays_within_the_fallback_height() {
+    // `gsw | cat` with no `LINES` has no pane size to fill. The frame then
+    // takes the fallback height, so a long history does not flood the pipe.
+    // The test removes `LINES` and `COLUMNS`, so a value that the shell of
+    // the person who runs it exports cannot change the result. Standard
+    // input, output, and error are no terminal here, so gsw measures no
+    // window either.
+    let dir = setup_repo();
+    add_history(dir.path(), LONG_HISTORY_COMMITS);
+
+    let output = gsw_command(dir.path())
+        .arg("--no-color")
+        .env_remove("LINES")
+        .env_remove("COLUMNS")
+        .output()
+        .expect("failed to invoke gsw");
+    assert!(
+        output.status.success(),
+        "gsw exited non-zero: stderr = {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let out = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        out.lines().count(),
+        termwindow::DEFAULT_TERMINAL_HEIGHT,
+        "a clean worktree fills the fallback height and no more:\n{out}",
+    );
+}
+
+/// The commits that [`setup_repo`] makes.
+const SETUP_COMMITS: usize = 1;
+
+#[test]
+fn a_short_history_shows_every_commit_and_no_blank_row() {
+    // A history shorter than the pane shows every commit. The frame ends
+    // under the last commit, with no blank row to fill the pane.
+    const SHORT_HISTORY_COMMITS: usize = 4;
+    let dir = setup_repo();
+    add_history(dir.path(), SHORT_HISTORY_COMMITS);
+
+    let out = run_gsw_in_pane(dir.path(), &[]);
+
+    assert_eq!(
+        history_rows(&out),
+        SHORT_HISTORY_COMMITS,
+        "every commit of the history shows:\n{out}",
+    );
+    assert_eq!(
+        out.lines().count(),
+        HEADER_ROWS + SHORT_HISTORY_COMMITS + SETUP_COMMITS,
+        "the frame is the header and one row for each commit:\n{out}",
+    );
+    assert!(
+        out.lines().all(|line| !line.trim().is_empty()),
+        "no row is blank:\n{out}",
+    );
+}
+
 #[test]
 fn shows_upstream_ahead_and_behind_counts_when_branch_tracks_remote() {
     // End-to-end: a repo whose local branch tracks an upstream should have

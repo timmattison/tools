@@ -14,6 +14,7 @@ use crate::age::{
 };
 use crate::bar::render_bar;
 use crate::git::FileStatus;
+use crate::repo::LogStart;
 use crate::worktrees::WorktreeBadge;
 
 /// The rows of the worktree list, and the hint under them.
@@ -34,7 +35,32 @@ pub struct Snapshot {
     /// The head of this list is HEAD, so its age is the last-commit age. The
     /// frame shows that age here and nowhere else, and the watch-mode decay
     /// timer reads it from here too.
+    ///
+    /// The walk fetches no more commits than the pane can show. So this list
+    /// can stop before the history does, and [`Snapshot::log_complete`] tells
+    /// the two cases apart.
     pub log: Vec<LogEntry>,
+    /// `log` is complete: it holds every commit that [`Snapshot::log_start`]
+    /// reaches, because the walk of the history reached its end at or before
+    /// the fetch limit. A read of the log from that start with a higher limit
+    /// then finds no more commits.
+    ///
+    /// Watch mode reads it on a resize. A pane that grows past a complete log
+    /// needs no read of the log, because no read can give it more commits.
+    /// `false` when the walk stopped at the limit, and when a read failed, so
+    /// a doubt costs one read of the log and never a row of the log.
+    pub log_complete: bool,
+    /// The commit that the walk of the log started from: the commit that HEAD
+    /// named at the walk. `None` when HEAD named no commit, because it was
+    /// unborn or it did not resolve to a commit.
+    ///
+    /// The walk records it at every limit, zero too, because a pane too short
+    /// for a log at the walk can grow later. Watch mode then reads the log
+    /// again from this commit, and never from HEAD. The history of a commit
+    /// never changes, so that read extends the log of the walk, and it never
+    /// puts the commits of another branch under the header of this snapshot.
+    /// A snapshot with no start gives a resize no log to read.
+    pub log_start: Option<LogStart>,
     /// Upstream tracking branch status (ahead/behind). `None` when the
     /// current branch has no configured upstream.
     pub upstream: Option<UpstreamStatus>,
@@ -1067,7 +1093,10 @@ const LOG_FLOOR_ROWS: usize = 5;
 /// given the actual demand from each section and the total terminal rows
 /// available for content (i.e. terminal height minus chrome the caller has
 /// already deducted: header, post-header separator, inter-section
-/// separator, and a reserved row for a possible `+N more files` footer).
+/// separator, and a row for the `+N more files` footer when the file list
+/// truncates). The caller knows whether the list truncates only from a plan,
+/// so `render_frame` in `main.rs` plans once with no footer row, and plans
+/// again with the row when the first plan hides file rows.
 ///
 /// When everything fits, both sections are rendered in full. When the
 /// combined demand exceeds the available rows, the **file list wins**: it is
@@ -1149,6 +1178,8 @@ mod tests {
             commits_behind: 0,
             files,
             log: vec![],
+            log_complete: false,
+            log_start: None,
             upstream: None,
             operation: None,
             push_remote: None,
@@ -2280,7 +2311,7 @@ mod tests {
     #[test]
     fn plan_section_caps_floors_log_at_five_rows_when_files_dominate() {
         // Repro of the "too many files" report: a branch with ~129
-        // changed files vs the default 20-line log on a ~26-row
+        // changed files vs a 20-commit log on a ~26-row
         // terminal. A naive proportional split would squeeze the log
         // section down to ~3 rows; the floor lifts that to 5 so the
         // recent-commit context stays visible.
