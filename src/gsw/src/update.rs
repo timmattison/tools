@@ -13,7 +13,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 
 use shellquote::shell_quote;
 
@@ -476,6 +476,13 @@ const TERMINAL_PROMPT_VAR: &str = "GIT_TERMINAL_PROMPT";
 /// the way it reports a push: both are a command that either worked or wrote a
 /// reason.
 ///
+/// **The run reads the work tree before the shell starts and after it exits.**
+/// The read before refuses a work tree where an operation or a checkout
+/// started after the question, and then no shell starts. The read after aborts
+/// a rebase that the command left stopped, because the run has no terminal and
+/// nobody can resolve a conflict inside it. Both reads go to `workdir`, which
+/// is the work tree of the run.
+///
 /// **There is no deadline.** `grp` pushes, and a pre-push hook of this
 /// workspace builds and tests every crate in it, which takes minutes. The run
 /// ends when the shell exits, and the notice counts the time — so a run that
@@ -600,6 +607,22 @@ fn run_in(
         }
     };
 
+    // **The work tree is read again after the shell exits.** The run has no
+    // terminal, so nobody can resolve a conflict inside it. A rebase that the
+    // command left stopped is thus a rebase that nobody can finish from here,
+    // and gsw aborts it. The read before the shell found no operation, so this
+    // rebase started after that read.
+    //
+    // Only after an exit. A wait that failed says nothing about the child, and
+    // a command that still runs can still finish its own rebase.
+    //
+    // The abort goes to `workdir`, which is the work tree of the run. The
+    // arrow keys can move the watch to a different worktree while the run is
+    // in flight, and that worktree holds no operation of this run.
+    if let Some(Operation::Rebase { .. }) = crate::repo::held_operation(workdir) {
+        let _ = abort_child(workdir).output();
+    }
+
     let success = status.success();
     let mut text = record.into_text();
     if !success && text.trim().is_empty() {
@@ -615,6 +638,32 @@ fn run_in(
         success,
         output: text,
     }
+}
+
+/// The child that aborts the rebase that git holds in the work tree at
+/// `workdir`.
+///
+/// **The rules of every git child of gsw apply.** The child sheds the
+/// inherited git environment and keeps the six variables that a user states.
+/// A `gsw` that a pre-commit hook started holds `GIT_DIR`, and an abort that
+/// obeyed it would abort a rebase in a different repository. The child reads
+/// no stdin and has no terminal, because gsw holds the terminal in raw mode.
+///
+/// **`workdir` is the work tree of the run.** git reads the state of an
+/// operation from the git dir of the worktree it runs in. A linked worktree
+/// thus gets its own rebase aborted, and no other.
+///
+/// The caller runs the child with [`Command::output`], so what git writes
+/// goes to the caller and never to the screen.
+fn abort_child(workdir: &Path) -> Command {
+    let mut command = Command::new("git");
+    gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
+    command
+        .args(["rebase", "--abort"])
+        .current_dir(workdir)
+        .stdin(Stdio::null());
+    crate::child::detach_from_terminal(&mut command);
+    command
 }
 
 /// Every line a run has written, in arrival order, as one string with a newline
