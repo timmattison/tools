@@ -607,7 +607,9 @@ pub(crate) fn collect_snapshot(
         &ages,
     );
 
-    snapshot.log = fetch_log(repo, log_limit);
+    let fetched = fetch_log(repo, log_limit);
+    snapshot.log = fetched.entries;
+    snapshot.log_complete = fetched.complete;
 
     snapshot.upstream = repo::upstream_status(repo);
     snapshot.push_remote = repo::push_remote(repo);
@@ -796,6 +798,21 @@ pub(crate) fn render_list_frame(
     }
 }
 
+/// One read of the log: the newest commits of HEAD, up to the limit of the
+/// read, and whether the history ended at or before that limit.
+///
+/// [`fetch_log`] gives it, and [`collect_snapshot`] puts both halves on the
+/// [`Snapshot`]. Watch mode also takes it alone on a resize.
+#[derive(Debug, Clone)]
+pub(crate) struct FetchedLog {
+    /// The commits, newest first.
+    pub(crate) entries: Vec<LogEntry>,
+    /// `entries` is complete: the walk of the history reached its end at or
+    /// before the limit, so a read with a higher limit finds no more commits.
+    /// See [`Snapshot::log_complete`].
+    pub(crate) complete: bool,
+}
+
 /// Fetch the `n` most recent commits as [`LogEntry`] records via gix.
 ///
 /// Returns an empty list when `n == 0` or the repo has no commits.
@@ -810,9 +827,9 @@ pub(crate) fn render_list_frame(
 /// calls it for each walk. Watch mode also calls it alone, when a resize needs
 /// more commits than its cached snapshot holds, because the rest of the
 /// snapshot does not depend on the size of the pane.
-pub(crate) fn fetch_log(repo: &gix::Repository, n: usize) -> Vec<LogEntry> {
+pub(crate) fn fetch_log(repo: &gix::Repository, n: usize) -> FetchedLog {
     let now = SystemTime::now();
-    repo::recent_log(repo, n)
+    let entries = repo::recent_log(repo, n)
         .into_iter()
         .map(|(hash, secs, subject)| {
             let age = u64::try_from(secs)
@@ -821,7 +838,11 @@ pub(crate) fn fetch_log(repo: &gix::Repository, n: usize) -> Vec<LogEntry> {
                 .and_then(|when| now.duration_since(when).ok());
             LogEntry { hash, subject, age }
         })
-        .collect()
+        .collect();
+    FetchedLog {
+        entries,
+        complete: false,
+    }
 }
 
 /// Get mtime ages for each entry's path, where the path still exists on disk.
@@ -1064,6 +1085,7 @@ mod tests {
             commits_behind: 0,
             files,
             log: Vec::new(),
+            log_complete: false,
             upstream: None,
             operation: Some(Operation::Merge { conflicts: 1 }),
             push_remote: None,
@@ -1725,6 +1747,7 @@ mod tests {
             commits_behind: 0,
             files,
             log,
+            log_complete: false,
             upstream: None,
             operation: None,
             push_remote: None,
@@ -1848,6 +1871,7 @@ mod tests {
                 subject: "the newest commit".into(),
                 age: Some(Duration::from_secs(10)),
             }],
+            log_complete: false,
             upstream: None,
             operation: None,
             push_remote: None,

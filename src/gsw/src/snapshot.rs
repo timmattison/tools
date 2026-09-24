@@ -65,6 +65,7 @@ pub fn build_snapshot(
         commits_behind,
         files,
         log: Vec::new(),
+        log_complete: false,
         upstream: None,
         operation: None,
         push_remote: None,

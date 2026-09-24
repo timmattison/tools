@@ -653,6 +653,7 @@ mod question_tests {
             commits_behind: behind,
             files: Vec::new(),
             log: Vec::new(),
+            log_complete: false,
             upstream: None,
             operation: None,
             push_remote: None,

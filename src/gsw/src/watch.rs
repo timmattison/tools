@@ -35,7 +35,8 @@ use crate::worktrees::{
     head_label, list_worktrees, worktree_paths, WorktreeEntry, WorktreeList, WorktreePath,
 };
 use crate::{
-    collect_snapshot, render_frame, render_list_frame, FrameTiming, LogDemand, Render, RenderConfig,
+    collect_snapshot, render_frame, render_list_frame, FetchedLog, FrameTiming, LogDemand, Render,
+    RenderConfig,
 };
 use termwindow::{
     effective_terminal_height, effective_terminal_width, DEFAULT_TERMINAL_HEIGHT,
@@ -2223,15 +2224,16 @@ impl SnapshotCache {
     /// does not lose rows. A read that holds no more commits than the cache
     /// changes nothing either, and the cache keeps the log of the walk, which
     /// agrees with the rest of the snapshot.
-    fn take_fetched_log(&mut self, mut fetched: Vec<LogEntry>, fetched_at: Instant) {
-        if fetched.len() <= self.snapshot.log.len() {
+    fn take_fetched_log(&mut self, fetched: FetchedLog, fetched_at: Instant) {
+        let mut entries = fetched.entries;
+        if entries.len() <= self.snapshot.log.len() {
             return;
         }
         let since_walk = fetched_at.saturating_duration_since(self.collected_at);
-        for entry in &mut fetched {
+        for entry in &mut entries {
             entry.age = entry.age.map(|age| age.saturating_sub(since_walk));
         }
-        self.snapshot.log = fetched;
+        self.snapshot.log = entries;
     }
 }
 
@@ -3025,7 +3027,7 @@ fn event_loop<
 ) -> Result<()>
 where
     Collect: FnMut(&WorktreePath, usize) -> Result<Snapshot>,
-    FetchLog: FnMut(&WorktreePath, usize) -> Vec<LogEntry>,
+    FetchLog: FnMut(&WorktreePath, usize) -> FetchedLog,
     RenderFn: FnMut(&Snapshot, Dimensions, FrameTiming) -> Render,
     RenderList: FnMut(&Snapshot, Dimensions, FrameTiming, &WorktreeList) -> Render,
     Dims: Fn() -> Dimensions,
@@ -5327,8 +5329,11 @@ mod tests {
     /// such a pane is zero, and no cached log holds fewer commits than zero,
     /// so the loop never calls it. It gives no commit, and a fetch with no
     /// commit never replaces the cached log.
-    pub(super) fn no_fetch(_current: &WorktreePath, _limit: usize) -> Vec<LogEntry> {
-        Vec::new()
+    pub(super) fn no_fetch(_current: &WorktreePath, _limit: usize) -> FetchedLog {
+        FetchedLog {
+            entries: Vec::new(),
+            complete: false,
+        }
     }
 
     /// A `render_list` hook for the loop tests that never open the list of the
@@ -5362,6 +5367,7 @@ mod tests {
             commits_behind: 0,
             files: Vec::new(),
             log: Vec::new(),
+            log_complete: false,
             upstream: None,
             operation: None,
             push_remote: None,
@@ -6055,6 +6061,17 @@ mod tests {
         history.iter().take(limit).cloned().collect()
     }
 
+    /// A read of `history` with the limit `limit`, as [`crate::fetch_log`]
+    /// gives it: the newest `limit` commits, and complete when the limit
+    /// reaches the end of the history. A limit of zero reads no commit, so it
+    /// finds no end.
+    fn read_of(history: &[LogEntry], limit: usize) -> FetchedLog {
+        FetchedLog {
+            entries: newest(history, limit),
+            complete: limit > 0 && limit >= history.len(),
+        }
+    }
+
     /// A pane of `height` rows and 80 columns.
     fn pane(height: usize) -> Dimensions {
         Dimensions { width: 80, height }
@@ -6075,10 +6092,14 @@ mod tests {
         }
     }
 
-    /// What one loop run over a resize did.
+    /// What one loop run over its resizes did.
     struct ResizeRun {
-        /// The glyphs of the frame that the loop painted, with no escape code.
+        /// The glyphs of the frame that the loop painted last, with no escape
+        /// code.
         glyphs: String,
+        /// The glyphs of each frame that the loop rendered, one for each wake,
+        /// in the order of the wakes.
+        frames: Vec<String>,
         /// How many walks the loop made.
         collects: usize,
         /// How many reads of the log the loop made.
@@ -6093,33 +6114,86 @@ mod tests {
 
         /// How many commit rows the painted frame shows.
         fn commit_rows(&self) -> usize {
-            self.glyphs
-                .lines()
-                .filter(|line| line.contains(HISTORY_SUBJECT))
-                .count()
+            commit_rows(&self.glyphs)
+        }
+    }
+
+    /// How many commit rows `glyphs`, the glyphs of one frame, shows.
+    fn commit_rows(glyphs: &str) -> usize {
+        glyphs
+            .lines()
+            .filter(|line| line.contains(HISTORY_SUBJECT))
+            .count()
+    }
+
+    /// One wake of the loop in a test run: the events of one burst, and the
+    /// pane that the loop measures at that wake.
+    #[derive(Debug, Clone, Copy)]
+    struct Wake {
+        /// The burst holds a filesystem change before its resize, so the
+        /// loop walks at this wake.
+        walk: bool,
+        /// The rows of the pane that the loop measures at this wake.
+        rows: usize,
+    }
+
+    impl Wake {
+        /// A resize alone, to a pane of `rows` rows.
+        fn resize(rows: usize) -> Self {
+            Self { walk: false, rows }
+        }
+
+        /// A filesystem change and a resize to a pane of `rows` rows, in one
+        /// burst.
+        fn walk_and_resize(rows: usize) -> Self {
+            Self { walk: true, rows }
         }
     }
 
     /// Run the loop over one resize from `cache` to a pane of `measured` rows,
-    /// with a log that fills the pane, and paint the real status frame.
-    ///
-    /// The clock reads `now` at each read. `history` is the history of the
-    /// worktree at `now`: the `collect` hook gives all of it, and the
-    /// `fetch_log` hook gives its newest commits up to the limit it gets. The
-    /// codes of the colors are forced on and then removed, so the glyphs are
-    /// the same whether the test writes to a terminal or not.
+    /// as [`run_wakes`] does.
     fn run_resize(
         cache: SnapshotCache,
         measured: usize,
         now: Instant,
         history: &[LogEntry],
     ) -> ResizeRun {
+        run_wakes(cache, &[Wake::resize(measured)], now, history)
+    }
+
+    /// Run the loop from `cache` over `wakes`, in order, with a log that fills
+    /// the pane, and paint the real status frame.
+    ///
+    /// The burst of the first wake waits on the channel when the loop starts.
+    /// The render of each wake then sends the burst of the next wake, so each
+    /// burst comes to a wake of its own and never joins the burst before it.
+    /// The render of the last wake sends a quit.
+    ///
+    /// The clock reads `now` at each read. `history` is the history of the
+    /// worktree at `now`. The `collect` hook and the `fetch_log` hook each
+    /// give its newest commits up to the limit they get, complete when the
+    /// limit reaches the end of the history ([`read_of`]), as the real walk
+    /// does. The codes of the colors are forced on and then removed, so the
+    /// glyphs are the same whether the test writes to a terminal or not.
+    fn run_wakes(
+        cache: SnapshotCache,
+        wakes: &[Wake],
+        now: Instant,
+        history: &[LogEntry],
+    ) -> ResizeRun {
         let (tx, rx) = mpsc::channel();
-        tx.send(Event::Resize).expect("queue resize");
-        drop(tx);
+        let send_burst = |wake: &Wake| {
+            if wake.walk {
+                tx.send(Event::FsChanged).expect("queue the change");
+            }
+            tx.send(Event::Resize).expect("queue the resize");
+        };
+        send_burst(wakes.first().expect("a run has at least one wake"));
 
         let cfg = fill_config();
         let mut displayed = String::new();
+        let mut frames: Vec<String> = Vec::new();
+        let woken = std::cell::Cell::new(0_usize);
         let mut collects = 0_usize;
         let mut fetches = 0_usize;
         testcolor::with_forced_ansi(|| {
@@ -6137,21 +6211,38 @@ mod tests {
                     log: cfg.log,
                 },
                 LoopHooks {
-                    collect: |_current: &WorktreePath, _limit: usize| {
+                    collect: |_current: &WorktreePath, limit: usize| {
                         collects += 1;
+                        let read = read_of(history, limit);
                         Ok(Snapshot {
-                            log: history.to_vec(),
+                            log: read.entries,
+                            log_complete: read.complete,
                             ..empty_snapshot()
                         })
                     },
                     fetch_log: |_current: &WorktreePath, limit: usize| {
                         fetches += 1;
-                        newest(history, limit)
+                        read_of(history, limit)
                     },
                     render: |snap: &Snapshot, dims: Dimensions, timing: FrameTiming| {
-                        render_frame(snap, &cfg, dims, timing)
+                        let render = render_frame(snap, &cfg, dims, timing);
+                        frames.push(testcolor::strip_ansi(&render.output));
+                        let next = woken.get() + 1;
+                        woken.set(next);
+                        match wakes.get(next) {
+                            Some(wake) => send_burst(wake),
+                            None => tx.send(Event::Quit).expect("queue the quit"),
+                        }
+                        render
                     },
-                    dimensions: || pane(measured),
+                    dimensions: || {
+                        pane(
+                            wakes
+                                .get(woken.get())
+                                .expect("the loop measures the pane only at a wake of the run")
+                                .rows,
+                        )
+                    },
                     paint: |_output: &str| Ok(()),
                     clock: || now,
                     next_tick: timer_off,
@@ -6173,6 +6264,7 @@ mod tests {
 
         ResizeRun {
             glyphs: testcolor::strip_ansi(&displayed),
+            frames,
             collects,
             fetches,
         }
@@ -6331,6 +6423,53 @@ mod tests {
                 commit.hash,
             );
         }
+    }
+
+    #[test]
+    fn a_resize_past_a_complete_log_reads_no_log() {
+        // Issue #521: a history of 10 commits cannot fill a pane of more than
+        // 12 rows. The walk of a pane of 20 rows asked for 18 commits, and it
+        // found the end of the history after 10. So the cache holds every
+        // commit that HEAD reaches, and its log is complete.
+        //
+        // A read of the log cannot give a taller pane more commits. So the
+        // resize to 60 rows, the resize to 40 rows, and the resize to 12 rows
+        // read nothing from git, and each frame shows all 10 commits. Until
+        // now, each resize to a pane with rows for more than 10 commits read
+        // the log again for nothing.
+        let now = Instant::now();
+        let history = fake_history(10, Duration::from_secs(100));
+        let cache = SnapshotCache {
+            snapshot: Snapshot {
+                log: newest(&history, 18),
+                log_complete: true,
+                ..empty_snapshot()
+            },
+            collected_at: now,
+            dims: pane(20),
+        };
+
+        let run = run_wakes(
+            cache,
+            &[Wake::resize(60), Wake::resize(40), Wake::resize(12)],
+            now,
+            &history,
+        );
+
+        assert_eq!(
+            (run.collects, run.fetches),
+            (0, 0),
+            "a resize past a complete log reads nothing from git",
+        );
+        assert_eq!(run.frames.len(), 3, "the loop renders once for each wake");
+        for (frame, rows) in run.frames.iter().zip([60, 40, 12]) {
+            assert_eq!(
+                commit_rows(frame),
+                10,
+                "a pane of {rows} rows shows every commit of the history:\n{frame}",
+            );
+        }
+        assert_eq!(run.rows(), 12, "the last frame fills the last pane");
     }
 
     #[test]
@@ -7486,6 +7625,7 @@ mod push_loop_tests {
             commits_behind: 0,
             files: Vec::new(),
             log: Vec::new(),
+            log_complete: false,
             upstream: None,
             operation: None,
             push_remote: Some("origin".into()),

@@ -34,7 +34,20 @@ pub struct Snapshot {
     /// The head of this list is HEAD, so its age is the last-commit age. The
     /// frame shows that age here and nowhere else, and the watch-mode decay
     /// timer reads it from here too.
+    ///
+    /// The walk fetches no more commits than the pane can show. So this list
+    /// can stop before the history does, and [`Snapshot::log_complete`] tells
+    /// the two cases apart.
     pub log: Vec<LogEntry>,
+    /// `log` is complete: it holds every commit that HEAD reaches, because the
+    /// walk of the history reached its end at or before the fetch limit. A
+    /// read of the log with a higher limit then finds no more commits.
+    ///
+    /// Watch mode reads it on a resize. A pane that grows past a complete log
+    /// needs no read of the log, because no read can give it more commits.
+    /// `false` when the walk stopped at the limit, and when a read failed, so
+    /// a doubt costs one read of the log and never a row of the log.
+    pub log_complete: bool,
     /// Upstream tracking branch status (ahead/behind). `None` when the
     /// current branch has no configured upstream.
     pub upstream: Option<UpstreamStatus>,
@@ -1152,6 +1165,7 @@ mod tests {
             commits_behind: 0,
             files,
             log: vec![],
+            log_complete: false,
             upstream: None,
             operation: None,
             push_remote: None,
