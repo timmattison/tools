@@ -479,8 +479,8 @@ const TERMINAL_PROMPT_VAR: &str = "GIT_TERMINAL_PROMPT";
 /// **The run reads the work tree before the shell starts and after it exits.**
 /// The read before refuses a work tree where an operation or a checkout
 /// started after the question, and then no shell starts. The read after aborts
-/// a rebase that the command left stopped, because the run has no terminal and
-/// nobody can resolve a conflict inside it. Both reads go to `workdir`, which
+/// a rebase or a merge that the command left stopped, because the run has no
+/// terminal and nobody can resolve a conflict inside it. Both reads go to `workdir`, which
 /// is the work tree of the run.
 ///
 /// **There is no deadline.** `grp` pushes, and a pre-push hook of this
@@ -608,19 +608,19 @@ fn run_in(
     };
 
     // **The work tree is read again after the shell exits.** The run has no
-    // terminal, so nobody can resolve a conflict inside it. A rebase that the
-    // command left stopped is thus a rebase that nobody can finish from here,
-    // and gsw aborts it. The read before the shell found no operation, so this
-    // rebase started after that read.
+    // terminal, so nobody can resolve a conflict inside it. A rebase or a
+    // merge that the command left stopped is thus an operation that nobody can
+    // finish from here, and gsw aborts it. The read before the shell found no
+    // operation, so this operation started after that read.
     //
     // Only after an exit. A wait that failed says nothing about the child, and
-    // a command that still runs can still finish its own rebase.
+    // a command that still runs can still finish its own operation.
     //
     // The abort goes to `workdir`, which is the work tree of the run. The
     // arrow keys can move the watch to a different worktree while the run is
     // in flight, and that worktree holds no operation of this run.
-    if let Some(Operation::Rebase { .. }) = crate::repo::held_operation(workdir) {
-        let _ = abort_child(workdir).output();
+    if let Some(operation) = crate::repo::held_operation(workdir) {
+        let _ = abort_child(workdir, &operation).output();
     }
 
     let success = status.success();
@@ -640,8 +640,15 @@ fn run_in(
     }
 }
 
-/// The child that aborts the rebase that git holds in the work tree at
+/// The child that aborts `operation`, which git holds in the work tree at
 /// `workdir`.
+///
+/// **The abort follows the operation that git holds, and not the key that
+/// started the run.** The command of a key belongs to the user, so `R` can
+/// leave a merge stopped, and `git rebase --abort` does not end a merge. The
+/// match names the commands of git here, and not [`BaseUpdate::verb`]: those
+/// words are the words of gsw, and a change to them must not change what git
+/// runs.
 ///
 /// **The rules of every git child of gsw apply.** The child sheds the
 /// inherited git environment and keeps the six variables that a user states.
@@ -651,15 +658,19 @@ fn run_in(
 ///
 /// **`workdir` is the work tree of the run.** git reads the state of an
 /// operation from the git dir of the worktree it runs in. A linked worktree
-/// thus gets its own rebase aborted, and no other.
+/// thus gets its own operation aborted, and no other.
 ///
 /// The caller runs the child with [`Command::output`], so what git writes
 /// goes to the caller and never to the screen.
-fn abort_child(workdir: &Path) -> Command {
+fn abort_child(workdir: &Path, operation: &Operation) -> Command {
+    let subcommand = match operation {
+        Operation::Rebase { .. } => "rebase",
+        Operation::Merge { .. } => "merge",
+    };
     let mut command = Command::new("git");
     gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
     command
-        .args(["rebase", "--abort"])
+        .args([subcommand, "--abort"])
         .current_dir(workdir)
         .stdin(Stdio::null());
     crate::child::detach_from_terminal(&mut command);
