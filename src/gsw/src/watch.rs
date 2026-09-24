@@ -1719,7 +1719,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             // Each switch gives the new watcher a sender of its own on the one
             // channel of the loop. The first walk of the new worktree fetches
             // as many commits as the pane can show now, as `collect` does.
-            switch: |target: &WorktreePath| {
+            switch: |target: &WorktreePath, _limit: usize| {
                 let log_limit = cfg
                     .log
                     .fetch_limit(current_dimensions(cfg.width_offset).height);
@@ -2322,7 +2322,7 @@ impl LoopState {
         &mut self,
         target: WorktreePath,
         clock: &impl Fn() -> Instant,
-        open: &mut impl FnMut(&WorktreePath) -> Result<Snapshot, String>,
+        open: &mut impl FnMut(&WorktreePath, usize) -> Result<Snapshot, String>,
     ) {
         let now = clock();
         // The answer goes unread: no state here stands on where the line
@@ -2352,9 +2352,9 @@ impl LoopState {
         target: WorktreePath,
         since: Instant,
         clock: &impl Fn() -> Instant,
-        open: &mut impl FnMut(&WorktreePath) -> Result<Snapshot, String>,
+        open: &mut impl FnMut(&WorktreePath, usize) -> Result<Snapshot, String>,
     ) -> Result<(), String> {
-        let opened = open(&target);
+        let opened = open(&target, 0);
         let cost = clock().saturating_duration_since(since);
         let snapshot = opened?;
         self.cache.snapshot = snapshot;
@@ -2404,7 +2404,7 @@ impl LoopState {
         now: Instant,
         clock: &impl Fn() -> Instant,
         worktree_paths: &mut impl FnMut() -> Vec<WorktreePath>,
-        open: &mut impl FnMut(&WorktreePath) -> Result<Snapshot, String>,
+        open: &mut impl FnMut(&WorktreePath, usize) -> Result<Snapshot, String>,
     ) {
         if self.current == self.home || matches!(self.ui.mode(), InputMode::Running(_)) {
             return;
@@ -2659,7 +2659,7 @@ where
     StartConflicts: FnMut(&WorktreePath, Generation),
     Worktrees: FnMut() -> Vec<WorktreeEntry>,
     Paths: FnMut() -> Vec<WorktreePath>,
-    Switch: FnMut(&WorktreePath) -> Result<Snapshot, String>,
+    Switch: FnMut(&WorktreePath, usize) -> Result<Snapshot, String>,
 {
     let clock = &hooks.clock;
     match event {
@@ -3030,7 +3030,7 @@ where
     StartConflicts: FnMut(&WorktreePath, Generation),
     Worktrees: FnMut() -> Vec<WorktreeEntry>,
     Paths: FnMut() -> Vec<WorktreePath>,
-    Switch: FnMut(&WorktreePath) -> Result<Snapshot, String>,
+    Switch: FnMut(&WorktreePath, usize) -> Result<Snapshot, String>,
 {
     let LoopStart {
         cache,
@@ -5311,7 +5311,7 @@ mod tests {
 
     /// A `switch` hook that refuses every switch, and so changes nothing. No
     /// loop test that uses it presses an arrow key, so the loop never calls it.
-    pub(super) fn no_switch(_target: &WorktreePath) -> Result<Snapshot, String> {
+    pub(super) fn no_switch(_target: &WorktreePath, _limit: usize) -> Result<Snapshot, String> {
         Err("this loop test watches one worktree".to_string())
     }
 
@@ -6381,6 +6381,76 @@ mod tests {
             limits,
             vec![58],
             "the walk fetches the commits of the pane that the loop measured",
+        );
+    }
+
+    #[test]
+    fn a_switch_fetches_the_commits_of_the_pane_that_the_loop_measured() {
+        // The first walk of the worktree that a switch goes to fills the log
+        // of the pane, as every other walk does. The loop passes the limit
+        // from the pane that it measured last, which is the pane that the
+        // user saw at the press. A pane of 60 rows has room for 58 commits
+        // under the header and the separator.
+        let (tx, rx) = mpsc::channel();
+        tx.send(Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)))
+            .expect("queue the key");
+        drop(tx);
+
+        let other = WorktreePath::fake("/code/other");
+        let mut displayed = String::new();
+        let mut switches: Vec<(WorktreePath, usize)> = Vec::new();
+        let now = Instant::now();
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            LoopStart {
+                cache: SnapshotCache {
+                    snapshot: empty_snapshot(),
+                    collected_at: now,
+                    dims: pane(60),
+                },
+                freshest: None,
+                schedule: no_timed_refresh(),
+                ui: PushUi::new(false),
+                session: crate::remote::Session::Local,
+                home: loop_home(),
+                log: LogDemand::Fill,
+            },
+            LoopHooks {
+                collect: |_current: &WorktreePath, _limit: usize| Ok(empty_snapshot()),
+                fetch_log: no_fetch,
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
+                    frame("switched")
+                },
+                dimensions: || pane(60),
+                paint: |_output: &str| Ok(()),
+                clock: || now,
+                next_tick: timer_off,
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
+                start_issue: |_command: crate::shell::ShellCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                // Sorted by path, as the listing gives them: Right goes from
+                // home to the other worktree.
+                worktree_paths: || vec![loop_home(), other.clone()],
+                switch: |target: &WorktreePath, limit: usize| {
+                    switches.push((target.clone(), limit));
+                    Ok(empty_snapshot())
+                },
+                render_list: no_list,
+            },
+        )
+        .expect("loop");
+
+        assert_eq!(
+            switches,
+            vec![(other.clone(), 58)],
+            "the switch fetches the commits of the pane that the loop measured",
         );
     }
 
@@ -7993,7 +8063,7 @@ mod push_loop_tests {
                         .map(|entry| entry.path.clone())
                         .collect()
                 },
-                switch: |target: &WorktreePath| {
+                switch: |target: &WorktreePath, _limit: usize| {
                     seen.borrow_mut().switches.push(target.clone());
                     if world.refused.contains(target) || removed.borrow().contains(target) {
                         return Err(format!("{REFUSED}: {}", target.as_path().display()));
@@ -10232,7 +10302,7 @@ mod push_loop_tests {
         };
         assert!(state.issue.is_armed(now), "the fixture must start armed");
 
-        state.switch_to(worktree(CHARLIE), &|| now, &mut |target: &WorktreePath| {
+        state.switch_to(worktree(CHARLIE), &|| now, &mut |target: &WorktreePath, _limit: usize| {
             Ok(snapshot_of(target))
         });
 
