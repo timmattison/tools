@@ -2531,6 +2531,62 @@ mod run_tests {
     }
 
     #[test]
+    fn an_operation_that_started_from_a_different_commit_is_left_as_it_is() {
+        // **gsw aborts only an operation that it can show the run started.**
+        // The branch is the branch of the question here, but HEAD moved
+        // before the operation started. Another pane can commit on the branch
+        // between the read before the shell and the start of the shell, and
+        // then start an operation from that commit. The command can also
+        // commit first. gsw cannot tell those two cases apart, so an
+        // operation that did not start from the commit that HEAD held before
+        // the run stays as it is.
+        //
+        // **Only the commit differs.** Each operation is on the branch of the
+        // question, so the branch does not tell it apart from an operation
+        // that the run started. git writes the commit where a rebase started
+        // in `orig-head`, and a stopped merge does not move HEAD. So each act
+        // is here.
+        for update in BaseUpdate::ALL {
+            let (act, in_progress, sentence): (&str, fn(&Path) -> bool, &str) = match update {
+                BaseUpdate::Rebase => ("rebase", rebase_in_progress, REBASE_LEFT),
+                BaseUpdate::Merge => ("merge", merge_in_progress, MERGE_LEFT),
+            };
+            let workdir = init_repo();
+            conflicting_branches(workdir.path());
+            let stub = StubShell::new(&format!(
+                "{} && {}",
+                real_git("commit -q --allow-empty -m extra"),
+                real_git(&format!("{act} {BASE}")),
+            ));
+
+            let (outcome, rows) = run_through_the_row(&stub, update, workdir.path());
+
+            assert!(
+                in_progress(workdir.path()),
+                "the {act} did not start from the HEAD of before the run, so gsw cannot show that \
+                 the run started it, and it must still be in progress: {:?}",
+                outcome.output,
+            );
+            assert!(
+                !outcome.success,
+                "a run that left a {act} in progress must not report success: {:?}",
+                outcome.output,
+            );
+            assert_eq!(
+                last_line_of(&outcome.output).1,
+                sentence,
+                "the last line must say that gsw did not start the {act} and left it: {:?}",
+                outcome.output,
+            );
+            assert_eq!(
+                rows.lines().last(),
+                Some(sentence),
+                "the row must end with the sentence of gsw ({act}): {rows:?}",
+            );
+        }
+    }
+
+    #[test]
     fn a_refused_run_names_the_key_of_its_own_act() {
         // The advice belongs to the act, and not to a constant the push owns:
         // `p` says `press p again`, and a refused merge must say `press M
