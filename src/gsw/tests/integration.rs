@@ -617,6 +617,127 @@ fn the_log_fills_the_rows_that_a_short_file_list_leaves() {
     );
 }
 
+/// The rows of the `+N more files` footer.
+const FOOTER_ROWS: usize = 1;
+
+#[test]
+fn a_max_files_cap_keeps_the_footer_row_and_the_log_fills_the_rest() {
+    // `--max-files 2` hides 3 of 5 file rows, so the footer prints and keeps
+    // its row. The log fills what the header, the rule, the file rows, and
+    // the footer leave.
+    const CHANGED_FILES: usize = 5;
+    const MAX_FILES: usize = 2;
+    let dir = setup_repo();
+    add_history(dir.path(), LONG_HISTORY_COMMITS);
+    add_changed_files(dir.path(), CHANGED_FILES);
+
+    let out = run_gsw_in_pane(dir.path(), &["--max-files", &MAX_FILES.to_string()]);
+
+    assert_eq!(
+        changed_file_rows(&out),
+        MAX_FILES,
+        "the cap sets the file rows:\n{out}",
+    );
+    let footer = format!("+{} more files", CHANGED_FILES - MAX_FILES);
+    assert!(
+        out.lines().any(|line| line.trim() == footer),
+        "the footer {footer:?} prints:\n{out}",
+    );
+    assert_eq!(
+        out.lines().count(),
+        PANE_ROWS,
+        "the frame is as tall as the pane:\n{out}",
+    );
+    assert_eq!(
+        history_rows(&out),
+        PANE_ROWS - HEADER_ROWS - SECTION_SEPARATOR_ROWS - MAX_FILES - FOOTER_ROWS,
+        "the log takes every row that the file rows and the footer leave:\n{out}",
+    );
+}
+
+#[test]
+fn log_lines_caps_the_log_in_a_pane_with_more_rows() {
+    // An explicit `--log-lines N` stays a cap. The pane has rows for more
+    // commits, and the log shows N.
+    const LOG_LINES: usize = 30;
+    const {
+        assert!(
+            LOG_LINES < PANE_ROWS - HEADER_ROWS,
+            "the cap must be under the rows of the pane, or the test proves nothing",
+        );
+    }
+    let dir = setup_repo();
+    add_history(dir.path(), LONG_HISTORY_COMMITS);
+
+    let out = run_gsw_in_pane(dir.path(), &["--log-lines", &LOG_LINES.to_string()]);
+
+    assert_eq!(
+        history_rows(&out),
+        LOG_LINES,
+        "--log-lines {LOG_LINES} caps the log:\n{out}",
+    );
+}
+
+#[test]
+fn piped_output_with_no_stated_size_stays_within_the_fallback_height() {
+    // `gsw | cat` with no `LINES` has no pane size to fill. The frame then
+    // takes the fallback height, so a long history does not flood the pipe.
+    // The test removes `LINES` and `COLUMNS`, so a value that the shell of
+    // the person who runs it exports cannot change the result. Standard
+    // input, output, and error are no terminal here, so gsw measures no
+    // window either.
+    let dir = setup_repo();
+    add_history(dir.path(), LONG_HISTORY_COMMITS);
+
+    let output = gsw_command(dir.path())
+        .arg("--no-color")
+        .env_remove("LINES")
+        .env_remove("COLUMNS")
+        .output()
+        .expect("failed to invoke gsw");
+    assert!(
+        output.status.success(),
+        "gsw exited non-zero: stderr = {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let out = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        out.lines().count(),
+        termwindow::DEFAULT_TERMINAL_HEIGHT,
+        "a clean worktree fills the fallback height and no more:\n{out}",
+    );
+}
+
+/// The commits that [`setup_repo`] makes.
+const SETUP_COMMITS: usize = 1;
+
+#[test]
+fn a_short_history_shows_every_commit_and_no_blank_row() {
+    // A history shorter than the pane shows every commit. The frame ends
+    // under the last commit, with no blank row to fill the pane.
+    const SHORT_HISTORY_COMMITS: usize = 4;
+    let dir = setup_repo();
+    add_history(dir.path(), SHORT_HISTORY_COMMITS);
+
+    let out = run_gsw_in_pane(dir.path(), &[]);
+
+    assert_eq!(
+        history_rows(&out),
+        SHORT_HISTORY_COMMITS,
+        "every commit of the history shows:\n{out}",
+    );
+    assert_eq!(
+        out.lines().count(),
+        HEADER_ROWS + SHORT_HISTORY_COMMITS + SETUP_COMMITS,
+        "the frame is the header and one row for each commit:\n{out}",
+    );
+    assert!(
+        out.lines().all(|line| !line.trim().is_empty()),
+        "no row is blank:\n{out}",
+    );
+}
+
 #[test]
 fn shows_upstream_ahead_and_behind_counts_when_branch_tracks_remote() {
     // End-to-end: a repo whose local branch tracks an upstream should have

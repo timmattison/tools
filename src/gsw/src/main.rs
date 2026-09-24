@@ -1075,6 +1075,76 @@ mod tests {
         );
     }
 
+    /// The start of the hash of each log row that [`snapshot_of`] makes. The
+    /// header and the file rows never start with it.
+    const SWEEP_HASH_PREFIX: &str = "lg";
+
+    /// A snapshot with `files` changed files and `commits` log rows, for the
+    /// sweep of the row budget. The files are named `f<n>.rs`, as in
+    /// [`snapshot_with`].
+    fn snapshot_of(files: usize, commits: usize) -> Snapshot {
+        let mut snap = snapshot_with(None, &vec![Some(Duration::from_secs(30)); files]);
+        snap.log = (0..commits)
+            .map(|n| LogEntry {
+                hash: format!("{SWEEP_HASH_PREFIX}{n:05}"),
+                subject: format!("commit {n}"),
+                age: Some(Duration::from_secs(90)),
+            })
+            .collect();
+        snap
+    }
+
+    #[test]
+    fn a_status_frame_fits_its_pane_and_hides_nothing_when_it_is_shorter() {
+        // The row budget of `render_frame`, over each mix of file rows and log
+        // rows up to more than a pane of 6 to 24 rows can show. A frame taller
+        // than the pane pushes its bottom rows, the file list, off the screen.
+        // A frame shorter than the pane that hides a row wastes the row that
+        // the hidden row could take. Issue #521 found the second defect: a
+        // row kept for a `+N more files` footer that did not print.
+        //
+        // 6 rows is the smallest pane that holds each part of a full frame:
+        // the header, the separator, a log row, the rule, a file row, and the
+        // footer. `--max-files` is not swept, because a pinned file cap wins
+        // over the height of the pane on purpose.
+        const SMALLEST_PANE: usize = 6;
+        const TALLEST_PANE: usize = 24;
+        const MOST_ROWS: usize = TALLEST_PANE + 2;
+        let cfg = render_config();
+        for height in SMALLEST_PANE..=TALLEST_PANE {
+            for files in 0..=MOST_ROWS {
+                for commits in 0..=MOST_ROWS {
+                    let snap = snapshot_of(files, commits);
+                    let painted = testcolor::with_forced_ansi(|| {
+                        render_frame(&snap, &cfg, pane_of(height), FrameTiming::at_walk(None))
+                            .output
+                    });
+                    let glyphs = testcolor::strip_ansi(&painted);
+                    let lines: Vec<&str> = glyphs.lines().collect();
+                    let shape = format!("{files} files and {commits} commits in {height} rows");
+
+                    assert!(
+                        lines.len() <= height,
+                        "{shape}: the frame has {} lines:\n{glyphs}",
+                        lines.len(),
+                    );
+                    if lines.len() < height {
+                        let log_rows = lines
+                            .iter()
+                            .filter(|line| line.starts_with(SWEEP_HASH_PREFIX))
+                            .count();
+                        let file_rows = lines.iter().filter(|line| line.contains(".rs")).count();
+                        assert_eq!(
+                            (log_rows, file_rows),
+                            (commits, files),
+                            "{shape}: a frame shorter than its pane shows every row:\n{glyphs}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// A pane of `height` rows and 80 columns. The width does not change how
     /// many rows the list takes.
     fn pane_of(height: usize) -> watch::Dimensions {
