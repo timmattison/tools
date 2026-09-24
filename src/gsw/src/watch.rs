@@ -82,31 +82,51 @@ pub(crate) struct SizeInputs {
     pub width_offset: usize,
 }
 
+/// Rows that a one-shot frame on a terminal leaves free under it for the shell
+/// prompt.
+///
+/// `println!` ends the frame with a newline, and the shell then prints its
+/// prompt on the next row. A frame as tall as the terminal thus pushes its
+/// first row, the header with the branch and the ahead/behind counts, off the
+/// top of the screen. A wrapper keeps
+/// [`WRAPPER_CHROME_ROWS`](termwindow::WRAPPER_CHROME_ROWS) for its own chrome
+/// for the same reason. Watch mode prints no prompt under its frame, so it
+/// keeps every row.
+const PROMPT_ROWS: usize = 1;
+
 /// Resolve the terminal dimensions `gsw` should render for, keyed off the mode.
 ///
 /// - [`Mode::OneShot`] preserves the existing viddy-aware behavior: width and
 ///   height come from the `COLUMNS`/`LINES` env vars when stdout is captured by
 ///   a wrapper, reserving rows for the wrapper's chrome. This keeps `gsw | …`
-///   and `viddy gsw` byte-identical to before.
+///   and `viddy gsw` byte-identical to before. On a terminal, the height is the
+///   height of the terminal minus [`PROMPT_ROWS`], and at least 1.
 /// - [`Mode::Watch`] owns the entire pane, so it takes width and height
 ///   straight from `termsize::stdout_size`, ignores `COLUMNS`/`LINES`, and reserves
 ///   **no** wrapper chrome rows. The one-cell width safety margin (DECAWM) and
 ///   the user's `width_offset` still apply.
 pub(crate) fn resolve_dimensions(mode: Mode, inputs: &SizeInputs) -> Dimensions {
     match mode {
-        Mode::OneShot => Dimensions {
-            width: effective_terminal_width(
-                inputs.tty_width,
-                inputs.columns_env,
-                inputs.stdout_is_tty,
-                inputs.width_offset,
-            ),
-            height: effective_terminal_height(
+        Mode::OneShot => {
+            let height = effective_terminal_height(
                 inputs.tty_height,
                 inputs.lines_env,
                 inputs.stdout_is_tty,
-            ),
-        },
+            );
+            Dimensions {
+                width: effective_terminal_width(
+                    inputs.tty_width,
+                    inputs.columns_env,
+                    inputs.stdout_is_tty,
+                    inputs.width_offset,
+                ),
+                height: if inputs.stdout_is_tty {
+                    height.saturating_sub(PROMPT_ROWS).max(1)
+                } else {
+                    height
+                },
+            }
+        }
         Mode::Watch => Dimensions {
             // Watch owns the whole pane: ignore COLUMNS/LINES, take the size
             // from termsize::stdout_size, and reserve no wrapper chrome. The one-cell
