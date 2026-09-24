@@ -734,6 +734,10 @@ pub(crate) struct PushOutcome {
     pub success: bool,
     /// Everything the command wrote, both streams, in the order they were
     /// captured.
+    ///
+    /// A rebase or a merge of the base whose command left an operation
+    /// stopped also gets a sentence of gsw as the last line, which says what
+    /// gsw did with that operation. See [`crate::update`].
     pub output: String,
 }
 

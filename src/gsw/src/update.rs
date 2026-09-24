@@ -243,6 +243,34 @@ fn in_progress_refusal(operation: &Operation) -> String {
     )
 }
 
+/// The last line of a run whose command left `operation` stopped, after gsw
+/// aborted it.
+///
+/// **The sentence of gsw, and not a line of the command.** The lines of the
+/// command above it describe an operation that is still in progress, and the
+/// `⚠` row of that operation is gone after the abort. Without this sentence,
+/// the row describes a work tree that no longer exists. It names the act, the
+/// count of conflicts, and the abort.
+///
+/// The verb is the operation that git held, for the reason
+/// [`in_progress_refusal`] gives. The count is the count of the read before
+/// the abort, which is the count of the `⚠` row. With no conflict, the
+/// sentence drops the count, as the `⚠` row does.
+fn stopped_sentence(operation: &Operation) -> String {
+    let conflicts = match operation {
+        Operation::Rebase { conflicts, .. } | Operation::Merge { conflicts } => *conflicts,
+    };
+    let on = match conflicts {
+        0 => String::new(),
+        1 => " on 1 conflict".to_string(),
+        n => format!(" on {n} conflicts"),
+    };
+    format!(
+        "{} stopped{on} — gsw aborted it",
+        BaseUpdate::held(operation).verb(),
+    )
+}
+
 /// A confirmed rebase or merge: the act, the branch the question named, the
 /// base it named, and the command the user supplied.
 ///
@@ -619,8 +647,14 @@ fn run_in(
     // The abort goes to `workdir`, which is the work tree of the run. The
     // arrow keys can move the watch to a different worktree while the run is
     // in flight, and that worktree holds no operation of this run.
+    //
+    // **The sentence of gsw goes last.** The row shows the last lines of a
+    // failure, so the last line is the one that the cut to three rows keeps.
+    // The lines of the command stay above it, and the line of git that names
+    // the file that conflicted is one of them.
     if let Some(operation) = crate::repo::held_operation(workdir) {
         let _ = abort_child(workdir, &operation).output();
+        record.push(&stopped_sentence(&operation));
     }
 
     let success = status.success();
@@ -679,6 +713,11 @@ fn abort_child(workdir: &Path, operation: &Operation) -> Command {
 
 /// Every line a run has written, in arrival order, as one string with a newline
 /// between each line and the one before it.
+///
+/// A run whose command left an operation stopped also gets the sentence of gsw
+/// about that operation, after the lines of the command. It goes through
+/// [`Record::push`] like every other line, so the one rule for the newlines
+/// holds for it too, and an empty record gets no blank line in front of it.
 ///
 /// **One growing string, and not one [`String`] for each line.** A pre-push
 /// hook that builds and tests a workspace prints hundreds of thousands of
@@ -1047,6 +1086,59 @@ mod question_tests {
         assert_eq!(
             refusal(&stopped, BaseUpdate::Rebase),
             "a rebase is in progress — finish it first",
+        );
+    }
+}
+
+#[cfg(test)]
+mod sentence_tests {
+    use super::*;
+
+    /// A rebase that stopped on `conflicts` conflicts.
+    fn rebase(conflicts: u32) -> Operation {
+        Operation::Rebase {
+            step: None,
+            conflicts,
+        }
+    }
+
+    #[test]
+    fn one_conflict_takes_the_singular() {
+        // "1 conflicts" reads as a defect in the tool, right beside the
+        // number it is about. The `⚠` row says "1 conflict" for the same
+        // work tree.
+        assert_eq!(
+            stopped_sentence(&rebase(1)),
+            "rebase stopped on 1 conflict — gsw aborted it",
+        );
+    }
+
+    #[test]
+    fn more_conflicts_than_one_take_the_plural() {
+        assert_eq!(
+            stopped_sentence(&rebase(2)),
+            "rebase stopped on 2 conflicts — gsw aborted it",
+        );
+    }
+
+    #[test]
+    fn no_conflict_drops_the_count() {
+        // A rebase also stops on an `edit` step or on a failed `exec` step,
+        // with no conflict at all. "on 0 conflicts" describes a stop that
+        // did not occur, and the `⚠` row drops the clause for the same work
+        // tree.
+        assert_eq!(
+            stopped_sentence(&rebase(0)),
+            "rebase stopped — gsw aborted it",
+        );
+    }
+
+    #[test]
+    fn a_merge_is_named_as_the_merge() {
+        // The verb is the operation that git held, as in the refusal.
+        assert_eq!(
+            stopped_sentence(&Operation::Merge { conflicts: 1 }),
+            "merge stopped on 1 conflict — gsw aborted it",
         );
     }
 }
