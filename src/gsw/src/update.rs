@@ -1458,6 +1458,11 @@ mod run_tests {
     /// gsw then aborted.
     const REBASE_ABORTED: &str = "rebase stopped on 1 conflict — gsw aborted it";
 
+    /// The sentence of gsw under a rebase that stopped on one conflict, which
+    /// gsw then could not abort.
+    const REBASE_NOT_ABORTED: &str =
+        "rebase stopped on 1 conflict — gsw could not abort it, and it is still in progress";
+
     #[test]
     fn the_run_hands_the_whole_script_to_an_interactive_shell() {
         // The command is a shell function, so only a shell that read the rc
@@ -2106,6 +2111,78 @@ mod run_tests {
             rows.lines().last(),
             Some(REBASE_ABORTED),
             "the row must end with the sentence of the abort: {rows:?}",
+        );
+    }
+
+    #[test]
+    fn an_abort_that_git_refuses_gives_the_reason_of_git_and_says_the_rebase_stays() {
+        // git refuses an abort that cannot take the lock of the index. A git
+        // process holds that lock while it works, and a git that crashed
+        // leaves it behind. The rebase then stays, and the `⚠` row of the
+        // next frame shows it. A sentence that said "aborted" would disagree
+        // with that row and send the user away from a rebase that is still
+        // there.
+        //
+        // The reason is the reason of git, so the lines of git go above the
+        // sentence of gsw.
+        //
+        // The tail takes the lock after the rebase stopped. The rebase is thus
+        // a real one, and only the abort meets the lock.
+        let workdir = init_repo();
+        conflicting_branches(workdir.path());
+        let stub = StubShell::new(&format!(
+            "{}; touch \"$({})\"",
+            real_git(&format!("rebase {BASE}")),
+            real_git("rev-parse --git-path index.lock"),
+        ));
+
+        let (outcome, rows) = run_through_the_row(&stub, BaseUpdate::Rebase, workdir.path());
+
+        let still_in_progress = rebase_in_progress(workdir.path());
+        let lock = PathBuf::from(git_stdout(
+            workdir.path(),
+            &[
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-path",
+                "index.lock",
+            ],
+        ));
+        let lock_was_taken = lock.is_file();
+        // The lock goes before the assertions, so a failed assertion leaves no
+        // lock for a later read of this work tree to meet.
+        let _ = std::fs::remove_file(&lock);
+        assert!(
+            lock_was_taken,
+            "the fixture must take the lock, or the abort had nothing to meet",
+        );
+        assert!(
+            still_in_progress,
+            "git refused the abort, so the rebase must still be in progress: {:?}",
+            outcome.output,
+        );
+        assert!(
+            !outcome.success,
+            "a run that left a rebase in progress must not report success: {:?}",
+            outcome.output,
+        );
+        let (above, last) = last_line_of(&outcome.output);
+        assert_eq!(
+            last, REBASE_NOT_ABORTED,
+            "the last line must say that gsw could not abort the rebase and that it stays: {:?}",
+            outcome.output,
+        );
+        assert!(
+            above
+                .lines()
+                .any(|line| line.contains("index.lock") && line.contains("File exists")),
+            "the reason of git must stay above the sentence: {:?}",
+            outcome.output,
+        );
+        assert_eq!(
+            rows.lines().last(),
+            Some(REBASE_NOT_ABORTED),
+            "the row must end with the sentence of the failed abort: {rows:?}",
         );
     }
 
