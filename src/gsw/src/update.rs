@@ -1579,13 +1579,15 @@ mod run_tests {
     use super::*;
     use crate::repo::DETACHED_HEAD;
     use crate::shell::stub_shell::{
-        a_child_of_this_test_passes, entries_of, kill_now, shed_git_lines, test_name,
-        test_process_can_open_the_terminal, user_intent_lost, user_intent_value, StubShell,
-        CHILD_RAN, GAVE_UP_WITHIN, HOSTILE_GIT_ENVIRONMENT, HOSTILE_MARKER, TTY_REFUSED,
+        a_child_of_this_test_passes, a_child_of_this_test_passes_with, entries_of, kill_now,
+        shed_git_lines, test_name, test_process_can_open_the_terminal, user_intent_lost,
+        user_intent_value, StubShell, CHILD_RAN, GAVE_UP_WITHIN, HOSTILE_GIT_ENVIRONMENT,
+        HOSTILE_MARKER, TTY_REFUSED,
     };
     use crate::testrepo::{
         git, git_allowing_failure, git_output, git_stdout, init_repo, init_repo_with_worktree,
     };
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::mpsc::{channel, Receiver};
     use std::time::Instant;
     use tempfile::TempDir;
@@ -1843,6 +1845,134 @@ mod run_tests {
     /// The sentence of gsw under a merge that the run did not start, which gsw
     /// left as it is.
     const MERGE_LEFT: &str = "a merge is in progress that gsw did not start — left as it is";
+
+    /// The variable that names the directory of the recording git to the
+    /// child that finds it first on its `PATH`.
+    ///
+    /// The name carries no `GIT_` prefix, so no sweep of gsw takes it away.
+    const RECORDING_GIT_VAR: &str = "GSW_RECORDING_GIT";
+
+    /// One call of the recording git.
+    struct RecordedCall {
+        /// Each argument of the call, in order.
+        arguments: Vec<String>,
+        /// The directory of the call, with every symbolic link in it resolved.
+        cwd: PathBuf,
+        /// The environment of the call, one `NAME=value` line for each
+        /// variable.
+        environment: String,
+    }
+
+    /// Run `test` in a child of this test binary whose `PATH` finds a
+    /// recording git first, and fail where that child fails.
+    ///
+    /// **The recording git is how a test reads the environment of a git child
+    /// of gsw itself.** gsw starts git by name, so the first `git` on the
+    /// `PATH` is the process that gsw starts. That program writes down its
+    /// arguments, its directory and its environment. Then it puts back the
+    /// `PATH` of this process and gives the call to the real git, so the run
+    /// does all of its real work.
+    ///
+    /// A read of the removals off the [`Command`] proves less. It reads the
+    /// command that a function builds, and not the process that the run
+    /// starts. A change that [`abort`] makes to the command after
+    /// [`abort_child`] built it does not show in that read, and neither does a
+    /// second builder that the run uses in place of [`abort_child`]. A git
+    /// hook proves less too. git adds variables of its own to the environment
+    /// of a hook, so a record from a hook cannot use the rule of the `GIT_`
+    /// prefix.
+    ///
+    /// **The `PATH` goes on the child, and never on this process**, for the
+    /// reason [`a_child_of_this_test_passes_with`] gives. This process writes
+    /// the program into a temporary directory of its own, and holds that
+    /// directory until the child ends.
+    ///
+    /// # Panics
+    ///
+    /// Panics where the program cannot be written, and where
+    /// [`a_child_of_this_test_passes_with`] panics.
+    fn a_child_with_a_recording_git_passes(test: &str) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let own_path = std::env::var_os("PATH").unwrap_or_default();
+        let program = dir.path().join("git");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\n\
+                 call=$(mktemp -d {dir}/call.XXXXXX) || exit 1\n\
+                 printf '%s\\n' \"$@\" > \"$call/arguments\"\n\
+                 pwd -P > \"$call/cwd\"\n\
+                 env > \"$call/environment\"\n\
+                 PATH={own_path}\n\
+                 export PATH\n\
+                 exec git \"$@\"\n",
+                dir = shell_quote(&dir.path().display().to_string()),
+                own_path = shell_quote(&own_path.to_string_lossy()),
+            ),
+        )
+        .expect("write the recording git");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+            .expect("make the recording git executable");
+        let path = std::env::join_paths(
+            std::iter::once(dir.path().to_path_buf()).chain(std::env::split_paths(&own_path)),
+        )
+        .expect("a PATH that holds the recording git");
+        a_child_of_this_test_passes_with(
+            test,
+            &[
+                ("PATH", path.as_os_str()),
+                (RECORDING_GIT_VAR, dir.path().as_os_str()),
+            ],
+        );
+    }
+
+    /// Each call that the recording git of this child recorded, in no order.
+    ///
+    /// # Panics
+    ///
+    /// Panics where [`a_child_with_a_recording_git_passes`] did not start this
+    /// process, and where a record cannot be read.
+    fn recorded_git_calls() -> Vec<RecordedCall> {
+        let dir = PathBuf::from(
+            std::env::var_os(RECORDING_GIT_VAR).expect("the parent must name the recording git"),
+        );
+        let read = |call: &Path, name: &str| {
+            std::fs::read_to_string(call.join(name)).expect("read a record of the call")
+        };
+        std::fs::read_dir(&dir)
+            .expect("read the records of the recording git")
+            .map(|entry| entry.expect("an entry of the records").path())
+            .filter(|path| path.is_dir())
+            .map(|call| RecordedCall {
+                arguments: read(&call, "arguments")
+                    .lines()
+                    .map(str::to_string)
+                    .collect(),
+                cwd: PathBuf::from(read(&call, "cwd").trim_end_matches('\n')),
+                environment: read(&call, "environment"),
+            })
+            .collect()
+    }
+
+    /// The calls of the recording git of this child that abort a rebase.
+    ///
+    /// The arguments to look for are the arguments of [`abort_child`], read
+    /// from the child itself, so the record and the abort cannot name two
+    /// different commands.
+    fn recorded_rebase_aborts() -> Vec<RecordedCall> {
+        let rebase = Operation::Rebase {
+            step: None,
+            conflicts: 1,
+        };
+        let arguments: Vec<String> = abort_child(Path::new("."), &rebase)
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect();
+        recorded_git_calls()
+            .into_iter()
+            .filter(|call| call.arguments == arguments)
+            .collect()
+    }
 
     #[test]
     fn the_run_hands_the_whole_script_to_an_interactive_shell() {
@@ -2852,5 +2982,144 @@ mod run_tests {
                 .any(|line| line == format!("{TERMINAL_PROMPT_VAR}=0")),
             "git must be told not to ask at the terminal: {environment:?}",
         );
+    }
+
+    #[test]
+    fn the_abort_child_sheds_the_git_variables_of_gsw_and_keeps_those_of_the_user() {
+        // **This test starts this test binary again, and the hostile
+        // environment goes on that child**, for the reason that the test of
+        // the run child gives.
+        //
+        // The abort moves a branch and resets a work tree, so a leaked
+        // variable does damage here too. A `gsw` that a pre-commit hook
+        // started holds `GIT_DIR`, and an abort that obeyed it would abort a
+        // rebase in the repository of the hook. The abort also acts for the
+        // user, so it keeps the six variables that the user states.
+        //
+        // **Two halves, because each half sees what the other half cannot.**
+        //
+        // - The run: a real run whose command stops a real rebase, in a child
+        //   that holds `GIT_DIR=/gsw-decoy/.git`. An abort that obeyed that
+        //   variable finds no repository and fails, and the rebase stays. The
+        //   run cannot show the six variables of the user, because git aborts
+        //   a rebase without them too.
+        // - The record: the child finds a recording git first on its `PATH`,
+        //   so the abort child itself writes down the environment it got. The
+        //   record shows each variable that the abort child held.
+        //
+        // **The armed control comes first.** The child asserts that it really
+        // holds each hostile variable and each variable of the user, that no
+        // path of the hostile variables is on this machine, and that the git
+        // it starts by name is the recording git. An assertion that a
+        // variable is absent passes just as readily where there was nothing
+        // to remove.
+        if std::env::var_os(HOSTILE_MARKER).is_none() {
+            a_child_with_a_recording_git_passes(&test_name(
+                module_path!(),
+                "the_abort_child_sheds_the_git_variables_of_gsw_and_keeps_those_of_the_user",
+            ));
+            return;
+        }
+
+        for (name, _) in HOSTILE_GIT_ENVIRONMENT {
+            assert!(
+                std::env::var_os(name).is_some(),
+                "the child must really hold {name}, or there is nothing here to remove and the \
+                 assertions below are measured against nothing",
+            );
+        }
+        for name in gitscratch::USER_INTENT_GIT_ENVIRONMENT {
+            assert_eq!(
+                std::env::var(name).ok(),
+                Some(user_intent_value(name)),
+                "the child must really hold {name}, or there is nothing here to keep",
+            );
+        }
+        let nothing_at = |path: &Path| {
+            matches!(
+                std::fs::symlink_metadata(path),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            )
+        };
+        let decoys: Vec<&Path> = HOSTILE_GIT_ENVIRONMENT
+            .iter()
+            .map(|(_, value)| Path::new(*value))
+            .filter(|path| path.is_absolute())
+            .collect();
+        for decoy in &decoys {
+            assert!(
+                nothing_at(decoy),
+                "{} must name nothing on this machine, or a write there cannot be seen",
+                decoy.display(),
+            );
+        }
+
+        let workdir = init_repo();
+        conflicting_branches(workdir.path());
+        assert!(
+            !recorded_git_calls().is_empty(),
+            "the fixture runs git by name, so the recording git must have recorded it. Without \
+             that, the record of the abort below is empty for a reason that is not the abort",
+        );
+        let before = checkout_of(workdir.path());
+        let stub = StubShell::new(&real_git(&format!("rebase {BASE}")));
+
+        let outcome = run_quiet(stub.as_shell(), &default_command(), workdir.path());
+
+        assert!(
+            !rebase_in_progress(workdir.path()),
+            "the abort did not end the rebase in the work tree of the run. An abort that obeyed \
+             GIT_DIR goes to a repository that does not exist, and fails: {:?}",
+            outcome.output,
+        );
+        assert_eq!(
+            checkout_of(workdir.path()),
+            before,
+            "the abort must check the branch out again, at its commit from before the run",
+        );
+        assert_eq!(
+            last_line_of(&outcome.output).1,
+            REBASE_ABORTED,
+            "gsw must say that it aborted the rebase: {:?}",
+            outcome.output,
+        );
+        for decoy in &decoys {
+            assert!(
+                nothing_at(decoy),
+                "a git child of gsw obeyed a hostile variable and wrote to {}",
+                decoy.display(),
+            );
+        }
+
+        let aborts = recorded_rebase_aborts();
+        let calls: Vec<String> = recorded_git_calls()
+            .iter()
+            .map(|call| call.arguments.join(" "))
+            .collect();
+        assert_eq!(
+            aborts.len(),
+            1,
+            "the run must abort the rebase once, through the git that the PATH finds: {calls:?}",
+        );
+        let abort = &aborts[0];
+        assert_eq!(
+            abort.cwd,
+            resolved(workdir.path()),
+            "the abort must run in the work tree of the run",
+        );
+        let carried = shed_git_lines(&abort.environment);
+        assert!(
+            carried.is_empty(),
+            "the abort child carried a git variable out of the environment of gsw. Each of these \
+             aims the abort, or configures it, somewhere the user never pointed it: {carried:?}",
+        );
+        let lost = user_intent_lost(&abort.environment, None);
+        assert!(
+            lost.is_empty(),
+            "the abort child lost a git variable that the user states on purpose, so git aborts \
+             with a configuration that the user did not choose: {lost:?}",
+        );
+
+        println!("{CHILD_RAN}");
     }
 }
