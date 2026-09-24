@@ -1605,7 +1605,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             // The walk fetches as many commits as the pane can show now. The
             // hook reads the size of the pane at the time of the walk, because
             // the pane can change size after the seed walk.
-            collect: |current: &WorktreePath| {
+            collect: |current: &WorktreePath, _limit: usize| {
                 let mut watched = watched.borrow_mut();
                 debug_assert_eq!(
                     current, &watched.path,
@@ -3015,7 +3015,7 @@ fn event_loop<
     >,
 ) -> Result<()>
 where
-    Collect: FnMut(&WorktreePath) -> Result<Snapshot>,
+    Collect: FnMut(&WorktreePath, usize) -> Result<Snapshot>,
     FetchLog: FnMut(&WorktreePath, usize) -> Vec<LogEntry>,
     RenderFn: FnMut(&Snapshot, Dimensions, FrameTiming) -> Render,
     RenderList: FnMut(&Snapshot, Dimensions, FrameTiming, &WorktreeList) -> Render,
@@ -3189,7 +3189,7 @@ where
         // The walk comes before the division of the pane below. It needs no
         // pane size, and what it finds can change what goes under the frame.
         if walk_now {
-            let collected = (hooks.collect)(&state.current);
+            let collected = (hooks.collect)(&state.current, 0);
             match collected {
                 Ok(snapshot) => {
                     // Re-seed the collection time to the walk's start so a later
@@ -5418,7 +5418,7 @@ mod tests {
                 log: LogDemand::Off,
             },
             LoopHooks {
-                collect: |_current: &WorktreePath| {
+                collect: |_current: &WorktreePath, _limit: usize| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -5485,7 +5485,7 @@ mod tests {
                 log: LogDemand::Off,
             },
             LoopHooks {
-                collect: |_current: &WorktreePath| Ok(empty_snapshot()),
+                collect: |_current: &WorktreePath, _limit: usize| Ok(empty_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, timing: FrameTiming| {
                     seen = Some(timing);
                     let _ = tx.send(Event::Quit);
@@ -5545,7 +5545,7 @@ mod tests {
                 log: LogDemand::Off,
             },
             LoopHooks {
-                collect: |_current: &WorktreePath| {
+                collect: |_current: &WorktreePath, _limit: usize| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -5611,7 +5611,7 @@ mod tests {
                 log: LogDemand::Off,
             },
             LoopHooks {
-                collect: |_current: &WorktreePath| {
+                collect: |_current: &WorktreePath, _limit: usize| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -5670,7 +5670,7 @@ mod tests {
                 log: LogDemand::Off,
             },
             LoopHooks {
-                collect: |_current: &WorktreePath| {
+                collect: |_current: &WorktreePath, _limit: usize| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -5730,7 +5730,7 @@ mod tests {
                 log: LogDemand::Off,
             },
             LoopHooks {
-                collect: |_current: &WorktreePath| {
+                collect: |_current: &WorktreePath, _limit: usize| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -5786,7 +5786,7 @@ mod tests {
                 log: LogDemand::Off,
             },
             LoopHooks {
-                collect: |_current: &WorktreePath| Ok(empty_snapshot()),
+                collect: |_current: &WorktreePath, _limit: usize| Ok(empty_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                     renders += 1;
                     // End the loop right after this first tick-driven render.
@@ -5849,7 +5849,7 @@ mod tests {
                 log: LogDemand::Off,
             },
             LoopHooks {
-                collect: |_current: &WorktreePath| Ok(empty_snapshot()),
+                collect: |_current: &WorktreePath, _limit: usize| Ok(empty_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                     renders += 1;
                     let _ = tx.send(Event::Quit);
@@ -5909,7 +5909,7 @@ mod tests {
                 log: LogDemand::Off,
             },
             LoopHooks {
-                collect: |_current: &WorktreePath| {
+                collect: |_current: &WorktreePath, _limit: usize| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -5978,7 +5978,7 @@ mod tests {
                 log: LogDemand::Off,
             },
             LoopHooks {
-                collect: |_current: &WorktreePath| {
+                collect: |_current: &WorktreePath, _limit: usize| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -6123,7 +6123,7 @@ mod tests {
                     log: cfg.log,
                 },
                 LoopHooks {
-                    collect: |_current: &WorktreePath| {
+                    collect: |_current: &WorktreePath, _limit: usize| {
                         collects += 1;
                         Ok(Snapshot {
                             log: history.to_vec(),
@@ -6318,6 +6318,68 @@ mod tests {
     }
 
     #[test]
+    fn a_walk_fetches_the_commits_of_the_pane_that_the_loop_measured() {
+        // The loop measures the pane before each walk, and passes the walk
+        // the most commits that the pane can show. The loop is then the one
+        // place that decides the rows of the pane, for the walk and for the
+        // read of the log on a resize. A pane of 60 rows has room for 58
+        // commits under the header and the separator.
+        let (tx, rx) = mpsc::channel();
+        tx.send(Event::FsChanged).expect("queue fs change");
+        drop(tx);
+
+        let mut displayed = String::new();
+        let mut limits: Vec<usize> = Vec::new();
+        let now = Instant::now();
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            LoopStart {
+                cache: seeded_cache(now),
+                freshest: None,
+                schedule: no_timed_refresh(),
+                ui: PushUi::new(false),
+                session: crate::remote::Session::Local,
+                home: loop_home(),
+                log: LogDemand::Fill,
+            },
+            LoopHooks {
+                collect: |_current: &WorktreePath, limit: usize| {
+                    limits.push(limit);
+                    Ok(empty_snapshot())
+                },
+                fetch_log: no_fetch,
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
+                    frame("walked")
+                },
+                dimensions: || pane(60),
+                paint: |_output: &str| Ok(()),
+                clock: || now,
+                next_tick: timer_off,
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
+                start_issue: |_command: crate::shell::ShellCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: Vec::new,
+                worktree_paths: Vec::new,
+                switch: no_switch,
+                render_list: no_list,
+            },
+        )
+        .expect("loop");
+
+        assert_eq!(
+            limits,
+            vec![58],
+            "the walk fetches the commits of the pane that the loop measured",
+        );
+    }
+
+    #[test]
     fn event_loop_fs_change_reseeds_collected_at() {
         // After a filesystem change re-collects the snapshot, a later decay tick
         // must measure its age offset from the NEW collection time, not the stale
@@ -6350,7 +6412,7 @@ mod tests {
                 log: LogDemand::Off,
             },
             LoopHooks {
-                collect: |_current: &WorktreePath| Ok(empty_snapshot()),
+                collect: |_current: &WorktreePath, _limit: usize| Ok(empty_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, timing: FrameTiming| {
                     offsets.push(timing.age_offset);
                     // First render is the FS walk (offset 0); the next wake is a
@@ -6442,7 +6504,7 @@ mod tests {
                 log: LogDemand::Off,
             },
             LoopHooks {
-                collect: |_current: &WorktreePath| {
+                collect: |_current: &WorktreePath, _limit: usize| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -6533,7 +6595,7 @@ mod tests {
                 log: LogDemand::Off,
             },
             LoopHooks {
-                collect: |_current: &WorktreePath| {
+                collect: |_current: &WorktreePath, _limit: usize| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -6621,7 +6683,7 @@ mod tests {
                 log: LogDemand::Off,
             },
             LoopHooks {
-                collect: |_current: &WorktreePath| {
+                collect: |_current: &WorktreePath, _limit: usize| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -6710,7 +6772,7 @@ mod tests {
                 log: LogDemand::Off,
             },
             LoopHooks {
-                collect: |_current: &WorktreePath| {
+                collect: |_current: &WorktreePath, _limit: usize| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -6799,7 +6861,7 @@ mod tests {
                 log: LogDemand::Off,
             },
             LoopHooks {
-                collect: |_current: &WorktreePath| {
+                collect: |_current: &WorktreePath, _limit: usize| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -6877,7 +6939,7 @@ mod tests {
                 log: LogDemand::Off,
             },
             LoopHooks {
-                collect: |_current: &WorktreePath| {
+                collect: |_current: &WorktreePath, _limit: usize| {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
@@ -6958,7 +7020,7 @@ mod tests {
                 log: LogDemand::Off,
             },
             LoopHooks {
-                collect: |_current: &WorktreePath| {
+                collect: |_current: &WorktreePath, _limit: usize| {
                     collects += 1;
                     // The exact shape `collect_snapshot` produces when the ref
                     // store has gone missing mid-walk.
@@ -7056,7 +7118,7 @@ mod tests {
                 log: LogDemand::Off,
             },
             LoopHooks {
-                collect: |_current: &WorktreePath| {
+                collect: |_current: &WorktreePath, _limit: usize| {
                     collects += 1;
                     Err(anyhow::anyhow!("status platform: repository is gone"))
                 },
@@ -7164,7 +7226,7 @@ mod tests {
                 log: LogDemand::Off,
             },
             LoopHooks {
-                collect: |_current: &WorktreePath| {
+                collect: |_current: &WorktreePath, _limit: usize| {
                     collects += 1;
                     if collects == 1 {
                         // The repo is momentarily unreadable — mid-`gc`, say.
@@ -7850,7 +7912,7 @@ mod push_loop_tests {
                 log: LogDemand::Off,
             },
             LoopHooks {
-                collect: |current: &WorktreePath| {
+                collect: |current: &WorktreePath, _limit: usize| {
                     let mut seen = seen.borrow_mut();
                     seen.collects += 1;
                     seen.collected_from.push(current.clone());
@@ -8710,7 +8772,7 @@ mod push_loop_tests {
                 log: LogDemand::Off,
             },
             LoopHooks {
-                collect: |_current: &WorktreePath| Ok(pushable_snapshot()),
+                collect: |_current: &WorktreePath, _limit: usize| Ok(pushable_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| frame("FRAME"),
                 dimensions: || TEST_DIMS,
                 paint: |output: &str| {
@@ -9565,7 +9627,7 @@ mod push_loop_tests {
                     log: LogDemand::Off,
                 },
                 LoopHooks {
-                    collect: |_current: &WorktreePath| Ok(pushable_snapshot()),
+                    collect: |_current: &WorktreePath, _limit: usize| Ok(pushable_snapshot()),
                     render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                         frame("FRAME")
                     },
