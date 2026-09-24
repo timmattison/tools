@@ -338,9 +338,11 @@ impl BaseUpdateCommand {
 /// **The refusals are read in order, and the first that applies wins.** Several
 /// of them describe one repository at once — a rebase that stopped on a
 /// conflict is a detached HEAD *and* an operation in progress — and the order
-/// puts the thing the user has to deal with first at the top. Each one posts a
-/// fading line and asks nothing, because none of them is an error: they are the
-/// repository saying that this key has nothing to do here.
+/// puts the thing the user has to deal with first at the top. That is why the
+/// operation that git holds comes first of all: the detached HEAD of a stopped
+/// rebase is a result of the rebase, so the words send the user to the rebase.
+/// Each one posts a fading line and asks nothing, because none of them is an
+/// error: they are the repository saying that this key has nothing to do here.
 pub(crate) fn base_update_prompt_for(
     snapshot: &Snapshot,
     update: BaseUpdate,
@@ -350,6 +352,19 @@ pub(crate) fn base_update_prompt_for(
     let base = snapshot.base.as_str();
     let refuse = |message: String| PushPrompt::Refuse { message };
 
+    // git is holding an operation that the user must finish or abort, and gsw
+    // does neither. The `⚠ rebase` row of the header is showing it already.
+    //
+    // **At the top, above the detached HEAD.** A rebase that stops on a
+    // conflict detaches HEAD, and the advice to check out a branch is wrong in
+    // the middle of a rebase: the detached HEAD is a result of the operation,
+    // and it goes away when the user finishes or aborts that operation.
+    if let Some(operation) = &snapshot.operation {
+        return refuse(format!(
+            "a {} is in progress — finish it first",
+            BaseUpdate::held(operation).verb(),
+        ));
+    }
     // No branch to act on. git refuses `HEAD` as the name of a branch, so
     // `grp` has nothing to rebase and `gmp` has nothing to merge into.
     if branch == DETACHED_HEAD {
@@ -372,14 +387,6 @@ pub(crate) fn base_update_prompt_for(
     // and `main already contains main` says nothing.
     if branch == base {
         return refuse(format!("on {base} — nothing to {}", update.verb()));
-    }
-    // git is holding an operation that the user must finish or abort, and gsw
-    // does neither. The `⚠ rebase` row of the header is showing it already.
-    if let Some(operation) = &snapshot.operation {
-        return refuse(format!(
-            "a {} is in progress — finish it first",
-            BaseUpdate::held(operation).verb(),
-        ));
     }
     // Nothing to bring over. The count in the header is the whole reason for
     // these keys, and at zero a rebase would rewrite every commit of the branch
