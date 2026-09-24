@@ -2209,9 +2209,18 @@ struct SnapshotCache {
 
 impl SnapshotCache {
     /// Put `fetched`, a new read of the log of the cached worktree, in the
-    /// place of the cached log.
+    /// place of the cached log, when `fetched` holds more commits.
+    ///
+    /// A read of the log that fails gives no commit, and a read that cannot
+    /// read a commit leaves that commit out. Neither read holds more commits
+    /// than the cache, so neither changes anything, and the log on the screen
+    /// does not lose rows. A read that holds no more commits than the cache
+    /// changes nothing either, and the cache keeps the log of the walk, which
+    /// agrees with the rest of the snapshot.
     fn take_fetched_log(&mut self, fetched: Vec<LogEntry>) {
-        self.snapshot.log = fetched;
+        if fetched.len() > self.snapshot.log.len() {
+            self.snapshot.log = fetched;
+        }
     }
 }
 
@@ -2912,8 +2921,9 @@ where
 ///   by `clock() - collected_at`, and repaints only if the frame changed;
 /// - a resize re-renders the cached snapshot at the new dimensions with **no**
 ///   collect. When the new pane has rows for more commits than the cached log
-///   holds, the resize first reads the log alone (`fetch_log` in `hooks`) and
-///   puts the new log in the cache;
+///   holds, the resize first reads the log alone (`fetch_log` in `hooks`). The
+///   read goes into the cache only when it holds more commits, so a read that
+///   fails never blanks the log;
 /// - a recompute whose output is byte-identical to what's displayed paints
 ///   nothing (suppression);
 /// - a walk that *fails* does not end the loop: the last good snapshot is
