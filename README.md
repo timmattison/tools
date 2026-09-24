@@ -510,7 +510,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - Compact pretty output of branch state: a self-refreshing live watch on a TTY, and a single
     render when its output is piped or `--one-shot` is given — so it needs no `viddy`/`watch`
     wrapper, but still works under one. Shows branch, ahead/behind, working-tree changes, and
-    a `git log --oneline` tail. Ages use two units and get coarser as they grow — `5m23s`,
+    a `git log --oneline` tail. The log fills the rows that the header and the file list leave,
+    so a tall window shows more history. `--log-lines N` caps the log at N rows. Under the live
+    watch, a window that grows reads more commits, and it reads none when the history is already
+    all on the screen. Ages use two units and get coarser as they grow — `5m23s`,
     `2h14m`, `3d12h`, `5y6mo` — so a repo untouched for years stays readable. Every age sits on
     the row of the thing it ages, a file or a commit, and each is shown exactly once: the newest
     commit's age is on the first log row, not also in the header (so `--no-log` takes the commit

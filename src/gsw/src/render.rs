@@ -2297,7 +2297,7 @@ mod tests {
     #[test]
     fn plan_section_caps_floors_log_at_five_rows_when_files_dominate() {
         // Repro of the "too many files" report: a branch with ~129
-        // changed files vs the default 20-line log on a ~26-row
+        // changed files vs a 20-commit log on a ~26-row
         // terminal. A naive proportional split would squeeze the log
         // section down to ~3 rows; the floor lifts that to 5 so the
         // recent-commit context stays visible.
