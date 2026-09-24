@@ -1018,7 +1018,7 @@ mod run_tests {
         test_process_can_open_the_terminal, user_intent_lost, user_intent_value, StubShell,
         CHILD_RAN, GAVE_UP_WITHIN, HOSTILE_GIT_ENVIRONMENT, HOSTILE_MARKER, TTY_REFUSED,
     };
-    use crate::testrepo::{git, init_repo};
+    use crate::testrepo::{git, git_allowing_failure, git_output, git_stdout, init_repo};
     use std::sync::mpsc::{channel, Receiver};
     use std::time::Instant;
     use tempfile::TempDir;
@@ -1082,6 +1082,61 @@ mod run_tests {
     /// resolved before they are compared.
     fn resolved(path: &Path) -> PathBuf {
         std::fs::canonicalize(path).expect("resolve the path")
+    }
+
+    /// Give the repository of `checkout` a real conflict between [`BASE`] and
+    /// [`BRANCH`], and leave [`BRANCH`] checked out in `checkout`.
+    ///
+    /// Line 1 of `a.txt` changes in one way on the base and in a different way
+    /// on the branch, each in a commit of its own. `git rebase main` and `git
+    /// merge main` then both stop with `CONFLICT (content): Merge conflict in
+    /// a.txt`, which is the state a user who pressed `y` finds.
+    ///
+    /// `checkout` is the main worktree of an [`init_repo`] repository, or a
+    /// linked worktree of a [`crate::testrepo::init_repo_with_worktree`]
+    /// repository. The commit on the base goes through the main worktree of
+    /// the repository, where [`BASE`] is checked out, because git refuses a
+    /// checkout of [`BASE`] in a second worktree. The branch starts from the
+    /// commit that `checkout` holds before the call, so the two commits share
+    /// one parent.
+    ///
+    /// # Panics
+    ///
+    /// Panics where the main worktree does not have [`BASE`] checked out, or
+    /// where git refuses a step. A fixture that did not build its conflict
+    /// makes every later assertion measure something else.
+    fn conflicting_branches(checkout: &Path) {
+        let fork_point = git_stdout(checkout, &["rev-parse", "HEAD"]);
+        let common_dir = PathBuf::from(git_stdout(
+            checkout,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        ));
+        let main_worktree = common_dir
+            .parent()
+            .expect("the git dir of the main worktree is inside that worktree");
+        assert_eq!(
+            git_stdout(main_worktree, &["symbolic-ref", "--short", "HEAD"]),
+            BASE,
+            "the main worktree must have the base checked out, or the base gets no commit",
+        );
+
+        std::fs::write(main_worktree.join("a.txt"), "base\n").expect("write a.txt on the base");
+        git(main_worktree, &["commit", "-q", "-am", "change a.txt on the base"]);
+
+        git(checkout, &["checkout", "-q", "-b", BRANCH, &fork_point]);
+        std::fs::write(checkout.join("a.txt"), "branch\n").expect("write a.txt on the branch");
+        git(checkout, &["commit", "-q", "-am", "change a.txt on the branch"]);
+    }
+
+    /// Whether git holds a merge in the work tree at `dir`.
+    ///
+    /// git is the oracle here, and not the reader of gsw: a test of the reader
+    /// that asks the reader proves nothing. `MERGE_HEAD` is a ref of the
+    /// worktree, so a linked worktree answers about its own merge.
+    fn merge_in_progress(dir: &Path) -> bool {
+        git_output(dir, &["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+            .status
+            .success()
     }
 
     #[test]
@@ -1457,6 +1512,44 @@ mod run_tests {
             outcome.output,
         );
         assert_eq!(stub.runs(), "", "a refused run must start no shell at all");
+    }
+
+    #[test]
+    fn a_merge_that_started_after_the_confirmation_refuses_the_run_and_stays() {
+        // The window the question opens, for an operation instead of a
+        // checkout. `M` reads the snapshot while nothing is in progress, `y`
+        // arrives seconds later, and a `git merge` in another pane stops on a
+        // conflict in between. A merge keeps HEAD on the branch, so the branch
+        // is the branch of the question, and `gmp` would meet a merge that it
+        // did not start. Nothing may run in that case.
+        //
+        // gsw did not start that merge either, so the merge stays as it is:
+        // the user started it, and only the user decides to finish or abort it.
+        let stub = StubShell::answering(0);
+        let workdir = init_repo();
+        conflicting_branches(workdir.path());
+        git_allowing_failure(workdir.path(), &["merge", "-q", BASE]);
+        assert!(
+            merge_in_progress(workdir.path()),
+            "the fixture must hold a real merge, or the run has nothing to refuse",
+        );
+
+        let outcome = run_quiet(stub.as_shell(), &confirmed_merge(), workdir.path());
+
+        assert!(
+            !outcome.success,
+            "a run over a merge in progress must not report success: {:?}",
+            outcome.output,
+        );
+        assert_eq!(
+            outcome.output, "a merge is in progress — finish it first",
+            "the run must refuse with the words of the question",
+        );
+        assert_eq!(stub.runs(), "", "a refused run must start no shell at all");
+        assert!(
+            merge_in_progress(workdir.path()),
+            "gsw did not start the merge, so the merge must still be in progress",
+        );
     }
 
     #[test]
