@@ -29,12 +29,14 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::conflicts::ConflictsWorker;
 use crate::push::{PushCommand, PushUi};
-use crate::render::Snapshot;
+use crate::render::{LogEntry, Snapshot};
 use crate::repo::RepoHandle;
 use crate::worktrees::{
     head_label, list_worktrees, worktree_paths, WorktreeEntry, WorktreeList, WorktreePath,
 };
-use crate::{collect_snapshot, render_frame, render_list_frame, FrameTiming, Render, RenderConfig};
+use crate::{
+    collect_snapshot, render_frame, render_list_frame, FrameTiming, LogDemand, Render, RenderConfig,
+};
 use termwindow::{
     effective_terminal_height, effective_terminal_width, DEFAULT_TERMINAL_HEIGHT,
     DEFAULT_TERMINAL_WIDTH,
@@ -1589,6 +1591,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             ui: PushUi::new(cfg.truecolor),
             session,
             home: home.clone(),
+            log: cfg.log,
         },
         LoopHooks {
             // The loop passes the worktree on the screen. The loop moves to a
@@ -1611,6 +1614,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                     .fetch_limit(current_dimensions(cfg.width_offset).height);
                 watched.walk(cfg, &home, log_limit)
             },
+            fetch_log: |_current: &WorktreePath, _limit: usize| Vec::new(),
             render: |snap: &Snapshot, dims: Dimensions, timing: FrameTiming| {
                 render_frame(snap, cfg, dims, timing)
             },
@@ -2211,6 +2215,10 @@ struct LoopStart {
     /// every comparison of the loop uses. The loop starts on it, and Up goes
     /// back to it.
     home: WorktreePath,
+    /// How many recent commits the log asks for, as the command line states
+    /// it. The loop applies it to the pane that it measured, so the loop is
+    /// the one place that decides how many commits each read of the log gets.
+    log: LogDemand,
 }
 
 /// Everything the loop changes while it runs.
@@ -2241,6 +2249,8 @@ struct LoopState {
     current: WorktreePath,
     /// How many switches the loop has made. See [`Generation`].
     generation: Generation,
+    /// How many recent commits the log asks for. See [`LoopStart::log`].
+    log: LogDemand,
 }
 
 impl LoopState {
@@ -2374,6 +2384,7 @@ impl LoopState {
 /// ran — and with what age offset — without a TTY or real time.
 struct LoopHooks<
     Collect,
+    FetchLog,
     RenderFn,
     RenderList,
     Dims,
@@ -2391,6 +2402,11 @@ struct LoopHooks<
     /// Walk the worktree that the loop passes, which is the worktree the frame
     /// shows, into a fresh [`Snapshot`] (the expensive git work).
     collect: Collect,
+    /// Read the newest commits of the worktree that the loop passes, which is
+    /// the worktree the frame shows, up to the limit that the loop passes.
+    /// Production reads them through [`crate::fetch_log`]. It reads the log
+    /// alone, and no status walk.
+    fetch_log: FetchLog,
     /// Render a snapshot at the given dimensions and timing.
     render: RenderFn,
     /// Render the frame of the open list of the worktrees: the head of the
@@ -2522,13 +2538,14 @@ enum Flow {
 /// is where the push, the issue key, and `m` do their work.
 #[expect(
     clippy::type_complexity,
-    reason = "the loop takes one generic for each of its fourteen hooks, so each hook stays \
+    reason = "the loop takes one generic for each of its fifteen hooks, so each hook stays \
               a plain closure that a test replaces with a fake. A type alias spells the same \
-              fourteen generics, and the borrow of the whole value keeps every call of \
+              fifteen generics, and the borrow of the whole value keeps every call of \
               absorb the same"
 )]
 fn absorb<
     Collect,
+    FetchLog,
     RenderFn,
     RenderList,
     Dims,
@@ -2548,6 +2565,7 @@ fn absorb<
     state: &mut LoopState,
     hooks: &mut LoopHooks<
         Collect,
+        FetchLog,
         RenderFn,
         RenderList,
         Dims,
@@ -2881,12 +2899,13 @@ where
 /// loop goes back to the home worktree ([`LoopState::return_home_if_gone`]).
 #[expect(
     clippy::type_complexity,
-    reason = "the loop takes one generic for each of its fourteen hooks, so each hook stays \
+    reason = "the loop takes one generic for each of its fifteen hooks, so each hook stays \
               a plain closure that a test replaces with a fake. A type alias spells the same \
-              fourteen generics, as the expectation on absorb says"
+              fifteen generics, as the expectation on absorb says"
 )]
 fn event_loop<
     Collect,
+    FetchLog,
     RenderFn,
     RenderList,
     Dims,
@@ -2907,6 +2926,7 @@ fn event_loop<
     start: LoopStart,
     mut hooks: LoopHooks<
         Collect,
+        FetchLog,
         RenderFn,
         RenderList,
         Dims,
@@ -2924,6 +2944,7 @@ fn event_loop<
 ) -> Result<()>
 where
     Collect: FnMut(&WorktreePath) -> Result<Snapshot>,
+    FetchLog: FnMut(&WorktreePath, usize) -> Vec<LogEntry>,
     RenderFn: FnMut(&Snapshot, Dimensions, FrameTiming) -> Render,
     RenderList: FnMut(&Snapshot, Dimensions, FrameTiming, &WorktreeList) -> Render,
     Dims: Fn() -> Dimensions,
@@ -2945,6 +2966,7 @@ where
         ui,
         session,
         home,
+        log,
     } = start;
     let mut state = LoopState {
         cache,
@@ -2962,6 +2984,7 @@ where
         current: home.clone(),
         home,
         generation: Generation::default(),
+        log,
     };
     loop {
         // Wait for the first event, or — when the decay timer is enabled — wake
@@ -5191,6 +5214,14 @@ mod tests {
         Err("this loop test watches one worktree".to_string())
     }
 
+    /// A `fetch_log` hook for the loop tests whose log is off. The limit of
+    /// such a pane is zero, and no cached log holds fewer commits than zero,
+    /// so the loop never calls it. It gives no commit, and a fetch with no
+    /// commit never replaces the cached log.
+    pub(super) fn no_fetch(_current: &WorktreePath, _limit: usize) -> Vec<LogEntry> {
+        Vec::new()
+    }
+
     /// A `render_list` hook for the loop tests that never open the list of the
     /// worktrees. Their `worktrees` hook gives no worktree, so Down opens no
     /// list, and the loop never calls it.
@@ -5288,6 +5319,7 @@ mod tests {
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
                 home: loop_home(),
+                log: LogDemand::Off,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath| {
@@ -5317,6 +5349,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                fetch_log: no_fetch,
                 render_list: no_list,
             },
         )
@@ -5353,6 +5386,7 @@ mod tests {
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
                 home: loop_home(),
+                log: LogDemand::Off,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath| Ok(empty_snapshot()),
@@ -5375,6 +5409,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                fetch_log: no_fetch,
                 render_list: no_list,
             },
         )
@@ -5411,6 +5446,7 @@ mod tests {
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
                 home: loop_home(),
+                log: LogDemand::Off,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath| {
@@ -5436,6 +5472,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                fetch_log: no_fetch,
                 render_list: no_list,
             },
         )
@@ -5475,6 +5512,7 @@ mod tests {
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
                 home: loop_home(),
+                log: LogDemand::Off,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath| {
@@ -5499,6 +5537,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                fetch_log: no_fetch,
                 render_list: no_list,
             },
         )
@@ -5532,6 +5571,7 @@ mod tests {
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
                 home: loop_home(),
+                log: LogDemand::Off,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath| {
@@ -5558,6 +5598,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                fetch_log: no_fetch,
                 render_list: no_list,
             },
         )
@@ -5590,6 +5631,7 @@ mod tests {
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
                 home: loop_home(),
+                log: LogDemand::Off,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath| {
@@ -5614,6 +5656,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                fetch_log: no_fetch,
                 render_list: no_list,
             },
         )
@@ -5644,6 +5687,7 @@ mod tests {
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
                 home: loop_home(),
+                log: LogDemand::Off,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath| Ok(empty_snapshot()),
@@ -5672,6 +5716,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                fetch_log: no_fetch,
                 render_list: no_list,
             },
         )
@@ -5705,6 +5750,7 @@ mod tests {
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
                 home: loop_home(),
+                log: LogDemand::Off,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath| Ok(empty_snapshot()),
@@ -5730,6 +5776,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                fetch_log: no_fetch,
                 render_list: no_list,
             },
         )
@@ -5763,6 +5810,7 @@ mod tests {
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
                 home: loop_home(),
+                log: LogDemand::Off,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath| {
@@ -5789,6 +5837,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                fetch_log: no_fetch,
                 render_list: no_list,
             },
         )
@@ -5830,6 +5879,7 @@ mod tests {
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
                 home: loop_home(),
+                log: LogDemand::Off,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath| {
@@ -5854,6 +5904,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                fetch_log: no_fetch,
                 render_list: no_list,
             },
         )
@@ -5865,6 +5916,231 @@ mod tests {
             Some(new_dims),
             "a resize must re-render at the freshly-queried dimensions",
         );
+    }
+
+    /// The subject of each commit of [`fake_history`], before the number of
+    /// the commit. No other row of a status frame holds it, so the rows that
+    /// hold it are the commit rows.
+    const HISTORY_SUBJECT: &str = "history commit";
+
+    /// A fake history of `commits` commits, newest first, as a read of the log
+    /// gives it. The newest commit is `newest_age` old, and each commit is one
+    /// minute older than the commit before it.
+    fn fake_history(commits: usize, newest_age: Duration) -> Vec<LogEntry> {
+        (0..commits)
+            .map(|n| LogEntry {
+                hash: format!("{n:07x}"),
+                subject: format!("{HISTORY_SUBJECT} {n}"),
+                age: Some(
+                    newest_age
+                        + Duration::from_secs(60) * u32::try_from(n).expect("a test history is short"),
+                ),
+            })
+            .collect()
+    }
+
+    /// The newest `limit` commits of `history`, as a read of the log with that
+    /// limit gives them.
+    fn newest(history: &[LogEntry], limit: usize) -> Vec<LogEntry> {
+        history.iter().take(limit).cloned().collect()
+    }
+
+    /// A pane of `height` rows and 80 columns.
+    fn pane(height: usize) -> Dimensions {
+        Dimensions { width: 80, height }
+    }
+
+    /// A [`RenderConfig`] whose log fills the pane, as the log of gsw does
+    /// with no `--log-lines` and no `--no-log`, for the loop tests that paint
+    /// the real status frame.
+    fn fill_config() -> RenderConfig {
+        RenderConfig {
+            base: None,
+            max_files: None,
+            bar_width: 6,
+            log: LogDemand::Fill,
+            truecolor: false,
+            width_offset: 0,
+            refresh_interval: None,
+        }
+    }
+
+    /// What one loop run over a resize did.
+    struct ResizeRun {
+        /// The glyphs of the frame that the loop painted, with no escape code.
+        glyphs: String,
+        /// How many walks the loop made.
+        collects: usize,
+        /// How many reads of the log the loop made.
+        fetches: usize,
+    }
+
+    impl ResizeRun {
+        /// How many rows the painted frame has.
+        fn rows(&self) -> usize {
+            self.glyphs.lines().count()
+        }
+
+        /// How many commit rows the painted frame shows.
+        fn commit_rows(&self) -> usize {
+            self.glyphs
+                .lines()
+                .filter(|line| line.contains(HISTORY_SUBJECT))
+                .count()
+        }
+    }
+
+    /// Run the loop over one resize from `cache` to a pane of `measured` rows,
+    /// with a log that fills the pane, and paint the real status frame.
+    ///
+    /// The clock reads `now` at each read. `history` is the history of the
+    /// worktree at `now`: the `collect` hook gives all of it, and the
+    /// `fetch_log` hook gives its newest commits up to the limit it gets. The
+    /// codes of the colors are forced on and then removed, so the glyphs are
+    /// the same whether the test writes to a terminal or not.
+    fn run_resize(
+        cache: SnapshotCache,
+        measured: usize,
+        now: Instant,
+        history: &[LogEntry],
+    ) -> ResizeRun {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Event::Resize).expect("queue resize");
+        drop(tx);
+
+        let cfg = fill_config();
+        let mut displayed = String::new();
+        let mut collects = 0_usize;
+        let mut fetches = 0_usize;
+        testcolor::with_forced_ansi(|| {
+            event_loop(
+                &rx,
+                TEST_DEBOUNCE,
+                &mut displayed,
+                LoopStart {
+                    cache,
+                    freshest: None,
+                    schedule: no_timed_refresh(),
+                    ui: PushUi::new(false),
+                    session: crate::remote::Session::Local,
+                    home: loop_home(),
+                    log: cfg.log,
+                },
+                LoopHooks {
+                    collect: |_current: &WorktreePath| {
+                        collects += 1;
+                        Ok(Snapshot {
+                            log: history.to_vec(),
+                            ..empty_snapshot()
+                        })
+                    },
+                    fetch_log: |_current: &WorktreePath, limit: usize| {
+                        fetches += 1;
+                        newest(history, limit)
+                    },
+                    render: |snap: &Snapshot, dims: Dimensions, timing: FrameTiming| {
+                        render_frame(snap, &cfg, dims, timing)
+                    },
+                    dimensions: || pane(measured),
+                    paint: |_output: &str| Ok(()),
+                    clock: || now,
+                    next_tick: timer_off,
+                    start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                    start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                        _current: &WorktreePath| {},
+                    start_issue: |_command: crate::shell::ShellCommand,
+                                  _current: &WorktreePath,
+                                  _generation: Generation| {},
+                    start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                    worktrees: Vec::new,
+                    worktree_paths: Vec::new,
+                    switch: no_switch,
+                    render_list: no_list,
+                },
+            )
+        })
+        .expect("loop");
+
+        ResizeRun {
+            glyphs: testcolor::strip_ansi(&displayed),
+            collects,
+            fetches,
+        }
+    }
+
+    #[test]
+    fn a_resize_that_outgrows_the_cached_log_reads_the_log_and_fills_the_pane() {
+        // Issue #521: a walk fetches only the commits that the pane had rows
+        // for at the time of the walk. A pane that grows after the walk needs
+        // more commits than the cache holds, and until now nothing read them
+        // before the next walk. The resize reads the log again, and walks
+        // nothing, because the rest of the snapshot does not depend on the
+        // size of the pane.
+        //
+        // The walk filled a pane of 20 rows: 18 commits under the header and
+        // the separator. The pane then grows to 60 rows, which have room for
+        // 58 commits.
+        let now = Instant::now();
+        let history = fake_history(100, Duration::from_secs(100));
+        let cache = SnapshotCache {
+            snapshot: Snapshot {
+                log: newest(&history, 18),
+                ..empty_snapshot()
+            },
+            collected_at: now,
+            dims: pane(20),
+        };
+
+        let run = run_resize(cache, 60, now, &history);
+
+        assert_eq!(
+            run.commit_rows(),
+            58,
+            "the log fills the grown pane under the header and the separator:\n{}",
+            run.glyphs,
+        );
+        assert_eq!(
+            run.rows(),
+            60,
+            "the frame fills the pane:\n{}",
+            run.glyphs
+        );
+        assert_eq!(run.collects, 0, "a resize walks nothing");
+        assert_eq!(run.fetches, 1, "the resize reads the log once");
+    }
+
+    #[test]
+    fn a_resize_to_a_pane_that_the_cached_log_fills_reads_no_log() {
+        // The cache holds the 58 commits of a pane of 60 rows. The same pane,
+        // as after a change of the width alone, and a pane of 30 rows show no
+        // more commits than the cache holds, so the resize reads nothing.
+        let now = Instant::now();
+        let history = fake_history(100, Duration::from_secs(100));
+        for (measured, commit_rows) in [(60, 58), (30, 28)] {
+            let cache = SnapshotCache {
+                snapshot: Snapshot {
+                    log: newest(&history, 58),
+                    ..empty_snapshot()
+                },
+                collected_at: now,
+                dims: pane(60),
+            };
+
+            let run = run_resize(cache, measured, now, &history);
+
+            assert_eq!(
+                run.commit_rows(),
+                commit_rows,
+                "a pane of {measured} rows:\n{}",
+                run.glyphs,
+            );
+            assert_eq!(run.rows(), measured, "a pane of {measured} rows");
+            assert_eq!(
+                (run.collects, run.fetches),
+                (0, 0),
+                "a resize to a pane of {measured} rows reads nothing from git",
+            );
+        }
     }
 
     #[test]
@@ -5897,6 +6173,7 @@ mod tests {
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
                 home: loop_home(),
+                log: LogDemand::Off,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath| Ok(empty_snapshot()),
@@ -5927,6 +6204,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                fetch_log: no_fetch,
                 render_list: no_list,
             },
         )
@@ -5987,6 +6265,7 @@ mod tests {
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
                 home: loop_home(),
+                log: LogDemand::Off,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath| {
@@ -6022,6 +6301,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                fetch_log: no_fetch,
                 render_list: no_list,
             },
         )
@@ -6076,6 +6356,7 @@ mod tests {
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
                 home: loop_home(),
+                log: LogDemand::Off,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath| {
@@ -6121,6 +6402,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                fetch_log: no_fetch,
                 render_list: no_list,
             },
         )
@@ -6162,6 +6444,7 @@ mod tests {
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
                 home: loop_home(),
+                log: LogDemand::Off,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath| {
@@ -6201,6 +6484,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                fetch_log: no_fetch,
                 render_list: no_list,
             },
         )
@@ -6249,6 +6533,7 @@ mod tests {
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
                 home: loop_home(),
+                log: LogDemand::Off,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath| {
@@ -6288,6 +6573,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                fetch_log: no_fetch,
                 render_list: no_list,
             },
         )
@@ -6336,6 +6622,7 @@ mod tests {
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
                 home: loop_home(),
+                log: LogDemand::Off,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath| {
@@ -6374,6 +6661,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                fetch_log: no_fetch,
                 render_list: no_list,
             },
         )
@@ -6412,6 +6700,7 @@ mod tests {
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
                 home: loop_home(),
+                log: LogDemand::Off,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath| {
@@ -6440,6 +6729,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                fetch_log: no_fetch,
                 render_list: no_list,
             },
         )
@@ -6491,6 +6781,7 @@ mod tests {
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
                 home: loop_home(),
+                log: LogDemand::Off,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath| {
@@ -6519,6 +6810,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                fetch_log: no_fetch,
                 render_list: no_list,
             },
         );
@@ -6587,6 +6879,7 @@ mod tests {
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
                 home: loop_home(),
+                log: LogDemand::Off,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath| {
@@ -6622,6 +6915,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                fetch_log: no_fetch,
                 render_list: no_list,
             },
         );
@@ -6693,6 +6987,7 @@ mod tests {
                 ui: PushUi::new(false),
                 session: crate::remote::Session::Local,
                 home: loop_home(),
+                log: LogDemand::Off,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath| {
@@ -6749,6 +7044,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                fetch_log: no_fetch,
                 render_list: no_list,
             },
         );
@@ -6845,7 +7141,8 @@ mod tests {
 #[cfg(test)]
 mod push_loop_tests {
     use super::tests::{
-        frame, loop_home, no_list, no_switch, stepping_clock, timer_off, TEST_DEBOUNCE, TEST_DIMS,
+        frame, loop_home, no_fetch, no_list, no_switch, stepping_clock, timer_off, TEST_DEBOUNCE,
+        TEST_DIMS,
     };
     use super::*;
     use crate::conflicts::ConflictsOutcome;
@@ -7376,6 +7673,7 @@ mod push_loop_tests {
                 ui,
                 session,
                 home: world.home.clone(),
+                log: LogDemand::Off,
             },
             LoopHooks {
                 collect: |current: &WorktreePath| {
@@ -7387,6 +7685,7 @@ mod push_loop_tests {
                     }
                     Ok(snapshot_here(current))
                 },
+                fetch_log: no_fetch,
                 render: |snap: &Snapshot, frame_dims: Dimensions, timing: FrameTiming| {
                     queue_next_burst();
                     let mut seen = seen.borrow_mut();
@@ -8234,6 +8533,7 @@ mod push_loop_tests {
                 ui: pushed_ui(base),
                 session: crate::remote::Session::Local,
                 home: loop_home(),
+                log: LogDemand::Off,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath| Ok(pushable_snapshot()),
@@ -8267,6 +8567,7 @@ mod push_loop_tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                fetch_log: no_fetch,
                 render_list: no_list,
             },
         )
@@ -9087,6 +9388,7 @@ mod push_loop_tests {
                     ui: PushUi::new(false),
                     session: crate::remote::Session::Local,
                     home: loop_home(),
+                    log: LogDemand::Off,
                 },
                 LoopHooks {
                     collect: |_current: &WorktreePath| Ok(pushable_snapshot()),
@@ -9115,6 +9417,7 @@ mod push_loop_tests {
                     worktrees: Vec::new,
                     worktree_paths: Vec::new,
                     switch: no_switch,
+                    fetch_log: no_fetch,
                     render_list: no_list,
                 },
             )
@@ -9684,6 +9987,7 @@ mod push_loop_tests {
             home: worktree(BRAVO),
             current: worktree(BRAVO),
             generation: Generation::default(),
+            log: LogDemand::Off,
         };
         assert!(state.issue.is_armed(now), "the fixture must start armed");
 
