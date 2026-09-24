@@ -1472,7 +1472,8 @@ fn listed_paths(watched: &RefCell<Watched>) -> Vec<WorktreePath> {
 /// repository so config changed in another pane takes effect — and re-seed the
 /// cache; decay ticks and resizes re-render the cached snapshot with no walk
 /// (Part A). A resize to a pane with rows for more commits than the cached log
-/// holds reads the log alone, through [`crate::fetch_log`], before the repaint.
+/// holds reads the log alone, through [`crate::fetch_log`], before the repaint,
+/// unless the cached log is complete ([`Snapshot::log_complete`]).
 /// The [`TerminalGuard`] restores the main screen and cursor on every exit path.
 ///
 /// Takes the [`RepoHandle`] **by value**: watch mode owns the repository for
@@ -1616,11 +1617,11 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                 watched.walk(cfg, &home, log_limit)
             },
             // A resize reads the log alone when the pane outgrows the log of
-            // the cache. The read goes through the handle as the last walk
-            // left it, with no re-open. A re-open costs a parse of the
-            // configuration, and the next walk makes one, as every walk does.
-            // The loop passes the worktree on the screen, as it does to
-            // `collect`.
+            // the cache, and that log is not complete. The read goes through
+            // the handle as the last walk left it, with no re-open. A re-open
+            // costs a parse of the configuration, and the next walk makes one,
+            // as every walk does. The loop passes the worktree on the screen,
+            // as it does to `collect`.
             fetch_log: |current: &WorktreePath, limit: usize| {
                 let watched = watched.borrow();
                 debug_assert_eq!(
@@ -2191,7 +2192,8 @@ fn global_excludes_path(repo: &gix::Repository) -> Option<PathBuf> {
 /// log holds reads the log again before the repaint, and
 /// [`SnapshotCache::take_fetched_log`] puts the new log in the cache. The rest
 /// of the snapshot does not depend on the size of the pane, so it stays as the
-/// walk left it.
+/// walk left it. A complete log ([`Snapshot::log_complete`]) already holds
+/// every commit that HEAD reaches, so no resize reads the log again for it.
 struct SnapshotCache {
     /// The most recently collected repository state.
     snapshot: Snapshot,
@@ -2452,7 +2454,8 @@ impl LoopState {
 /// without a TTY or real time.
 ///
 /// A resize never calls `collect`. It calls `fetch_log` when the new pane has
-/// rows for more commits than the cached log holds.
+/// rows for more commits than the cached log holds, and the cached log is not
+/// complete ([`Snapshot::log_complete`]).
 struct LoopHooks<
     Collect,
     FetchLog,
@@ -2950,7 +2953,9 @@ where
 ///   collect. When the new pane has rows for more commits than the cached log
 ///   holds, the resize first reads the log alone (`fetch_log` in `hooks`). The
 ///   read goes into the cache only when it holds more commits, so a read that
-///   fails never blanks the log;
+///   fails never blanks the log. A complete cached log
+///   ([`Snapshot::log_complete`]) holds every commit that HEAD reaches, so a
+///   resize past it reads nothing;
 /// - a recompute whose output is byte-identical to what's displayed paints
 ///   nothing (suppression);
 /// - a walk that *fails* does not end the loop: the last good snapshot is
@@ -3261,6 +3266,12 @@ where
         // log alone, because the rest of the snapshot does not depend on the
         // size of the pane.
         //
+        // A complete log ([`Snapshot::log_complete`]) is the exception. It
+        // holds every commit that HEAD reaches, so no read can give the pane
+        // more commits, and the resize reads nothing. Without this check, a
+        // branch with fewer commits than the pane has rows reads its log again
+        // on each resize, for no new row.
+        //
         // The schedule does not record this read, because it is not a walk.
         // `WalkSchedule::record` clears a walk that a cooldown deferred, and it
         // moves the timed refresh on by a whole interval. A record here would
@@ -3271,7 +3282,8 @@ where
         // the frame below measures the age offset from `now` too.
         if saw_resize {
             let limit = state.log_limit();
-            if state.cache.snapshot.log.len() < limit {
+            let cached = &state.cache.snapshot;
+            if cached.log.len() < limit && !cached.log_complete {
                 let fetched = (hooks.fetch_log)(&state.current, limit);
                 state.cache.take_fetched_log(fetched, now);
             }
