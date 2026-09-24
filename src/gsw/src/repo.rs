@@ -392,6 +392,52 @@ pub fn operation_state(repo: &gix::Repository, conflicts: u32) -> Option<Operati
     }
 }
 
+/// How many of `statuses` are unmerged paths, which is the conflict count of an
+/// operation in progress.
+///
+/// The one rule for that count. Every unmerged path is one
+/// [`FileStatus::Conflicted`] row of the status walk, so the snapshot and
+/// [`held_operation`] both count those rows here. The `⚠` row of the header and
+/// the words of `R` and `M` then cannot give two counts for one work tree.
+pub fn conflict_count(statuses: impl IntoIterator<Item = FileStatus>) -> u32 {
+    let conflicted = statuses
+        .into_iter()
+        .filter(|status| *status == FileStatus::Conflicted)
+        .count();
+    u32::try_from(conflicted).unwrap_or(u32::MAX)
+}
+
+/// The rebase or merge that git holds in the work tree at `workdir` right now,
+/// or `None` when git holds neither.
+///
+/// The one reader for a caller that has a path and no repository handle: the
+/// run of `R` and `M` reads the work tree of the run with it, on a thread of
+/// its own, and a [`gix::Repository`] is not `Send`. It asks
+/// [`operation_state`], which is the one detector, with the conflict count of
+/// [`conflict_count`], which is the one rule for that count. So this reader and
+/// the snapshot cannot disagree about one work tree.
+///
+/// **`gix::open`, and never `gix::discover`.** `open` reads `workdir/.git`,
+/// also the `.git` file of a linked worktree, and so it reads the git dir of
+/// that worktree, where git keeps the state of its operation. It never walks up
+/// the directory tree, so a work tree that vanished is an error here, and never
+/// the repository of a parent directory. See [`RepoHandle::reopened`] for the
+/// same rule.
+///
+/// A repository that cannot be opened reads as `None`, the same as a git that
+/// cannot be run reads for the branch check of the run: the run then goes
+/// ahead, and a repository that cannot be read holds no operation that gsw can
+/// name. A status walk that fails counts no conflict. The operation itself is
+/// still read, because the operation is what a refusal is about, and the count
+/// is only a part of the words.
+pub fn held_operation(workdir: &std::path::Path) -> Option<Operation> {
+    let repo = gix::open(workdir).ok()?;
+    let conflicts = collect_changes(&repo).map_or(0, |changes| {
+        conflict_count(changes.entries.iter().map(|entry| entry.status))
+    });
+    operation_state(&repo, conflicts)
+}
+
 /// Both rebase step-counter pairs, in the order [`gix::Repository::state`]
 /// resolves the directories they live in: `rebase-apply/` before
 /// `rebase-merge/`. See [`rebase_step`], which reads them, for why the order

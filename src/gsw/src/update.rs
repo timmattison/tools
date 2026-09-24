@@ -226,6 +226,23 @@ impl BaseUpdate {
     }
 }
 
+/// What `R` and `M` say while git holds `operation`.
+///
+/// **One function for the question and for the run.** The question refuses a
+/// snapshot that shows an operation, and the run refuses a work tree where an
+/// operation started after the question. The user reads the same words for the
+/// same repository, whichever of the two found the operation.
+///
+/// The verb is the operation that git holds, and not the key that was pressed.
+/// The parameter is the operation for that reason: a caller cannot hand this
+/// function the act of the key by mistake. See [`BaseUpdate::held`].
+fn in_progress_refusal(operation: &Operation) -> String {
+    format!(
+        "a {} is in progress — finish it first",
+        BaseUpdate::held(operation).verb(),
+    )
+}
+
 /// A confirmed rebase or merge: the act, the branch the question named, the
 /// base it named, and the command the user supplied.
 ///
@@ -514,6 +531,19 @@ fn run_in(
                 ),
             };
         }
+    }
+
+    // **An operation that git holds refuses the run too, and it stays as it
+    // is.** The gap is the gap of the branch check above: a merge that another
+    // pane starts between the question and the `y` keeps HEAD on the branch,
+    // and the command would meet a merge that it did not start. gsw did not
+    // start it either, so gsw does not abort it. The words are the words of the
+    // question.
+    if let Some(operation) = crate::repo::held_operation(workdir) {
+        return PushOutcome {
+            success: false,
+            output: in_progress_refusal(&operation),
+        };
     }
 
     // The child is interactive, it carries no `GIT_` variable out of the
