@@ -1051,7 +1051,9 @@ mod run_tests {
         test_process_can_open_the_terminal, user_intent_lost, user_intent_value, StubShell,
         CHILD_RAN, GAVE_UP_WITHIN, HOSTILE_GIT_ENVIRONMENT, HOSTILE_MARKER, TTY_REFUSED,
     };
-    use crate::testrepo::{git, git_allowing_failure, git_output, git_stdout, init_repo};
+    use crate::testrepo::{
+        git, git_allowing_failure, git_output, git_stdout, init_repo, init_repo_with_worktree,
+    };
     use std::sync::mpsc::{channel, Receiver};
     use std::time::Instant;
     use tempfile::TempDir;
@@ -1192,6 +1194,45 @@ mod run_tests {
             ))
             .is_dir()
         })
+    }
+
+    /// The branch that the work tree at `dir` has checked out, and the commit
+    /// that HEAD holds, as git reports them.
+    ///
+    /// A detached HEAD gives [`DETACHED_HEAD`] as the branch, so a test that
+    /// compares the pair also sees a rebase that left HEAD detached.
+    fn checkout_of(dir: &Path) -> (String, String) {
+        let branch = git_output(dir, &["symbolic-ref", "-q", "--short", "HEAD"]);
+        let branch = if branch.status.success() {
+            String::from_utf8_lossy(&branch.stdout).trim().to_string()
+        } else {
+            DETACHED_HEAD.to_string()
+        };
+        (branch, git_stdout(dir, &["rev-parse", "HEAD"]))
+    }
+
+    /// The line of a stub shell that runs real git with `arguments`.
+    ///
+    /// The run sheds every `GIT_` variable except the six that a user states,
+    /// and `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` are two of those six.
+    /// The line pins both to `/dev/null`, so the global configuration of the
+    /// developer does not decide what the test reads.
+    fn real_git(arguments: &str) -> String {
+        format!("GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git {arguments}")
+    }
+
+    /// A [`crate::RenderConfig`] for a walk of a fixture. The walk reads git,
+    /// and the settings of the frame do not change what it reads.
+    fn walk_config() -> crate::RenderConfig {
+        crate::RenderConfig {
+            base: None,
+            max_files: None,
+            bar_width: 20,
+            log_lines: 0,
+            truecolor: false,
+            width_offset: 0,
+            refresh_interval: None,
+        }
     }
 
     #[test]
@@ -1640,6 +1681,78 @@ mod run_tests {
         assert!(
             rebase_in_progress(workdir.path()),
             "gsw did not start the rebase, so the rebase must still be in progress",
+        );
+    }
+
+    #[test]
+    fn a_rebase_that_the_run_left_stopped_is_aborted_in_the_linked_worktree_of_the_run() {
+        // The run has no terminal, so nobody can resolve a conflict inside it.
+        // A rebase that the command started and left stopped is thus a rebase
+        // that gsw aborts, and the branch goes back to where it was.
+        //
+        // **The run is in a linked worktree, and this process is somewhere
+        // else.** The current directory of this process is the directory of
+        // the crate, and git keeps the rebase of a linked worktree in the git
+        // dir of that worktree, not in the `.git` dir of the repository. An
+        // abort that goes to the wrong directory, or to the wrong git dir,
+        // leaves the rebase in place, and the checks below see it.
+        let (repo, linked) = init_repo_with_worktree();
+        conflicting_branches(&linked);
+        let before = checkout_of(&linked);
+        assert_eq!(
+            before.0, BRANCH,
+            "the linked worktree must have the branch of the question checked out",
+        );
+        let main_before = checkout_of(repo.path());
+        let stub = StubShell::new(&real_git(&format!("rebase {BASE}")));
+
+        let outcome = run_quiet(stub.as_shell(), &default_command(), &linked);
+
+        assert!(
+            !rebase_in_progress(&linked),
+            "the run started the rebase and left it stopped, so gsw must abort it: {:?}",
+            outcome.output,
+        );
+        assert_eq!(
+            crate::repo::held_operation(&linked),
+            None,
+            "the reader of gsw must see no operation in the work tree of the run",
+        );
+        assert_eq!(
+            checkout_of(&linked),
+            before,
+            "the branch must be checked out again, at its commit from before the run",
+        );
+        assert_eq!(
+            git_stdout(&linked, &["status", "--porcelain"]),
+            "",
+            "the abort must leave the work tree clean",
+        );
+        assert!(
+            !outcome.success,
+            "a run that stopped on a conflict must not report success: {:?}",
+            outcome.output,
+        );
+
+        // The watch loop walks the repository after every outcome of a run,
+        // and this walk is the same walk. An operation on the snapshot is the
+        // `⚠` row of the next frame.
+        let walked = gix::open(&linked).expect("open the linked worktree");
+        let snapshot = crate::collect_snapshot(&walked, &walk_config()).expect("walk the worktree");
+        assert_eq!(
+            snapshot.operation, None,
+            "the next frame must show no ⚠ row for a rebase that gsw aborted",
+        );
+
+        // The main worktree holds no rebase, and it did not move.
+        assert!(
+            !rebase_in_progress(repo.path()),
+            "the main worktree must hold no rebase",
+        );
+        assert_eq!(
+            checkout_of(repo.path()),
+            main_before,
+            "the main worktree must stay on its branch, at its commit",
         );
     }
 
