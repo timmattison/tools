@@ -66,6 +66,7 @@ pub fn build_snapshot(
         files,
         log: Vec::new(),
         log_complete: false,
+        log_start: None,
         upstream: None,
         operation: None,
         push_remote: None,

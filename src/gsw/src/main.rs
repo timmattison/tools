@@ -612,6 +612,7 @@ pub(crate) fn collect_snapshot(
     let fetched = fetch_log(repo, log_limit);
     snapshot.log = fetched.entries;
     snapshot.log_complete = fetched.complete;
+    snapshot.log_start = fetched.start;
 
     snapshot.upstream = repo::upstream_status(repo);
     snapshot.push_remote = repo::push_remote(repo);
@@ -807,6 +808,8 @@ pub(crate) fn render_list_frame(
 /// [`Snapshot`]. Watch mode also takes it alone on a resize.
 #[derive(Debug, Clone)]
 pub(crate) struct FetchedLog {
+    /// The commit that the read started from ([`Snapshot::log_start`]).
+    pub(crate) start: Option<repo::LogStart>,
     /// The commits, newest first.
     pub(crate) entries: Vec<LogEntry>,
     /// `entries` is complete: the walk of the history reached its end at or
@@ -836,7 +839,23 @@ pub(crate) struct FetchedLog {
 /// snapshot does not depend on the size of the pane.
 pub(crate) fn fetch_log(repo: &gix::Repository, n: usize) -> FetchedLog {
     let now = SystemTime::now();
-    let recent = repo::recent_log(repo, n);
+    fetched_at(repo::recent_log(repo, n), now)
+}
+
+/// Fetch the `n` most recent commits of the history of `start` as
+/// [`LogEntry`] records, as [`fetch_log`] fetches them from HEAD.
+pub(crate) fn fetch_log_from(
+    repo: &gix::Repository,
+    start: repo::LogStart,
+    n: usize,
+) -> FetchedLog {
+    let now = SystemTime::now();
+    fetched_at(repo::recent_log_from(repo, start, n), now)
+}
+
+/// The [`FetchedLog`] of `recent`, with the age of each commit measured at
+/// `now`.
+fn fetched_at(recent: repo::RecentLog, now: SystemTime) -> FetchedLog {
     let entries = recent
         .commits
         .into_iter()
@@ -849,6 +868,7 @@ pub(crate) fn fetch_log(repo: &gix::Repository, n: usize) -> FetchedLog {
         })
         .collect();
     FetchedLog {
+        start: recent.start,
         entries,
         complete: recent.complete,
     }
@@ -1095,6 +1115,7 @@ mod tests {
             files,
             log: Vec::new(),
             log_complete: false,
+            log_start: None,
             upstream: None,
             operation: Some(Operation::Merge { conflicts: 1 }),
             push_remote: None,
@@ -1757,6 +1778,7 @@ mod tests {
             files,
             log,
             log_complete: false,
+            log_start: None,
             upstream: None,
             operation: None,
             push_remote: None,
@@ -1881,6 +1903,7 @@ mod tests {
                 age: Some(Duration::from_secs(10)),
             }],
             log_complete: false,
+            log_start: None,
             upstream: None,
             operation: None,
             push_remote: None,

@@ -2277,6 +2277,7 @@ mod ui_tests {
             files: Vec::new(),
             log: Vec::new(),
             log_complete: false,
+            log_start: None,
             upstream,
             operation: None,
             push_remote: Some("origin".to_string()),

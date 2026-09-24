@@ -14,6 +14,7 @@ use crate::age::{
 };
 use crate::bar::render_bar;
 use crate::git::FileStatus;
+use crate::repo::LogStart;
 use crate::worktrees::WorktreeBadge;
 
 /// The rows of the worktree list, and the hint under them.
@@ -48,6 +49,17 @@ pub struct Snapshot {
     /// `false` when the walk stopped at the limit, and when a read failed, so
     /// a doubt costs one read of the log and never a row of the log.
     pub log_complete: bool,
+    /// The commit that the walk of the log started from: the commit that HEAD
+    /// named at the walk. `None` when HEAD named no commit, because it was
+    /// unborn or it did not resolve to a commit.
+    ///
+    /// The walk records it at every limit, zero too, because a pane too short
+    /// for a log at the walk can grow later. Watch mode then reads the log
+    /// again from this commit, and never from HEAD. The history of a commit
+    /// never changes, so that read extends the log of the walk, and it never
+    /// puts the commits of another branch under the header of this snapshot.
+    /// A snapshot with no start gives a resize no log to read.
+    pub log_start: Option<LogStart>,
     /// Upstream tracking branch status (ahead/behind). `None` when the
     /// current branch has no configured upstream.
     pub upstream: Option<UpstreamStatus>,
@@ -1166,6 +1178,7 @@ mod tests {
             files,
             log: vec![],
             log_complete: false,
+            log_start: None,
             upstream: None,
             operation: None,
             push_remote: None,

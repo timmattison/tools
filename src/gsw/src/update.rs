@@ -654,6 +654,7 @@ mod question_tests {
             files: Vec::new(),
             log: Vec::new(),
             log_complete: false,
+            log_start: None,
             upstream: None,
             operation: None,
             push_remote: None,

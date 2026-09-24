@@ -2254,6 +2254,7 @@ impl SnapshotCache {
     /// agrees with the rest of the snapshot.
     fn take_fetched_log(&mut self, fetched: FetchedLog, fetched_at: Instant) {
         let FetchedLog {
+            start: _,
             mut entries,
             complete,
         } = fetched;
@@ -3670,6 +3671,7 @@ fn restore_terminal() {
 mod tests {
     use super::*;
     use crate::render::LogEntry;
+    use crate::repo::LogStart;
     use crate::testrepo;
     use crate::update::BaseUpdate;
     use ignore::gitignore::GitignoreBuilder;
@@ -5374,6 +5376,7 @@ mod tests {
     /// commit never replaces the cached log.
     pub(super) fn no_fetch(_current: &WorktreePath, _limit: usize) -> FetchedLog {
         FetchedLog {
+            start: None,
             entries: Vec::new(),
             complete: false,
         }
@@ -5411,6 +5414,7 @@ mod tests {
             files: Vec::new(),
             log: Vec::new(),
             log_complete: false,
+            log_start: None,
             upstream: None,
             operation: None,
             push_remote: None,
@@ -6085,10 +6089,17 @@ mod tests {
     /// gives it. The newest commit is `newest_age` old, and each commit is one
     /// minute older than the commit before it.
     fn fake_history(commits: usize, newest_age: Duration) -> Vec<LogEntry> {
+        branch_history('0', commits, newest_age)
+    }
+
+    /// The history of [`fake_history`] on the branch `branch`. Each hash
+    /// starts with `branch`, and each subject names it, so no row of one
+    /// branch matches a commit of another branch.
+    fn branch_history(branch: char, commits: usize, newest_age: Duration) -> Vec<LogEntry> {
         (0..commits)
             .map(|n| LogEntry {
-                hash: format!("{n:07x}"),
-                subject: format!("{HISTORY_SUBJECT} {n}"),
+                hash: format!("{branch}{n:06x}"),
+                subject: format!("{HISTORY_SUBJECT} {branch}{n}"),
                 age: Some(
                     newest_age
                         + Duration::from_secs(60)
@@ -6104,14 +6115,83 @@ mod tests {
         history.iter().take(limit).cloned().collect()
     }
 
-    /// A read of `history` with the limit `limit`, as [`crate::fetch_log`]
-    /// gives it: the newest `limit` commits, and complete when the limit
-    /// reaches the end of the history. A limit of zero reads no commit, so it
-    /// finds no end.
-    fn read_of(history: &[LogEntry], limit: usize) -> FetchedLog {
+    /// A read from `start`, whose history is `history`, with the limit
+    /// `limit`, as [`crate::fetch_log`] gives it: the newest `limit` commits,
+    /// and complete when the limit reaches the end of the history. A limit of
+    /// zero reads no commit, so it finds no end.
+    fn read_of(start: LogStart, history: &[LogEntry], limit: usize) -> FetchedLog {
         FetchedLog {
+            start: Some(start),
             entries: newest(history, limit),
             complete: limit > 0 && limit >= history.len(),
+        }
+    }
+
+    /// The start of the walk in the loop tests: the commit that HEAD named
+    /// when the walk read the log of the cache.
+    fn walk_start() -> LogStart {
+        LogStart::fake(1)
+    }
+
+    /// The commit that HEAD names after a checkout moves it to another
+    /// history.
+    fn moved_start() -> LogStart {
+        LogStart::fake(2)
+    }
+
+    /// The snapshot of a walk from [`walk_start`] that read `log`.
+    fn walked(log: Vec<LogEntry>) -> Snapshot {
+        Snapshot {
+            log,
+            log_start: Some(walk_start()),
+            ..empty_snapshot()
+        }
+    }
+
+    /// A fake repository for the loop tests that read the log: the history
+    /// of each start that it holds, and the start that HEAD names.
+    struct FakeRepo {
+        /// Each start that the repository holds, and its history, newest
+        /// first.
+        histories: Vec<(LogStart, Vec<LogEntry>)>,
+        /// The start that HEAD names while the loop runs.
+        head: LogStart,
+    }
+
+    impl FakeRepo {
+        /// A repository of the one history `history`, at [`walk_start`],
+        /// which HEAD still names.
+        fn at(history: &[LogEntry]) -> Self {
+            Self {
+                histories: vec![(walk_start(), history.to_vec())],
+                head: walk_start(),
+            }
+        }
+
+        /// The history of `start`. A start that the repository does not hold
+        /// has no commit.
+        fn history(&self, start: LogStart) -> &[LogEntry] {
+            self.histories
+                .iter()
+                .find(|(held, _)| *held == start)
+                .map_or(&[], |(_, history)| history.as_slice())
+        }
+
+        /// A read from `start` with the limit `limit` ([`read_of`]).
+        fn read(&self, start: LogStart, limit: usize) -> FetchedLog {
+            read_of(start, self.history(start), limit)
+        }
+
+        /// The snapshot of a walk with the log limit `limit`. The walk reads
+        /// from the start that HEAD names, and it records that start.
+        fn walk(&self, limit: usize) -> Snapshot {
+            let read = self.read(self.head, limit);
+            Snapshot {
+                log: read.entries,
+                log_complete: read.complete,
+                log_start: read.start,
+                ..empty_snapshot()
+            }
         }
     }
 
@@ -6199,9 +6279,9 @@ mod tests {
         cache: SnapshotCache,
         measured: usize,
         now: Instant,
-        history: &[LogEntry],
+        repo: &FakeRepo,
     ) -> ResizeRun {
-        run_wakes(cache, &[Wake::resize(measured)], now, history)
+        run_wakes(cache, &[Wake::resize(measured)], now, repo)
     }
 
     /// Run the loop from `cache` over `wakes`, in order, with a log that fills
@@ -6212,18 +6292,14 @@ mod tests {
     /// burst comes to a wake of its own and never joins the burst before it.
     /// The render of the last wake sends a quit.
     ///
-    /// The clock reads `now` at each read. `history` is the history of the
-    /// worktree at `now`. The `collect` hook and the `fetch_log` hook each
-    /// give its newest commits up to the limit they get, complete when the
-    /// limit reaches the end of the history ([`read_of`]), as the real walk
-    /// does. The codes of the colors are forced on and then removed, so the
-    /// glyphs are the same whether the test writes to a terminal or not.
-    fn run_wakes(
-        cache: SnapshotCache,
-        wakes: &[Wake],
-        now: Instant,
-        history: &[LogEntry],
-    ) -> ResizeRun {
+    /// The clock reads `now` at each read. `repo` is the repository of the
+    /// worktree at `now`. The `collect` hook walks it ([`FakeRepo::walk`]),
+    /// and the `fetch_log` hook reads its log. Each gives the newest commits
+    /// of a history up to the limit it gets, complete when the limit reaches
+    /// the end of the history ([`read_of`]), as the real walk does. The codes
+    /// of the colors are forced on and then removed, so the glyphs are the
+    /// same whether the test writes to a terminal or not.
+    fn run_wakes(cache: SnapshotCache, wakes: &[Wake], now: Instant, repo: &FakeRepo) -> ResizeRun {
         let (tx, rx) = mpsc::channel();
         let send_burst = |wake: &Wake| {
             if wake.walk {
@@ -6256,16 +6332,13 @@ mod tests {
                 LoopHooks {
                     collect: |_current: &WorktreePath, limit: usize| {
                         collects += 1;
-                        let read = read_of(history, limit);
-                        Ok(Snapshot {
-                            log: read.entries,
-                            log_complete: read.complete,
-                            ..empty_snapshot()
-                        })
+                        Ok(repo.walk(limit))
                     },
+                    // The hook gets no start, so it reads the history that
+                    // HEAD names.
                     fetch_log: |_current: &WorktreePath, limit: usize| {
                         fetches += 1;
-                        read_of(history, limit)
+                        repo.read(repo.head, limit)
                     },
                     render: |snap: &Snapshot, dims: Dimensions, timing: FrameTiming| {
                         let render = render_frame(snap, &cfg, dims, timing);
@@ -6328,15 +6401,12 @@ mod tests {
         let now = Instant::now();
         let history = fake_history(100, Duration::from_secs(100));
         let cache = SnapshotCache {
-            snapshot: Snapshot {
-                log: newest(&history, 18),
-                ..empty_snapshot()
-            },
+            snapshot: walked(newest(&history, 18)),
             collected_at: now,
             dims: pane(20),
         };
 
-        let run = run_resize(cache, 60, now, &history);
+        let run = run_resize(cache, 60, now, &FakeRepo::at(&history));
 
         assert_eq!(
             run.commit_rows(),
@@ -6358,15 +6428,12 @@ mod tests {
         let history = fake_history(100, Duration::from_secs(100));
         for (measured, commit_rows) in [(60, 58), (30, 28)] {
             let cache = SnapshotCache {
-                snapshot: Snapshot {
-                    log: newest(&history, 58),
-                    ..empty_snapshot()
-                },
+                snapshot: walked(newest(&history, 58)),
                 collected_at: now,
                 dims: pane(60),
             };
 
-            let run = run_resize(cache, measured, now, &history);
+            let run = run_resize(cache, measured, now, &FakeRepo::at(&history));
 
             assert_eq!(
                 run.commit_rows(),
@@ -6394,15 +6461,12 @@ mod tests {
         let history = fake_history(100, Duration::from_secs(100));
         for readable in [0, 5] {
             let cache = SnapshotCache {
-                snapshot: Snapshot {
-                    log: newest(&history, 18),
-                    ..empty_snapshot()
-                },
+                snapshot: walked(newest(&history, 18)),
                 collected_at: now,
                 dims: pane(20),
             };
 
-            let run = run_resize(cache, 60, now, &history[..readable]);
+            let run = run_resize(cache, 60, now, &FakeRepo::at(&history[..readable]));
 
             assert_eq!(
                 run.fetches, 1,
@@ -6432,15 +6496,12 @@ mod tests {
         let at_walk = fake_history(100, Duration::from_secs(50));
         let at_read = fake_history(100, Duration::from_secs(100));
         let cache = SnapshotCache {
-            snapshot: Snapshot {
-                log: newest(&at_walk, 18),
-                ..empty_snapshot()
-            },
+            snapshot: walked(newest(&at_walk, 18)),
             collected_at: walked_at,
             dims: pane(20),
         };
 
-        let run = run_resize(cache, 60, now, &at_read);
+        let run = run_resize(cache, 60, now, &FakeRepo::at(&at_read));
 
         assert_eq!(
             run.commit_rows(),
@@ -6484,9 +6545,8 @@ mod tests {
         let history = fake_history(10, Duration::from_secs(100));
         let cache = SnapshotCache {
             snapshot: Snapshot {
-                log: newest(&history, 18),
                 log_complete: true,
-                ..empty_snapshot()
+                ..walked(newest(&history, 18))
             },
             collected_at: now,
             dims: pane(20),
@@ -6496,7 +6556,7 @@ mod tests {
             cache,
             &[Wake::resize(60), Wake::resize(40), Wake::resize(12)],
             now,
-            &history,
+            &FakeRepo::at(&history),
         );
 
         assert_eq!(
@@ -6526,15 +6586,19 @@ mod tests {
         let history = fake_history(30, Duration::from_secs(100));
         let cache = SnapshotCache {
             snapshot: Snapshot {
-                log: newest(&history, 18),
                 log_complete: false,
-                ..empty_snapshot()
+                ..walked(newest(&history, 18))
             },
             collected_at: now,
             dims: pane(20),
         };
 
-        let run = run_wakes(cache, &[Wake::resize(60), Wake::resize(100)], now, &history);
+        let run = run_wakes(
+            cache,
+            &[Wake::resize(60), Wake::resize(100)],
+            now,
+            &FakeRepo::at(&history),
+        );
 
         assert_eq!(run.collects, 0, "a resize walks nothing");
         assert_eq!(
@@ -6562,15 +6626,19 @@ mod tests {
         let history = fake_history(5, Duration::from_secs(100));
         let cache = SnapshotCache {
             snapshot: Snapshot {
-                log: newest(&fake_history(100, Duration::from_secs(100)), 18),
                 log_complete: false,
-                ..empty_snapshot()
+                ..walked(newest(&fake_history(100, Duration::from_secs(100)), 18))
             },
             collected_at: now,
             dims: pane(20),
         };
 
-        let run = run_wakes(cache, &[Wake::resize(60), Wake::resize(100)], now, &history);
+        let run = run_wakes(
+            cache,
+            &[Wake::resize(60), Wake::resize(100)],
+            now,
+            &FakeRepo::at(&history),
+        );
 
         assert_eq!(
             run.fetches, 2,
@@ -6599,7 +6667,12 @@ mod tests {
             dims: pane(20),
         };
 
-        let run = run_wakes(cache, &[Wake::walk_and_resize(60)], now, &history);
+        let run = run_wakes(
+            cache,
+            &[Wake::walk_and_resize(60)],
+            now,
+            &FakeRepo::at(&history),
+        );
 
         assert_eq!(
             (run.collects, run.fetches),
@@ -6611,6 +6684,142 @@ mod tests {
             10,
             "the frame shows every commit of the history:\n{}",
             run.glyphs,
+        );
+    }
+
+    /// Whether `glyphs`, the glyphs of one frame, hold a row of `commit`.
+    fn shows(glyphs: &str, commit: &LogEntry) -> bool {
+        glyphs.lines().any(|line| line.starts_with(&commit.hash))
+    }
+
+    #[test]
+    fn a_resize_after_a_checkout_reads_the_log_from_the_start_of_the_walk() {
+        // Review R-20260924T181319Z#I2: the walk of a pane of 20 rows read 18
+        // commits of a history of 30. Then a checkout in another pane moves
+        // HEAD to another history of 100 commits. No walk has read it yet,
+        // because the cooldown defers the walk. The pane then grows to 60
+        // rows.
+        //
+        // The frame still shows the header of the walk: its branch, its
+        // counts, and the age of its first commit. So the log under that
+        // header must be the log of the walk. The resize reads from the commit
+        // that the walk started from, and not from HEAD. The frame then shows
+        // all 30 commits of the history of the walk, and no commit of the
+        // history that HEAD moved to.
+        let now = Instant::now();
+        let walked_history = branch_history('a', 30, Duration::from_secs(100));
+        let moved_history = branch_history('b', 100, Duration::from_secs(10));
+        let repo = FakeRepo {
+            histories: vec![
+                (walk_start(), walked_history.clone()),
+                (moved_start(), moved_history.clone()),
+            ],
+            head: moved_start(),
+        };
+        let cache = SnapshotCache {
+            snapshot: walked(newest(&walked_history, 18)),
+            collected_at: now,
+            dims: pane(20),
+        };
+
+        let run = run_resize(cache, 60, now, &repo);
+
+        assert_eq!(run.fetches, 1, "the grown pane reads the log once");
+        assert_eq!(
+            run.commit_rows(),
+            30,
+            "the frame shows every commit of the history of the walk:\n{}",
+            run.glyphs,
+        );
+        for commit in &walked_history {
+            assert!(
+                shows(&run.glyphs, commit),
+                "the frame shows {} of the history of the walk:\n{}",
+                commit.hash,
+                run.glyphs,
+            );
+        }
+        for commit in &moved_history {
+            assert!(
+                !shows(&run.glyphs, commit),
+                "the frame shows {} of the history that HEAD moved to, under the header of \
+                 the walk:\n{}",
+                commit.hash,
+                run.glyphs,
+            );
+        }
+    }
+
+    #[test]
+    fn a_resize_reads_no_log_for_a_walk_that_recorded_no_start() {
+        // The walk found a HEAD that did not resolve to a commit, as while a
+        // ref changes under it. So the walk recorded no start, read no commit,
+        // and did not reach the end of a history. HEAD then names a history of
+        // 100 commits, and no walk has read it yet. The pane then grows to 60
+        // rows.
+        //
+        // The resize has no history of the walk to extend. A read from HEAD
+        // puts commits under the header of a walk that saw none. So the resize
+        // reads nothing, and the frame keeps the empty log of the walk until
+        // the next walk.
+        let now = Instant::now();
+        let history = fake_history(100, Duration::from_secs(100));
+        let cache = SnapshotCache {
+            snapshot: empty_snapshot(),
+            collected_at: now,
+            dims: pane(20),
+        };
+
+        let run = run_resize(cache, 60, now, &FakeRepo::at(&history));
+
+        assert_eq!(
+            (run.collects, run.fetches),
+            (0, 0),
+            "a resize of a walk with no start reads nothing from git",
+        );
+        assert_eq!(
+            run.commit_rows(),
+            0,
+            "the frame keeps the empty log of the walk:\n{}",
+            run.glyphs,
+        );
+    }
+
+    #[test]
+    fn the_cache_refuses_a_read_of_the_log_from_another_start() {
+        // The cache holds 18 commits of the walk from `walk_start`. A read
+        // from another commit reads another history: here its 40 commits and
+        // its end. The read holds more commits than the cache, but its rows
+        // under the header of the walk show the commits of one branch under
+        // the name and the counts of another. So the cache refuses the read
+        // and its flag, whatever hook made the read.
+        let now = Instant::now();
+        let walked_history = branch_history('a', 30, Duration::from_secs(100));
+        let moved_history = branch_history('b', 40, Duration::from_secs(10));
+        let mut cache = SnapshotCache {
+            snapshot: walked(newest(&walked_history, 18)),
+            collected_at: now,
+            dims: pane(20),
+        };
+
+        cache.take_fetched_log(read_of(moved_start(), &moved_history, 58), now);
+
+        let hashes = |log: &[LogEntry]| -> Vec<String> {
+            log.iter().map(|entry| entry.hash.clone()).collect()
+        };
+        assert_eq!(
+            hashes(&cache.snapshot.log),
+            hashes(&newest(&walked_history, 18)),
+            "the cache keeps the log of the walk",
+        );
+        assert!(
+            !cache.snapshot.log_complete,
+            "the flag of a read that the cache refused stays out of the cache",
+        );
+        assert_eq!(
+            cache.snapshot.log_start,
+            Some(walk_start()),
+            "the cache keeps the start of the walk",
         );
     }
 
@@ -7828,6 +8037,7 @@ mod push_loop_tests {
             files: Vec::new(),
             log: Vec::new(),
             log_complete: false,
+            log_start: None,
             upstream: None,
             operation: None,
             push_remote: Some("origin".into()),

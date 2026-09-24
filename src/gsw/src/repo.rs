@@ -169,8 +169,35 @@ pub fn resolve_base(repo: &gix::Repository) -> String {
     "HEAD".to_string()
 }
 
+/// The commit that a walk of the log starts from: the commit that HEAD named
+/// when [`recent_log`] resolved it.
+///
+/// A commit names its parents by their ids, and an id names its content. So
+/// the history of one start is the same at every read, whatever HEAD names by
+/// then. Watch mode reads the log again from the start of the walk on a
+/// resize ([`recent_log_from`]), and that read extends the log of the walk. It
+/// never gives the history of another branch.
+///
+/// The field is private, and only [`recent_log`] makes a start. So a read of
+/// the log starts from a commit that a walk recorded, or from HEAD.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogStart(gix::ObjectId);
+
+impl LogStart {
+    /// A start that names no commit, for the tests that fake the histories of
+    /// a repository. One seed gives the same start at every call, and two
+    /// seeds give two different starts.
+    #[cfg(test)]
+    pub(crate) fn fake(seed: u8) -> Self {
+        Self(gix::ObjectId::from_bytes_or_panic(&[seed; 20]))
+    }
+}
+
 /// The newest commits of HEAD, as [`recent_log`] reads them.
 pub struct RecentLog {
+    /// The commit that the walk started from. `None` when HEAD named no
+    /// commit: HEAD was unborn, or it did not resolve to a commit.
+    pub start: Option<LogStart>,
     /// The commits, newest first, as `(short_hash, unix_secs, summary)`.
     pub commits: Vec<(String, i64, String)>,
     /// The walk of the history reached its end at or before the limit, so
@@ -202,6 +229,7 @@ pub struct RecentLog {
 /// higher limit cannot read that commit either.
 pub fn recent_log(repo: &gix::Repository, n: usize) -> RecentLog {
     let incomplete = || RecentLog {
+        start: None,
         commits: Vec::new(),
         complete: false,
     };
@@ -211,10 +239,12 @@ pub fn recent_log(repo: &gix::Repository, n: usize) -> RecentLog {
     let Ok(head) = repo.head_commit() else {
         // An unborn HEAD is not a failure. It is a history of no commit.
         return RecentLog {
+            start: None,
             commits: Vec::new(),
             complete: repo.head().is_ok_and(|head| head.is_unborn()),
         };
     };
+    let start = Some(LogStart(head.id));
     let Ok(mut walk) = head.ancestors().all() else {
         return incomplete();
     };
@@ -235,7 +265,17 @@ pub fn recent_log(repo: &gix::Repository, n: usize) -> RecentLog {
         })
         .collect();
     let complete = !step_failed && walk.next().is_none();
-    RecentLog { commits, complete }
+    RecentLog {
+        start,
+        commits,
+        complete,
+    }
+}
+
+/// The `n` most recent commits of the history of `start`, as [`recent_log`]
+/// reads them from HEAD, and whether the walk reached the end of that history.
+pub fn recent_log_from(repo: &gix::Repository, _start: LogStart, n: usize) -> RecentLog {
+    recent_log(repo, n)
 }
 
 /// How HEAD relates to its base ref, as a pair of commit counts. See
@@ -1048,6 +1088,10 @@ mod tests {
 
         assert!(log.commits.is_empty(), "an unborn HEAD has no commit");
         assert!(log.complete, "an unborn HEAD has an empty history");
+        assert_eq!(
+            log.start, None,
+            "an unborn HEAD names no commit to start from"
+        );
     }
 
     #[test]
@@ -1061,6 +1105,10 @@ mod tests {
 
         assert!(log.commits.is_empty(), "a limit of zero reads no commit");
         assert!(!log.complete, "a read of no commit finds no end");
+        assert!(
+            log.start.is_some(),
+            "a limit of zero still resolves HEAD, so a later read knows where the history starts",
+        );
     }
 
     #[test]
@@ -1082,6 +1130,10 @@ mod tests {
 
         assert!(log.commits.is_empty(), "a missing commit gives no row");
         assert!(!log.complete, "a HEAD that does not resolve finds no end");
+        assert_eq!(
+            log.start, None,
+            "a HEAD that does not resolve names no start"
+        );
     }
 
     #[test]
@@ -1105,6 +1157,20 @@ mod tests {
         assert!(!log.complete, "a walk that fails finds no end");
     }
 
+    /// A [`crate::RenderConfig`] whose log fills the pane, for the walks that
+    /// read the log.
+    fn log_walk_config() -> crate::RenderConfig {
+        crate::RenderConfig {
+            base: None,
+            max_files: None,
+            bar_width: 20,
+            log: crate::LogDemand::Fill,
+            truecolor: false,
+            width_offset: 0,
+            refresh_interval: None,
+        }
+    }
+
     #[test]
     fn a_walk_puts_the_end_of_the_history_on_the_snapshot() {
         // Issue #521: watch mode reads the flag from the snapshot on a resize,
@@ -1113,15 +1179,7 @@ mod tests {
         // limit of 2 does not.
         let dir = three_commit_repo();
         let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
-        let cfg = crate::RenderConfig {
-            base: None,
-            max_files: None,
-            bar_width: 20,
-            log: crate::LogDemand::Fill,
-            truecolor: false,
-            width_offset: 0,
-            refresh_interval: None,
-        };
+        let cfg = log_walk_config();
 
         let past_the_end = crate::collect_snapshot(handle.repo(), &cfg, 10).expect("walk");
         assert_eq!(past_the_end.log.len(), 3, "the walk reads every commit");
@@ -1135,6 +1193,83 @@ mod tests {
         assert!(
             !short_of_the_end.log_complete,
             "a walk that stops at its limit puts an incomplete log on the snapshot",
+        );
+    }
+
+    /// Move HEAD of the repository at `dir` to another history: a new branch
+    /// with no commit in common with the history before, and four commits of
+    /// its own, `moved 1` to `moved 4`. It is the checkout that a user makes
+    /// in another pane while gsw watches.
+    fn move_head_to_another_history(dir: &Path) {
+        git(dir, &["checkout", "-q", "--orphan", "moved"]);
+        for n in 1..=4 {
+            git(
+                dir,
+                &["commit", "-q", "--allow-empty", "-m", &format!("moved {n}")],
+            );
+        }
+    }
+
+    #[test]
+    fn recent_log_from_reads_the_history_of_its_start_after_head_moves() {
+        // Review R-20260924T181319Z#I2: a walk records the commit that HEAD
+        // names. A checkout then moves HEAD to another history. A read from
+        // the recorded start gives the history of the walk, and not the
+        // history that HEAD names now. The read goes through the handle that
+        // the walk used, as the read on a resize does.
+        let dir = three_commit_repo();
+        let p = dir.path();
+        let repo = open_at(p).expect("fixture is a worktree repo");
+        let start = super::recent_log(&repo, 1)
+            .start
+            .expect("HEAD names a commit");
+
+        move_head_to_another_history(p);
+
+        assert_eq!(
+            subjects(&super::recent_log(&repo, 10)),
+            ["moved 4", "moved 3", "moved 2", "moved 1"],
+            "HEAD names the other history, so a read from HEAD gives it",
+        );
+        let log = super::recent_log_from(&repo, start, 10);
+        assert_eq!(
+            subjects(&log),
+            ["third", "second", "initial"],
+            "a read from the start of the walk gives the history of the walk",
+        );
+        assert!(log.complete, "a limit past the history reaches its end");
+        assert_eq!(log.start, Some(start), "the read names its start");
+    }
+
+    #[test]
+    fn a_walk_with_a_log_limit_of_zero_records_the_start_of_its_history() {
+        // Review R-20260924T181319Z#I2: a pane too short for a log gives the
+        // walk a log limit of zero. The pane can grow later, and the read of
+        // the log on that resize starts from the commit that the walk
+        // recorded. So the walk records its start at a limit of zero too. A
+        // checkout then moves HEAD, and the read from the recorded start still
+        // gives the history of the walk.
+        let dir = three_commit_repo();
+        let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
+
+        let snapshot = crate::collect_snapshot(handle.repo(), &log_walk_config(), 0).expect("walk");
+        assert!(snapshot.log.is_empty(), "a limit of zero reads no commit");
+        let start = snapshot
+            .log_start
+            .expect("a walk with a log limit of zero records its start");
+
+        move_head_to_another_history(dir.path());
+
+        let read = crate::fetch_log_from(handle.repo(), start, 10);
+        let subjects: Vec<&str> = read
+            .entries
+            .iter()
+            .map(|entry| entry.subject.as_str())
+            .collect();
+        assert_eq!(
+            subjects,
+            ["third", "second", "initial"],
+            "a read from the start of the walk gives the history of the walk",
         );
     }
 
