@@ -829,7 +829,9 @@ pub(crate) struct FetchedLog {
 /// snapshot does not depend on the size of the pane.
 pub(crate) fn fetch_log(repo: &gix::Repository, n: usize) -> FetchedLog {
     let now = SystemTime::now();
-    let entries = repo::recent_log(repo, n)
+    let recent = repo::recent_log(repo, n);
+    let entries = recent
+        .commits
         .into_iter()
         .map(|(hash, secs, subject)| {
             let age = u64::try_from(secs)
@@ -841,7 +843,7 @@ pub(crate) fn fetch_log(repo: &gix::Repository, n: usize) -> FetchedLog {
         .collect();
     FetchedLog {
         entries,
-        complete: false,
+        complete: recent.complete,
     }
 }
 

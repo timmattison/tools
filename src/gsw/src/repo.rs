@@ -169,19 +169,33 @@ pub fn resolve_base(repo: &gix::Repository) -> String {
     "HEAD".to_string()
 }
 
+/// The newest commits of HEAD, as [`recent_log`] reads them.
+pub struct RecentLog {
+    /// The commits, newest first, as `(short_hash, unix_secs, summary)`.
+    pub commits: Vec<(String, i64, String)>,
+    /// The walk of the history reached its end at or before the limit, so
+    /// `commits` holds every commit that HEAD reaches.
+    pub complete: bool,
+}
+
 /// The `n` most recent commits from HEAD as `(short_hash, unix_secs, summary)`.
 /// Empty when `n == 0` or there are no commits.
-pub fn recent_log(repo: &gix::Repository, n: usize) -> Vec<(String, i64, String)> {
+pub fn recent_log(repo: &gix::Repository, n: usize) -> RecentLog {
+    let incomplete = || RecentLog {
+        commits: Vec::new(),
+        complete: false,
+    };
     if n == 0 {
-        return Vec::new();
+        return incomplete();
     }
     let Ok(head) = repo.head_commit() else {
-        return Vec::new();
+        return incomplete();
     };
     let Ok(walk) = head.ancestors().all() else {
-        return Vec::new();
+        return incomplete();
     };
-    walk.take(n)
+    let commits = walk
+        .take(n)
         .filter_map(|info| {
             let info = info.ok()?;
             let commit = info.object().ok()?;
@@ -190,7 +204,11 @@ pub fn recent_log(repo: &gix::Repository, n: usize) -> Vec<(String, i64, String)
             let summary = commit.message().ok()?.summary().to_string();
             Some((hash, secs, summary))
         })
-        .collect()
+        .collect();
+    RecentLog {
+        commits,
+        complete: false,
+    }
 }
 
 /// How HEAD relates to its base ref, as a pair of commit counts. See
@@ -748,7 +766,8 @@ mod tests {
     use crate::git::FileStatus;
     use crate::render::{Operation, StepProgress};
     use crate::testrepo::{
-        git, git_allowing_failure, init_repo, init_repo_with_upstream, init_repo_with_worktree,
+        git, git_allowing_failure, git_stdout, init_repo, init_repo_with_upstream,
+        init_repo_with_worktree,
     };
 
     /// Open a repo at an explicit path (tests can't rely on cwd under a
@@ -914,7 +933,7 @@ mod tests {
         git(p, &["add", "b.txt"]);
         git(p, &["commit", "-q", "-m", "second commit"]);
         let repo = open_at(p).unwrap();
-        let log = super::recent_log(&repo, 10);
+        let log = super::recent_log(&repo, 10).commits;
         assert_eq!(log.len(), 2);
         assert_eq!(log[0].2, "second commit");
         assert_eq!(log[1].2, "initial");
@@ -925,7 +944,171 @@ mod tests {
     fn recent_log_zero_is_empty() {
         let dir = init_repo();
         let repo = open_at(dir.path()).unwrap();
-        assert!(super::recent_log(&repo, 0).is_empty());
+        assert!(super::recent_log(&repo, 0).commits.is_empty());
+    }
+
+    /// A repository of three commits: the commit of [`init_repo`], then
+    /// `second` and `third`.
+    fn three_commit_repo() -> TempDir {
+        let dir = init_repo();
+        for name in ["second", "third"] {
+            let file = format!("{name}.txt");
+            std::fs::write(dir.path().join(&file), format!("{name}\n")).expect("write a file");
+            git(dir.path(), &["add", &file]);
+            git(dir.path(), &["commit", "-q", "-m", name]);
+        }
+        dir
+    }
+
+    /// The subjects of the commits of `log`, newest first.
+    fn subjects(log: &super::RecentLog) -> Vec<&str> {
+        log.commits
+            .iter()
+            .map(|(_, _, subject)| subject.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn recent_log_reports_the_end_of_a_history_shorter_than_the_limit() {
+        // Issue #521: the walk asks for 10 commits and finds the end of the
+        // history after 3. A read with a higher limit finds no more.
+        let dir = three_commit_repo();
+        let repo = open_at(dir.path()).expect("fixture is a worktree repo");
+
+        let log = super::recent_log(&repo, 10);
+
+        assert_eq!(subjects(&log), ["third", "second", "initial"]);
+        assert!(log.complete, "a limit past the history reaches its end");
+    }
+
+    #[test]
+    fn recent_log_reports_the_end_of_a_history_exactly_as_long_as_the_limit() {
+        // The walk takes 3 commits, and the history has no fourth. So this
+        // read holds every commit that HEAD reaches, as the read with a
+        // limit of 10 does.
+        let dir = three_commit_repo();
+        let repo = open_at(dir.path()).expect("fixture is a worktree repo");
+
+        let log = super::recent_log(&repo, 3);
+
+        assert_eq!(subjects(&log), ["third", "second", "initial"]);
+        assert!(log.complete, "the third commit is the last commit");
+    }
+
+    #[test]
+    fn recent_log_reports_no_end_when_the_history_goes_past_the_limit() {
+        // The walk stops at its limit of 2 commits, and a third commit comes
+        // after them. A read with a higher limit finds more.
+        let dir = three_commit_repo();
+        let repo = open_at(dir.path()).expect("fixture is a worktree repo");
+
+        let log = super::recent_log(&repo, 2);
+
+        assert_eq!(subjects(&log), ["third", "second"]);
+        assert!(!log.complete, "the walk stopped before the last commit");
+    }
+
+    #[test]
+    fn recent_log_of_a_repository_with_no_commit_reports_the_end() {
+        // An unborn HEAD reaches no commit. So the empty log holds every
+        // commit that HEAD reaches, and a read with a higher limit finds no
+        // more.
+        let dir = tempfile::tempdir().expect("tempdir");
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        let repo = open_at(dir.path()).expect("an unborn repository has a work tree");
+
+        let log = super::recent_log(&repo, 10);
+
+        assert!(log.commits.is_empty(), "an unborn HEAD has no commit");
+        assert!(log.complete, "an unborn HEAD has an empty history");
+    }
+
+    #[test]
+    fn recent_log_of_a_limit_of_zero_reports_no_end() {
+        // A limit of zero reads no commit, so it never sees where the history
+        // ends.
+        let dir = three_commit_repo();
+        let repo = open_at(dir.path()).expect("fixture is a worktree repo");
+
+        let log = super::recent_log(&repo, 0);
+
+        assert!(log.commits.is_empty(), "a limit of zero reads no commit");
+        assert!(!log.complete, "a read of no commit finds no end");
+    }
+
+    #[test]
+    fn recent_log_of_a_head_that_names_a_missing_commit_reports_no_end() {
+        // HEAD names a branch, and the branch names an object that the
+        // repository does not hold. That is a failure, not an empty history,
+        // so the read does not claim the end of the history.
+        let dir = init_repo();
+        let p = dir.path();
+        std::fs::write(
+            p.join(".git/refs/heads/broken"),
+            "0123456789abcdef0123456789abcdef01234567\n",
+        )
+        .expect("write a ref to a missing object");
+        git(p, &["symbolic-ref", "HEAD", "refs/heads/broken"]);
+        let repo = open_at(p).expect("fixture is a worktree repo");
+
+        let log = super::recent_log(&repo, 10);
+
+        assert!(log.commits.is_empty(), "a missing commit gives no row");
+        assert!(!log.complete, "a HEAD that does not resolve finds no end");
+    }
+
+    #[test]
+    fn recent_log_of_a_walk_that_meets_a_missing_commit_reports_no_end() {
+        // The object of the first commit is gone, so the walk fails when it
+        // comes to that commit. The walk then has no next commit, but the
+        // failure, and not the end of the history, stopped it. So the read
+        // does not claim the end of the history.
+        let dir = three_commit_repo();
+        let p = dir.path();
+        let root = git_stdout(p, &["rev-parse", "HEAD~2"]);
+        let fan_out: String = root.chars().take(2).collect();
+        let rest: String = root.chars().skip(2).collect();
+        std::fs::remove_file(p.join(".git/objects").join(fan_out).join(rest))
+            .expect("remove the object of the first commit");
+        let repo = open_at(p).expect("fixture is a worktree repo");
+
+        let log = super::recent_log(&repo, 10);
+
+        assert_eq!(subjects(&log), ["third", "second"]);
+        assert!(!log.complete, "a walk that fails finds no end");
+    }
+
+    #[test]
+    fn a_walk_puts_the_end_of_the_history_on_the_snapshot() {
+        // Issue #521: watch mode reads the flag from the snapshot on a resize,
+        // so the walk must put it there, and not only find it. A walk with a
+        // limit of 10 finds the end of a history of 3 commits. A walk with a
+        // limit of 2 does not.
+        let dir = three_commit_repo();
+        let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
+        let cfg = crate::RenderConfig {
+            base: None,
+            max_files: None,
+            bar_width: 20,
+            log: crate::LogDemand::Fill,
+            truecolor: false,
+            width_offset: 0,
+            refresh_interval: None,
+        };
+
+        let past_the_end = crate::collect_snapshot(handle.repo(), &cfg, 10).expect("walk");
+        assert_eq!(past_the_end.log.len(), 3, "the walk reads every commit");
+        assert!(
+            past_the_end.log_complete,
+            "a walk past the end of the history puts a complete log on the snapshot",
+        );
+
+        let short_of_the_end = crate::collect_snapshot(handle.repo(), &cfg, 2).expect("walk");
+        assert_eq!(short_of_the_end.log.len(), 2, "the walk stops at its limit");
+        assert!(
+            !short_of_the_end.log_complete,
+            "a walk that stops at its limit puts an incomplete log on the snapshot",
+        );
     }
 
     fn statuses(repo: &gix::Repository) -> Vec<(String, FileStatus, bool)> {
