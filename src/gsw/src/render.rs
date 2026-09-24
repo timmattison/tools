@@ -1067,7 +1067,10 @@ const LOG_FLOOR_ROWS: usize = 5;
 /// given the actual demand from each section and the total terminal rows
 /// available for content (i.e. terminal height minus chrome the caller has
 /// already deducted: header, post-header separator, inter-section
-/// separator, and a reserved row for a possible `+N more files` footer).
+/// separator, and a row for the `+N more files` footer when the file list
+/// truncates). The caller knows whether the list truncates only from a plan,
+/// so `render_frame` in `main.rs` plans once with no footer row, and plans
+/// again with the row when the first plan hides file rows.
 ///
 /// When everything fits, both sections are rendered in full. When the
 /// combined demand exceeds the available rows, the **file list wins**: it is

@@ -655,31 +655,38 @@ pub(crate) fn render_frame(
     // section based on what each actually needs to show. Chrome we
     // deduct up front:
     //   header                                                          1
+    //   merge or rebase line (only while an operation is in progress)   0 or 1
     //   post-header separator                                            1
     //   inter-section separator (only when both sections render)         0 or 1
-    //   reserved row for a `+N more files` footer (only when files > 0)  0 or 1
+    //   `+N more files` footer (only when the file list truncates)       0 or 1
     // Whatever's left goes to the file list first — it's the primary
     // content and renders at the bottom, so it must stay fully on-screen
     // rather than being squeezed by a long log (by default the walk fetches
     // enough commits to fill the pane). The log takes the remaining rows; only
     // when the file list is itself truncated does a floor claw rows back to
     // it. See `plan_section_caps`.
+    //
+    // The footer gets a row only when it prints. A row kept for a footer that
+    // does not print stays empty at the bottom of the frame, and the log then
+    // stops one row short of the pane. So the split is planned first with no
+    // footer row. When that plan hides file rows, the footer prints, and the
+    // split is planned again with a row for it. The second plan has one row
+    // less, so it hides file rows too, and the footer prints in the row that
+    // the plan kept for it.
     let file_count = snapshot.files.len();
     let log_count = snapshot.log.len();
     // The operation indicator (merge/rebase) is one extra chrome row between
     // the header and the separator, present only when the snapshot carries an
     // in-progress operation. `header_chrome` reserves it, so the file list at
     // the bottom isn't pushed past the fold.
-    let inter_chrome: usize = if file_count > 0 && log_count > 0 {
-        1
-    } else {
-        0
+    let inter_chrome = usize::from(file_count > 0 && log_count > 0);
+    // The rows for content under the chrome, with or without a row for the
+    // footer.
+    let content_rows = |footer: bool| {
+        terminal_height
+            .saturating_sub(header_chrome(snapshot) + inter_chrome + usize::from(footer))
+            .max(1)
     };
-    let footer_chrome: usize = if file_count > 0 { 1 } else { 0 };
-    let chrome = header_chrome(snapshot) + inter_chrome + footer_chrome;
-    let available_rows = terminal_height.saturating_sub(chrome).max(1);
-    let (planned_file_cap, planned_log_cap) =
-        plan_section_caps(file_count, log_count, available_rows);
 
     // `--max-files` always wins when the user has set it (including 0,
     // which means unlimited). When the user pinned a file cap, the log
@@ -691,10 +698,21 @@ pub(crate) fn render_frame(
             } else {
                 n.min(file_count)
             };
-            let log_budget = available_rows.saturating_sub(consumed_by_files);
+            // The pinned cap hides file rows exactly when it is under the
+            // file count, and only then does the footer print.
+            let truncates = consumed_by_files < file_count;
+            let log_budget = content_rows(truncates).saturating_sub(consumed_by_files);
             (Some(n), log_count.min(log_budget))
         }
-        None => (Some(planned_file_cap), planned_log_cap),
+        None => {
+            let plan =
+                |footer: bool| plan_section_caps(file_count, log_count, content_rows(footer));
+            let (file_cap, log_cap) = match plan(false) {
+                (shown_files, _) if shown_files < file_count => plan(true),
+                fits => fits,
+            };
+            (Some(file_cap), log_cap)
+        }
     };
 
     let opts = RenderOptions {
