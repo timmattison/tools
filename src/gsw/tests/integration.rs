@@ -535,6 +535,32 @@ fn history_rows(out: &str) -> usize {
         .count()
 }
 
+/// The start of the name of each file that [`add_changed_files`] writes. A
+/// line that holds it is a file row.
+const CHANGED_FILE_PREFIX: &str = "changed-file-";
+
+/// The rows of the rule between the log and the file list.
+const SECTION_SEPARATOR_ROWS: usize = 1;
+
+/// Write `count` untracked files into the worktree at `dir`. Each name starts
+/// with [`CHANGED_FILE_PREFIX`].
+fn add_changed_files(dir: &Path, count: usize) {
+    for i in 0..count {
+        fs::write(
+            dir.join(format!("{CHANGED_FILE_PREFIX}{i}.txt")),
+            "changed\n",
+        )
+        .expect("write a changed file");
+    }
+}
+
+/// The file rows of `out` whose files [`add_changed_files`] wrote.
+fn changed_file_rows(out: &str) -> usize {
+    out.lines()
+        .filter(|line| line.contains(CHANGED_FILE_PREFIX))
+        .count()
+}
+
 #[test]
 fn a_clean_worktree_fills_the_pane_with_the_log() {
     // Issue #521: the log showed 20 commits at most, and the rest of a tall
@@ -554,6 +580,40 @@ fn a_clean_worktree_fills_the_pane_with_the_log() {
         out.lines().count(),
         PANE_ROWS,
         "the frame is as tall as the pane:\n{out}",
+    );
+}
+
+#[test]
+fn the_log_fills_the_rows_that_a_short_file_list_leaves() {
+    // A file list that fits shows every row and prints no `+N more files`
+    // footer. So the frame keeps no row for that footer, and the log takes
+    // the row. The log fills what the header, the rule, and the file rows
+    // leave, and the frame is as tall as the pane.
+    const CHANGED_FILES: usize = 3;
+    let dir = setup_repo();
+    add_history(dir.path(), LONG_HISTORY_COMMITS);
+    add_changed_files(dir.path(), CHANGED_FILES);
+
+    let out = run_gsw_in_pane(dir.path(), &[]);
+
+    assert_eq!(
+        changed_file_rows(&out),
+        CHANGED_FILES,
+        "every file row shows:\n{out}",
+    );
+    assert!(
+        !out.contains("more file"),
+        "a file list that fits shows no footer:\n{out}",
+    );
+    assert_eq!(
+        out.lines().count(),
+        PANE_ROWS,
+        "the frame is as tall as the pane:\n{out}",
+    );
+    assert_eq!(
+        history_rows(&out),
+        PANE_ROWS - HEADER_ROWS - SECTION_SEPARATOR_ROWS - CHANGED_FILES,
+        "the log takes every row that the header, the rule, and the file rows leave:\n{out}",
     );
 }
 
