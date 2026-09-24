@@ -29,7 +29,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::conflicts::ConflictsWorker;
 use crate::push::{PushCommand, PushUi};
-use crate::render::{LogEntry, Snapshot};
+use crate::render::Snapshot;
 use crate::repo::RepoHandle;
 use crate::worktrees::{
     head_label, list_worktrees, worktree_paths, WorktreeEntry, WorktreeList, WorktreePath,
@@ -3649,6 +3649,7 @@ fn restore_terminal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::LogEntry;
     use crate::testrepo;
     use crate::update::BaseUpdate;
     use ignore::gitignore::GitignoreBuilder;
@@ -6513,12 +6514,7 @@ mod tests {
             dims: pane(20),
         };
 
-        let run = run_wakes(
-            cache,
-            &[Wake::resize(60), Wake::resize(100)],
-            now,
-            &history,
-        );
+        let run = run_wakes(cache, &[Wake::resize(60), Wake::resize(100)], now, &history);
 
         assert_eq!(run.collects, 0, "a resize walks nothing");
         assert_eq!(
@@ -6554,12 +6550,7 @@ mod tests {
             dims: pane(20),
         };
 
-        let run = run_wakes(
-            cache,
-            &[Wake::resize(60), Wake::resize(100)],
-            now,
-            &history,
-        );
+        let run = run_wakes(cache, &[Wake::resize(60), Wake::resize(100)], now, &history);
 
         assert_eq!(
             run.fetches, 2,
