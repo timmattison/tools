@@ -377,10 +377,7 @@ pub(crate) fn base_update_prompt_for(
     // the middle of a rebase: the detached HEAD is a result of the operation,
     // and it goes away when the user finishes or aborts that operation.
     if let Some(operation) = &snapshot.operation {
-        return refuse(format!(
-            "a {} is in progress — finish it first",
-            BaseUpdate::held(operation).verb(),
-        ));
+        return refuse(in_progress_refusal(operation));
     }
     // No branch to act on. git refuses `HEAD` as the name of a branch, so
     // `grp` has nothing to rebase and `gmp` has nothing to merge into.
