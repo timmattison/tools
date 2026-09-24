@@ -1136,7 +1136,7 @@ mod question_tests {
         // commit or a bisect leaves HEAD here with no operation in progress. A
         // rebase that stopped on a conflict also detaches HEAD, but the refusal
         // that names the rebase wins there — see
-        // `the_first_refusal_that_applies_wins`.
+        // `a_stopped_rebase_is_named_as_the_rebase_and_not_as_a_detached_head`.
         let detached = Snapshot {
             branch: DETACHED_HEAD.to_string(),
             ..behind(5)
@@ -1278,23 +1278,37 @@ mod question_tests {
 
     #[test]
     fn the_first_refusal_that_applies_wins() {
-        // A rebase that stopped on a conflict detaches HEAD and leaves an
-        // operation in progress, so two rows of the table describe it. The
-        // higher row wins, because it names the thing the user has to deal with
-        // first: the operation that git holds. The detached HEAD is a result of
-        // that operation, and it goes away when the operation ends.
-        let stopped = Snapshot {
-            branch: DETACHED_HEAD.to_string(),
-            operation: Some(Operation::Rebase {
-                step: None,
-                conflicts: 1,
-            }),
-            ..behind(5)
-        };
-        assert_eq!(
-            refusal(&stopped, BaseUpdate::Rebase),
-            "a rebase is in progress — finish it first",
-        );
+        // `resolve_base` falls back on the target of `origin/HEAD` and then on
+        // HEAD itself, and neither is `main` or `master`. So a checkout of a
+        // commit in a repository with no `main` and no `master` matches two
+        // rows of the table. HEAD is detached, and the base is not one that
+        // these keys act on. The loop takes one base from each fallback.
+        //
+        // **The detached HEAD wins.** git refuses `HEAD` as the name of a
+        // branch, so `grp` has nothing to rebase and `gmp` has nothing to merge
+        // into. Every question about the base is a question about what to bring
+        // into a branch. So the user must check out a branch before the base
+        // means anything, and the higher row says so. After that checkout, the
+        // next press of the key gives the refusal of the missing base.
+        //
+        // The operation that git holds wins over both rows.
+        // `a_stopped_rebase_is_named_as_the_rebase_and_not_as_a_detached_head`
+        // holds the pair of the operation and the detached HEAD.
+        for base in ["origin/trunk", "HEAD"] {
+            let detached_with_no_base = Snapshot {
+                branch: DETACHED_HEAD.to_string(),
+                base: base.to_string(),
+                ..behind(5)
+            };
+            assert_eq!(
+                refusal(&detached_with_no_base, BaseUpdate::Rebase),
+                "HEAD is detached — check out a branch to rebase",
+            );
+            assert_eq!(
+                refusal(&detached_with_no_base, BaseUpdate::Merge),
+                "HEAD is detached — check out a branch to merge",
+            );
+        }
     }
 }
 
