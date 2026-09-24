@@ -6485,6 +6485,45 @@ mod tests {
     }
 
     #[test]
+    fn a_read_of_the_log_that_reaches_the_end_of_the_history_is_the_last_read() {
+        // The walk of a pane of 20 rows stopped at its limit of 18 commits, in
+        // a history of 30. So the log of the cache is not complete, and the
+        // resize to 60 rows reads the log. That read finds the end of the
+        // history after 30 commits, so the cache then holds every commit that
+        // HEAD reaches. The resize to 100 rows reads nothing.
+        let now = Instant::now();
+        let history = fake_history(30, Duration::from_secs(100));
+        let cache = SnapshotCache {
+            snapshot: Snapshot {
+                log: newest(&history, 18),
+                log_complete: false,
+                ..empty_snapshot()
+            },
+            collected_at: now,
+            dims: pane(20),
+        };
+
+        let run = run_wakes(
+            cache,
+            &[Wake::resize(60), Wake::resize(100)],
+            now,
+            &history,
+        );
+
+        assert_eq!(run.collects, 0, "a resize walks nothing");
+        assert_eq!(
+            run.fetches, 1,
+            "the read that reaches the end of the history is the last read",
+        );
+        assert_eq!(
+            run.commit_rows(),
+            30,
+            "the frame shows every commit of the history:\n{}",
+            run.glyphs,
+        );
+    }
+
+    #[test]
     fn a_walk_fetches_the_commits_of_the_pane_that_the_loop_measured() {
         // The loop measures the pane before each walk, and passes the walk
         // the most commits that the pane can show. The loop is then the one
