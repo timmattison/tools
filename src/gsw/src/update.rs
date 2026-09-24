@@ -580,9 +580,11 @@ fn run_in(
     // starts no shell.** A question describes the repository as it stood when
     // the key was pressed, and the answer arrives whenever the user presses `y`
     // — long enough for another pane to act in between. Two reads cover that
-    // gap: the operation that git holds, and then the branch. The gap between
-    // these reads and the shell's own is microseconds rather than seconds, and
-    // nothing here closes it entirely, short of a lock git does not offer.
+    // gap: the operation that git holds, and then the branch. A third read, of
+    // the commit that HEAD holds, refuses nothing, and the read after the
+    // shell uses it. The gap between these reads and the shell's own is
+    // microseconds rather than seconds, and nothing here closes it entirely,
+    // short of a lock git does not offer.
     //
     // **The operation is read first.** A merge or a rebase that started in the
     // gap is one the command would meet and did not start. gsw did not start
@@ -619,6 +621,18 @@ fn run_in(
             };
         }
     }
+
+    // **The commit that HEAD holds is read last, just before the shell
+    // starts.** It refuses nothing. The read after the shell compares it with
+    // the commit where a held operation started, which is condition 3 of the
+    // abort below. A HEAD that cannot be read gives `None`, and gsw then
+    // aborts nothing, because it cannot show that the run started an
+    // operation.
+    //
+    // gix reads it, and not a git child as for the branch: for a merge, the
+    // value that the read after the shell compares it with is the same read of
+    // HEAD through gix. See [`crate::repo::head_commit`].
+    let head_before = crate::repo::head_commit(workdir);
 
     // The child is interactive, it carries no `GIT_` variable out of the
     // environment of gsw but the six a user states on purpose, and it is
@@ -694,10 +708,21 @@ fn run_in(
     //    branch. gsw cannot tell those two cases apart, so it cannot show that
     //    the run started an operation on a branch that the question did not
     //    name.
+    // 3. The operation started from the commit that HEAD held just before the
+    //    shell started. In the same gap, another pane can also commit on the
+    //    branch of the question and start an operation from that commit, and
+    //    the command can also commit first. git records the commit where an
+    //    operation started, so gsw compares it with the HEAD that it read.
     //
-    // An operation that fails a condition stays as it is, and the last line
-    // says so. The outcome is a failure, and the `⚠` row of the next frame
-    // shows the operation.
+    // Conditions 2 and 3 close most of the gap of condition 1, and not all of
+    // it. An operation that another pane starts in the gap, on the same branch
+    // and from the same commit, looks the same as an operation of the run. The
+    // branch check at the top of this function has the same gap.
+    //
+    // A value that cannot be read matches nothing, so gsw then cannot show
+    // that the run started the operation. An operation that fails a condition
+    // stays as it is, and the last line says so. The outcome is a failure, and
+    // the `⚠` row of the next frame shows the operation.
     //
     // The abort goes to `workdir`, which is the work tree of the run. The
     // arrow keys can move the watch to a different worktree while the run is
@@ -716,7 +741,7 @@ fn run_in(
     let held = crate::repo::held_operation(workdir);
     if let Some(operation) = &held {
         let start = crate::repo::operation_start(workdir, operation);
-        let cleanup = if started_by_the_run(&start, command.branch()) {
+        let cleanup = if started_by_the_run(&start, command.branch(), head_before.as_ref()) {
             match abort(workdir, operation) {
                 Ok(()) => Cleanup::Aborted,
                 Err(reason) => {
@@ -755,15 +780,27 @@ fn run_in(
 }
 
 /// Whether the run can show that it started an operation that started at
-/// `start`, for a question about `branch`.
+/// `start`, for a question about `branch` and a HEAD that held `head_before`
+/// just before the shell started.
 ///
-/// Condition 2 of the rule that [`run_in`] states before its abort: the
-/// operation is on the branch of the question. A branch that cannot be read,
-/// and a detached HEAD, are `None` in `start`, and `None` never matches. gsw
-/// then cannot show that the run started the operation, so it does not abort
-/// it.
-fn started_by_the_run(start: &OperationStart, branch: &str) -> bool {
-    start.branch.as_deref() == Some(branch)
+/// Conditions 2 and 3 of the rule that [`run_in`] states before its abort:
+/// the operation is on the branch of the question, and it started from the
+/// commit that HEAD held before the run. Condition 1 is true before this
+/// function is called.
+///
+/// **`None` never matches, on either side.** A branch that cannot be read, a
+/// detached HEAD, and a commit that cannot be read are `None` in `start`. A
+/// HEAD that cannot be read before the run is `None` in `head_before`. Two
+/// values that gsw could not read are not two values that agree, so gsw then
+/// cannot show that the run started the operation, and it does not abort it.
+fn started_by_the_run(
+    start: &OperationStart,
+    branch: &str,
+    head_before: Option<&gix::ObjectId>,
+) -> bool {
+    let on_the_branch = start.branch.as_deref() == Some(branch);
+    let from_the_head_before = head_before.is_some_and(|head| start.commit.as_ref() == Some(head));
+    on_the_branch && from_the_head_before
 }
 
 /// The child that aborts `operation`, which git holds in the work tree at

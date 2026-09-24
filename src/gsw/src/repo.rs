@@ -515,16 +515,25 @@ fn rebase_step(git_dir: &std::path::Path) -> Option<StepProgress> {
 /// started on: `refs/heads/<branch>`, or `detached HEAD`.
 const REBASE_HEAD_NAME: &str = "head-name";
 
+/// The file of a rebase directory where git writes the full id of the commit
+/// that HEAD held when the rebase started.
+const REBASE_ORIG_HEAD: &str = "orig-head";
+
 /// The start of the full name of every branch.
 const BRANCH_REF_PREFIX: &str = "refs/heads/";
 
 /// Where a rebase or a merge that git holds started. See [`operation_start`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The default value knows nothing: no branch and no commit.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OperationStart {
     /// The branch that the operation started on, in the short form that
     /// [`branch_name`] gives. `None` for an operation that started on a
     /// detached HEAD, and for a branch that cannot be read.
     pub branch: Option<String>,
+    /// The commit that HEAD held when the operation started. `None` for a
+    /// commit that cannot be read.
+    pub commit: Option<gix::ObjectId>,
 }
 
 /// Where `operation`, which git holds in the work tree at `workdir`, started.
@@ -537,39 +546,85 @@ pub struct OperationStart {
 /// HEAD.**
 ///
 /// - For a rebase, git writes the branch in `head-name` of the rebase
-///   directory. The directory is the first of [`REBASE_DIRS`] that exists,
-///   which is the directory that [`gix::Repository::state`] classified the
-///   rebase from.
-/// - For a merge, HEAD stays on its branch while the merge is stopped. The
-///   branch of the merge is thus the branch that HEAD names now.
+///   directory, and the full id of the commit in `orig-head`. The directory is
+///   the first of [`REBASE_DIRS`] that exists, which is the directory that
+///   [`gix::Repository::state`] classified the rebase from.
+/// - For a merge, HEAD stays on its branch, at its commit, while the merge is
+///   stopped. The branch and the commit of the merge are thus the branch that
+///   HEAD names now and the commit that HEAD holds now. The commit is the read
+///   of [`head_commit`], so a comparison with the value of that function
+///   compares two values of one reader.
 ///
-/// **A value that cannot be read is `None`, and `None` names no branch.** A
-/// missing file, a file that cannot be read, and a repository that cannot be
-/// opened thus never show that the run started the operation. A ref outside
-/// `refs/heads/` is no branch either, and `detached HEAD` is not a ref.
+/// **A value that cannot be read is `None`, and `None` names no branch and no
+/// commit.** A missing file, a file that cannot be read or parsed, and a
+/// repository that cannot be opened thus never show that the run started the
+/// operation. A ref outside `refs/heads/` is no branch either, and `detached
+/// HEAD` is not a ref.
 ///
 /// **`gix::open`, and never `gix::discover`**, for the reason that
 /// [`held_operation`] gives.
 pub fn operation_start(workdir: &std::path::Path, operation: &Operation) -> OperationStart {
     let Ok(repo) = gix::open(workdir) else {
-        return OperationStart { branch: None };
+        return OperationStart::default();
     };
-    let full_name = match operation {
-        Operation::Rebase { .. } => REBASE_DIRS
-            .iter()
-            .map(|dir| repo.path().join(dir.name))
-            .find(|dir| dir.is_dir())
-            .and_then(|dir| std::fs::read_to_string(dir.join(REBASE_HEAD_NAME)).ok())
-            .map(|contents| contents.trim().to_string()),
-        Operation::Merge { .. } => repo
-            .head_name()
-            .ok()
-            .flatten()
-            .map(|full| full.as_bstr().to_string()),
+    let (full_name, commit) = match operation {
+        Operation::Rebase { .. } => {
+            let Some(dir) = REBASE_DIRS
+                .iter()
+                .map(|dir| repo.path().join(dir.name))
+                .find(|dir| dir.is_dir())
+            else {
+                return OperationStart::default();
+            };
+            let read = |name: &str| {
+                std::fs::read_to_string(dir.join(name))
+                    .ok()
+                    .map(|contents| contents.trim().to_string())
+            };
+            (
+                read(REBASE_HEAD_NAME),
+                read(REBASE_ORIG_HEAD).and_then(|hex| gix::ObjectId::from_hex(hex.as_bytes()).ok()),
+            )
+        }
+        Operation::Merge { .. } => (
+            repo.head_name()
+                .ok()
+                .flatten()
+                .map(|full| full.as_bstr().to_string()),
+            head_commit_of(&repo),
+        ),
     };
     OperationStart {
         branch: full_name.and_then(|full| full.strip_prefix(BRANCH_REF_PREFIX).map(str::to_string)),
+        commit,
     }
+}
+
+/// The commit that HEAD holds in the work tree at `workdir` right now, or
+/// `None` when it cannot be read.
+///
+/// The run of `R` and `M` reads it just before its shell starts, and compares
+/// it with the commit of [`operation_start`] after the shell exits. A HEAD that
+/// cannot be read is `None` here, and `None` matches no commit: gsw then cannot
+/// show that the run started an operation, so it aborts nothing.
+///
+/// **gix, and not a git child.** For a merge, the commit of
+/// [`operation_start`] is this same read of HEAD. So both sides of the
+/// comparison come from one reader, in one form, from one open of the work
+/// tree by one rule. The branch check of the run is a git child for a reason
+/// of its own, and no comparison with this value depends on it.
+///
+/// **`gix::open`, and never `gix::discover`**, for the reason that
+/// [`held_operation`] gives.
+pub fn head_commit(workdir: &std::path::Path) -> Option<gix::ObjectId> {
+    head_commit_of(&gix::open(workdir).ok()?)
+}
+
+/// The commit that HEAD of `repo` holds, or `None` when it cannot be read. An
+/// unborn HEAD holds no commit. The one read of HEAD for [`head_commit`] and
+/// for the merge case of [`operation_start`].
+fn head_commit_of(repo: &gix::Repository) -> Option<gix::ObjectId> {
+    repo.head_id().ok().map(gix::Id::detach)
 }
 
 /// Everything one working-tree status walk produces: the `FileEntry` rows plus
