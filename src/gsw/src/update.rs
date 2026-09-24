@@ -1681,6 +1681,14 @@ mod run_tests {
     const REBASE_NOT_ABORTED: &str =
         "rebase stopped on 1 conflict — gsw could not abort it, and it is still in progress";
 
+    /// The sentence of gsw under a rebase that the run did not start, which gsw
+    /// left as it is.
+    const REBASE_LEFT: &str = "a rebase is in progress that gsw did not start — left as it is";
+
+    /// The sentence of gsw under a merge that the run did not start, which gsw
+    /// left as it is.
+    const MERGE_LEFT: &str = "a merge is in progress that gsw did not start — left as it is";
+
     #[test]
     fn the_run_hands_the_whole_script_to_an_interactive_shell() {
         // The command is a shell function, so only a shell that read the rc
@@ -2402,6 +2410,74 @@ mod run_tests {
             Some(REBASE_NOT_ABORTED),
             "the row must end with the sentence of the failed abort: {rows:?}",
         );
+    }
+
+    #[test]
+    fn an_operation_that_the_run_left_on_a_different_branch_is_left_as_it_is() {
+        // **gsw aborts only an operation that it can show the run started.**
+        // The question named one branch, and the command of the user can check
+        // out a different one. A rebase or a merge that stops there is on a
+        // branch that the question did not name. It can be work of the user
+        // that the command only continued, so gsw does not abort it, and the
+        // last line says so. The outcome is a failure, because an operation is
+        // still in progress.
+        //
+        // **Only the branch differs.** `other` holds the commit that the branch
+        // of the question holds. Each operation here thus starts from the
+        // commit that HEAD held before the run, and the branch is the one
+        // condition that tells it apart from an operation that the run
+        // started. A detached HEAD is no branch, so it never matches the branch
+        // of the question.
+        //
+        // A merge keeps HEAD on its branch, and git writes the branch of a
+        // rebase in `head-name`, or `detached HEAD`. So each act is here with
+        // each kind of checkout.
+        for (update, checkout) in [
+            (BaseUpdate::Merge, "other"),
+            (BaseUpdate::Rebase, "other"),
+            (BaseUpdate::Merge, "--detach"),
+            (BaseUpdate::Rebase, "--detach"),
+        ] {
+            let (act, in_progress, sentence): (&str, fn(&Path) -> bool, &str) = match update {
+                BaseUpdate::Rebase => ("rebase", rebase_in_progress, REBASE_LEFT),
+                BaseUpdate::Merge => ("merge", merge_in_progress, MERGE_LEFT),
+            };
+            let case = format!("{act} after checkout {checkout}");
+            let workdir = init_repo();
+            conflicting_branches(workdir.path());
+            git(workdir.path(), &["branch", "other"]);
+            let stub = StubShell::new(&format!(
+                "{} && {}",
+                real_git(&format!("checkout -q {checkout}")),
+                real_git(&format!("{act} {BASE}")),
+            ));
+
+            let (outcome, rows) = run_through_the_row(&stub, update, workdir.path());
+
+            assert!(
+                in_progress(workdir.path()),
+                "gsw cannot show that the run started this {case}, so it must still be in \
+                 progress: {:?}",
+                outcome.output,
+            );
+            assert!(
+                !outcome.success,
+                "a run that left an operation in progress must not report success ({case}): {:?}",
+                outcome.output,
+            );
+            assert_eq!(
+                last_line_of(&outcome.output).1,
+                sentence,
+                "the last line must say that gsw did not start the operation and left it \
+                 ({case}): {:?}",
+                outcome.output,
+            );
+            assert_eq!(
+                rows.lines().last(),
+                Some(sentence),
+                "the row must end with the sentence of gsw ({case}): {rows:?}",
+            );
+        }
     }
 
     #[test]
