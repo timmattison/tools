@@ -3462,6 +3462,98 @@ mod ui_tests {
         );
     }
 
+    /// The rows that a failed run of `update` leaves under the frame, as the
+    /// glyphs a user reads, where the run wrote `output`.
+    fn rows_of_a_failed_base_update(update: BaseUpdate, output: &str) -> String {
+        let now = t0();
+        let mut ui = asking_base_update(update, now);
+        ui.confirm(now).expect("the question must confirm");
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output: output.to_string(),
+            },
+            now,
+        );
+        painted(&mut ui, tall_pane(120), now)
+    }
+
+    #[test]
+    fn a_rebase_that_gsw_aborted_keeps_the_conflict_line_of_git_in_the_rows() {
+        // What the run records when `git rebase main` of git 2.55 stops on a
+        // conflict and gsw aborts it. git writes `Rebasing (1/1)` and then a
+        // carriage return, and the next line draws over it, so the run keeps
+        // no line of it.
+        //
+        // The `CONFLICT` line is the one line that names the file. The user
+        // needs that name to do the rebase by hand. A tail of three rows
+        // loses it, because git writes two lines of its own after it and gsw
+        // adds its sentence after them.
+        let output = "Auto-merging a.txt\n\
+                      CONFLICT (content): Merge conflict in a.txt\n\
+                      error: could not apply e84a0c0... change a.txt on the branch\n\
+                      hint: Resolve all conflicts manually, mark them as resolved with\n\
+                      hint: \"git add/rm <conflicted_files>\", then run \"git rebase --continue\".\n\
+                      hint: You can instead skip this commit: run \"git rebase --skip\".\n\
+                      hint: To abort and get back to the state before \"git rebase\", run \
+                      \"git rebase --abort\".\n\
+                      hint: Disable this message with \"git config set advice.mergeConflict false\"\n\
+                      Could not apply e84a0c0... # change a.txt on the branch\n\
+                      rebase stopped on 1 conflict — gsw aborted it";
+
+        assert_eq!(
+            rows_of_a_failed_base_update(BaseUpdate::Rebase, output),
+            "CONFLICT (content): Merge conflict in a.txt\n\
+             Could not apply e84a0c0... # change a.txt on the branch\n\
+             rebase stopped on 1 conflict — gsw aborted it",
+            "the conflict line must outrank the other lines above the sentence of gsw",
+        );
+    }
+
+    #[test]
+    fn more_conflict_lines_than_rows_keep_the_last_line_and_the_conflicts_nearest_it() {
+        // A merge that stops on three files writes three `CONFLICT` lines, and
+        // the sentence of gsw takes one of the three rows. The last line
+        // always stays, because it says what became of the run. The conflict
+        // lines nearest the end fill the other rows, and every line keeps the
+        // order that it had in the output.
+        let output = "Auto-merging a.txt\n\
+                      CONFLICT (content): Merge conflict in a.txt\n\
+                      Auto-merging b.txt\n\
+                      CONFLICT (content): Merge conflict in b.txt\n\
+                      Auto-merging c.txt\n\
+                      CONFLICT (modify/delete): c.txt deleted in HEAD and modified in main.\n\
+                      Automatic merge failed; fix conflicts and then commit the result.\n\
+                      merge stopped on 3 conflicts — gsw aborted it";
+
+        assert_eq!(
+            rows_of_a_failed_base_update(BaseUpdate::Merge, output),
+            "CONFLICT (content): Merge conflict in b.txt\n\
+             CONFLICT (modify/delete): c.txt deleted in HEAD and modified in main.\n\
+             merge stopped on 3 conflicts — gsw aborted it",
+            "the two conflict lines nearest the end must take the rows above the last line",
+        );
+    }
+
+    #[test]
+    fn a_merge_that_gsw_aborted_keeps_the_rows_that_the_tail_gave_it() {
+        // A merge writes one line after its `CONFLICT` line, so the tail of
+        // three rows already held the name of the file. The rank of the
+        // conflict line must not change these rows.
+        let output = "Auto-merging a.txt\n\
+                      CONFLICT (content): Merge conflict in a.txt\n\
+                      Automatic merge failed; fix conflicts and then commit the result.\n\
+                      merge stopped on 1 conflict — gsw aborted it";
+
+        assert_eq!(
+            rows_of_a_failed_base_update(BaseUpdate::Merge, output),
+            "CONFLICT (content): Merge conflict in a.txt\n\
+             Automatic merge failed; fix conflicts and then commit the result.\n\
+             merge stopped on 1 conflict — gsw aborted it",
+            "a merge must keep the rows that the tail of three rows gave it",
+        );
+    }
+
     #[test]
     fn a_running_base_update_takes_its_notice_from_the_question_and_counts_the_time() {
         // The run carries no deadline, because a pre-push hook of this

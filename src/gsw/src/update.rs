@@ -2599,6 +2599,12 @@ mod run_tests {
             Some(REBASE_ABORTED),
             "the sentence must be the last row, so that the cut to three rows keeps it: {rows:?}",
         );
+        assert!(
+            rows.lines().any(|line| line == CONFLICT_LINE),
+            "the line of git that names the file must reach the rows that the user reads, \
+             and not only the text of the outcome: {rows:?} from {:?}",
+            outcome.output,
+        );
     }
 
     #[test]
