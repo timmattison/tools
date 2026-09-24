@@ -1154,11 +1154,17 @@ mod run_tests {
         );
 
         std::fs::write(main_worktree.join("a.txt"), "base\n").expect("write a.txt on the base");
-        git(main_worktree, &["commit", "-q", "-am", "change a.txt on the base"]);
+        git(
+            main_worktree,
+            &["commit", "-q", "-am", "change a.txt on the base"],
+        );
 
         git(checkout, &["checkout", "-q", "-b", BRANCH, &fork_point]);
         std::fs::write(checkout.join("a.txt"), "branch\n").expect("write a.txt on the branch");
-        git(checkout, &["commit", "-q", "-am", "change a.txt on the branch"]);
+        git(
+            checkout,
+            &["commit", "-q", "-am", "change a.txt on the branch"],
+        );
     }
 
     /// Whether git holds a merge in the work tree at `dir`.
