@@ -805,7 +805,12 @@ pub(crate) fn render_list_frame(
 /// hand-set `--date` — yields `age: None`. The row then renders the unknown-age
 /// mark. Collapsing such a commit to `Duration::ZERO` instead would paint it as
 /// the freshest thing on screen, which is the one reading ruled out.
-fn fetch_log(repo: &gix::Repository, n: usize) -> Vec<LogEntry> {
+///
+/// Each age is measured at the instant of this call. [`collect_snapshot`]
+/// calls it for each walk. Watch mode also calls it alone, when a resize needs
+/// more commits than its cached snapshot holds, because the rest of the
+/// snapshot does not depend on the size of the pane.
+pub(crate) fn fetch_log(repo: &gix::Repository, n: usize) -> Vec<LogEntry> {
     let now = SystemTime::now();
     repo::recent_log(repo, n)
         .into_iter()

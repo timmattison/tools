@@ -1469,9 +1469,10 @@ fn listed_paths(watched: &RefCell<Watched>) -> Vec<WorktreePath> {
 ///
 /// Filesystem changes and timed refreshes [`walk`] git — re-opening the
 /// repository so config changed in another pane takes effect — and re-seed the
-/// cache; decay ticks and resizes re-render the cached snapshot with no git work
-/// (Part A). The [`TerminalGuard`] restores the main screen and cursor on every
-/// exit path.
+/// cache; decay ticks and resizes re-render the cached snapshot with no walk
+/// (Part A). A resize to a pane with rows for more commits than the cached log
+/// holds reads the log alone, through [`crate::fetch_log`], before the repaint.
+/// The [`TerminalGuard`] restores the main screen and cursor on every exit path.
 ///
 /// Takes the [`RepoHandle`] **by value**: watch mode owns the repository for
 /// the rest of the process. The handle moves into the [`Watched`] of the home
@@ -1481,9 +1482,10 @@ fn listed_paths(watched: &RefCell<Watched>) -> Vec<WorktreePath> {
 /// afterward.
 ///
 /// The hooks of the loop share one [`Watched`] through a [`RefCell`]. The
-/// `collect` hook walks it, the `worktrees` and `worktree_paths` hooks read
-/// the worktrees of its repository through [`listed`] and [`listed_paths`],
-/// and the `switch` hook replaces it through [`switch_watched`].
+/// `collect` hook walks it, the `fetch_log` hook reads its log, the
+/// `worktrees` and `worktree_paths` hooks read the worktrees of its repository
+/// through [`listed`] and [`listed_paths`], and the `switch` hook replaces it
+/// through [`switch_watched`].
 pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     // Before the guard takes the screen, so a refusal prints on the screen the
     // user started from, and not on the alternate screen that the guard
@@ -1614,7 +1616,20 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                     .fetch_limit(current_dimensions(cfg.width_offset).height);
                 watched.walk(cfg, &home, log_limit)
             },
-            fetch_log: |_current: &WorktreePath, _limit: usize| Vec::new(),
+            // A resize reads the log alone when the pane outgrows the log of
+            // the cache. The read goes through the handle as the last walk
+            // left it, with no re-open. A re-open costs a parse of the
+            // configuration, and the next walk makes one, as every walk does.
+            // The loop passes the worktree on the screen, as it does to
+            // `collect`.
+            fetch_log: |current: &WorktreePath, limit: usize| {
+                let watched = watched.borrow();
+                debug_assert_eq!(
+                    current, &watched.path,
+                    "the loop and the watch must be on the same worktree",
+                );
+                crate::fetch_log(watched.handle.repo(), limit)
+            },
             render: |snap: &Snapshot, dims: Dimensions, timing: FrameTiming| {
                 render_frame(snap, cfg, dims, timing)
             },
@@ -2174,6 +2189,13 @@ fn global_excludes_path(repo: &gix::Repository) -> Option<PathBuf> {
 /// re-render it without re-walking git. A decay tick or resize repaints from
 /// this cache, advancing every displayed age by `now - collected_at`; only a
 /// filesystem change re-collects and re-seeds it.
+///
+/// The walk fetched only the commits that the pane had rows for at the time of
+/// the walk. So a resize to a pane with rows for more commits than the cached
+/// log holds reads the log again before the repaint, and
+/// [`SnapshotCache::take_fetched_log`] puts the new log in the cache. The rest
+/// of the snapshot does not depend on the size of the pane, so it stays as the
+/// walk left it.
 struct SnapshotCache {
     /// The most recently collected repository state.
     snapshot: Snapshot,
@@ -2183,6 +2205,14 @@ struct SnapshotCache {
     /// The dimensions `snapshot` was last rendered at, so a resize can re-render
     /// the cached snapshot at the new size without collecting.
     dims: Dimensions,
+}
+
+impl SnapshotCache {
+    /// Put `fetched`, a new read of the log of the cached worktree, in the
+    /// place of the cached log.
+    fn take_fetched_log(&mut self, fetched: Vec<LogEntry>) {
+        self.snapshot.log = fetched;
+    }
 }
 
 /// Everything the watch loop starts from — as opposed to [`LoopHooks`], which
@@ -2216,8 +2246,8 @@ struct LoopStart {
     /// back to it.
     home: WorktreePath,
     /// How many recent commits the log asks for, as the command line states
-    /// it. The loop applies it to the pane that it measured, so the loop is
-    /// the one place that decides how many commits each read of the log gets.
+    /// it. The loop applies it to the pane that it measured last
+    /// ([`LoopState::log_limit`]).
     log: LogDemand,
 }
 
@@ -2375,13 +2405,27 @@ impl LoopState {
     fn is_stale(&self, generation: Generation) -> bool {
         generation != self.generation
     }
+
+    /// The most commits that the pane of the cache can show under the log
+    /// demand ([`LogDemand::fetch_limit`]).
+    ///
+    /// It counts the rows of the full pane, and not the rows of the frame that
+    /// the row under the frame leaves. A message that comes and goes under
+    /// the frame then never causes a read of the log.
+    fn log_limit(&self) -> usize {
+        self.log.fetch_limit(self.cache.dims.height)
+    }
 }
 
 /// The side-effecting hooks the watch loop drives, bundled so the loop stays one
 /// testable function instead of taking a fistful of closures. Production wires
-/// these to the real git collect, render, terminal-size query, painter, and
-/// clock; tests inject counters and a controllable clock to assert which hooks
-/// ran — and with what age offset — without a TTY or real time.
+/// these to the real git collect, the real read of the log, render,
+/// terminal-size query, painter, and clock; tests inject counters and a
+/// controllable clock to assert which hooks ran — and with what age offset —
+/// without a TTY or real time.
+///
+/// A resize never calls `collect`. It calls `fetch_log` when the new pane has
+/// rows for more commits than the cached log holds.
 struct LoopHooks<
     Collect,
     FetchLog,
@@ -2856,18 +2900,20 @@ where
 /// [`absorb`], so the next key of the same burst already acts on the new
 /// worktree.
 ///
-/// `hooks` bundles the side effects (collect, render, terminal-size query, paint,
-/// clock, tick cadence) so the loop is one function testable without a TTY or
-/// real time: a test feeds a pre-loaded channel, a controllable clock, and
-/// counters, then asserts which hooks ran and with what age offset. The
-/// contracts verified there:
+/// `hooks` bundles the side effects (collect, read of the log, render,
+/// terminal-size query, paint, clock, tick cadence) so the loop is one function
+/// testable without a TTY or real time: a test feeds a pre-loaded channel, a
+/// controllable clock, and counters, then asserts which hooks ran and with what
+/// age offset. The contracts verified there:
 ///
 /// - a burst of filesystem events between renders collapses into **one** collect
 ///   (re-seeding the cache) and at most one paint (coalescing);
 /// - a decay tick re-renders from cache with **no** collect, advancing every age
 ///   by `clock() - collected_at`, and repaints only if the frame changed;
 /// - a resize re-renders the cached snapshot at the new dimensions with **no**
-///   collect;
+///   collect. When the new pane has rows for more commits than the cached log
+///   holds, the resize first reads the log alone (`fetch_log` in `hooks`) and
+///   puts the new log in the cache;
 /// - a recompute whose output is byte-identical to what's displayed paints
 ///   nothing (suppression);
 /// - a walk that *fails* does not end the loop: the last good snapshot is
@@ -3086,9 +3132,9 @@ where
         // cooldown's expiry. `on_change` defers a mid-cooldown FS change (setting
         // the throttle's dirty flag) and we fall through to a cheap cached
         // re-render (Part A) instead of walking. A resize or a plain decay tick
-        // never walks. A filesystem walk in a coalesced burst wins over a
-        // co-arriving resize: the fresh walk already renders at the current
-        // dimensions.
+        // never walks. A resize can read the log alone, after the walk below.
+        // A filesystem walk in a coalesced burst wins over a co-arriving
+        // resize: the fresh walk already renders at the current dimensions.
         let walk_now = if saw_force {
             // Manual refresh (`r`): lift the cooldown gate and walk now. The walk
             // branch re-measures cost and re-arms the throttle from it.
@@ -3164,6 +3210,27 @@ where
             // replaces that one, from the same start.
             let cost = (hooks.clock)().saturating_duration_since(now);
             state.schedule.record(now, cost);
+        }
+
+        // A walk fetches only the commits that the pane had rows for at the
+        // time of the walk. A pane that grew since then has rows for more
+        // commits than the cache holds, and no walk comes until the next
+        // change or timed refresh. So a resize that needs more commits than
+        // the cache holds reads the log again, before the repaint. It reads the
+        // log alone, because the rest of the snapshot does not depend on the
+        // size of the pane.
+        //
+        // The schedule does not record this read, because it is not a walk.
+        // `WalkSchedule::record` clears a walk that a cooldown deferred, and it
+        // moves the timed refresh on by a whole interval. A record here would
+        // drop a change that no walk has read yet, and it would put the next
+        // refresh off.
+        if saw_resize {
+            let limit = state.log_limit();
+            if state.cache.snapshot.log.len() < limit {
+                let fetched = (hooks.fetch_log)(&state.current, limit);
+                state.cache.take_fetched_log(fetched);
+            }
         }
 
         // The open list takes the rows under the head of the frame. A pane
