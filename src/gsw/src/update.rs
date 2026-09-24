@@ -710,9 +710,10 @@ fn run_in(
     //    name.
     // 3. The operation started from the commit that HEAD held just before the
     //    shell started. In the same gap, another pane can also commit on the
-    //    branch of the question and start an operation from that commit, and
-    //    the command can also commit first. git records the commit where an
-    //    operation started, so gsw compares it with the HEAD that it read.
+    //    branch of the question and start an operation from that commit. The
+    //    command can also commit first. gsw cannot tell those two cases apart
+    //    either. git records the commit where an operation started, so gsw
+    //    compares it with the HEAD that it read.
     //
     // Conditions 2 and 3 close most of the gap of condition 1, and not all of
     // it. An operation that another pane starts in the gap, on the same branch
