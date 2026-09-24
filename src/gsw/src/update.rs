@@ -505,14 +505,33 @@ fn run_in(
 ) -> PushOutcome {
     let name = command.command().name();
 
-    // **The branch is compared first, and a mismatch starts no shell.** A
-    // question describes the repository as it stood when the key was pressed,
-    // and the answer arrives whenever the user presses `y` — long enough for a
-    // checkout in another pane to land in between. `grp` reads HEAD when the
-    // shell starts it, so it would rebase a branch the question never named and
-    // push it. The gap between this read and the shell's own is microseconds
-    // rather than seconds, and nothing here closes it entirely, short of a lock
-    // git does not offer.
+    // **The work tree is read again before the shell starts, and a change
+    // starts no shell.** A question describes the repository as it stood when
+    // the key was pressed, and the answer arrives whenever the user presses `y`
+    // — long enough for another pane to act in between. Two reads cover that
+    // gap: the operation that git holds, and then the branch. The gap between
+    // these reads and the shell's own is microseconds rather than seconds, and
+    // nothing here closes it entirely, short of a lock git does not offer.
+    //
+    // **The operation is read first.** A merge or a rebase that started in the
+    // gap is one the command would meet and did not start. gsw did not start
+    // it either, so gsw does not abort it: it stays as it is, and the words are
+    // the words of the question. A rebase must be read before the branch,
+    // because a stopped rebase detaches HEAD. The branch check would then read
+    // `HEAD` and blame a checkout that never happened.
+    //
+    // A repository that cannot be read holds no operation here, and the run
+    // goes ahead, for the reason the branch check gives below.
+    if let Some(operation) = crate::repo::held_operation(workdir) {
+        return PushOutcome {
+            success: false,
+            output: in_progress_refusal(&operation),
+        };
+    }
+
+    // **The branch is compared next.** A checkout in another pane moves HEAD to
+    // a different branch, and `grp` reads HEAD when the shell starts it, so it
+    // would rebase a branch the question never named and push it.
     //
     // `None` means git could not be run at all. The run goes ahead in that
     // case, as a push does: to refuse here would blame a checkout that never
@@ -528,19 +547,6 @@ fn run_in(
                 ),
             };
         }
-    }
-
-    // **An operation that git holds refuses the run too, and it stays as it
-    // is.** The gap is the gap of the branch check above: a merge that another
-    // pane starts between the question and the `y` keeps HEAD on the branch,
-    // and the command would meet a merge that it did not start. gsw did not
-    // start it either, so gsw does not abort it. The words are the words of the
-    // question.
-    if let Some(operation) = crate::repo::held_operation(workdir) {
-        return PushOutcome {
-            success: false,
-            output: in_progress_refusal(&operation),
-        };
     }
 
     // The child is interactive, it carries no `GIT_` variable out of the
