@@ -6574,6 +6574,36 @@ mod tests {
     }
 
     #[test]
+    fn a_walk_that_reaches_the_end_of_the_history_leaves_its_resize_no_read() {
+        // A filesystem change and a resize come in one burst. The walk of the
+        // burst comes first, at the pane of 60 rows that the loop measured,
+        // and it asks for 58 commits. It finds the end of a history of 10
+        // commits, so its log is complete. The resize of the same wake then
+        // has no commit to read, and it reads nothing.
+        let now = Instant::now();
+        let history = fake_history(10, Duration::from_secs(100));
+        let cache = SnapshotCache {
+            snapshot: empty_snapshot(),
+            collected_at: now,
+            dims: pane(20),
+        };
+
+        let run = run_wakes(cache, &[Wake::walk_and_resize(60)], now, &history);
+
+        assert_eq!(
+            (run.collects, run.fetches),
+            (1, 0),
+            "the burst walks once and reads no log after the walk",
+        );
+        assert_eq!(
+            run.commit_rows(),
+            10,
+            "the frame shows every commit of the history:\n{}",
+            run.glyphs,
+        );
+    }
+
+    #[test]
     fn a_walk_fetches_the_commits_of_the_pane_that_the_loop_measured() {
         // The loop measures the pane before each walk, and passes the walk
         // the most commits that the pane can show. The loop is then the one
