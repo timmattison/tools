@@ -6211,6 +6211,40 @@ mod tests {
     }
 
     #[test]
+    fn a_read_of_the_log_with_fewer_commits_than_the_cache_keeps_the_cached_log() {
+        // A read of the log that fails gives no commit, as when `git gc`
+        // swaps the ref store under it. A read that cannot read a commit
+        // leaves that commit out. Neither read is a reason to take rows off
+        // the log on the screen, so the frame keeps the 18 commits of the
+        // walk.
+        let now = Instant::now();
+        let history = fake_history(100, Duration::from_secs(100));
+        for readable in [0, 5] {
+            let cache = SnapshotCache {
+                snapshot: Snapshot {
+                    log: newest(&history, 18),
+                    ..empty_snapshot()
+                },
+                collected_at: now,
+                dims: pane(20),
+            };
+
+            let run = run_resize(cache, 60, now, &history[..readable]);
+
+            assert_eq!(
+                run.fetches, 1,
+                "the grown pane asks for the log when the read gives {readable} commits",
+            );
+            assert_eq!(
+                run.commit_rows(),
+                18,
+                "a read that gives {readable} commits keeps the log of the walk:\n{}",
+                run.glyphs,
+            );
+        }
+    }
+
+    #[test]
     fn event_loop_fs_change_reseeds_collected_at() {
         // After a filesystem change re-collects the snapshot, a later decay tick
         // must measure its age offset from the NEW collection time, not the stale
