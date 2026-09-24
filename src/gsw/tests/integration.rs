@@ -530,7 +530,9 @@ fn run_gsw_in_pane(dir: &Path, extra: &[&str]) -> String {
 
 /// The log rows of `out` whose commits [`add_history`] made.
 fn history_rows(out: &str) -> usize {
-    out.lines().filter(|line| line.contains(HISTORY_PREFIX)).count()
+    out.lines()
+        .filter(|line| line.contains(HISTORY_PREFIX))
+        .count()
 }
 
 #[test]

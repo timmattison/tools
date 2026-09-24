@@ -1241,14 +1241,21 @@ impl Generation {
 /// reason, and stays on the worktree it watched. So this signature says "this
 /// walk did not produce a snapshot", not "the monitor should stop" — a
 /// distinction worth preserving if another caller ever appears.
+///
+/// `log_limit` is the number of recent commits that the walk fetches for the
+/// log. The caller takes it from [`LogDemand::fetch_limit`] at the height of
+/// the pane, as [`collect_snapshot`] says.
+///
+/// [`LogDemand::fetch_limit`]: crate::LogDemand::fetch_limit
 pub(crate) fn walk(
     handle: &mut RepoHandle,
     ignore: &LiveIgnore,
     cfg: &RenderConfig,
+    log_limit: usize,
 ) -> Result<Snapshot> {
     let repo = handle.reopened();
     ignore.refresh(repo);
-    collect_snapshot(repo, cfg)
+    collect_snapshot(repo, cfg, log_limit)
 }
 
 /// Everything that is tied to the worktree that the loop watches: its path,
@@ -1349,13 +1356,19 @@ impl Watched {
     /// Walk the worktree, and put its badge on the snapshot. [`walk`] re-opens
     /// the repository, rebuilds the ignore matcher, and collects the snapshot.
     /// [`badged`] then reads the badge from the repository that the walk
-    /// re-opened. `home` is the worktree where the user started gsw.
+    /// re-opened. `home` is the worktree where the user started gsw, and
+    /// `log_limit` is the number of commits that the walk fetches for the log.
     ///
     /// # Errors
     ///
     /// Gives the error of [`walk`], which is the error of the status walk.
-    fn walk(&mut self, cfg: &RenderConfig, home: &WorktreePath) -> Result<Snapshot> {
-        let snapshot = walk(&mut self.handle, &self.ignore, cfg)?;
+    fn walk(
+        &mut self,
+        cfg: &RenderConfig,
+        home: &WorktreePath,
+        log_limit: usize,
+    ) -> Result<Snapshot> {
+        let snapshot = walk(&mut self.handle, &self.ignore, cfg, log_limit)?;
         Ok(badged(snapshot, self.handle.repo(), &self.path, home))
     }
 }
@@ -1386,7 +1399,8 @@ fn badged(
 
 /// Switch the watch to the worktree at `target` as one step, and give the first
 /// frame of that worktree. The watcher of the new worktree sends its events on
-/// `tx`, and `home` is the worktree where the user started gsw.
+/// `tx`, and `home` is the worktree where the user started gsw. The walk of the
+/// new worktree fetches `log_limit` commits for the log.
 ///
 /// 1. Open a candidate [`Watched`] on `target`. That starts its watcher.
 /// 2. Walk the candidate, which puts its badge on the snapshot.
@@ -1410,10 +1424,11 @@ fn switch_watched(
     tx: Sender<Event>,
     cfg: &RenderConfig,
     home: &WorktreePath,
+    log_limit: usize,
 ) -> Result<Snapshot, String> {
     let mut candidate = Watched::open(target, tx)?;
     let snapshot = candidate
-        .walk(cfg, home)
+        .walk(cfg, home, log_limit)
         .map_err(|error| format!("{WALK_FAILED}: {}: {error:#}", target.as_path().display()))?;
     // The old worktree goes here, and the drop of its watcher stops its events.
     drop(watched.replace(candidate));
@@ -1488,9 +1503,11 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     let dims = current_dimensions(cfg.width_offset);
     let collected_at = Instant::now();
     // The badge goes on through the same helper as on every later walk, so the
-    // first frame names the worktree as every later frame does.
+    // first frame names the worktree as every later frame does. The walk
+    // fetches as many commits as the pane at `dims` can show, so the log of
+    // the first frame can fill the pane.
     let snapshot = badged(
-        collect_snapshot(handle.repo(), cfg)?,
+        collect_snapshot(handle.repo(), cfg, cfg.log.fetch_limit(dims.height))?,
         handle.repo(),
         &home,
         &home,
@@ -1579,13 +1596,20 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             // replaces `watched` only when it gives `Ok`, so the two always
             // name the same worktree. The assertion states that in the debug
             // build, which the tests run.
+            //
+            // The walk fetches as many commits as the pane can show now. The
+            // hook reads the size of the pane at the time of the walk, because
+            // the pane can change size after the seed walk.
             collect: |current: &WorktreePath| {
                 let mut watched = watched.borrow_mut();
                 debug_assert_eq!(
                     current, &watched.path,
                     "the loop and the watch must be on the same worktree",
                 );
-                watched.walk(cfg, &home)
+                let log_limit = cfg
+                    .log
+                    .fetch_limit(current_dimensions(cfg.width_offset).height);
+                watched.walk(cfg, &home, log_limit)
             },
             render: |snap: &Snapshot, dims: Dimensions, timing: FrameTiming| {
                 render_frame(snap, cfg, dims, timing)
@@ -1676,9 +1700,13 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             worktrees: || listed(&watched),
             worktree_paths: || listed_paths(&watched),
             // Each switch gives the new watcher a sender of its own on the one
-            // channel of the loop.
+            // channel of the loop. The first walk of the new worktree fetches
+            // as many commits as the pane can show now, as `collect` does.
             switch: |target: &WorktreePath| {
-                switch_watched(&watched, target, switch_tx.clone(), cfg, &home)
+                let log_limit = cfg
+                    .log
+                    .fetch_limit(current_dimensions(cfg.width_offset).height);
+                switch_watched(&watched, target, switch_tx.clone(), cfg, &home, log_limit)
             },
         },
     );
@@ -3478,12 +3506,17 @@ mod tests {
             base: None,
             max_files: None,
             bar_width: 20,
-            log_lines: 0,
+            log: crate::LogDemand::Off,
             truecolor: false,
             width_offset: 0,
             refresh_interval: None,
         }
     }
+
+    /// The number of commits that a walk test fetches for the log. The
+    /// [`walk_config`] asks for no log, and no walk test reads a log row, so
+    /// the walk fetches no commit.
+    pub(super) const WALK_LOG_LIMIT: usize = 0;
 
     /// `resolve_home` gives the root of the work tree in the spelling of
     /// [`WorktreePath::resolve`], so the loop compares the home worktree with
@@ -3530,7 +3563,7 @@ mod tests {
         let ignore = LiveIgnore::new(handle.repo());
         let cfg = walk_config();
 
-        let before = walk(&mut handle, &ignore, &cfg).expect("first walk");
+        let before = walk(&mut handle, &ignore, &cfg, WALK_LOG_LIMIT).expect("first walk");
         assert!(
             before.upstream.is_none(),
             "a local-only branch has no upstream yet",
@@ -3539,7 +3572,7 @@ mod tests {
         // What `git push -u origin feature` in another pane does while gsw runs.
         testrepo::git(p, &["push", "-q", "-u", "origin", "feature"]);
 
-        let after = walk(&mut handle, &ignore, &cfg).expect("second walk");
+        let after = walk(&mut handle, &ignore, &cfg, WALK_LOG_LIMIT).expect("second walk");
         let up = after
             .upstream
             .as_ref()
@@ -3571,7 +3604,7 @@ mod tests {
         let ignore = LiveIgnore::new(handle.repo());
         let cfg = walk_config();
 
-        let before = walk(&mut handle, &ignore, &cfg).expect("first walk");
+        let before = walk(&mut handle, &ignore, &cfg, WALK_LOG_LIMIT).expect("first walk");
         let up = before
             .upstream
             .as_ref()
@@ -3581,7 +3614,7 @@ mod tests {
         // What `git branch --unset-upstream` in another pane does while gsw runs.
         testrepo::git(p, &["branch", "--unset-upstream"]);
 
-        let after = walk(&mut handle, &ignore, &cfg).expect("second walk");
+        let after = walk(&mut handle, &ignore, &cfg, WALK_LOG_LIMIT).expect("second walk");
         assert!(
             after.upstream.is_none(),
             "the upstream segment must vanish without restarting gsw; instead \
@@ -3614,7 +3647,7 @@ mod tests {
         let ignore = LiveIgnore::new(handle.repo());
         let cfg = walk_config();
 
-        let before = walk(&mut handle, &ignore, &cfg).expect("first walk");
+        let before = walk(&mut handle, &ignore, &cfg, WALK_LOG_LIMIT).expect("first walk");
         let up = before
             .upstream
             .as_ref()
@@ -3632,7 +3665,7 @@ mod tests {
         testrepo::git(op, &["commit", "-q", "-m", "remote moved on"]);
         testrepo::git(p, &["fetch", "-q"]);
 
-        let after = walk(&mut handle, &ignore, &cfg).expect("second walk");
+        let after = walk(&mut handle, &ignore, &cfg, WALK_LOG_LIMIT).expect("second walk");
         let up = after
             .upstream
             .as_ref()
@@ -3662,7 +3695,7 @@ mod tests {
         let ignore = LiveIgnore::new(handle.repo());
         let cfg = walk_config();
 
-        let before = walk(&mut handle, &ignore, &cfg).expect("first walk");
+        let before = walk(&mut handle, &ignore, &cfg, WALK_LOG_LIMIT).expect("first walk");
         assert_eq!(
             before.upstream.as_ref().map(|u| u.name.as_str()),
             Some("origin/main"),
@@ -3672,7 +3705,7 @@ mod tests {
         // What `git remote rename origin upstream` in another pane does.
         testrepo::git(p, &["remote", "rename", "origin", "upstream"]);
 
-        let after = walk(&mut handle, &ignore, &cfg).expect("second walk");
+        let after = walk(&mut handle, &ignore, &cfg, WALK_LOG_LIMIT).expect("second walk");
         assert_eq!(
             after.upstream.as_ref().map(|u| u.name.as_str()),
             Some("upstream/main"),
@@ -3728,7 +3761,10 @@ mod tests {
         let ignore = LiveIgnore::new(handle.repo());
         let cfg = walk_config();
 
-        let before = header_line(&walk(&mut handle, &ignore, &cfg).expect("first walk"), &cfg);
+        let before = header_line(
+            &walk(&mut handle, &ignore, &cfg, WALK_LOG_LIMIT).expect("first walk"),
+            &cfg,
+        );
         assert!(
             !before.contains("origin/"),
             "a local-only branch must not advertise any upstream: {before:?}",
@@ -3738,7 +3774,7 @@ mod tests {
         testrepo::git(p, &["push", "-q", "-u", "origin", "feature"]);
 
         let after = header_line(
-            &walk(&mut handle, &ignore, &cfg).expect("second walk"),
+            &walk(&mut handle, &ignore, &cfg, WALK_LOG_LIMIT).expect("second walk"),
             &cfg,
         );
         assert!(
@@ -3813,7 +3849,7 @@ mod tests {
 
         // What `echo 'build/' >> .gitignore` in another pane does while gsw runs.
         std::fs::write(p.join(".gitignore"), "build/\n").expect("write .gitignore");
-        walk(&mut handle, &ignore, &cfg).expect("walk");
+        walk(&mut handle, &ignore, &cfg, WALK_LOG_LIMIT).expect("walk");
 
         assert!(
             !should_react(&churn, &ignore, &workdir, &git_dirs),
@@ -3849,7 +3885,7 @@ mod tests {
 
         // What deleting the `build/` line in another pane does while gsw runs.
         std::fs::write(p.join(".gitignore"), "").expect("truncate .gitignore");
-        walk(&mut handle, &ignore, &cfg).expect("walk");
+        walk(&mut handle, &ignore, &cfg, WALK_LOG_LIMIT).expect("walk");
 
         assert!(
             should_react(&churn, &ignore, &workdir, &git_dirs),
@@ -10699,7 +10735,7 @@ mod watched_tests {
 
     use tempfile::TempDir;
 
-    use super::tests::walk_config;
+    use super::tests::{walk_config, WALK_LOG_LIMIT};
     use super::{
         listed, listed_paths, switch_watched, Event, Watched, DIRECTORY_GONE, NOT_A_WORK_TREE,
     };
@@ -10820,7 +10856,7 @@ mod watched_tests {
         for (name, badge) in expected {
             let mut watched = seeded(&dir.path().join(name), tx.clone());
             let snapshot = watched
-                .walk(&walk_config(), &home)
+                .walk(&walk_config(), &home, WALK_LOG_LIMIT)
                 .expect("walk the fixture");
             assert_eq!(
                 snapshot.worktree,
@@ -10840,7 +10876,7 @@ mod watched_tests {
 
         let mut watched = seeded(dir.path(), tx);
         let snapshot = watched
-            .walk(&walk_config(), &home)
+            .walk(&walk_config(), &home, WALK_LOG_LIMIT)
             .expect("walk the fixture");
 
         assert_eq!(snapshot.worktree, None);
@@ -10883,7 +10919,7 @@ mod watched_tests {
         std::fs::write(dir.join(CHANGED), "changed\n").expect("write in the old worktree");
         let later = watched
             .borrow_mut()
-            .walk(&walk_config(), home)
+            .walk(&walk_config(), home, WALK_LOG_LIMIT)
             .expect("walk the old worktree");
         assert_eq!(
             later.branch, branch,
@@ -10949,8 +10985,15 @@ mod watched_tests {
         let (tx, _rx) = mpsc::channel();
         let watched = RefCell::new(seeded(&main, tx.clone()));
 
-        let first = switch_watched(&watched, &resolved(&linked), tx, &cfg, &home)
-            .unwrap_or_else(|reason| panic!("the switch to {LINKED} must work: {reason}"));
+        let first = switch_watched(
+            &watched,
+            &resolved(&linked),
+            tx,
+            &cfg,
+            &home,
+            WALK_LOG_LIMIT,
+        )
+        .unwrap_or_else(|reason| panic!("the switch to {LINKED} must work: {reason}"));
         assert_eq!(
             first.branch, LINKED,
             "the switch gives the first frame of the new worktree",
@@ -10960,7 +11003,7 @@ mod watched_tests {
         std::fs::write(linked.join(CHANGED), "changed\n").expect("write in the new worktree");
         let later = watched
             .borrow_mut()
-            .walk(&cfg, &home)
+            .walk(&cfg, &home, WALK_LOG_LIMIT)
             .expect("walk the new worktree");
 
         assert_eq!(later.branch, LINKED);
@@ -10994,7 +11037,7 @@ mod watched_tests {
         let (tx, _rx) = mpsc::channel();
         let watched = RefCell::new(seeded(&main, tx.clone()));
 
-        let reason = switch_watched(&watched, &target, tx, &walk_config(), &home)
+        let reason = switch_watched(&watched, &target, tx, &walk_config(), &home, WALK_LOG_LIMIT)
             .expect_err("a directory that is gone must refuse the switch");
 
         assert_still_on(&watched, &main, MAIN, &home);
@@ -11034,7 +11077,7 @@ mod watched_tests {
         let (tx, _rx) = mpsc::channel();
         let watched = RefCell::new(seeded(&main, tx.clone()));
 
-        let reason = switch_watched(&watched, &target, tx, &walk_config(), &home)
+        let reason = switch_watched(&watched, &target, tx, &walk_config(), &home, WALK_LOG_LIMIT)
             .expect_err("a worktree whose walk fails must refuse the switch");
 
         assert_still_on(&watched, &main, MAIN, &home);
@@ -11074,8 +11117,15 @@ mod watched_tests {
         let watched = RefCell::new(seeded(&main, old_tx));
         let (new_tx, new_rx) = mpsc::channel();
 
-        switch_watched(&watched, &resolved(&linked), new_tx, &walk_config(), &home)
-            .unwrap_or_else(|reason| panic!("the switch to {LINKED} must work: {reason}"));
+        switch_watched(
+            &watched,
+            &resolved(&linked),
+            new_tx,
+            &walk_config(),
+            &home,
+            WALK_LOG_LIMIT,
+        )
+        .unwrap_or_else(|reason| panic!("the switch to {LINKED} must work: {reason}"));
 
         assert!(
             hangs_up(&old_rx, WATCHER_DEADLINE),
@@ -11157,7 +11207,7 @@ mod watched_tests {
 
         assert_eq!(watched.path, linked);
         let snapshot = watched
-            .walk(&walk_config(), &linked)
+            .walk(&walk_config(), &linked, WALK_LOG_LIMIT)
             .expect("walk the linked worktree");
         assert_eq!(snapshot.branch, LINKED);
     }

@@ -171,10 +171,10 @@ struct Cli {
     #[arg(long, default_value_t = 0)]
     width_offset: usize,
 
-    /// Number of recent commits to show in the `git log --oneline`-style
-    /// section appended after the file list.
-    #[arg(long, default_value_t = 20)]
-    log_lines: usize,
+    /// Cap the recent-commit log at N rows. By default the log fills the rows
+    /// that the header and the file list leave.
+    #[arg(long, value_name = "N")]
+    log_lines: Option<usize>,
 
     /// Disable the recent-commit section entirely. The newest commit's age
     /// lives on the first row of that section, so this takes the commit age
@@ -313,7 +313,7 @@ fn main() -> Result<()> {
         base: cli.base,
         max_files: cli.max_files,
         bar_width: cli.bar_width,
-        log_lines: if cli.no_log { 0 } else { cli.log_lines },
+        log: LogDemand::from_cli(cli.no_log, cli.log_lines),
         truecolor,
         width_offset: cli.width_offset,
         refresh_interval: refresh_interval(cli.refresh_interval),
@@ -372,8 +372,10 @@ pub(crate) struct RenderConfig {
     pub max_files: Option<usize>,
     /// Magnitude-bar width in cells.
     pub bar_width: usize,
-    /// Recent-commit rows to request; `0` when `--no-log` suppressed the section.
-    pub log_lines: usize,
+    /// How many recent commits the log section asks for (`--log-lines` and
+    /// `--no-log`). A frame applies it to the height of its pane through
+    /// [`LogDemand::fetch_limit`].
+    pub log: LogDemand,
     /// Whether the 24-bit truecolor fades are in effect. The fades are the
     /// commit-log gradient, the recency fade on the file rows, and the fade
     /// on the push status message.
@@ -383,6 +385,57 @@ pub(crate) struct RenderConfig {
     /// How often watch mode re-walks the repository with no filesystem event to
     /// prompt it (`--refresh-interval`), or `None` to stay purely event-driven.
     pub refresh_interval: Option<Duration>,
+}
+
+/// How many recent commits the log section asks for, as the command line
+/// states it.
+///
+/// The rows that the log gets come from the pane, and the pane of watch mode
+/// changes size while gsw runs. So the demand stays a rule, and each walk
+/// applies it to the height of its pane through
+/// [`fetch_limit`](Self::fetch_limit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LogDemand {
+    /// `--no-log`: the frame has no log section, and the walk fetches no
+    /// commit.
+    Off,
+    /// The default: the log fills the rows that the header and the file list
+    /// leave.
+    Fill,
+    /// `--log-lines N`: the log fills the rows that the header and the file
+    /// list leave, up to N rows. `--log-lines 0` gives no log, as it always
+    /// did.
+    AtMost(usize),
+}
+
+impl LogDemand {
+    /// The demand that the command line states. `--no-log` wins over
+    /// `--log-lines`, and no `--log-lines` means [`Fill`](Self::Fill).
+    fn from_cli(no_log: bool, log_lines: Option<usize>) -> Self {
+        match (no_log, log_lines) {
+            (true, _) => Self::Off,
+            (false, Some(rows)) => Self::AtMost(rows),
+            (false, None) => Self::Fill,
+        }
+    }
+
+    /// The most commits that a pane of `height` rows can show under this
+    /// demand.
+    ///
+    /// The tallest log fills the pane under the smallest header chrome
+    /// ([`BASE_HEADER_CHROME`]): no merge or rebase in progress, and no file
+    /// row. A walk fetches no more commits than that, because a commit that no
+    /// row can show costs a step of the walk and gives nothing. A frame with
+    /// file rows or with the line of an operation shows fewer, and
+    /// [`render_frame`] takes the rows it has from the top of this fetch.
+    pub(crate) fn fetch_limit(self, height: usize) -> usize {
+        let tallest = height.saturating_sub(BASE_HEADER_CHROME);
+        match self {
+            Self::Off => 0,
+            Self::Fill => tallest,
+            Self::AtMost(rows) => rows.min(tallest),
+        }
+    }
 }
 
 /// Where a frame sits in time: how stale the snapshot behind it is, and when
@@ -436,8 +489,17 @@ impl FrameTiming {
 /// [`render::render_head`] draws exactly these rows. Every row budget counts
 /// them from here, so no frame reserves a different number of rows for them.
 fn header_chrome(snapshot: &Snapshot) -> usize {
-    2 + usize::from(snapshot.operation.is_some())
+    BASE_HEADER_CHROME + usize::from(snapshot.operation.is_some())
 }
+
+/// Rows at the top of a frame with no merge or rebase in progress: the header
+/// and the separator.
+///
+/// [`header_chrome`] adds the line of an operation to this number, and
+/// [`LogDemand::fetch_limit`] reads it as the smallest header chrome. Both read
+/// this one constant, so the fetch never counts the header differently from
+/// the frame.
+const BASE_HEADER_CHROME: usize = 2;
 
 /// A rendered frame plus the metadata watch mode needs to schedule its next
 /// time-driven refresh. One-shot mode reads only [`Render::output`]; watch mode
@@ -483,12 +545,15 @@ fn snapshot_freshest_age(snapshot: &Snapshot) -> Option<Duration> {
 /// byte-identical to a direct render; watch mode instead calls the two halves
 /// separately so it can re-render a *cached* snapshot at a growing offset
 /// without re-walking the repo.
+///
+/// The walk fetches as many commits as a pane of `dims.height` rows can show
+/// under `cfg.log` ([`LogDemand::fetch_limit`]), so the log can fill the pane.
 pub(crate) fn build_output(
     repo: &gix::Repository,
     cfg: &RenderConfig,
     dims: watch::Dimensions,
 ) -> Result<Render> {
-    let snapshot = collect_snapshot(repo, cfg)?;
+    let snapshot = collect_snapshot(repo, cfg, cfg.log.fetch_limit(dims.height))?;
     Ok(render_frame(
         &snapshot,
         cfg,
@@ -507,8 +572,17 @@ pub(crate) fn build_output(
 /// repository state, independent of the live terminal — turning it into a frame
 /// for a given [`watch::Dimensions`] is the separate, cheap [`render_frame`]
 /// half. Watch mode collects once per filesystem change and re-renders the
-/// cached snapshot many times. Uses only `cfg.base` and `cfg.log_lines`.
-pub(crate) fn collect_snapshot(repo: &gix::Repository, cfg: &RenderConfig) -> Result<Snapshot> {
+/// cached snapshot many times. Uses only `cfg.base`.
+///
+/// `log_limit` is the number of recent commits to fetch for the log. The
+/// caller takes it from [`LogDemand::fetch_limit`] at the height of the pane
+/// that it renders for. The snapshot has no terminal size of its own, so the
+/// caller, which has one, sets the limit.
+pub(crate) fn collect_snapshot(
+    repo: &gix::Repository,
+    cfg: &RenderConfig,
+    log_limit: usize,
+) -> Result<Snapshot> {
     let branch = repo::branch_name(repo);
 
     let base = cfg.base.clone().unwrap_or_else(|| repo::resolve_base(repo));
@@ -533,7 +607,7 @@ pub(crate) fn collect_snapshot(repo: &gix::Repository, cfg: &RenderConfig) -> Re
         &ages,
     );
 
-    snapshot.log = fetch_log(repo, cfg.log_lines);
+    snapshot.log = fetch_log(repo, log_limit);
 
     snapshot.upstream = repo::upstream_status(repo);
     snapshot.push_remote = repo::push_remote(repo);
@@ -586,10 +660,10 @@ pub(crate) fn render_frame(
     //   reserved row for a `+N more files` footer (only when files > 0)  0 or 1
     // Whatever's left goes to the file list first — it's the primary
     // content and renders at the bottom, so it must stay fully on-screen
-    // rather than being squeezed by a long log (`--log-lines` defaults to
-    // 20). The log takes the remaining rows; only when the file list is
-    // itself truncated does a floor claw rows back to it. See
-    // `plan_section_caps`.
+    // rather than being squeezed by a long log (by default the walk fetches
+    // enough commits to fill the pane). The log takes the remaining rows; only
+    // when the file list is itself truncated does a floor claw rows back to
+    // it. See `plan_section_caps`.
     let file_count = snapshot.files.len();
     let log_count = snapshot.log.len();
     // The operation indicator (merge/rebase) is one extra chrome row between
@@ -844,6 +918,89 @@ mod tests {
         );
     }
 
+    /// The demand of the log that `args` state on the command line.
+    fn log_demand_of(args: &[&str]) -> LogDemand {
+        let cli = Cli::parse_from(std::iter::once("gsw").chain(args.iter().copied()));
+        LogDemand::from_cli(cli.no_log, cli.log_lines)
+    }
+
+    #[test]
+    fn with_no_log_flag_the_log_fills_the_pane() {
+        // Issue #521: the default was a cap of 20 rows, and a tall pane
+        // stayed empty under the log.
+        assert_eq!(log_demand_of(&[]), LogDemand::Fill);
+    }
+
+    #[test]
+    fn log_lines_is_a_cap_and_no_log_wins_over_it() {
+        assert_eq!(log_demand_of(&["--log-lines", "30"]), LogDemand::AtMost(30));
+        assert_eq!(
+            log_demand_of(&["--log-lines", "0"]),
+            LogDemand::AtMost(0),
+            "--log-lines 0 stays a log of no rows",
+        );
+        assert_eq!(log_demand_of(&["--no-log"]), LogDemand::Off);
+        assert_eq!(
+            log_demand_of(&["--no-log", "--log-lines", "30"]),
+            LogDemand::Off,
+            "--no-log removes the log whatever --log-lines says",
+        );
+    }
+
+    #[test]
+    fn fetch_limit_is_the_pane_under_the_header_and_the_separator() {
+        // A pane of 40 rows. The header and the separator take 2 rows, so the
+        // tallest log has 38 rows.
+        assert_eq!(LogDemand::Fill.fetch_limit(40), 38);
+        assert_eq!(
+            LogDemand::AtMost(30).fetch_limit(40),
+            30,
+            "a cap under the pane is the limit",
+        );
+        assert_eq!(
+            LogDemand::AtMost(100).fetch_limit(40),
+            38,
+            "a cap over the pane fetches no commit that no row can show",
+        );
+        assert_eq!(LogDemand::AtMost(0).fetch_limit(40), 0);
+        assert_eq!(LogDemand::Off.fetch_limit(40), 0);
+    }
+
+    #[test]
+    fn fetch_limit_of_a_pane_with_no_row_under_the_separator_is_zero() {
+        for height in [0, 1, 2] {
+            for demand in [LogDemand::Fill, LogDemand::AtMost(5), LogDemand::Off] {
+                assert_eq!(
+                    demand.fetch_limit(height),
+                    0,
+                    "{demand:?} in a pane of {height} rows",
+                );
+            }
+        }
+        assert_eq!(
+            LogDemand::Fill.fetch_limit(3),
+            1,
+            "one row under the separator"
+        );
+    }
+
+    #[test]
+    fn fetch_limit_and_header_chrome_count_the_same_header() {
+        // The tallest log and the header chrome of a frame with no merge or
+        // rebase fill the pane together, and no row is left over. If the two
+        // counted the header differently, the log of a clean worktree would
+        // stop one row short of the pane, or it would push the frame one row
+        // past it.
+        let clean = snapshot_with(None, &[]);
+        for height in BASE_HEADER_CHROME..=60 {
+            assert_eq!(
+                LogDemand::Fill.fetch_limit(height) + header_chrome(&clean),
+                height,
+                "a pane of {height} rows",
+            );
+        }
+    }
+
     #[test]
     fn operation_line_reserves_a_chrome_row_so_file_list_is_not_clipped() {
         // When an in-progress operation adds its indicator line between the
@@ -868,7 +1025,7 @@ mod tests {
             base: None,
             max_files: None,
             bar_width: 6,
-            log_lines: 0,
+            log: LogDemand::Off,
             truecolor: false,
             refresh_interval: None,
             width_offset: 0,
@@ -1041,7 +1198,7 @@ mod tests {
             base: None,
             max_files: None,
             bar_width: 6,
-            log_lines: 0,
+            log: LogDemand::Off,
             truecolor: false,
             refresh_interval: None,
             width_offset: 0,
@@ -1607,7 +1764,7 @@ mod tests {
             base: None,
             max_files: None,
             bar_width: 6,
-            log_lines: 1,
+            log: LogDemand::AtMost(1),
             truecolor: false,
             refresh_interval: None,
             width_offset: 0,

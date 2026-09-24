@@ -1744,12 +1744,12 @@ mod push_remote_tests {
             base: None,
             max_files: None,
             bar_width: 20,
-            log_lines: 0,
+            log: crate::LogDemand::Off,
             truecolor: false,
             width_offset: 0,
             refresh_interval: None,
         };
-        let snapshot = crate::collect_snapshot(handle.repo(), &cfg).expect("walk the clone");
+        let snapshot = crate::collect_snapshot(handle.repo(), &cfg, 0).expect("walk the clone");
         assert_eq!(snapshot.push_remote, Some("origin".to_string()));
     }
 }
