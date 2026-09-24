@@ -8,12 +8,18 @@
 //! command exists, and the run that reads what the command writes.
 //!
 //! What is here is what belongs to these two keys alone: the variable that
-//! names each command, the name each key falls back on, the line the shell
-//! runs, and the record of what the run said.
+//! names each command, the name each key falls back on, the question and its
+//! refusals, the line the shell runs, the reads of the work tree before and
+//! after the run, and the record of what the run said.
+//!
+//! **One act here is gsw's own: the abort.** The run has no terminal, so
+//! nobody can resolve a conflict inside it. After the command exits, gsw
+//! aborts a rebase or a merge that the run started and left stopped, and no
+//! other operation. See `run` for the rule.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, Output, Stdio};
 
 use shellquote::shell_quote;
 
@@ -21,7 +27,7 @@ use crate::push::{
     confirm_hint, current_branch, Confirmed, PushOutcome, PushPrompt, SuccessReport,
 };
 use crate::render::{Operation, Snapshot};
-use crate::repo::DETACHED_HEAD;
+use crate::repo::{OperationStart, DETACHED_HEAD};
 use crate::shell::{shell_child, start_run, RunEnd, ShellCommand};
 
 /// The variable that holds the command `R` runs.
@@ -226,6 +232,80 @@ impl BaseUpdate {
     }
 }
 
+/// What `R` and `M` say while git holds `operation`.
+///
+/// **One function for the question and for the run.** The question refuses a
+/// snapshot that shows an operation, and the run refuses a work tree where an
+/// operation started after the question. The user reads the same words for the
+/// same repository, whichever of the two found the operation.
+///
+/// The verb is the operation that git holds, and not the key that was pressed.
+/// The parameter is the operation for that reason: a caller cannot hand this
+/// function the act of the key by mistake. See [`BaseUpdate::held`].
+fn in_progress_refusal(operation: &Operation) -> String {
+    format!(
+        "a {} is in progress — finish it first",
+        BaseUpdate::held(operation).verb(),
+    )
+}
+
+/// What became of an operation that git held after the command of a run
+/// exited.
+///
+/// [`stopped_sentence`] takes this value, so the words of every case are in
+/// that one function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cleanup {
+    /// gsw aborted the operation, and git holds no operation now.
+    Aborted,
+    /// gsw tried to abort the operation, and git refused. The operation is
+    /// still in progress.
+    AbortFailed,
+    /// gsw cannot show that the run started the operation, so gsw did not try
+    /// to abort it. The operation is still in progress. See [`run_in`] for the
+    /// conditions.
+    LeftAsItIs,
+}
+
+/// The last line of a run after which git held `operation`, with the result
+/// `cleanup`.
+///
+/// **The sentence of gsw, and not a line of the command.** The lines of the
+/// command above it describe an operation that is still in progress. After an
+/// abort, the `⚠` row of that operation is gone, and without this sentence
+/// the row describes a work tree that no longer exists. After an abort that
+/// git refused, the operation stays, and the sentence says so, in agreement
+/// with the `⚠` row of the next frame. It names the act, the count of
+/// conflicts, and what gsw did.
+///
+/// **An operation that gsw did not start gets words of its own, with no
+/// count.** gsw did not try to abort it, and gsw cannot show that the command
+/// stopped it. So the words say only what gsw knows: git holds the operation,
+/// gsw did not start it, and gsw left it as it is.
+///
+/// The verb is the operation that git held, for the reason
+/// [`in_progress_refusal`] gives. The count is the count of the read before
+/// the abort, which is the count of the `⚠` row, in the words of that row —
+/// see [`crate::render::conflict_words`]. With no conflict, the sentence drops
+/// the count, as the `⚠` row does.
+fn stopped_sentence(operation: &Operation, cleanup: Cleanup) -> String {
+    let verb = BaseUpdate::held(operation).verb();
+    let what_gsw_did = match cleanup {
+        Cleanup::Aborted => "gsw aborted it",
+        Cleanup::AbortFailed => "gsw could not abort it, and it is still in progress",
+        Cleanup::LeftAsItIs => {
+            return format!("a {verb} is in progress that gsw did not start — left as it is");
+        }
+    };
+    let conflicts = match operation {
+        Operation::Rebase { conflicts, .. } | Operation::Merge { conflicts } => *conflicts,
+    };
+    let on = crate::render::conflict_words(conflicts)
+        .map(|words| format!(" on {words}"))
+        .unwrap_or_default();
+    format!("{verb} stopped{on} — {what_gsw_did}")
+}
+
 /// A confirmed rebase or merge: the act, the branch the question named, the
 /// base it named, and the command the user supplied.
 ///
@@ -235,7 +315,8 @@ impl BaseUpdate {
 /// necessarily what HEAD pointed at when the question went on the screen. The
 /// answer arrives whenever the user presses `y`, and a checkout in another pane
 /// fits in between. Carrying the branch beside the command is what lets [`run`]
-/// refuse a repository that moved on.
+/// refuse a repository that moved on. It is also what lets [`run`] abort only
+/// an operation on the branch that the question named.
 ///
 /// Built only by the question of this module, so a command nobody confirmed
 /// cannot be assembled somewhere else and handed to the runner.
@@ -338,9 +419,11 @@ impl BaseUpdateCommand {
 /// **The refusals are read in order, and the first that applies wins.** Several
 /// of them describe one repository at once — a rebase that stopped on a
 /// conflict is a detached HEAD *and* an operation in progress — and the order
-/// puts the thing the user has to deal with first at the top. Each one posts a
-/// fading line and asks nothing, because none of them is an error: they are the
-/// repository saying that this key has nothing to do here.
+/// puts the thing the user has to deal with first at the top. That is why the
+/// operation that git holds comes first of all: the detached HEAD of a stopped
+/// rebase is a result of the rebase, so the words send the user to the rebase.
+/// Each one posts a fading line and asks nothing, because none of them is an
+/// error: they are the repository saying that this key has nothing to do here.
 pub(crate) fn base_update_prompt_for(
     snapshot: &Snapshot,
     update: BaseUpdate,
@@ -350,6 +433,18 @@ pub(crate) fn base_update_prompt_for(
     let base = snapshot.base.as_str();
     let refuse = |message: String| PushPrompt::Refuse { message };
 
+    // git is holding an operation that the user must finish or abort. gsw
+    // did not start it, so gsw does neither: the run aborts only an operation
+    // that the run started. The `⚠ rebase` row of the header is showing it
+    // already.
+    //
+    // **At the top, above the detached HEAD.** A rebase that stops on a
+    // conflict detaches HEAD, and the advice to check out a branch is wrong in
+    // the middle of a rebase: the detached HEAD is a result of the operation,
+    // and it goes away when the user finishes or aborts that operation.
+    if let Some(operation) = &snapshot.operation {
+        return refuse(in_progress_refusal(operation));
+    }
     // No branch to act on. git refuses `HEAD` as the name of a branch, so
     // `grp` has nothing to rebase and `gmp` has nothing to merge into.
     if branch == DETACHED_HEAD {
@@ -372,14 +467,6 @@ pub(crate) fn base_update_prompt_for(
     // and `main already contains main` says nothing.
     if branch == base {
         return refuse(format!("on {base} — nothing to {}", update.verb()));
-    }
-    // git is holding an operation that the user must finish or abort, and gsw
-    // does neither. The `⚠ rebase` row of the header is showing it already.
-    if let Some(operation) = &snapshot.operation {
-        return refuse(format!(
-            "a {} is in progress — finish it first",
-            BaseUpdate::held(operation).verb(),
-        ));
     }
     // Nothing to bring over. The count in the header is the whole reason for
     // these keys, and at zero a rebase would rewrite every commit of the branch
@@ -453,7 +540,20 @@ const TERMINAL_PROMPT_VAR: &str = "GIT_TERMINAL_PROMPT";
 ///
 /// The outcome is a [`PushOutcome`], which is what lets the row report a rebase
 /// the way it reports a push: both are a command that either worked or wrote a
-/// reason.
+/// reason. A run worked when the command exited 0 and left no operation that
+/// git holds. A run that left one is a failure whatever its exit status, and
+/// its last line is the sentence of gsw about that operation.
+///
+/// **The run reads the work tree before the shell starts and after it exits.**
+/// The read before refuses a work tree where an operation or a checkout
+/// started after the question, and then no shell starts. The read after aborts
+/// a rebase or a merge that the run started and left stopped, because the run
+/// has no terminal and nobody can resolve a conflict inside it. gsw aborts only
+/// an operation that it can show the run started — [`run_in`] states the
+/// conditions. Any other operation stays as it is, and the last line says so.
+/// An abort that git refuses leaves the operation in progress, and the outcome
+/// gives the reason of git above the sentence that says so. Both reads go to
+/// `workdir`, which is the work tree of the run.
 ///
 /// **There is no deadline.** `grp` pushes, and a pre-push hook of this
 /// workspace builds and tests every crate in it, which takes minutes. The run
@@ -484,14 +584,35 @@ fn run_in(
 ) -> PushOutcome {
     let name = command.command().name();
 
-    // **The branch is compared first, and a mismatch starts no shell.** A
-    // question describes the repository as it stood when the key was pressed,
-    // and the answer arrives whenever the user presses `y` — long enough for a
-    // checkout in another pane to land in between. `grp` reads HEAD when the
-    // shell starts it, so it would rebase a branch the question never named and
-    // push it. The gap between this read and the shell's own is microseconds
-    // rather than seconds, and nothing here closes it entirely, short of a lock
-    // git does not offer.
+    // **The work tree is read again before the shell starts, and a change
+    // starts no shell.** A question describes the repository as it stood when
+    // the key was pressed, and the answer arrives whenever the user presses `y`
+    // — long enough for another pane to act in between. Two reads cover that
+    // gap: the operation that git holds, and then the branch. A third read, of
+    // the commit that HEAD holds, refuses nothing, and the read after the
+    // shell uses it. The gap between these reads and the shell's own is
+    // microseconds rather than seconds, and nothing here closes it entirely,
+    // short of a lock git does not offer.
+    //
+    // **The operation is read first.** A merge or a rebase that started in the
+    // gap is one the command would meet and did not start. gsw did not start
+    // it either, so gsw does not abort it: it stays as it is, and the words are
+    // the words of the question. A rebase must be read before the branch,
+    // because a stopped rebase detaches HEAD. The branch check would then read
+    // `HEAD` and blame a checkout that never happened.
+    //
+    // A repository that cannot be read holds no operation here, and the run
+    // goes ahead, for the reason the branch check gives below.
+    if let Some(operation) = crate::repo::held_operation(workdir) {
+        return PushOutcome {
+            success: false,
+            output: in_progress_refusal(&operation),
+        };
+    }
+
+    // **The branch is compared next.** A checkout in another pane moves HEAD to
+    // a different branch, and `grp` reads HEAD when the shell starts it, so it
+    // would rebase a branch the question never named and push it.
     //
     // `None` means git could not be run at all. The run goes ahead in that
     // case, as a push does: to refuse here would blame a checkout that never
@@ -508,6 +629,18 @@ fn run_in(
             };
         }
     }
+
+    // **The commit that HEAD holds is read last, just before the shell
+    // starts.** It refuses nothing. The read after the shell compares it with
+    // the commit where a held operation started, which is condition 3 of the
+    // abort below. A HEAD that cannot be read gives `None`, and gsw then
+    // aborts nothing, because it cannot show that the run started an
+    // operation.
+    //
+    // gix reads it, and not a git child as for the branch: for a merge, the
+    // value that the read after the shell compares it with is the same read of
+    // HEAD through gix. See [`crate::repo::head_commit`].
+    let head_before = crate::repo::head_commit(workdir);
 
     // The child is interactive, it carries no `GIT_` variable out of the
     // environment of gsw but the six a user states on purpose, and it is
@@ -560,7 +693,86 @@ fn run_in(
         }
     };
 
-    let success = status.success();
+    // **The work tree is read again after the shell exits.** The run has no
+    // terminal, so nobody can resolve a conflict inside it. A rebase or a
+    // merge that the run started and left stopped is thus an operation that
+    // nobody can finish from here, and gsw aborts it.
+    //
+    // Only after an exit. A wait that failed says nothing about the child, and
+    // a command that still runs can still finish its own operation.
+    //
+    // **gsw aborts only an operation that it can show the run started.** An
+    // abort discards work, and that work can belong to the user. So gsw
+    // aborts the operation only when each of these conditions is true:
+    //
+    // 1. No operation was in progress when gsw read the work tree just before
+    //    the shell started. The read at the top of this function refuses the
+    //    run otherwise, so this condition is true here. An operation that was
+    //    in progress before the run is the work of the user.
+    // 2. The operation is on the branch of the question. Condition 1 leaves a
+    //    gap between that read and the start of the shell, and in that gap
+    //    another pane can check out a different branch and start an operation
+    //    there. The command of the user can also check out a different
+    //    branch. gsw cannot tell those two cases apart, so it cannot show that
+    //    the run started an operation on a branch that the question did not
+    //    name.
+    // 3. The operation started from the commit that HEAD held just before the
+    //    shell started. In the same gap, another pane can also commit on the
+    //    branch of the question and start an operation from that commit. The
+    //    command can also commit first. gsw cannot tell those two cases apart
+    //    either. git records the commit where an operation started, so gsw
+    //    compares it with the HEAD that it read.
+    //
+    // Conditions 2 and 3 close most of the gap of condition 1, and not all of
+    // it. An operation that another pane starts in the gap, on the same branch
+    // and from the same commit, looks the same as an operation of the run. The
+    // branch check at the top of this function has the same gap.
+    //
+    // A value that cannot be read matches nothing, so gsw then cannot show
+    // that the run started the operation. An operation that fails a condition
+    // stays as it is, and the last line says so. The outcome is a failure, and
+    // the `⚠` row of the next frame shows the operation.
+    //
+    // The abort goes to `workdir`, which is the work tree of the run. The run
+    // got that path by value when the user pressed `y`, and it never reads the
+    // worktree on the screen. The key table keeps the arrow keys inert while
+    // the run is in flight, but the abort does not depend on that rule.
+    //
+    // **The sentence of gsw goes last.** The cut to three rows always keeps
+    // the last line of a failure. The lines of the command stay above it. The
+    // cut keeps the `CONFLICT` line of git, which names the file that
+    // conflicted, before any other line of the command.
+    //
+    // **An abort that git refuses gives its reason above the sentence.** The
+    // operation then stays, and the `⚠` row of the next frame shows it. The
+    // lines of git go between the lines of the command and the sentence, so
+    // the reason is the text just above the sentence, and the sentence says
+    // that the operation is still in progress.
+    let held = crate::repo::held_operation(workdir);
+    if let Some(operation) = &held {
+        let start = crate::repo::operation_start(workdir, operation);
+        let cleanup = if started_by_the_run(&start, command.branch(), head_before.as_ref()) {
+            match abort(workdir, operation) {
+                Ok(()) => Cleanup::Aborted,
+                Err(reason) => {
+                    for line in &reason {
+                        record.push(line);
+                    }
+                    Cleanup::AbortFailed
+                }
+            }
+        } else {
+            Cleanup::LeftAsItIs
+        };
+        record.push(&stopped_sentence(operation, cleanup));
+    }
+
+    // **The repository decides the outcome, and not the exit status alone.**
+    // A shell function returns the status of its last command, so a command
+    // can stop a rebase and then exit 0. The row would then report a rebase
+    // and a push that did not occur. A run that left an operation that git
+    // holds is a failure, whatever its exit status.
+    let success = status.success() && held.is_none();
     let mut text = record.into_text();
     if !success && text.trim().is_empty() {
         // A failure with nothing to show would paint a blank row, and a blank
@@ -577,8 +789,143 @@ fn run_in(
     }
 }
 
+/// Whether the run can show that it started an operation that started at
+/// `start`, for a question about `branch` and a HEAD that held `head_before`
+/// just before the shell started.
+///
+/// Conditions 2 and 3 of the rule that [`run_in`] states before its abort:
+/// the operation is on the branch of the question, and it started from the
+/// commit that HEAD held before the run. Condition 1 is true before this
+/// function is called.
+///
+/// **`None` never matches, on either side.** A branch that cannot be read, a
+/// detached HEAD, and a commit that cannot be read are `None` in `start`. A
+/// HEAD that cannot be read before the run is `None` in `head_before`. Two
+/// values that gsw could not read are not two values that agree, so gsw then
+/// cannot show that the run started the operation, and it does not abort it.
+fn started_by_the_run(
+    start: &OperationStart,
+    branch: &str,
+    head_before: Option<&gix::ObjectId>,
+) -> bool {
+    let on_the_branch = start.branch.as_deref() == Some(branch);
+    let from_the_head_before = head_before.is_some_and(|head| start.commit.as_ref() == Some(head));
+    on_the_branch && from_the_head_before
+}
+
+/// The child that aborts `operation`, which git holds in the work tree at
+/// `workdir`.
+///
+/// **The abort follows the operation that git holds, and not the key that
+/// started the run.** The command of a key belongs to the user, so `R` can
+/// leave a merge stopped, and `git rebase --abort` does not end a merge. The
+/// match names the commands of git here, and not [`BaseUpdate::verb`]: those
+/// words are the words of gsw, and a change to them must not change what git
+/// runs.
+///
+/// **The rules of every git child of gsw apply.** The child sheds the
+/// inherited git environment and keeps the six variables that a user states.
+/// A `gsw` that a pre-commit hook started holds `GIT_DIR`, and an abort that
+/// obeyed it would abort a rebase in a different repository. The child reads
+/// no stdin and has no terminal, because gsw holds the terminal in raw mode.
+///
+/// **`workdir` is the work tree of the run.** git reads the state of an
+/// operation from the git dir of the worktree it runs in. A linked worktree
+/// thus gets its own operation aborted, and no other.
+///
+/// [`abort`] runs the child with [`Command::output`], so what git writes goes
+/// to gsw and never to the screen. It reaches the outcome when git refuses the
+/// abort.
+fn abort_child(workdir: &Path, operation: &Operation) -> Command {
+    let subcommand = match operation {
+        Operation::Rebase { .. } => "rebase",
+        Operation::Merge { .. } => "merge",
+    };
+    let mut command = Command::new("git");
+    gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
+    command
+        .args([subcommand, "--abort"])
+        .current_dir(workdir)
+        .stdin(Stdio::null());
+    crate::child::detach_from_terminal(&mut command);
+    command
+}
+
+/// Abort `operation`, which git holds in the work tree at `workdir`.
+///
+/// # Errors
+///
+/// Gives the lines that say why the abort failed, when git did not abort the
+/// operation. See [`abort_result`].
+fn abort(workdir: &Path, operation: &Operation) -> Result<(), Vec<String>> {
+    let mut child = abort_child(workdir, operation);
+    let attempt = child.output();
+    abort_result(&command_line(&child), attempt)
+}
+
+/// Whether `attempt`, a run of the abort that `line` names, aborted the
+/// operation.
+///
+/// Separate from [`abort`] so a test can hand it a child that did not start,
+/// which no real git of a test can give.
+///
+/// **Every line that git wrote, stdout first and stderr after it.**
+/// [`Command::output`] reads the two streams apart, so the order between them
+/// is lost. git writes the reason of a failed abort to stderr and nothing to
+/// stdout, so the lost order costs nothing here.
+///
+/// # Errors
+///
+/// Gives the lines that say why the abort failed:
+///
+/// - An abort that cannot start gives one line that says so, in the words of
+///   a run that cannot start.
+/// - An abort that exits with a status other than 0 gives every line that git
+///   wrote. When git wrote no line with text in it, the line is the exit
+///   status, for the rule that [`run_in`] states: a failure with nothing to
+///   show reads as a failure that did not occur.
+fn abort_result(line: &str, attempt: std::io::Result<Output>) -> Result<(), Vec<String>> {
+    let output = match attempt {
+        Ok(output) => output,
+        Err(error) => return Err(vec![format!("cannot run {line}: {error}")]),
+    };
+    if output.status.success() {
+        return Ok(());
+    }
+    let written: Vec<String> = [&output.stdout, &output.stderr]
+        .into_iter()
+        .flat_map(|stream| {
+            String::from_utf8_lossy(stream)
+                .lines()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    if written.iter().all(|written| written.trim().is_empty()) {
+        return Err(vec![format!("{line} failed ({})", output.status)]);
+    }
+    Err(written)
+}
+
+/// The command line that `command` runs, as the words of gsw name it.
+///
+/// Read from the child itself, so a line that names the abort cannot name a
+/// different command from the one that ran.
+fn command_line(command: &Command) -> String {
+    std::iter::once(command.get_program())
+        .chain(command.get_args())
+        .map(OsStr::to_string_lossy)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Every line a run has written, in arrival order, as one string with a newline
 /// between each line and the one before it.
+///
+/// A run whose command left an operation stopped also gets the sentence of gsw
+/// about that operation, after the lines of the command. It goes through
+/// [`Record::push`] like every other line, so the one rule for the newlines
+/// holds for it too, and an empty record gets no blank line in front of it.
 ///
 /// **One growing string, and not one [`String`] for each line.** A pre-push
 /// hook that builds and tests a workspace prints hundreds of thousands of
@@ -787,8 +1134,11 @@ mod question_tests {
     #[test]
     fn a_detached_head_leaves_no_branch_to_act_on() {
         // git refuses `HEAD` as the name of a branch, so there is nothing for
-        // `grp` to rebase and nothing for `gmp` to merge into. A rebase that
-        // stopped on a conflict leaves HEAD exactly here.
+        // `grp` to rebase and nothing for `gmp` to merge into. A checkout of a
+        // commit or a bisect leaves HEAD here with no operation in progress. A
+        // rebase that stopped on a conflict also detaches HEAD, but the refusal
+        // that names the rebase wins there — see
+        // `a_stopped_rebase_is_named_as_the_rebase_and_not_as_a_detached_head`.
         let detached = Snapshot {
             branch: DETACHED_HEAD.to_string(),
             ..behind(5)
@@ -907,11 +1257,11 @@ mod question_tests {
     }
 
     #[test]
-    fn the_first_refusal_that_applies_wins() {
-        // A rebase that stopped on a conflict detaches HEAD and leaves an
-        // operation in progress, so two rows of the table describe it. The
-        // higher row wins, because it names the thing the user has to deal with
-        // first: there is no branch here to act on whatever git is holding.
+    fn a_stopped_rebase_is_named_as_the_rebase_and_not_as_a_detached_head() {
+        // A rebase that stops on a conflict detaches HEAD. The advice to check
+        // out a branch is wrong in the middle of a rebase: a checkout there
+        // leaves the rebase behind and does not finish it. The user must
+        // continue or abort the rebase, so both keys send the user to it.
         let stopped = Snapshot {
             branch: DETACHED_HEAD.to_string(),
             operation: Some(Operation::Rebase {
@@ -920,9 +1270,280 @@ mod question_tests {
             }),
             ..behind(5)
         };
+        for update in BaseUpdate::ALL {
+            assert_eq!(
+                refusal(&stopped, update),
+                "a rebase is in progress — finish it first",
+            );
+        }
+    }
+
+    #[test]
+    fn the_first_refusal_that_applies_wins() {
+        // `resolve_base` falls back on the target of `origin/HEAD` and then on
+        // HEAD itself, and neither is `main` or `master`. So a checkout of a
+        // commit in a repository with no `main` and no `master` matches two
+        // rows of the table. HEAD is detached, and the base is not one that
+        // these keys act on. The loop takes one base from each fallback.
+        //
+        // **The detached HEAD wins.** git refuses `HEAD` as the name of a
+        // branch, so `grp` has nothing to rebase and `gmp` has nothing to merge
+        // into. Every question about the base is a question about what to bring
+        // into a branch. So the user must check out a branch before the base
+        // means anything, and the higher row says so. After that checkout, the
+        // next press of the key gives the refusal of the missing base.
+        //
+        // The operation that git holds wins over both rows.
+        // `a_stopped_rebase_is_named_as_the_rebase_and_not_as_a_detached_head`
+        // holds the pair of the operation and the detached HEAD.
+        for base in ["origin/trunk", "HEAD"] {
+            let detached_with_no_base = Snapshot {
+                branch: DETACHED_HEAD.to_string(),
+                base: base.to_string(),
+                ..behind(5)
+            };
+            assert_eq!(
+                refusal(&detached_with_no_base, BaseUpdate::Rebase),
+                "HEAD is detached — check out a branch to rebase",
+            );
+            assert_eq!(
+                refusal(&detached_with_no_base, BaseUpdate::Merge),
+                "HEAD is detached — check out a branch to merge",
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod sentence_tests {
+    use super::*;
+
+    /// A rebase that stopped on `conflicts` conflicts.
+    fn rebase(conflicts: u32) -> Operation {
+        Operation::Rebase {
+            step: None,
+            conflicts,
+        }
+    }
+
+    #[test]
+    fn one_conflict_takes_the_singular() {
+        // "1 conflicts" reads as a defect in the tool, right beside the
+        // number it is about. The `⚠` row says "1 conflict" for the same
+        // work tree.
         assert_eq!(
-            refusal(&stopped, BaseUpdate::Rebase),
-            "HEAD is detached — check out a branch to rebase",
+            stopped_sentence(&rebase(1), Cleanup::Aborted),
+            "rebase stopped on 1 conflict — gsw aborted it",
+        );
+    }
+
+    #[test]
+    fn more_conflicts_than_one_take_the_plural() {
+        assert_eq!(
+            stopped_sentence(&rebase(2), Cleanup::Aborted),
+            "rebase stopped on 2 conflicts — gsw aborted it",
+        );
+    }
+
+    #[test]
+    fn no_conflict_drops_the_count() {
+        // A rebase also stops on an `edit` step or on a failed `exec` step,
+        // with no conflict at all. "on 0 conflicts" describes a stop that
+        // did not occur, and the `⚠` row drops the clause for the same work
+        // tree.
+        assert_eq!(
+            stopped_sentence(&rebase(0), Cleanup::Aborted),
+            "rebase stopped — gsw aborted it",
+        );
+    }
+
+    #[test]
+    fn a_merge_is_named_as_the_merge() {
+        // The verb is the operation that git held, as in the refusal.
+        assert_eq!(
+            stopped_sentence(&Operation::Merge { conflicts: 1 }, Cleanup::Aborted),
+            "merge stopped on 1 conflict — gsw aborted it",
+        );
+    }
+
+    #[test]
+    fn an_abort_that_failed_says_that_the_operation_is_still_in_progress() {
+        // The `⚠` row of the next frame shows the operation, so the sentence
+        // must agree with it. The count follows the same rule as after an
+        // abort that worked.
+        assert_eq!(
+            stopped_sentence(&rebase(1), Cleanup::AbortFailed),
+            "rebase stopped on 1 conflict — gsw could not abort it, and it is still in progress",
+        );
+        assert_eq!(
+            stopped_sentence(&rebase(0), Cleanup::AbortFailed),
+            "rebase stopped — gsw could not abort it, and it is still in progress",
+        );
+        assert_eq!(
+            stopped_sentence(&Operation::Merge { conflicts: 2 }, Cleanup::AbortFailed),
+            "merge stopped on 2 conflicts — gsw could not abort it, and it is still in progress",
+        );
+    }
+}
+
+#[cfg(test)]
+mod started_tests {
+    use super::*;
+
+    /// The branch of every question here.
+    const BRANCH: &str = "issue-12";
+
+    /// A commit id. The rule compares ids and reads no repository, so any
+    /// full id serves.
+    fn head() -> gix::ObjectId {
+        gix::ObjectId::from_hex(b"1111111111111111111111111111111111111111").expect("a full id")
+    }
+
+    #[test]
+    fn two_values_that_gsw_could_not_read_do_not_agree() {
+        // `None == None` is true in Rust. A comparison of the two options
+        // would thus abort an operation whose start commit gsw cannot read,
+        // after a run whose HEAD gsw could not read either. gsw can show
+        // nothing in that case, so it must abort nothing.
+        //
+        // **The armed control comes first.** A start on the branch and the
+        // HEAD of the question matches, so the assertions below are not
+        // measured against a rule that never matches.
+        //
+        // This guard is not red-first: the rule came with the comparison. A
+        // mutation proved it: `start.commit.as_ref() == head_before` fails
+        // this test.
+        let head = head();
+        let read = OperationStart {
+            branch: Some(BRANCH.to_string()),
+            commit: Some(head),
+        };
+        assert!(
+            started_by_the_run(&read, BRANCH, Some(&head)),
+            "a start on the branch and the HEAD of the question must match",
+        );
+
+        let unread = OperationStart {
+            branch: Some(BRANCH.to_string()),
+            commit: None,
+        };
+        assert!(
+            !started_by_the_run(&unread, BRANCH, None),
+            "two commits that gsw could not read must not match",
+        );
+        assert!(
+            !started_by_the_run(&unread, BRANCH, Some(&head)),
+            "a start commit that gsw could not read must not match",
+        );
+        assert!(
+            !started_by_the_run(&read, BRANCH, None),
+            "a HEAD that gsw could not read before the run must not match",
+        );
+        assert!(
+            !started_by_the_run(
+                &OperationStart {
+                    branch: None,
+                    commit: Some(head),
+                },
+                BRANCH,
+                Some(&head),
+            ),
+            "a branch that gsw could not read must not match",
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod abort_tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    /// The command line that every abort here names.
+    const REBASE_ABORT: &str = "git rebase --abort";
+
+    /// What a child gives that exited with `code` and wrote `stdout` and
+    /// `stderr`.
+    fn exited(code: i32, stdout: &str, stderr: &str) -> std::io::Result<Output> {
+        Ok(Output {
+            // A wait status holds the exit code in its second byte.
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        })
+    }
+
+    #[test]
+    fn the_abort_child_is_named_by_the_command_it_runs() {
+        // The line that names a failed abort reads the child itself, so it
+        // names the abort of the operation that git held.
+        let dir = std::env::temp_dir();
+        let rebase = Operation::Rebase {
+            step: None,
+            conflicts: 1,
+        };
+        let merge = Operation::Merge { conflicts: 1 };
+        assert_eq!(command_line(&abort_child(&dir, &rebase)), REBASE_ABORT);
+        assert_eq!(
+            command_line(&abort_child(&dir, &merge)),
+            "git merge --abort"
+        );
+    }
+
+    #[test]
+    fn an_abort_that_exits_0_worked() {
+        assert_eq!(abort_result(REBASE_ABORT, exited(0, "", "")), Ok(()));
+    }
+
+    #[test]
+    fn an_abort_that_git_refuses_gives_every_line_of_git_stdout_first() {
+        // The lines go to the outcome as git wrote them, blank lines too. The
+        // row drops the blank lines, and the text keeps them.
+        assert_eq!(
+            abort_result(
+                REBASE_ABORT,
+                exited(
+                    128,
+                    "out\n",
+                    "error: Unable to create 'index.lock'\n\nfatal: could not move back\n"
+                ),
+            ),
+            Err(vec![
+                "out".to_string(),
+                "error: Unable to create 'index.lock'".to_string(),
+                String::new(),
+                "fatal: could not move back".to_string(),
+            ]),
+        );
+    }
+
+    #[test]
+    fn an_abort_that_fails_and_says_nothing_gives_its_exit_status() {
+        // A failure with nothing to show reads as a failure that did not
+        // occur. The exit status is all that git left.
+        assert_eq!(
+            abort_result(REBASE_ABORT, exited(1, "", " \n")),
+            Err(vec![
+                "git rebase --abort failed (exit status: 1)".to_string()
+            ]),
+        );
+    }
+
+    #[test]
+    fn an_abort_that_cannot_start_says_so() {
+        // git is not on the path of gsw, although the shell of the user found
+        // it for the command. The reader of the operation is gsw's own, so it
+        // still found the operation that the command left stopped.
+        assert_eq!(
+            abort_result(
+                REBASE_ABORT,
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "No such file or directory"
+                )),
+            ),
+            Err(vec![
+                "cannot run git rebase --abort: No such file or directory".to_string()
+            ]),
         );
     }
 }
@@ -983,11 +1604,15 @@ mod run_tests {
     use super::*;
     use crate::repo::DETACHED_HEAD;
     use crate::shell::stub_shell::{
-        a_child_of_this_test_passes, entries_of, kill_now, shed_git_lines, test_name,
-        test_process_can_open_the_terminal, user_intent_lost, user_intent_value, StubShell,
-        CHILD_RAN, GAVE_UP_WITHIN, HOSTILE_GIT_ENVIRONMENT, HOSTILE_MARKER, TTY_REFUSED,
+        a_child_of_this_test_passes, a_child_of_this_test_passes_with, entries_of, kill_now,
+        shed_git_lines, test_name, test_process_can_open_the_terminal, user_intent_lost,
+        user_intent_value, StubShell, CHILD_RAN, GAVE_UP_WITHIN, HOSTILE_GIT_ENVIRONMENT,
+        HOSTILE_MARKER, TTY_OPENED, TTY_REFUSED,
     };
-    use crate::testrepo::{git, init_repo};
+    use crate::testrepo::{
+        git, git_allowing_failure, git_output, git_stdout, init_repo, init_repo_with_worktree,
+    };
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::mpsc::{channel, Receiver};
     use std::time::Instant;
     use tempfile::TempDir;
@@ -1017,11 +1642,17 @@ mod run_tests {
     /// A confirmed merge of [`BASE`] into [`BRANCH`], running the default
     /// command of that act.
     fn confirmed_merge() -> BaseUpdateCommand {
+        confirmed_act(BaseUpdate::Merge)
+    }
+
+    /// A confirmed `update` of [`BRANCH`] against [`BASE`], running the
+    /// default command of that act.
+    fn confirmed_act(update: BaseUpdate) -> BaseUpdateCommand {
         BaseUpdateCommand::new(
-            BaseUpdate::Merge,
+            update,
             BRANCH,
             BASE,
-            ShellCommand::new(None, DEFAULT_MERGE_COMMAND).expect("a name"),
+            ShellCommand::new(None, update.default_command()).expect("a name"),
         )
     }
 
@@ -1051,6 +1682,331 @@ mod run_tests {
     /// resolved before they are compared.
     fn resolved(path: &Path) -> PathBuf {
         std::fs::canonicalize(path).expect("resolve the path")
+    }
+
+    /// Give the repository of `checkout` a real conflict between [`BASE`] and
+    /// [`BRANCH`], and leave [`BRANCH`] checked out in `checkout`.
+    ///
+    /// Line 1 of `a.txt` changes in one way on the base and in a different way
+    /// on the branch, each in a commit of its own. `git rebase main` and `git
+    /// merge main` then both stop with `CONFLICT (content): Merge conflict in
+    /// a.txt`, which is the state a user who pressed `y` finds.
+    ///
+    /// `checkout` is the main worktree of an [`init_repo`] repository, or a
+    /// linked worktree of a [`crate::testrepo::init_repo_with_worktree`]
+    /// repository. The commit on the base goes through the main worktree of
+    /// the repository, where [`BASE`] is checked out, because git refuses a
+    /// checkout of [`BASE`] in a second worktree. The branch starts from the
+    /// commit that `checkout` holds before the call, so the two commits share
+    /// one parent.
+    ///
+    /// # Panics
+    ///
+    /// Panics where the main worktree does not have [`BASE`] checked out, or
+    /// where git refuses a step. A fixture that did not build its conflict
+    /// makes every later assertion measure something else.
+    fn conflicting_branches(checkout: &Path) {
+        let fork_point = git_stdout(checkout, &["rev-parse", "HEAD"]);
+        let common_dir = PathBuf::from(git_stdout(
+            checkout,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        ));
+        let main_worktree = common_dir
+            .parent()
+            .expect("the git dir of the main worktree is inside that worktree");
+        assert_eq!(
+            git_stdout(main_worktree, &["symbolic-ref", "--short", "HEAD"]),
+            BASE,
+            "the main worktree must have the base checked out, or the base gets no commit",
+        );
+
+        std::fs::write(main_worktree.join("a.txt"), "base\n").expect("write a.txt on the base");
+        git(
+            main_worktree,
+            &["commit", "-q", "-am", "change a.txt on the base"],
+        );
+
+        git(checkout, &["checkout", "-q", "-b", BRANCH, &fork_point]);
+        std::fs::write(checkout.join("a.txt"), "branch\n").expect("write a.txt on the branch");
+        git(
+            checkout,
+            &["commit", "-q", "-am", "change a.txt on the branch"],
+        );
+    }
+
+    /// Whether git holds a merge in the work tree at `dir`.
+    ///
+    /// git is the oracle here, and not the reader of gsw: a test of the reader
+    /// that asks the reader proves nothing. `MERGE_HEAD` is a ref of the
+    /// worktree, so a linked worktree answers about its own merge.
+    fn merge_in_progress(dir: &Path) -> bool {
+        git_output(dir, &["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+            .status
+            .success()
+    }
+
+    /// Whether git holds a rebase in the work tree at `dir`.
+    ///
+    /// git is the oracle, as for [`merge_in_progress`]. git keeps a rebase in
+    /// `rebase-merge/` or in `rebase-apply/` of the git dir of the worktree,
+    /// and `--git-path` names the directory in that git dir, so a linked
+    /// worktree answers about its own rebase.
+    fn rebase_in_progress(dir: &Path) -> bool {
+        ["rebase-merge", "rebase-apply"].into_iter().any(|name| {
+            PathBuf::from(git_stdout(
+                dir,
+                &["rev-parse", "--path-format=absolute", "--git-path", name],
+            ))
+            .is_dir()
+        })
+    }
+
+    /// The branch that the work tree at `dir` has checked out, and the commit
+    /// that HEAD holds, as git reports them.
+    ///
+    /// A detached HEAD gives [`DETACHED_HEAD`] as the branch, so a test that
+    /// compares the pair also sees a rebase that left HEAD detached.
+    fn checkout_of(dir: &Path) -> (String, String) {
+        let branch = git_output(dir, &["symbolic-ref", "-q", "--short", "HEAD"]);
+        let branch = if branch.status.success() {
+            String::from_utf8_lossy(&branch.stdout).trim().to_string()
+        } else {
+            DETACHED_HEAD.to_string()
+        };
+        (branch, git_stdout(dir, &["rev-parse", "HEAD"]))
+    }
+
+    /// The line of a stub shell that runs real git with `arguments`.
+    ///
+    /// The run sheds every `GIT_` variable except the six that a user states,
+    /// and `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` are two of those six.
+    /// The line pins both to `/dev/null`, so the global configuration of the
+    /// developer does not decide what the test reads.
+    fn real_git(arguments: &str) -> String {
+        format!("GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git {arguments}")
+    }
+
+    /// A [`crate::RenderConfig`] for a walk of a fixture. The walk reads git,
+    /// and the settings of the frame do not change what it reads.
+    fn walk_config() -> crate::RenderConfig {
+        crate::RenderConfig {
+            base: None,
+            max_files: None,
+            bar_width: 20,
+            log_lines: 0,
+            truecolor: false,
+            width_offset: 0,
+            refresh_interval: None,
+        }
+    }
+
+    /// A pane wider than every line here and taller than every overlay, so a
+    /// test about the words of the row is not also a test about clipping.
+    const ROOMY_PANE: crate::watch::Dimensions = crate::watch::Dimensions {
+        width: 200,
+        height: 20,
+    };
+
+    /// The outcome of a run of `update` through `stub` in the work tree at
+    /// `dir`, and the rows that the row under the frame then shows.
+    ///
+    /// The chain that a user drives, from end to end. A walk of the work tree
+    /// gives the snapshot, the key asks its question, `y` confirms it, the run
+    /// acts on the work tree, and the outcome goes to the row. The rows are the
+    /// glyphs that a user reads: the escapes are forced on and then taken out
+    /// again, as the tests of the row do it.
+    ///
+    /// # Panics
+    ///
+    /// Panics where the key refuses the work tree. A test that reads the rows
+    /// of a run needs a run.
+    fn run_through_the_row(
+        stub: &StubShell,
+        update: BaseUpdate,
+        dir: &Path,
+    ) -> (PushOutcome, String) {
+        let walked = gix::open(dir).expect("open the work tree");
+        let snapshot =
+            crate::collect_snapshot(&walked, &walk_config()).expect("walk the work tree");
+        let command = ShellCommand::new(None, update.default_command()).expect("a name");
+        let now = Instant::now();
+        let mut ui = crate::push::PushUi::new(false);
+        ui.request_base_update(&snapshot, update, &command, ROOMY_PANE, now);
+        let Some(Confirmed::BaseUpdate(confirmed)) = ui.confirm(now) else {
+            panic!(
+                "the {} key must ask about this work tree, and not refuse it",
+                update.key(),
+            );
+        };
+        let outcome = run_quiet(stub.as_shell(), &confirmed, dir);
+        ui.finished(outcome.clone(), now);
+        let rows = testcolor::strip_ansi(&testcolor::with_forced_ansi(|| {
+            ui.overlay(ROOMY_PANE, now).text()
+        }));
+        (outcome, rows)
+    }
+
+    /// The last line of `output`, and every line above it.
+    fn last_line_of(output: &str) -> (&str, &str) {
+        output.rsplit_once('\n').unwrap_or(("", output))
+    }
+
+    /// What git writes when a rebase or a merge of the conflict fixture stops.
+    const CONFLICT_LINE: &str = "CONFLICT (content): Merge conflict in a.txt";
+
+    /// The sentence of gsw under a rebase that stopped on one conflict, which
+    /// gsw then aborted.
+    const REBASE_ABORTED: &str = "rebase stopped on 1 conflict — gsw aborted it";
+
+    /// The sentence of gsw under a rebase that stopped on one conflict, which
+    /// gsw then could not abort.
+    const REBASE_NOT_ABORTED: &str =
+        "rebase stopped on 1 conflict — gsw could not abort it, and it is still in progress";
+
+    /// The sentence of gsw under a rebase that the run did not start, which gsw
+    /// left as it is.
+    const REBASE_LEFT: &str = "a rebase is in progress that gsw did not start — left as it is";
+
+    /// The sentence of gsw under a merge that the run did not start, which gsw
+    /// left as it is.
+    const MERGE_LEFT: &str = "a merge is in progress that gsw did not start — left as it is";
+
+    /// The variable that names the directory of the recording git to the
+    /// child that finds it first on its `PATH`.
+    ///
+    /// The name carries no `GIT_` prefix, so no sweep of gsw takes it away.
+    const RECORDING_GIT_VAR: &str = "GSW_RECORDING_GIT";
+
+    /// One call of the recording git.
+    struct RecordedCall {
+        /// Each argument of the call, in order.
+        arguments: Vec<String>,
+        /// The directory of the call, with every symbolic link in it resolved.
+        cwd: PathBuf,
+        /// The environment of the call, one `NAME=value` line for each
+        /// variable.
+        environment: String,
+        /// [`TTY_OPENED`] where the call could open the controlling terminal,
+        /// and [`TTY_REFUSED`] where it could not.
+        terminal: String,
+    }
+
+    /// Run `test` in a child of this test binary whose `PATH` finds a
+    /// recording git first, and fail where that child fails.
+    ///
+    /// **The recording git is how a test reads the environment of a git child
+    /// of gsw itself.** gsw starts git by name, so the first `git` on the
+    /// `PATH` is the process that gsw starts. That program writes down its
+    /// arguments, its directory and its environment, and it tries to open the
+    /// controlling terminal, as [`StubShell::probing_the_terminal`] does. Then
+    /// it puts back the `PATH` of this process and gives the call to the real
+    /// git, so the run does all of its real work.
+    ///
+    /// A read of the removals off the [`Command`] proves less. It reads the
+    /// command that a function builds, and not the process that the run
+    /// starts. A change that [`abort`] makes to the command after
+    /// [`abort_child`] built it does not show in that read, and neither does a
+    /// second builder that the run uses in place of [`abort_child`]. A git
+    /// hook proves less too. git adds variables of its own to the environment
+    /// of a hook, so a record from a hook cannot use the rule of the `GIT_`
+    /// prefix.
+    ///
+    /// **The `PATH` goes on the child, and never on this process**, for the
+    /// reason [`a_child_of_this_test_passes_with`] gives. This process writes
+    /// the program into a temporary directory of its own, and holds that
+    /// directory until the child ends.
+    ///
+    /// # Panics
+    ///
+    /// Panics where the program cannot be written, and where
+    /// [`a_child_of_this_test_passes_with`] panics.
+    fn a_child_with_a_recording_git_passes(test: &str) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let own_path = std::env::var_os("PATH").unwrap_or_default();
+        let program = dir.path().join("git");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\n\
+                 call=$(mktemp -d {dir}/call.XXXXXX) || exit 1\n\
+                 printf '%s\\n' \"$@\" > \"$call/arguments\"\n\
+                 pwd -P > \"$call/cwd\"\n\
+                 env > \"$call/environment\"\n\
+                 if ( exec 3<>/dev/tty ) 2>/dev/null; then\n\
+                 \tprintf '{TTY_OPENED}' > \"$call/terminal\"\n\
+                 else\n\
+                 \tprintf '{TTY_REFUSED}' > \"$call/terminal\"\n\
+                 fi\n\
+                 PATH={own_path}\n\
+                 export PATH\n\
+                 exec git \"$@\"\n",
+                dir = shell_quote(&dir.path().display().to_string()),
+                own_path = shell_quote(&own_path.to_string_lossy()),
+            ),
+        )
+        .expect("write the recording git");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+            .expect("make the recording git executable");
+        let path = std::env::join_paths(
+            std::iter::once(dir.path().to_path_buf()).chain(std::env::split_paths(&own_path)),
+        )
+        .expect("a PATH that holds the recording git");
+        a_child_of_this_test_passes_with(
+            test,
+            &[
+                ("PATH", path.as_os_str()),
+                (RECORDING_GIT_VAR, dir.path().as_os_str()),
+            ],
+        );
+    }
+
+    /// Each call that the recording git of this child recorded, in no order.
+    ///
+    /// # Panics
+    ///
+    /// Panics where [`a_child_with_a_recording_git_passes`] did not start this
+    /// process, and where a record cannot be read.
+    fn recorded_git_calls() -> Vec<RecordedCall> {
+        let dir = PathBuf::from(
+            std::env::var_os(RECORDING_GIT_VAR).expect("the parent must name the recording git"),
+        );
+        let read = |call: &Path, name: &str| {
+            std::fs::read_to_string(call.join(name)).expect("read a record of the call")
+        };
+        std::fs::read_dir(&dir)
+            .expect("read the records of the recording git")
+            .map(|entry| entry.expect("an entry of the records").path())
+            .filter(|path| path.is_dir())
+            .map(|call| RecordedCall {
+                arguments: read(&call, "arguments")
+                    .lines()
+                    .map(str::to_string)
+                    .collect(),
+                cwd: PathBuf::from(read(&call, "cwd").trim_end_matches('\n')),
+                environment: read(&call, "environment"),
+                terminal: read(&call, "terminal"),
+            })
+            .collect()
+    }
+
+    /// The calls of the recording git of this child that abort a rebase.
+    ///
+    /// The arguments to look for are the arguments of [`abort_child`], read
+    /// from the child itself, so the record and the abort cannot name two
+    /// different commands.
+    fn recorded_rebase_aborts() -> Vec<RecordedCall> {
+        let rebase = Operation::Rebase {
+            step: None,
+            conflicts: 1,
+        };
+        let arguments: Vec<String> = abort_child(Path::new("."), &rebase)
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect();
+        recorded_git_calls()
+            .into_iter()
+            .filter(|call| call.arguments == arguments)
+            .collect()
     }
 
     #[test]
@@ -1429,6 +2385,485 @@ mod run_tests {
     }
 
     #[test]
+    fn a_merge_that_started_after_the_confirmation_refuses_the_run_and_stays() {
+        // The window the question opens, for an operation instead of a
+        // checkout. `M` reads the snapshot while nothing is in progress, `y`
+        // arrives seconds later, and a `git merge` in another pane stops on a
+        // conflict in between. A merge keeps HEAD on the branch, so the branch
+        // is the branch of the question, and `gmp` would meet a merge that it
+        // did not start. Nothing may run in that case.
+        //
+        // gsw did not start that merge either, so the merge stays as it is:
+        // the user started it, and only the user decides to finish or abort it.
+        let stub = StubShell::answering(0);
+        let workdir = init_repo();
+        conflicting_branches(workdir.path());
+        git_allowing_failure(workdir.path(), &["merge", "-q", BASE]);
+        assert!(
+            merge_in_progress(workdir.path()),
+            "the fixture must hold a real merge, or the run has nothing to refuse",
+        );
+
+        let outcome = run_quiet(stub.as_shell(), &confirmed_merge(), workdir.path());
+
+        assert!(
+            !outcome.success,
+            "a run over a merge in progress must not report success: {:?}",
+            outcome.output,
+        );
+        assert_eq!(
+            outcome.output, "a merge is in progress — finish it first",
+            "the run must refuse with the words of the question",
+        );
+        assert_eq!(stub.runs(), "", "a refused run must start no shell at all");
+        assert!(
+            merge_in_progress(workdir.path()),
+            "gsw did not start the merge, so the merge must still be in progress",
+        );
+    }
+
+    #[test]
+    fn a_rebase_that_started_after_the_confirmation_is_named_and_not_blamed_on_a_checkout() {
+        // The same window, for a rebase. A `git rebase` in another pane stops
+        // on a conflict between the question and the `y`, and a stopped rebase
+        // detaches HEAD. The branch then reads as `HEAD`, and the words of the
+        // branch check would blame a checkout that never happened. The user
+        // must finish or abort the rebase, so the words name the rebase.
+        //
+        // gsw did not start that rebase, so the rebase stays as it is.
+        let stub = StubShell::answering(0);
+        let workdir = init_repo();
+        conflicting_branches(workdir.path());
+        git_allowing_failure(workdir.path(), &["rebase", BASE]);
+        assert!(
+            rebase_in_progress(workdir.path()),
+            "the fixture must hold a real stopped rebase, or the run has nothing to refuse",
+        );
+
+        let outcome = run_quiet(stub.as_shell(), &default_command(), workdir.path());
+
+        assert!(
+            !outcome.success,
+            "a run over a rebase in progress must not report success: {:?}",
+            outcome.output,
+        );
+        assert_eq!(
+            outcome.output, "a rebase is in progress — finish it first",
+            "the run must name the rebase, and not a change of branch",
+        );
+        assert_eq!(stub.runs(), "", "a refused run must start no shell at all");
+        assert!(
+            rebase_in_progress(workdir.path()),
+            "gsw did not start the rebase, so the rebase must still be in progress",
+        );
+    }
+
+    #[test]
+    fn a_rebase_that_the_run_left_stopped_is_aborted_in_the_linked_worktree_of_the_run() {
+        // The run has no terminal, so nobody can resolve a conflict inside it.
+        // A rebase that the command started and left stopped is thus a rebase
+        // that gsw aborts, and the branch goes back to where it was.
+        //
+        // **The run is in a linked worktree, and this process is somewhere
+        // else.** The current directory of this process is the directory of
+        // the crate, and git keeps the rebase of a linked worktree in the git
+        // dir of that worktree, not in the `.git` dir of the repository. An
+        // abort that goes to the wrong directory, or to the wrong git dir,
+        // leaves the rebase in place, and the checks below see it.
+        let (repo, linked) = init_repo_with_worktree();
+        conflicting_branches(&linked);
+        let before = checkout_of(&linked);
+        assert_eq!(
+            before.0, BRANCH,
+            "the linked worktree must have the branch of the question checked out",
+        );
+        let main_before = checkout_of(repo.path());
+        let stub = StubShell::new(&real_git(&format!("rebase {BASE}")));
+
+        let outcome = run_quiet(stub.as_shell(), &default_command(), &linked);
+
+        assert!(
+            !rebase_in_progress(&linked),
+            "the run started the rebase and left it stopped, so gsw must abort it: {:?}",
+            outcome.output,
+        );
+        assert_eq!(
+            crate::repo::held_operation(&linked),
+            None,
+            "the reader of gsw must see no operation in the work tree of the run",
+        );
+        assert_eq!(
+            checkout_of(&linked),
+            before,
+            "the branch must be checked out again, at its commit from before the run",
+        );
+        assert_eq!(
+            git_stdout(&linked, &["status", "--porcelain"]),
+            "",
+            "the abort must leave the work tree clean",
+        );
+        assert!(
+            !outcome.success,
+            "a run that stopped on a conflict must not report success: {:?}",
+            outcome.output,
+        );
+
+        // The watch loop walks the repository after every outcome of a run,
+        // and this walk is the same walk. An operation on the snapshot is the
+        // `⚠` row of the next frame.
+        let walked = gix::open(&linked).expect("open the linked worktree");
+        let snapshot = crate::collect_snapshot(&walked, &walk_config()).expect("walk the worktree");
+        assert_eq!(
+            snapshot.operation, None,
+            "the next frame must show no ⚠ row for a rebase that gsw aborted",
+        );
+
+        // The main worktree holds no rebase, and it did not move.
+        assert!(
+            !rebase_in_progress(repo.path()),
+            "the main worktree must hold no rebase",
+        );
+        assert_eq!(
+            checkout_of(repo.path()),
+            main_before,
+            "the main worktree must stay on its branch, at its commit",
+        );
+    }
+
+    #[test]
+    fn a_merge_that_the_run_left_stopped_is_aborted_whichever_key_started_the_run() {
+        // The same rule for a merge. A merge that stops on a conflict keeps
+        // HEAD on the branch, so the branch and its commit do not show it. The
+        // merge itself and the conflicted file do.
+        //
+        // **The abort follows the operation that git holds, and not the key.**
+        // The command of `R` belongs to the user and can merge, and `git
+        // rebase --abort` does not end a merge. So both keys run a command that
+        // stops a merge here, and both runs must end with no merge.
+        let stub = StubShell::new(&real_git(&format!("merge {BASE}")));
+        for update in BaseUpdate::ALL {
+            let key = update.key();
+            let workdir = init_repo();
+            conflicting_branches(workdir.path());
+            let before = checkout_of(workdir.path());
+
+            let outcome = run_quiet(stub.as_shell(), &confirmed_act(update), workdir.path());
+
+            assert!(
+                !merge_in_progress(workdir.path()),
+                "the {key} run started the merge and left it stopped, so gsw must abort it: {:?}",
+                outcome.output,
+            );
+            assert_eq!(
+                crate::repo::held_operation(workdir.path()),
+                None,
+                "the reader of gsw must see no operation after the {key} run",
+            );
+            assert_eq!(
+                checkout_of(workdir.path()),
+                before,
+                "the branch must stay checked out at its commit from before the {key} run",
+            );
+            assert_eq!(
+                git_stdout(workdir.path(), &["status", "--porcelain"]),
+                "",
+                "the abort must leave the work tree of the {key} run clean",
+            );
+            assert!(
+                !outcome.success,
+                "a {key} run that stopped on a conflict must not report success: {:?}",
+                outcome.output,
+            );
+        }
+    }
+
+    #[test]
+    fn a_rebase_that_gsw_aborted_is_named_in_the_last_line_and_in_the_last_row() {
+        // The command wrote why it stopped, and then gsw aborted the rebase.
+        // The words of the command alone describe a rebase that is still in
+        // progress, and the `⚠` row of that rebase is gone. So gsw says what
+        // it did, in a sentence of its own, as the last line.
+        //
+        // **Last, so that it survives the cut to three rows.** The cut always
+        // keeps the last line of a failure. git names the file that conflicted
+        // in its `CONFLICT` line, and then writes more lines of its own. The
+        // cut keeps that line before them, so the rows that the user reads
+        // still name the file, and not only the text of the outcome.
+        let workdir = init_repo();
+        conflicting_branches(workdir.path());
+        let stub = StubShell::new(&real_git(&format!("rebase {BASE}")));
+
+        let (outcome, rows) = run_through_the_row(&stub, BaseUpdate::Rebase, workdir.path());
+
+        assert!(
+            !rebase_in_progress(workdir.path()),
+            "the fixture must leave a rebase that gsw aborted: {:?}",
+            outcome.output,
+        );
+        let (above, last) = last_line_of(&outcome.output);
+        assert_eq!(
+            last, REBASE_ABORTED,
+            "the sentence of gsw must be the last line of the outcome: {:?}",
+            outcome.output,
+        );
+        assert!(
+            above.lines().any(|line| line == CONFLICT_LINE),
+            "the line of git that names the file must stay above the sentence: {:?}",
+            outcome.output,
+        );
+        assert_eq!(
+            rows.lines().last(),
+            Some(REBASE_ABORTED),
+            "the sentence must be the last row, so that the cut to three rows keeps it: {rows:?}",
+        );
+        assert!(
+            rows.lines().any(|line| line == CONFLICT_LINE),
+            "the line of git that names the file must reach the rows that the user reads, \
+             and not only the text of the outcome: {rows:?} from {:?}",
+            outcome.output,
+        );
+    }
+
+    #[test]
+    fn a_command_that_stops_a_rebase_and_exits_zero_is_aborted_and_fails() {
+        // A command can stop a rebase and then exit 0. A shell function
+        // returns the status of its last command, and a `grp` that ends with
+        // an `echo` or a `true` exits 0 after any rebase. The row would then
+        // say `Rebased issue-12 onto main with grp`, and nothing was rebased
+        // and nothing was pushed.
+        //
+        // So the repository after the run decides the outcome, and not the
+        // exit status alone.
+        let workdir = init_repo();
+        conflicting_branches(workdir.path());
+        let stub = StubShell::new(&format!("{}; true", real_git(&format!("rebase {BASE}"))));
+
+        let (outcome, rows) = run_through_the_row(&stub, BaseUpdate::Rebase, workdir.path());
+
+        assert!(
+            !rebase_in_progress(workdir.path()),
+            "a rebase that the run left stopped must be aborted whatever the exit status: {:?}",
+            outcome.output,
+        );
+        assert!(
+            !outcome.success,
+            "a run that gsw had to abort must not report success: {:?}",
+            outcome.output,
+        );
+        assert_eq!(
+            last_line_of(&outcome.output).1,
+            REBASE_ABORTED,
+            "the last line must say that gsw aborted the rebase: {:?}",
+            outcome.output,
+        );
+        assert!(
+            !rows.contains("Rebased issue-12 onto main with grp"),
+            "the row must not say that the rebase worked: {rows:?}",
+        );
+        assert_eq!(
+            rows.lines().last(),
+            Some(REBASE_ABORTED),
+            "the row must end with the sentence of the abort: {rows:?}",
+        );
+    }
+
+    #[test]
+    fn an_abort_that_git_refuses_gives_the_reason_of_git_and_says_the_rebase_stays() {
+        // git refuses an abort that cannot take the lock of the index. A git
+        // process holds that lock while it works, and a git that crashed
+        // leaves it behind. The rebase then stays, and the `⚠` row of the
+        // next frame shows it. A sentence that said "aborted" would disagree
+        // with that row and send the user away from a rebase that is still
+        // there.
+        //
+        // The reason is the reason of git, so the lines of git go above the
+        // sentence of gsw.
+        //
+        // The tail takes the lock after the rebase stopped. The rebase is thus
+        // a real one, and only the abort meets the lock.
+        let workdir = init_repo();
+        conflicting_branches(workdir.path());
+        let stub = StubShell::new(&format!(
+            "{}; touch \"$({})\"",
+            real_git(&format!("rebase {BASE}")),
+            real_git("rev-parse --git-path index.lock"),
+        ));
+
+        let (outcome, rows) = run_through_the_row(&stub, BaseUpdate::Rebase, workdir.path());
+
+        let still_in_progress = rebase_in_progress(workdir.path());
+        let lock = PathBuf::from(git_stdout(
+            workdir.path(),
+            &[
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-path",
+                "index.lock",
+            ],
+        ));
+        let lock_was_taken = lock.is_file();
+        // The lock goes before the assertions, so a failed assertion leaves no
+        // lock for a later read of this work tree to meet.
+        let _ = std::fs::remove_file(&lock);
+        assert!(
+            lock_was_taken,
+            "the fixture must take the lock, or the abort had nothing to meet",
+        );
+        assert!(
+            still_in_progress,
+            "git refused the abort, so the rebase must still be in progress: {:?}",
+            outcome.output,
+        );
+        assert!(
+            !outcome.success,
+            "a run that left a rebase in progress must not report success: {:?}",
+            outcome.output,
+        );
+        let (above, last) = last_line_of(&outcome.output);
+        assert_eq!(
+            last, REBASE_NOT_ABORTED,
+            "the last line must say that gsw could not abort the rebase and that it stays: {:?}",
+            outcome.output,
+        );
+        assert!(
+            above
+                .lines()
+                .any(|line| line.contains("index.lock") && line.contains("File exists")),
+            "the reason of git must stay above the sentence: {:?}",
+            outcome.output,
+        );
+        assert_eq!(
+            rows.lines().last(),
+            Some(REBASE_NOT_ABORTED),
+            "the row must end with the sentence of the failed abort: {rows:?}",
+        );
+    }
+
+    #[test]
+    fn an_operation_that_the_run_left_on_a_different_branch_is_left_as_it_is() {
+        // **gsw aborts only an operation that it can show the run started.**
+        // The question named one branch, and the command of the user can check
+        // out a different one. A rebase or a merge that stops there is on a
+        // branch that the question did not name. It can be work of the user
+        // that the command only continued, so gsw does not abort it, and the
+        // last line says so. The outcome is a failure, because an operation is
+        // still in progress.
+        //
+        // **Only the branch differs.** `other` holds the commit that the branch
+        // of the question holds. Each operation here thus starts from the
+        // commit that HEAD held before the run, and the branch is the one
+        // condition that tells it apart from an operation that the run
+        // started. A detached HEAD is no branch, so it never matches the branch
+        // of the question.
+        //
+        // A merge keeps HEAD on its branch, and git writes the branch of a
+        // rebase in `head-name`, or `detached HEAD`. So each act is here with
+        // each kind of checkout.
+        for (update, checkout) in [
+            (BaseUpdate::Merge, "other"),
+            (BaseUpdate::Rebase, "other"),
+            (BaseUpdate::Merge, "--detach"),
+            (BaseUpdate::Rebase, "--detach"),
+        ] {
+            let (act, in_progress, sentence): (&str, fn(&Path) -> bool, &str) = match update {
+                BaseUpdate::Rebase => ("rebase", rebase_in_progress, REBASE_LEFT),
+                BaseUpdate::Merge => ("merge", merge_in_progress, MERGE_LEFT),
+            };
+            let case = format!("{act} after checkout {checkout}");
+            let workdir = init_repo();
+            conflicting_branches(workdir.path());
+            git(workdir.path(), &["branch", "other"]);
+            let stub = StubShell::new(&format!(
+                "{} && {}",
+                real_git(&format!("checkout -q {checkout}")),
+                real_git(&format!("{act} {BASE}")),
+            ));
+
+            let (outcome, rows) = run_through_the_row(&stub, update, workdir.path());
+
+            assert!(
+                in_progress(workdir.path()),
+                "gsw cannot show that the run started this {case}, so it must still be in \
+                 progress: {:?}",
+                outcome.output,
+            );
+            assert!(
+                !outcome.success,
+                "a run that left an operation in progress must not report success ({case}): {:?}",
+                outcome.output,
+            );
+            assert_eq!(
+                last_line_of(&outcome.output).1,
+                sentence,
+                "the last line must say that gsw did not start the operation and left it \
+                 ({case}): {:?}",
+                outcome.output,
+            );
+            assert_eq!(
+                rows.lines().last(),
+                Some(sentence),
+                "the row must end with the sentence of gsw ({case}): {rows:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn an_operation_that_started_from_a_different_commit_is_left_as_it_is() {
+        // **gsw aborts only an operation that it can show the run started.**
+        // The branch is the branch of the question here, but HEAD moved
+        // before the operation started. Another pane can commit on the branch
+        // between the read before the shell and the start of the shell, and
+        // then start an operation from that commit. The command can also
+        // commit first. gsw cannot tell those two cases apart, so an
+        // operation that did not start from the commit that HEAD held before
+        // the run stays as it is.
+        //
+        // **Only the commit differs.** Each operation is on the branch of the
+        // question, so the branch does not tell it apart from an operation
+        // that the run started. git writes the commit where a rebase started
+        // in `orig-head`, and a stopped merge does not move HEAD. So each act
+        // is here.
+        for update in BaseUpdate::ALL {
+            let (act, in_progress, sentence): (&str, fn(&Path) -> bool, &str) = match update {
+                BaseUpdate::Rebase => ("rebase", rebase_in_progress, REBASE_LEFT),
+                BaseUpdate::Merge => ("merge", merge_in_progress, MERGE_LEFT),
+            };
+            let workdir = init_repo();
+            conflicting_branches(workdir.path());
+            let stub = StubShell::new(&format!(
+                "{} && {}",
+                real_git("commit -q --allow-empty -m extra"),
+                real_git(&format!("{act} {BASE}")),
+            ));
+
+            let (outcome, rows) = run_through_the_row(&stub, update, workdir.path());
+
+            assert!(
+                in_progress(workdir.path()),
+                "the {act} did not start from the HEAD of before the run, so gsw cannot show that \
+                 the run started it, and it must still be in progress: {:?}",
+                outcome.output,
+            );
+            assert!(
+                !outcome.success,
+                "a run that left a {act} in progress must not report success: {:?}",
+                outcome.output,
+            );
+            assert_eq!(
+                last_line_of(&outcome.output).1,
+                sentence,
+                "the last line must say that gsw did not start the {act} and left it: {:?}",
+                outcome.output,
+            );
+            assert_eq!(
+                rows.lines().last(),
+                Some(sentence),
+                "the row must end with the sentence of gsw ({act}): {rows:?}",
+            );
+        }
+    }
+
+    #[test]
     fn a_refused_run_names_the_key_of_its_own_act() {
         // The advice belongs to the act, and not to a constant the push owns:
         // `p` says `press p again`, and a refused merge must say `press M
@@ -1589,5 +3024,222 @@ mod run_tests {
                 .any(|line| line == format!("{TERMINAL_PROMPT_VAR}=0")),
             "git must be told not to ask at the terminal: {environment:?}",
         );
+    }
+
+    #[test]
+    fn the_abort_child_sheds_the_git_variables_of_gsw_and_keeps_those_of_the_user() {
+        // **This test starts this test binary again, and the hostile
+        // environment goes on that child**, for the reason that the test of
+        // the run child gives.
+        //
+        // The abort moves a branch and resets a work tree, so a leaked
+        // variable does damage here too. A `gsw` that a pre-commit hook
+        // started holds `GIT_DIR`, and an abort that obeyed it would abort a
+        // rebase in the repository of the hook. The abort also acts for the
+        // user, so it keeps the six variables that the user states.
+        //
+        // **Two halves, because each half sees what the other half cannot.**
+        //
+        // - The run: a real run whose command stops a real rebase, in a child
+        //   that holds `GIT_DIR=/gsw-decoy/.git`. An abort that obeyed that
+        //   variable finds no repository and fails, and the rebase stays. The
+        //   run cannot show the six variables of the user, because git aborts
+        //   a rebase without them too.
+        // - The record: the child finds a recording git first on its `PATH`,
+        //   so the abort child itself writes down the environment it got. The
+        //   record shows each variable that the abort child held.
+        //
+        // **The armed control comes first.** The child asserts that it really
+        // holds each hostile variable and each variable of the user, that no
+        // path of the hostile variables is on this machine, and that the git
+        // it starts by name is the recording git. An assertion that a
+        // variable is absent passes just as readily where there was nothing
+        // to remove.
+        if std::env::var_os(HOSTILE_MARKER).is_none() {
+            a_child_with_a_recording_git_passes(&test_name(
+                module_path!(),
+                "the_abort_child_sheds_the_git_variables_of_gsw_and_keeps_those_of_the_user",
+            ));
+            return;
+        }
+
+        for (name, _) in HOSTILE_GIT_ENVIRONMENT {
+            assert!(
+                std::env::var_os(name).is_some(),
+                "the child must really hold {name}, or there is nothing here to remove and the \
+                 assertions below are measured against nothing",
+            );
+        }
+        for name in gitscratch::USER_INTENT_GIT_ENVIRONMENT {
+            assert_eq!(
+                std::env::var(name).ok(),
+                Some(user_intent_value(name)),
+                "the child must really hold {name}, or there is nothing here to keep",
+            );
+        }
+        let nothing_at = |path: &Path| {
+            matches!(
+                std::fs::symlink_metadata(path),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            )
+        };
+        let decoys: Vec<&Path> = HOSTILE_GIT_ENVIRONMENT
+            .iter()
+            .map(|(_, value)| Path::new(*value))
+            .filter(|path| path.is_absolute())
+            .collect();
+        for decoy in &decoys {
+            assert!(
+                nothing_at(decoy),
+                "{} must name nothing on this machine, or a write there cannot be seen",
+                decoy.display(),
+            );
+        }
+
+        let workdir = init_repo();
+        conflicting_branches(workdir.path());
+        assert!(
+            !recorded_git_calls().is_empty(),
+            "the fixture runs git by name, so the recording git must have recorded it. Without \
+             that, the record of the abort below is empty for a reason that is not the abort",
+        );
+        let before = checkout_of(workdir.path());
+        let stub = StubShell::new(&real_git(&format!("rebase {BASE}")));
+
+        let outcome = run_quiet(stub.as_shell(), &default_command(), workdir.path());
+
+        assert!(
+            !rebase_in_progress(workdir.path()),
+            "the abort did not end the rebase in the work tree of the run. An abort that obeyed \
+             GIT_DIR goes to a repository that does not exist, and fails: {:?}",
+            outcome.output,
+        );
+        assert_eq!(
+            checkout_of(workdir.path()),
+            before,
+            "the abort must check the branch out again, at its commit from before the run",
+        );
+        assert_eq!(
+            last_line_of(&outcome.output).1,
+            REBASE_ABORTED,
+            "gsw must say that it aborted the rebase: {:?}",
+            outcome.output,
+        );
+        for decoy in &decoys {
+            assert!(
+                nothing_at(decoy),
+                "a git child of gsw obeyed a hostile variable and wrote to {}",
+                decoy.display(),
+            );
+        }
+
+        let aborts = recorded_rebase_aborts();
+        let calls: Vec<String> = recorded_git_calls()
+            .iter()
+            .map(|call| call.arguments.join(" "))
+            .collect();
+        assert_eq!(
+            aborts.len(),
+            1,
+            "the run must abort the rebase once, through the git that the PATH finds: {calls:?}",
+        );
+        let abort = &aborts[0];
+        assert_eq!(
+            abort.cwd,
+            resolved(workdir.path()),
+            "the abort must run in the work tree of the run",
+        );
+        let carried = shed_git_lines(&abort.environment);
+        assert!(
+            carried.is_empty(),
+            "the abort child carried a git variable out of the environment of gsw. Each of these \
+             aims the abort, or configures it, somewhere the user never pointed it: {carried:?}",
+        );
+        let lost = user_intent_lost(&abort.environment, None);
+        assert!(
+            lost.is_empty(),
+            "the abort child lost a git variable that the user states on purpose, so git aborts \
+             with a configuration that the user did not choose: {lost:?}",
+        );
+
+        println!("{CHILD_RAN}");
+    }
+
+    #[test]
+    fn the_abort_child_cannot_open_the_controlling_terminal() {
+        // gsw holds the terminal in raw mode while the abort runs, as it does
+        // while the command of the user runs. git asks nothing on the terminal
+        // for an abort today. But git starts hooks and helpers, and each of
+        // them gets the terminal of the abort child. A program that opens
+        // `/dev/tty` paints over the frame of gsw and reads the keys that the
+        // event thread of gsw waits for. So the abort child gets no terminal,
+        // as no child of gsw gets one.
+        //
+        // **The recording git is the probe.** git itself cannot be a probe.
+        // The recording git is the process that gsw starts, so it tries
+        // `/dev/tty` before it gives the call to the real git.
+        //
+        // **The armed control comes first, and it has two parts.** The test
+        // process must hold a terminal, or `/dev/tty` is unopenable for every
+        // process and the refusal below holds for no reason. The git calls of
+        // the fixture must open it, because the fixture does not detach them.
+        // That shows that the probe sees a terminal where there is one.
+        //
+        // The hostile environment is on this child too, because the helper
+        // that puts the recording git on a child also puts it there. It
+        // changes nothing here: the test above shows that the abort works
+        // under it.
+        if std::env::var_os(HOSTILE_MARKER).is_none() {
+            if !test_process_can_open_the_terminal() {
+                eprintln!(
+                    "skipped: this test process has no controlling terminal, so /dev/tty is \
+                     unopenable for every child regardless - the assertion would hold vacuously",
+                );
+                return;
+            }
+            a_child_with_a_recording_git_passes(&test_name(
+                module_path!(),
+                "the_abort_child_cannot_open_the_controlling_terminal",
+            ));
+            return;
+        }
+
+        assert!(
+            test_process_can_open_the_terminal(),
+            "the child must hold the terminal of this test, or the refusal below holds for every \
+             process",
+        );
+        let workdir = init_repo();
+        conflicting_branches(workdir.path());
+        let fixture: Vec<String> = recorded_git_calls()
+            .into_iter()
+            .map(|call| call.terminal)
+            .collect();
+        assert!(
+            !fixture.is_empty() && fixture.iter().all(|terminal| terminal == TTY_OPENED),
+            "the fixture does not detach its git, so each of its calls must open the terminal. \
+             Otherwise the probe sees no terminal anywhere: {fixture:?}",
+        );
+        let stub = StubShell::new(&real_git(&format!("rebase {BASE}")));
+
+        let outcome = run_quiet(stub.as_shell(), &default_command(), workdir.path());
+
+        assert!(
+            !rebase_in_progress(workdir.path()),
+            "the run must abort the rebase, or there is no abort child to ask: {:?}",
+            outcome.output,
+        );
+        let aborts: Vec<String> = recorded_rebase_aborts()
+            .into_iter()
+            .map(|call| call.terminal)
+            .collect();
+        assert_eq!(
+            aborts,
+            [TTY_REFUSED],
+            "the abort child keeps the controlling terminal, so a hook or a helper that git \
+             starts can paint over the frame of gsw and take the keys gsw is reading",
+        );
+
+        println!("{CHILD_RAN}");
     }
 }

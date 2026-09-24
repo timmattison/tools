@@ -651,19 +651,30 @@ fn render_operation_line(op: &Operation, width: usize) -> String {
     let label = truncate_to_budget(&label, width);
     let left = width - UnicodeWidthStr::width(label.as_str());
     let label_styled = label.yellow().bold();
-    if conflicts > 0 {
-        let word = if conflicts == 1 {
-            "conflict"
-        } else {
-            "conflicts"
-        };
-        let clause_text = truncate_to_budget(&format!(" · {conflicts} {word} to resolve"), left);
+    if let Some(words) = conflict_words(conflicts) {
+        let clause_text = truncate_to_budget(&format!(" · {words} to resolve"), left);
         if !clause_text.is_empty() {
             let clause = clause_text.red().bold();
             return format!("{label_styled}{clause}");
         }
     }
     label_styled.to_string()
+}
+
+/// The count of conflicts of an operation in words, or `None` when there is no
+/// conflict.
+///
+/// **The one rule for these words.** The `⚠` row of the header says them, and
+/// so does the sentence that `R` and `M` leave after gsw aborts an operation.
+/// The two thus cannot put one work tree in two sets of words. One conflict
+/// takes the singular. No conflict gives no words, because "0 conflicts"
+/// describes a stop that did not occur.
+pub(crate) fn conflict_words(conflicts: u32) -> Option<String> {
+    match conflicts {
+        0 => None,
+        1 => Some("1 conflict".to_string()),
+        n => Some(format!("{n} conflicts")),
+    }
 }
 
 /// Render one file row.

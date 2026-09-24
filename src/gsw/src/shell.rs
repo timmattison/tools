@@ -1622,6 +1622,22 @@ pub(crate) mod stub_shell {
     /// Panics where the child cannot be started, where it fails, where it hangs
     /// past [`CHILD_DEADLINE`], and where it printed no [`CHILD_RAN`].
     pub(crate) fn a_child_of_this_test_passes(test: &str) {
+        a_child_of_this_test_passes_with(test, &[]);
+    }
+
+    /// [`a_child_of_this_test_passes`], with each name of `extra` set on the
+    /// child to its value, after the hostile environment.
+    ///
+    /// **A variable that the code under test must find in its own environment
+    /// goes on the child, and never on this process**, for the reason the
+    /// hostile environment goes there. The case this serves is a `PATH` that
+    /// puts a program of the test in front of a program that gsw starts by
+    /// name.
+    ///
+    /// # Panics
+    ///
+    /// Panics where [`a_child_of_this_test_passes`] panics.
+    pub(crate) fn a_child_of_this_test_passes_with(test: &str, extra: &[(&str, &OsStr)]) {
         let workdir = tempfile::tempdir().expect("tempdir");
         let stdout = NamedTempFile::new().expect("a file for what the child says");
         let stderr = NamedTempFile::new().expect("a file for why the child stopped");
@@ -1642,6 +1658,9 @@ pub(crate) mod stub_shell {
         }
         for name in gitscratch::USER_INTENT_GIT_ENVIRONMENT {
             command.env(name, user_intent_value(name));
+        }
+        for (name, value) in extra {
+            command.env(name, value);
         }
         let mut child = command.spawn().expect("start this test binary again");
 

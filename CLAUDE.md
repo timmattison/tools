@@ -227,7 +227,7 @@ allowlist.
 - `gitscratch` - render and paint tests of the halt diffs
 - `grime` - `--diff` paint tests, through a pipe and on a terminal
 - `grind` - `--diff` paint tests, through a pipe and on a terminal
-- `gsw` - render, watch, and push tests
+- `gsw` - render, watch, push, and update run tests
 - `prcp` - the `--shell-setup` refusal and help tests
 - `prgz` - render tests of the closing report
 - `swt` - the end-to-end helpers that read stdout and stderr of the binary

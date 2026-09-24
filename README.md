@@ -585,15 +585,16 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       stays there until you press a key. Those are the **last** three lines, not the first: a
       `pre-push` hook prints its whole run before it fails and git adds its verdict after, so the
       reason a push failed is at the end of what was said. A plain rejection reads the same either
-      way, because git writes exactly three non-hint lines for one. A push that succeeds re-walks
-      the repository immediately, so the ahead/behind arrows match what just happened. Nothing the
-      push runs can prompt at the terminal — it would be reading the same keystrokes gsw is. The
-      push is started detached from the terminal — its own session on Unix, no inherited console
-      on Windows — so nothing in its process tree can reach the keyboard gsw is reading, not git,
-      not ssh, and not anything below them: an HTTPS remote that wants a password, a
-      passphrase-protected key with no agent, and an unknown host key all fail fast and say so
-      under the frame instead of hanging behind a question gsw never drew. Credential helpers and
-      a GUI askpass still work — neither needs the terminal.
+      way, because git writes exactly three non-hint lines for one. The one exception is a
+      `CONFLICT` line of git: it keeps a row above the last line, because it names the file that
+      conflicted. A push that succeeds re-walks the repository immediately, so the ahead/behind
+      arrows match what just happened. Nothing the push runs can prompt at the terminal — it would
+      be reading the same keystrokes gsw is. The push is started detached from the terminal — its
+      own session on Unix, no inherited console on Windows — so nothing in its process tree can
+      reach the keyboard gsw is reading, not git, not ssh, and not anything below them: an HTTPS
+      remote that wants a password, a passphrase-protected key with no agent, and an unknown host
+      key all fail fast and say so under the frame instead of hanging behind a question gsw never
+      drew. Credential helpers and a GUI askpass still work — neither needs the terminal.
     - **The push goes to the repository on the screen, whatever gsw was started from.** git obeys
       the environment before it obeys the directory it was pointed at. So a gsw started from
       inside a pre-commit hook would otherwise push the repository being committed to. The push
@@ -743,19 +744,25 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       question takes the routine color. In a pane with no row to spare, neither key asks at all,
       for the reason `p` does not.
     - Where the repository gives the key nothing to do, it asks nothing and posts a fading line
-      instead. A detached HEAD gets `HEAD is detached — check out a branch to rebase`, a base that
-      is neither `main` nor `master` gets `no main or master branch to rebase onto`, HEAD on the
-      base itself gets `on main — nothing to rebase`, an operation that git is still holding gets
-      `a rebase is in progress — finish it first`, and a branch that is behind by nothing gets
-      `issue-12 already contains main`. The first line that applies is the one you get, so a
-      rebase stopped on a conflict reports the detached HEAD it left. `M` says `merge` where `R`
-      says `rebase`, except in the line about an operation in progress: that one names the
+      instead. An operation that git is still holding gets
+      `a rebase is in progress — finish it first`, a detached HEAD gets
+      `HEAD is detached — check out a branch to rebase`, a base that is neither `main` nor
+      `master` gets `no main or master branch to rebase onto`, HEAD on the base itself gets
+      `on main — nothing to rebase`, and a branch that is behind by nothing gets
+      `issue-12 already contains main`. The first line that applies is the one you get. So a
+      rebase stopped on a conflict reports the rebase, and not the detached HEAD it left: that
+      HEAD goes back to the branch when you finish or abort the rebase. `M` says `merge` where
+      `R` says `rebase`, except in the line about an operation in progress: that one names the
       operation git holds, whichever key you pressed. gsw refuses no other case: a dirty work
       tree reaches your command, and git says what it thinks of one. gsw fetches nothing and
       neither command fetches, so the base is your local branch.
     - A checkout in another pane between the question and your answer refuses the run and starts
       no shell, as it refuses a push: gsw says the branch changed, and you press `R` again for a
-      question about the branch that is there now.
+      question about the branch that is there now. A rebase or a merge that starts in that gap
+      refuses the run too, with the line of the question,
+      `a merge is in progress — finish it first`, and gsw leaves that operation as it is. gsw
+      reads the operation before the branch, so a rebase that another pane started is named as
+      the rebase, and not as a change of branch.
     - While the command runs, its output shows live under the frame, in the window a push uses: a
       `Rebasing issue-12 onto main with grp… (1m12s)` notice, and up to six indented rows carrying
       the newest lines. **The run has no deadline**, because a pre-push hook of this workspace
@@ -770,13 +777,35 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       `grp: rebased onto 'main'; 'issue-12' has no upstream - skipping push`. That second row is
       necessary: `grp` and `gmp` report a push they skipped only in their last line. Both rows age
       and fade off the screen after a minute. A run that failed leaves the last lines of the
-      output in red, where they wait for a key, as git's error text does.
+      output in red, where they wait for a key, as git's error text does. Any `CONFLICT` line of
+      git keeps a row above them, so the rows name the file that conflicted.
+    - **A rebase or a merge that the run leaves stopped is aborted.** The run has no terminal, so
+      nobody can resolve a conflict inside it. When your command exits, gsw reads the worktree of
+      the run. If git holds a rebase or a merge there that the run started, gsw runs
+      `git rebase --abort` or `git merge --abort` in that worktree, and the branch is back at its
+      commit from before the run. The run is then a failure, whatever the exit status of your
+      command, because a command can stop a rebase and still exit 0. The red rows keep the
+      `CONFLICT` line of git that names the file, then the last lines of your command, and the
+      last row is gsw's own:
+      `rebase stopped on 2 conflicts — gsw aborted it` (`1 conflict` for one, and no count for a
+      stop with no conflict). The abort gets no terminal, and no `GIT_` variable out of gsw's own
+      environment but the six you state on purpose, as the run does.
+    - **gsw aborts only an operation that it can show the run started**: the operation is on the
+      branch of the question, and it started from the commit that HEAD held just before the shell
+      started. gsw leaves any other operation as it is, and the last row says
+      `a rebase is in progress that gsw did not start — left as it is`. That includes a command
+      that makes a commit or checks out another branch before it starts its rebase or merge,
+      because gsw cannot tell that command apart from another pane. An abort that git refuses
+      leaves git's reason above the last row,
+      `rebase stopped on 1 conflict — gsw could not abort it, and it is still in progress`, and
+      the `⚠ rebase` row then shows the rebase.
     - **A quit does not stop the command.** A rebase that gsw stopped in the middle would leave a
-      repository you must repair, and nobody saw it stop. So gsw exits and your command runs on. A
-      rebase that then stops on a conflict shows in the `⚠ rebase` row the next time you start.
-    - Every outcome walks the repository at once, and not success alone: a rebase that stopped on
-      a conflict changed the repository as much as one that finished, and only a walk puts the new
-      counts and the `⚠ rebase` row in the header.
+      repository you must repair, and nobody saw it stop. So gsw exits and your command runs on.
+      **gsw aborts only while it runs**: a rebase that stops on a conflict after the quit stays in
+      progress, and it shows in the `⚠ rebase` row the next time you start.
+    - Every outcome walks the repository at once, and not success alone: a command that failed can
+      have changed the branch before it failed, and a walk during the run can have drawn the
+      `⚠ rebase` row of a rebase that gsw then aborted. Only a walk puts the header right again.
   - The arrow keys move the watch between the worktrees of the repository: the main worktree and
     every linked worktree, such as the ones `nwt` makes for each issue. The worktree where you
     started gsw is the **home worktree**.

@@ -8,7 +8,7 @@ use buildinfo::version_string;
 use clap::Parser;
 use colored::Colorize;
 
-use crate::git::{FileEntry, FileStatus};
+use crate::git::FileEntry;
 use crate::render::{
     plan_section_caps, render, render_with_offset, LogEntry, RefreshStatus, RenderOptions, Snapshot,
 };
@@ -111,9 +111,12 @@ mod worktrees;
                   force-pushes, but R runs your command, and grp force-pushes — so the R \
                   question takes the color of caution, because a rebase rewrites the commits of \
                   the branch. The key asks nothing and posts a fading line instead where the \
-                  repository gives it nothing to do: a detached HEAD, a base that is neither \
-                  main nor master, HEAD on the base itself, a rebase or a merge that git is \
-                  holding, and a branch that already contains the base. gsw fetches nothing and \
+                  repository gives it nothing to do: a rebase or a merge that git is holding, \
+                  a detached HEAD, a base that is neither main nor master, HEAD on the base \
+                  itself, and a branch that already contains the base. The first that applies \
+                  wins, so a stopped rebase is named as the rebase, not as a detached HEAD. A \
+                  checkout, a rebase, or a merge that starts between the question and the \
+                  answer refuses the run, and no shell starts. gsw fetches nothing and \
                   neither command fetches, so the base is your local branch. While the command \
                   runs, its output shows live in the window under the frame that a push uses, \
                   and the notice counts the time. The run has no deadline, because a pre-push \
@@ -121,11 +124,18 @@ mod worktrees;
                   nothing, and G still acts. A run that worked leaves the sentence of gsw \
                   and, under it, the last line the command wrote, because grp and gmp report a \
                   push they skipped only there. A run that failed leaves the last lines of the \
-                  output, in red, until you press a key. A quit does not stop the command: a \
+                  output, and above them any CONFLICT line of git, in red, until you press a \
+                  key. A rebase or a merge that the run started and left stopped is aborted in \
+                  the worktree of the run, and the run fails with a last line such as `rebase \
+                  stopped on 2 conflicts — gsw aborted it`, whatever the exit status of the \
+                  command. gsw aborts only an operation on the branch of the question that \
+                  started from the HEAD of before the run: it leaves any other operation as it \
+                  is, and says so. An abort that git refuses gives the reason of git and says \
+                  that the operation is still in progress. A quit does not stop the command: a \
                   rebase that gsw stopped in the middle would leave a repository you must \
-                  repair, and a rebase that stops on a conflict shows in the ⚠ rebase row at \
-                  the next start. Every outcome walks the repository at once, so the header \
-                  shows the new counts.\n\n\
+                  repair. gsw aborts only while it runs, so a rebase that stops on a conflict \
+                  after a quit shows in the ⚠ rebase row at the next start. Every outcome walks \
+                  the repository at once, so the header shows the new counts.\n\n\
                   Up goes to the home worktree, where gsw started. Left and Right go to the \
                   previous and the next worktree in path order, which is the order of cwt, and \
                   they wrap. Down opens a list of the worktrees: Up and Down move the cursor, \
@@ -621,14 +631,9 @@ pub(crate) fn collect_snapshot(
     // Surface an in-progress merge/rebase. The conflict count comes for free
     // from the status walk already done — every unmerged path is a
     // `FileStatus::Conflicted` row — so no extra git work is needed.
-    let conflicts = u32::try_from(
-        snapshot
-            .files
-            .iter()
-            .filter(|f| f.status == FileStatus::Conflicted)
-            .count(),
-    )
-    .unwrap_or(u32::MAX);
+    // `repo::conflict_count` is the one rule for that count, which the run of
+    // `R` and `M` shares through `repo::held_operation`.
+    let conflicts = repo::conflict_count(snapshot.files.iter().map(|f| f.status));
     snapshot.operation = repo::operation_state(repo, conflicts);
 
     Ok(snapshot)

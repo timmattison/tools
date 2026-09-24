@@ -465,14 +465,21 @@ const ORIGIN: &str = "origin";
 /// on git's own `wt-status.c` / `git-prompt.sh` logic: it inspects `MERGE_HEAD`,
 /// `rebase-merge/`, and `rebase-apply/` under the git dir, so it is
 /// worktree-aware and takes no locks — consistent with gsw's read-only,
-/// gix-only philosophy. `conflicts` is the unmerged-path count the caller
-/// already has from the status walk, so this does no extra git work.
+/// gix-only philosophy. `conflicts` is the unmerged-path count that the
+/// operation carries, and this function does no git work to find it. The
+/// snapshot passes the count of the status walk that it already did.
+/// [`held_operation`] passes 0, and walks for the count only when this
+/// function finds an operation.
 ///
 /// Every rebase flavor collapses to `Operation::Rebase`: `ApplyMailboxRebase`
 /// is gix's name for a bare `rebase-apply/` directory carrying neither the
 /// `applying` nor the `rebasing` marker, which cannot be told apart from an
 /// apply-backend rebase, so it is treated as one. Cherry-pick, revert, bisect,
 /// and plain `git am` are intentionally out of scope and yield `None`.
+///
+/// **The one detector.** The snapshot asks it for the `⚠` row and for the
+/// question of `R` and `M`. [`held_operation`] asks it for the run of those
+/// keys, which refuses and aborts by what this function gives.
 pub fn operation_state(repo: &gix::Repository, conflicts: u32) -> Option<Operation> {
     use gix::state::InProgress;
 
@@ -493,19 +500,114 @@ pub fn operation_state(repo: &gix::Repository, conflicts: u32) -> Option<Operati
     }
 }
 
-/// Both rebase step-counter pairs, in the order [`gix::Repository::state`]
-/// resolves the directories they live in: `rebase-apply/` before
-/// `rebase-merge/`. See [`rebase_step`], which reads them, for why the order
-/// is load-bearing.
+/// How many of `statuses` are unmerged paths, which is the conflict count of an
+/// operation in progress.
 ///
-/// This is the single source of truth for both that order and the file names
-/// themselves. The design spec
+/// The one rule for that count. Every unmerged path is one
+/// [`FileStatus::Conflicted`] row of the status walk, so the snapshot and
+/// [`held_operation`] both count those rows here. The `⚠` row of the header and
+/// the words of `R` and `M` then cannot give two counts for one work tree.
+pub fn conflict_count(statuses: impl IntoIterator<Item = FileStatus>) -> u32 {
+    let conflicted = statuses
+        .into_iter()
+        .filter(|status| *status == FileStatus::Conflicted)
+        .count();
+    u32::try_from(conflicted).unwrap_or(u32::MAX)
+}
+
+/// The rebase or merge that git holds in the work tree at `workdir` right now,
+/// or `None` when git holds neither.
+///
+/// The one reader for a caller that has a path and no repository handle: the
+/// run of `R` and `M` reads the work tree of the run with it, on a thread of
+/// its own, and a [`gix::Repository`] is not `Send`. It asks
+/// [`operation_state`], which is the one detector, with the conflict count of
+/// [`conflict_count`], which is the one rule for that count. So this reader and
+/// the snapshot cannot disagree about one work tree.
+///
+/// **The operation first, and the count only for an operation.** The count
+/// costs a full status walk and a line diff of each changed blob. The run reads
+/// the work tree before its shell and after it, and each read usually finds no
+/// operation. So this reader asks [`operation_state`] first, and walks for the
+/// count only when git holds an operation. A read that finds nothing thus
+/// costs only the check of the git dir, and the shell starts one walk sooner.
+///
+/// **`gix::open`, and never `gix::discover`.** `open` reads `workdir/.git`,
+/// also the `.git` file of a linked worktree, and so it reads the git dir of
+/// that worktree, where git keeps the state of its operation. It never walks up
+/// the directory tree, so a work tree that vanished is an error here, and never
+/// the repository of a parent directory. See [`RepoHandle::reopened`] for the
+/// same rule.
+///
+/// A repository that cannot be opened reads as `None`, the same as a git that
+/// cannot be run reads for the branch check of the run: the run then goes
+/// ahead, and a repository that cannot be read holds no operation that gsw can
+/// name. A status walk that fails counts no conflict. The operation itself is
+/// still read, because the operation is what a refusal is about, and the count
+/// is only a part of the words.
+pub fn held_operation(workdir: &std::path::Path) -> Option<Operation> {
+    let repo = gix::open(workdir).ok()?;
+    held_operation_in(&repo, |repo| {
+        collect_changes(repo).map_or(0, |changes| {
+            conflict_count(changes.entries.iter().map(|entry| entry.status))
+        })
+    })
+}
+
+/// [`held_operation`], with the count of conflicts given as a closure.
+///
+/// The count is a parameter so a test can see whether the count runs. The
+/// count is the expensive half of the read, and a test cannot see its cost
+/// in a time that it measures. Production passes the status walk and
+/// [`conflict_count`].
+///
+/// It asks [`operation_state`] first, with no count, and gives `None` when git
+/// holds nothing. Only then does it run `count_conflicts`, one time. It puts
+/// that count into the operation that it already has, so it reads the state of
+/// git one time.
+fn held_operation_in(
+    repo: &gix::Repository,
+    count_conflicts: impl FnOnce(&gix::Repository) -> u32,
+) -> Option<Operation> {
+    let mut operation = operation_state(repo, 0)?;
+    let (Operation::Merge { conflicts } | Operation::Rebase { conflicts, .. }) = &mut operation;
+    *conflicts = count_conflicts(repo);
+    Some(operation)
+}
+
+/// A directory where git keeps a rebase, and the two files in it that count the
+/// steps of that rebase.
+struct RebaseDir {
+    /// The name of the directory, in the git dir of the worktree.
+    name: &'static str,
+    /// The file that holds the number of the step that git is on.
+    current: &'static str,
+    /// The file that holds the number of steps.
+    total: &'static str,
+}
+
+/// Both directories where git keeps a rebase, in the order
+/// [`gix::Repository::state`] resolves them: `rebase-apply/` before
+/// `rebase-merge/`. See [`rebase_step`], which reads the step counters, for why
+/// the order is load-bearing. [`operation_start`] reads where a rebase started
+/// from the same directories, in the same order, for the same reason.
+///
+/// This is the single source of truth for that order, for the names of the
+/// directories, and for the names of the counter files. The design spec
 /// (`specs/2026-07-01-gsw-rebase-merge-indicators-design.md`) restates them in
 /// prose. That restatement is not checked automatically, so update it by hand
 /// whenever this table changes.
-const REBASE_COUNTERS: [(&str, &str); 2] = [
-    ("rebase-apply/next", "rebase-apply/last"),
-    ("rebase-merge/msgnum", "rebase-merge/end"),
+const REBASE_DIRS: [RebaseDir; 2] = [
+    RebaseDir {
+        name: "rebase-apply",
+        current: "next",
+        total: "last",
+    },
+    RebaseDir {
+        name: "rebase-merge",
+        current: "msgnum",
+        total: "end",
+    },
 ];
 
 /// How far through a rebase git is, or `None` when the counters cannot be read.
@@ -530,20 +632,136 @@ const REBASE_COUNTERS: [(&str, &str); 2] = [
 /// failing the whole indicator: the operation is still worth surfacing without
 /// its `current/total` clause.
 fn rebase_step(git_dir: &std::path::Path) -> Option<StepProgress> {
-    let read = |name: &str| -> Option<u32> {
-        std::fs::read_to_string(git_dir.join(name))
+    let read = |dir: &RebaseDir, name: &str| -> Option<u32> {
+        std::fs::read_to_string(git_dir.join(dir.name).join(name))
             .ok()?
             .trim()
             .parse()
             .ok()
     };
 
-    REBASE_COUNTERS.iter().find_map(|&(current, total)| {
+    REBASE_DIRS.iter().find_map(|dir| {
         Some(StepProgress {
-            current: read(current)?,
-            total: read(total)?,
+            current: read(dir, dir.current)?,
+            total: read(dir, dir.total)?,
         })
     })
+}
+
+/// The file of a rebase directory where git writes the branch that the rebase
+/// started on: `refs/heads/<branch>`, or `detached HEAD`.
+const REBASE_HEAD_NAME: &str = "head-name";
+
+/// The file of a rebase directory where git writes the full id of the commit
+/// that HEAD held when the rebase started.
+const REBASE_ORIG_HEAD: &str = "orig-head";
+
+/// The start of the full name of every branch.
+const BRANCH_REF_PREFIX: &str = "refs/heads/";
+
+/// Where a rebase or a merge that git holds started. See [`operation_start`].
+///
+/// The default value knows nothing: no branch and no commit.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OperationStart {
+    /// The branch that the operation started on, in the short form that
+    /// [`branch_name`] gives. `None` for an operation that started on a
+    /// detached HEAD, and for a branch that cannot be read.
+    pub branch: Option<String>,
+    /// The commit that HEAD held when the operation started. `None` for a
+    /// commit that cannot be read.
+    pub commit: Option<gix::ObjectId>,
+}
+
+/// Where `operation`, which git holds in the work tree at `workdir`, started.
+///
+/// The run of `R` and `M` compares this with the work tree of the run before
+/// its shell started, so that gsw aborts only an operation that it can show the
+/// run started.
+///
+/// **git records where a rebase started, and a stopped merge does not move
+/// HEAD.**
+///
+/// - For a rebase, git writes the branch in `head-name` of the rebase
+///   directory, and the full id of the commit in `orig-head`. The directory is
+///   the first of [`REBASE_DIRS`] that exists, which is the directory that
+///   [`gix::Repository::state`] classified the rebase from.
+/// - For a merge, HEAD stays on its branch, at its commit, while the merge is
+///   stopped. The branch and the commit of the merge are thus the branch that
+///   HEAD names now and the commit that HEAD holds now. The commit is the read
+///   of [`head_commit`], so a comparison with the value of that function
+///   compares two values of one reader.
+///
+/// **A value that cannot be read is `None`, and `None` names no branch and no
+/// commit.** A missing file, a file that cannot be read or parsed, and a
+/// repository that cannot be opened thus never show that the run started the
+/// operation. A ref outside `refs/heads/` is no branch either, and `detached
+/// HEAD` is not a ref.
+///
+/// **`gix::open`, and never `gix::discover`**, for the reason that
+/// [`held_operation`] gives.
+pub fn operation_start(workdir: &std::path::Path, operation: &Operation) -> OperationStart {
+    let Ok(repo) = gix::open(workdir) else {
+        return OperationStart::default();
+    };
+    let (full_name, commit) = match operation {
+        Operation::Rebase { .. } => {
+            let Some(dir) = REBASE_DIRS
+                .iter()
+                .map(|dir| repo.path().join(dir.name))
+                .find(|dir| dir.is_dir())
+            else {
+                return OperationStart::default();
+            };
+            let read = |name: &str| {
+                std::fs::read_to_string(dir.join(name))
+                    .ok()
+                    .map(|contents| contents.trim().to_string())
+            };
+            (
+                read(REBASE_HEAD_NAME),
+                read(REBASE_ORIG_HEAD).and_then(|hex| gix::ObjectId::from_hex(hex.as_bytes()).ok()),
+            )
+        }
+        Operation::Merge { .. } => (
+            repo.head_name()
+                .ok()
+                .flatten()
+                .map(|full| full.as_bstr().to_string()),
+            head_commit_of(&repo),
+        ),
+    };
+    OperationStart {
+        branch: full_name.and_then(|full| full.strip_prefix(BRANCH_REF_PREFIX).map(str::to_string)),
+        commit,
+    }
+}
+
+/// The commit that HEAD holds in the work tree at `workdir` right now, or
+/// `None` when it cannot be read.
+///
+/// The run of `R` and `M` reads it just before its shell starts, and compares
+/// it with the commit of [`operation_start`] after the shell exits. A HEAD that
+/// cannot be read is `None` here, and `None` matches no commit: gsw then cannot
+/// show that the run started an operation, so it aborts nothing.
+///
+/// **gix, and not a git child.** For a merge, the commit of
+/// [`operation_start`] is this same read of HEAD. So both sides of the
+/// comparison come from one reader, in one form, from one open of the work
+/// tree by one rule. The branch check of the run is a git child for a reason
+/// of its own, and no comparison with this value depends on it.
+///
+/// **`gix::open`, and never `gix::discover`**, for the reason that
+/// [`held_operation`] gives.
+pub fn head_commit(workdir: &std::path::Path) -> Option<gix::ObjectId> {
+    head_commit_of(&gix::open(workdir).ok()?)
+}
+
+/// The commit that HEAD of `repo` holds, or `None` when it cannot be read. An
+/// unborn HEAD holds no commit. The one read of HEAD for [`head_commit`] and
+/// for the merge case of [`operation_start`].
+fn head_commit_of(repo: &gix::Repository) -> Option<gix::ObjectId> {
+    repo.head_id().ok().map(gix::Id::detach)
 }
 
 /// Everything one working-tree status walk produces: the `FileEntry` rows plus
@@ -841,6 +1059,7 @@ fn worktree_bytes(repo: &gix::Repository, rela_path: &gix::bstr::BString) -> Vec
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::path::Path;
 
     use tempfile::TempDir;
@@ -1980,6 +2199,163 @@ mod tests {
         git_allowing_failure(p, &["cherry-pick", "feature~1"]);
         let repo = open_at(p).unwrap();
         assert_eq!(super::operation_state(&repo, 1), None);
+    }
+
+    /// A conflict count that no fixture below can produce by accident. The
+    /// walk of each fixture finds one conflict or none, so an operation that
+    /// carries this count carries the count of the closure.
+    const COUNT_OF_THE_CLOSURE: u32 = 7;
+
+    #[test]
+    fn held_operation_counts_no_conflict_when_git_holds_no_operation() {
+        // The run of `R` and `M` reads the work tree twice for each press:
+        // before the shell and after it. Both reads usually find no operation.
+        // The count costs a full status walk and a line diff of each changed
+        // blob, so a read that finds no operation must not pay for it.
+        let dir = init_repo();
+        let repo = open_at(dir.path()).unwrap();
+        let counted = Cell::new(false);
+
+        let held = super::held_operation_in(&repo, |_| {
+            counted.set(true);
+            COUNT_OF_THE_CLOSURE
+        });
+
+        assert_eq!(held, None, "a clean work tree holds no operation");
+        assert!(
+            !counted.get(),
+            "a work tree that holds no operation needs no conflict count, \
+             so the status walk must not run",
+        );
+    }
+
+    #[test]
+    fn held_operation_counts_the_conflicts_of_a_held_merge() {
+        // The merge of `main` into `feature` stops on `a.txt`. It exits
+        // non-zero, and that failure is the fixture.
+        let dir = diverged_repo();
+        git_allowing_failure(dir.path(), &["merge", "main"]);
+        let repo = open_at(dir.path()).unwrap();
+        let counts = Cell::new(0_u32);
+
+        let held = super::held_operation_in(&repo, |_| {
+            counts.set(counts.get() + 1);
+            COUNT_OF_THE_CLOSURE
+        });
+
+        assert_eq!(
+            held,
+            Some(Operation::Merge {
+                conflicts: COUNT_OF_THE_CLOSURE,
+            }),
+            "the merge must carry the count of the closure",
+        );
+        assert_eq!(counts.get(), 1, "a held merge needs one conflict count");
+    }
+
+    #[test]
+    fn held_operation_counts_the_conflicts_of_a_held_rebase_and_keeps_its_step() {
+        // The rebase stops on step 1 of 2. It exits non-zero, and that failure
+        // is the fixture. The count goes into a rebase that already carries
+        // its step, and the step must stay.
+        let dir = diverged_repo();
+        git_allowing_failure(dir.path(), &["rebase", "main"]);
+        let repo = open_at(dir.path()).unwrap();
+        let counts = Cell::new(0_u32);
+
+        let held = super::held_operation_in(&repo, |_| {
+            counts.set(counts.get() + 1);
+            COUNT_OF_THE_CLOSURE
+        });
+
+        assert_eq!(
+            held,
+            Some(Operation::Rebase {
+                step: Some(StepProgress {
+                    current: 1,
+                    total: 2,
+                }),
+                conflicts: COUNT_OF_THE_CLOSURE,
+            }),
+            "the rebase must carry its step and the count of the closure",
+        );
+        assert_eq!(counts.get(), 1, "a held rebase needs one conflict count");
+    }
+
+    /// A rebase that git holds, as [`super::operation_start`] takes it. The
+    /// reader reads the kind of the operation, and not its step or its count.
+    const HELD_REBASE: Operation = Operation::Rebase {
+        step: None,
+        conflicts: 1,
+    };
+
+    /// The full id of the commit that `rev` names in the repository at `dir`,
+    /// as git reports it.
+    fn commit_id(dir: &Path, rev: &str) -> gix::ObjectId {
+        let hex = crate::testrepo::git_stdout(dir, &["rev-parse", rev]);
+        gix::ObjectId::from_hex(hex.as_bytes()).expect("git gives a full id")
+    }
+
+    #[test]
+    fn operation_start_reads_the_rebase_directory_that_gix_classified_from() {
+        // The start of a rebase must come from the directory that the
+        // classification came from, for the reason that `rebase_step` gives.
+        // git never leaves both directories at once, so only a decoy built by
+        // hand can catch a read in the opposite order. The `rebase-merge/`
+        // decoy names a different branch and a different commit.
+        //
+        // This guard is not red-first: the order came with the reader. A
+        // mutation proved it: `REBASE_DIRS.iter().rev()` in the reader fails
+        // this test with the branch and the commit of the decoy.
+        let dir = diverged_repo();
+        let p = dir.path();
+        let before = commit_id(p, "HEAD");
+        git_allowing_failure(p, &["rebase", "--apply", "main"]);
+        assert!(
+            p.join(".git/rebase-apply/rebasing").exists(),
+            "the apply backend must have left its `rebasing` marker, which is what makes gix \
+             classify from `rebase-apply/`",
+        );
+        let decoy = p.join(".git/rebase-merge");
+        std::fs::create_dir_all(&decoy).expect("create the rebase-merge decoy");
+        std::fs::write(decoy.join("head-name"), "refs/heads/decoy\n").expect("write head-name");
+        std::fs::write(
+            decoy.join("orig-head"),
+            format!("{}\n", commit_id(p, "main")),
+        )
+        .expect("write orig-head");
+
+        assert_eq!(
+            super::operation_start(p, &HELD_REBASE),
+            super::OperationStart {
+                branch: Some("feature".to_string()),
+                commit: Some(before),
+            },
+        );
+    }
+
+    #[test]
+    fn operation_start_knows_nothing_that_it_cannot_read() {
+        // A missing file and a file that does not parse name nothing. The run
+        // of `R` and `M` compares each value with a value that it knows, and
+        // `None` matches nothing, so gsw then aborts nothing. A reader that
+        // fell back on HEAD for a commit that it cannot read would give a
+        // start that git never recorded.
+        //
+        // This guard is not red-first: the rule came with the reader. A
+        // mutation proved it: a fall back on the HEAD of the repository for an
+        // `orig-head` that does not parse fails this test.
+        let dir = diverged_repo();
+        let p = dir.path();
+        git_allowing_failure(p, &["rebase", "main"]);
+        std::fs::remove_file(p.join(".git/rebase-merge/head-name")).expect("remove head-name");
+        std::fs::write(p.join(".git/rebase-merge/orig-head"), "not-a-commit\n")
+            .expect("write orig-head");
+
+        assert_eq!(
+            super::operation_start(p, &HELD_REBASE),
+            super::OperationStart::default(),
+        );
     }
 }
 

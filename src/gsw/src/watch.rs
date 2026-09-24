@@ -730,9 +730,11 @@ enum Event {
     /// the same way: a command that either worked or wrote a reason. What it
     /// does not share is what happens next. **Every outcome of this one walks
     /// the repository**, and a failed push walks nothing: a push that failed
-    /// changed nothing to re-read, and a rebase that failed stopped in the
-    /// middle of rewriting the branch. The `⚠ rebase` row of the header is what
-    /// says so, and only a walk puts it there.
+    /// changed nothing to re-read, and a failed rebase or merge can have
+    /// changed the branch before it failed. A walk during the run can also
+    /// draw the `⚠` row of an operation that the run left stopped, and gsw
+    /// aborts that operation when the run ends. Only a walk puts the header
+    /// right again.
     BaseUpdateFinished(crate::push::PushOutcome),
     /// A key press with no other meaning. Clears a status message if one is on
     /// screen and does nothing otherwise, which is what keeps a push error up
@@ -2931,12 +2933,14 @@ where
                 state.ui.post_error(message.to_string());
             }
         }
-        // **A walk on every outcome, and not on success alone.** A rebase that
-        // failed still changed the repository: it rewrites the commits one at a
-        // time and stops where one of them conflicts, and the `⚠ rebase` row of
-        // the header is what tells the user that git is holding it. Only a walk
-        // puts that row there. A rebase that worked moved every commit and
-        // pushed them, so every count in the header is stale as well.
+        // **A walk on every outcome, and not on success alone.** A command
+        // that failed can have changed the branch before it failed. A walk
+        // during the run can have drawn the `⚠` row of an operation that the
+        // run left stopped, and gsw aborts that operation when the run ends, so
+        // only a walk takes that row away again. An operation that gsw did not
+        // abort stays, and a walk shows its row. A rebase that worked moved
+        // every commit and pushed them, so every count in the header is stale
+        // as well.
         Event::BaseUpdateFinished(outcome) => {
             state.ui.finished(outcome, clock());
             pending.force = true;
@@ -9642,11 +9646,11 @@ mod push_loop_tests {
     #[test]
     fn every_outcome_of_a_base_update_walks_git_again() {
         // **Unlike a push.** A push that failed changed nothing to re-read, so
-        // it walks nothing. A rebase that failed rewrote part of the branch and
-        // stopped in the middle of it, and the `⚠ rebase` row of the header is
-        // what says so — only a walk puts it there. A rebase that worked moved
-        // every commit and pushed them, so the counts in the header are stale
-        // the moment it lands.
+        // it walks nothing. A rebase that stopped on a conflict is a rebase
+        // that gsw aborts, and a walk during the run can have drawn its
+        // `⚠ rebase` row — only a walk takes that row away again. A rebase that
+        // worked moved every commit and pushed them, so the counts in the
+        // header are stale the moment it lands.
         let cases = [
             (
                 "a rebase that worked",
