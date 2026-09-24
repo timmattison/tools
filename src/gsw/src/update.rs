@@ -13,7 +13,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 
 use shellquote::shell_quote;
 
@@ -243,29 +243,48 @@ fn in_progress_refusal(operation: &Operation) -> String {
     )
 }
 
+/// What became of an operation that the command of a run left stopped.
+///
+/// [`stopped_sentence`] takes this value, so the words of every case are in
+/// that one function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cleanup {
+    /// gsw aborted the operation, and git holds no operation now.
+    Aborted,
+    /// gsw tried to abort the operation, and git refused. The operation is
+    /// still in progress.
+    AbortFailed,
+}
+
 /// The last line of a run whose command left `operation` stopped, after gsw
-/// aborted it.
+/// tried to abort it with the result `cleanup`.
 ///
 /// **The sentence of gsw, and not a line of the command.** The lines of the
-/// command above it describe an operation that is still in progress, and the
-/// `⚠` row of that operation is gone after the abort. Without this sentence,
-/// the row describes a work tree that no longer exists. It names the act, the
-/// count of conflicts, and the abort.
+/// command above it describe an operation that is still in progress. After an
+/// abort, the `⚠` row of that operation is gone, and without this sentence
+/// the row describes a work tree that no longer exists. After an abort that
+/// git refused, the operation stays, and the sentence says so, in agreement
+/// with the `⚠` row of the next frame. It names the act, the count of
+/// conflicts, and what gsw did.
 ///
 /// The verb is the operation that git held, for the reason
 /// [`in_progress_refusal`] gives. The count is the count of the read before
 /// the abort, which is the count of the `⚠` row, in the words of that row —
 /// see [`crate::render::conflict_words`]. With no conflict, the sentence drops
 /// the count, as the `⚠` row does.
-fn stopped_sentence(operation: &Operation) -> String {
+fn stopped_sentence(operation: &Operation, cleanup: Cleanup) -> String {
     let conflicts = match operation {
         Operation::Rebase { conflicts, .. } | Operation::Merge { conflicts } => *conflicts,
     };
     let on = crate::render::conflict_words(conflicts)
         .map(|words| format!(" on {words}"))
         .unwrap_or_default();
+    let what_gsw_did = match cleanup {
+        Cleanup::Aborted => "gsw aborted it",
+        Cleanup::AbortFailed => "gsw could not abort it, and it is still in progress",
+    };
     format!(
-        "{} stopped{on} — gsw aborted it",
+        "{} stopped{on} — {what_gsw_did}",
         BaseUpdate::held(operation).verb(),
     )
 }
@@ -509,7 +528,9 @@ const TERMINAL_PROMPT_VAR: &str = "GIT_TERMINAL_PROMPT";
 /// The read before refuses a work tree where an operation or a checkout
 /// started after the question, and then no shell starts. The read after aborts
 /// a rebase or a merge that the command left stopped, because the run has no
-/// terminal and nobody can resolve a conflict inside it. Both reads go to `workdir`, which
+/// terminal and nobody can resolve a conflict inside it. An abort that git
+/// refuses leaves the operation in progress, and the outcome gives the reason
+/// of git above the sentence that says so. Both reads go to `workdir`, which
 /// is the work tree of the run.
 ///
 /// **There is no deadline.** `grp` pushes, and a pre-push hook of this
@@ -653,10 +674,24 @@ fn run_in(
     // failure, so the last line is the one that the cut to three rows keeps.
     // The lines of the command stay above it, and the line of git that names
     // the file that conflicted is one of them.
+    //
+    // **An abort that git refuses gives its reason above the sentence.** The
+    // operation then stays, and the `⚠` row of the next frame shows it. The
+    // lines of git go between the lines of the command and the sentence, so
+    // the reason is the text just above the sentence, and the sentence says
+    // that the operation is still in progress.
     let held = crate::repo::held_operation(workdir);
     if let Some(operation) = &held {
-        let _ = abort_child(workdir, operation).output();
-        record.push(&stopped_sentence(operation));
+        let cleanup = match abort(workdir, operation) {
+            Ok(()) => Cleanup::Aborted,
+            Err(reason) => {
+                for line in &reason {
+                    record.push(line);
+                }
+                Cleanup::AbortFailed
+            }
+        };
+        record.push(&stopped_sentence(operation, cleanup));
     }
 
     // **The repository decides the outcome, and not the exit status alone.**
@@ -701,8 +736,9 @@ fn run_in(
 /// operation from the git dir of the worktree it runs in. A linked worktree
 /// thus gets its own operation aborted, and no other.
 ///
-/// The caller runs the child with [`Command::output`], so what git writes
-/// goes to the caller and never to the screen.
+/// [`abort`] runs the child with [`Command::output`], so what git writes goes
+/// to gsw and never to the screen. It reaches the outcome when git refuses the
+/// abort.
 fn abort_child(workdir: &Path, operation: &Operation) -> Command {
     let subcommand = match operation {
         Operation::Rebase { .. } => "rebase",
@@ -716,6 +752,74 @@ fn abort_child(workdir: &Path, operation: &Operation) -> Command {
         .stdin(Stdio::null());
     crate::child::detach_from_terminal(&mut command);
     command
+}
+
+/// Abort `operation`, which git holds in the work tree at `workdir`.
+///
+/// # Errors
+///
+/// Gives the lines that say why the abort failed, when git did not abort the
+/// operation. See [`abort_result`].
+fn abort(workdir: &Path, operation: &Operation) -> Result<(), Vec<String>> {
+    let mut child = abort_child(workdir, operation);
+    let attempt = child.output();
+    abort_result(&command_line(&child), attempt)
+}
+
+/// Whether `attempt`, a run of the abort that `line` names, aborted the
+/// operation.
+///
+/// Separate from [`abort`] so a test can hand it a child that did not start,
+/// which no real git of a test can give.
+///
+/// **Every line that git wrote, stdout first and stderr after it.**
+/// [`Command::output`] reads the two streams apart, so the order between them
+/// is lost. git writes the reason of a failed abort to stderr and nothing to
+/// stdout, so the lost order costs nothing here.
+///
+/// # Errors
+///
+/// Gives the lines that say why the abort failed:
+///
+/// - An abort that cannot start gives one line that says so, in the words of
+///   a run that cannot start.
+/// - An abort that exits with a status other than 0 gives every line that git
+///   wrote. When git wrote no line with text in it, the line is the exit
+///   status, for the rule that [`run_in`] states: a failure with nothing to
+///   show reads as a failure that did not occur.
+fn abort_result(line: &str, attempt: std::io::Result<Output>) -> Result<(), Vec<String>> {
+    let output = match attempt {
+        Ok(output) => output,
+        Err(error) => return Err(vec![format!("cannot run {line}: {error}")]),
+    };
+    if output.status.success() {
+        return Ok(());
+    }
+    let written: Vec<String> = [&output.stdout, &output.stderr]
+        .into_iter()
+        .flat_map(|stream| {
+            String::from_utf8_lossy(stream)
+                .lines()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    if written.iter().all(|written| written.trim().is_empty()) {
+        return Err(vec![format!("{line} failed ({})", output.status)]);
+    }
+    Err(written)
+}
+
+/// The command line that `command` runs, as the words of gsw name it.
+///
+/// Read from the child itself, so a line that names the abort cannot name a
+/// different command from the one that ran.
+fn command_line(command: &Command) -> String {
+    std::iter::once(command.get_program())
+        .chain(command.get_args())
+        .map(OsStr::to_string_lossy)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Every line a run has written, in arrival order, as one string with a newline
@@ -1115,7 +1219,7 @@ mod sentence_tests {
         // number it is about. The `⚠` row says "1 conflict" for the same
         // work tree.
         assert_eq!(
-            stopped_sentence(&rebase(1)),
+            stopped_sentence(&rebase(1), Cleanup::Aborted),
             "rebase stopped on 1 conflict — gsw aborted it",
         );
     }
@@ -1123,7 +1227,7 @@ mod sentence_tests {
     #[test]
     fn more_conflicts_than_one_take_the_plural() {
         assert_eq!(
-            stopped_sentence(&rebase(2)),
+            stopped_sentence(&rebase(2), Cleanup::Aborted),
             "rebase stopped on 2 conflicts — gsw aborted it",
         );
     }
@@ -1135,7 +1239,7 @@ mod sentence_tests {
         // did not occur, and the `⚠` row drops the clause for the same work
         // tree.
         assert_eq!(
-            stopped_sentence(&rebase(0)),
+            stopped_sentence(&rebase(0), Cleanup::Aborted),
             "rebase stopped — gsw aborted it",
         );
     }
@@ -1144,8 +1248,122 @@ mod sentence_tests {
     fn a_merge_is_named_as_the_merge() {
         // The verb is the operation that git held, as in the refusal.
         assert_eq!(
-            stopped_sentence(&Operation::Merge { conflicts: 1 }),
+            stopped_sentence(&Operation::Merge { conflicts: 1 }, Cleanup::Aborted),
             "merge stopped on 1 conflict — gsw aborted it",
+        );
+    }
+
+    #[test]
+    fn an_abort_that_failed_says_that_the_operation_is_still_in_progress() {
+        // The `⚠` row of the next frame shows the operation, so the sentence
+        // must agree with it. The count follows the same rule as after an
+        // abort that worked.
+        assert_eq!(
+            stopped_sentence(&rebase(1), Cleanup::AbortFailed),
+            "rebase stopped on 1 conflict — gsw could not abort it, and it is still in progress",
+        );
+        assert_eq!(
+            stopped_sentence(&rebase(0), Cleanup::AbortFailed),
+            "rebase stopped — gsw could not abort it, and it is still in progress",
+        );
+        assert_eq!(
+            stopped_sentence(&Operation::Merge { conflicts: 2 }, Cleanup::AbortFailed),
+            "merge stopped on 2 conflicts — gsw could not abort it, and it is still in progress",
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod abort_tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    /// The command line that every abort here names.
+    const REBASE_ABORT: &str = "git rebase --abort";
+
+    /// What a child gives that exited with `code` and wrote `stdout` and
+    /// `stderr`.
+    fn exited(code: i32, stdout: &str, stderr: &str) -> std::io::Result<Output> {
+        Ok(Output {
+            // A wait status holds the exit code in its second byte.
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        })
+    }
+
+    #[test]
+    fn the_abort_child_is_named_by_the_command_it_runs() {
+        // The line that names a failed abort reads the child itself, so it
+        // names the abort of the operation that git held.
+        let dir = std::env::temp_dir();
+        let rebase = Operation::Rebase {
+            step: None,
+            conflicts: 1,
+        };
+        let merge = Operation::Merge { conflicts: 1 };
+        assert_eq!(command_line(&abort_child(&dir, &rebase)), REBASE_ABORT);
+        assert_eq!(
+            command_line(&abort_child(&dir, &merge)),
+            "git merge --abort"
+        );
+    }
+
+    #[test]
+    fn an_abort_that_exits_0_worked() {
+        assert_eq!(abort_result(REBASE_ABORT, exited(0, "", "")), Ok(()));
+    }
+
+    #[test]
+    fn an_abort_that_git_refuses_gives_every_line_of_git_stdout_first() {
+        // The lines go to the outcome as git wrote them, blank lines too. The
+        // row drops the blank lines, and the text keeps them.
+        assert_eq!(
+            abort_result(
+                REBASE_ABORT,
+                exited(
+                    128,
+                    "out\n",
+                    "error: Unable to create 'index.lock'\n\nfatal: could not move back\n"
+                ),
+            ),
+            Err(vec![
+                "out".to_string(),
+                "error: Unable to create 'index.lock'".to_string(),
+                String::new(),
+                "fatal: could not move back".to_string(),
+            ]),
+        );
+    }
+
+    #[test]
+    fn an_abort_that_fails_and_says_nothing_gives_its_exit_status() {
+        // A failure with nothing to show reads as a failure that did not
+        // occur. The exit status is all that git left.
+        assert_eq!(
+            abort_result(REBASE_ABORT, exited(1, "", " \n")),
+            Err(vec![
+                "git rebase --abort failed (exit status: 1)".to_string()
+            ]),
+        );
+    }
+
+    #[test]
+    fn an_abort_that_cannot_start_says_so() {
+        // git is not on the path of gsw, although the shell of the user found
+        // it for the command. The reader of the operation is gsw's own, so it
+        // still found the operation that the command left stopped.
+        assert_eq!(
+            abort_result(
+                REBASE_ABORT,
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "No such file or directory"
+                )),
+            ),
+            Err(vec![
+                "cannot run git rebase --abort: No such file or directory".to_string()
+            ]),
         );
     }
 }
