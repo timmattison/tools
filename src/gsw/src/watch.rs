@@ -1602,18 +1602,16 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             // name the same worktree. The assertion states that in the debug
             // build, which the tests run.
             //
-            // The walk fetches as many commits as the pane can show now. The
-            // hook reads the size of the pane at the time of the walk, because
-            // the pane can change size after the seed walk.
-            collect: |current: &WorktreePath, _limit: usize| {
+            // The walk fetches as many commits as the loop passes, which is the
+            // most that the pane can show. The loop measures the pane just
+            // before the walk, because the pane can change size after the seed
+            // walk.
+            collect: |current: &WorktreePath, log_limit: usize| {
                 let mut watched = watched.borrow_mut();
                 debug_assert_eq!(
                     current, &watched.path,
                     "the loop and the watch must be on the same worktree",
                 );
-                let log_limit = cfg
-                    .log
-                    .fetch_limit(current_dimensions(cfg.width_offset).height);
                 watched.walk(cfg, &home, log_limit)
             },
             // A resize reads the log alone when the pane outgrows the log of
@@ -2469,7 +2467,10 @@ struct LoopHooks<
     Switch,
 > {
     /// Walk the worktree that the loop passes, which is the worktree the frame
-    /// shows, into a fresh [`Snapshot`] (the expensive git work).
+    /// shows, into a fresh [`Snapshot`] (the expensive git work). The walk
+    /// fetches no more commits for the log than the limit that the loop
+    /// passes, which is the most that the pane can show
+    /// ([`LoopState::log_limit`]).
     collect: Collect,
     /// Read the newest commits of the worktree that the loop passes, which is
     /// the worktree the frame shows, up to the limit that the loop passes.
@@ -3182,14 +3183,18 @@ where
         // Re-measure the pane before rendering, on the same two triggers as
         // before: a walk and a resize. Hoisted out of the branches so the frame
         // height below is computed from dimensions that are already current.
+        // The walk and the read of the log on a resize take the limit of the
+        // log from these dimensions too.
         if walk_now || saw_resize {
             state.cache.dims = (hooks.dimensions)();
         }
 
-        // The walk comes before the division of the pane below. It needs no
-        // pane size, and what it finds can change what goes under the frame.
+        // The walk comes after the measure above, because it fetches as many
+        // commits as the pane can show ([`LoopState::log_limit`]). It comes
+        // before the division of the pane below, because what it finds can
+        // change what goes under the frame.
         if walk_now {
-            let collected = (hooks.collect)(&state.current, 0);
+            let collected = (hooks.collect)(&state.current, state.log_limit());
             match collected {
                 Ok(snapshot) => {
                     // Re-seed the collection time to the walk's start so a later
