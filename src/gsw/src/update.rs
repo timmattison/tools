@@ -254,17 +254,16 @@ fn in_progress_refusal(operation: &Operation) -> String {
 ///
 /// The verb is the operation that git held, for the reason
 /// [`in_progress_refusal`] gives. The count is the count of the read before
-/// the abort, which is the count of the `⚠` row. With no conflict, the
-/// sentence drops the count, as the `⚠` row does.
+/// the abort, which is the count of the `⚠` row, in the words of that row —
+/// see [`crate::render::conflict_words`]. With no conflict, the sentence drops
+/// the count, as the `⚠` row does.
 fn stopped_sentence(operation: &Operation) -> String {
     let conflicts = match operation {
         Operation::Rebase { conflicts, .. } | Operation::Merge { conflicts } => *conflicts,
     };
-    let on = match conflicts {
-        0 => String::new(),
-        1 => " on 1 conflict".to_string(),
-        n => format!(" on {n} conflicts"),
-    };
+    let on = crate::render::conflict_words(conflicts)
+        .map(|words| format!(" on {words}"))
+        .unwrap_or_default();
     format!(
         "{} stopped{on} — gsw aborted it",
         BaseUpdate::held(operation).verb(),
