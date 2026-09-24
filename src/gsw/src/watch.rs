@@ -7720,6 +7720,66 @@ mod tests {
             "watch height must come from terminal_size with no chrome reserved",
         );
     }
+
+    #[test]
+    fn one_shot_on_a_terminal_leaves_the_row_of_the_prompt() {
+        // `gsw --one-shot` on a terminal prints its frame and a newline, and
+        // then the shell prints its prompt on the next row. A frame as tall as
+        // the terminal thus scrolls the header off the top of the screen.
+        let terminal = |rows: usize| SizeInputs {
+            tty_width: Some(200),
+            tty_height: Some(rows),
+            columns_env: None,
+            lines_env: None,
+            stdout_is_tty: true,
+            width_offset: 0,
+        };
+
+        assert_eq!(
+            resolve_dimensions(Mode::OneShot, &terminal(30)).height,
+            29,
+            "a one-shot frame on a 30-row terminal must leave one row for the prompt",
+        );
+        assert_eq!(
+            resolve_dimensions(
+                Mode::OneShot,
+                &SizeInputs {
+                    lines_env: Some(9999),
+                    ..terminal(30)
+                },
+            )
+            .height,
+            29,
+            "a stale LINES must not change the height of a one-shot frame on a terminal",
+        );
+        assert_eq!(
+            resolve_dimensions(Mode::OneShot, &terminal(1)).height,
+            1,
+            "a one-shot frame on a 1-row terminal must keep one row, not zero",
+        );
+
+        // Watch mode owns the whole pane and prints no prompt under it.
+        assert_eq!(
+            resolve_dimensions(Mode::Watch, &terminal(30)).height,
+            30,
+            "watch height must stay the full height of the terminal",
+        );
+
+        // A pipe with no LINES has no prompt under the frame either.
+        assert_eq!(
+            resolve_dimensions(
+                Mode::OneShot,
+                &SizeInputs {
+                    tty_height: None,
+                    stdout_is_tty: false,
+                    ..terminal(30)
+                },
+            )
+            .height,
+            DEFAULT_TERMINAL_HEIGHT,
+            "a one-shot frame into a pipe must keep the default height",
+        );
+    }
 }
 
 #[cfg(test)]
