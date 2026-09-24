@@ -124,18 +124,18 @@ mod worktrees;
                   nothing, and G still acts. A run that worked leaves the sentence of gsw \
                   and, under it, the last line the command wrote, because grp and gmp report a \
                   push they skipped only there. A run that failed leaves the last lines of the \
-                  output, in red, until you press a key. A rebase or a merge that the run \
-                  started and left stopped is aborted in the worktree of the run, and the run \
-                  fails with a last line such as `rebase stopped on 2 conflicts — gsw aborted \
-                  it`, whatever the exit status of the command. gsw aborts only an operation \
-                  on the branch of the question that started from the HEAD of before the run: \
-                  it leaves any other operation as it is, and says so. An abort that git \
-                  refuses gives the reason of git and says that the operation is still in \
-                  progress. A quit does not stop the command: a rebase that gsw stopped in the \
-                  middle would leave a repository you must repair. gsw aborts only while it \
-                  runs, so a rebase that stops on a conflict after a quit shows in the ⚠ rebase \
-                  row at the next start. Every outcome walks the repository at once, so the \
-                  header shows the new counts.\n\n\
+                  output, and above them any CONFLICT line of git, in red, until you press a \
+                  key. A rebase or a merge that the run started and left stopped is aborted in \
+                  the worktree of the run, and the run fails with a last line such as `rebase \
+                  stopped on 2 conflicts — gsw aborted it`, whatever the exit status of the \
+                  command. gsw aborts only an operation on the branch of the question that \
+                  started from the HEAD of before the run: it leaves any other operation as it \
+                  is, and says so. An abort that git refuses gives the reason of git and says \
+                  that the operation is still in progress. A quit does not stop the command: a \
+                  rebase that gsw stopped in the middle would leave a repository you must \
+                  repair. gsw aborts only while it runs, so a rebase that stops on a conflict \
+                  after a quit shows in the ⚠ rebase row at the next start. Every outcome walks \
+                  the repository at once, so the header shows the new counts.\n\n\
                   Up goes to the home worktree, where gsw started. Left and Right go to the \
                   previous and the next worktree in path order, which is the order of cwt, and \
                   they wrap. Down opens a list of the worktrees: Up and Down move the cursor, \

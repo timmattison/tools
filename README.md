@@ -581,15 +581,16 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       stays there until you press a key. Those are the **last** three lines, not the first: a
       `pre-push` hook prints its whole run before it fails and git adds its verdict after, so the
       reason a push failed is at the end of what was said. A plain rejection reads the same either
-      way, because git writes exactly three non-hint lines for one. A push that succeeds re-walks
-      the repository immediately, so the ahead/behind arrows match what just happened. Nothing the
-      push runs can prompt at the terminal — it would be reading the same keystrokes gsw is. The
-      push is started detached from the terminal — its own session on Unix, no inherited console
-      on Windows — so nothing in its process tree can reach the keyboard gsw is reading, not git,
-      not ssh, and not anything below them: an HTTPS remote that wants a password, a
-      passphrase-protected key with no agent, and an unknown host key all fail fast and say so
-      under the frame instead of hanging behind a question gsw never drew. Credential helpers and
-      a GUI askpass still work — neither needs the terminal.
+      way, because git writes exactly three non-hint lines for one. The one exception is a
+      `CONFLICT` line of git: it keeps a row above the last line, because it names the file that
+      conflicted. A push that succeeds re-walks the repository immediately, so the ahead/behind
+      arrows match what just happened. Nothing the push runs can prompt at the terminal — it would
+      be reading the same keystrokes gsw is. The push is started detached from the terminal — its
+      own session on Unix, no inherited console on Windows — so nothing in its process tree can
+      reach the keyboard gsw is reading, not git, not ssh, and not anything below them: an HTTPS
+      remote that wants a password, a passphrase-protected key with no agent, and an unknown host
+      key all fail fast and say so under the frame instead of hanging behind a question gsw never
+      drew. Credential helpers and a GUI askpass still work — neither needs the terminal.
     - **The push goes to the repository on the screen, whatever gsw was started from.** git obeys
       the environment before it obeys the directory it was pointed at. So a gsw started from
       inside a pre-commit hook would otherwise push the repository being committed to. The push
@@ -772,14 +773,16 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       `grp: rebased onto 'main'; 'issue-12' has no upstream - skipping push`. That second row is
       necessary: `grp` and `gmp` report a push they skipped only in their last line. Both rows age
       and fade off the screen after a minute. A run that failed leaves the last lines of the
-      output in red, where they wait for a key, as git's error text does.
+      output in red, where they wait for a key, as git's error text does. Any `CONFLICT` line of
+      git keeps a row above them, so the rows name the file that conflicted.
     - **A rebase or a merge that the run leaves stopped is aborted.** The run has no terminal, so
       nobody can resolve a conflict inside it. When your command exits, gsw reads the worktree of
       the run. If git holds a rebase or a merge there that the run started, gsw runs
       `git rebase --abort` or `git merge --abort` in that worktree, and the branch is back at its
       commit from before the run. The run is then a failure, whatever the exit status of your
-      command, because a command can stop a rebase and still exit 0. The last lines of your
-      command stay in the red rows, and the last row is gsw's own:
+      command, because a command can stop a rebase and still exit 0. The red rows keep the
+      `CONFLICT` line of git that names the file, then the last lines of your command, and the
+      last row is gsw's own:
       `rebase stopped on 2 conflicts — gsw aborted it` (`1 conflict` for one, and no count for a
       stop with no conflict). The abort gets no terminal, and no `GIT_` variable out of gsw's own
       environment but the six you state on purpose, as the run does.

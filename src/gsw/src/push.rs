@@ -40,7 +40,10 @@ use textfit::truncate_right;
 /// what the user is actually watching. Three rows is enough for git's
 /// `To <remote>` / `! [rejected] …` / `error: failed to push …` triple, which
 /// is the part that says what went wrong — and enough, when a pre-push hook
-/// failed instead, for the line that failed and git's verdict on it.
+/// failed instead, for the line that failed and git's verdict on it. After a
+/// rebase or a merge that stopped, it is enough for the `CONFLICT` line of git,
+/// the last line of git, and the sentence of gsw. [`failure_lines`] picks the
+/// three.
 ///
 /// A ceiling, not a promise: a pane with fewer than four rows cannot spare
 /// three and still show a frame, so [`PushUi::overlay`] clips the message
@@ -82,6 +85,14 @@ const MAX_HELD_MESSAGES: usize = 4;
 /// to fit in [`MAX_STATUS_ROWS`]. A lexical prefix is the right matcher here:
 /// this is git's own output convention, not a syntactic property of anything.
 const HINT_PREFIX: &str = "hint:";
+
+/// Git's prefix for the line that names a file a rebase or a merge left
+/// conflicted, such as `CONFLICT (content): Merge conflict in a.txt`. The user
+/// needs that name to finish the work by hand, so these lines outrank every
+/// other line but the last when the message has to fit in [`MAX_STATUS_ROWS`].
+/// A lexical prefix is the right matcher here, as for [`HINT_PREFIX`]: this is
+/// git's own output convention, not a syntactic property of anything.
+const CONFLICT_PREFIX: &str = "CONFLICT (";
 
 /// What pressing `p` will actually do, resolved from the snapshot *before* the
 /// confirmation appears — so the prompt describes the command that will run
@@ -723,11 +734,11 @@ pub(crate) fn current_branch(workdir: &Path) -> Option<String> {
 /// runner that pre-digested it would decide the wording from a place with no
 /// idea how many rows are free.
 ///
-/// The order is load-bearing. [`failure_lines`] shows the last lines, and on a
-/// failed pre-push hook the last line is git's verdict on stderr — which comes
-/// after a hook that wrote to stdout, and only after. The report of a run that
-/// worked reads the last line for the same reason: `grp` says there that it
-/// skipped the push.
+/// The order is load-bearing. [`failure_lines`] always keeps the last line,
+/// and on a failed pre-push hook the last line is git's verdict on stderr —
+/// which comes after a hook that wrote to stdout, and only after. The report
+/// of a run that worked reads the last line for the same reason: `grp` says
+/// there that it skipped the push.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PushOutcome {
     /// Whether the command worked.
@@ -1920,15 +1931,24 @@ fn colorize_status(line: &str, elapsed: Duration, truecolor: bool) -> ColoredStr
 /// What a failed push says when git said nothing gsw could show.
 const SILENT_FAILURE: &str = "git push failed";
 
-/// Pick the lines of a failed push's output worth the rows they cost.
+/// Pick the lines of a failed push or base update worth the rows they cost.
 ///
-/// **The last of them, not the first.** A push git refuses on its own writes
+/// **The last line always stays.** A push git refuses on its own writes
 /// exactly three non-hint lines — `To <remote>`, `! [rejected] …`,
 /// `error: failed to push …` — so for that failure the head and the tail are
 /// the same three and the choice does not arise. It arises the moment a
 /// repository has a pre-push hook: the hook prints its whole run, fails, and
 /// git adds its verdict after, so the reason sits at the end behind a banner
-/// that would otherwise take every row.
+/// that would otherwise take every row. After a rebase or a merge that
+/// stopped, the last line is the sentence of gsw about that operation.
+///
+/// **A `CONFLICT` line of git outranks every other line above the last.** It
+/// names the file that conflicted. A rebase writes two lines of its own after
+/// it, and gsw adds its sentence after them, so a plain tail loses it. The
+/// conflict lines nearest the end win when there are more of them than rows.
+/// The rows that are left go to the other lines nearest the end. The chosen
+/// lines keep the order they had in the output. Output with no conflict line
+/// thus gives the last three lines, as a plain tail does.
 ///
 /// Hints are dropped first either way. They follow the real error, so under a
 /// tail rule they are the lines that would crowd it out. Only if dropping them
@@ -1936,12 +1956,25 @@ const SILENT_FAILURE: &str = "git push failed";
 /// a blank row that reads as success.
 fn failure_lines(output: &str) -> Vec<String> {
     let meaningful = |line: &&str| !line.trim().is_empty();
-    let last = |lines: Vec<String>| -> Vec<String> {
-        let dropped = lines.len().saturating_sub(MAX_STATUS_ROWS);
-        lines.into_iter().skip(dropped).collect()
+    let pick = |lines: Vec<String>| -> Vec<String> {
+        let Some(last) = lines.len().checked_sub(1) else {
+            return lines;
+        };
+        let conflict = |index: &usize| lines[*index].trim_start().starts_with(CONFLICT_PREFIX);
+        // Nearest the end first, and every conflict line before any other.
+        let above = (0..last).rev();
+        let mut kept: Vec<usize> = above
+            .clone()
+            .filter(conflict)
+            .chain(above.filter(|index| !conflict(index)))
+            .take(MAX_STATUS_ROWS - 1)
+            .chain(std::iter::once(last))
+            .collect();
+        kept.sort_unstable();
+        kept.into_iter().map(|index| lines[index].clone()).collect()
     };
 
-    let mut lines = last(
+    let mut lines = pick(
         output
             .lines()
             .filter(meaningful)
@@ -1951,7 +1984,7 @@ fn failure_lines(output: &str) -> Vec<String> {
     );
 
     if lines.is_empty() {
-        lines = last(
+        lines = pick(
             output
                 .lines()
                 .filter(meaningful)
@@ -3417,6 +3450,10 @@ mod ui_tests {
         // user needs that name to do the rebase by hand. So it waits for a key
         // exactly as a failed push does: the clock must not take it away while
         // the user is looking at another pane.
+        //
+        // This output fits in three rows. A real rebase writes more lines, and
+        // the rank of the `CONFLICT` line then keeps the name in the rows. The
+        // tests of that rank follow this one.
         let now = t0();
         let mut ui = asking_base_update(BaseUpdate::Rebase, now);
         ui.confirm(now).expect("the question must confirm");

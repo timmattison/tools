@@ -738,10 +738,10 @@ fn run_in(
     // worktree on the screen. The key table keeps the arrow keys inert while
     // the run is in flight, but the abort does not depend on that rule.
     //
-    // **The sentence of gsw goes last.** The row shows the last lines of a
-    // failure, so the last line is the one that the cut to three rows keeps.
-    // The lines of the command stay above it, and the line of git that names
-    // the file that conflicted is one of them.
+    // **The sentence of gsw goes last.** The cut to three rows always keeps
+    // the last line of a failure. The lines of the command stay above it. The
+    // cut keeps the `CONFLICT` line of git, which names the file that
+    // conflicted, before any other line of the command.
     //
     // **An abort that git refuses gives its reason above the sentence.** The
     // operation then stays, and the `⚠` row of the next frame shows it. The
@@ -2568,10 +2568,11 @@ mod run_tests {
         // progress, and the `⚠` row of that rebase is gone. So gsw says what
         // it did, in a sentence of its own, as the last line.
         //
-        // **Last, so that it survives the cut to three rows.** The row shows
-        // the last lines of a failure, and git writes the file that conflicted
-        // above its own verdict. The `CONFLICT` line stays in the text, so the
-        // name of the file is not lost.
+        // **Last, so that it survives the cut to three rows.** The cut always
+        // keeps the last line of a failure. git names the file that conflicted
+        // in its `CONFLICT` line, and then writes more lines of its own. The
+        // cut keeps that line before them, so the rows that the user reads
+        // still name the file, and not only the text of the outcome.
         let workdir = init_repo();
         conflicting_branches(workdir.path());
         let stub = StubShell::new(&real_git(&format!("rebase {BASE}")));
