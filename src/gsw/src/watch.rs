@@ -30,7 +30,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use crate::conflicts::ConflictsWorker;
 use crate::push::{PushCommand, PushUi};
 use crate::render::Snapshot;
-use crate::repo::RepoHandle;
+use crate::repo::{LogStart, RepoHandle};
 use crate::worktrees::{
     head_label, list_worktrees, worktree_paths, WorktreeEntry, WorktreeList, WorktreePath,
 };
@@ -1492,8 +1492,11 @@ fn listed_paths(watched: &RefCell<Watched>) -> Vec<WorktreePath> {
 /// repository so config changed in another pane takes effect — and re-seed the
 /// cache; decay ticks and resizes re-render the cached snapshot with no walk
 /// (Part A). A resize to a pane with rows for more commits than the cached log
-/// holds reads the log alone, through [`crate::fetch_log`], before the repaint,
-/// unless the cached log is complete ([`Snapshot::log_complete`]).
+/// holds reads the log alone, through [`crate::fetch_log_from`], before the
+/// repaint. The read starts from the commit that the walk of the cached log
+/// started from ([`Snapshot::log_start`]), and never from the live HEAD. The
+/// resize reads nothing when the cached log is complete
+/// ([`Snapshot::log_complete`]) or has no start.
 /// The [`TerminalGuard`] restores the main screen and cursor on every exit path.
 ///
 /// Takes the [`RepoHandle`] **by value**: watch mode owns the repository for
@@ -1637,18 +1640,20 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                 watched.walk(cfg, &home, log_limit)
             },
             // A resize reads the log alone when the pane outgrows the log of
-            // the cache, and that log is not complete. The read goes through
-            // the handle as the last walk left it, with no re-open. A re-open
-            // costs a parse of the configuration, and the next walk makes one,
-            // as every walk does. The loop passes the worktree on the screen,
-            // as it does to `collect`.
-            fetch_log: |current: &WorktreePath, limit: usize| {
+            // the cache, and that log is not complete. The read starts from
+            // the commit that the walk of that log started from, which the
+            // loop passes, so it extends the log of the walk. The read goes
+            // through the handle as the last walk left it, with no re-open. A
+            // re-open costs a parse of the configuration, and the next walk
+            // makes one, as every walk does. The loop passes the worktree on
+            // the screen, as it does to `collect`.
+            fetch_log: |current: &WorktreePath, start: LogStart, limit: usize| {
                 let watched = watched.borrow();
                 debug_assert_eq!(
                     current, &watched.path,
                     "the loop and the watch must be on the same worktree",
                 );
-                crate::fetch_log(watched.handle.repo(), limit)
+                crate::fetch_log_from(watched.handle.repo(), start, limit)
             },
             render: |snap: &Snapshot, dims: Dimensions, timing: FrameTiming| {
                 render_frame(snap, cfg, dims, timing)
@@ -2209,11 +2214,13 @@ fn global_excludes_path(repo: &gix::Repository) -> Option<PathBuf> {
 ///
 /// The walk fetched only the commits that the pane had rows for at the time of
 /// the walk. So a resize to a pane with rows for more commits than the cached
-/// log holds reads the log again before the repaint, and
+/// log holds reads the log again before the repaint, from the commit that the
+/// walk started from ([`Snapshot::log_start`]).
 /// [`SnapshotCache::take_fetched_log`] puts the new log in the cache. The rest
 /// of the snapshot does not depend on the size of the pane, so it stays as the
 /// walk left it. A complete log ([`Snapshot::log_complete`]) already holds
-/// every commit that HEAD reaches, so no resize reads the log again for it.
+/// every commit that its start reaches, so no resize reads the log again for
+/// it.
 struct SnapshotCache {
     /// The most recently collected repository state.
     snapshot: Snapshot,
@@ -2227,8 +2234,17 @@ struct SnapshotCache {
 
 impl SnapshotCache {
     /// Put `fetched`, a read of the log of the cached worktree at
-    /// `fetched_at`, in the place of the cached log, when `fetched` holds more
+    /// `fetched_at`, in the place of the cached log, when `fetched` starts from
+    /// the start of the cached log ([`Snapshot::log_start`]) and holds more
     /// commits.
+    ///
+    /// The history of a commit never changes. So a read from the start of the
+    /// walk gives the commits of the walk first, in the same order, and more
+    /// commits of the same history after them: it extends the log of the walk.
+    /// A read from any other commit gives another history. Its rows show the
+    /// commits of one branch under the name and the counts of another, and
+    /// the age of its first row stands as the last-commit age of the wrong
+    /// branch. So the cache refuses such a read, whatever made it.
     ///
     /// The entries and the flag of the read go into the cache together
     /// ([`Snapshot::log_complete`]). So a read that reaches the end of the
@@ -2241,10 +2257,13 @@ impl SnapshotCache {
     /// `now - collected_at` to every age of the snapshot. So each fetched age
     /// moves back by `fetched_at - collected_at`, to the age that the commit
     /// had at the walk. The whole snapshot then stays at one instant, and the
-    /// frame shows each commit at its true age. A commit made after the walk
-    /// had no age at the walk. Its age stops at zero, so the frame shows it as
-    /// old as the walk, until the walk that its change causes gives its true
-    /// age.
+    /// frame shows each commit at its true age. Every commit of the read
+    /// existed at the walk, because the walk reached it from its start. But
+    /// the ages come from the wall clock, and the shift comes from the
+    /// monotonic clock. A step of the wall clock between the walk and the
+    /// read, or a commit time that was ahead of the clock at the walk and is
+    /// behind it at the read, gives an age shorter than the shift. That age
+    /// stops at zero, and the subtraction never underflows.
     ///
     /// A read of the log that fails gives no commit, and a read that cannot
     /// read a commit leaves that commit out. Neither read holds more commits
@@ -2254,11 +2273,11 @@ impl SnapshotCache {
     /// agrees with the rest of the snapshot.
     fn take_fetched_log(&mut self, fetched: FetchedLog, fetched_at: Instant) {
         let FetchedLog {
-            start: _,
+            start,
             mut entries,
             complete,
         } = fetched;
-        if entries.len() <= self.snapshot.log.len() {
+        if start != self.snapshot.log_start || entries.len() <= self.snapshot.log.len() {
             return;
         }
         let since_walk = fetched_at.saturating_duration_since(self.collected_at);
@@ -2486,7 +2505,8 @@ impl LoopState {
 ///
 /// A resize never calls `collect`. It calls `fetch_log` when the new pane has
 /// rows for more commits than the cached log holds, and the cached log is not
-/// complete ([`Snapshot::log_complete`]).
+/// complete ([`Snapshot::log_complete`]) and has a start
+/// ([`Snapshot::log_start`]).
 struct LoopHooks<
     Collect,
     FetchLog,
@@ -2511,9 +2531,11 @@ struct LoopHooks<
     /// ([`LoopState::log_limit`]).
     collect: Collect,
     /// Read the newest commits of the worktree that the loop passes, which is
-    /// the worktree the frame shows, up to the limit that the loop passes.
-    /// Production reads them through [`crate::fetch_log`]. It reads the log
-    /// alone, and no status walk.
+    /// the worktree the frame shows, from the start that the loop passes, up
+    /// to the limit that the loop passes. The start is the start of the cached
+    /// log ([`Snapshot::log_start`]), so the hook has no way to read from the
+    /// live HEAD. Production reads them through [`crate::fetch_log_from`]. It
+    /// reads the log alone, and no status walk.
     fetch_log: FetchLog,
     /// Render a snapshot at the given dimensions and timing.
     render: RenderFn,
@@ -2982,11 +3004,14 @@ where
 ///   by `clock() - collected_at`, and repaints only if the frame changed;
 /// - a resize re-renders the cached snapshot at the new dimensions with **no**
 ///   collect. When the new pane has rows for more commits than the cached log
-///   holds, the resize first reads the log alone (`fetch_log` in `hooks`). The
-///   read goes into the cache only when it holds more commits, so a read that
-///   fails never blanks the log. A complete cached log
-///   ([`Snapshot::log_complete`]) holds every commit that HEAD reaches, so a
-///   resize past it reads nothing;
+///   holds, the resize first reads the log alone (`fetch_log` in `hooks`),
+///   from the start of the cached log ([`Snapshot::log_start`]). The read goes
+///   into the cache only when it comes from that start and holds more
+///   commits, so a read that fails never blanks the log, and the log never
+///   shows another history under the header of the walk. A complete cached
+///   log ([`Snapshot::log_complete`]) holds every commit that its start
+///   reaches, and a cached log with no start has no history to extend, so a
+///   resize past either reads nothing;
 /// - a recompute whose output is byte-identical to what's displayed paints
 ///   nothing (suppression);
 /// - a walk that *fails* does not end the loop: the last good snapshot is
@@ -3063,7 +3088,7 @@ fn event_loop<
 ) -> Result<()>
 where
     Collect: FnMut(&WorktreePath, usize) -> Result<Snapshot>,
-    FetchLog: FnMut(&WorktreePath, usize) -> FetchedLog,
+    FetchLog: FnMut(&WorktreePath, LogStart, usize) -> FetchedLog,
     RenderFn: FnMut(&Snapshot, Dimensions, FrameTiming) -> Render,
     RenderList: FnMut(&Snapshot, Dimensions, FrameTiming, &WorktreeList) -> Render,
     Dims: Fn() -> Dimensions,
@@ -3297,11 +3322,21 @@ where
         // log alone, because the rest of the snapshot does not depend on the
         // size of the pane.
         //
-        // A complete log ([`Snapshot::log_complete`]) is the exception. It
-        // holds every commit that HEAD reaches, so no read can give the pane
-        // more commits, and the resize reads nothing. Without this check, a
-        // branch with fewer commits than the pane has rows reads its log again
-        // on each resize, for no new row.
+        // The read starts from the commit that the walk of the cached log
+        // started from ([`Snapshot::log_start`]), and never from the live
+        // HEAD. A checkout in another pane can move HEAD before the walk that
+        // its change causes, and the cooldown can defer that walk for some
+        // seconds. A read from HEAD then puts the commits of another branch
+        // under the header of the walk. The history of the start never
+        // changes, so the read from it extends the log of the walk. A walk
+        // that recorded no start has no history to extend, and the resize
+        // reads nothing.
+        //
+        // A complete log ([`Snapshot::log_complete`]) is the other exception.
+        // It holds every commit that its start reaches, so no read can give
+        // the pane more commits, and the resize reads nothing. Without this
+        // check, a branch with fewer commits than the pane has rows reads its
+        // log again on each resize, for no new row.
         //
         // The schedule does not record this read, because it is not a walk.
         // `WalkSchedule::record` clears a walk that a cooldown deferred, and it
@@ -3314,9 +3349,11 @@ where
         if saw_resize {
             let limit = state.log_limit();
             let cached = &state.cache.snapshot;
-            if cached.log.len() < limit && !cached.log_complete {
-                let fetched = (hooks.fetch_log)(&state.current, limit);
-                state.cache.take_fetched_log(fetched, now);
+            if let Some(start) = cached.log_start {
+                if cached.log.len() < limit && !cached.log_complete {
+                    let fetched = (hooks.fetch_log)(&state.current, start, limit);
+                    state.cache.take_fetched_log(fetched, now);
+                }
             }
         }
 
@@ -5374,7 +5411,7 @@ mod tests {
     /// such a pane is zero, and no cached log holds fewer commits than zero,
     /// so the loop never calls it. It gives no commit, and a fetch with no
     /// commit never replaces the cached log.
-    pub(super) fn no_fetch(_current: &WorktreePath, _limit: usize) -> FetchedLog {
+    pub(super) fn no_fetch(_current: &WorktreePath, _start: LogStart, _limit: usize) -> FetchedLog {
         FetchedLog {
             start: None,
             entries: Vec::new(),
@@ -6116,9 +6153,9 @@ mod tests {
     }
 
     /// A read from `start`, whose history is `history`, with the limit
-    /// `limit`, as [`crate::fetch_log`] gives it: the newest `limit` commits,
-    /// and complete when the limit reaches the end of the history. A limit of
-    /// zero reads no commit, so it finds no end.
+    /// `limit`, as [`crate::fetch_log_from`] gives it: the newest `limit`
+    /// commits, and complete when the limit reaches the end of the history. A
+    /// limit of zero reads no commit, so it finds no end.
     fn read_of(start: LogStart, history: &[LogEntry], limit: usize) -> FetchedLog {
         FetchedLog {
             start: Some(start),
@@ -6294,11 +6331,12 @@ mod tests {
     ///
     /// The clock reads `now` at each read. `repo` is the repository of the
     /// worktree at `now`. The `collect` hook walks it ([`FakeRepo::walk`]),
-    /// and the `fetch_log` hook reads its log. Each gives the newest commits
-    /// of a history up to the limit it gets, complete when the limit reaches
-    /// the end of the history ([`read_of`]), as the real walk does. The codes
-    /// of the colors are forced on and then removed, so the glyphs are the
-    /// same whether the test writes to a terminal or not.
+    /// and the `fetch_log` hook reads its log from the start that the loop
+    /// passes ([`FakeRepo::read`]). Each gives the newest commits of a history
+    /// up to the limit it gets, complete when the limit reaches the end of the
+    /// history ([`read_of`]), as the real walk does. The codes of the colors
+    /// are forced on and then removed, so the glyphs are the same whether the
+    /// test writes to a terminal or not.
     fn run_wakes(cache: SnapshotCache, wakes: &[Wake], now: Instant, repo: &FakeRepo) -> ResizeRun {
         let (tx, rx) = mpsc::channel();
         let send_burst = |wake: &Wake| {
@@ -6334,11 +6372,9 @@ mod tests {
                         collects += 1;
                         Ok(repo.walk(limit))
                     },
-                    // The hook gets no start, so it reads the history that
-                    // HEAD names.
-                    fetch_log: |_current: &WorktreePath, limit: usize| {
+                    fetch_log: |_current: &WorktreePath, start: LogStart, limit: usize| {
                         fetches += 1;
-                        repo.read(repo.head, limit)
+                        repo.read(start, limit)
                     },
                     render: |snap: &Snapshot, dims: Dimensions, timing: FrameTiming| {
                         let render = render_frame(snap, &cfg, dims, timing);
@@ -6534,7 +6570,7 @@ mod tests {
         // Issue #521: a history of 10 commits cannot fill a pane of more than
         // 12 rows. The walk of a pane of 20 rows asked for 18 commits, and it
         // found the end of the history after 10. So the cache holds every
-        // commit that HEAD reaches, and its log is complete.
+        // commit that the start of the walk reaches, and its log is complete.
         //
         // A read of the log cannot give a taller pane more commits. So the
         // resize to 60 rows, the resize to 40 rows, and the resize to 12 rows
@@ -6581,7 +6617,7 @@ mod tests {
         // a history of 30. So the log of the cache is not complete, and the
         // resize to 60 rows reads the log. That read finds the end of the
         // history after 30 commits, so the cache then holds every commit that
-        // HEAD reaches. The resize to 100 rows reads nothing.
+        // the start of the walk reaches. The resize to 100 rows reads nothing.
         let now = Instant::now();
         let history = fake_history(30, Duration::from_secs(100));
         let cache = SnapshotCache {
@@ -6617,10 +6653,10 @@ mod tests {
     fn the_cache_keeps_its_flag_when_it_refuses_a_shorter_read_of_the_log() {
         // The walk of a pane of 20 rows stopped at its limit of 18 commits.
         // Then a read of the log gives 5 commits and the end of the history,
-        // as after a reset of the branch that no walk has read yet. The cache
-        // refuses the read, because it holds fewer commits. The flag of the
-        // read describes those 5 commits and not the 18 of the cache, so the
-        // cache refuses the flag too. The next resize then reads the log
+        // as when the read cannot read the other commits that it passes. The
+        // cache refuses the read, because it holds fewer commits. The flag of
+        // the read describes those 5 commits and not the 18 of the cache, so
+        // the cache refuses the flag too. The next resize then reads the log
         // again.
         let now = Instant::now();
         let history = fake_history(5, Duration::from_secs(100));

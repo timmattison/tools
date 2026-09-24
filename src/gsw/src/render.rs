@@ -40,9 +40,10 @@ pub struct Snapshot {
     /// can stop before the history does, and [`Snapshot::log_complete`] tells
     /// the two cases apart.
     pub log: Vec<LogEntry>,
-    /// `log` is complete: it holds every commit that HEAD reaches, because the
-    /// walk of the history reached its end at or before the fetch limit. A
-    /// read of the log with a higher limit then finds no more commits.
+    /// `log` is complete: it holds every commit that [`Snapshot::log_start`]
+    /// reaches, because the walk of the history reached its end at or before
+    /// the fetch limit. A read of the log from that start with a higher limit
+    /// then finds no more commits.
     ///
     /// Watch mode reads it on a resize. A pane that grows past a complete log
     /// needs no read of the log, because no read can give it more commits.

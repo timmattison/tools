@@ -579,7 +579,8 @@ pub(crate) fn build_output(
 /// that it renders for. The snapshot has no terminal size of its own, so the
 /// caller, which has one, sets the limit. The walk also records whether it
 /// reached the end of the history at or before that limit
-/// ([`Snapshot::log_complete`]).
+/// ([`Snapshot::log_complete`]), and the commit that its log started from
+/// ([`Snapshot::log_start`]), at every limit.
 pub(crate) fn collect_snapshot(
     repo: &gix::Repository,
     cfg: &RenderConfig,
@@ -609,7 +610,7 @@ pub(crate) fn collect_snapshot(
         &ages,
     );
 
-    let fetched = fetch_log(repo, log_limit);
+    let fetched = fetch_head_log(repo, log_limit);
     snapshot.log = fetched.entries;
     snapshot.log_complete = fetched.complete;
     snapshot.log_start = fetched.start;
@@ -801,26 +802,32 @@ pub(crate) fn render_list_frame(
     }
 }
 
-/// One read of the log: the newest commits of HEAD, up to the limit of the
-/// read, and whether the history ended at or before that limit.
+/// One read of the log: the commit that the read started from, the newest
+/// commits of its history up to the limit of the read, and whether the history
+/// ended at or before that limit.
 ///
-/// [`fetch_log`] gives it, and [`collect_snapshot`] puts both halves on the
-/// [`Snapshot`]. Watch mode also takes it alone on a resize.
+/// [`fetch_head_log`] reads from the commit that HEAD names, and
+/// [`collect_snapshot`] puts all three on the [`Snapshot`]. Watch mode reads
+/// from the start that the snapshot recorded, through [`fetch_log_from`], on a
+/// resize.
 #[derive(Debug, Clone)]
 pub(crate) struct FetchedLog {
     /// The commit that the read started from ([`Snapshot::log_start`]).
+    /// `None` when HEAD named no commit.
     pub(crate) start: Option<repo::LogStart>,
     /// The commits, newest first.
     pub(crate) entries: Vec<LogEntry>,
-    /// `entries` is complete: the walk of the history reached its end at or
-    /// before the limit, so a read with a higher limit finds no more commits.
-    /// See [`Snapshot::log_complete`].
+    /// `entries` is complete: the walk of the history of `start` reached its
+    /// end at or before the limit, so a read from `start` with a higher limit
+    /// finds no more commits. See [`Snapshot::log_complete`].
     pub(crate) complete: bool,
 }
 
-/// Fetch the `n` most recent commits as [`LogEntry`] records via gix.
+/// Fetch the `n` most recent commits from HEAD as [`LogEntry`] records via
+/// gix, with the commit that HEAD names.
 ///
-/// Returns an empty list when `n == 0` or the repo has no commits.
+/// Returns an empty list when `n == 0` or the repo has no commits. The start
+/// is known at `n == 0` too, as [`repo::recent_log`] resolves it.
 ///
 /// [`FetchedLog::complete`] tells whether the walk reached the end of the
 /// history, as [`repo::recent_log`] finds it. A history of exactly `n` commits
@@ -834,16 +841,23 @@ pub(crate) struct FetchedLog {
 /// the freshest thing on screen, which is the one reading ruled out.
 ///
 /// Each age is measured at the instant of this call. [`collect_snapshot`]
-/// calls it for each walk. Watch mode also calls it alone, when a resize needs
-/// more commits than its cached snapshot holds, because the rest of the
-/// snapshot does not depend on the size of the pane.
-pub(crate) fn fetch_log(repo: &gix::Repository, n: usize) -> FetchedLog {
+/// calls it for each walk, and nothing else reads the log from HEAD.
+fn fetch_head_log(repo: &gix::Repository, n: usize) -> FetchedLog {
     let now = SystemTime::now();
     fetched_at(repo::recent_log(repo, n), now)
 }
 
 /// Fetch the `n` most recent commits of the history of `start` as
-/// [`LogEntry`] records, as [`fetch_log`] fetches them from HEAD.
+/// [`LogEntry`] records, as [`fetch_head_log`] fetches them from HEAD.
+///
+/// Watch mode calls it alone, when a resize needs more commits than its cached
+/// snapshot holds, because the rest of the snapshot does not depend on the
+/// size of the pane. `start` is the start that the walk of that snapshot
+/// recorded ([`Snapshot::log_start`]), and never the live HEAD. The history of
+/// a commit never changes, so the read gives the commits of the walk first,
+/// and more commits of the same history after them
+/// ([`repo::recent_log_from`]). Each age is measured at the instant of this
+/// call.
 pub(crate) fn fetch_log_from(
     repo: &gix::Repository,
     start: repo::LogStart,
