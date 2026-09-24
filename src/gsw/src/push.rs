@@ -730,7 +730,12 @@ pub(crate) fn current_branch(workdir: &Path) -> Option<String> {
 /// skipped the push.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PushOutcome {
-    /// Whether the command exited zero.
+    /// Whether the command worked.
+    ///
+    /// For a push, whether git exited zero. For a rebase or a merge of the
+    /// base, whether the command exited zero and left no operation that git
+    /// holds: a command can stop a rebase and still exit zero. See
+    /// [`crate::update`].
     pub success: bool,
     /// Everything the command wrote, both streams, in the order they were
     /// captured.

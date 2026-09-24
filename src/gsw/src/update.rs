@@ -501,7 +501,9 @@ const TERMINAL_PROMPT_VAR: &str = "GIT_TERMINAL_PROMPT";
 ///
 /// The outcome is a [`PushOutcome`], which is what lets the row report a rebase
 /// the way it reports a push: both are a command that either worked or wrote a
-/// reason.
+/// reason. A run worked when the command exited 0 and left no operation that
+/// git holds. A run that left one is a failure whatever its exit status, and
+/// its last line is the sentence of gsw about that operation.
 ///
 /// **The run reads the work tree before the shell starts and after it exits.**
 /// The read before refuses a work tree where an operation or a checkout
@@ -651,12 +653,18 @@ fn run_in(
     // failure, so the last line is the one that the cut to three rows keeps.
     // The lines of the command stay above it, and the line of git that names
     // the file that conflicted is one of them.
-    if let Some(operation) = crate::repo::held_operation(workdir) {
-        let _ = abort_child(workdir, &operation).output();
-        record.push(&stopped_sentence(&operation));
+    let held = crate::repo::held_operation(workdir);
+    if let Some(operation) = &held {
+        let _ = abort_child(workdir, operation).output();
+        record.push(&stopped_sentence(operation));
     }
 
-    let success = status.success();
+    // **The repository decides the outcome, and not the exit status alone.**
+    // A shell function returns the status of its last command, so a command
+    // can stop a rebase and then exit 0. The row would then report a rebase
+    // and a push that did not occur. A run that left an operation that git
+    // holds is a failure, whatever its exit status.
+    let success = status.success() && held.is_none();
     let mut text = record.into_text();
     if !success && text.trim().is_empty() {
         // A failure with nothing to show would paint a blank row, and a blank
