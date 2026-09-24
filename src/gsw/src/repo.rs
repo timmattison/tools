@@ -438,19 +438,38 @@ pub fn held_operation(workdir: &std::path::Path) -> Option<Operation> {
     operation_state(&repo, conflicts)
 }
 
-/// Both rebase step-counter pairs, in the order [`gix::Repository::state`]
-/// resolves the directories they live in: `rebase-apply/` before
-/// `rebase-merge/`. See [`rebase_step`], which reads them, for why the order
-/// is load-bearing.
+/// A directory where git keeps a rebase, and the two files in it that count the
+/// steps of that rebase.
+struct RebaseDir {
+    /// The name of the directory, in the git dir of the worktree.
+    name: &'static str,
+    /// The file that holds the number of the step that git is on.
+    current: &'static str,
+    /// The file that holds the number of steps.
+    total: &'static str,
+}
+
+/// Both directories where git keeps a rebase, in the order
+/// [`gix::Repository::state`] resolves them: `rebase-apply/` before
+/// `rebase-merge/`. See [`rebase_step`], which reads the step counters, for why
+/// the order is load-bearing.
 ///
-/// This is the single source of truth for both that order and the file names
-/// themselves. The design spec
+/// This is the single source of truth for that order, for the names of the
+/// directories, and for the names of the counter files. The design spec
 /// (`specs/2026-07-01-gsw-rebase-merge-indicators-design.md`) restates them in
 /// prose. That restatement is not checked automatically, so update it by hand
 /// whenever this table changes.
-const REBASE_COUNTERS: [(&str, &str); 2] = [
-    ("rebase-apply/next", "rebase-apply/last"),
-    ("rebase-merge/msgnum", "rebase-merge/end"),
+const REBASE_DIRS: [RebaseDir; 2] = [
+    RebaseDir {
+        name: "rebase-apply",
+        current: "next",
+        total: "last",
+    },
+    RebaseDir {
+        name: "rebase-merge",
+        current: "msgnum",
+        total: "end",
+    },
 ];
 
 /// How far through a rebase git is, or `None` when the counters cannot be read.
@@ -475,18 +494,18 @@ const REBASE_COUNTERS: [(&str, &str); 2] = [
 /// failing the whole indicator: the operation is still worth surfacing without
 /// its `current/total` clause.
 fn rebase_step(git_dir: &std::path::Path) -> Option<StepProgress> {
-    let read = |name: &str| -> Option<u32> {
-        std::fs::read_to_string(git_dir.join(name))
+    let read = |dir: &RebaseDir, name: &str| -> Option<u32> {
+        std::fs::read_to_string(git_dir.join(dir.name).join(name))
             .ok()?
             .trim()
             .parse()
             .ok()
     };
 
-    REBASE_COUNTERS.iter().find_map(|&(current, total)| {
+    REBASE_DIRS.iter().find_map(|dir| {
         Some(StepProgress {
-            current: read(current)?,
-            total: read(total)?,
+            current: read(dir, dir.current)?,
+            total: read(dir, dir.total)?,
         })
     })
 }
