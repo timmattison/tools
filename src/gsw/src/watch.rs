@@ -6534,6 +6534,46 @@ mod tests {
     }
 
     #[test]
+    fn the_cache_keeps_its_flag_when_it_refuses_a_shorter_read_of_the_log() {
+        // The walk of a pane of 20 rows stopped at its limit of 18 commits.
+        // Then a read of the log gives 5 commits and the end of the history,
+        // as after a reset of the branch that no walk has read yet. The cache
+        // refuses the read, because it holds fewer commits. The flag of the
+        // read describes those 5 commits and not the 18 of the cache, so the
+        // cache refuses the flag too. The next resize then reads the log
+        // again.
+        let now = Instant::now();
+        let history = fake_history(5, Duration::from_secs(100));
+        let cache = SnapshotCache {
+            snapshot: Snapshot {
+                log: newest(&fake_history(100, Duration::from_secs(100)), 18),
+                log_complete: false,
+                ..empty_snapshot()
+            },
+            collected_at: now,
+            dims: pane(20),
+        };
+
+        let run = run_wakes(
+            cache,
+            &[Wake::resize(60), Wake::resize(100)],
+            now,
+            &history,
+        );
+
+        assert_eq!(
+            run.fetches, 2,
+            "a log that the cache refused leaves the cache incomplete, so each resize reads",
+        );
+        assert_eq!(
+            run.commit_rows(),
+            18,
+            "the frame keeps the log of the walk:\n{}",
+            run.glyphs,
+        );
+    }
+
+    #[test]
     fn a_walk_fetches_the_commits_of_the_pane_that_the_loop_measured() {
         // The loop measures the pane before each walk, and passes the walk
         // the most commits that the pane can show. The loop is then the one
