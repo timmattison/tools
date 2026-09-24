@@ -372,6 +372,10 @@ const ORIGIN: &str = "origin";
 /// `applying` nor the `rebasing` marker, which cannot be told apart from an
 /// apply-backend rebase, so it is treated as one. Cherry-pick, revert, bisect,
 /// and plain `git am` are intentionally out of scope and yield `None`.
+///
+/// **The one detector.** The snapshot asks it for the `⚠` row and for the
+/// question of `R` and `M`. [`held_operation`] asks it for the run of those
+/// keys, which refuses and aborts by what this function gives.
 pub fn operation_state(repo: &gix::Repository, conflicts: u32) -> Option<Operation> {
     use gix::state::InProgress;
 

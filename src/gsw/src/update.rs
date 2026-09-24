@@ -8,8 +8,14 @@
 //! command exists, and the run that reads what the command writes.
 //!
 //! What is here is what belongs to these two keys alone: the variable that
-//! names each command, the name each key falls back on, the line the shell
-//! runs, and the record of what the run said.
+//! names each command, the name each key falls back on, the question and its
+//! refusals, the line the shell runs, the reads of the work tree before and
+//! after the run, and the record of what the run said.
+//!
+//! **One act here is gsw's own: the abort.** The run has no terminal, so
+//! nobody can resolve a conflict inside it. After the command exits, gsw
+//! aborts a rebase or a merge that the run started and left stopped, and no
+//! other operation. See `run` for the rule.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -427,8 +433,10 @@ pub(crate) fn base_update_prompt_for(
     let base = snapshot.base.as_str();
     let refuse = |message: String| PushPrompt::Refuse { message };
 
-    // git is holding an operation that the user must finish or abort, and gsw
-    // does neither. The `⚠ rebase` row of the header is showing it already.
+    // git is holding an operation that the user must finish or abort. gsw
+    // did not start it, so gsw does neither: the run aborts only an operation
+    // that the run started. The `⚠ rebase` row of the header is showing it
+    // already.
     //
     // **At the top, above the detached HEAD.** A rebase that stops on a
     // conflict detaches HEAD, and the advice to check out a branch is wrong in
@@ -725,9 +733,10 @@ fn run_in(
     // stays as it is, and the last line says so. The outcome is a failure, and
     // the `⚠` row of the next frame shows the operation.
     //
-    // The abort goes to `workdir`, which is the work tree of the run. The
-    // arrow keys can move the watch to a different worktree while the run is
-    // in flight, and that worktree holds no operation of this run.
+    // The abort goes to `workdir`, which is the work tree of the run. The run
+    // got that path by value when the user pressed `y`, and it never reads the
+    // worktree on the screen. The key table keeps the arrow keys inert while
+    // the run is in flight, but the abort does not depend on that rule.
     //
     // **The sentence of gsw goes last.** The row shows the last lines of a
     // failure, so the last line is the one that the cut to three rows keeps.

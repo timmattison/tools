@@ -2756,12 +2756,14 @@ where
                 state.ui.post_error(message.to_string());
             }
         }
-        // **A walk on every outcome, and not on success alone.** A rebase that
-        // failed still changed the repository: it rewrites the commits one at a
-        // time and stops where one of them conflicts, and the `⚠ rebase` row of
-        // the header is what tells the user that git is holding it. Only a walk
-        // puts that row there. A rebase that worked moved every commit and
-        // pushed them, so every count in the header is stale as well.
+        // **A walk on every outcome, and not on success alone.** A command
+        // that failed can have changed the branch before it failed. A walk
+        // during the run can have drawn the `⚠` row of an operation that the
+        // run left stopped, and gsw aborts that operation when the run ends, so
+        // only a walk takes that row away again. An operation that gsw did not
+        // abort stays, and a walk shows its row. A rebase that worked moved
+        // every commit and pushed them, so every count in the header is stale
+        // as well.
         Event::BaseUpdateFinished(outcome) => {
             state.ui.finished(outcome, clock());
             pending.force = true;

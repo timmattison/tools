@@ -742,7 +742,9 @@ pub(crate) struct PushOutcome {
     ///
     /// A rebase or a merge of the base whose command left an operation
     /// stopped also gets a sentence of gsw as the last line, which says what
-    /// gsw did with that operation. See [`crate::update`].
+    /// gsw did with that operation. An abort that git refused puts the lines
+    /// of git between the lines of the command and that sentence. See
+    /// [`crate::update`].
     pub output: String,
 }
 
