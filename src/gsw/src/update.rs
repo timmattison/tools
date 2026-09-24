@@ -1582,7 +1582,7 @@ mod run_tests {
         a_child_of_this_test_passes, a_child_of_this_test_passes_with, entries_of, kill_now,
         shed_git_lines, test_name, test_process_can_open_the_terminal, user_intent_lost,
         user_intent_value, StubShell, CHILD_RAN, GAVE_UP_WITHIN, HOSTILE_GIT_ENVIRONMENT,
-        HOSTILE_MARKER, TTY_REFUSED,
+        HOSTILE_MARKER, TTY_OPENED, TTY_REFUSED,
     };
     use crate::testrepo::{
         git, git_allowing_failure, git_output, git_stdout, init_repo, init_repo_with_worktree,
@@ -1861,6 +1861,9 @@ mod run_tests {
         /// The environment of the call, one `NAME=value` line for each
         /// variable.
         environment: String,
+        /// [`TTY_OPENED`] where the call could open the controlling terminal,
+        /// and [`TTY_REFUSED`] where it could not.
+        terminal: String,
     }
 
     /// Run `test` in a child of this test binary whose `PATH` finds a
@@ -1869,9 +1872,10 @@ mod run_tests {
     /// **The recording git is how a test reads the environment of a git child
     /// of gsw itself.** gsw starts git by name, so the first `git` on the
     /// `PATH` is the process that gsw starts. That program writes down its
-    /// arguments, its directory and its environment. Then it puts back the
-    /// `PATH` of this process and gives the call to the real git, so the run
-    /// does all of its real work.
+    /// arguments, its directory and its environment, and it tries to open the
+    /// controlling terminal, as [`StubShell::probing_the_terminal`] does. Then
+    /// it puts back the `PATH` of this process and gives the call to the real
+    /// git, so the run does all of its real work.
     ///
     /// A read of the removals off the [`Command`] proves less. It reads the
     /// command that a function builds, and not the process that the run
@@ -1903,6 +1907,11 @@ mod run_tests {
                  printf '%s\\n' \"$@\" > \"$call/arguments\"\n\
                  pwd -P > \"$call/cwd\"\n\
                  env > \"$call/environment\"\n\
+                 if ( exec 3<>/dev/tty ) 2>/dev/null; then\n\
+                 \tprintf '{TTY_OPENED}' > \"$call/terminal\"\n\
+                 else\n\
+                 \tprintf '{TTY_REFUSED}' > \"$call/terminal\"\n\
+                 fi\n\
                  PATH={own_path}\n\
                  export PATH\n\
                  exec git \"$@\"\n",
@@ -1950,6 +1959,7 @@ mod run_tests {
                     .collect(),
                 cwd: PathBuf::from(read(&call, "cwd").trim_end_matches('\n')),
                 environment: read(&call, "environment"),
+                terminal: read(&call, "terminal"),
             })
             .collect()
     }
@@ -3118,6 +3128,84 @@ mod run_tests {
             lost.is_empty(),
             "the abort child lost a git variable that the user states on purpose, so git aborts \
              with a configuration that the user did not choose: {lost:?}",
+        );
+
+        println!("{CHILD_RAN}");
+    }
+
+    #[test]
+    fn the_abort_child_cannot_open_the_controlling_terminal() {
+        // gsw holds the terminal in raw mode while the abort runs, as it does
+        // while the command of the user runs. git asks nothing on the terminal
+        // for an abort today. But git starts hooks and helpers, and each of
+        // them gets the terminal of the abort child. A program that opens
+        // `/dev/tty` paints over the frame of gsw and reads the keys that the
+        // event thread of gsw waits for. So the abort child gets no terminal,
+        // as no child of gsw gets one.
+        //
+        // **The recording git is the probe.** git itself cannot be a probe.
+        // The recording git is the process that gsw starts, so it tries
+        // `/dev/tty` before it gives the call to the real git.
+        //
+        // **The armed control comes first, and it has two parts.** The test
+        // process must hold a terminal, or `/dev/tty` is unopenable for every
+        // process and the refusal below holds for no reason. The git calls of
+        // the fixture must open it, because the fixture does not detach them.
+        // That shows that the probe sees a terminal where there is one.
+        //
+        // The hostile environment is on this child too, because the helper
+        // that puts the recording git on a child also puts it there. It
+        // changes nothing here: the test above shows that the abort works
+        // under it.
+        if std::env::var_os(HOSTILE_MARKER).is_none() {
+            if !test_process_can_open_the_terminal() {
+                eprintln!(
+                    "skipped: this test process has no controlling terminal, so /dev/tty is \
+                     unopenable for every child regardless - the assertion would hold vacuously",
+                );
+                return;
+            }
+            a_child_with_a_recording_git_passes(&test_name(
+                module_path!(),
+                "the_abort_child_cannot_open_the_controlling_terminal",
+            ));
+            return;
+        }
+
+        assert!(
+            test_process_can_open_the_terminal(),
+            "the child must hold the terminal of this test, or the refusal below holds for every \
+             process",
+        );
+        let workdir = init_repo();
+        conflicting_branches(workdir.path());
+        let fixture: Vec<String> = recorded_git_calls()
+            .into_iter()
+            .map(|call| call.terminal)
+            .collect();
+        assert!(
+            !fixture.is_empty() && fixture.iter().all(|terminal| terminal == TTY_OPENED),
+            "the fixture does not detach its git, so each of its calls must open the terminal. \
+             Otherwise the probe sees no terminal anywhere: {fixture:?}",
+        );
+        let stub = StubShell::new(&real_git(&format!("rebase {BASE}")));
+
+        let outcome = run_quiet(stub.as_shell(), &default_command(), workdir.path());
+
+        assert!(
+            !rebase_in_progress(workdir.path()),
+            "the run must abort the rebase, or there is no abort child to ask: {:?}",
+            outcome.output,
+        );
+        let aborts: Vec<String> = recorded_rebase_aborts()
+            .into_iter()
+            .map(|call| call.terminal)
+            .collect();
+        assert_eq!(
+            aborts,
+            [TTY_REFUSED],
+            "the abort child keeps the controlling terminal, so a hook or a helper that git \
+             starts can paint over the frame of gsw and take the keys gsw is reading",
         );
 
         println!("{CHILD_RAN}");
