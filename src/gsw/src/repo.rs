@@ -1802,6 +1802,82 @@ mod tests {
         let repo = open_at(p).unwrap();
         assert_eq!(super::operation_state(&repo, 1), None);
     }
+
+    /// A rebase that git holds, as [`super::operation_start`] takes it. The
+    /// reader reads the kind of the operation, and not its step or its count.
+    const HELD_REBASE: Operation = Operation::Rebase {
+        step: None,
+        conflicts: 1,
+    };
+
+    /// The full id of the commit that `rev` names in the repository at `dir`,
+    /// as git reports it.
+    fn commit_id(dir: &Path, rev: &str) -> gix::ObjectId {
+        let hex = crate::testrepo::git_stdout(dir, &["rev-parse", rev]);
+        gix::ObjectId::from_hex(hex.as_bytes()).expect("git gives a full id")
+    }
+
+    #[test]
+    fn operation_start_reads_the_rebase_directory_that_gix_classified_from() {
+        // The start of a rebase must come from the directory that the
+        // classification came from, for the reason that `rebase_step` gives.
+        // git never leaves both directories at once, so only a decoy built by
+        // hand can catch a read in the opposite order. The `rebase-merge/`
+        // decoy names a different branch and a different commit.
+        //
+        // This guard is not red-first: the order came with the reader. A
+        // mutation proved it: `REBASE_DIRS.iter().rev()` in the reader fails
+        // this test with the branch and the commit of the decoy.
+        let dir = diverged_repo();
+        let p = dir.path();
+        let before = commit_id(p, "HEAD");
+        git_allowing_failure(p, &["rebase", "--apply", "main"]);
+        assert!(
+            p.join(".git/rebase-apply/rebasing").exists(),
+            "the apply backend must have left its `rebasing` marker, which is what makes gix \
+             classify from `rebase-apply/`",
+        );
+        let decoy = p.join(".git/rebase-merge");
+        std::fs::create_dir_all(&decoy).expect("create the rebase-merge decoy");
+        std::fs::write(decoy.join("head-name"), "refs/heads/decoy\n").expect("write head-name");
+        std::fs::write(
+            decoy.join("orig-head"),
+            format!("{}\n", commit_id(p, "main")),
+        )
+        .expect("write orig-head");
+
+        assert_eq!(
+            super::operation_start(p, &HELD_REBASE),
+            super::OperationStart {
+                branch: Some("feature".to_string()),
+                commit: Some(before),
+            },
+        );
+    }
+
+    #[test]
+    fn operation_start_knows_nothing_that_it_cannot_read() {
+        // A missing file and a file that does not parse name nothing. The run
+        // of `R` and `M` compares each value with a value that it knows, and
+        // `None` matches nothing, so gsw then aborts nothing. A reader that
+        // fell back on HEAD for a commit that it cannot read would give a
+        // start that git never recorded.
+        //
+        // This guard is not red-first: the rule came with the reader. A
+        // mutation proved it: a fall back on the HEAD of the repository for an
+        // `orig-head` that does not parse fails this test.
+        let dir = diverged_repo();
+        let p = dir.path();
+        git_allowing_failure(p, &["rebase", "main"]);
+        std::fs::remove_file(p.join(".git/rebase-merge/head-name")).expect("remove head-name");
+        std::fs::write(p.join(".git/rebase-merge/orig-head"), "not-a-commit\n")
+            .expect("write orig-head");
+
+        assert_eq!(
+            super::operation_start(p, &HELD_REBASE),
+            super::OperationStart::default(),
+        );
+    }
 }
 
 #[cfg(test)]

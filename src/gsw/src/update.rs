@@ -1360,6 +1360,73 @@ mod sentence_tests {
     }
 }
 
+#[cfg(test)]
+mod started_tests {
+    use super::*;
+
+    /// The branch of every question here.
+    const BRANCH: &str = "issue-12";
+
+    /// A commit id. The rule compares ids and reads no repository, so any
+    /// full id serves.
+    fn head() -> gix::ObjectId {
+        gix::ObjectId::from_hex(b"1111111111111111111111111111111111111111").expect("a full id")
+    }
+
+    #[test]
+    fn two_values_that_gsw_could_not_read_do_not_agree() {
+        // `None == None` is true in Rust. A comparison of the two options
+        // would thus abort an operation whose start commit gsw cannot read,
+        // after a run whose HEAD gsw could not read either. gsw can show
+        // nothing in that case, so it must abort nothing.
+        //
+        // **The armed control comes first.** A start on the branch and the
+        // HEAD of the question matches, so the assertions below are not
+        // measured against a rule that never matches.
+        //
+        // This guard is not red-first: the rule came with the comparison. A
+        // mutation proved it: `start.commit.as_ref() == head_before` fails
+        // this test.
+        let head = head();
+        let read = OperationStart {
+            branch: Some(BRANCH.to_string()),
+            commit: Some(head),
+        };
+        assert!(
+            started_by_the_run(&read, BRANCH, Some(&head)),
+            "a start on the branch and the HEAD of the question must match",
+        );
+
+        let unread = OperationStart {
+            branch: Some(BRANCH.to_string()),
+            commit: None,
+        };
+        assert!(
+            !started_by_the_run(&unread, BRANCH, None),
+            "two commits that gsw could not read must not match",
+        );
+        assert!(
+            !started_by_the_run(&unread, BRANCH, Some(&head)),
+            "a start commit that gsw could not read must not match",
+        );
+        assert!(
+            !started_by_the_run(&read, BRANCH, None),
+            "a HEAD that gsw could not read before the run must not match",
+        );
+        assert!(
+            !started_by_the_run(
+                &OperationStart {
+                    branch: None,
+                    commit: Some(head),
+                },
+                BRANCH,
+                Some(&head),
+            ),
+            "a branch that gsw could not read must not match",
+        );
+    }
+}
+
 #[cfg(all(test, unix))]
 mod abort_tests {
     use super::*;
