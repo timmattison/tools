@@ -1718,11 +1718,8 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             worktree_paths: || listed_paths(&watched),
             // Each switch gives the new watcher a sender of its own on the one
             // channel of the loop. The first walk of the new worktree fetches
-            // as many commits as the pane can show now, as `collect` does.
-            switch: |target: &WorktreePath, _limit: usize| {
-                let log_limit = cfg
-                    .log
-                    .fetch_limit(current_dimensions(cfg.width_offset).height);
+            // as many commits as the loop passes, as `collect` does.
+            switch: |target: &WorktreePath, log_limit: usize| {
                 switch_watched(&watched, target, switch_tx.clone(), cfg, &home, log_limit)
             },
         },
@@ -2270,7 +2267,9 @@ struct LoopStart {
     home: WorktreePath,
     /// How many recent commits the log asks for, as the command line states
     /// it. The loop applies it to the pane that it measured last
-    /// ([`LoopState::log_limit`]).
+    /// ([`LoopState::log_limit`]), and passes the limit to each walk, each
+    /// switch, and each read of the log on a resize. So the loop is the one
+    /// place that decides how many commits a read of the log gets.
     log: LogDemand,
 }
 
@@ -2336,7 +2335,10 @@ impl LoopState {
     /// the switch of a key, and the return to the home worktree.
     ///
     /// 1. Open `target` through `open`, and read the clock for the cost of the
-    ///    open, counted from `since`.
+    ///    open, counted from `since`. The first walk of `target` fetches as
+    ///    many commits as the pane of the cache can show
+    ///    ([`LoopState::log_limit`]). That is the pane that the user saw at
+    ///    the press, because no render runs between two keys of one burst.
     /// 2. On `Ok`, the snapshot of `target` goes into the cache, collected at
     ///    `since`, and the schedule records the open as a walk that started
     ///    at `since`, which starts the refresh clock again. The loop then
@@ -2354,7 +2356,7 @@ impl LoopState {
         clock: &impl Fn() -> Instant,
         open: &mut impl FnMut(&WorktreePath, usize) -> Result<Snapshot, String>,
     ) -> Result<(), String> {
-        let opened = open(&target, 0);
+        let opened = open(&target, self.log_limit());
         let cost = clock().saturating_duration_since(since);
         let snapshot = opened?;
         self.cache.snapshot = snapshot;
@@ -2542,7 +2544,8 @@ struct LoopHooks<
     /// learn whether the worktree on the screen still exists.
     worktree_paths: Paths,
     /// Open the worktree at the path, start its watcher, and walk it, as one
-    /// step.
+    /// step. The walk fetches no more commits for the log than the limit that
+    /// the loop passes, as the walk of `collect` does.
     ///
     /// It commits only on `Ok`, and the snapshot it gives is the first frame
     /// of that worktree. `Err` carries the reason for a fading line, and then
@@ -2925,6 +2928,11 @@ where
 /// worktree. The arrow keys change it through [`LoopState::switch_to`], inside
 /// [`absorb`], so the next key of the same burst already acts on the new
 /// worktree.
+///
+/// The loop decides how many commits each read of the log gets: the walk of
+/// `collect`, the first walk of a switch, and the read of the log alone on a
+/// resize. It applies the log demand of `start` to the pane that it measured
+/// last ([`LoopState::log_limit`]).
 ///
 /// `hooks` bundles the side effects (collect, read of the log, render,
 /// terminal-size query, paint, clock, tick cadence) so the loop is one function
@@ -6034,7 +6042,8 @@ mod tests {
                 subject: format!("{HISTORY_SUBJECT} {n}"),
                 age: Some(
                     newest_age
-                        + Duration::from_secs(60) * u32::try_from(n).expect("a test history is short"),
+                        + Duration::from_secs(60)
+                            * u32::try_from(n).expect("a test history is short"),
                 ),
             })
             .collect()
@@ -6147,8 +6156,8 @@ mod tests {
                     clock: || now,
                     next_tick: timer_off,
                     start_push: |_command: PushCommand, _current: &WorktreePath| {},
-                    start_base_update: |_command: crate::update::BaseUpdateCommand,
-                                        _current: &WorktreePath| {},
+                    start_base_update:
+                        |_command: crate::update::BaseUpdateCommand, _current: &WorktreePath| {},
                     start_issue: |_command: crate::shell::ShellCommand,
                                   _current: &WorktreePath,
                                   _generation: Generation| {},
@@ -6200,12 +6209,7 @@ mod tests {
             "the log fills the grown pane under the header and the separator:\n{}",
             run.glyphs,
         );
-        assert_eq!(
-            run.rows(),
-            60,
-            "the frame fills the pane:\n{}",
-            run.glyphs
-        );
+        assert_eq!(run.rows(), 60, "the frame fills the pane:\n{}", run.glyphs);
         assert_eq!(run.collects, 0, "a resize walks nothing");
         assert_eq!(run.fetches, 1, "the resize reads the log once");
     }
@@ -6303,7 +6307,12 @@ mod tests {
 
         let run = run_resize(cache, 60, now, &at_read);
 
-        assert_eq!(run.commit_rows(), 58, "the log fills the pane:\n{}", run.glyphs);
+        assert_eq!(
+            run.commit_rows(),
+            58,
+            "the log fills the pane:\n{}",
+            run.glyphs
+        );
         for commit in newest(&at_read, 58) {
             let row = run
                 .glyphs
@@ -6311,7 +6320,9 @@ mod tests {
                 .find(|line| line.starts_with(&commit.hash))
                 .unwrap_or_else(|| panic!("no row for {}:\n{}", commit.hash, run.glyphs));
             let true_age = crate::age::format_age_detailed(
-                commit.age.expect("each commit of the fake history has an age"),
+                commit
+                    .age
+                    .expect("each commit of the fake history has an age"),
             );
             assert_eq!(
                 row.split_whitespace().last(),
@@ -6355,9 +6366,7 @@ mod tests {
                     Ok(empty_snapshot())
                 },
                 fetch_log: no_fetch,
-                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
-                    frame("walked")
-                },
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| frame("walked"),
                 dimensions: || pane(60),
                 paint: |_output: &str| Ok(()),
                 clock: || now,
@@ -6392,8 +6401,11 @@ mod tests {
         // user saw at the press. A pane of 60 rows has room for 58 commits
         // under the header and the separator.
         let (tx, rx) = mpsc::channel();
-        tx.send(Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)))
-            .expect("queue the key");
+        tx.send(Event::Key(KeyEvent::new(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+        )))
+        .expect("queue the key");
         drop(tx);
 
         let other = WorktreePath::fake("/code/other");
@@ -10302,9 +10314,11 @@ mod push_loop_tests {
         };
         assert!(state.issue.is_armed(now), "the fixture must start armed");
 
-        state.switch_to(worktree(CHARLIE), &|| now, &mut |target: &WorktreePath, _limit: usize| {
-            Ok(snapshot_of(target))
-        });
+        state.switch_to(
+            worktree(CHARLIE),
+            &|| now,
+            &mut |target: &WorktreePath, _limit: usize| Ok(snapshot_of(target)),
+        );
 
         assert_eq!(
             state.current,
