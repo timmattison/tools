@@ -436,10 +436,25 @@ pub fn conflict_count(statuses: impl IntoIterator<Item = FileStatus>) -> u32 {
 /// is only a part of the words.
 pub fn held_operation(workdir: &std::path::Path) -> Option<Operation> {
     let repo = gix::open(workdir).ok()?;
-    let conflicts = collect_changes(&repo).map_or(0, |changes| {
-        conflict_count(changes.entries.iter().map(|entry| entry.status))
-    });
-    operation_state(&repo, conflicts)
+    held_operation_in(&repo, |repo| {
+        collect_changes(repo).map_or(0, |changes| {
+            conflict_count(changes.entries.iter().map(|entry| entry.status))
+        })
+    })
+}
+
+/// [`held_operation`], with the count of conflicts given as a closure.
+///
+/// The count is a parameter so a test can see whether the count runs. The
+/// count is the expensive half of the read, and a test cannot see its cost
+/// in a time that it measures. Production passes the status walk and
+/// [`conflict_count`].
+fn held_operation_in(
+    repo: &gix::Repository,
+    count_conflicts: impl FnOnce(&gix::Repository) -> u32,
+) -> Option<Operation> {
+    let conflicts = count_conflicts(repo);
+    operation_state(repo, conflicts)
 }
 
 /// A directory where git keeps a rebase, and the two files in it that count the
@@ -926,6 +941,7 @@ fn worktree_bytes(repo: &gix::Repository, rela_path: &gix::bstr::BString) -> Vec
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::path::Path;
 
     use tempfile::TempDir;
@@ -1805,6 +1821,87 @@ mod tests {
         git_allowing_failure(p, &["cherry-pick", "feature~1"]);
         let repo = open_at(p).unwrap();
         assert_eq!(super::operation_state(&repo, 1), None);
+    }
+
+    /// A conflict count that no fixture below can produce by accident. The
+    /// walk of each fixture finds one conflict or none, so an operation that
+    /// carries this count carries the count of the closure.
+    const COUNT_OF_THE_CLOSURE: u32 = 7;
+
+    #[test]
+    fn held_operation_counts_no_conflict_when_git_holds_no_operation() {
+        // The run of `R` and `M` reads the work tree twice for each press:
+        // before the shell and after it. Both reads usually find no operation.
+        // The count costs a full status walk and a line diff of each changed
+        // blob, so a read that finds no operation must not pay for it.
+        let dir = init_repo();
+        let repo = open_at(dir.path()).unwrap();
+        let counted = Cell::new(false);
+
+        let held = super::held_operation_in(&repo, |_| {
+            counted.set(true);
+            COUNT_OF_THE_CLOSURE
+        });
+
+        assert_eq!(held, None, "a clean work tree holds no operation");
+        assert!(
+            !counted.get(),
+            "a work tree that holds no operation needs no conflict count, \
+             so the status walk must not run",
+        );
+    }
+
+    #[test]
+    fn held_operation_counts_the_conflicts_of_a_held_merge() {
+        // The merge of `main` into `feature` stops on `a.txt`. It exits
+        // non-zero, and that failure is the fixture.
+        let dir = diverged_repo();
+        git_allowing_failure(dir.path(), &["merge", "main"]);
+        let repo = open_at(dir.path()).unwrap();
+        let counts = Cell::new(0_u32);
+
+        let held = super::held_operation_in(&repo, |_| {
+            counts.set(counts.get() + 1);
+            COUNT_OF_THE_CLOSURE
+        });
+
+        assert_eq!(
+            held,
+            Some(Operation::Merge {
+                conflicts: COUNT_OF_THE_CLOSURE,
+            }),
+            "the merge must carry the count of the closure",
+        );
+        assert_eq!(counts.get(), 1, "a held merge needs one conflict count");
+    }
+
+    #[test]
+    fn held_operation_counts_the_conflicts_of_a_held_rebase_and_keeps_its_step() {
+        // The rebase stops on step 1 of 2. It exits non-zero, and that failure
+        // is the fixture. The count goes into a rebase that already carries
+        // its step, and the step must stay.
+        let dir = diverged_repo();
+        git_allowing_failure(dir.path(), &["rebase", "main"]);
+        let repo = open_at(dir.path()).unwrap();
+        let counts = Cell::new(0_u32);
+
+        let held = super::held_operation_in(&repo, |_| {
+            counts.set(counts.get() + 1);
+            COUNT_OF_THE_CLOSURE
+        });
+
+        assert_eq!(
+            held,
+            Some(Operation::Rebase {
+                step: Some(StepProgress {
+                    current: 1,
+                    total: 2,
+                }),
+                conflicts: COUNT_OF_THE_CLOSURE,
+            }),
+            "the rebase must carry its step and the count of the closure",
+        );
+        assert_eq!(counts.get(), 1, "a held rebase needs one conflict count");
     }
 
     /// A rebase that git holds, as [`super::operation_start`] takes it. The
