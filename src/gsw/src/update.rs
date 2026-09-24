@@ -1132,11 +1132,17 @@ mod run_tests {
     /// A confirmed merge of [`BASE`] into [`BRANCH`], running the default
     /// command of that act.
     fn confirmed_merge() -> BaseUpdateCommand {
+        confirmed_act(BaseUpdate::Merge)
+    }
+
+    /// A confirmed `update` of [`BRANCH`] against [`BASE`], running the
+    /// default command of that act.
+    fn confirmed_act(update: BaseUpdate) -> BaseUpdateCommand {
         BaseUpdateCommand::new(
-            BaseUpdate::Merge,
+            update,
             BRANCH,
             BASE,
-            ShellCommand::new(None, DEFAULT_MERGE_COMMAND).expect("a name"),
+            ShellCommand::new(None, update.default_command()).expect("a name"),
         )
     }
 
@@ -1803,6 +1809,53 @@ mod run_tests {
             main_before,
             "the main worktree must stay on its branch, at its commit",
         );
+    }
+
+    #[test]
+    fn a_merge_that_the_run_left_stopped_is_aborted_whichever_key_started_the_run() {
+        // The same rule for a merge. A merge that stops on a conflict keeps
+        // HEAD on the branch, so the branch and its commit do not show it. The
+        // merge itself and the conflicted file do.
+        //
+        // **The abort follows the operation that git holds, and not the key.**
+        // The command of `R` belongs to the user and can merge, and `git
+        // rebase --abort` does not end a merge. So both keys run a command that
+        // stops a merge here, and both runs must end with no merge.
+        let stub = StubShell::new(&real_git(&format!("merge {BASE}")));
+        for update in BaseUpdate::ALL {
+            let key = update.key();
+            let workdir = init_repo();
+            conflicting_branches(workdir.path());
+            let before = checkout_of(workdir.path());
+
+            let outcome = run_quiet(stub.as_shell(), &confirmed_act(update), workdir.path());
+
+            assert!(
+                !merge_in_progress(workdir.path()),
+                "the {key} run started the merge and left it stopped, so gsw must abort it: {:?}",
+                outcome.output,
+            );
+            assert_eq!(
+                crate::repo::held_operation(workdir.path()),
+                None,
+                "the reader of gsw must see no operation after the {key} run",
+            );
+            assert_eq!(
+                checkout_of(workdir.path()),
+                before,
+                "the branch must stay checked out at its commit from before the {key} run",
+            );
+            assert_eq!(
+                git_stdout(workdir.path(), &["status", "--porcelain"]),
+                "",
+                "the abort must leave the work tree of the {key} run clean",
+            );
+            assert!(
+                !outcome.success,
+                "a {key} run that stopped on a conflict must not report success: {:?}",
+                outcome.output,
+            );
+        }
     }
 
     #[test]
