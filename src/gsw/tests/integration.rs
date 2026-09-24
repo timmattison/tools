@@ -462,6 +462,99 @@ fn log_lines_flag_caps_visible_commits() {
     );
 }
 
+/// The start of the subject of each commit that [`add_history`] makes. A line
+/// that holds it is a log row, so a test counts the log rows with no parse of
+/// the frame.
+const HISTORY_PREFIX: &str = "history-commit-";
+
+/// The commits that a long history adds to the [`setup_repo`] commit. The
+/// number is larger than the rows of [`PANE_ROWS`], so the history is longer
+/// than the pane.
+const LONG_HISTORY_COMMITS: usize = 60;
+
+/// The rows of the pane that the tests of the log height state.
+const PANE_ROWS: usize = 40;
+
+/// The columns of the pane that the tests of the log height state.
+const PANE_COLUMNS: usize = 80;
+
+/// The rows above the log of a frame with no merge or rebase in progress: the
+/// header and the separator. The tests state this number apart from the code
+/// under test, as an oracle.
+const HEADER_ROWS: usize = 2;
+
+/// Add `count` empty commits to the repository at `dir`. Each subject starts
+/// with [`HISTORY_PREFIX`].
+fn add_history(dir: &Path, count: usize) {
+    for i in 0..count {
+        run_git(
+            dir,
+            &[
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                &format!("{HISTORY_PREFIX}{i:02}"),
+            ],
+        );
+    }
+}
+
+/// Run `gsw --no-color <extra…>` in `dir` in a pane of [`PANE_ROWS`] rows and
+/// [`PANE_COLUMNS`] columns, and give its stdout.
+///
+/// The output goes to a pipe, as under a watch wrapper. A wrapper states the
+/// full height of its terminal in `LINES`, and gsw takes
+/// [`termwindow::WRAPPER_CHROME_ROWS`] off that height for the chrome of the
+/// wrapper. So `LINES` holds the pane and that chrome. The test states both
+/// sizes, so the result does not change with the terminal of the person who
+/// runs the test.
+fn run_gsw_in_pane(dir: &Path, extra: &[&str]) -> String {
+    let output = gsw_command(dir)
+        .arg("--no-color")
+        .args(extra)
+        .env("COLUMNS", PANE_COLUMNS.to_string())
+        .env(
+            "LINES",
+            (PANE_ROWS + termwindow::WRAPPER_CHROME_ROWS).to_string(),
+        )
+        .output()
+        .expect("failed to invoke gsw");
+    assert!(
+        output.status.success(),
+        "gsw exited non-zero: stderr = {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+/// The log rows of `out` whose commits [`add_history`] made.
+fn history_rows(out: &str) -> usize {
+    out.lines().filter(|line| line.contains(HISTORY_PREFIX)).count()
+}
+
+#[test]
+fn a_clean_worktree_fills_the_pane_with_the_log() {
+    // Issue #521: the log showed 20 commits at most, and the rest of a tall
+    // pane stayed empty. With no changed file, the log takes every row under
+    // the header, so the frame is as tall as the pane.
+    let dir = setup_repo();
+    add_history(dir.path(), LONG_HISTORY_COMMITS);
+
+    let out = run_gsw_in_pane(dir.path(), &[]);
+
+    assert_eq!(
+        history_rows(&out),
+        PANE_ROWS - HEADER_ROWS,
+        "the log takes every row under the header:\n{out}",
+    );
+    assert_eq!(
+        out.lines().count(),
+        PANE_ROWS,
+        "the frame is as tall as the pane:\n{out}",
+    );
+}
+
 #[test]
 fn shows_upstream_ahead_and_behind_counts_when_branch_tracks_remote() {
     // End-to-end: a repo whose local branch tracks an upstream should have
