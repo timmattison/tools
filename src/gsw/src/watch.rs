@@ -2208,8 +2208,19 @@ struct SnapshotCache {
 }
 
 impl SnapshotCache {
-    /// Put `fetched`, a new read of the log of the cached worktree, in the
-    /// place of the cached log, when `fetched` holds more commits.
+    /// Put `fetched`, a read of the log of the cached worktree at
+    /// `fetched_at`, in the place of the cached log, when `fetched` holds more
+    /// commits.
+    ///
+    /// The read measured each age at `fetched_at`, but the walk measured every
+    /// other age of the snapshot at `collected_at`, and each frame adds
+    /// `now - collected_at` to every age of the snapshot. So each fetched age
+    /// moves back by `fetched_at - collected_at`, to the age that the commit
+    /// had at the walk. The whole snapshot then stays at one instant, and the
+    /// frame shows each commit at its true age. A commit made after the walk
+    /// had no age at the walk. Its age stops at zero, so the frame shows it as
+    /// old as the walk, until the walk that its change causes gives its true
+    /// age.
     ///
     /// A read of the log that fails gives no commit, and a read that cannot
     /// read a commit leaves that commit out. Neither read holds more commits
@@ -2217,10 +2228,15 @@ impl SnapshotCache {
     /// does not lose rows. A read that holds no more commits than the cache
     /// changes nothing either, and the cache keeps the log of the walk, which
     /// agrees with the rest of the snapshot.
-    fn take_fetched_log(&mut self, fetched: Vec<LogEntry>) {
-        if fetched.len() > self.snapshot.log.len() {
-            self.snapshot.log = fetched;
+    fn take_fetched_log(&mut self, mut fetched: Vec<LogEntry>, fetched_at: Instant) {
+        if fetched.len() <= self.snapshot.log.len() {
+            return;
         }
+        let since_walk = fetched_at.saturating_duration_since(self.collected_at);
+        for entry in &mut fetched {
+            entry.age = entry.age.map(|age| age.saturating_sub(since_walk));
+        }
+        self.snapshot.log = fetched;
     }
 }
 
@@ -3235,11 +3251,14 @@ where
         // moves the timed refresh on by a whole interval. A record here would
         // drop a change that no walk has read yet, and it would put the next
         // refresh off.
+        //
+        // The read counts as made at `now`, the instant of this wake, because
+        // the frame below measures the age offset from `now` too.
         if saw_resize {
             let limit = state.log_limit();
             if state.cache.snapshot.log.len() < limit {
                 let fetched = (hooks.fetch_log)(&state.current, limit);
-                state.cache.take_fetched_log(fetched);
+                state.cache.take_fetched_log(fetched, now);
             }
         }
 
