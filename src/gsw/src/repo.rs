@@ -452,7 +452,8 @@ struct RebaseDir {
 /// Both directories where git keeps a rebase, in the order
 /// [`gix::Repository::state`] resolves them: `rebase-apply/` before
 /// `rebase-merge/`. See [`rebase_step`], which reads the step counters, for why
-/// the order is load-bearing.
+/// the order is load-bearing. [`operation_start`] reads where a rebase started
+/// from the same directories, in the same order, for the same reason.
 ///
 /// This is the single source of truth for that order, for the names of the
 /// directories, and for the names of the counter files. The design spec
@@ -508,6 +509,67 @@ fn rebase_step(git_dir: &std::path::Path) -> Option<StepProgress> {
             total: read(dir, dir.total)?,
         })
     })
+}
+
+/// The file of a rebase directory where git writes the branch that the rebase
+/// started on: `refs/heads/<branch>`, or `detached HEAD`.
+const REBASE_HEAD_NAME: &str = "head-name";
+
+/// The start of the full name of every branch.
+const BRANCH_REF_PREFIX: &str = "refs/heads/";
+
+/// Where a rebase or a merge that git holds started. See [`operation_start`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationStart {
+    /// The branch that the operation started on, in the short form that
+    /// [`branch_name`] gives. `None` for an operation that started on a
+    /// detached HEAD, and for a branch that cannot be read.
+    pub branch: Option<String>,
+}
+
+/// Where `operation`, which git holds in the work tree at `workdir`, started.
+///
+/// The run of `R` and `M` compares this with the work tree of the run before
+/// its shell started, so that gsw aborts only an operation that it can show the
+/// run started.
+///
+/// **git records where a rebase started, and a stopped merge does not move
+/// HEAD.**
+///
+/// - For a rebase, git writes the branch in `head-name` of the rebase
+///   directory. The directory is the first of [`REBASE_DIRS`] that exists,
+///   which is the directory that [`gix::Repository::state`] classified the
+///   rebase from.
+/// - For a merge, HEAD stays on its branch while the merge is stopped. The
+///   branch of the merge is thus the branch that HEAD names now.
+///
+/// **A value that cannot be read is `None`, and `None` names no branch.** A
+/// missing file, a file that cannot be read, and a repository that cannot be
+/// opened thus never show that the run started the operation. A ref outside
+/// `refs/heads/` is no branch either, and `detached HEAD` is not a ref.
+///
+/// **`gix::open`, and never `gix::discover`**, for the reason that
+/// [`held_operation`] gives.
+pub fn operation_start(workdir: &std::path::Path, operation: &Operation) -> OperationStart {
+    let Ok(repo) = gix::open(workdir) else {
+        return OperationStart { branch: None };
+    };
+    let full_name = match operation {
+        Operation::Rebase { .. } => REBASE_DIRS
+            .iter()
+            .map(|dir| repo.path().join(dir.name))
+            .find(|dir| dir.is_dir())
+            .and_then(|dir| std::fs::read_to_string(dir.join(REBASE_HEAD_NAME)).ok())
+            .map(|contents| contents.trim().to_string()),
+        Operation::Merge { .. } => repo
+            .head_name()
+            .ok()
+            .flatten()
+            .map(|full| full.as_bstr().to_string()),
+    };
+    OperationStart {
+        branch: full_name.and_then(|full| full.strip_prefix(BRANCH_REF_PREFIX).map(str::to_string)),
+    }
 }
 
 /// Everything one working-tree status walk produces: the `FileEntry` rows plus

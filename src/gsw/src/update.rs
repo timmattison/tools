@@ -21,7 +21,7 @@ use crate::push::{
     confirm_hint, current_branch, Confirmed, PushOutcome, PushPrompt, SuccessReport,
 };
 use crate::render::{Operation, Snapshot};
-use crate::repo::DETACHED_HEAD;
+use crate::repo::{OperationStart, DETACHED_HEAD};
 use crate::shell::{shell_child, start_run, RunEnd, ShellCommand};
 
 /// The variable that holds the command `R` runs.
@@ -243,7 +243,8 @@ fn in_progress_refusal(operation: &Operation) -> String {
     )
 }
 
-/// What became of an operation that the command of a run left stopped.
+/// What became of an operation that git held after the command of a run
+/// exited.
 ///
 /// [`stopped_sentence`] takes this value, so the words of every case are in
 /// that one function.
@@ -254,10 +255,14 @@ enum Cleanup {
     /// gsw tried to abort the operation, and git refused. The operation is
     /// still in progress.
     AbortFailed,
+    /// gsw cannot show that the run started the operation, so gsw did not try
+    /// to abort it. The operation is still in progress. See [`run_in`] for the
+    /// conditions.
+    LeftAsItIs,
 }
 
-/// The last line of a run whose command left `operation` stopped, after gsw
-/// tried to abort it with the result `cleanup`.
+/// The last line of a run after which git held `operation`, with the result
+/// `cleanup`.
 ///
 /// **The sentence of gsw, and not a line of the command.** The lines of the
 /// command above it describe an operation that is still in progress. After an
@@ -267,26 +272,32 @@ enum Cleanup {
 /// with the `⚠` row of the next frame. It names the act, the count of
 /// conflicts, and what gsw did.
 ///
+/// **An operation that gsw did not start gets words of its own, with no
+/// count.** gsw did not try to abort it, and gsw cannot show that the command
+/// stopped it. So the words say only what gsw knows: git holds the operation,
+/// gsw did not start it, and gsw left it as it is.
+///
 /// The verb is the operation that git held, for the reason
 /// [`in_progress_refusal`] gives. The count is the count of the read before
 /// the abort, which is the count of the `⚠` row, in the words of that row —
 /// see [`crate::render::conflict_words`]. With no conflict, the sentence drops
 /// the count, as the `⚠` row does.
 fn stopped_sentence(operation: &Operation, cleanup: Cleanup) -> String {
+    let verb = BaseUpdate::held(operation).verb();
+    let what_gsw_did = match cleanup {
+        Cleanup::Aborted => "gsw aborted it",
+        Cleanup::AbortFailed => "gsw could not abort it, and it is still in progress",
+        Cleanup::LeftAsItIs => {
+            return format!("a {verb} is in progress that gsw did not start — left as it is");
+        }
+    };
     let conflicts = match operation {
         Operation::Rebase { conflicts, .. } | Operation::Merge { conflicts } => *conflicts,
     };
     let on = crate::render::conflict_words(conflicts)
         .map(|words| format!(" on {words}"))
         .unwrap_or_default();
-    let what_gsw_did = match cleanup {
-        Cleanup::Aborted => "gsw aborted it",
-        Cleanup::AbortFailed => "gsw could not abort it, and it is still in progress",
-    };
-    format!(
-        "{} stopped{on} — {what_gsw_did}",
-        BaseUpdate::held(operation).verb(),
-    )
+    format!("{verb} stopped{on} — {what_gsw_did}")
 }
 
 /// A confirmed rebase or merge: the act, the branch the question named, the
@@ -298,7 +309,8 @@ fn stopped_sentence(operation: &Operation, cleanup: Cleanup) -> String {
 /// necessarily what HEAD pointed at when the question went on the screen. The
 /// answer arrives whenever the user presses `y`, and a checkout in another pane
 /// fits in between. Carrying the branch beside the command is what lets [`run`]
-/// refuse a repository that moved on.
+/// refuse a repository that moved on. It is also what lets [`run`] abort only
+/// an operation on the branch that the question named.
 ///
 /// Built only by the question of this module, so a command nobody confirmed
 /// cannot be assembled somewhere else and handed to the runner.
@@ -527,11 +539,13 @@ const TERMINAL_PROMPT_VAR: &str = "GIT_TERMINAL_PROMPT";
 /// **The run reads the work tree before the shell starts and after it exits.**
 /// The read before refuses a work tree where an operation or a checkout
 /// started after the question, and then no shell starts. The read after aborts
-/// a rebase or a merge that the command left stopped, because the run has no
-/// terminal and nobody can resolve a conflict inside it. An abort that git
-/// refuses leaves the operation in progress, and the outcome gives the reason
-/// of git above the sentence that says so. Both reads go to `workdir`, which
-/// is the work tree of the run.
+/// a rebase or a merge that the run started and left stopped, because the run
+/// has no terminal and nobody can resolve a conflict inside it. gsw aborts only
+/// an operation that it can show the run started — [`run_in`] states the
+/// conditions. Any other operation stays as it is, and the last line says so.
+/// An abort that git refuses leaves the operation in progress, and the outcome
+/// gives the reason of git above the sentence that says so. Both reads go to
+/// `workdir`, which is the work tree of the run.
 ///
 /// **There is no deadline.** `grp` pushes, and a pre-push hook of this
 /// workspace builds and tests every crate in it, which takes minutes. The run
@@ -659,12 +673,31 @@ fn run_in(
 
     // **The work tree is read again after the shell exits.** The run has no
     // terminal, so nobody can resolve a conflict inside it. A rebase or a
-    // merge that the command left stopped is thus an operation that nobody can
-    // finish from here, and gsw aborts it. The read before the shell found no
-    // operation, so this operation started after that read.
+    // merge that the run started and left stopped is thus an operation that
+    // nobody can finish from here, and gsw aborts it.
     //
     // Only after an exit. A wait that failed says nothing about the child, and
     // a command that still runs can still finish its own operation.
+    //
+    // **gsw aborts only an operation that it can show the run started.** An
+    // abort discards work, and that work can belong to the user. So gsw
+    // aborts the operation only when each of these conditions is true:
+    //
+    // 1. No operation was in progress when gsw read the work tree just before
+    //    the shell started. The read at the top of this function refuses the
+    //    run otherwise, so this condition is true here. An operation that was
+    //    in progress before the run is the work of the user.
+    // 2. The operation is on the branch of the question. Condition 1 leaves a
+    //    gap between that read and the start of the shell, and in that gap
+    //    another pane can check out a different branch and start an operation
+    //    there. The command of the user can also check out a different
+    //    branch. gsw cannot tell those two cases apart, so it cannot show that
+    //    the run started an operation on a branch that the question did not
+    //    name.
+    //
+    // An operation that fails a condition stays as it is, and the last line
+    // says so. The outcome is a failure, and the `⚠` row of the next frame
+    // shows the operation.
     //
     // The abort goes to `workdir`, which is the work tree of the run. The
     // arrow keys can move the watch to a different worktree while the run is
@@ -682,14 +715,19 @@ fn run_in(
     // that the operation is still in progress.
     let held = crate::repo::held_operation(workdir);
     if let Some(operation) = &held {
-        let cleanup = match abort(workdir, operation) {
-            Ok(()) => Cleanup::Aborted,
-            Err(reason) => {
-                for line in &reason {
-                    record.push(line);
+        let start = crate::repo::operation_start(workdir, operation);
+        let cleanup = if started_by_the_run(&start, command.branch()) {
+            match abort(workdir, operation) {
+                Ok(()) => Cleanup::Aborted,
+                Err(reason) => {
+                    for line in &reason {
+                        record.push(line);
+                    }
+                    Cleanup::AbortFailed
                 }
-                Cleanup::AbortFailed
             }
+        } else {
+            Cleanup::LeftAsItIs
         };
         record.push(&stopped_sentence(operation, cleanup));
     }
@@ -714,6 +752,18 @@ fn run_in(
         success,
         output: text,
     }
+}
+
+/// Whether the run can show that it started an operation that started at
+/// `start`, for a question about `branch`.
+///
+/// Condition 2 of the rule that [`run_in`] states before its abort: the
+/// operation is on the branch of the question. A branch that cannot be read,
+/// and a detached HEAD, are `None` in `start`, and `None` never matches. gsw
+/// then cannot show that the run started the operation, so it does not abort
+/// it.
+fn started_by_the_run(start: &OperationStart, branch: &str) -> bool {
+    start.branch.as_deref() == Some(branch)
 }
 
 /// The child that aborts `operation`, which git holds in the work tree at
