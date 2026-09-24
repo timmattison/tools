@@ -364,8 +364,11 @@ const ORIGIN: &str = "origin";
 /// on git's own `wt-status.c` / `git-prompt.sh` logic: it inspects `MERGE_HEAD`,
 /// `rebase-merge/`, and `rebase-apply/` under the git dir, so it is
 /// worktree-aware and takes no locks — consistent with gsw's read-only,
-/// gix-only philosophy. `conflicts` is the unmerged-path count the caller
-/// already has from the status walk, so this does no extra git work.
+/// gix-only philosophy. `conflicts` is the unmerged-path count that the
+/// operation carries, and this function does no git work to find it. The
+/// snapshot passes the count of the status walk that it already did.
+/// [`held_operation`] passes 0, and walks for the count only when this
+/// function finds an operation.
 ///
 /// Every rebase flavor collapses to `Operation::Rebase`: `ApplyMailboxRebase`
 /// is gix's name for a bare `rebase-apply/` directory carrying neither the
@@ -421,6 +424,13 @@ pub fn conflict_count(statuses: impl IntoIterator<Item = FileStatus>) -> u32 {
 /// [`conflict_count`], which is the one rule for that count. So this reader and
 /// the snapshot cannot disagree about one work tree.
 ///
+/// **The operation first, and the count only for an operation.** The count
+/// costs a full status walk and a line diff of each changed blob. The run reads
+/// the work tree before its shell and after it, and each read usually finds no
+/// operation. So this reader asks [`operation_state`] first, and walks for the
+/// count only when git holds an operation. A read that finds nothing thus
+/// costs only the check of the git dir, and the shell starts one walk sooner.
+///
 /// **`gix::open`, and never `gix::discover`.** `open` reads `workdir/.git`,
 /// also the `.git` file of a linked worktree, and so it reads the git dir of
 /// that worktree, where git keeps the state of its operation. It never walks up
@@ -449,12 +459,19 @@ pub fn held_operation(workdir: &std::path::Path) -> Option<Operation> {
 /// count is the expensive half of the read, and a test cannot see its cost
 /// in a time that it measures. Production passes the status walk and
 /// [`conflict_count`].
+///
+/// It asks [`operation_state`] first, with no count, and gives `None` when git
+/// holds nothing. Only then does it run `count_conflicts`, one time. It puts
+/// that count into the operation that it already has, so it reads the state of
+/// git one time.
 fn held_operation_in(
     repo: &gix::Repository,
     count_conflicts: impl FnOnce(&gix::Repository) -> u32,
 ) -> Option<Operation> {
-    let conflicts = count_conflicts(repo);
-    operation_state(repo, conflicts)
+    let mut operation = operation_state(repo, 0)?;
+    let (Operation::Merge { conflicts } | Operation::Rebase { conflicts, .. }) = &mut operation;
+    *conflicts = count_conflicts(repo);
+    Some(operation)
 }
 
 /// A directory where git keeps a rebase, and the two files in it that count the
