@@ -785,8 +785,11 @@ mod question_tests {
     #[test]
     fn a_detached_head_leaves_no_branch_to_act_on() {
         // git refuses `HEAD` as the name of a branch, so there is nothing for
-        // `grp` to rebase and nothing for `gmp` to merge into. A rebase that
-        // stopped on a conflict leaves HEAD exactly here.
+        // `grp` to rebase and nothing for `gmp` to merge into. A checkout of a
+        // commit or a bisect leaves HEAD here with no operation in progress. A
+        // rebase that stopped on a conflict also detaches HEAD, but the refusal
+        // that names the rebase wins there — see
+        // `the_first_refusal_that_applies_wins`.
         let detached = Snapshot {
             branch: DETACHED_HEAD.to_string(),
             ..behind(5)
@@ -905,11 +908,34 @@ mod question_tests {
     }
 
     #[test]
+    fn a_stopped_rebase_is_named_as_the_rebase_and_not_as_a_detached_head() {
+        // A rebase that stops on a conflict detaches HEAD. The advice to check
+        // out a branch is wrong in the middle of a rebase: a checkout there
+        // leaves the rebase behind and does not finish it. The user must
+        // continue or abort the rebase, so both keys send the user to it.
+        let stopped = Snapshot {
+            branch: DETACHED_HEAD.to_string(),
+            operation: Some(Operation::Rebase {
+                step: None,
+                conflicts: 1,
+            }),
+            ..behind(5)
+        };
+        for update in BaseUpdate::ALL {
+            assert_eq!(
+                refusal(&stopped, update),
+                "a rebase is in progress — finish it first",
+            );
+        }
+    }
+
+    #[test]
     fn the_first_refusal_that_applies_wins() {
         // A rebase that stopped on a conflict detaches HEAD and leaves an
         // operation in progress, so two rows of the table describe it. The
         // higher row wins, because it names the thing the user has to deal with
-        // first: there is no branch here to act on whatever git is holding.
+        // first: the operation that git holds. The detached HEAD is a result of
+        // that operation, and it goes away when the operation ends.
         let stopped = Snapshot {
             branch: DETACHED_HEAD.to_string(),
             operation: Some(Operation::Rebase {
@@ -920,7 +946,7 @@ mod question_tests {
         };
         assert_eq!(
             refusal(&stopped, BaseUpdate::Rebase),
-            "HEAD is detached — check out a branch to rebase",
+            "a rebase is in progress — finish it first",
         );
     }
 }
