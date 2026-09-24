@@ -1166,6 +1166,22 @@ mod run_tests {
             .success()
     }
 
+    /// Whether git holds a rebase in the work tree at `dir`.
+    ///
+    /// git is the oracle, as for [`merge_in_progress`]. git keeps a rebase in
+    /// `rebase-merge/` or in `rebase-apply/` of the git dir of the worktree,
+    /// and `--git-path` names the directory in that git dir, so a linked
+    /// worktree answers about its own rebase.
+    fn rebase_in_progress(dir: &Path) -> bool {
+        ["rebase-merge", "rebase-apply"].into_iter().any(|name| {
+            PathBuf::from(git_stdout(
+                dir,
+                &["rev-parse", "--path-format=absolute", "--git-path", name],
+            ))
+            .is_dir()
+        })
+    }
+
     #[test]
     fn the_run_hands_the_whole_script_to_an_interactive_shell() {
         // The command is a shell function, so only a shell that read the rc
@@ -1576,6 +1592,42 @@ mod run_tests {
         assert!(
             merge_in_progress(workdir.path()),
             "gsw did not start the merge, so the merge must still be in progress",
+        );
+    }
+
+    #[test]
+    fn a_rebase_that_started_after_the_confirmation_is_named_and_not_blamed_on_a_checkout() {
+        // The same window, for a rebase. A `git rebase` in another pane stops
+        // on a conflict between the question and the `y`, and a stopped rebase
+        // detaches HEAD. The branch then reads as `HEAD`, and the words of the
+        // branch check would blame a checkout that never happened. The user
+        // must finish or abort the rebase, so the words name the rebase.
+        //
+        // gsw did not start that rebase, so the rebase stays as it is.
+        let stub = StubShell::answering(0);
+        let workdir = init_repo();
+        conflicting_branches(workdir.path());
+        git_allowing_failure(workdir.path(), &["rebase", BASE]);
+        assert!(
+            rebase_in_progress(workdir.path()),
+            "the fixture must hold a real stopped rebase, or the run has nothing to refuse",
+        );
+
+        let outcome = run_quiet(stub.as_shell(), &default_command(), workdir.path());
+
+        assert!(
+            !outcome.success,
+            "a run over a rebase in progress must not report success: {:?}",
+            outcome.output,
+        );
+        assert_eq!(
+            outcome.output, "a rebase is in progress — finish it first",
+            "the run must name the rebase, and not a change of branch",
+        );
+        assert_eq!(stub.runs(), "", "a refused run must start no shell at all");
+        assert!(
+            rebase_in_progress(workdir.path()),
+            "gsw did not start the rebase, so the rebase must still be in progress",
         );
     }
 
