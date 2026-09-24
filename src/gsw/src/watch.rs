@@ -2210,6 +2210,12 @@ impl SnapshotCache {
     /// `fetched_at`, in the place of the cached log, when `fetched` holds more
     /// commits.
     ///
+    /// The entries and the flag of the read go into the cache together
+    /// ([`Snapshot::log_complete`]). So a read that reaches the end of the
+    /// history is the last read that a resize makes, until a walk gives a new
+    /// log. The flag of a read that the cache does not take stays out too,
+    /// because it describes a log that the cache does not hold.
+    ///
     /// The read measured each age at `fetched_at`, but the walk measured every
     /// other age of the snapshot at `collected_at`, and each frame adds
     /// `now - collected_at` to every age of the snapshot. So each fetched age
@@ -2227,7 +2233,10 @@ impl SnapshotCache {
     /// changes nothing either, and the cache keeps the log of the walk, which
     /// agrees with the rest of the snapshot.
     fn take_fetched_log(&mut self, fetched: FetchedLog, fetched_at: Instant) {
-        let mut entries = fetched.entries;
+        let FetchedLog {
+            mut entries,
+            complete,
+        } = fetched;
         if entries.len() <= self.snapshot.log.len() {
             return;
         }
@@ -2236,6 +2245,7 @@ impl SnapshotCache {
             entry.age = entry.age.map(|age| age.saturating_sub(since_walk));
         }
         self.snapshot.log = entries;
+        self.snapshot.log_complete = complete;
     }
 }
 
