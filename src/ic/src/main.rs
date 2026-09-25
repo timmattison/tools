@@ -443,7 +443,7 @@ where
     ///
     /// These are the outcomes:
     ///
-    /// * A path that this run already handled gives no output.
+    /// * A path that is in the record gives no output.
     /// * Monitor mode ignores a path that is not a regular file, such as a
     ///   directory. It gives no output.
     /// * Monitor mode ignores a path that is gone. It gives no output. This
@@ -454,14 +454,30 @@ where
     /// * Monitor mode ignores an empty file that is not an image and not a
     ///   video. It gives no output. The watcher often reports a new file
     ///   before the program writes the text, and a later event shows the text.
+    /// * Monitor mode ignores a video. It gives no output.
     /// * An image goes to the image display.
     /// * A path that is not an image and not a video is read as text. The text
     ///   comes after a header line.
+    /// * A display that fails gives one line on `err`. The line names the path
+    ///   and the whole chain of the error, down to its cause.
     ///
-    /// A path goes into the record when its display succeeds, and a text file
-    /// goes into the record when its read fails, so its error prints one time.
-    /// A path that monitor mode ignores, or an image whose display fails, stays
-    /// out of the record, so a later event for the path tries it again.
+    /// The record decides what a later event for the same path gives:
+    ///
+    /// * A path that monitor mode shows goes into the record. A program that
+    ///   writes a file gives many events, and the user sees the file one time.
+    /// * A text file whose read fails goes into the record. A read that fails
+    ///   for a cause such as a missing permission fails again at each later
+    ///   event, so the error prints one time.
+    /// * A path that monitor mode ignores stays out of the record. A later
+    ///   event can find something to show, such as the text that a program
+    ///   writes into a file that was empty.
+    /// * An image whose display fails stays out of the record. The watcher
+    ///   reports an image before the program completes the write, and an image
+    ///   that is not complete does not decode. A later event tries the image
+    ///   again, so each failure prints its error.
+    ///
+    /// [`Monitor::forget_all`] empties the record. A path gives its output
+    /// again at the first event after that call.
     ///
     /// # Arguments
     /// * `path` - The path that the watcher reported.
@@ -501,68 +517,72 @@ where
             Ok(_) | Err(_) => {}
         }
 
-        if is_image_file(path) {
-            // The display prints the two header rows itself, so the auto-fit
-            // path can count them. The first row is empty, which separates
-            // this image from the one before it.
-            let header = [
-                String::new(),
-                format!("Found new image: {}", path.display()),
-            ];
-            match (self.show_image)(path, &header) {
-                Ok(()) => {
-                    self.seen.insert(path.to_path_buf());
-                }
-                Err(error) => {
-                    // The alternate format shows the whole chain of the
-                    // error. The plain format shows only the outermost
-                    // context, which names the path and no cause.
-                    writeln!(
-                        err,
-                        "Failed to display image {}: {:#}",
-                        path.display(),
-                        error
-                    )?;
-                }
-            }
+        let outcome = if is_image_file(path) {
+            self.show_new_image(path)
         } else if is_text_file(path) {
-            // The header comes after the read, when the bytes are known to be
-            // text. A file can go away between the check above and the read,
-            // and an empty file or a binary file holds no text, so none of
-            // them gives a header.
-            //
-            // An empty file and a binary file stay out of the record on
-            // purpose. A program writes a text file after it makes it, so the
-            // file can be empty at its first event. A text file that a program
-            // is in the middle of writing can also end in half of a character
-            // of more than one byte, so that file is not UTF-8 now. A later
-            // event for either file shows it when it is complete.
-            match read_new_text_file(path) {
-                Ok(Some(contents)) => {
-                    writeln!(out, "\nFound new text file: {}", path.display())?;
-                    out.write_all(contents.as_bytes())?;
-                    out.flush()?;
-                    self.seen.insert(path.to_path_buf());
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    // A read that fails for a cause such as a missing
-                    // permission fails again at each later event, and a
-                    // program that writes a file gives many events. So the
-                    // path goes into the record, and its error prints one
-                    // time.
-                    writeln!(
-                        err,
-                        "Failed to display text file {}: {}",
-                        path.display(),
-                        error
-                    )?;
+            show_new_text_file(path, out)?
+        } else {
+            // A video goes to no display in monitor mode.
+            DisplayOutcome::Ignored
+        };
+
+        // Each display gives its outcome, and this match alone records the
+        // path and reports a failure. The rule of the record and the format
+        // of a failure thus stand in one place.
+        match outcome {
+            DisplayOutcome::Shown => {
+                self.seen.insert(path.to_path_buf());
+            }
+            DisplayOutcome::Ignored => {}
+            DisplayOutcome::Failed {
+                what,
+                error,
+                next_event,
+            } => {
+                // The alternate format shows the whole chain of the error. The
+                // plain format shows only the outermost context, which can
+                // name the path and no cause.
+                writeln!(
+                    err,
+                    "Failed to display {what} {}: {error:#}",
+                    path.display()
+                )?;
+                if next_event == NextEvent::GivesNoOutput {
                     self.seen.insert(path.to_path_buf());
                 }
             }
         }
 
         Ok(())
+    }
+
+    /// Give one image that monitor mode found to the image display.
+    ///
+    /// # Arguments
+    /// * `path` - The path of the image.
+    ///
+    /// # Returns
+    /// [`DisplayOutcome::Shown`] when the display succeeds.
+    /// [`DisplayOutcome::Failed`] when it fails, and a later event tries the
+    /// image again. The watcher reports an image before the program completes
+    /// the write, and an image that is not complete does not decode. A later
+    /// event decodes the complete image.
+    fn show_new_image(&mut self, path: &Path) -> DisplayOutcome {
+        // The display prints the two header rows itself, so the auto-fit path
+        // can count them. The first row is empty, which separates this image
+        // from the one before it.
+        let header = [
+            String::new(),
+            format!("Found new image: {}", path.display()),
+        ];
+        match (self.show_image)(path, &header) {
+            Ok(()) => DisplayOutcome::Shown,
+            Err(error) => DisplayOutcome::Failed {
+                what: "image",
+                error,
+                next_event: NextEvent::TriesAgain,
+            },
+        }
     }
 
     /// Forget every path that this run handled.
@@ -572,6 +592,82 @@ where
     /// gives its output again.
     fn forget_all(&mut self) {
         self.seen.clear();
+    }
+}
+
+/// What the display of one path gave at one event of monitor mode.
+///
+/// Each display in [`Monitor::handle`] gives one of these, and `handle` alone
+/// records the path and reports a failure.
+enum DisplayOutcome {
+    /// The path went to the display. It goes into the record.
+    Shown,
+    /// The path holds nothing to show at this event. It gives no output, and
+    /// it stays out of the record.
+    Ignored,
+    /// The display of the path failed.
+    Failed {
+        /// The kind of the path, as the failure message names it.
+        what: &'static str,
+        /// The failure. The message shows its whole chain.
+        error: anyhow::Error,
+        /// What a later event for the path gives.
+        next_event: NextEvent,
+    },
+}
+
+/// What a later event gives for a path whose display failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NextEvent {
+    /// The path stays out of the record, so a later event tries it again.
+    TriesAgain,
+    /// The path goes into the record, so a later event gives no output.
+    GivesNoOutput,
+}
+
+/// Show a text file that monitor mode found, after a header line.
+///
+/// The header comes after the read, when the bytes are known to be text. A
+/// file can go away between the check in [`Monitor::handle`] and the read, and
+/// an empty file or a binary file holds no text, so none of them gives a
+/// header. [`read_new_text_file`] decides which files hold text to show.
+///
+/// # Arguments
+/// * `path` - The path of the file.
+/// * `out` - The destination of the header and the text.
+///
+/// # Returns
+/// [`DisplayOutcome::Shown`] when the header and the text are on `out`.
+/// [`DisplayOutcome::Ignored`] when the file is gone, empty, or binary.
+/// [`DisplayOutcome::Failed`] when the read fails for a different cause, and a
+/// later event gives no output.
+///
+/// # Errors
+/// An error when a write to `out` fails.
+fn show_new_text_file(path: &Path, out: &mut impl Write) -> io::Result<DisplayOutcome> {
+    match read_new_text_file(path) {
+        Ok(Some(contents)) => {
+            writeln!(out, "\nFound new text file: {}", path.display())?;
+            out.write_all(contents.as_bytes())?;
+            out.flush()?;
+            Ok(DisplayOutcome::Shown)
+        }
+        // An empty file and a binary file stay out of the record on purpose.
+        // A program writes a text file after it makes it, so the file can be
+        // empty at its first event. A text file that a program is in the
+        // middle of writing can also end in half of a character of more than
+        // one byte, so that file is not UTF-8 now. A later event for either
+        // file shows it when it is complete.
+        Ok(None) => Ok(DisplayOutcome::Ignored),
+        // A read that fails for a cause such as a missing permission fails
+        // again at each later event, and a program that writes a file gives
+        // many events. So the path goes into the record, and its error prints
+        // one time.
+        Err(error) => Ok(DisplayOutcome::Failed {
+            what: "text file",
+            error: error.into(),
+            next_event: NextEvent::GivesNoOutput,
+        }),
     }
 }
 
