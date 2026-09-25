@@ -1634,7 +1634,8 @@ EXIT CODES:
     12 Config file error (invalid TOML, validation failed)
     13 Not running inside tmux (--tmux specified)
     14 Shell setup failed
-    15 Invalid --sparse-exclude directory"
+    15 Invalid --sparse-exclude directory
+    16 More than one remote holds the new branch"
 )]
 struct Cli {
     /// Specify branch name instead of generating a random one.
