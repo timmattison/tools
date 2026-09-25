@@ -3585,6 +3585,52 @@ mod tests {
         );
     }
 
+    /// A path that is gone at the time of its handling gives no output.
+    ///
+    /// A program often writes a temporary file and then renames or removes
+    /// it. macOS writes a screenshot under a hidden temporary name, such as
+    /// `.Screenshot 1.png`, and then renames it. The event for the temporary
+    /// name thus arrives after the file is gone. Monitor mode printed a header
+    /// and a failure for such a text path, and it sent such an image path to
+    /// the image display. A path that is gone holds nothing to show, so the
+    /// correct outcome is no output at all.
+    ///
+    /// The file `note.tmp` holds the rule to the text display, and the file
+    /// `.Screenshot 1.png` holds it to the image display. The test makes each
+    /// file and then removes it, as the program that wrote it does.
+    #[test]
+    fn a_path_that_is_gone_in_monitor_mode_gives_no_output() {
+        let directory = TemporaryDirectory::new();
+        let mut monitor = MonitorUnderTest::new();
+
+        let written: Vec<(&str, Written)> = [
+            ("note.tmp", b"a draft\n".to_vec()),
+            (
+                ".Screenshot 1.png",
+                picture_bytes_in(image::ImageFormat::Png),
+            ),
+        ]
+        .into_iter()
+        .map(|(name, bytes)| {
+            let path = directory.file_of(name, &bytes);
+            fs::remove_file(&path).expect("a removal of a file in the temporary directory");
+            (name, monitor.handle(&path))
+        })
+        .collect();
+
+        assert!(
+            written
+                .iter()
+                .all(|(_, output)| *output == Written::default()),
+            "a path that is gone must give no output, but these paths gave output: {written:#?}"
+        );
+        assert!(
+            monitor.image_headers().is_empty(),
+            "a path that is gone must not reach the image display, but it got {:?}",
+            monitor.image_headers()
+        );
+    }
+
     // =========================================================================
     // Tests for ensure_file_exists
     // =========================================================================
