@@ -189,8 +189,8 @@ struct Args {
     #[clap(long)]
     adaptive_fps: bool,
 
-    /// Monitor directories for new images and display them automatically
-    #[clap(long)]
+    /// Monitor directories for new images and text files, and show them automatically
+    #[clap(long, value_name = "DIR")]
     monitor: Vec<PathBuf>,
 
     /// Report whether this session can display an image, then exit. Exit code 0
@@ -333,7 +333,7 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
         }
     }
 
-    println!("Monitoring directories for new images:");
+    println!("Monitoring directories for new images and text files:");
     for dir in directories {
         println!("  - {}", dir.display());
     }

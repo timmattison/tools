@@ -66,6 +66,35 @@ cat image.png | ./ic --stdin
 curl -s https://example.com/image.jpg | ./ic --stdin
 ```
 
+### Show new images and text files in a directory:
+
+```bash
+ic --monitor ~/Screenshots
+```
+
+`--monitor` watches the directory and all the directories in it. When a file is new or changes, `ic` shows it:
+
+- `ic` shows a new image below the line `Found new image: <path>`.
+- `ic` prints the content of a new text file below the line `Found new text file: <path>`.
+
+`ic` shows each file one time. It forgets the files that it showed every 60 seconds, and a file that changes after that shows again.
+
+Monitor mode ignores these paths, and it gives no output for them:
+
+- A directory.
+- A binary file. A file is binary when its bytes are not valid UTF-8, or when they hold a NUL byte.
+- An empty file. A program often makes a file before it writes the text, so `ic` shows the text at a later event, when the file holds text.
+- A path that is gone at its event, for example a temporary file that a program renamed.
+- A video.
+
+A text file that `ic` cannot read, for example because you do not have permission to read it, gives one error. The error names the path and the cause.
+
+An image that does not display gives an error that names the path and the cause. `ic` tries the image again at the next event for it, because a program can write an image in more than one step, and an image that is not complete does not decode. Thus each failed event gives its error.
+
+To watch more than one directory, give `--monitor` one time for each directory. Press `Ctrl+C` to stop monitor mode.
+
+`--monitor` is an input mode of its own. Do not combine it with a file, `--stdin`, or `--will-display`.
+
 ### Ask whether an image can be displayed here:
 
 ```bash
@@ -91,6 +120,7 @@ The flag asks the same question the display path asks — the terminal, the mult
 - `--height <HEIGHT>` - Height in characters (defaults to auto-sizing)
 - `--preserve-aspect` - Preserve aspect ratio when resizing (default: true)
 - `--stdin` - Read from stdin instead of file
+- `--monitor <DIR>` - Watch a directory and show each new image and text file (see [Show new images and text files in a directory](#show-new-images-and-text-files-in-a-directory)). Give it more than one time to watch more than one directory
 - `-n, --no-newline` - Leave the cursor to the caller and write only the image (see [Where the Cursor Ends](#where-the-cursor-ends))
 - `--will-display` - Report whether this session can display an image, then exit (0 = yes, 1 = no with the reason on stderr)
 - `-h, --help` - Print help information
