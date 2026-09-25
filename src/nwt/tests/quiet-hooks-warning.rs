@@ -32,7 +32,7 @@ fn ungated_worktree_warning_survives_quiet() {
     // runs these tests concurrently with the pre-commit hook's own run.
     let branch = format!("quiet-warn-{}-{}", std::process::id(), nanos());
 
-    // nwt_command scrubs ZELLIJ/TMUX so this never touches a real multiplexer.
+    // nwt_command scrubs ZELLIJ so this never touches a real zellij session.
     let output = nwt_command(&repo)
         .args(["-b", &branch, "-q"])
         .output()

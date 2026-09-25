@@ -1,8 +1,8 @@
 //! Enforces issue #283's "safe by construction" guarantee: every integration
 //! test that spawns the real `nwt` binary must go through `support::nwt_command`,
-//! which scrubs `ZELLIJ`/`TMUX` from the child. A test that reaches for the raw
+//! which scrubs `ZELLIJ` from the child. A test that reaches for the raw
 //! `CARGO_BIN_EXE_nwt` path bypasses that scrub and — when the suite is run from
-//! inside a multiplexer — could hijack the user's tab. This guard fails if any
+//! inside zellij — could hijack the user's tab. This guard fails if any
 //! sibling test file references the raw binary path, so the bypass can't creep
 //! back in.
 //!
@@ -97,7 +97,7 @@ fn scanner_recurses_into_test_subdirectories() {
     // A raw spawn can hide in a helper module pulled in from a subdirectory of
     // `tests/` (e.g. `tests/nested/sneaky.rs`). The scanner must descend into
     // those subdirectories, not just read top-level `.rs` files, or such a spawn
-    // would bypass the ZELLIJ/TMUX scrub undetected.
+    // would bypass the ZELLIJ scrub undetected.
     let temp = tempfile::TempDir::new().expect("create temp tests dir");
     let nested = temp.path().join("nested");
     fs::create_dir(&nested).expect("create nested subdir");
@@ -125,7 +125,7 @@ fn no_integration_test_spawns_the_raw_nwt_binary() {
     assert!(
         offenders.is_empty(),
         "these integration tests spawn the raw nwt binary directly instead of \
-         going through support::nwt_command, bypassing the ZELLIJ/TMUX scrub \
+         going through support::nwt_command, bypassing the ZELLIJ scrub \
          (issue #283): {offenders:?}"
     );
 }

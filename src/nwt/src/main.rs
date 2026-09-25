@@ -69,18 +69,9 @@ const WORKTREES_DIR_KEY: &str = "nwt.worktreesDir";
 /// Shell code to be installed by --shell-setup.
 ///
 /// This function wraps the nwt binary and automatically changes to the new worktree
-/// directory after creation. When --tmux is specified, it skips the cd since the
-/// worktree opens in a new tmux window.
+/// directory after creation.
 const SHELL_CODE: &str = r#"
 function nwt() {
-    # If --tmux is specified, don't cd (worktree opens in new tmux window)
-    case " $* " in
-        *" --tmux "* | *" --tmux")
-            command nwt "$@"
-            return $?
-            ;;
-    esac
-
     # Capture the worktree path and cd to it
     local dir
     dir=$(command nwt "$@")
@@ -265,14 +256,14 @@ fn validate_config(config: &NwtConfig) -> Result<(), ConfigError> {
 ///
 /// # Boolean Flag Merging Design Decision
 ///
-/// Boolean flags (`quiet`, `tmux`) use OR logic: `cli.flag || config.flag`. This means:
-/// - If CLI specifies `--quiet` or `--tmux`, the flag is enabled (CLI wins).
+/// The boolean flag `quiet` uses OR logic: `cli.quiet || config.quiet`. This means:
+/// - If CLI specifies `--quiet`, the flag is enabled (CLI wins).
 /// - If CLI doesn't specify the flag, the config file value is used.
 /// - **Limitation**: Users cannot disable a config file's `true` value from CLI.
 ///
 /// This is an intentional design choice, not a bug:
 /// 1. **Standard CLI convention**: Most tools (git, docker, etc.) use this pattern.
-///    Adding `--no-quiet`/`--no-tmux` flags adds CLI complexity for a rare use case.
+///    Adding a `--no-quiet` flag adds CLI complexity for a rare use case.
 /// 2. **Simple mental model**: "CLI flags enable features" is easier to understand
 ///    than "CLI flags toggle features based on config state".
 /// 3. **Workaround exists**: Users who need to temporarily disable a config default
@@ -297,7 +288,7 @@ fn merge_config(cli: &Cli, config: Option<NwtConfig>) -> MergedConfig {
         // bootstrap_hooks: config default is true, CLI --no-bootstrap-hooks disables it.
         // Same merge shape as copy_env: CLI disables, otherwise use config value.
         bootstrap_hooks: !cli.no_bootstrap_hooks && config.bootstrap_hooks,
-        // Boolean flags use OR: CLI can enable but not disable config defaults.
+        // The boolean flag uses OR: CLI can enable but not disable the config default.
         // See function-level doc comment for rationale.
         quiet: cli.quiet || config.quiet,
         run: cli.run.clone().or(config.run),
@@ -384,19 +375,15 @@ fn get_exit_code(status: ExitStatus) -> i32 {
 
 /// Checks if a string contains any ASCII control characters.
 ///
-/// Control characters (0x00-0x1F and 0x7F) can cause unexpected behavior
-/// in terminal applications like tmux when used in window names.
+/// Control characters are the bytes 0x00-0x1F and 0x7F.
+/// [`SparseExcludeDir::parse`] uses this check to refuse a `--sparse-exclude`
+/// value that holds one, before the value reaches git. A sparse pattern file
+/// holds one pattern on each line, so a line break in a value makes two
+/// patterns.
 ///
-/// # Why ASCII-only, not full Unicode control characters (U+0080-U+009F)?
-///
-/// We only check ASCII control characters because:
-/// 1. The `names` crate generates only lowercase ASCII letters and hyphens,
-///    so Unicode control characters cannot appear in generated names.
-/// 2. Even if a future version allowed Unicode, the C1 control characters
-///    (U+0080-U+009F) are extremely rare in practice and tmux handles them
-///    by displaying replacement characters rather than causing terminal issues.
-/// 3. Using `char::is_control()` would add overhead for a theoretical edge case
-///    that cannot occur with the current name generator.
+/// The check reads bytes, so it finds only the ASCII control characters. A C1
+/// control character (U+0080-U+009F) is two bytes in UTF-8, and neither byte is
+/// a line break, so git reads it as part of one pattern.
 fn contains_control_chars(s: &str) -> bool {
     s.bytes().any(|b| b < 0x20 || b == 0x7F)
 }
@@ -409,16 +396,16 @@ fn is_running_in_zellij() -> bool {
     std::env::var("ZELLIJ").is_ok()
 }
 
-/// Returns true if tab/window renaming has been explicitly disabled via the
+/// Returns true if tab renaming has been explicitly disabled via the
 /// `NWT_NO_TAB_RENAME` environment variable.
 ///
-/// Renaming the current tab/window is an interactive convenience: when `nwt`
+/// Renaming the current tab is an interactive convenience: when `nwt`
 /// runs inside a terminal multiplexer it retargets the *current* tab to the new
 /// worktree's short name. That is what a human wants when they run
 /// `nwt -b issue-42`, but catastrophic when something *else* runs `nwt` while
 /// sharing the user's multiplexer session — most notably `nwt`'s own
 /// integration tests, which shell out to the real binary. If such a child
-/// inherits `ZELLIJ`/`TMUX`, the rename hijacks whatever tab the runner is
+/// inherits `ZELLIJ`, the rename hijacks whatever tab the runner is
 /// sitting in (issue #283).
 ///
 /// This env var is the belt-and-suspenders safety net: even if a test or script
@@ -446,7 +433,7 @@ fn rename_zellij_tab(name: &str) {
 ///
 /// # Exit Code Design Decision: Why --run passes through the command's exit code
 ///
-/// When `--run` is used without `--tmux`, we pass through the command's exit code
+/// When `--run` is used, we pass through the command's exit code
 /// directly. This means exit codes 1-8 from the user's command will shadow nwt's
 /// own error codes. This is intentional:
 ///
@@ -487,7 +474,8 @@ mod exit_codes {
     pub const RUN_COMMAND_FAILED: i32 = 9;
     // Note: Exit code 10 is reserved (previously TMUX_FAILED; nwt removed its
     // tmux support in #527)
-    // Note: Exit code 11 is reserved (previously INVALID_WINDOW_NAME, now a debug assertion)
+    // Note: Exit code 11 is reserved (previously INVALID_WINDOW_NAME, later a
+    // debug assertion that #527 removed)
     /// Configuration error: an invalid `~/.nwt.toml` (bad TOML, failed
     /// validation), or a `nwt.worktreesDir` git configuration key that is set to
     /// an empty value and therefore names no directory.
@@ -1069,7 +1057,6 @@ CONFIGURATION:
         copy_env = false       # disable .env file copying
         bootstrap_hooks = true # run package-manager install to set up git hooks
         quiet = false
-        tmux = true
         run = \"pnpm install\"
 
 ENV FILE COPYING:
@@ -1139,18 +1126,16 @@ HOOK BOOTSTRAP:
     bootstrap_hooks = false in ~/.nwt.toml to disable it by default. Repos without
     a 'prepare' script are unaffected — no install is run.
 
-    When a synchronous --run command (without --tmux) already invokes a package
-    manager install (e.g. --run \"pnpm install\"), nwt skips its own bootstrap
-    install so the install runs once, not twice.
+    When a --run command already invokes a package manager install (e.g.
+    --run \"pnpm install\"), nwt skips its own bootstrap install so the install
+    runs once, not twice.
 
     As a safety net, nwt verifies the effective 'core.hooksPath' directory
     actually exists, and prints a loud warning if it does not — whether bootstrap
-    was skipped, failed, or didn't apply. When you pass a synchronous --run
-    command (without --tmux), this check runs AFTER that command finishes, so a
-    --run that installs hooks (e.g. \"pnpm install\") gets the chance to create the
-    directory before the check looks — no false alarm. With --tmux the --run
-    command runs asynchronously inside the new window, so the check necessarily
-    runs before tmux is spawned. Git silently runs no hooks when that directory
+    was skipped, failed, or didn't apply. When you pass a --run command, this
+    check runs AFTER that command finishes, so a --run that installs hooks (e.g.
+    \"pnpm install\") gets the chance to create the directory before the check
+    looks — no false alarm. Git silently runs no hooks when that directory
     is missing, so this warning is the only signal that commits in the new
     worktree would otherwise be ungated. Because that signal must never be
     invisible, this warning is printed to stderr even with --quiet.
@@ -1237,8 +1222,6 @@ EXAMPLES:
     nwt -c main                      # Checkout existing 'main' branch
     nwt -c v1.0.0                    # Checkout a tag
     nwt --run \"npm install\"          # Run a command after creation
-    nwt --tmux                       # Open worktree in a new tmux window
-    nwt --tmux --run \"npm install\"   # Run command in a new tmux window
     nwt --no-copy-env                # Skip copying .env files
     nwt --no-bootstrap-hooks         # Skip running install to set up git hooks
     nwt --sparse-exclude assets      # Leave the tracked directory assets/ out
@@ -1246,8 +1229,7 @@ EXAMPLES:
 
 SHELL INTEGRATION:
     Run 'nwt --shell-setup' to install a shell function that automatically
-    changes to the new worktree directory after creation. The shell function
-    skips the cd when --tmux is used (since the worktree opens in a new window).
+    changes to the new worktree directory after creation.
 
 EXIT CODES:
     0  Success
@@ -1259,9 +1241,7 @@ EXIT CODES:
     7  Git worktree creation failed
     8  Path contains non-UTF8 characters
     9  Command specified with --run failed
-    10 Tmux command failed
     12 Config file error (invalid TOML, validation failed)
-    13 Not running inside tmux (--tmux specified)
     14 Shell setup failed
     15 Invalid --sparse-exclude directory"
 )]
@@ -1302,13 +1282,10 @@ struct Cli {
 
     /// Run a command in the worktree directory after creation.
     ///
-    /// When used alone, executes via `sh -c` on Unix or `cmd /C` on Windows.
-    /// Shell aliases are NOT available in this mode.
+    /// Executes via `sh -c` on Unix or `cmd /C` on Windows.
+    /// Shell aliases are NOT available.
     ///
-    /// When combined with --tmux, the command runs in an interactive shell
-    /// (`$SHELL -ic`), so aliases and shell functions ARE available.
-    ///
-    /// Exit codes: When --run is used without --tmux, the command's exit code is
+    /// Exit codes: When --run is used, the command's exit code is
     /// passed through directly. This means exit codes 1-8 may shadow nwt's own
     /// error codes. Use --quiet if you need to distinguish command failures from
     /// nwt errors (nwt won't print errors in quiet mode, but the command might).
@@ -1373,9 +1350,6 @@ struct Cli {
     ///
     /// Adds a shell function to your ~/.zshrc or ~/.bashrc that wraps nwt
     /// and automatically changes directory to the new worktree after creation.
-    ///
-    /// When --tmux is used, the shell function skips the cd (since the worktree
-    /// opens in a new tmux window).
     ///
     /// To activate after installation, run `source ~/.zshrc` (or `~/.bashrc`)
     /// or open a new terminal.
@@ -1481,12 +1455,12 @@ fn join_branch_args(args: &[String]) -> String {
     }
 }
 
-/// Shortens a worktree name for use as a tab/window name in terminal multiplexers.
+/// Shortens a worktree name for use as a Zellij tab name.
 ///
 /// Converts `issue-<digits>` prefixes to `#<digits>` to save space in tab bars.
 /// All other names are returned unchanged.
 ///
-/// This shortening is applied to both Zellij tab names and tmux window names.
+/// This shortening applies to Zellij tab names only.
 /// The worktree directory and branch names are never modified.
 fn shorten_tab_name(name: &str) -> String {
     if let Some(rest) = name.strip_prefix("issue-") {
@@ -2822,7 +2796,7 @@ fn main() {
             &sparse_excludes,
         ) {
             WorktreeResult::Success => {
-                // Compute shortened tab name for terminal multiplexers.
+                // Compute the shortened name for the Zellij tab.
                 // This converts "issue-123-fix-bug" to "#123-fix-bug" to save
                 // space in tab bars. The directory/branch names are unaffected.
                 let tab_name = shorten_tab_name(&dir_name);
@@ -3371,16 +3345,12 @@ fn missing_hooks_path(worktree: &Path) -> Option<String> {
 /// command can be the very thing that creates the missing directory (e.g.
 /// `pnpm install` regenerating `.husky/_`):
 ///
-/// - Synchronous `--run` (no `--tmux`): call this AFTER `run_shell_command`
+/// - Synchronous `--run`: call this AFTER `run_shell_command`
 ///   completes, on every outcome (success, failure, execution error) before any
 ///   `exit`. Checking before the run would be a false alarm when the run is
 ///   about to fix the directory; a failing run must still not swallow the
 ///   warning.
-/// - `--tmux` (with or without `--run`): call this BEFORE spawning tmux. The run
-///   command executes inside the tmux window, asynchronously from nwt's
-///   perspective, so nwt can't re-check after it — the pre-spawn check is the
-///   best available signal.
-/// - No `--run` and no `--tmux`: call this right after hook bootstrap; nothing
+/// - No `--run`: call this right after hook bootstrap; nothing
 ///   could fix the directory later.
 fn warn_if_hooks_missing(worktree: &Path) {
     if let Some(hooks_path) = missing_hooks_path(worktree) {
@@ -4810,6 +4780,10 @@ mod tests {
             assert_eq!(
                 serde_defaults.run, manual_defaults.run,
                 "run default mismatch between impl Default and serde"
+            );
+            assert_eq!(
+                serde_defaults.removed_tmux, manual_defaults.removed_tmux,
+                "removed_tmux default mismatch between impl Default and serde"
             );
         }
 

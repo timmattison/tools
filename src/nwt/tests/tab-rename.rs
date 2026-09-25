@@ -1,15 +1,15 @@
-//! Integration tests pinning `nwt`'s terminal-multiplexer tab/window renaming
-//! against issue #283: tests (and stray scripts) must never hijack the user's
-//! real tab, while interactive `nwt` must keep renaming as before.
+//! Integration tests pinning `nwt`'s zellij tab renaming against issue #283:
+//! tests (and stray scripts) must never hijack the user's real tab, while
+//! interactive `nwt` must keep renaming as before.
 //!
 //! Every test here drives the *real* `nwt` binary with a [`FakeMultiplexer`] on
-//! `PATH`, so `nwt`'s `zellij`/`tmux` calls hit a recording fake instead of the
+//! `PATH`, so `nwt`'s `zellij` calls hit a recording fake instead of the
 //! tester's live session. That makes the suite safe to run from inside a real
-//! zellij/tmux session (the exact scenario that triggers the bug) and lets each
+//! zellij session (the exact scenario that triggers the bug) and lets each
 //! test assert precisely whether a rename was attempted.
 //!
-//! Unix-only: [`FakeMultiplexer`] relies on executable POSIX `sh` shims, and
-//! zellij/tmux are Unix-only, so the hijack can only happen there.
+//! Unix-only: [`FakeMultiplexer`] relies on an executable POSIX `sh` shim, and
+//! zellij is Unix-only, so the hijack can only happen there.
 #![cfg(unix)]
 
 mod support;

@@ -7,7 +7,7 @@
 //! creates that directory (e.g. `pnpm install` regenerating `.husky/_`). If the
 //! check fires BEFORE the run, it's a false alarm: the run is about to fix it.
 //!
-//! So for a synchronous `--run` (no --tmux), the check must run AFTER the command
+//! So for a synchronous `--run`, the check must run AFTER the command
 //! completes. These tests pin both halves of that contract against the real
 //! binary:
 //!   * a run that DOES create the missing dir must produce NO warning, and
