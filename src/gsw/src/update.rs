@@ -1793,7 +1793,7 @@ mod run_tests {
             base: None,
             max_files: None,
             bar_width: 20,
-            log_lines: 0,
+            log: crate::LogDemand::Off,
             truecolor: false,
             width_offset: 0,
             refresh_interval: None,
@@ -1827,7 +1827,7 @@ mod run_tests {
     ) -> (PushOutcome, String) {
         let walked = gix::open(dir).expect("open the work tree");
         let snapshot =
-            crate::collect_snapshot(&walked, &walk_config()).expect("walk the work tree");
+            crate::collect_snapshot(&walked, &walk_config(), 0).expect("walk the work tree");
         let command = ShellCommand::new(None, update.default_command()).expect("a name");
         let now = Instant::now();
         let mut ui = crate::push::PushUi::new(false);
@@ -2512,7 +2512,8 @@ mod run_tests {
         // and this walk is the same walk. An operation on the snapshot is the
         // `⚠` row of the next frame.
         let walked = gix::open(&linked).expect("open the linked worktree");
-        let snapshot = crate::collect_snapshot(&walked, &walk_config()).expect("walk the worktree");
+        let snapshot =
+            crate::collect_snapshot(&walked, &walk_config(), 0).expect("walk the worktree");
         assert_eq!(
             snapshot.operation, None,
             "the next frame must show no ⚠ row for a rebase that gsw aborted",
