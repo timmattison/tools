@@ -1353,11 +1353,35 @@ fn resolve_sparse_excludes(
 /// The one stderr line after a run that makes a new branch that tracks
 /// `branch`, for example `Tracking origin/issue-33`.
 ///
-/// The line tells the user which start point `nwt` used. `main` prints it to
-/// stderr after the path, because the shell wrapper reads the path from
-/// stdout.
+/// The line tells the user which start point `nwt` used.
+/// [`print_tracking_notice`] prints it.
 fn tracking_notice(branch: &RemoteTrackingBranch) -> String {
     format!("Tracking {branch}")
+}
+
+/// Print the [`tracking_notice`] to stderr when `source` is a
+/// [`WorktreeSource::NewBranchTracking`] and `quiet` is false. For each other
+/// source, print nothing.
+///
+/// Git reports the upstream that it sets on its stdout, and `nwt` sends that
+/// stream to null. So this line is the one report of the start point. The line
+/// goes to stderr, because the shell wrapper reads the worktree path from
+/// stdout. `--quiet` suppresses it.
+///
+/// `main` calls this function in each place where a run keeps the new branch:
+///
+/// - After the path of a run that works.
+/// - After the error line of a sparse run whose `post-checkout` hook fails
+///   ([`WorktreeResult::PostCheckoutHookFailed`]), or whose `git hook run`
+///   cannot start ([`WorktreeResult::PostCheckoutHookNotStarted`]). The
+///   worktree, the branch, and its upstream stay, and the user must hear
+///   which start point they have.
+fn print_tracking_notice(source: WorktreeSource<'_>, quiet: bool) {
+    if let WorktreeSource::NewBranchTracking(branch) = source {
+        if !quiet {
+            eprintln!("{}", tracking_notice(branch));
+        }
+    }
 }
 
 /// The one stderr line that tells the user which directories the new worktree
@@ -3332,15 +3356,7 @@ fn main() {
 
                 println!("{}", worktree_path.display());
 
-                // Git reports the upstream it set on stdout, and that stream
-                // goes to null. So this line is the one report of the start
-                // point. The shell wrapper reads the path from stdout, so the
-                // line goes to stderr. `--quiet` suppresses it.
-                if let WorktreeSource::NewBranchTracking(branch) = source {
-                    if !config.quiet {
-                        eprintln!("{}", tracking_notice(branch));
-                    }
-                }
+                print_tracking_notice(source, config.quiet);
 
                 // The shell wrapper reads the path from stdout, so the notice
                 // goes to stderr.
@@ -3591,18 +3607,23 @@ fn main() {
                 // A plain add keeps the worktree when its hook fails, and so
                 // does this path. No path goes to stdout, so the shell wrapper
                 // stays put, and this line tells the user where the worktree is.
+                // The branch and its upstream stay too, so the tracking notice
+                // follows the error line.
                 error!(
                     config.quiet,
                     "Error: the post-checkout hook failed ({}). The new worktree stays at '{}'.",
                     status,
                     worktree_path.display()
                 );
+                print_tracking_notice(source, config.quiet);
                 exit(exit_codes::WORKTREE_FAILED);
             }
             WorktreeResult::PostCheckoutHookNotStarted(e) => {
                 // A git command that cannot start exits GIT_COMMAND_ERROR. The
                 // worktree holds its sparse files and stays, so this line names
-                // the step and tells the user where the worktree is.
+                // the step and tells the user where the worktree is. The branch
+                // and its upstream stay too, so the tracking notice follows the
+                // error line.
                 error!(
                     config.quiet,
                     "Error: git could not start the post-checkout hook step ({}). The new \
@@ -3610,6 +3631,7 @@ fn main() {
                     e,
                     worktree_path.display()
                 );
+                print_tracking_notice(source, config.quiet);
                 exit(exit_codes::GIT_COMMAND_ERROR);
             }
         }
