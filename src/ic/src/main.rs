@@ -458,9 +458,10 @@ where
     /// * A path that is not an image and not a video is read as text. The text
     ///   comes after a header line.
     ///
-    /// A path goes into the record only when its display succeeds. A path that
-    /// monitor mode ignores, or whose display fails, stays out of the record,
-    /// so a later event for the path tries it again.
+    /// A path goes into the record when its display succeeds, and a text file
+    /// goes into the record when its read fails, so its error prints one time.
+    /// A path that monitor mode ignores, or an image whose display fails, stays
+    /// out of the record, so a later event for the path tries it again.
     ///
     /// # Arguments
     /// * `path` - The path that the watcher reported.
@@ -537,12 +538,18 @@ where
                 }
                 Ok(None) => {}
                 Err(error) => {
+                    // A read that fails for a cause such as a missing
+                    // permission fails again at each later event, and a
+                    // program that writes a file gives many events. So the
+                    // path goes into the record, and its error prints one
+                    // time.
                     writeln!(
                         err,
                         "Failed to display text file {}: {}",
                         path.display(),
                         error
                     )?;
+                    self.seen.insert(path.to_path_buf());
                 }
             }
         }
