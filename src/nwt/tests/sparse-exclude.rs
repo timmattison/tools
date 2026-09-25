@@ -1348,6 +1348,42 @@ fn run_nwt_with_fake_git(repo: &Path, fake: &FakeGit, arguments: &[&str]) -> Out
         .expect("run the nwt binary")
 }
 
+/// A `git rev-parse` that fails while the lookup checks the remote branch of
+/// `-c <branch>` is a ref that git cannot read, and not a branch that no
+/// remote holds. So the run exits 7, names the ref as the user typed it, and
+/// makes nothing.
+///
+/// The lookup maps `refs/heads/foo` through the fetch refspec of `origin`, and
+/// checks the mapped `refs/remotes/origin/foo` with
+/// `git rev-parse --verify --quiet --end-of-options`. The fake git refuses
+/// each call that holds `--end-of-options`, and no other git child of `nwt`
+/// passes that argument.
+#[cfg(unix)]
+#[test]
+fn a_failed_check_of_the_mapped_remote_branch_refuses_like_an_unreadable_ref() {
+    let (_source_temp, source) = source_with_a_heavy_remote_branch();
+    let (temp, clone) = clone_of(&source);
+    assert_only_a_remote_holds_the_branch(&clone);
+    let fake = FakeGit::refusing(&["--end-of-options"]);
+
+    let output = run_nwt_with_fake_git(
+        &clone,
+        &fake,
+        &["-c", REMOTE_ONLY_BRANCH, "--sparse-exclude", HEAVY_DIR],
+    );
+
+    assert_refused(
+        &output,
+        WORKTREE_FAILED,
+        &format!(
+            "Error: git cannot read the ref '{REMOTE_ONLY_BRANCH}' to check --sparse-exclude: \
+             fake git refuses --end-of-options"
+        ),
+    );
+    assert_made_nothing(&temp, &clone);
+    assert_only_a_remote_holds_the_branch(&clone);
+}
+
 /// Demand that git holds no entry for a linked worktree of `repo`:
 /// `.git/worktrees` is absent or empty.
 ///

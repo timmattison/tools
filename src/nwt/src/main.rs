@@ -15,6 +15,8 @@ use serde::Deserialize;
 use shellsetup::ShellIntegration;
 use walkdir::WalkDir;
 
+mod refspec;
+
 /// Directories to skip when copying .env files.
 ///
 /// These are common directories that either:
@@ -5144,6 +5146,25 @@ mod tests {
         assert_eq!(error.exit_code(), exit_codes::WORKTREE_FAILED);
     }
 
+    /// A git child of the lookup that fails names its subcommand and the
+    /// search. The lookup reads the fetch refspecs with `git config` and
+    /// checks each mapped ref with `git rev-parse`. Neither child lists the
+    /// remote branches, so the message does not say that.
+    #[test]
+    fn a_failed_lookup_child_names_its_subcommand_and_the_search() {
+        for command in ["config", "rev-parse"] {
+            let error = RemoteLookupError::Failed {
+                command,
+                stderr: "fatal: no answer".to_owned(),
+            };
+
+            assert_eq!(
+                error.to_string(),
+                format!("git {command} could not look for a remote branch: fatal: no answer")
+            );
+        }
+    }
+
     /// The branch that the source of [`clone_holding_remote_branch`] holds.
     const GLOB_FIXTURE_BRANCH: &str = "issue-33";
 
@@ -5289,9 +5310,24 @@ mod tests {
         }
     }
 
+    /// One name for each other rule of `git check-ref-format` that holds
+    /// anywhere in a ref name: a space, an ASCII control character (a tab and
+    /// DEL), two dots in a row, and the sequence `@{`.
+    const OTHER_REFUSED_NAMES: [&str; 5] = [
+        "issue 33",
+        "issue\t33",
+        "issue-33\u{7f}",
+        "issue..33",
+        "issue-33@{0}",
+    ];
+
     /// The answer for a name that git refuses as a ref name is known before
     /// git runs, so the lookup asks git nothing. A git that cannot answer
     /// then cannot turn that answer into a failure.
+    ///
+    /// The names cover each character and each sequence that git refuses
+    /// anywhere in a ref name: the glob characters, the characters of revision
+    /// syntax, and [`OTHER_REFUSED_NAMES`].
     ///
     /// The working directory is missing, so each git child fails to start. An
     /// answer of `Ok` proves that no child ran.
@@ -5300,7 +5336,11 @@ mod tests {
         let temp = tempfile::TempDir::new().expect("create a temporary directory");
         let missing = temp.path().join("no-such-repository");
 
-        for name in GLOB_NAMES {
+        for name in GLOB_NAMES
+            .into_iter()
+            .chain(REVISION_NAMES)
+            .chain(OTHER_REFUSED_NAMES)
+        {
             assert_eq!(
                 find_remote_tracking_branch(&missing, name),
                 Ok(RemoteTrackingMatch::None),

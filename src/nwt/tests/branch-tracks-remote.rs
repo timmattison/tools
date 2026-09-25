@@ -7,6 +7,12 @@
 //! the new worktree does not hold the work of that branch, and the user must
 //! move the branch and set its upstream by hand.
 //!
+//! A remote holds `<name>` when a fetch refspec of that remote maps
+//! `refs/heads/<name>` to a ref that the clone holds, as the checkout DWIM of
+//! git reads it. With the default refspec, that ref is
+//! `refs/remotes/<remote>/<name>`. The last section of this file gives the
+//! clone other refspecs.
+//!
 //! Every test runs the real binary through `support::nwt_command`. The fixture
 //! is a bare repository as the remote and a clone of it. The remote holds
 //! [`REMOTE_BRANCH`] at a commit that is not the `HEAD` of the clone, so "the
@@ -416,18 +422,31 @@ fn a_branch_that_no_remote_holds_starts_at_head_without_an_upstream() {
     );
 
     let output = run_nwt(&fixture, &["-b", LOCAL_ONLY_BRANCH]);
-    let worktree = created_worktree(&output);
 
-    assert_worktree_is_named(&fixture, &worktree, LOCAL_ONLY_BRANCH);
+    assert_started_at_head_without_an_upstream(&fixture, &output, LOCAL_ONLY_BRANCH);
+}
+
+/// Demand that `output` is a run that worked, and that it made the new branch
+/// `branch` at `HEAD` of the clone without an upstream: the worktree is
+/// `<clone>-worktrees/<branch>` at `HEAD` of the clone, the branch exists,
+/// git reports no upstream for it, and stderr holds no `Tracking` line.
+///
+/// This is the run of a branch that no remote gives, as before the lookup
+/// existed.
+fn assert_started_at_head_without_an_upstream(fixture: &Fixture, output: &Output, branch: &str) {
+    let worktree = created_worktree(output);
+
+    assert_worktree_is_named(fixture, &worktree, branch);
     assert_eq!(
         rev_parse(&worktree, "HEAD"),
         rev_parse(&fixture.clone, "HEAD"),
-        "the worktree must start at HEAD of the clone"
+        "the worktree must start at HEAD of the clone.\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 
     // The branch must exist, so that the failed upstream question below means
     // "no upstream" and not "no branch".
-    let local = format!("refs/heads/{LOCAL_ONLY_BRANCH}");
+    let local = format!("refs/heads/{branch}");
     assert!(
         run_git(&fixture.clone, &["show-ref", "--verify", "--quiet", &local]),
         "the run must make {local}"
@@ -438,13 +457,13 @@ fn a_branch_that_no_remote_holds_starts_at_head_without_an_upstream() {
             &[
                 "rev-parse",
                 "--abbrev-ref",
-                &format!("{LOCAL_ONLY_BRANCH}@{{upstream}}"),
+                &format!("{branch}@{{upstream}}")
             ]
         ),
-        "{LOCAL_ONLY_BRANCH} must have no upstream"
+        "{branch} must have no upstream"
     );
 
-    let lines = stderr_lines(&output);
+    let lines = stderr_lines(output);
     assert!(
         !lines.iter().any(|line| line.starts_with(TRACKING_WORD)),
         "a run that tracks nothing must print no {TRACKING_WORD} line, but stderr holds:\n{}",
@@ -565,16 +584,54 @@ fn assert_made_nothing(fixture: &Fixture, branch: &str) {
 /// The lines of the refusal when [`REMOTE`] and [`SECOND_REMOTE`] both hold
 /// `branch`, and `checkout.defaultRemote` picks neither.
 fn ambiguous_remote_lines(branch: &str) -> Vec<String> {
-    vec![
-        format!(
-            "Error: more than one remote holds the branch '{branch}', and \
-             checkout.defaultRemote picks none of them:"
-        ),
-        format!("  {REMOTE}/{branch}"),
-        format!("  {SECOND_REMOTE}/{branch}"),
+    ambiguous_refusal_lines(
+        branch,
+        &[
+            format!("{REMOTE}/{branch}"),
+            format!("{SECOND_REMOTE}/{branch}"),
+        ],
+    )
+}
+
+/// The lines of the refusal of `branch` when `checkout.defaultRemote` picks
+/// none of the remotes that hold it. `candidates` holds the text of each
+/// candidate line, without its indentation, in the order of the remotes.
+fn ambiguous_refusal_lines(branch: &str, candidates: &[String]) -> Vec<String> {
+    std::iter::once(format!(
+        "Error: more than one remote holds the branch '{branch}', and \
+         checkout.defaultRemote picks none of them:"
+    ))
+    .chain(candidates.iter().map(|candidate| format!("  {candidate}")))
+    .chain([
         "Name the remote to track, and run nwt again:".to_owned(),
         "  git config checkout.defaultRemote <remote>".to_owned(),
-    ]
+    ])
+    .collect()
+}
+
+/// Demand that `output` is a refusal with exit 16 that printed no path, and
+/// that its stderr holds `expected` as consecutive lines.
+fn assert_ambiguous_refusal(output: &Output, expected: &[String]) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stderr_lines(output);
+    assert_eq!(
+        output.status.code(),
+        Some(AMBIGUOUS_REMOTE_BRANCH),
+        "the run must exit {AMBIGUOUS_REMOTE_BRANCH}.\nstdout:\n{stdout}\nstderr:\n{}",
+        lines.join("\n")
+    );
+    assert!(
+        stdout.is_empty(),
+        "a refused run prints no path. stdout: {stdout:?}"
+    );
+    assert!(
+        lines
+            .windows(expected.len())
+            .any(|window| window == expected),
+        "stderr must hold these lines:\n{}\nbut it holds:\n{}",
+        expected.join("\n"),
+        lines.join("\n")
+    );
 }
 
 /// When two remotes hold `<name>` and `checkout.defaultRemote` picks neither,
@@ -588,29 +645,7 @@ fn two_remotes_that_hold_the_branch_and_no_default_remote_refuse_and_make_nothin
 
     let output = run_nwt(&fixture, &["-b", REMOTE_BRANCH]);
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let lines = stderr_lines(&output);
-    assert_eq!(
-        output.status.code(),
-        Some(AMBIGUOUS_REMOTE_BRANCH),
-        "the run must exit {AMBIGUOUS_REMOTE_BRANCH}.\nstdout:\n{stdout}\nstderr:\n{}",
-        lines.join("\n")
-    );
-    assert!(
-        stdout.is_empty(),
-        "a refused run prints no path. stdout: {stdout:?}"
-    );
-
-    let expected = ambiguous_remote_lines(REMOTE_BRANCH);
-    assert!(
-        lines
-            .windows(expected.len())
-            .any(|window| window == expected.as_slice()),
-        "stderr must hold these lines:\n{}\nbut it holds:\n{}",
-        expected.join("\n"),
-        lines.join("\n")
-    );
-
+    assert_ambiguous_refusal(&output, &ambiguous_remote_lines(REMOTE_BRANCH));
     assert_made_nothing(&fixture, REMOTE_BRANCH);
 }
 
@@ -1063,5 +1098,323 @@ fn quiet_prints_no_tracking_line_when_the_hook_of_a_tracked_sparse_run_fails() {
         !lines.iter().any(|line| line.starts_with(TRACKING_WORD)),
         "--quiet must print no {TRACKING_WORD} line, but stderr holds:\n{}",
         lines.join("\n")
+    );
+}
+
+// The fetch refspec of each remote.
+//
+// The checkout DWIM of git does not look for `refs/remotes/<remote>/<name>`.
+// For each remote, it maps `refs/heads/<name>` through the fetch refspecs of
+// that remote, and it takes the mapped ref when that ref exists. The tests
+// below give the clone a refspec that is not the default, and each one gives
+// a different answer from a lookup that reads `refs/remotes/*/<name>`.
+
+/// A branch that the tests name in `git remote set-branches`, in place of
+/// [`REMOTE_BRANCH`]. No remote needs to hold it.
+const OTHER_BRANCH: &str = "main";
+
+/// A fetch refspec of [`REMOTE`] that stores each branch one level deeper than
+/// the default, under `refs/remotes/mirror/heads/`. A lookup that reads
+/// `refs/remotes/*/<name>` cannot see a ref there, because its `*` matches no
+/// `/`.
+const NESTED_REFSPEC: &str = "+refs/heads/*:refs/remotes/mirror/heads/*";
+
+/// A fetch refspec of [`REMOTE`] that stores each branch outside
+/// `refs/remotes/`, under `refs/mirror/`.
+const OUTSIDE_REFSPEC: &str = "+refs/heads/*:refs/mirror/*";
+
+/// Make `remote` of the clone map only [`OTHER_BRANCH`], as
+/// `git remote set-branches <remote> main` does.
+///
+/// The remote-tracking branches that an earlier fetch wrote stay in the
+/// clone, and no refspec of `remote` maps any of them now.
+fn map_only_the_other_branch(fixture: &Fixture, remote: &str) {
+    assert!(
+        run_git(
+            &fixture.clone,
+            &["remote", "set-branches", remote, OTHER_BRANCH]
+        ),
+        "git remote set-branches failed"
+    );
+}
+
+/// Give [`REMOTE`] of the clone the fetch refspec `refspec` in place of the
+/// default, fetch it, and delete `refs/remotes/origin/<branch>`, which the
+/// default refspec wrote. So only `refspec` puts `branch` in the clone.
+fn store_the_remote_branches_with(fixture: &Fixture, refspec: &str, branch: &str) {
+    assert!(
+        run_git(
+            &fixture.clone,
+            &["config", "--replace-all", "remote.origin.fetch", refspec]
+        ),
+        "git config failed"
+    );
+    assert!(
+        run_git(&fixture.clone, &["fetch", "--quiet", REMOTE]),
+        "git fetch failed"
+    );
+    assert!(
+        run_git(&fixture.clone, &["update-ref", "-d", &remote_ref(branch)]),
+        "git update-ref -d failed"
+    );
+}
+
+/// The ref where [`NESTED_REFSPEC`] puts `branch`.
+fn nested_ref(branch: &str) -> String {
+    format!("refs/remotes/mirror/heads/{branch}")
+}
+
+/// Demand that the clone holds the ref `full_ref`.
+fn assert_holds_ref(fixture: &Fixture, full_ref: &str) {
+    assert!(
+        run_git(
+            &fixture.clone,
+            &["show-ref", "--verify", "--quiet", full_ref]
+        ),
+        "the fixture clone must hold {full_ref}"
+    );
+}
+
+/// Demand that `output` is a run that worked, and that its new branch
+/// [`REMOTE_BRANCH`] starts at the commit of `tracking_ref` and tracks it.
+///
+/// `upstream` is the short form of the upstream that
+/// `git rev-parse --abbrev-ref` gives. `tracked` is the name of the branch in
+/// the `Tracking` line on stderr.
+fn assert_starts_at_and_tracks(
+    fixture: &Fixture,
+    output: &Output,
+    tracking_ref: &str,
+    upstream: &str,
+    tracked: &str,
+) {
+    let worktree = created_worktree(output);
+
+    assert_worktree_is_named(fixture, &worktree, REMOTE_BRANCH);
+    assert_eq!(
+        rev_parse(&worktree, "HEAD"),
+        rev_parse(&fixture.clone, tracking_ref),
+        "the worktree must start at {tracking_ref}.\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        upstream_of(&fixture.clone, REMOTE_BRANCH),
+        upstream,
+        "the new branch must track {tracking_ref}"
+    );
+
+    let expected = format!("{TRACKING_WORD} {tracked}");
+    let lines = stderr_lines(output);
+    assert!(
+        lines.contains(&expected),
+        "stderr must hold the line {expected:?}, but it holds:\n{}",
+        lines.join("\n")
+    );
+}
+
+/// After `git remote set-branches origin main`, the clone still holds
+/// `refs/remotes/origin/issue-33`, but no refspec of `origin` maps
+/// `refs/heads/issue-33` to it. The checkout DWIM of git ignores such a stale
+/// ref (`fatal: invalid reference: issue-33`), and `git worktree add --track`
+/// refuses it as "not a branch".
+///
+/// So the lookup ignores it too. The new branch starts at `HEAD` of the clone
+/// without an upstream, as it did before the lookup existed.
+#[test]
+fn a_remote_branch_that_no_refspec_maps_is_stale_and_the_branch_starts_at_head() {
+    let fixture = clone_whose_remote_holds(REMOTE_BRANCH);
+    map_only_the_other_branch(&fixture, REMOTE);
+    assert_holds_ref(&fixture, &remote_ref(REMOTE_BRANCH));
+
+    let output = run_nwt(&fixture, &["-b", REMOTE_BRANCH]);
+
+    assert_started_at_head_without_an_upstream(&fixture, &output, REMOTE_BRANCH);
+}
+
+/// A remote without a fetch refspec maps no branch. `git config` then lists
+/// no fetch refspec at all, and the stale `refs/remotes/origin/issue-33`
+/// stays. The new branch starts at `HEAD` without an upstream.
+#[test]
+fn a_remote_without_a_fetch_refspec_gives_no_branch() {
+    let fixture = clone_whose_remote_holds(REMOTE_BRANCH);
+    assert!(
+        run_git(
+            &fixture.clone,
+            &["config", "--unset-all", "remote.origin.fetch"]
+        ),
+        "git config --unset-all failed"
+    );
+    assert_holds_ref(&fixture, &remote_ref(REMOTE_BRANCH));
+
+    let output = run_nwt(&fixture, &["-b", REMOTE_BRANCH]);
+
+    assert_started_at_head_without_an_upstream(&fixture, &output, REMOTE_BRANCH);
+}
+
+/// When two remotes hold `issue-33` and the refspec of [`REMOTE`] no longer
+/// maps it, only [`SECOND_REMOTE`] gives the branch. A stale ref is not a
+/// candidate, so the run does not refuse with exit 16. It starts at
+/// `upstream/issue-33` and tracks it.
+#[test]
+fn a_stale_branch_of_one_remote_leaves_the_branch_of_the_other_remote() {
+    let fixture = clone_whose_two_remotes_hold(REMOTE_BRANCH);
+    map_only_the_other_branch(&fixture, REMOTE);
+    assert_holds_ref(&fixture, &remote_ref(REMOTE_BRANCH));
+
+    let output = run_nwt(&fixture, &["-b", REMOTE_BRANCH]);
+
+    let short = format!("{SECOND_REMOTE}/{REMOTE_BRANCH}");
+    assert_starts_at_and_tracks(
+        &fixture,
+        &output,
+        &remote_ref_on(SECOND_REMOTE, REMOTE_BRANCH),
+        &short,
+        &short,
+    );
+}
+
+/// The fetch refspec of a remote decides where the clone stores each branch
+/// of that remote. With [`NESTED_REFSPEC`], `origin` stores `issue-33` at
+/// `refs/remotes/mirror/heads/issue-33`. The checkout DWIM of git finds the
+/// branch there, and so does the lookup.
+///
+/// The run starts at that ref and tracks it. The `Tracking` line names it
+/// without `refs/remotes/`, as git names the upstream. A lookup that reads
+/// `refs/remotes/*/<name>` finds nothing, and the branch starts at `HEAD`.
+#[test]
+fn a_fetch_refspec_with_another_destination_gives_the_branch_there() {
+    let fixture = clone_whose_remote_holds(REMOTE_BRANCH);
+    store_the_remote_branches_with(&fixture, NESTED_REFSPEC, REMOTE_BRANCH);
+
+    let output = run_nwt(&fixture, &["-b", REMOTE_BRANCH]);
+
+    let short = format!("mirror/heads/{REMOTE_BRANCH}");
+    assert_starts_at_and_tracks(
+        &fixture,
+        &output,
+        &nested_ref(REMOTE_BRANCH),
+        &short,
+        &short,
+    );
+}
+
+/// With [`OUTSIDE_REFSPEC`], `origin` stores `issue-33` at
+/// `refs/mirror/issue-33`, outside `refs/remotes/`. The run starts at that
+/// ref and tracks it. The `Tracking` line names the full ref, because only
+/// `refs/remotes/` is the place of a remote-tracking branch, and a short
+/// `mirror/issue-33` reads like a branch of a remote `mirror`.
+#[test]
+fn a_destination_outside_refs_remotes_shows_as_the_full_ref() {
+    let fixture = clone_whose_remote_holds(REMOTE_BRANCH);
+    store_the_remote_branches_with(&fixture, OUTSIDE_REFSPEC, REMOTE_BRANCH);
+
+    let output = run_nwt(&fixture, &["-b", REMOTE_BRANCH]);
+
+    let full_ref = format!("refs/mirror/{REMOTE_BRANCH}");
+    assert_starts_at_and_tracks(
+        &fixture,
+        &output,
+        &full_ref,
+        &format!("mirror/{REMOTE_BRANCH}"),
+        &full_ref,
+    );
+}
+
+/// A negative refspec `^refs/heads/issue-33` keeps `origin` from fetching
+/// `issue-33`. The `refs/remotes/origin/issue-33` of an earlier fetch stays.
+/// The tracking setup of git honors the negative refspec, so
+/// `git worktree add --track` refuses that ref as "not a branch".
+///
+/// So the lookup honors the negative refspec too, and the new branch starts
+/// at `HEAD` without an upstream. The checkout DWIM of git 2.55 differs here:
+/// after a pattern refspec, it takes the stale ref and sets no upstream.
+#[test]
+fn a_negative_refspec_keeps_the_remote_from_giving_the_branch() {
+    let fixture = clone_whose_remote_holds(REMOTE_BRANCH);
+    let negative = format!("^refs/heads/{REMOTE_BRANCH}");
+    assert!(
+        run_git(
+            &fixture.clone,
+            &["config", "--add", "remote.origin.fetch", &negative]
+        ),
+        "git config --add failed"
+    );
+    assert_holds_ref(&fixture, &remote_ref(REMOTE_BRANCH));
+
+    let output = run_nwt(&fixture, &["-b", REMOTE_BRANCH]);
+
+    assert_started_at_head_without_an_upstream(&fixture, &output, REMOTE_BRANCH);
+}
+
+/// When two remotes hold the branch and `checkout.defaultRemote` picks
+/// neither, each candidate line names the branch in its short form. The user
+/// needs the name of the remote for `git config checkout.defaultRemote`, so a
+/// line whose short form does not start with `<remote>/` adds
+/// `(remote <remote>)`.
+///
+/// `origin` stores its branch at `refs/remotes/mirror/heads/issue-33` with
+/// [`NESTED_REFSPEC`], so its line names `origin` after the branch. The line
+/// of `upstream` needs no note.
+#[test]
+fn the_refusal_names_the_remote_of_a_candidate_whose_short_form_does_not() {
+    let fixture = clone_whose_two_remotes_hold(REMOTE_BRANCH);
+    store_the_remote_branches_with(&fixture, NESTED_REFSPEC, REMOTE_BRANCH);
+
+    let output = run_nwt(&fixture, &["-b", REMOTE_BRANCH]);
+
+    assert_ambiguous_refusal(
+        &output,
+        &ambiguous_refusal_lines(
+            REMOTE_BRANCH,
+            &[
+                format!("mirror/heads/{REMOTE_BRANCH} (remote {REMOTE})"),
+                format!("{SECOND_REMOTE}/{REMOTE_BRANCH}"),
+            ],
+        ),
+    );
+    assert_made_nothing(&fixture, REMOTE_BRANCH);
+}
+
+/// `nwt -c issue-33` goes through the checkout DWIM of git, which finds
+/// `issue-33` where the fetch refspec of `origin` puts it. With
+/// [`NESTED_REFSPEC`], that is `refs/remotes/mirror/heads/issue-33`. The
+/// `--sparse-exclude` check must read the same ref, because the files of the
+/// new worktree come from it.
+///
+/// Only that ref tracks [`HEAVY_DIR`], so the check passes only when it reads
+/// that ref. A check that finds no remote branch reads `issue-33`, which git
+/// cannot read, and the run exits 7.
+#[test]
+fn checkout_with_sparse_exclude_reads_the_branch_where_the_refspec_puts_it() {
+    let fixture = clone_whose_remote_branch_holds_the_heavy_dir(REMOTE_BRANCH);
+    store_the_remote_branches_with(&fixture, NESTED_REFSPEC, REMOTE_BRANCH);
+    let tracking_ref = nested_ref(REMOTE_BRANCH);
+    assert!(
+        tracks_directory_at(&fixture.clone, &tracking_ref, HEAVY_DIR),
+        "the fixture must track {HEAVY_DIR}/ at {tracking_ref}"
+    );
+
+    let output = run_nwt(
+        &fixture,
+        &["-c", REMOTE_BRANCH, "--sparse-exclude", HEAVY_DIR],
+    );
+    let worktree = created_worktree(&output);
+
+    assert!(
+        !worktree.join(HEAVY_DIR).exists(),
+        "{HEAVY_DIR}/ must be out of the worktree at {}",
+        worktree.display()
+    );
+    for file in KEPT_FILES {
+        assert!(
+            worktree.join(file).is_file(),
+            "{file} of {tracking_ref} must be in the worktree at {}",
+            worktree.display()
+        );
+    }
+    assert_eq!(
+        rev_parse(&worktree, "HEAD"),
+        rev_parse(&fixture.clone, &tracking_ref),
+        "the worktree must check out {tracking_ref}"
     );
 }
