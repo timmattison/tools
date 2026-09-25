@@ -4080,6 +4080,44 @@ mod tests {
         );
     }
 
+    /// An image error in monitor mode names its path one time.
+    ///
+    /// The line of a failure starts with the path of the image. The chain of
+    /// the error then started with the context of the file reader, which is
+    /// `Failed to open image file: <path>`. So the user read the path two
+    /// times on one long line. The second copy tells the user nothing new.
+    /// The monitor names the path, so the chain of the error must not name it.
+    ///
+    /// The expected cause comes from the same read that the image display of
+    /// this test makes, so the test does not copy the words of the decoder.
+    /// The test also checks that the cause stays on the line, so a fix that
+    /// drops the whole chain makes this test fail.
+    #[test]
+    fn an_image_error_in_monitor_mode_names_its_path_one_time() {
+        let directory = TemporaryDirectory::new();
+        let broken = directory.file_of("broken.png", &b"no picture here\n".repeat(4));
+        let cause = read_image_file(&broken, &a_terminal_that_sends_a_file())
+            .expect_err("bytes with no image signature do not decode as a PNG")
+            .root_cause()
+            .to_string();
+        let mut monitor = MonitorUnderTest::new();
+
+        let written = monitor.handle(&broken);
+
+        assert_eq!(
+            written.stderr.matches(&broken.display().to_string()).count(),
+            1,
+            "the error must name the path {} one time, but it is {:?}",
+            broken.display(),
+            written.stderr
+        );
+        assert!(
+            written.stderr.contains(&cause),
+            "the error must still name the cause {cause:?}, but it is {:?}",
+            written.stderr
+        );
+    }
+
     /// The reader of a new text file ignores a path that is gone at the read.
     ///
     /// [`Monitor::handle`] checks the path before the read, and a path that is
