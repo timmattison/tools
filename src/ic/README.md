@@ -82,8 +82,8 @@ ic --monitor ~/Screenshots
 Monitor mode ignores these paths, and it gives no output for them:
 
 - A directory.
-- A binary file. A file is binary when its bytes are not valid UTF-8, or when they hold a NUL byte.
-- An empty file. A program often makes a file before it writes the text, so `ic` shows the text at a later event, when the file holds text.
+- A binary file that is not an image. A file is binary when its bytes are not valid UTF-8, or when they hold a NUL byte.
+- An empty file. A program often makes a file before it writes to it, so `ic` shows the file at a later event, when the file holds its content.
 - A path that is gone at its event, for example a temporary file that a program renamed.
 - A video.
 

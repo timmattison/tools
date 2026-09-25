@@ -456,12 +456,12 @@ where
     ///   directory. It gives no output.
     /// * Monitor mode ignores a path that is gone. It gives no output. This
     ///   includes a text file that goes away before its read.
-    /// * Monitor mode ignores a binary file. It gives no output. A file is
-    ///   binary when its bytes are not valid UTF-8, or when they hold a NUL
-    ///   byte.
-    /// * Monitor mode ignores an empty file that is not an image and not a
-    ///   video. It gives no output. The watcher often reports a new file
-    ///   before the program writes the text, and a later event shows the text.
+    /// * Monitor mode ignores a binary file that is not an image. It gives no
+    ///   output. A file is binary when its bytes are not valid UTF-8, or when
+    ///   they hold a NUL byte.
+    /// * Monitor mode ignores an empty file. It gives no output. The watcher
+    ///   often reports a new file before the program writes to it, and a later
+    ///   event shows the text or the image.
     /// * Monitor mode ignores a video. It gives no output.
     /// * The monitor reads the bytes of an image, and the bytes go to the image
     ///   display.
@@ -478,8 +478,8 @@ where
     ///   for a cause such as a missing permission fails again at each later
     ///   event, so the error prints one time.
     /// * A path that monitor mode ignores stays out of the record. A later
-    ///   event can find something to show, such as the text that a program
-    ///   writes into a file that was empty.
+    ///   event can find something to show, such as the text or the image that
+    ///   a program writes into a file that was empty.
     /// * An image whose read or display fails stays out of the record. The
     ///   watcher reports an image before the program completes the write, and
     ///   an image that is not complete does not decode. A later event tries the
@@ -580,25 +580,35 @@ where
     ///
     /// # Returns
     /// [`DisplayOutcome::Shown`] when the display succeeds.
+    /// [`DisplayOutcome::Ignored`] when the file is empty, and a later event
+    /// shows the image. [`read_new_image_file`] decides which files hold an
+    /// image to show.
     /// [`DisplayOutcome::Failed`] when the read or the display fails, and a
     /// later event tries the image again. The watcher reports an image before
     /// the program completes the write, and an image that is not complete does
     /// not decode. A later event decodes the complete image.
     fn show_new_image(&mut self, path: &Path) -> DisplayOutcome {
-        // The display prints the two header rows itself, so the auto-fit path
-        // can count them. The first row is empty, which separates this image
-        // from the one before it.
-        let header = [
-            String::new(),
-            format!("Found new image: {}", path.display()),
-        ];
         // A failure of the read and a failure of the display give the same
         // outcome, so one match holds the rule of the record for both. The
         // error of the read is the error of the operating system, which does
         // not name the path.
-        let shown = fs::read(path)
-            .map_err(anyhow::Error::from)
-            .and_then(|source| (self.show_image)(path, source, &header));
+        let shown = match read_new_image_file(path) {
+            Ok(Some(source)) => {
+                // The display prints the two header rows itself, so the
+                // auto-fit path can count them. The first row is empty, which
+                // separates this image from the one before it.
+                let header = [
+                    String::new(),
+                    format!("Found new image: {}", path.display()),
+                ];
+                (self.show_image)(path, source, &header)
+            }
+            // An empty image gives no header and stays out of the record on
+            // purpose. A program makes the file before it writes the bytes,
+            // so a later event for the file shows the image.
+            Ok(None) => return DisplayOutcome::Ignored,
+            Err(error) => Err(error.into()),
+        };
         match shown {
             Ok(()) => DisplayOutcome::Shown,
             Err(error) => DisplayOutcome::Failed {
@@ -2159,6 +2169,37 @@ fn read_new_text_file(path: &Path) -> io::Result<Option<String>> {
     }
 
     Ok(String::from_utf8(bytes).ok())
+}
+
+/// Read an image that monitor mode found, and decide whether to show it.
+///
+/// A program such as `curl -o`, an editor, or a screenshot tool makes a file
+/// before it writes the bytes. The watcher thus often reports an image while
+/// it is still empty. An empty file holds no image to decode, so it is not a
+/// failure. A later event for the file shows the image.
+///
+/// The decision uses the bytes that the read gave, not a check of the size
+/// before the read. A program can write to the file between such a check and
+/// the read.
+///
+/// # Arguments
+/// * `path` - The path that the watcher reported.
+///
+/// # Returns
+/// `Some` with the bytes of the file when monitor mode shows it. `None` when
+/// monitor mode ignores the file, because it is empty.
+///
+/// # Errors
+/// The error of the read when the file does not read. The error does not name
+/// the path, because the caller puts the path in front of it.
+fn read_new_image_file(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    let bytes = fs::read(path)?;
+
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(bytes))
 }
 
 /// Print the content of a text file to standard output.
