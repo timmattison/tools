@@ -111,7 +111,8 @@ fn record(root: &Path, dir: &Path, into: &mut Snapshot) {
 ///
 /// Each decoy test of `tests/production-git-env-isolation.rs` takes a snapshot
 /// of the decoy before and after its run: the plain `-b` run, the sparse `-b`
-/// run, and the sparse `-c` run. The helpers live here, so each of those tests
+/// run, the sparse `-c` run, and the two `-b` runs that track a remote branch.
+/// The helpers live here, so each of those tests
 /// reads the decoy with one rule, and a later test file that needs a decoy
 /// reads it with the same rule.
 pub fn snapshot(root: &Path) -> Snapshot {
