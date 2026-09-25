@@ -1,0 +1,224 @@
+//! End-to-end coverage for `nwt -b <name>` when a remote holds `<name>`
+//! (issue #528).
+//!
+//! When the clone has no local branch `<name>` and exactly one remote holds
+//! it, the new branch starts at `<remote>/<name>` and tracks it. Without this,
+//! the new worktree does not hold the work of that branch, and the user must
+//! move the branch and set its upstream by hand.
+//!
+//! Every test runs the real binary through `support::nwt_command`. The fixture
+//! is a bare repository as the remote and a clone of it. The remote holds
+//! [`REMOTE_BRANCH`] at a commit that is not the `HEAD` of the clone, so "the
+//! worktree starts at the remote branch" and "the worktree starts at `HEAD`"
+//! give different answers. Each test owns its own temporary directory, so the
+//! fixed branch names are private to one test.
+//!
+//! Each `nwt` run reads an empty global and system git configuration, so a
+//! `checkout.defaultRemote` or a `branch.autoSetupMerge` of the host cannot
+//! change the answer. The run sets the two variables on the child only.
+
+mod support;
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Output;
+
+use support::{clone_of, git_stdout, init_repo, nwt_command, run_git, write_file};
+use tempfile::{NamedTempFile, TempDir};
+
+/// The branch that the remote holds, and that the clone holds only as a
+/// remote-tracking branch.
+const REMOTE_BRANCH: &str = "issue-33";
+
+/// The one remote of the clone.
+const REMOTE: &str = "origin";
+
+/// A clone whose one remote holds a branch that the clone does not hold.
+struct Fixture {
+    /// The temporary directory that holds the clone and its worktrees
+    /// directory.
+    _temp: TempDir,
+    /// The clone, where each `nwt` run starts.
+    clone: PathBuf,
+    /// The temporary directory that holds the remote, kept alive for the life
+    /// of the clone.
+    _remote: TempDir,
+    /// An empty file that each `nwt` run reads as its global and its system
+    /// git configuration.
+    empty_config: NamedTempFile,
+}
+
+impl Fixture {
+    /// The directory where `nwt` puts the worktrees of the clone.
+    fn worktrees_dir(&self) -> PathBuf {
+        let name = self
+            .clone
+            .file_name()
+            .expect("the clone has a name")
+            .to_str()
+            .expect("utf-8 clone name");
+        self.clone.with_file_name(format!("{name}-worktrees"))
+    }
+}
+
+/// Make a bare remote that holds `branch`, and a clone of it that holds
+/// `branch` only as `origin/<branch>`.
+///
+/// `branch` stays at the first commit, and the checked-out branch of the
+/// remote gets a second commit. So `HEAD` of the clone is not the commit of
+/// `origin/<branch>`.
+fn clone_whose_remote_holds(branch: &str) -> Fixture {
+    let (remote_temp, source) = init_repo();
+    assert!(run_git(&source, &["branch", branch]), "git branch failed");
+    write_file(&source, "later.txt", "later\n");
+    assert!(
+        run_git(&source, &["add", "--", "later.txt"]),
+        "git add failed"
+    );
+    assert!(
+        run_git(
+            &source,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "move HEAD past the branch"
+            ]
+        ),
+        "git commit failed"
+    );
+
+    let bare = remote_temp.path().join("remote.git");
+    assert!(
+        run_git(
+            remote_temp.path(),
+            &[
+                "clone",
+                "--bare",
+                "--quiet",
+                source.to_str().expect("utf-8 source path"),
+                bare.to_str().expect("utf-8 remote path"),
+            ]
+        ),
+        "git clone --bare failed"
+    );
+
+    let (temp, clone) = clone_of(&bare);
+
+    let local = format!("refs/heads/{branch}");
+    assert!(
+        !run_git(&clone, &["show-ref", "--verify", "--quiet", &local]),
+        "the fixture clone must not hold {local}"
+    );
+    assert_ne!(
+        rev_parse(&clone, "HEAD"),
+        rev_parse(&clone, &remote_ref(branch)),
+        "the fixture branch must not be at HEAD of the clone"
+    );
+
+    Fixture {
+        _temp: temp,
+        clone,
+        _remote: remote_temp,
+        empty_config: NamedTempFile::new().expect("create an empty git configuration"),
+    }
+}
+
+/// The full remote-tracking ref of `branch` on [`REMOTE`].
+fn remote_ref(branch: &str) -> String {
+    format!("refs/remotes/{REMOTE}/{branch}")
+}
+
+/// The commit that `rev` names in `repo`.
+fn rev_parse(repo: &Path, rev: &str) -> String {
+    git_stdout(repo, &["rev-parse", "--verify", rev])
+        .trim_end()
+        .to_owned()
+}
+
+/// The upstream of `branch` in `repo`, in its short form (`origin/issue-33`).
+fn upstream_of(repo: &Path, branch: &str) -> String {
+    git_stdout(
+        repo,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            &format!("{branch}@{{upstream}}"),
+        ],
+    )
+    .trim_end()
+    .to_owned()
+}
+
+/// Run `nwt` in the clone with `args`, without the `.env` copy and the hook
+/// bootstrap, and hand back what it wrote.
+fn run_nwt(fixture: &Fixture, args: &[&str]) -> Output {
+    nwt_command(&fixture.clone)
+        .args(["--no-copy-env", "--no-bootstrap-hooks"])
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", fixture.empty_config.path())
+        .env("GIT_CONFIG_SYSTEM", fixture.empty_config.path())
+        .output()
+        .expect("run the nwt binary")
+}
+
+/// Demand that `output` is a run that worked, and hand back the worktree path
+/// it printed.
+fn created_worktree(output: &Output) -> PathBuf {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "nwt failed ({:?}):\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status.code()
+    );
+
+    let printed = PathBuf::from(stdout.trim());
+    assert!(
+        printed.is_dir(),
+        "nwt printed {}, which is no directory.\nstderr:\n{stderr}",
+        printed.display()
+    );
+    printed
+}
+
+/// Demand that `worktree` is the directory `<clone>-worktrees/<name>`.
+///
+/// Git can name the clone through a path that holds a symbolic link, such as
+/// `/var` for `/private/var` on macOS. So the two paths are compared after
+/// each is resolved.
+fn assert_worktree_is_named(fixture: &Fixture, worktree: &Path, name: &str) {
+    let expected = fixture.worktrees_dir().join(name);
+    assert_eq!(
+        fs::canonicalize(worktree).expect("resolve the worktree path"),
+        fs::canonicalize(&expected).expect("resolve the expected worktree path"),
+        "the worktree must be {}",
+        expected.display()
+    );
+}
+
+/// With `-b <name>`, and one remote that holds `<name>`, the new branch starts
+/// at the commit of `<remote>/<name>` and tracks that branch. The directory
+/// still takes the branch name.
+#[test]
+fn a_branch_that_one_remote_holds_starts_at_that_branch_and_tracks_it() {
+    let fixture = clone_whose_remote_holds(REMOTE_BRANCH);
+
+    let output = run_nwt(&fixture, &["-b", REMOTE_BRANCH]);
+    let worktree = created_worktree(&output);
+
+    assert_worktree_is_named(&fixture, &worktree, REMOTE_BRANCH);
+    assert_eq!(
+        rev_parse(&worktree, "HEAD"),
+        rev_parse(&fixture.clone, &remote_ref(REMOTE_BRANCH)),
+        "the worktree must start at {REMOTE}/{REMOTE_BRANCH}, and not at HEAD of the clone.\n\
+         stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        upstream_of(&fixture.clone, REMOTE_BRANCH),
+        format!("{REMOTE}/{REMOTE_BRANCH}"),
+        "the new branch must track {REMOTE}/{REMOTE_BRANCH}"
+    );
+}
