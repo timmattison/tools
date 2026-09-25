@@ -249,3 +249,33 @@ fn a_run_that_tracks_a_remote_branch_names_it_on_stderr() {
         lines.join("\n")
     );
 }
+
+/// The first word of the line that names the branch that a run tracks.
+const TRACKING_WORD: &str = "Tracking";
+
+/// `--quiet` suppresses the line that names the tracked branch. The run still
+/// starts at the remote branch and tracks it.
+#[test]
+fn quiet_prints_no_tracking_line_and_still_tracks() {
+    let fixture = clone_whose_remote_holds(REMOTE_BRANCH);
+
+    let output = run_nwt(&fixture, &["-b", REMOTE_BRANCH, "--quiet"]);
+    let worktree = created_worktree(&output);
+
+    let lines = stderr_lines(&output);
+    assert!(
+        !lines.iter().any(|line| line.starts_with(TRACKING_WORD)),
+        "--quiet must print no {TRACKING_WORD} line, but stderr holds:\n{}",
+        lines.join("\n")
+    );
+    assert_eq!(
+        rev_parse(&worktree, "HEAD"),
+        rev_parse(&fixture.clone, &remote_ref(REMOTE_BRANCH)),
+        "the worktree must start at {REMOTE}/{REMOTE_BRANCH} under --quiet too"
+    );
+    assert_eq!(
+        upstream_of(&fixture.clone, REMOTE_BRANCH),
+        format!("{REMOTE}/{REMOTE_BRANCH}"),
+        "the new branch must track {REMOTE}/{REMOTE_BRANCH} under --quiet too"
+    );
+}
