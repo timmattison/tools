@@ -473,7 +473,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
 - crap (Claude, Resume Anywhere Please)
   - Resume a Claude Code session from wherever you are. Given a session id, `crap` looks the
     session up under `~/.claude/projects`, recovers the directory it originally ran in, `cd`s
-    there, and re-launches Claude with `--resume <id>` — preferring your `clauded` alias if you
+    there, and re-launches Claude with `--resume <id>` — preferring your `c` alias or command if you
     have one, otherwise plain `claude`. If the original directory no longer exists — or exists but
     can't be entered from your account — it tells you and stops, pointing you at `crap --here <id>`
     to fork it where you stand instead; and it refuses to resume a session that's already open in
@@ -3363,7 +3363,7 @@ crap 57570685-2d64-4431-8ab6-c021a12fa1af   # cd into that session's dir and res
 
 The session id is the name of the `.jsonl` file under `~/.claude/projects/<project>/`. `crap` reads the directory from the session log itself (the sanitized project folder name is lossy), so it always lands in the real original path.
 
-If you have a `clauded` alias or command (e.g. `claude --dangerously-skip-permissions`), `crap` uses it; otherwise it falls back to plain `claude`. If the session's original directory no longer exists, `crap` prints an error and stops without launching anything.
+If you have a `c` alias or command (for example `claude --dangerously-skip-permissions`), `crap` starts Claude through it, with the same arguments; otherwise it falls back to plain `claude`. A fork always passes `--session-id <new-id>`, so a `c` that keeps the session id in its own argv lets a Zellij resurrect resume the fork, not fork the original session again. If the session's original directory no longer exists, `crap` prints an error and stops without launching anything.
 
 ### Resume in the current directory: `--here`
 
@@ -3569,7 +3569,7 @@ crap --status --json | jq -r '.[] | select(.state == "waiting-for-user") | .sess
 
 ### Shell Integration
 
-Because a program can't change its parent shell's working directory — and can't see shell aliases such as `clauded` — `crap` ships as a shell function. Install it once:
+Because a program can't change its parent shell's working directory — and can't see shell aliases such as `c` — `crap` ships as a shell function. Install it once:
 
 ```bash
 crap --shell-setup
@@ -3645,11 +3645,13 @@ function crap() {
         # Build the resume argv: always --fork-session, so the original
         # transcript is left untouched, and always --session-id with the id
         # that the binary supplied, so the fork id is known after Claude exits.
+        # A launcher that keeps that id in its own argv, such as the one behind
+        # `c`, then resumes the fork after a Zellij resurrect, not the original.
         # The earlier "command crap" call has already consumed the function's
         # own arguments, so reusing the positional parameters here is safe.
         set -- --resume "$__crap_session" --fork-session --session-id "$__crap_newid"
-        if command -v clauded >/dev/null 2>&1; then
-            eval 'clauded "$@"'
+        if command -v c >/dev/null 2>&1; then
+            eval 'c "$@"'
         else
             claude "$@"
         fi
@@ -3670,8 +3672,8 @@ function crap() {
     __crap_session=${__crap_out%%$'\n'*}
     __crap_dir=${__crap_out#*$'\n'}
     cd -- "$__crap_dir" || return 1
-    if command -v clauded >/dev/null 2>&1; then
-        eval 'clauded --resume "$__crap_session"'
+    if command -v c >/dev/null 2>&1; then
+        eval 'c --resume "$__crap_session"'
     else
         claude --resume "$__crap_session"
     fi
@@ -3694,7 +3696,7 @@ The function always resumes a fork with `--resume <session-id> --fork-session --
 
 After the cleanup, the function prints `Resume this fork with: crap <new-id>`. It prints this line only when `crap --status <new-id>` finds the fork. Claude saves the fork only after your first new input. Thus, if you exit a fork at once, the function prints no line.
 
-The function sends `--status`, `--help`, `-h`, `--version`, `-V`, and `--shell-setup` directly to the binary. These flags do not change the parent shell, and their output must go to the terminal. The function forwards `"$@"`, so flags such as `--force` and `--here` get to the binary. The `eval` is intentional. A shell does not expand aliases in a function body, so the `eval` makes sure that the function uses a `clauded` alias. The `command crap` calls get to the binary, not to the function of the same name.
+The function sends `--status`, `--help`, `-h`, `--version`, `-V`, and `--shell-setup` directly to the binary. These flags do not change the parent shell, and their output must go to the terminal. The function forwards `"$@"`, so flags such as `--force` and `--here` get to the binary. The `eval` is intentional. A shell does not expand aliases in a function body, so the `eval` makes sure that the function uses a `c` alias. The `command crap` calls get to the binary, not to the function of the same name.
 
 ### Exit Codes
 

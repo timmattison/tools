@@ -97,7 +97,7 @@
 //! enforces by allowlisting every program the binary may spawn.
 //!
 //! Because a binary cannot change its parent shell's working directory (nor see
-//! shell aliases such as `clauded`), the user-facing `crap` command is a shell
+//! shell aliases such as `c`), the user-facing `crap` command is a shell
 //! function installed via `crap --shell-setup`. This binary resolves the session
 //! id — printing the original directory to resume from, or (for `--here`, and
 //! for a cross-user hit) importing the transcript into the right project folder
@@ -1630,9 +1630,12 @@ fn format_fork_at_output(
 ///
 /// `crap` shadows the binary, so the function reaches the binary explicitly via
 /// `command crap`, forwarding all arguments (so flags like `--force` and
-/// `--here` work). `clauded` is resolved through `eval` so that an alias of that
-/// name is expanded at call time (shell aliases are otherwise not expanded
-/// inside function bodies); if no `clauded` exists, plain `claude` is used. If
+/// `--here` work). Claude starts through `c` when that name exists, else
+/// through plain `claude`, with the same argv. `c` is resolved through `eval`
+/// so that an alias of that name is expanded at call time (shell aliases are
+/// otherwise not expanded inside function bodies). A `c` that keeps the
+/// session id in its own argv, as `claude-resumable.zsh` does, lets a Zellij
+/// resurrect resume a fork, because the fork argv pins the fork id. If
 /// the binary exits non-zero (session not found, already running, …) its message
 /// is shown and the function does nothing further.
 ///
@@ -1730,11 +1733,13 @@ function crap() {
         # Build the resume argv: always --fork-session, so the original
         # transcript is left untouched, and always --session-id with the id
         # that the binary supplied, so the fork id is known after Claude exits.
+        # A launcher that keeps that id in its own argv, such as the one behind
+        # `c`, then resumes the fork after a Zellij resurrect, not the original.
         # The earlier "command crap" call has already consumed the function's
         # own arguments, so reusing the positional parameters here is safe.
         set -- --resume "$__crap_session" --fork-session --session-id "$__crap_newid"
-        if command -v clauded >/dev/null 2>&1; then
-            eval 'clauded "$@"'
+        if command -v c >/dev/null 2>&1; then
+            eval 'c "$@"'
         else
             claude "$@"
         fi
@@ -1755,8 +1760,8 @@ function crap() {
     __crap_session=${__crap_out%%$'\n'*}
     __crap_dir=${__crap_out#*$'\n'}
     cd -- "$__crap_dir" || return 1
-    if command -v clauded >/dev/null 2>&1; then
-        eval 'clauded --resume "$__crap_session"'
+    if command -v c >/dev/null 2>&1; then
+        eval 'c --resume "$__crap_session"'
     else
         claude --resume "$__crap_session"
     fi
