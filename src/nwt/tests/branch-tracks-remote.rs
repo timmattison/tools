@@ -526,3 +526,80 @@ fn two_remotes_that_hold_the_branch_and_no_default_remote_refuse_and_make_nothin
 
     assert_made_nothing(&fixture, REMOTE_BRANCH);
 }
+
+/// The exit code of a run whose add git refuses. It is `WORKTREE_FAILED` in
+/// the `exit_codes` of `nwt`.
+const WORKTREE_FAILED: i32 = 7;
+
+/// Make a local branch `branch` at `HEAD` of the clone of `fixture`, and hand
+/// back its commit.
+///
+/// `HEAD` of the clone is not the commit of any remote branch of the fixture,
+/// so a run that moves the branch to a remote branch changes the commit.
+fn make_local_branch(fixture: &Fixture, branch: &str) -> String {
+    assert!(
+        run_git(&fixture.clone, &["branch", "--no-track", branch]),
+        "git branch failed"
+    );
+    rev_parse(&fixture.clone, &format!("refs/heads/{branch}"))
+}
+
+/// Demand that `output` is the refusal of a branch that already exists, as
+/// `tests/branch-already-exists.rs` pins it: exit 7, no path on stdout, and
+/// the message that names the branch on stderr.
+fn assert_branch_exists_refusal(output: &Output, branch: &str) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(WORKTREE_FAILED),
+        "a local branch {branch} must give the branch-exists error, exit {WORKTREE_FAILED}.\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "a refused run prints no path. stdout: {stdout:?}"
+    );
+    let expected = format!("Error: Branch '{branch}' already exists.");
+    assert!(
+        stderr.contains(&expected),
+        "stderr must hold {expected:?}:\n{stderr}"
+    );
+}
+
+/// Demand that the local branch `branch` is still at `commit`, and that it
+/// has no upstream.
+fn assert_local_branch_untouched(fixture: &Fixture, branch: &str, commit: &str) {
+    assert_eq!(
+        rev_parse(&fixture.clone, &format!("refs/heads/{branch}")),
+        commit,
+        "the local branch {branch} must keep its commit"
+    );
+    assert!(
+        !run_git(
+            &fixture.clone,
+            &[
+                "rev-parse",
+                "--abbrev-ref",
+                &format!("{branch}@{{upstream}}"),
+            ]
+        ),
+        "the local branch {branch} must get no upstream"
+    );
+}
+
+/// The lookup runs only when no local branch `<name>` exists. When one
+/// exists, the run gives the branch-exists error that it gave before the
+/// lookup existed, also when two remotes hold `<name>` and no default remote
+/// picks one. The error names the problem that the user has: the branch is
+/// already there, and `--checkout` gets it.
+#[test]
+fn a_local_branch_gives_the_branch_exists_error_even_when_two_remotes_hold_it() {
+    let fixture = clone_whose_two_remotes_hold(REMOTE_BRANCH);
+    let commit = make_local_branch(&fixture, REMOTE_BRANCH);
+
+    let output = run_nwt(&fixture, &["-b", REMOTE_BRANCH]);
+
+    assert_branch_exists_refusal(&output, REMOTE_BRANCH);
+    assert_local_branch_untouched(&fixture, REMOTE_BRANCH, &commit);
+}
