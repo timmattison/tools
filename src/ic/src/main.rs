@@ -3718,6 +3718,49 @@ mod tests {
         );
     }
 
+    /// A text file that is empty at its first event shows its text at a later
+    /// event.
+    ///
+    /// A program that writes a file makes it first, and the watcher reports
+    /// the new empty file before the program writes the text. Monitor mode
+    /// showed the empty file as a header with no text, put the path into the
+    /// record, and then ignored the event that the write gave. The user thus
+    /// never saw the text. An empty file holds nothing to show, so the first
+    /// event gives no output, and the path stays out of the record.
+    ///
+    /// One monitor handles the path two times, as monitor mode does. The
+    /// expected output of the second event is exact, so a header without the
+    /// text makes this test fail too.
+    #[test]
+    fn a_text_file_that_is_empty_at_its_first_event_shows_its_text_at_a_later_event() {
+        let directory = TemporaryDirectory::new();
+        let note = directory.file_of("note.txt", b"");
+        let mut monitor = MonitorUnderTest::new();
+
+        let first = monitor.handle(&note);
+        fs::write(&note, b"hello\n").expect("a write to the temporary directory");
+        let second = monitor.handle(&note);
+
+        assert_eq!(
+            first,
+            Written::default(),
+            "an empty text file must give no output"
+        );
+        assert_eq!(
+            second,
+            Written {
+                stdout: format!("\nFound new text file: {}\nhello\n", note.display()),
+                stderr: String::new(),
+            },
+            "a later event must show the text that the file holds now"
+        );
+        assert!(
+            monitor.image_headers().is_empty(),
+            "a text file must not reach the image display, but it got {:?}",
+            monitor.image_headers()
+        );
+    }
+
     // =========================================================================
     // Tests for ensure_file_exists
     // =========================================================================
