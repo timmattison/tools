@@ -455,7 +455,7 @@ where
     /// * Monitor mode ignores a path that is not a regular file, such as a
     ///   directory. It gives no output.
     /// * Monitor mode ignores a path that is gone. It gives no output. This
-    ///   includes a text file that goes away before its read.
+    ///   includes a text file or an image that goes away before its read.
     /// * Monitor mode ignores a binary file that is not an image. It gives no
     ///   output. A file is binary when its bytes are not valid UTF-8, or when
     ///   they hold a NUL byte.
@@ -518,8 +518,11 @@ where
         //
         // A path that is gone gives no output either. A program often writes
         // a temporary file and then renames or removes it, so the event for
-        // that file arrives after it is gone. A different failure of this
-        // check goes on to the display, and the display reports it.
+        // that file arrives after it is gone. The program can also remove the
+        // file after this check. So each reader of monitor mode applies the
+        // same rule again at its open, through `open_new_file`. A different
+        // failure of this check goes on to the display, and the display
+        // reports it.
         match fs::metadata(path) {
             Ok(metadata) if !metadata.is_file() => return Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -580,9 +583,9 @@ where
     ///
     /// # Returns
     /// [`DisplayOutcome::Shown`] when the display succeeds.
-    /// [`DisplayOutcome::Ignored`] when the file is empty, and a later event
-    /// shows the image. [`read_new_image_file`] decides which files hold an
-    /// image to show.
+    /// [`DisplayOutcome::Ignored`] when the file is gone or empty. A later
+    /// event for an empty file shows the image. [`read_new_image_file`] decides
+    /// which files hold an image to show.
     /// [`DisplayOutcome::Failed`] when the read or the display fails, and a
     /// later event tries the image again. The watcher reports an image before
     /// the program completes the write, and an image that is not complete does
@@ -603,9 +606,9 @@ where
                 ];
                 (self.show_image)(path, source, &header)
             }
-            // An empty image gives no header and stays out of the record on
-            // purpose. A program makes the file before it writes the bytes,
-            // so a later event for the file shows the image.
+            // An image that is gone or empty gives no header. It stays out of
+            // the record on purpose. A program makes the file before it
+            // writes the bytes, so a later event for the file shows the image.
             Ok(None) => return DisplayOutcome::Ignored,
             Err(error) => Err(error.into()),
         };
@@ -2145,6 +2148,9 @@ fn display_image_with_header(
 /// it writes the text, so the watcher often reports the file while it is
 /// still empty. A later event for the file shows the text.
 ///
+/// A path that is gone at the read holds nothing to show. [`open_new_file`]
+/// holds that rule for each reader of monitor mode.
+///
 /// # Arguments
 /// * `path` - The path that the watcher reported.
 ///
@@ -2154,15 +2160,16 @@ fn display_image_with_header(
 /// is binary.
 ///
 /// # Errors
-/// The error of the read when the file does not read for a different cause,
-/// such as a permission that the user does not have. The error does not name
-/// the path, because the caller puts the path in front of it.
+/// The error of the open or the read when the file does not read for a
+/// different cause, such as a permission that the user does not have. The
+/// error does not name the path, because the caller puts the path in front of
+/// it.
 fn read_new_text_file(path: &Path) -> io::Result<Option<String>> {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
+    let Some(mut file) = open_new_file(path)? else {
+        return Ok(None);
     };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
 
     if bytes.is_empty() || bytes.contains(&0) {
         return Ok(None);
@@ -2182,24 +2189,69 @@ fn read_new_text_file(path: &Path) -> io::Result<Option<String>> {
 /// before the read. A program can write to the file between such a check and
 /// the read.
 ///
+/// A path that is gone at the read holds no image either. The screenshot tool
+/// of macOS writes a temporary file and then renames it, so the event for the
+/// temporary name arrives after the file is gone. [`open_new_file`] holds that
+/// rule for each reader of monitor mode.
+///
 /// # Arguments
 /// * `path` - The path that the watcher reported.
 ///
 /// # Returns
 /// `Some` with the bytes of the file when monitor mode shows it. `None` when
-/// monitor mode ignores the file, because it is empty.
+/// monitor mode ignores the file, because the file is gone or it is empty.
 ///
 /// # Errors
-/// The error of the read when the file does not read. The error does not name
-/// the path, because the caller puts the path in front of it.
+/// The error of the open or the read when the file does not read for a
+/// different cause, such as a permission that the user does not have. The
+/// error does not name the path, because the caller puts the path in front of
+/// it.
 fn read_new_image_file(path: &Path) -> io::Result<Option<Vec<u8>>> {
-    let bytes = fs::read(path)?;
+    let Some(mut file) = open_new_file(path)? else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
 
     if bytes.is_empty() {
         return Ok(None);
     }
 
     Ok(Some(bytes))
+}
+
+/// Open a file that monitor mode found, and ignore a path that is gone.
+///
+/// A program often writes a temporary file and then renames or removes it. The
+/// event for such a file arrives after the file is gone, so a path that is gone
+/// is not a failure. [`Monitor::handle`] checks the path before the read, but
+/// the program can rename or remove the file after that check. So each reader
+/// of monitor mode applies the rule again here, on the result of the open.
+///
+/// The open is the one step where the file can go away. On Unix, a file that
+/// is open stays readable after a rename or a removal of its path. The read
+/// after the open thus gives the bytes of the file.
+///
+/// The rule looks only at the error of this open. An error of kind `NotFound`
+/// from a different step, such as the display, does not show that the path is
+/// gone. Monitor mode reports such an error.
+///
+/// # Arguments
+/// * `path` - The path that the watcher reported.
+///
+/// # Returns
+/// `Some` with the open file. `None` when no file is at the path.
+///
+/// # Errors
+/// The error of the open when the open fails for a different cause, such as a
+/// permission that the user does not have. The error does not name the path,
+/// because the caller puts the path in front of it.
+fn open_new_file(path: &Path) -> io::Result<Option<fs::File>> {
+    match fs::File::open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 /// Print the content of a text file to standard output.
