@@ -2143,18 +2143,9 @@ fn display_image_with_header(
 /// of `main` does not come here: a file that the user names must read as text,
 /// or `ic` fails.
 ///
-/// A file is text when its bytes are valid UTF-8 and [`is_plain_text`] accepts
-/// the decoded text. Every other file is binary, and monitor mode ignores it.
-/// A decode alone is not sufficient. Bytes that are only NUL bytes are valid
-/// UTF-8, and so are the bytes of an escape sequence. The rule thus looks at
-/// each character after the decode.
-///
-/// An empty file holds nothing to show either. A program makes a file before
-/// it writes the text, so the watcher often reports the file while it is
-/// still empty. A later event for the file shows the text.
-///
 /// A path that is gone at the read holds nothing to show. [`open_new_file`]
-/// holds that rule for each reader of monitor mode.
+/// holds that rule for each reader of monitor mode. [`read_text_to_show`]
+/// holds the rule for the content of the file.
 ///
 /// # Arguments
 /// * `path` - The path that the watcher reported.
@@ -2170,11 +2161,37 @@ fn display_image_with_header(
 /// error does not name the path, because the caller puts the path in front of
 /// it.
 fn read_new_text_file(path: &Path) -> io::Result<Option<String>> {
-    let Some(mut file) = open_new_file(path)? else {
+    let Some(file) = open_new_file(path)? else {
         return Ok(None);
     };
+    read_text_to_show(file)
+}
+
+/// Read the content of a file that monitor mode found, and decide whether it
+/// is text to show.
+///
+/// Content is text when its bytes are valid UTF-8 and [`is_plain_text`]
+/// accepts the decoded text. All other content is binary, and monitor mode
+/// ignores it. A decode alone is not sufficient. Bytes that are only NUL bytes
+/// are valid UTF-8, and so are the bytes of an escape sequence. The rule thus
+/// looks at each character after the decode.
+///
+/// Empty content holds nothing to show either. A program makes a file before
+/// it writes the text, so the watcher often reports the file while it is
+/// still empty. A later event for the file shows the text.
+///
+/// # Arguments
+/// * `reader` - The source of the content, such as a file that is open.
+///
+/// # Returns
+/// `Some` with the content when monitor mode shows it. `None` when monitor
+/// mode ignores the content, because it is empty or it is binary.
+///
+/// # Errors
+/// The error of the read when the content does not read.
+fn read_text_to_show(mut reader: impl Read) -> io::Result<Option<String>> {
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    reader.read_to_end(&mut bytes)?;
 
     if bytes.is_empty() {
         return Ok(None);
