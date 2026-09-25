@@ -3658,6 +3658,47 @@ mod tests {
         );
     }
 
+    /// A new binary file in monitor mode gives no output.
+    ///
+    /// Monitor mode reads each path that is not an image and not a video as
+    /// text. A binary file, such as a database, an archive, or a lock file,
+    /// holds no text to show. Monitor mode reported a failure for a file that
+    /// is not UTF-8, and it printed a header and then the raw bytes for a file
+    /// that holds NUL bytes. Neither output helps the user, so the correct
+    /// outcome is no output at all.
+    ///
+    /// The file `blob.bin` holds bytes that are not valid UTF-8. The file
+    /// `zeros.dat` holds only NUL bytes. These bytes are valid UTF-8, so the
+    /// rule must see a NUL byte, not only a failure to decode.
+    #[test]
+    fn a_new_binary_file_in_monitor_mode_gives_no_output() {
+        let directory = TemporaryDirectory::new();
+        let mut monitor = MonitorUnderTest::new();
+
+        let written: Vec<(&str, Written)> = [
+            (
+                "blob.bin",
+                vec![0xff, 0xfe, 0x80, 0x81, 0xc0, 0xc1, 0xf5, 0x41, 0x0a],
+            ),
+            ("zeros.dat", vec![0x00; 64]),
+        ]
+        .into_iter()
+        .map(|(name, bytes)| (name, monitor.handle(&directory.file_of(name, &bytes))))
+        .collect();
+
+        assert!(
+            written
+                .iter()
+                .all(|(_, output)| *output == Written::default()),
+            "a new binary file must give no output, but these files gave output: {written:#?}"
+        );
+        assert!(
+            monitor.image_headers().is_empty(),
+            "a binary file must not reach the image display, but it got {:?}",
+            monitor.image_headers()
+        );
+    }
+
     // =========================================================================
     // Tests for ensure_file_exists
     // =========================================================================
