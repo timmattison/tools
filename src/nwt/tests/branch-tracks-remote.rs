@@ -1,5 +1,6 @@
-//! End-to-end coverage for `nwt -b <name>` when a remote holds `<name>`
-//! (issue #528).
+//! End-to-end coverage for a new branch `<name>` when a remote holds `<name>`
+//! (issue #528). The name comes from `-b <name>`, from the bare-number
+//! shorthand `-b 33`, or from `branch = "<name>"` in `~/.nwt.toml`.
 //!
 //! When the clone has no local branch `<name>` and exactly one remote holds
 //! it, the new branch starts at `<remote>/<name>` and tracks it. Without this,
@@ -18,7 +19,9 @@
 //! change the answer. The run sets the two variables on the child only.
 //! `support::nwt_command` also gives each run a private home directory, so a
 //! `~/.nwt.toml` of the host cannot remove the `Tracking` line or a refusal
-//! that these tests read, and cannot send a run through `-c`.
+//! that these tests read, and cannot send a run through `-c`. The test of the
+//! `branch` key gives its run a home of its own, in the temporary directory of
+//! its fixture, and writes the `~/.nwt.toml` of that home.
 
 mod support;
 
@@ -174,13 +177,26 @@ fn upstream_of(repo: &Path, branch: &str) -> String {
 /// Run `nwt` in the clone with `args`, without the `.env` copy and the hook
 /// bootstrap, and hand back what it wrote.
 fn run_nwt(fixture: &Fixture, args: &[&str]) -> Output {
-    nwt_command(&fixture.clone)
+    run_nwt_under_home(fixture, None, args)
+}
+
+/// Run `nwt` as [`run_nwt`] does, and hand back what it wrote.
+///
+/// `home`, when it is there, becomes the home directory of the child, so the
+/// child reads the `~/.nwt.toml` of that directory. `home` wins over the
+/// private home of `support::nwt_command`, because this call sets `HOME` after
+/// `nwt_command` sets it.
+fn run_nwt_under_home(fixture: &Fixture, home: Option<&Path>, args: &[&str]) -> Output {
+    let mut command = nwt_command(&fixture.clone);
+    command
         .args(["--no-copy-env", "--no-bootstrap-hooks"])
         .args(args)
         .env("GIT_CONFIG_GLOBAL", fixture.empty_config.path())
-        .env("GIT_CONFIG_SYSTEM", fixture.empty_config.path())
-        .output()
-        .expect("run the nwt binary")
+        .env("GIT_CONFIG_SYSTEM", fixture.empty_config.path());
+    if let Some(home) = home {
+        command.env("HOME", home);
+    }
+    command.output().expect("run the nwt binary")
 }
 
 /// Demand that `output` is a run that worked, and hand back the worktree path
@@ -323,6 +339,61 @@ fn the_bare_number_shorthand_tracks_the_remote_branch_too() {
         upstream_of(&fixture.clone, REMOTE_BRANCH),
         format!("{REMOTE}/{REMOTE_BRANCH}"),
         "-b {REMOTE_BRANCH_NUMBER} must track {REMOTE}/{REMOTE_BRANCH}"
+    );
+}
+
+/// The file name of the `nwt` configuration in a home directory.
+const CONFIG_FILE: &str = ".nwt.toml";
+
+/// Make a home directory in the temporary directory of `fixture`, write a
+/// [`CONFIG_FILE`] into it that sets `branch` to `branch`, and hand back the
+/// home directory.
+///
+/// The home is beside the clone, so it is private to one test, and it goes
+/// away with the fixture.
+fn home_whose_config_names_the_branch(fixture: &Fixture, branch: &str) -> PathBuf {
+    let home = fixture
+        .clone
+        .parent()
+        .expect("the clone has a parent")
+        .join("home");
+    fs::create_dir(&home).unwrap_or_else(|e| panic!("create {}: {e}", home.display()));
+    write_file(&home, CONFIG_FILE, &format!("branch = \"{branch}\"\n"));
+    home
+}
+
+/// `branch = "<name>"` in `~/.nwt.toml` is a source of the name, as `-b <name>`
+/// is. The run gives no `-b`. The lookup reads the name from the
+/// configuration, so the new branch starts at `<remote>/<name>` and tracks it,
+/// the directory takes the branch name, and stderr names the tracked branch.
+#[test]
+fn a_branch_from_the_config_file_starts_at_the_remote_branch_and_tracks_it() {
+    let fixture = clone_whose_remote_holds(REMOTE_BRANCH);
+    let home = home_whose_config_names_the_branch(&fixture, REMOTE_BRANCH);
+
+    let output = run_nwt_under_home(&fixture, Some(&home), &[]);
+    let worktree = created_worktree(&output);
+
+    assert_worktree_is_named(&fixture, &worktree, REMOTE_BRANCH);
+    assert_eq!(
+        rev_parse(&worktree, "HEAD"),
+        rev_parse(&fixture.clone, &remote_ref(REMOTE_BRANCH)),
+        "branch in {CONFIG_FILE} must start at {REMOTE}/{REMOTE_BRANCH}, and not at HEAD of \
+         the clone.\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        upstream_of(&fixture.clone, REMOTE_BRANCH),
+        format!("{REMOTE}/{REMOTE_BRANCH}"),
+        "branch in {CONFIG_FILE} must track {REMOTE}/{REMOTE_BRANCH}"
+    );
+
+    let expected = format!("{TRACKING_WORD} {REMOTE}/{REMOTE_BRANCH}");
+    let lines = stderr_lines(&output);
+    assert!(
+        lines.contains(&expected),
+        "stderr must hold the line {expected:?}, but it holds:\n{}",
+        lines.join("\n")
     );
 }
 
