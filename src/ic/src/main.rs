@@ -441,11 +441,12 @@ where
 
     /// Handle one path that the watcher reported.
     ///
-    /// A path that this run already handled gives no output. An image goes to
-    /// the image display. A path that is not an image and not a video is read
-    /// as text, and the text comes after a header line. A path goes into the
-    /// record only when its display succeeds, so a later event for a path that
-    /// failed tries the path again.
+    /// A path that this run already handled gives no output. A path that is
+    /// not a regular file, such as a directory, gives no output. An image goes
+    /// to the image display. A path that is not an image and not a video is
+    /// read as text, and the text comes after a header line. A path goes into
+    /// the record only when its display succeeds, so a later event for a path
+    /// that failed tries the path again.
     ///
     /// # Arguments
     /// * `path` - The path that the watcher reported.
@@ -465,6 +466,16 @@ where
         err: &mut impl Write,
     ) -> io::Result<()> {
         if self.seen.contains(path) {
+            return Ok(());
+        }
+
+        // Only a regular file holds an image or text. A directory, a FIFO, a
+        // socket, or a device gives no output, and it does not go into the
+        // record. This check stands before any open of the path, because an
+        // open of a FIFO waits for a writer and monitor mode then stops.
+        // `fs::metadata` follows a symbolic link, so a link to a regular file
+        // counts as a regular file.
+        if fs::metadata(path).is_ok_and(|metadata| !metadata.is_file()) {
             return Ok(());
         }
 
