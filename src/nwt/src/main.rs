@@ -1197,8 +1197,17 @@ impl NewBranchStartError {
 /// worktree.
 ///
 /// `main` calls this for each run that makes a new branch `name`: `-b <name>`,
-/// the bare-number shorthand, and `branch` in `~/.nwt.toml`. The rules are the
-/// rules of the checkout DWIM of git, through [`find_remote_tracking_branch`]:
+/// the bare-number shorthand, and `branch` in `~/.nwt.toml`.
+///
+/// The lookup runs only when git reports that no local branch `name` exists
+/// ([`branch_known_absent`]). When git does not report the branch as absent,
+/// because the branch exists or because git cannot answer, the answer is
+/// `None`. `git worktree add -b` then refuses a branch that exists with the
+/// error that it gave before the lookup existed. That error names the problem
+/// that the user has, and a refusal of the lookup does not.
+///
+/// When no local branch `name` exists, the rules are the rules of the checkout
+/// DWIM of git, through [`find_remote_tracking_branch`]:
 ///
 /// 1. When exactly one remote holds `name`, or `checkout.defaultRemote` picks
 ///    one of the remotes that hold it, the answer is that remote-tracking
@@ -1221,6 +1230,10 @@ fn new_branch_start(
     repo_root: &Path,
     name: &str,
 ) -> Result<Option<RemoteTrackingBranch>, NewBranchStartError> {
+    if !branch_known_absent(repo_root, name) {
+        return Ok(None);
+    }
+
     match find_remote_tracking_branch(repo_root, name).map_err(NewBranchStartError::Lookup)? {
         RemoteTrackingMatch::One(branch) => Ok(Some(branch)),
         RemoteTrackingMatch::Ambiguous(candidates) => {
