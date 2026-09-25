@@ -968,6 +968,18 @@ impl RemoteLookupError {
     }
 }
 
+/// The characters that `git for-each-ref` reads as wildmatch characters in
+/// its pattern: `*`, `?`, `[` and `\`.
+///
+/// [`find_remote_tracking_branch`] puts the branch name into a pattern, so a
+/// name that holds one of these characters matches refs of other names. Git
+/// refuses each of these characters in a ref name (`git check-ref-format`).
+/// So no remote-tracking branch has such a name, and the lookup answers
+/// [`RemoteTrackingMatch::None`] for it without git. The rule holds for both
+/// callers of the lookup: `-b <name>` and the `-c <name>` of
+/// [`resolve_checkout_ref`].
+const REF_PATTERN_GLOB_CHARACTERS: [char; 4] = ['*', '?', '[', '\\'];
+
 /// Find the remote-tracking branch `refs/remotes/<remote>/<name>` that the
 /// checkout DWIM of git takes for `name`.
 ///
@@ -982,6 +994,10 @@ impl RemoteLookupError {
 ///    `checkout.defaultRemote` picks none of them, the answer is
 ///    [`RemoteTrackingMatch::Ambiguous`] with each candidate.
 /// 3. When no such ref exists, the answer is [`RemoteTrackingMatch::None`].
+///
+/// A `name` that holds one of [`REF_PATTERN_GLOB_CHARACTERS`] is not a ref
+/// name. The answer for it is [`RemoteTrackingMatch::None`], and no git child
+/// runs.
 ///
 /// Two callers use it. [`resolve_checkout_ref`] runs its own first step
 /// (`git rev-parse`) before it, for `-c <name>`. [`new_branch_start`] runs it
@@ -1006,6 +1022,12 @@ fn find_remote_tracking_branch(
     repo_root: &Path,
     name: &str,
 ) -> Result<RemoteTrackingMatch, RemoteLookupError> {
+    // Git refuses these characters in a ref name, so the answer is known
+    // before git runs. In the pattern, each one matches refs of other names.
+    if name.contains(REF_PATTERN_GLOB_CHARACTERS) {
+        return Ok(RemoteTrackingMatch::None);
+    }
+
     // A `*` in a `for-each-ref` pattern does not match a `/`, so each listed
     // ref is `refs/remotes/<one remote>/<name>`.
     let mut list = production_git_command(repo_root);
