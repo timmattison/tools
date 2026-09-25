@@ -4018,6 +4018,56 @@ mod tests {
         );
     }
 
+    /// An image that is empty at its first event shows at a later event.
+    ///
+    /// A program such as `curl -o shot.png`, an editor, or a screenshot tool
+    /// makes the file first, and the watcher reports the new empty file before
+    /// the program writes the bytes. Monitor mode sent the empty file to the
+    /// image display. Each event then gave a header on standard output and an
+    /// `unexpected end of file` error on standard error. An empty file holds
+    /// nothing to show, so the first event gives no output, and the path stays
+    /// out of the record.
+    ///
+    /// One monitor handles the path two times, as monitor mode does. The
+    /// second event must reach the image display exactly one time. The empty
+    /// event thus did not reach the display, and it did not put the path into
+    /// the record.
+    #[test]
+    fn an_image_that_is_empty_at_its_first_event_shows_at_a_later_event() {
+        let directory = TemporaryDirectory::new();
+        let shot = directory.file_of("shot.png", b"");
+        let mut monitor = MonitorUnderTest::new();
+
+        let first = monitor.handle(&shot);
+        let headers_after_first = monitor.image_headers();
+        fs::write(&shot, picture_bytes_in(image::ImageFormat::Png))
+            .expect("a write to the temporary directory");
+        let second = monitor.handle(&shot);
+
+        assert_eq!(
+            first,
+            Written::default(),
+            "an empty image must give no output"
+        );
+        assert!(
+            headers_after_first.is_empty(),
+            "an empty image must not reach the image display, but it got {headers_after_first:?}"
+        );
+        assert_eq!(
+            second,
+            Written::default(),
+            "an image that displays must give no text of its own"
+        );
+        assert_eq!(
+            monitor.image_headers(),
+            vec![vec![
+                String::new(),
+                format!("Found new image: {}", shot.display())
+            ]],
+            "a later event must reach the image display one time, with its header"
+        );
+    }
+
     /// A text file that does not read for a different cause gives one error,
     /// and the error names the cause.
     ///
