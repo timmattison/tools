@@ -451,6 +451,9 @@ where
     /// * Monitor mode ignores a binary file. It gives no output. A file is
     ///   binary when its bytes are not valid UTF-8, or when they hold a NUL
     ///   byte.
+    /// * Monitor mode ignores an empty file that is not an image and not a
+    ///   video. It gives no output. The watcher often reports a new file
+    ///   before the program writes the text, and a later event shows the text.
     /// * An image goes to the image display.
     /// * A path that is not an image and not a video is read as text. The text
     ///   comes after a header line.
@@ -516,12 +519,15 @@ where
         } else if is_text_file(path) {
             // The header comes after the read, when the bytes are known to be
             // text. A file can go away between the check above and the read,
-            // and a binary file holds no text, so neither gives a header.
+            // and an empty file or a binary file holds no text, so none of
+            // them gives a header.
             //
-            // A binary file stays out of the record on purpose. A text file
-            // that a program is in the middle of writing can end in half of a
-            // character of more than one byte. That file is not UTF-8 now, but
-            // a later event for it shows it when it is complete.
+            // An empty file and a binary file stay out of the record on
+            // purpose. A program writes a text file after it makes it, so the
+            // file can be empty at its first event. A text file that a program
+            // is in the middle of writing can also end in half of a character
+            // of more than one byte, so that file is not UTF-8 now. A later
+            // event for either file shows it when it is complete.
             match read_new_text_file(path) {
                 Ok(Some(contents)) => {
                     writeln!(out, "\nFound new text file: {}", path.display())?;
@@ -1883,12 +1889,17 @@ fn display_image_from_file(file_path: &Path, args: &Args, header: &[String]) -> 
 /// NUL byte. Bytes that are only NUL bytes are valid UTF-8, so the check for a
 /// NUL byte is necessary. A text file never holds a NUL byte.
 ///
+/// An empty file holds nothing to show either. A program makes a file before
+/// it writes the text, so the watcher often reports the file while it is
+/// still empty. A later event for the file shows the text.
+///
 /// # Arguments
 /// * `path` - The path that the watcher reported.
 ///
 /// # Returns
 /// `Some` with the content of the file when monitor mode shows it. `None` when
-/// monitor mode ignores the file, because the file is gone or it is binary.
+/// monitor mode ignores the file, because the file is gone, it is empty, or it
+/// is binary.
 ///
 /// # Errors
 /// The error of the read when the file does not read for a different cause,
@@ -1901,7 +1912,7 @@ fn read_new_text_file(path: &Path) -> io::Result<Option<String>> {
         Err(error) => return Err(error),
     };
 
-    if bytes.contains(&0) {
+    if bytes.is_empty() || bytes.contains(&0) {
         return Ok(None);
     }
 
