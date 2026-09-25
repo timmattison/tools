@@ -1216,6 +1216,16 @@ fn resolve_sparse_excludes(
     Ok(dirs)
 }
 
+/// The one stderr line after a run that makes a new branch that tracks
+/// `branch`, for example `Tracking origin/issue-33`.
+///
+/// The line tells the user which start point `nwt` used. `main` prints it to
+/// stderr after the path, because the shell wrapper reads the path from
+/// stdout.
+fn tracking_notice(branch: &RemoteTrackingBranch) -> String {
+    format!("Tracking {branch}")
+}
+
 /// The one stderr line that tells the user which directories the new worktree
 /// does not hold, and how to get them.
 ///
@@ -3141,6 +3151,14 @@ fn main() {
                 }
 
                 println!("{}", worktree_path.display());
+
+                // Git reports the upstream it set on stdout, and that stream
+                // goes to null. So this line is the one report of the start
+                // point. The shell wrapper reads the path from stdout, so the
+                // line goes to stderr.
+                if let WorktreeSource::NewBranchTracking(branch) = source {
+                    eprintln!("{}", tracking_notice(branch));
+                }
 
                 // The shell wrapper reads the path from stdout, so the notice
                 // goes to stderr.
