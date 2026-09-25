@@ -4540,6 +4540,115 @@ mod tests {
         );
     }
 
+    /// A reader that fails at each read.
+    ///
+    /// A test puts this reader after the bytes that the text rule can take. A
+    /// rule that reads past those bytes thus gets an error.
+    struct ReaderThatFails;
+
+    impl Read for ReaderThatFails {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("the reader read past the first block"))
+        }
+    }
+
+    /// The text rule of monitor mode reads only the first block of a binary
+    /// file.
+    ///
+    /// The rule read the whole file before it decided that the file is binary.
+    /// An ignored file stays out of the record, so a later event reads it
+    /// again. A browser writes a download, such as a `.crdownload` file, in
+    /// many steps, and each step gives an event. So each event read the whole
+    /// partial file again, and memory use rose to the size of the file at each
+    /// event.
+    ///
+    /// Each reader of this test gives a start of 64 KiB and then fails. A rule
+    /// that reads past its first block thus gives an error, not `None`. So
+    /// 64 KiB bounds the size of the first block that the rule can take. Each
+    /// start is binary. The first start holds NUL bytes, as the start of an
+    /// archive or a partial download does. The second start holds bytes that
+    /// are not UTF-8. The third start holds an escape sequence and then text.
+    #[test]
+    fn the_text_rule_reads_only_the_first_block_of_a_binary_file() {
+        const START_BYTES: usize = 64 * 1024;
+        let mut escape = b"\x1b[2J".to_vec();
+        escape.resize(START_BYTES, b'a');
+
+        let reads: Vec<(&str, io::Result<Option<String>>)> = [
+            ("NUL bytes", vec![0_u8; START_BYTES]),
+            ("bytes that are not UTF-8", vec![0xff_u8; START_BYTES]),
+            ("an escape sequence", escape),
+        ]
+        .into_iter()
+        .map(|(name, start)| {
+            (
+                name,
+                read_text_to_show(io::Cursor::new(start).chain(ReaderThatFails)),
+            )
+        })
+        .collect();
+
+        let not_ignored: Vec<&(&str, io::Result<Option<String>>)> = reads
+            .iter()
+            .filter(|(_, read)| !matches!(read, Ok(None)))
+            .collect();
+        assert!(
+            not_ignored.is_empty(),
+            "a binary start must be ignored after the first block, but the rule gave: {not_ignored:#?}"
+        );
+    }
+
+    /// A text file larger than the first block shows whole in monitor mode.
+    ///
+    /// The text rule decides on a first block of the file, and then it reads
+    /// the rest. The text of this file is the character `日`, which is three
+    /// bytes in UTF-8. No power of two divides by three, so a character sits
+    /// across each block edge that is a power of two. A rule that ignores a
+    /// block that ends in part of a character makes this test fail. A rule
+    /// that shows only the first block makes this test fail too.
+    #[test]
+    fn a_text_file_larger_than_the_first_block_shows_whole_in_monitor_mode() {
+        let directory = TemporaryDirectory::new();
+        let text = format!("{}\n", "日".repeat(30_000));
+        let large = directory.file_of("large.txt", text.as_bytes());
+        let mut monitor = MonitorUnderTest::new();
+
+        let written = monitor.handle(&large);
+
+        assert_eq!(
+            written,
+            Written {
+                stdout: format!("\nFound new text file: {}\n{text}", large.display()),
+                stderr: String::new(),
+            },
+            "a text file larger than the first block must give its header and all of its text"
+        );
+    }
+
+    /// A file with text at the start and a NUL byte later gives no output.
+    ///
+    /// The text rule decides on a first block of the file, and a first block
+    /// of text is not sufficient. The NUL byte of this file is after 64 KiB of
+    /// text, so it is not in the first block. The rule must apply the full
+    /// check to the complete content. A rule that decides on the first block
+    /// alone makes this test fail.
+    #[test]
+    fn a_file_with_text_at_the_start_and_a_nul_byte_later_gives_no_output() {
+        let directory = TemporaryDirectory::new();
+        let mut bytes = "a".repeat(64 * 1024).into_bytes();
+        bytes.extend_from_slice(b"\0\n");
+        let late_nul = directory.file_of("late-nul.txt", &bytes);
+        let mut monitor = MonitorUnderTest::new();
+
+        let written = monitor.handle(&late_nul);
+
+        assert_eq!(
+            written,
+            Written::default(),
+            "a file with a NUL byte after its first block must give no output"
+        );
+    }
+
     // =========================================================================
     // Tests for ensure_file_exists
     // =========================================================================
