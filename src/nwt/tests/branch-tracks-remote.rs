@@ -16,6 +16,9 @@
 //! Each `nwt` run reads an empty global and system git configuration, so a
 //! `checkout.defaultRemote` or a `branch.autoSetupMerge` of the host cannot
 //! change the answer. The run sets the two variables on the child only.
+//! `support::nwt_command` also gives each run a private home directory, so a
+//! `~/.nwt.toml` of the host cannot remove the `Tracking` line or a refusal
+//! that these tests read, and cannot send a run through `-c`.
 
 mod support;
 
