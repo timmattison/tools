@@ -2770,7 +2770,7 @@ nwt --sparse-exclude assets   # Leave the tracked directory assets/ out
 
 ### Options
 
-- `-b, --branch <NAME>`: Create worktree with specific branch name instead of random name
+- `-b, --branch <NAME>`: Create worktree with specific branch name instead of random name. When no local branch of that name exists and the clone has a remote branch of that name, the new branch starts at the remote branch and tracks it. Run `git fetch` first (see Remote branches below)
 - `--random-directory`: Use a random directory name even when `--branch` is given (by default the branch name doubles as the directory name)
 - `-c, --checkout <REF>`: Check out an existing branch/tag/commit instead of creating a new branch
 - `--run <COMMAND>`: Run a command in the new worktree after creation
@@ -2924,7 +2924,7 @@ nwt -b issue-12 --sparse-exclude assets/video --sparse-exclude fixtures/large
 | A path that is not a directory that git tracks at the ref the worktree checks out: a missing path, a file, or a directory that is only on disk | 15 |
 | A value that passes the first row, when git cannot read the ref (for example, a `-c <ref>` that does not exist) | 7 |
 
-The check reads the ref and not the disk, because the files of the new worktree come from the ref. For a `-c <branch>` that only a remote holds, git makes a local branch that tracks the remote branch. nwt then checks the remote branch that git picks: the branch of the one remote that holds it, or of the remote that `checkout.defaultRemote` names. nwt finds that branch at `refs/remotes/<remote>/<branch>`, where the default fetch refspec puts it. A remote with a different fetch refspec can give a different result.
+The check reads the ref and not the disk, because the files of the new worktree come from the ref. For a `-c <branch>` that only a remote holds, git makes a local branch that tracks the remote branch. nwt then checks the remote branch that git picks: the branch of the one remote that holds it, or of the remote that `checkout.defaultRemote` names. For a `-b <name>` that tracks a remote branch, nwt checks the remote branch where the new branch starts (see Remote branches above). nwt finds each remote branch at `refs/remotes/<remote>/<branch>`, where the default fetch refspec puts it. A remote with a different fetch refspec can give a different result.
 
 **Scope.** Only the new worktree is sparse. Git keeps its sparse settings in `.git/worktrees/<name>/config.worktree` and `.git/worktrees/<name>/info/sparse-checkout`. The main worktree, the other worktrees, and later worktrees that nwt makes without the flag stay full.
 
@@ -2975,6 +2975,12 @@ nwt --run "pnpm install"
 Create a worktree from an existing branch:
 ```bash
 nwt -c feature-branch
+```
+
+Create a worktree for issue 33 whose branch `issue-33` tracks `origin/issue-33`:
+```bash
+git fetch
+nwt -b 33
 ```
 
 Create worktree and open in tmux:

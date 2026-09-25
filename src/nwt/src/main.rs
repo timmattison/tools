@@ -1440,8 +1440,9 @@ REMOTE BRANCHES:
 
       - One remote holds the branch. The new branch starts at that remote branch,
         and it tracks it.
-      - More than one remote holds the branch. The remote that the git configuration
-        key 'checkout.defaultRemote' names gives the start point.
+      - More than one remote holds the branch, and the git configuration key
+        'checkout.defaultRemote' names the remote of one of them. The new branch
+        starts at the branch of that remote, and it tracks it.
       - More than one remote holds the branch, and checkout.defaultRemote picks none
         of them. nwt exits 16, and it makes nothing.
       - No remote holds the branch. The new branch starts at HEAD, as before.
@@ -1585,9 +1586,11 @@ SPARSE WORKTREES:
     out. Each of these refusals exits 15. A ref that git cannot read exits 7.
 
     For a '-c BRANCH' that only a remote holds, git makes a local branch that tracks
-    the remote branch. nwt then checks the remote branch that git picks. nwt finds it
-    at 'refs/remotes/REMOTE/BRANCH', so a remote with a different fetch refspec can
-    give a different result.
+    the remote branch. nwt then checks the remote branch that git picks. For a
+    '-b NAME' that tracks a remote branch, nwt checks the remote branch where the new
+    branch starts (see REMOTE BRANCHES). nwt finds each remote branch at
+    'refs/remotes/REMOTE/BRANCH', so a remote with a different fetch refspec can give
+    a different result.
 
     Only the new worktree is sparse. The main worktree, the other worktrees, and
     later worktrees that nwt makes without the flag stay full. There is one
@@ -1643,6 +1646,7 @@ EXAMPLES:
     nwt -b issue-42                  # Branch 'issue-42', directory 'issue-42'
     nwt -b fix login bug             # Branch 'fix-login-bug'
     nwt -b 192 fix pagination        # Branch 'issue-192-fix-pagination'
+    nwt -b 33                        # Branch 'issue-33', which tracks origin/issue-33 if it exists
     nwt -b feature/login             # Branch 'feature/login', directory 'feature_login'
     nwt -b fix --random-directory    # Branch 'fix', random directory name
     nwt -c main                      # Checkout existing 'main' branch
@@ -1690,6 +1694,11 @@ struct Cli {
     /// If the first argument is a bare number, "issue-" is prepended:
     ///   nwt -b 192 fix pagination → branch "issue-192-fix-pagination"
     ///   nwt -b 42                 → branch "issue-42"
+    ///
+    /// When no local branch of that name exists and a remote holds one, the
+    /// new branch starts at the remote branch and tracks it. nwt does not
+    /// fetch, so run `git fetch` first. The REMOTE BRANCHES section of --help
+    /// gives the rules.
     #[arg(short, long, conflicts_with = "checkout", num_args = 1..)]
     branch: Option<Vec<String>>,
 
