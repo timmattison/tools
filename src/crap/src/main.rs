@@ -1633,11 +1633,11 @@ fn format_fork_at_output(
 /// `--here` work). Claude starts through `c` when that name exists, else
 /// through plain `claude`, with the same argv. `c` is resolved through `eval`
 /// so that an alias of that name is expanded at call time (shell aliases are
-/// otherwise not expanded inside function bodies). A `c` that keeps the
-/// session id in its own argv, as `claude-resumable.zsh` does, lets a Zellij
-/// resurrect resume a fork, because the fork argv pins the fork id. If
-/// the binary exits non-zero (session not found, already running, …) its message
-/// is shown and the function does nothing further.
+/// otherwise not expanded inside function bodies). A `c` that keeps the session
+/// id in its own argv lets a Zellij resurrect resume a fork, because the fork
+/// argv pins the fork id. If the binary exits non-zero (session not found,
+/// already running, …) its message is shown and the function does nothing
+/// further.
 ///
 /// The binary speaks one of three output shapes:
 ///
@@ -4843,11 +4843,11 @@ mod tests {
     }
 
     /// In zsh, `c` is often an alias with flags of its own, for example
-    /// `alias c='claude-resumable.zsh --dangerously-skip-permissions --'`. zsh
-    /// expands an alias when it parses a line, and it parses a function body
-    /// when it defines the function, so the function names `c` inside `eval`:
-    /// the alias then expands when the function runs. The fork argv comes
-    /// after the flags of the alias.
+    /// `alias c='my-launcher --dangerously-skip-permissions --'`. zsh expands
+    /// an alias when it parses a line, and it parses a function body when it
+    /// defines the function, so the function names `c` inside `eval`: the alias
+    /// then expands when the function runs. The fork argv comes after the flags
+    /// of the alias.
     #[cfg(unix)]
     #[test]
     fn shell_function_expands_a_c_alias_at_call_time_in_zsh() {
