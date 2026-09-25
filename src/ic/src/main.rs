@@ -3371,6 +3371,20 @@ mod tests {
 
             path
         }
+
+        /// Make a new, empty directory in this directory.
+        ///
+        /// # Arguments
+        /// * `name` - The name of the new directory in this directory.
+        ///
+        /// # Returns
+        /// The path of the new directory.
+        fn directory(&self, name: &str) -> PathBuf {
+            let path = self.path().join(name);
+            fs::create_dir(&path).expect("a new directory in the temporary directory");
+
+            path
+        }
     }
 
     impl Drop for TemporaryDirectory {
@@ -3523,6 +3537,40 @@ mod tests {
                 format!("Found new image: {}", picture.display())
             ]],
             "an image must reach the image display one time, with its header"
+        );
+    }
+
+    /// A new directory in monitor mode gives no output.
+    ///
+    /// The watcher reports a new directory with a create event, as it reports
+    /// a new file. Monitor mode routed each path by its extension alone, so a
+    /// directory went to the text display. That display printed a header and
+    /// then a failure, and each later event for the directory printed the
+    /// failure again. A directory holds no text and no image, so the correct
+    /// outcome is no output at all.
+    ///
+    /// The directory `album.png` holds the rule to the image display too. The
+    /// extension of an image in its name does not make a directory an image.
+    #[test]
+    fn a_new_directory_in_monitor_mode_gives_no_output() {
+        let directory = TemporaryDirectory::new();
+        let mut monitor = MonitorUnderTest::new();
+
+        let written: Vec<(&str, Written)> = ["subdir", "album.png"]
+            .into_iter()
+            .map(|name| (name, monitor.handle(&directory.directory(name))))
+            .collect();
+
+        assert!(
+            written
+                .iter()
+                .all(|(_, output)| *output == Written::default()),
+            "a new directory must give no output, but these directories gave output: {written:#?}"
+        );
+        assert!(
+            monitor.image_headers().is_empty(),
+            "a directory must not reach the image display, but it got {:?}",
+            monitor.image_headers()
         );
     }
 
