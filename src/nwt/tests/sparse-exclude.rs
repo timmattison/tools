@@ -1501,6 +1501,61 @@ fn a_failed_read_tree_deletes_the_branch_that_the_checkout_dwim_made() {
     assert_only_a_remote_holds_the_branch(&clone);
 }
 
+/// Each `branch.<branch>.*` line of the local configuration of `repo`.
+///
+/// `git worktree add --track -b <branch>` writes `branch.<branch>.remote` and
+/// `branch.<branch>.merge` there. Only the repository configuration counts, so
+/// a key of the host configuration cannot change the answer.
+#[cfg(unix)]
+fn branch_configuration(repo: &Path, branch: &str) -> Vec<String> {
+    let section = format!("branch.{branch}.");
+    git_stdout(repo, &["config", "--local", "--list"])
+        .lines()
+        .filter(|line| line.starts_with(&section))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A sparse `-b <branch>` run that tracks a remote branch removes the branch
+/// and its upstream configuration, when `git read-tree -mu HEAD` fails.
+///
+/// The clone holds [`REMOTE_ONLY_BRANCH`] only as `origin/foo`, so
+/// `nwt -b foo` runs `git worktree add --track -b foo <path> <full ref>`. That
+/// add makes the local `foo` and writes `branch.foo.remote` and
+/// `branch.foo.merge`. The run made all three, so the cleanup takes all three
+/// back with the worktree. `HEAD` of the clone does not track [`HEAVY_DIR`],
+/// so the check passes only when the run reads `origin/foo`. That proves that
+/// the run took the tracked branch.
+#[cfg(unix)]
+#[test]
+fn a_failed_read_tree_removes_a_tracked_branch_and_its_upstream() {
+    let (_source_temp, source) = source_with_a_heavy_remote_branch();
+    let (temp, clone) = clone_of(&source);
+    assert_only_a_remote_holds_the_branch(&clone);
+    assert!(
+        branch_configuration(&clone, REMOTE_ONLY_BRANCH).is_empty(),
+        "the fixture clone must hold no branch.{REMOTE_ONLY_BRANCH}.* configuration"
+    );
+    let before = local_branches(&clone);
+    let fake = FakeGit::refusing(&["read-tree"]);
+
+    let output = run_nwt_with_fake_git(
+        &clone,
+        &fake,
+        &["-b", REMOTE_ONLY_BRANCH, "--sparse-exclude", HEAVY_DIR],
+    );
+
+    assert_the_failed_step_left_nothing(&temp, &clone, &before, &output);
+    assert_only_a_remote_holds_the_branch(&clone);
+    let left = branch_configuration(&clone, REMOTE_ONLY_BRANCH);
+    assert!(
+        left.is_empty(),
+        "the run must remove the upstream configuration of the branch it made, but the \
+         clone holds:\n{}",
+        left.join("\n")
+    );
+}
+
 /// Demand that `output` is a run that failed with exit 7 and printed no path.
 fn assert_failed_without_a_path(output: &Output) {
     let stdout = String::from_utf8_lossy(&output.stdout);
