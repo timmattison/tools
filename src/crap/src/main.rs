@@ -97,11 +97,12 @@
 //! enforces by allowlisting every program the binary may spawn.
 //!
 //! Because a binary cannot change its parent shell's working directory (nor see
-//! shell aliases such as `c`), the user-facing `crap` command is a shell
-//! function installed via `crap --shell-setup`. This binary resolves the session
-//! id — printing the original directory to resume from, or (for `--here`, and
-//! for a cross-user hit) importing the transcript into the right project folder
-//! and printing what the function should run and clean up.
+//! the shell alias that `CRAP_LAUNCHER` can name), the user-facing `crap`
+//! command is a shell function installed via `crap --shell-setup`. This binary
+//! resolves the session id — printing the original directory to resume from,
+//! or (for `--here`, and for a cross-user hit) importing the transcript into
+//! the right project folder and printing what the function should run and
+//! clean up.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -1630,14 +1631,18 @@ fn format_fork_at_output(
 ///
 /// `crap` shadows the binary, so the function reaches the binary explicitly via
 /// `command crap`, forwarding all arguments (so flags like `--force` and
-/// `--here` work). Claude starts through `c` when that name exists, else
-/// through plain `claude`, with the same argv. `c` is resolved through `eval`
-/// so that an alias of that name is expanded at call time (shell aliases are
-/// otherwise not expanded inside function bodies). A `c` that keeps the session
-/// id in its own argv lets a Zellij resurrect resume a fork, because the fork
-/// argv pins the fork id. If the binary exits non-zero (session not found,
-/// already running, …) its message is shown and the function does nothing
-/// further.
+/// `--here` work). The helper `__crap_launch` starts Claude, with the same argv
+/// on every path. It starts Claude through the shell text in `CRAP_LAUNCHER`
+/// when that variable is set and not empty, else through `clauded` when that
+/// name exists, else through plain `claude`. The function never guesses at a
+/// generic name such as `c`, because many users give `c` to a command that is
+/// not Claude. The helper evaluates the launcher through `eval`, so an alias is
+/// expanded at call time (shell aliases are otherwise not expanded inside
+/// function bodies), and a launcher with flags of its own works. A launcher
+/// that keeps the session id in its own argv lets a Zellij resurrect resume a
+/// fork, because the fork argv pins the fork id. If the binary exits non-zero
+/// (session not found, already running, …) its message is shown and the
+/// function does nothing further.
 ///
 /// The binary speaks one of three output shapes:
 ///
@@ -1672,6 +1677,20 @@ fn format_fork_at_output(
 /// the same lookup as `crap <new-id>`. So the line shows exactly when
 /// `crap <new-id>` can resume the fork.
 const SHELL_CODE: &str = r#"
+# Start Claude with the argv in "$@". CRAP_LAUNCHER holds the launcher as shell
+# text: an alias, a function, or a command with flags. Else clauded starts
+# Claude when it exists, else plain claude does. A shell does not expand an
+# alias in a function body that it parsed before the alias existed, and eval
+# parses the text when this function runs.
+function __crap_launch() {
+    if [ -n "${CRAP_LAUNCHER:-}" ]; then
+        eval "$CRAP_LAUNCHER"' "$@"'
+    elif command -v clauded >/dev/null 2>&1; then
+        eval 'clauded "$@"'
+    else
+        claude "$@"
+    fi
+}
 function crap() {
     # These flags make the binary print to stdout and exit 0 without mutating
     # the parent shell: --status queries, --help/-h/--version/-V emit
@@ -1733,16 +1752,12 @@ function crap() {
         # Build the resume argv: always --fork-session, so the original
         # transcript is left untouched, and always --session-id with the id
         # that the binary supplied, so the fork id is known after Claude exits.
-        # A launcher that keeps that id in its own argv, such as the one behind
-        # `c`, then resumes the fork after a Zellij resurrect, not the original.
+        # A launcher in CRAP_LAUNCHER that keeps that id in its own argv then
+        # resumes the fork after a Zellij resurrect, not the original.
         # The earlier "command crap" call has already consumed the function's
         # own arguments, so reusing the positional parameters here is safe.
         set -- --resume "$__crap_session" --fork-session --session-id "$__crap_newid"
-        if command -v c >/dev/null 2>&1; then
-            eval 'c "$@"'
-        else
-            claude "$@"
-        fi
+        __crap_launch "$@"
         if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
             kill "$__crap_watcher" 2>/dev/null
             rm -f -- "$__crap_link"
@@ -1760,11 +1775,7 @@ function crap() {
     __crap_session=${__crap_out%%$'\n'*}
     __crap_dir=${__crap_out#*$'\n'}
     cd -- "$__crap_dir" || return 1
-    if command -v c >/dev/null 2>&1; then
-        eval 'c --resume "$__crap_session"'
-    else
-        claude --resume "$__crap_session"
-    fi
+    __crap_launch --resume "$__crap_session"
 }
 "#;
 
@@ -4320,8 +4331,10 @@ mod tests {
         // is the remainder (so a path with embedded newlines stays whole).
         assert!(SHELL_CODE.contains("__crap_session=${__crap_out%%$'\\n'*}"));
         assert!(SHELL_CODE.contains("__crap_dir=${__crap_out#*$'\\n'}"));
-        assert!(SHELL_CODE.contains("eval 'c --resume \"$__crap_session\"'"));
-        assert!(SHELL_CODE.contains("claude --resume"));
+        // Both paths start Claude through the one launcher helper.
+        assert!(SHELL_CODE.contains("function __crap_launch()"));
+        assert!(SHELL_CODE.contains("__crap_launch --resume \"$__crap_session\""));
+        assert!(SHELL_CODE.contains("__crap_launch \"$@\""));
     }
 
     #[test]
