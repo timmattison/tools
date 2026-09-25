@@ -279,3 +279,84 @@ fn quiet_prints_no_tracking_line_and_still_tracks() {
         "the new branch must track {REMOTE}/{REMOTE_BRANCH} under --quiet too"
     );
 }
+
+/// The bare number that the shorthand turns into [`REMOTE_BRANCH`].
+const REMOTE_BRANCH_NUMBER: &str = "33";
+
+/// `-b 33` becomes `-b issue-33`, and the lookup reads the branch name after
+/// that step. So the shorthand gives the same result as the full name: the
+/// directory `issue-33`, a start at `origin/issue-33`, and that upstream.
+#[test]
+fn the_bare_number_shorthand_tracks_the_remote_branch_too() {
+    let fixture = clone_whose_remote_holds(REMOTE_BRANCH);
+
+    let output = run_nwt(&fixture, &["-b", REMOTE_BRANCH_NUMBER]);
+    let worktree = created_worktree(&output);
+
+    assert_worktree_is_named(&fixture, &worktree, REMOTE_BRANCH);
+    assert_eq!(
+        rev_parse(&worktree, "HEAD"),
+        rev_parse(&fixture.clone, &remote_ref(REMOTE_BRANCH)),
+        "-b {REMOTE_BRANCH_NUMBER} must start at {REMOTE}/{REMOTE_BRANCH}"
+    );
+    assert_eq!(
+        upstream_of(&fixture.clone, REMOTE_BRANCH),
+        format!("{REMOTE}/{REMOTE_BRANCH}"),
+        "-b {REMOTE_BRANCH_NUMBER} must track {REMOTE}/{REMOTE_BRANCH}"
+    );
+}
+
+/// A branch that no remote holds.
+const LOCAL_ONLY_BRANCH: &str = "issue-44";
+
+/// When no remote holds `<name>`, the new branch starts at `HEAD` of the
+/// clone and has no upstream, as before the lookup existed. No line names a
+/// tracked branch.
+#[test]
+fn a_branch_that_no_remote_holds_starts_at_head_without_an_upstream() {
+    let fixture = clone_whose_remote_holds(REMOTE_BRANCH);
+    let remote_ref_of_the_name = remote_ref(LOCAL_ONLY_BRANCH);
+    assert!(
+        !run_git(
+            &fixture.clone,
+            &["show-ref", "--verify", "--quiet", &remote_ref_of_the_name]
+        ),
+        "the fixture clone must not hold {remote_ref_of_the_name}"
+    );
+
+    let output = run_nwt(&fixture, &["-b", LOCAL_ONLY_BRANCH]);
+    let worktree = created_worktree(&output);
+
+    assert_worktree_is_named(&fixture, &worktree, LOCAL_ONLY_BRANCH);
+    assert_eq!(
+        rev_parse(&worktree, "HEAD"),
+        rev_parse(&fixture.clone, "HEAD"),
+        "the worktree must start at HEAD of the clone"
+    );
+
+    // The branch must exist, so that the failed upstream question below means
+    // "no upstream" and not "no branch".
+    let local = format!("refs/heads/{LOCAL_ONLY_BRANCH}");
+    assert!(
+        run_git(&fixture.clone, &["show-ref", "--verify", "--quiet", &local]),
+        "the run must make {local}"
+    );
+    assert!(
+        !run_git(
+            &fixture.clone,
+            &[
+                "rev-parse",
+                "--abbrev-ref",
+                &format!("{LOCAL_ONLY_BRANCH}@{{upstream}}"),
+            ]
+        ),
+        "{LOCAL_ONLY_BRANCH} must have no upstream"
+    );
+
+    let lines = stderr_lines(&output);
+    assert!(
+        !lines.iter().any(|line| line.starts_with(TRACKING_WORD)),
+        "a run that tracks nothing must print no {TRACKING_WORD} line, but stderr holds:\n{}",
+        lines.join("\n")
+    );
+}
