@@ -448,6 +448,9 @@ where
     ///   directory. It gives no output.
     /// * Monitor mode ignores a path that is gone. It gives no output. This
     ///   includes a text file that goes away before its read.
+    /// * Monitor mode ignores a binary file. It gives no output. A file is
+    ///   binary when its bytes are not valid UTF-8, or when they hold a NUL
+    ///   byte.
     /// * An image goes to the image display.
     /// * A path that is not an image and not a video is read as text. The text
     ///   comes after a header line.
@@ -511,8 +514,14 @@ where
                 }
             }
         } else if is_text_file(path) {
-            // The header comes after the read. A file can go away between the
-            // check above and the read, and such a file gives no header.
+            // The header comes after the read, when the bytes are known to be
+            // text. A file can go away between the check above and the read,
+            // and a binary file holds no text, so neither gives a header.
+            //
+            // A binary file stays out of the record on purpose. A text file
+            // that a program is in the middle of writing can end in half of a
+            // character of more than one byte. That file is not UTF-8 now, but
+            // a later event for it shows it when it is complete.
             match read_new_text_file(path) {
                 Ok(Some(contents)) => {
                     writeln!(out, "\nFound new text file: {}", path.display())?;
@@ -1865,28 +1874,38 @@ fn display_image_from_file(file_path: &Path, args: &Args, header: &[String]) -> 
 
 /// Read a text file that monitor mode found, and decide whether to show it.
 ///
-/// Monitor mode hears about each file that a program writes, and some of those
-/// files are gone before the read. A file that is gone holds nothing to show,
-/// so it is not a failure. The file argument of `main` does not come here: a
-/// file that the user names must read as text, or `ic` fails.
+/// Monitor mode hears about each file that a program writes, and many of those
+/// files hold no text to show. Such a file is not a failure. The file argument
+/// of `main` does not come here: a file that the user names must read as text,
+/// or `ic` fails.
+///
+/// A file is binary when its bytes are not valid UTF-8, or when they hold a
+/// NUL byte. Bytes that are only NUL bytes are valid UTF-8, so the check for a
+/// NUL byte is necessary. A text file never holds a NUL byte.
 ///
 /// # Arguments
 /// * `path` - The path that the watcher reported.
 ///
 /// # Returns
 /// `Some` with the content of the file when monitor mode shows it. `None` when
-/// monitor mode ignores the file, because the file is gone.
+/// monitor mode ignores the file, because the file is gone or it is binary.
 ///
 /// # Errors
 /// The error of the read when the file does not read for a different cause,
 /// such as a permission that the user does not have. The error does not name
 /// the path, because the caller puts the path in front of it.
 fn read_new_text_file(path: &Path) -> io::Result<Option<String>> {
-    match fs::read_to_string(path) {
-        Ok(text) => Ok(Some(text)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+
+    if bytes.contains(&0) {
+        return Ok(None);
     }
+
+    Ok(String::from_utf8(bytes).ok())
 }
 
 /// Print the content of a text file to standard output.
