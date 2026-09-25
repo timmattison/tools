@@ -33,18 +33,20 @@
 //! holds.
 //!
 //! `-b <name>` looks for a remote branch of that name before it makes
-//! anything, and that lookup adds three git children. `git show-ref` asks
-//! whether a local branch `<name>` exists. `git for-each-ref` lists each
-//! remote-tracking branch of that name. When more than one remote holds the
-//! name, `git config --get checkout.defaultRemote` names the remote to take.
-//! Each of the three only reads, so it leaves the decoy
-//! byte-identical also when it reads the decoy. So two more tests measure the
-//! answer of the lookup, and not only the damage. Their decoy holds a local
-//! branch `<name>`, no remote-tracking branch, and no `checkout.defaultRemote`.
+//! anything, and that lookup adds four git children. `git show-ref` asks
+//! whether a local branch `<name>` exists. `git config --get-regexp` reads the
+//! fetch refspec of each remote, and `git rev-parse --verify` asks whether each
+//! mapped ref exists. When more than one remote holds the name,
+//! `git config --get checkout.defaultRemote` names the remote to take. Each of
+//! the four only reads, so it leaves the decoy byte-identical also when it
+//! reads the decoy. So two more tests measure the answer of the lookup, and not
+//! only the damage. Their decoy holds a local branch `<name>`, no remote, and no
+//! `checkout.defaultRemote`.
 //! A child that reads that decoy gets another answer than the clone gives, and
 //! the run then starts the branch at `HEAD` or refuses. One test has one
-//! remote, and it holds `git show-ref` and `git for-each-ref`. The other has
-//! two remotes and a `checkout.defaultRemote`, and it holds all three.
+//! remote, and it holds `git show-ref`, `git config --get-regexp` and
+//! `git rev-parse`. The other has two remotes and a `checkout.defaultRemote`,
+//! and it holds all four.
 //!
 //! Every variable below is set on the **child command**, and nothing here
 //! touches the environment of this process. Cargo runs the tests of one binary
@@ -542,13 +544,13 @@ fn clone_whose_two_remotes_hold(branch: &str) -> RemoteBranchClone {
 
 /// Make the decoy repository, and give it a local branch `branch`.
 ///
-/// The lookup of `-b <branch>` reads three answers, and the decoy gives a
+/// The lookup of `-b <branch>` reads four answers, and the decoy gives a
 /// different answer to each of them than the clone gives. It holds `branch`
 /// as a local branch, so a `git show-ref` that reads it finds the branch and
-/// skips the lookup. It holds no remote-tracking branch, so a
-/// `git for-each-ref` that reads it finds none. It states no
-/// `checkout.defaultRemote`, so a `git config --get` that reads it picks no
-/// remote.
+/// skips the lookup. It holds no remote, so a `git config --get-regexp` that
+/// reads it finds no fetch refspec, and a `git rev-parse` that reads it finds
+/// no mapped ref. It states no `checkout.defaultRemote`, so a
+/// `git config --get` that reads it picks no remote.
 fn decoy_that_holds_the_branch(branch: &str) -> (tempfile::TempDir, PathBuf) {
     let (temp, decoy) = init_repo();
     assert!(run_git(&decoy, &["branch", branch]), "git branch failed");
@@ -600,12 +602,12 @@ fn assert_tracks(clone: &Path, worktree: &Path, branch: &str, remote: &str) {
 /// untouched.
 ///
 /// Before it makes anything, the run asks `git show-ref` whether a local
-/// `<branch>` exists, and asks `git for-each-ref` which remote holds
-/// `<branch>`. Both only read, so the decoy stays byte-identical also when a
-/// child reads it. The decoy of [`decoy_that_holds_the_branch`] thus gives
-/// each child another answer, and a child that reads it starts the branch at
-/// `HEAD` of the clone. `HEAD` is not the commit of `origin/<branch>`, so
-/// [`assert_tracks`] fails then.
+/// `<branch>` exists, and asks `git config --get-regexp` and `git rev-parse`
+/// which remote holds `<branch>`. Each only reads, so the decoy stays
+/// byte-identical also when a child reads it. The decoy of
+/// [`decoy_that_holds_the_branch`] thus gives each child another answer, and
+/// a child that reads it starts the branch at `HEAD` of the clone. `HEAD` is
+/// not the commit of `origin/<branch>`, so [`assert_tracks`] fails then.
 #[test]
 fn a_branch_that_tracks_a_remote_branch_reads_the_repository_nwt_stands_in() {
     let branch = unique_branch("hostile-track");
@@ -626,7 +628,8 @@ fn a_branch_that_tracks_a_remote_branch_reads_the_repository_nwt_stands_in() {
 /// The clone names [`SECOND_REMOTE`], and the decoy names no remote. A
 /// `git config --get checkout.defaultRemote` that reads the decoy picks none
 /// of the two candidates, and the run refuses with exit 16. The test also
-/// holds `git show-ref` and `git for-each-ref`, as the test above does.
+/// holds `git show-ref`, `git config --get-regexp` and `git rev-parse`, as the
+/// test above does.
 #[test]
 fn checkout_default_remote_is_read_from_the_repository_nwt_stands_in() {
     let branch = unique_branch("hostile-default-remote");

@@ -850,73 +850,78 @@ fn sparse_check_output(
 /// The prefix of every remote-tracking ref.
 const REMOTE_TRACKING_PREFIX: &str = "refs/remotes/";
 
-/// A remote-tracking branch `refs/remotes/<remote>/<branch>`.
+/// A remote-tracking branch: the ref where the fetch refspec of a remote puts
+/// a branch of that remote.
 ///
-/// [`find_remote_tracking_branch`] makes each value from a ref that git
-/// listed. [`fmt::Display`] gives the short form `<remote>/<branch>`, and each
-/// message of `nwt` names the branch in that form.
+/// [`find_remote_tracking_branch`] makes each value from a ref that the fetch
+/// refspec of `remote` maps, and that the clone holds. The default refspec
+/// puts the branch `<branch>` at `refs/remotes/<remote>/<branch>`. Another
+/// refspec can put it at another ref, for example
+/// `refs/remotes/mirror/heads/<branch>`.
+///
+/// [`fmt::Display`] gives the short form, and each message of `nwt` names the
+/// branch in that form: the ref without `refs/remotes/`, or the full ref when
+/// it is not under `refs/remotes/`. For a ref under `refs/remotes/`, that is
+/// the form in which git names the upstream (`origin/issue-33`).
 /// [`RemoteTrackingBranch::full_ref`] gives the full ref, and each git command
-/// takes that form. So a tag or a local branch with the name
-/// `<remote>/<branch>` cannot shadow the remote-tracking branch.
+/// takes that form. So a tag or a local branch with the name of the short form
+/// cannot shadow the remote-tracking branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RemoteTrackingBranch {
-    /// The name of the remote, for example `origin`.
+    /// The name of the remote whose fetch refspec maps the branch, for example
+    /// `origin`.
     remote: String,
-    /// The name of the branch on the remote, for example `issue-33`.
-    branch: String,
+    /// The full ref, for example `refs/remotes/origin/issue-33`.
+    tracking_ref: String,
 }
 
 impl RemoteTrackingBranch {
-    /// Read the remote-tracking branch `name` out of `refname`, a ref that
-    /// `git for-each-ref` listed for the pattern `refs/remotes/*/<name>`.
-    ///
-    /// The part between `refs/remotes/` and `/<name>` is the remote. The
-    /// function removes a prefix and a suffix, and it never cuts at a byte
-    /// offset. So a name with multi-byte characters stays intact.
-    ///
-    /// Returns `None` when `refname` does not have that shape, or when the part
-    /// for the remote is empty.
-    fn from_listed_ref(refname: &str, name: &str) -> Option<Self> {
-        let remote = refname
-            .strip_prefix(REMOTE_TRACKING_PREFIX)?
-            .strip_suffix(name)?
-            .strip_suffix('/')?;
-        if remote.is_empty() {
-            return None;
-        }
-
-        Some(Self {
-            remote: remote.to_owned(),
-            branch: name.to_owned(),
-        })
-    }
-
-    /// The full ref, `refs/remotes/<remote>/<branch>`.
-    fn full_ref(&self) -> String {
-        format!("{REMOTE_TRACKING_PREFIX}{}/{}", self.remote, self.branch)
+    /// The full ref, for example `refs/remotes/origin/issue-33`.
+    fn full_ref(&self) -> &str {
+        &self.tracking_ref
     }
 
     /// The name of the remote.
     fn remote(&self) -> &str {
         &self.remote
     }
+
+    /// The ref without `refs/remotes/`, or the full ref when it is not under
+    /// `refs/remotes/`. The function removes a prefix, and it never cuts at a
+    /// byte offset, so a name with multi-byte characters stays intact.
+    fn short_form(&self) -> &str {
+        self.tracking_ref
+            .strip_prefix(REMOTE_TRACKING_PREFIX)
+            .unwrap_or(&self.tracking_ref)
+    }
+
+    /// True when the short form starts with `<remote>/`, so that a reader
+    /// finds the name of the remote in it.
+    fn short_form_names_the_remote(&self) -> bool {
+        self.short_form()
+            .strip_prefix(self.remote.as_str())
+            .is_some_and(|rest| rest.starts_with('/'))
+    }
 }
 
 impl fmt::Display for RemoteTrackingBranch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}/{}", self.remote, self.branch)
+        f.write_str(self.short_form())
     }
 }
 
 /// The answer of [`find_remote_tracking_branch`].
+///
+/// A remote holds the branch `<name>` when a fetch refspec of that remote maps
+/// `refs/heads/<name>` to a ref that the clone holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RemoteTrackingMatch {
     /// Exactly one remote holds the branch. Or more than one remote holds it,
     /// and `checkout.defaultRemote` names one of those remotes.
     One(RemoteTrackingBranch),
     /// More than one remote holds the branch, and `checkout.defaultRemote`
-    /// picks none of them. The candidates are in the order that
-    /// `git for-each-ref` lists them.
+    /// picks none of them. The candidates are in the order of the remotes in
+    /// the git configuration.
     Ambiguous(Vec<RemoteTrackingBranch>),
     /// No remote holds the branch.
     None,
@@ -931,9 +936,9 @@ enum RemoteLookupError {
         command: &'static str,
         error: String,
     },
-    /// Git exited with a status that is not zero, so it did not list the
-    /// remote-tracking branches. `command` names the git subcommand, and
-    /// `stderr` holds what git wrote.
+    /// Git exited with a status that tells of a failure, so it did not read
+    /// the fetch refspecs or did not check a mapped ref. `command` names the
+    /// git subcommand, and `stderr` holds what git wrote.
     Failed {
         command: &'static str,
         stderr: String,
@@ -949,7 +954,7 @@ impl fmt::Display for RemoteLookupError {
             ),
             Self::Failed { command, stderr } => write!(
                 f,
-                "git {command} could not list the remote branches: {stderr}"
+                "git {command} could not look for a remote branch: {stderr}"
             ),
         }
     }
@@ -970,34 +975,89 @@ impl RemoteLookupError {
     }
 }
 
-/// The characters that `git for-each-ref` reads as wildmatch characters in
-/// its pattern: `*`, `?`, `[` and `\`.
+/// The characters that git refuses anywhere in a ref name, other than the
+/// ASCII control characters: a space, `~`, `^`, `:`, `?`, `*`, `[` and `\`
+/// (`git check-ref-format`, rules 4, 5 and 10).
+const REF_NAME_FORBIDDEN_CHARACTERS: [char; 8] = [' ', '~', '^', ':', '?', '*', '[', '\\'];
+
+/// The sequences that git refuses anywhere in a ref name: `..` and `@{`
+/// (`git check-ref-format`, rules 3 and 8).
+const REF_NAME_FORBIDDEN_SEQUENCES: [&str; 2] = ["..", "@{"];
+
+/// True when `name` holds a character or a sequence that git refuses anywhere
+/// in a ref name: an ASCII control character, one of
+/// [`REF_NAME_FORBIDDEN_CHARACTERS`], or one of
+/// [`REF_NAME_FORBIDDEN_SEQUENCES`].
 ///
-/// [`find_remote_tracking_branch`] puts the branch name into a pattern, so a
-/// name that holds one of these characters matches refs of other names. Git
-/// refuses each of these characters in a ref name (`git check-ref-format`).
-/// So no remote-tracking branch has such a name, and the lookup answers
-/// [`RemoteTrackingMatch::None`] for it without git. The rule holds for both
+/// No ref has such a name, so [`find_remote_tracking_branch`] answers
+/// [`RemoteTrackingMatch::None`] for it without git. The lookup has a second
+/// reason not to ask git: it checks each mapped ref with `git rev-parse`, and
+/// `git rev-parse` reads `~`, `^`, `:` and `@{` as revision syntax. For the
+/// name `issue-33~1`, the mapped ref `refs/remotes/origin/issue-33~1` names
+/// the parent of `origin/issue-33`, and not a ref. The rule holds for both
 /// callers of the lookup: `-b <name>` and the `-c <name>` of
 /// [`resolve_checkout_ref`].
-const REF_PATTERN_GLOB_CHARACTERS: [char; 4] = ['*', '?', '[', '\\'];
+fn git_refuses_in_any_ref_name(name: &str) -> bool {
+    name.chars()
+        .any(|c| c.is_ascii_control() || REF_NAME_FORBIDDEN_CHARACTERS.contains(&c))
+        || REF_NAME_FORBIDDEN_SEQUENCES
+            .iter()
+            .any(|sequence| name.contains(sequence))
+}
 
-/// Find the remote-tracking branch `refs/remotes/<remote>/<name>` that the
-/// checkout DWIM of git takes for `name`.
+/// The exit status of `git config --get-regexp` when no key matches.
+const CONFIG_NO_MATCH_STATUS: i32 = 1;
+
+/// The exit status of `git rev-parse --verify --quiet` for a ref that is not
+/// there.
+const REV_PARSE_MISSING_STATUS: i32 = 1;
+
+/// Find the remote-tracking branch that the checkout DWIM of git takes for
+/// `name`.
 ///
 /// This function mirrors steps 2 and 3 of `unique_tracking_name` in
-/// `checkout.c` of git:
+/// `checkout.c` of git. For each remote, `check_tracking_name` maps
+/// `refs/heads/<name>` through the fetch refspecs of that remote
+/// (`remote_find_tracking`), and it counts the remote only when the mapped ref
+/// exists. [`refspec::RemoteFetchRefspecs`] holds the rules of that mapping.
+/// So with the default refspec the ref is `refs/remotes/<remote>/<name>`, and
+/// with `+refs/heads/*:refs/remotes/mirror/heads/*` it is
+/// `refs/remotes/mirror/heads/<name>`. A ref that no refspec maps any more,
+/// for example after `git remote set-branches`, is stale, and it is no
+/// candidate. The rules:
 ///
-/// 1. When exactly one ref `refs/remotes/<remote>/<name>` exists, the answer is
+/// 1. When exactly one remote maps `name` to a ref that exists, the answer is
 ///    [`RemoteTrackingMatch::One`] with that ref.
-/// 2. When more than one such ref exists, `checkout.defaultRemote` names a
-///    remote, and that remote holds one of them, the answer is
+/// 2. When more than one remote does, `checkout.defaultRemote` names a remote,
+///    and that remote is one of them, the answer is
 ///    [`RemoteTrackingMatch::One`] with the ref of that remote. When
 ///    `checkout.defaultRemote` picks none of them, the answer is
 ///    [`RemoteTrackingMatch::Ambiguous`] with each candidate.
-/// 3. When no such ref exists, the answer is [`RemoteTrackingMatch::None`].
+/// 3. When no remote does, the answer is [`RemoteTrackingMatch::None`].
 ///
-/// A `name` that holds one of [`REF_PATTERN_GLOB_CHARACTERS`] is not a ref
+/// The function reads the fetch refspecs with
+/// `git config -z --get-regexp '^remote\..+\.fetch$'`, and it checks each
+/// mapped ref with `git rev-parse --verify --quiet --end-of-options <ref>`, as
+/// git checks it with `repo_get_oid`. It reads only the remotes of the git
+/// configuration. A remote that only a file in the legacy `$GIT_DIR/remotes/`
+/// or `$GIT_DIR/branches/` directory defines is not read. Git 3.0 drops those
+/// files. The function never fetches. It reads only the refs that the clone
+/// already holds.
+///
+/// One rule differs from git on purpose. A negative refspec such as
+/// `^refs/heads/issue-33` keeps its remote from mapping each branch that it
+/// matches, after a pattern refspec too. The checkout DWIM of git 2.55
+/// honors a negative refspec only after an exact refspec. After the default
+/// pattern refspec, it takes a stale `refs/remotes/origin/issue-33` and sets
+/// no upstream. But the tracking setup of git honors the negative refspec,
+/// so `git worktree add --track`, which `-b` runs, refuses that ref as "not a
+/// branch". Only this rule gives a `-b` that works. For `-c <name>` with
+/// `--sparse-exclude`, the rule has one cost: in such a clone,
+/// [`resolve_checkout_ref`] finds no remote branch, `git ls-tree` then reads
+/// the name and refuses it, and the run exits 7, where a plain `-c <name>`
+/// takes the stale ref through the DWIM of git.
+///
+/// A `name` for which [`git_refuses_in_any_ref_name`] is true is not a ref
 /// name. The answer for it is [`RemoteTrackingMatch::None`], and no git child
 /// runs.
 ///
@@ -1006,51 +1066,35 @@ const REF_PATTERN_GLOB_CHARACTERS: [char; 4] = ['*', '?', '[', '\\'];
 /// for `-b <name>`, where a local branch `name` makes git refuse the add, so
 /// that caller needs no first step.
 ///
-/// Git finds the remote-tracking branch through the fetch refspec of each
-/// remote. This function reads `refs/remotes/<remote>/<name>`, where the
-/// default refspec puts it. A remote with a different refspec can give a
-/// different answer. The function never fetches. It reads only the refs that
-/// the clone already holds.
-///
 /// Each git child starts from [`production_git_command`].
 ///
 /// # Errors
 ///
 /// - [`RemoteLookupError::NotStarted`] when git does not start.
-/// - [`RemoteLookupError::Failed`] when `git for-each-ref` exits with a status
-///   that is not zero. A failed listing is not an empty listing, so the
-///   function never reports [`RemoteTrackingMatch::None`] for it.
+/// - [`RemoteLookupError::Failed`] when `git config` or `git rev-parse` exits
+///   with a status that is neither 0 nor 1. A failed read is not an empty
+///   read, so the function never reports [`RemoteTrackingMatch::None`] for
+///   it.
 fn find_remote_tracking_branch(
     repo_root: &Path,
     name: &str,
 ) -> Result<RemoteTrackingMatch, RemoteLookupError> {
-    // Git refuses these characters in a ref name, so the answer is known
-    // before git runs. In the pattern, each one matches refs of other names.
-    if name.contains(REF_PATTERN_GLOB_CHARACTERS) {
+    // No ref has such a name, so the answer is known before git runs. And
+    // `git rev-parse` reads some of these characters as revision syntax.
+    if git_refuses_in_any_ref_name(name) {
         return Ok(RemoteTrackingMatch::None);
     }
 
-    // A `*` in a `for-each-ref` pattern does not match a `/`, so each listed
-    // ref is `refs/remotes/<one remote>/<name>`.
-    let mut list = production_git_command(repo_root);
-    list.args([
-        "for-each-ref",
-        "--format=%(refname)",
-        &format!("{REMOTE_TRACKING_PREFIX}*/{name}"),
-    ]);
-    let listed = remote_lookup_output(list, "for-each-ref")?;
-    if !listed.status.success() {
-        return Err(RemoteLookupError::Failed {
-            command: "for-each-ref",
-            stderr: String::from_utf8_lossy(&listed.stderr).trim().to_owned(),
-        });
+    let refspecs = read_remote_fetch_refspecs(repo_root)?;
+    let mut candidates = Vec::new();
+    for mapped in refspecs.map_branch(name) {
+        if tracking_ref_exists(repo_root, &mapped.tracking_ref)? {
+            candidates.push(RemoteTrackingBranch {
+                remote: mapped.remote,
+                tracking_ref: mapped.tracking_ref,
+            });
+        }
     }
-
-    let listed = String::from_utf8_lossy(&listed.stdout);
-    let mut candidates: Vec<RemoteTrackingBranch> = listed
-        .lines()
-        .filter_map(|refname| RemoteTrackingBranch::from_listed_ref(refname, name))
-        .collect();
 
     match candidates.len() {
         0 => return Ok(RemoteTrackingMatch::None),
@@ -1077,6 +1121,75 @@ fn find_remote_tracking_branch(
     Ok(RemoteTrackingMatch::Ambiguous(candidates))
 }
 
+/// Read the fetch refspecs of every remote of the repository at `repo_root`.
+///
+/// `git config --get-regexp` exits [`CONFIG_NO_MATCH_STATUS`] when no remote
+/// has a fetch refspec. Then no remote maps a branch, and the answer holds no
+/// remote.
+///
+/// # Errors
+///
+/// - [`RemoteLookupError::NotStarted`] when git does not start.
+/// - [`RemoteLookupError::Failed`] when `git config` exits with another
+///   status that is not zero, for example 128 in a directory that git
+///   refuses as a repository.
+fn read_remote_fetch_refspecs(
+    repo_root: &Path,
+) -> Result<refspec::RemoteFetchRefspecs, RemoteLookupError> {
+    let mut list = production_git_command(repo_root);
+    list.args([
+        "config",
+        "-z",
+        "--get-regexp",
+        refspec::REMOTE_FETCH_KEY_PATTERN,
+    ]);
+    let listed = remote_lookup_output(list, "config")?;
+
+    match listed.status.code() {
+        Some(0) => Ok(refspec::RemoteFetchRefspecs::from_config_listing(
+            &listed.stdout,
+        )),
+        Some(CONFIG_NO_MATCH_STATUS) => Ok(refspec::RemoteFetchRefspecs::default()),
+        _ => Err(RemoteLookupError::Failed {
+            command: "config",
+            stderr: String::from_utf8_lossy(&listed.stderr).trim().to_owned(),
+        }),
+    }
+}
+
+/// True when the ref `tracking_ref` exists in the repository at `repo_root`.
+///
+/// `check_tracking_name` of git counts a remote only when `repo_get_oid`
+/// resolves the mapped ref. `git rev-parse --verify --quiet` asks the same
+/// question, and `--end-of-options` keeps a ref that starts with `-` from
+/// being read as an option.
+///
+/// # Errors
+///
+/// - [`RemoteLookupError::NotStarted`] when git does not start.
+/// - [`RemoteLookupError::Failed`] when `git rev-parse` exits with a status
+///   other than 0 or [`REV_PARSE_MISSING_STATUS`].
+fn tracking_ref_exists(repo_root: &Path, tracking_ref: &str) -> Result<bool, RemoteLookupError> {
+    let mut verify = production_git_command(repo_root);
+    verify.args([
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "--end-of-options",
+        tracking_ref,
+    ]);
+    let verified = remote_lookup_output(verify, "rev-parse")?;
+
+    match verified.status.code() {
+        Some(0) => Ok(true),
+        Some(REV_PARSE_MISSING_STATUS) => Ok(false),
+        _ => Err(RemoteLookupError::Failed {
+            command: "rev-parse",
+            stderr: String::from_utf8_lossy(&verified.stderr).trim().to_owned(),
+        }),
+    }
+}
+
 /// Run one git child of [`find_remote_tracking_branch`] to its end, with its
 /// output captured.
 ///
@@ -1098,23 +1211,23 @@ fn remote_lookup_output(
 ///
 /// This function mirrors the checkout DWIM of git (`unique_tracking_name` in
 /// `checkout.c`). `git worktree add <path> <name>` runs that DWIM for a `name`
-/// that names no commit. It finds the remote-tracking branch `<remote>/<name>`,
-/// makes a local branch `name` that tracks it, and checks that branch out. So
-/// `nwt -c foo` works in a clone that holds `foo` only as `origin/foo`.
-/// `git ls-tree foo` does not run the DWIM, and it cannot read `foo`. Without
-/// this function, the check of `--sparse-exclude` refuses a run that works
-/// without the flag.
+/// that names no commit. It finds the remote-tracking branch where the fetch
+/// refspec of a remote puts `refs/heads/<name>`, makes a local branch `name`
+/// that tracks it, and checks that branch out. So `nwt -c foo` works in a
+/// clone that holds `foo` only as `origin/foo`. `git ls-tree foo` does not run
+/// the DWIM, and it cannot read `foo`. Without this function, the check of
+/// `--sparse-exclude` refuses a run that works without the flag.
 ///
 /// The steps are the steps of git:
 ///
 /// 1. When `name` resolves to a commit
 ///    (`git rev-parse --verify --quiet <name>^{commit}`), git takes `name`, and
 ///    so does this function.
-/// 2. Else, when exactly one ref `refs/remotes/<remote>/<name>` exists, git
-///    checks it out, and this function returns it.
-/// 3. Else, when more than one such ref exists, `checkout.defaultRemote` names
-///    a remote, and that remote holds one of them, git checks that ref out, and
-///    this function returns it.
+/// 2. Else, when exactly one remote maps `refs/heads/<name>` to a ref that
+///    exists, git checks that ref out, and this function returns it.
+/// 3. Else, when more than one remote does, `checkout.defaultRemote` names a
+///    remote, and that remote is one of them, git checks the ref of that
+///    remote out, and this function returns it.
 /// 4. Else git refuses the add with `fatal: invalid reference: <name>`. This
 ///    function returns `name`, so `git ls-tree` refuses it too, and the run
 ///    exits as a failed add.
@@ -1122,12 +1235,15 @@ fn remote_lookup_output(
 /// This function runs step 1 itself. [`find_remote_tracking_branch`] holds
 /// steps 2 and 3, and [`new_branch_start`] uses the same function for
 /// `-b <name>`. So the two flags find a remote branch with one set of rules.
+/// That function honors each negative refspec, and the DWIM of git does not
+/// always. Its documentation names the one case where the check then refuses
+/// a `-c <name>` that git takes.
 ///
 /// # Errors
 ///
 /// - [`SparseExcludeError::GitCommand`] when git does not start.
-/// - [`SparseExcludeError::UnreadableRef`], which names `name`, when
-///   `git for-each-ref` fails.
+/// - [`SparseExcludeError::UnreadableRef`], which names `name`, when a git
+///   child of [`find_remote_tracking_branch`] fails.
 fn resolve_checkout_ref(repo_root: &Path, name: &str) -> Result<String, SparseExcludeError> {
     let mut verify = production_git_command(repo_root);
     verify.args([
@@ -1151,7 +1267,7 @@ fn resolve_checkout_ref(repo_root: &Path, name: &str) -> Result<String, SparseEx
     })?;
 
     Ok(match found {
-        RemoteTrackingMatch::One(branch) => branch.full_ref(),
+        RemoteTrackingMatch::One(branch) => branch.full_ref().to_owned(),
         // Git refuses the add for both, so `git ls-tree` gets the name and
         // refuses it too.
         RemoteTrackingMatch::Ambiguous(_) | RemoteTrackingMatch::None => name.to_owned(),
@@ -1167,8 +1283,8 @@ const CHECKOUT_DEFAULT_REMOTE_KEY: &str = "checkout.defaultRemote";
 enum NewBranchStartError {
     /// More than one remote holds the branch, and `checkout.defaultRemote`
     /// picks none of them. `branch` is the name of the new branch.
-    /// `candidates` holds each remote-tracking branch of that name, in the
-    /// order that `git for-each-ref` lists them.
+    /// `candidates` holds the remote-tracking branch of each remote that holds
+    /// it, in the order of the remotes in the git configuration.
     AmbiguousRemoteBranch {
         branch: String,
         candidates: Vec<RemoteTrackingBranch>,
@@ -1181,8 +1297,11 @@ impl fmt::Display for NewBranchStartError {
     /// The message after `Error: `.
     ///
     /// For [`NewBranchStartError::AmbiguousRemoteBranch`], the message has
-    /// more than one line. It names each candidate on a line of its own, and
-    /// it ends with the command that names the remote to track.
+    /// more than one line. It names each candidate in its short form on a line
+    /// of its own, and it ends with the command that names the remote to
+    /// track. That command needs the name of the remote. So a line whose short
+    /// form does not start with `<remote>/`, for example
+    /// `mirror/heads/issue-33`, adds `(remote <remote>)`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AmbiguousRemoteBranch { branch, candidates } => {
@@ -1192,7 +1311,11 @@ impl fmt::Display for NewBranchStartError {
                      {CHECKOUT_DEFAULT_REMOTE_KEY} picks none of them:"
                 )?;
                 for candidate in candidates {
-                    writeln!(f, "  {candidate}")?;
+                    write!(f, "  {candidate}")?;
+                    if !candidate.short_form_names_the_remote() {
+                        write!(f, " (remote {})", candidate.remote())?;
+                    }
+                    writeln!(f)?;
                 }
                 writeln!(f, "Name the remote to track, and run nwt again:")?;
                 write!(f, "  git config {CHECKOUT_DEFAULT_REMOTE_KEY} <remote>")
@@ -1231,7 +1354,9 @@ impl NewBranchStartError {
 /// that the user has, and a refusal of the lookup does not.
 ///
 /// When no local branch `name` exists, the rules are the rules of the checkout
-/// DWIM of git, through [`find_remote_tracking_branch`]:
+/// DWIM of git, through [`find_remote_tracking_branch`]. A remote holds `name`
+/// when a fetch refspec of that remote maps `refs/heads/<name>` to a ref that
+/// the clone holds:
 ///
 /// 1. When exactly one remote holds `name`, or `checkout.defaultRemote` picks
 ///    one of the remotes that hold it, the answer is that remote-tracking
@@ -1337,7 +1462,9 @@ fn resolve_sparse_excludes(
         WorktreeSource::NewBranchAtHead => {
             (SPARSE_DEFAULT_REF.to_owned(), SPARSE_DEFAULT_REF.to_owned())
         }
-        WorktreeSource::NewBranchTracking(branch) => (branch.to_string(), branch.full_ref()),
+        WorktreeSource::NewBranchTracking(branch) => {
+            (branch.to_string(), branch.full_ref().to_owned())
+        }
     };
 
     for dir in &dirs {
@@ -1461,8 +1588,10 @@ WHERE WORKTREES GO:
 REMOTE BRANCHES:
     A run that makes a new branch first looks for a remote branch of that name. The
     name comes from -b NAME, from the shorthand '-b 33' (branch 'issue-33'), or from
-    'branch' in ~/.nwt.toml. nwt finds 'refs/remotes/REMOTE/NAME' with the rules of
-    'git checkout':
+    'branch' in ~/.nwt.toml. nwt finds it with the rules of 'git checkout'. A remote
+    holds the branch when a fetch refspec of that remote maps 'refs/heads/NAME' to a
+    ref that the clone holds. With the default refspec, that ref is
+    'refs/remotes/REMOTE/NAME'.
 
       - One remote holds the branch. The new branch starts at that remote branch,
         and it tracks it.
@@ -1496,8 +1625,16 @@ REMOTE BRANCHES:
     error that it gave before: the branch already exists. The directory name does
     not change, so 'nwt -b issue-33' makes the directory 'issue-33'.
 
-    nwt finds each remote branch at 'refs/remotes/REMOTE/NAME', so a remote with a
-    different fetch refspec can give a different result.
+    A remote branch that no fetch refspec maps is stale, for example after
+    'git remote set-branches'. nwt ignores it, as git does. A negative refspec such
+    as '^refs/heads/NAME' also keeps its remote from giving the branch.
+
+    nwt names a remote branch without 'refs/remotes/', for example
+    'mirror/heads/issue-33' for '+refs/heads/*:refs/remotes/mirror/heads/*'. It
+    names a ref outside 'refs/remotes/' in full. When the name of a candidate does
+    not start with the name of its remote, the refusal adds the remote:
+
+          mirror/heads/issue-33 (remote origin)
 
 CONFIGURATION:
     Default values can be set in ~/.nwt.toml. CLI arguments override config values.
@@ -1614,9 +1751,8 @@ SPARSE WORKTREES:
     For a '-c BRANCH' that only a remote holds, git makes a local branch that tracks
     the remote branch. nwt then checks the remote branch that git picks. For a
     '-b NAME' that tracks a remote branch, nwt checks the remote branch where the new
-    branch starts (see REMOTE BRANCHES). nwt finds each remote branch at
-    'refs/remotes/REMOTE/BRANCH', so a remote with a different fetch refspec can give
-    a different result.
+    branch starts. In both cases, nwt finds the remote branch through the fetch
+    refspec of each remote, with the rules of REMOTE BRANCHES.
 
     Only the new worktree is sparse. The main worktree, the other worktrees, and
     later worktrees that nwt makes without the flag stay full. There is one
@@ -2380,7 +2516,7 @@ fn run_cleanup_step(mut command: Command) -> Result<(), String> {
 ///   `git worktree add --track -b <branch_name> <path> <full ref>`, which
 ///   starts the branch at the remote-tracking branch and sets it as the
 ///   upstream. The full ref, and not the short form, makes sure that a tag or
-///   a local branch with the name `<remote>/<branch>` cannot shadow it.
+///   a local branch with the name of the short form cannot shadow it.
 ///
 /// When `sparse_excludes` is not empty, the add runs with `--no-checkout`, and
 /// [`apply_sparse_checkout`] then writes the files without those directories.
@@ -3188,8 +3324,9 @@ fn main() {
         }
     };
 
-    // A new branch `<name>` starts at the remote-tracking branch of that name,
-    // and tracks it, when the lookup finds one. The lookup runs before
+    // A new branch `<name>` starts at the remote-tracking branch where a fetch
+    // refspec puts the remote branch `<name>`, and tracks it, when the lookup
+    // finds one. The lookup runs before
     // anything is made, so a refusal makes nothing. It never falls back to
     // `HEAD` in silence, because a silent fall back hides the mistake. A run
     // with `-c <ref>`, or with a random name, does no lookup.
@@ -4085,7 +4222,9 @@ mod tests {
     /// the tests ask. A search that goes past the `.git` file thus fails each
     /// test, and does not let it pass for the wrong reason:
     ///
-    /// - `git for-each-ref` succeeds there.
+    /// - `git config --get-regexp` for the fetch refspecs exits 1 there,
+    ///   because the repository has no remote, and the remote lookup then
+    ///   answers `None`.
     /// - `git ls-files` lists a file inside the directory.
     /// - `core.hooksPath` names a directory that is missing from the
     ///   directory.
@@ -5056,46 +5195,33 @@ mod tests {
         assert_eq!(error.exit_code(), exit_codes::GIT_COMMAND_ERROR);
     }
 
-    /// The remote is the part between `refs/remotes/` and `/<name>`, so a name
-    /// with a `/` or with multi-byte characters stays intact in the full ref
-    /// and in the short form.
+    /// The short form is the ref without `refs/remotes/`, so a name with a `/`
+    /// or with multi-byte characters stays intact in it. The full ref stays as
+    /// the fetch refspec mapped it.
     #[test]
     fn remote_tracking_branch_keeps_a_slash_and_multi_byte_characters() {
-        for (refname, name, remote) in [
+        for (tracking_ref, remote, short) in [
             (
                 "refs/remotes/origin/feature/login",
-                "feature/login",
                 "origin",
+                "origin/feature/login",
             ),
-            ("refs/remotes/upstream/café", "café", "upstream"),
+            ("refs/remotes/upstream/café", "upstream", "upstream/café"),
         ] {
-            let branch = RemoteTrackingBranch::from_listed_ref(refname, name)
-                .unwrap_or_else(|| panic!("{refname} must hold the branch {name}"));
+            let branch = RemoteTrackingBranch {
+                remote: remote.to_owned(),
+                tracking_ref: tracking_ref.to_owned(),
+            };
 
             assert_eq!(branch.remote(), remote);
-            assert_eq!(branch.full_ref(), refname);
-            assert_eq!(branch.to_string(), format!("{remote}/{name}"));
-        }
-    }
-
-    /// A ref that is not `refs/remotes/<remote>/<name>` gives no branch.
-    #[test]
-    fn remote_tracking_branch_refuses_a_ref_of_another_shape() {
-        for (refname, name) in [
-            ("refs/heads/issue-33", "issue-33"),
-            ("refs/remotes//issue-33", "issue-33"),
-            ("refs/remotes/origin/xissue-33", "issue-33"),
-        ] {
-            assert_eq!(
-                RemoteTrackingBranch::from_listed_ref(refname, name),
-                None,
-                "{refname} must not give the branch {name}"
-            );
+            assert_eq!(branch.full_ref(), tracking_ref);
+            assert_eq!(branch.to_string(), short);
         }
     }
 
     /// A git that does not start is a lookup that did not start, and not a
-    /// branch that no remote holds.
+    /// branch that no remote holds. The first git child of the lookup is the
+    /// `git config` that reads the fetch refspecs.
     #[test]
     fn find_remote_tracking_branch_reports_a_git_that_does_not_start() {
         let temp = tempfile::TempDir::new().expect("create a temporary directory");
@@ -5108,40 +5234,42 @@ mod tests {
             matches!(
                 error,
                 RemoteLookupError::NotStarted {
-                    command: "for-each-ref",
+                    command: "config",
                     ..
                 }
             ),
-            "the error must be NotStarted for for-each-ref, got {error:?}"
+            "the error must be NotStarted for config, got {error:?}"
         );
         assert_eq!(error.exit_code(), exit_codes::GIT_COMMAND_ERROR);
     }
 
-    /// A listing that git refuses is a failed lookup, and not a branch that no
-    /// remote holds. So `-b <name>` does not fall back to `HEAD` in silence.
+    /// A read of the fetch refspecs that git refuses is a failed lookup, and
+    /// not a branch that no remote holds. So `-b <name>` does not fall back to
+    /// `HEAD` in silence.
     ///
     /// The lookup runs in the directory of
     /// [`not_a_repository_inside_a_repository`]. Git refuses that directory
-    /// as a repository, so `git for-each-ref` exits with the status 128 there.
-    /// The directory is inside a repository where the listing succeeds, so a
-    /// lookup that reached that repository answers `None` and fails the test.
+    /// as a repository, so `git config --get-regexp` exits with the status 128
+    /// there. The directory is inside a repository where the same command
+    /// exits 1, because that repository has no remote. So a lookup that
+    /// reached that repository answers `None` and fails the test.
     #[test]
     fn find_remote_tracking_branch_reports_a_failed_listing() {
         let temp = tempfile::TempDir::new().expect("create a temporary directory");
         let not_a_repository = not_a_repository_inside_a_repository(&temp);
 
         let error = find_remote_tracking_branch(&not_a_repository, "issue-33")
-            .expect_err("a failed listing must stop the lookup");
+            .expect_err("a failed read of the fetch refspecs must stop the lookup");
 
         assert!(
             matches!(
                 error,
                 RemoteLookupError::Failed {
-                    command: "for-each-ref",
+                    command: "config",
                     ..
                 }
             ),
-            "the error must be Failed for for-each-ref, got {error:?}"
+            "the error must be Failed for config, got {error:?}"
         );
         assert_eq!(error.exit_code(), exit_codes::WORKTREE_FAILED);
     }
@@ -5250,6 +5378,8 @@ mod tests {
     /// wildmatch characters. Git refuses each of those characters in a ref
     /// name, so no remote-tracking branch has such a name, and the lookup
     /// answers [`RemoteTrackingMatch::None`] for each name that holds one.
+    /// The lookup puts no name into a pattern, but a lookup that lists refs
+    /// with a pattern fails this test.
     ///
     /// Each name below matches `refs/remotes/origin/issue-33` as a pattern.
     /// The test states that first, so a name that matches nothing cannot make
@@ -5583,28 +5713,42 @@ mod tests {
     /// The samples are copies, and only the functions run. So this test builds
     /// the `Tracking` line with [`tracking_notice`], and the refusal with the
     /// [`fmt::Display`] of [`NewBranchStartError::AmbiguousRemoteBranch`]
-    /// after the `Error: ` that `main` puts in front of it. Each line of each
-    /// sample, without its indentation, must be a line of its own in each
-    /// document. Change the wording in the code alone, and this test fails and
-    /// names the document that did not change.
+    /// after the `Error: ` that `main` puts in front of it. It builds the
+    /// refusal two times: with the default refspec of each remote, and with
+    /// `origin` at `refs/remotes/mirror/heads/issue-33`, whose line adds the
+    /// name of the remote. Each line of each sample, without its indentation,
+    /// must be a line of its own in each document. Change the wording in the
+    /// code alone, and this test fails and names the document that did not
+    /// change.
     #[test]
     fn test_help_and_readme_samples_match_the_remote_branch_lines() {
         const FETCH: &str = "git fetch";
 
         let remote_branch = |remote: &str| RemoteTrackingBranch {
             remote: remote.to_owned(),
-            branch: "issue-33".to_owned(),
+            tracking_ref: format!("{REMOTE_TRACKING_PREFIX}{remote}/issue-33"),
+        };
+        let nested_branch = RemoteTrackingBranch {
+            remote: "origin".to_owned(),
+            tracking_ref: format!("{REMOTE_TRACKING_PREFIX}mirror/heads/issue-33"),
+        };
+        let refusal_of = |candidates: Vec<RemoteTrackingBranch>| {
+            let refusal = NewBranchStartError::AmbiguousRemoteBranch {
+                branch: "issue-33".to_owned(),
+                candidates,
+            };
+            format!("Error: {refusal}")
         };
         let notice = tracking_notice(&remote_branch("origin"));
-        let refusal = NewBranchStartError::AmbiguousRemoteBranch {
-            branch: "issue-33".to_owned(),
-            candidates: vec![remote_branch("origin"), remote_branch("upstream")],
-        };
-        let refusal = format!("Error: {refusal}");
+        let refusal = refusal_of(vec![remote_branch("origin"), remote_branch("upstream")]);
+        let nested_refusal = refusal_of(vec![nested_branch, remote_branch("upstream")]);
 
         let (help_section, readme_section) = remote_branch_doc_sections();
 
-        for sample in std::iter::once(notice.as_str()).chain(refusal.lines()) {
+        for sample in std::iter::once(notice.as_str())
+            .chain(refusal.lines())
+            .chain(nested_refusal.lines())
+        {
             let sample = sample.trim();
             assert!(
                 has_sample_line(&help_section, sample),
