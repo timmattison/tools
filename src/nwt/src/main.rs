@@ -4959,6 +4959,137 @@ mod tests {
         assert_eq!(error.exit_code(), exit_codes::WORKTREE_FAILED);
     }
 
+    /// The branch that the source of [`clone_holding_remote_branch`] holds.
+    const GLOB_FIXTURE_BRANCH: &str = "issue-33";
+
+    /// One name for each character that `git for-each-ref` reads as a
+    /// wildmatch character: `*`, `?`, `[` and `\`. As a pattern, each name
+    /// matches [`GLOB_FIXTURE_BRANCH`].
+    const GLOB_NAMES: [&str; 4] = ["*", "issue-3?", "issue-3[3]", "issue\\-33"];
+
+    /// Make a source repository that holds [`GLOB_FIXTURE_BRANCH`], and a
+    /// clone of it under `temp`. Hand back the clone, which holds the branch
+    /// only as `origin/<branch>`.
+    ///
+    /// The commit states its identity with `-c`, so the fixture writes no
+    /// configuration.
+    fn clone_holding_remote_branch(temp: &tempfile::TempDir) -> PathBuf {
+        let source = temp.path().join("source");
+        let clone = temp.path().join("clone");
+        let source_arg = source.to_str().expect("utf-8 source path");
+        let clone_arg = clone.to_str().expect("utf-8 clone path");
+
+        assert!(
+            run_git(temp.path(), &["init", "--quiet", source_arg]),
+            "git init failed"
+        );
+        assert!(
+            run_git(
+                &source,
+                &[
+                    "-c",
+                    "user.name=Test User",
+                    "-c",
+                    "user.email=test@example.com",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "--quiet",
+                    "--allow-empty",
+                    "-m",
+                    "baseline",
+                ]
+            ),
+            "git commit failed"
+        );
+        assert!(
+            run_git(&source, &["branch", GLOB_FIXTURE_BRANCH]),
+            "git branch failed"
+        );
+        assert!(
+            run_git(temp.path(), &["clone", "--quiet", source_arg, clone_arg]),
+            "git clone failed"
+        );
+
+        clone
+    }
+
+    /// Each ref that `git for-each-ref` lists in `repo` for `pattern`, one on
+    /// each line.
+    ///
+    /// The command sheds the whole inherited `GIT_` prefix, as [`run_git`]
+    /// does, so it reads `repo` and no other repository.
+    fn listed_refs(repo: &Path, pattern: &str) -> Vec<String> {
+        let mut command = Command::new("git");
+        gitscratch::shed_inherited_git_environment(&mut command);
+        let output = command
+            .args(["for-each-ref", "--format=%(refname)", pattern])
+            .current_dir(repo)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run git for-each-ref");
+        assert!(
+            output.status.success(),
+            "git for-each-ref failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// `git for-each-ref` reads `*`, `?`, `[` and `\` in its pattern as
+    /// wildmatch characters. Git refuses each of those characters in a ref
+    /// name, so no remote-tracking branch has such a name, and the lookup
+    /// answers [`RemoteTrackingMatch::None`] for each name that holds one.
+    ///
+    /// Each name below matches `refs/remotes/origin/issue-33` as a pattern.
+    /// The test states that first, so a name that matches nothing cannot make
+    /// the test pass for the wrong reason.
+    #[test]
+    fn find_remote_tracking_branch_never_reads_the_name_as_a_glob() {
+        let temp = tempfile::TempDir::new().expect("create a temporary directory");
+        let clone = clone_holding_remote_branch(&temp);
+        let remote_branch = format!("{REMOTE_TRACKING_PREFIX}origin/{GLOB_FIXTURE_BRANCH}");
+
+        for name in GLOB_NAMES {
+            let pattern = format!("{REMOTE_TRACKING_PREFIX}*/{name}");
+            let listed = listed_refs(&clone, &pattern);
+            assert!(
+                listed.contains(&remote_branch),
+                "the pattern {pattern:?} must match {remote_branch}, but it lists {listed:?}"
+            );
+
+            assert_eq!(
+                find_remote_tracking_branch(&clone, name),
+                Ok(RemoteTrackingMatch::None),
+                "no remote-tracking branch has the name {name:?}"
+            );
+        }
+    }
+
+    /// The answer for a name that git refuses as a ref name is known before
+    /// git runs, so the lookup asks git nothing. A git that cannot answer
+    /// then cannot turn that answer into a failure.
+    ///
+    /// The working directory is missing, so each git child fails to start. An
+    /// answer of `Ok` proves that no child ran.
+    #[test]
+    fn find_remote_tracking_branch_asks_git_nothing_for_a_name_that_git_refuses() {
+        let temp = tempfile::TempDir::new().expect("create a temporary directory");
+        let missing = temp.path().join("no-such-repository");
+
+        for name in GLOB_NAMES {
+            assert_eq!(
+                find_remote_tracking_branch(&missing, name),
+                Ok(RemoteTrackingMatch::None),
+                "the lookup must answer for {name:?} without git"
+            );
+        }
+    }
+
     /// Parse each of `raw` into a directory, or panic.
     fn sparse_dirs(raw: &[&str]) -> Vec<SparseExcludeDir> {
         raw.iter()
