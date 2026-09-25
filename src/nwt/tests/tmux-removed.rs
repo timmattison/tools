@@ -88,7 +88,7 @@ fn entries(dir: &Path) -> Vec<String> {
 /// `nwt --tmux` is an argument clap does not know, so the run stops with a
 /// usage error and makes nothing.
 ///
-/// Before #527 the flag was real. The test harness removes `TMUX` from the
+/// Before #527 the flag was real. The test harness removed `TMUX` from the
 /// child, so the old binary stopped with its own "not running inside tmux"
 /// error instead, which is exit code 13.
 #[test]
