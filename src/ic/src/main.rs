@@ -4017,6 +4017,37 @@ mod tests {
         );
     }
 
+    /// An image error in monitor mode names its cause one time.
+    ///
+    /// The decoder of the `image` crate writes its cause into its own message,
+    /// such as `Format error decoding Png: Invalid PNG signature.`, and it also
+    /// gives that cause as the next link of the chain. The alternate format of
+    /// `anyhow` prints each link, so the user read the cause two times, as
+    /// `Invalid PNG signature.: Invalid PNG signature.`. A link that only
+    /// repeats the end of the link before it tells the user nothing new.
+    ///
+    /// The expected cause comes from the same read that the image display of
+    /// this test makes, so the test does not copy the words of the decoder.
+    #[test]
+    fn an_image_error_in_monitor_mode_names_its_cause_one_time() {
+        let directory = TemporaryDirectory::new();
+        let broken = directory.file_of("broken.png", &b"no picture here\n".repeat(4));
+        let cause = read_image_file(&broken, &a_terminal_that_sends_a_file())
+            .expect_err("bytes with no image signature do not decode as a PNG")
+            .root_cause()
+            .to_string();
+        let mut monitor = MonitorUnderTest::new();
+
+        let written = monitor.handle(&broken);
+
+        assert_eq!(
+            written.stderr.matches(&cause).count(),
+            1,
+            "the error must name the cause {cause:?} one time, but it is {:?}",
+            written.stderr
+        );
+    }
+
     /// The reader of a new text file ignores a path that is gone at the read.
     ///
     /// [`Monitor::handle`] checks the path before the read, and a path that is
