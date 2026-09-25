@@ -3772,6 +3772,70 @@ mod tests {
         );
     }
 
+    /// A text file that does not read for a different cause gives one error,
+    /// and the error names the cause.
+    ///
+    /// A file that the user has no permission to read is not gone, not empty,
+    /// and not binary, so monitor mode reports it. Monitor mode kept such a
+    /// path out of the record, so each later event for the path printed the
+    /// same error again. A program that writes a file gives many events, so
+    /// the user saw one error many times. The error of one path must print one
+    /// time.
+    ///
+    /// The expected cause is the text that the operating system gives for the
+    /// same read. The test thus does not depend on the words of one operating
+    /// system. A user that ignores permissions, such as root, reads the file,
+    /// and the test then has nothing to prove. It says so and stops.
+    ///
+    /// The directory guard removes the file at the end, because the removal of
+    /// a file needs the permissions of its directory and not those of the file.
+    #[cfg(unix)]
+    #[test]
+    fn a_text_file_that_does_not_read_gives_one_error_that_names_the_cause() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TemporaryDirectory::new();
+        let secret = directory.file_of("secret.txt", b"hello\n");
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o000))
+            .expect("a change of the permissions of a file in the temporary directory");
+        let cause = match fs::read(&secret) {
+            Ok(_) => {
+                eprintln!(
+                    "skipped: this user reads a file that has no permissions, so the read cannot fail"
+                );
+                return;
+            }
+            Err(error) => error.to_string(),
+        };
+        let mut monitor = MonitorUnderTest::new();
+
+        let first = monitor.handle(&secret);
+        let second = monitor.handle(&secret);
+
+        assert_eq!(
+            first.stdout, "",
+            "a text file that does not read must give no header and no text"
+        );
+        let lines: Vec<&str> = first.stderr.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "a text file that does not read must give exactly one line of error, but it gave {:?}",
+            first.stderr
+        );
+        assert!(
+            lines[0].contains(&secret.display().to_string()) && lines[0].contains(&cause),
+            "the error must name the path {} and the cause {cause:?}, but it is {:?}",
+            secret.display(),
+            lines[0]
+        );
+        assert_eq!(
+            second,
+            Written::default(),
+            "a later event for the same path must not print the error again"
+        );
+    }
+
     // =========================================================================
     // Tests for ensure_file_exists
     // =========================================================================
