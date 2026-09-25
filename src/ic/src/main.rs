@@ -354,9 +354,13 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
     }
 
     // The monitor decides what one path gives. This loop only gives it the
-    // paths that the watcher reports.
-    let mut monitor =
-        Monitor::new(|path: &Path, header: &[String]| display_image_from_file(path, args, header));
+    // paths that the watcher reports. The monitor reads the bytes of an image
+    // itself, so the display decodes them and names no path in an error.
+    let mut monitor = Monitor::new(|path: &Path, source: Vec<u8>, header: &[String]| {
+        display_image_with_header(args, header, |capabilities| {
+            decode_image(source, path, capabilities)
+        })
+    });
     let mut last_cleanup = Instant::now();
 
     // Monitor for new files
@@ -406,29 +410,33 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
 /// temporary directory. It needs no watcher, no terminal, and no wait for an
 /// event.
 ///
-/// The type parameter is the display of one image. Production gives a closure
-/// over [`display_image_from_file`], which talks to the terminal. A test gives
-/// a closure that reads the image with [`read_image_file`] and a terminal that
-/// the test states.
+/// The type parameter is the display of one image. The monitor reads the bytes
+/// of the image itself, and the display decodes those bytes. Production gives a
+/// closure over [`display_image_with_header`] and [`decode_image`], which talks
+/// to the terminal. A test gives a closure that decodes the bytes with
+/// [`decode_image`] and a terminal that the test states.
 struct Monitor<ShowImage> {
     /// The paths this run already handled.
     seen: HashSet<PathBuf>,
-    /// Prints the header lines and then draws one image. Production passes a
-    /// closure over `display_image_from_file`. A test passes a closure that
-    /// reads the image with `read_image_file` and a stated terminal.
+    /// Prints the header lines, then decodes the bytes of one image and draws
+    /// it. Production passes a closure over `display_image_with_header` and
+    /// `decode_image`. A test passes a closure that decodes the bytes with
+    /// `decode_image` and a stated terminal.
     show_image: ShowImage,
 }
 
 impl<ShowImage> Monitor<ShowImage>
 where
-    ShowImage: FnMut(&Path, &[String]) -> Result<()>,
+    ShowImage: FnMut(&Path, Vec<u8>, &[String]) -> Result<()>,
 {
     /// Make a monitor that has handled no path.
     ///
     /// # Arguments
     /// * `show_image` - The display of one image. It takes the path of the
-    ///   image and the header lines to print above it. It prints the header
-    ///   lines itself, so the auto-fit path can count their rows.
+    ///   image, the bytes that the monitor read from that path, and the header
+    ///   lines to print above the image. It prints the header lines itself, so
+    ///   the auto-fit path can count their rows. It decodes the bytes and does
+    ///   not open the path, and its error does not name the path.
     ///
     /// # Returns
     /// A monitor that has no path in its record.
@@ -455,11 +463,12 @@ where
     ///   video. It gives no output. The watcher often reports a new file
     ///   before the program writes the text, and a later event shows the text.
     /// * Monitor mode ignores a video. It gives no output.
-    /// * An image goes to the image display.
+    /// * The monitor reads the bytes of an image, and the bytes go to the image
+    ///   display.
     /// * A path that is not an image and not a video is read as text. The text
     ///   comes after a header line.
     /// * A display that fails gives one line on `err`. The line names the path
-    ///   and the whole chain of the error, down to its cause.
+    ///   one time, and then the whole chain of the error, down to its cause.
     ///
     /// The record decides what a later event for the same path gives:
     ///
@@ -471,10 +480,10 @@ where
     /// * A path that monitor mode ignores stays out of the record. A later
     ///   event can find something to show, such as the text that a program
     ///   writes into a file that was empty.
-    /// * An image whose display fails stays out of the record. The watcher
-    ///   reports an image before the program completes the write, and an image
-    ///   that is not complete does not decode. A later event tries the image
-    ///   again, so each failure prints its error.
+    /// * An image whose read or display fails stays out of the record. The
+    ///   watcher reports an image before the program completes the write, and
+    ///   an image that is not complete does not decode. A later event tries the
+    ///   image again, so each failure prints its error.
     ///
     /// [`Monitor::forget_all`] empties the record. A path gives its output
     /// again at the first event after that call.
@@ -557,17 +566,24 @@ where
         Ok(())
     }
 
-    /// Give one image that monitor mode found to the image display.
+    /// Read one image that monitor mode found, and give its bytes to the image
+    /// display.
+    ///
+    /// The monitor reads the bytes itself, and the display decodes them. The
+    /// line of a failure in [`Monitor::handle`] names the path, so no link of
+    /// the error names it again. A reader of a path puts the path into its
+    /// context, as [`read_image_file`] does, and the user then reads the path
+    /// two times on one line.
     ///
     /// # Arguments
     /// * `path` - The path of the image.
     ///
     /// # Returns
     /// [`DisplayOutcome::Shown`] when the display succeeds.
-    /// [`DisplayOutcome::Failed`] when it fails, and a later event tries the
-    /// image again. The watcher reports an image before the program completes
-    /// the write, and an image that is not complete does not decode. A later
-    /// event decodes the complete image.
+    /// [`DisplayOutcome::Failed`] when the read or the display fails, and a
+    /// later event tries the image again. The watcher reports an image before
+    /// the program completes the write, and an image that is not complete does
+    /// not decode. A later event decodes the complete image.
     fn show_new_image(&mut self, path: &Path) -> DisplayOutcome {
         // The display prints the two header rows itself, so the auto-fit path
         // can count them. The first row is empty, which separates this image
@@ -576,7 +592,14 @@ where
             String::new(),
             format!("Found new image: {}", path.display()),
         ];
-        match (self.show_image)(path, &header) {
+        // A failure of the read and a failure of the display give the same
+        // outcome, so one match holds the rule of the record for both. The
+        // error of the read is the error of the operating system, which does
+        // not name the path.
+        let shown = fs::read(path)
+            .map_err(anyhow::Error::from)
+            .and_then(|source| (self.show_image)(path, source, &header));
+        match shown {
             Ok(()) => DisplayOutcome::Shown,
             Err(error) => DisplayOutcome::Failed {
                 what: "image",
@@ -1920,6 +1943,47 @@ fn draw_progress_bar(
 
 /// Read an image file, and give back the picture and the bytes of the file.
 ///
+/// This is the read of the file argument of `main`. It reads the bytes of the
+/// file, and [`decode_image`] makes the picture out of them. Each failure names
+/// the path in its context, because the error of `ic file.png` is the whole
+/// output of the run, and nothing else names the path to the user.
+///
+/// # Arguments
+/// * `file_path` - The path of the image file.
+/// * `capabilities` - What the terminal of this run does. The caller reads the
+///   terminal one time and states it here, so this read never depends on the
+///   terminal of whoever runs it.
+///
+/// # Returns
+/// The picture, and the bytes it came out of for a file that this terminal
+/// takes as it stands. [`None`] in place of the bytes for every other file and
+/// every other terminal. [`decode_image`] holds that rule.
+///
+/// # Errors
+/// An error when the file does not open, or when it holds no image. The
+/// outermost context of each error is `Failed to open image file: <path>`.
+fn read_image_file(
+    file_path: &Path,
+    capabilities: &Capabilities,
+) -> Result<(DynamicImage, Option<Vec<u8>>)> {
+    // One closure gives the context of both failures, so the two texts cannot
+    // drift apart. The closure holds only a reference, so it is `Copy`, and
+    // each `with_context` takes its own copy.
+    let failure = || format!("Failed to open image file: {}", file_path.display());
+
+    let source = fs::read(file_path).with_context(failure)?;
+
+    decode_image(source, file_path, capabilities).with_context(failure)
+}
+
+/// Make a picture out of the bytes of an image file, and keep the bytes when
+/// this terminal sends them as they stand.
+///
+/// The error of this function starts at the error of the decoder, and it does
+/// not name the file. Monitor mode puts the path at the start of its failure
+/// line, so a path in this error names the path two times on one line.
+/// [`read_image_file`] adds the path for the file argument of `main`.
+///
 /// The bytes travel beside the picture because `termgfx` sends a file it can
 /// carry as it stands: a JPEG on a disk is already a JPEG, and an encoder that
 /// read it and wrote it out again would throw a second helping of the picture
@@ -1944,9 +2008,12 @@ fn draw_progress_bar(
 /// second protocol carries a file.
 ///
 /// # Arguments
-/// * `file_path` - The path of the image file.
+/// * `source` - The bytes of the image file.
+/// * `name` - The path of the image file. The decoder takes the format from
+///   its extension when the first bytes name no format. This function does not
+///   open the path.
 /// * `capabilities` - What the terminal of this run does. The caller reads the
-///   terminal one time and states it here, so this read never depends on the
+///   terminal one time and states it here, so this decode never depends on the
 ///   terminal of whoever runs it.
 ///
 /// # Returns
@@ -1955,30 +2022,25 @@ fn draw_progress_bar(
 /// every other terminal.
 ///
 /// # Errors
-/// An error when the file does not open, or when it holds no image.
-fn read_image_file(
-    file_path: &Path,
+/// An error when the bytes hold no image. The chain of the error starts at the
+/// error of the decoder, and no link names the path.
+fn decode_image(
+    source: Vec<u8>,
+    name: &Path,
     capabilities: &Capabilities,
 ) -> Result<(DynamicImage, Option<Vec<u8>>)> {
-    let source = fs::read(file_path)
-        .with_context(|| format!("Failed to open image file: {}", file_path.display()))?;
-
     // The decoder reads the format out of the first bytes of the file, and it
     // takes the extension of the name where those bytes name nothing. That is
     // what `image::open` does with a path, and this reads the same file the
-    // same way out of the memory it already holds.
+    // same way out of the memory that already holds it.
     let mut reader = image::ImageReader::new(io::Cursor::new(&source));
-    if let Ok(format) = image::ImageFormat::from_path(file_path) {
+    if let Ok(format) = image::ImageFormat::from_path(name) {
         reader.set_format(format);
     }
 
-    let img = reader
-        .with_guessed_format()
-        .with_context(|| format!("Failed to open image file: {}", file_path.display()))?
-        .decode()
-        .with_context(|| format!("Failed to open image file: {}", file_path.display()))?;
+    let img = reader.with_guessed_format()?.decode()?;
 
-    // A file that the writer cannot send drops here, at the end of the read,
+    // A file that the writer cannot send drops here, at the end of the decode,
     // and the caller holds the picture alone.
     let source = capabilities.travels_as_it_stands(&source).then_some(source);
 
@@ -1987,11 +2049,9 @@ fn read_image_file(
 
 /// Print a header and then display an image file.
 ///
-/// The function prints the header itself and then counts the rows that it
-/// printed. The count and the print can therefore never drift apart, so a
-/// caller cannot print a header and forget to pay for the rows. A header line
-/// that is wider than the terminal wraps onto more than one row, so the count
-/// comes from the display width of each line and not from the number of lines.
+/// This is the display of the file argument of `main`. It reads the file with
+/// [`read_image_file`], so each error names the path.
+/// [`display_image_with_header`] prints the header and counts its rows.
 ///
 /// # Arguments
 /// * `file_path` - The path of the image file.
@@ -1999,8 +2059,47 @@ fn read_image_file(
 /// * `header` - The lines to print above the image, one line per element.
 ///
 /// # Returns
+/// Nothing when the image is on the terminal.
+///
+/// # Errors
 /// An error when the file does not open as an image, or when the display fails.
 fn display_image_from_file(file_path: &Path, args: &Args, header: &[String]) -> Result<()> {
+    display_image_with_header(args, header, |capabilities| {
+        read_image_file(file_path, capabilities)
+    })
+}
+
+/// Print a header, get a picture from `load`, and then display the picture.
+///
+/// The function prints the header itself and then counts the rows that it
+/// printed. The count and the print can therefore never drift apart, so a
+/// caller cannot print a header and forget to pay for the rows. A header line
+/// that is wider than the terminal wraps onto more than one row, so the count
+/// comes from the display width of each line and not from the number of lines.
+///
+/// The two displays of an image file share this body. The file argument of
+/// `main` gives a `load` that reads the file with [`read_image_file`]. Monitor
+/// mode reads the bytes itself, and it gives a `load` that decodes them with
+/// [`decode_image`]. The header prints before `load` runs, for both callers.
+///
+/// # Arguments
+/// * `args` - The command line arguments.
+/// * `header` - The lines to print above the image, one line per element.
+/// * `load` - Gives the picture, and the bytes it came out of when this
+///   terminal sends them as they stand. It takes what the terminal of this run
+///   does.
+///
+/// # Returns
+/// Nothing when the image is on the terminal.
+///
+/// # Errors
+/// The error of `load` when it gives no picture, or an error when the display
+/// fails.
+fn display_image_with_header(
+    args: &Args,
+    header: &[String],
+    load: impl FnOnce(&Capabilities) -> Result<(DynamicImage, Option<Vec<u8>>)>,
+) -> Result<()> {
     for line in header {
         println!("{line}");
     }
@@ -2009,7 +2108,7 @@ fn display_image_from_file(file_path: &Path, args: &Args, header: &[String]) -> 
     // `display_image` below takes that same answer out of the memory of
     // `termgfx`. So this call costs no round trip of its own.
     let capabilities = Capabilities::detect_by_asking();
-    let (img, source) = read_image_file(file_path, &capabilities)?;
+    let (img, source) = load(&capabilities)?;
 
     let (term_width, _) = terminal_cells();
     display_image(
@@ -2086,13 +2185,13 @@ fn display_text_file(file_path: &Path) -> Result<()> {
 /// Read one image out of `reader`, and give back the picture and the bytes.
 ///
 /// This is the read of the standard input path, and it keeps the bytes of a
-/// file by the rule that [`read_image_file`] keeps them by. One rule serves
-/// both readers: a rule that reached the reader of a path alone would hold 36
+/// file by the rule that [`decode_image`] keeps them by. One rule serves
+/// both readers: a rule that reached the decoder of a file alone would hold 36
 /// megabytes of dead bytes for `ic < photograph.bmp`, which is the case that
 /// the rule exists for.
 ///
 /// The read stands apart from the display of the picture for the reason
-/// [`read_image_file`] stands apart from [`display_image_from_file`]: a test
+/// [`decode_image`] stands apart from [`display_image_with_header`]: a test
 /// reads a picture out of bytes it built itself, where a test of the display
 /// would draw into the terminal of whoever runs it.
 ///
@@ -3619,16 +3718,19 @@ mod tests {
         stderr: String,
     }
 
-    /// The display of one image that a test gives to a [`Monitor`].
-    type ShowImageInTest = Box<dyn FnMut(&Path, &[String]) -> Result<()>>;
+    /// The display of one image that a test gives to a [`Monitor`]. It takes
+    /// the path of the image, the bytes that the monitor read, and the header
+    /// lines.
+    type ShowImageInTest = Box<dyn FnMut(&Path, Vec<u8>, &[String]) -> Result<()>>;
 
     /// A [`Monitor`] that a test drives, and a record of each image display.
     ///
     /// The display of production asks the terminal of whoever runs the suite
     /// what it can draw, and then it draws into that terminal. The display here
-    /// reads the image with [`read_image_file`] and a terminal that the test
-    /// states, and it draws nothing. It keeps the header lines of each call,
-    /// because the display of production prints them. A test that finds no
+    /// decodes the bytes that the monitor read with [`decode_image`] and a
+    /// terminal that the test states, and it draws nothing. Production decodes
+    /// the bytes with the same function. The display here keeps the header
+    /// lines of each call, because the display of production prints them. A test that finds no
     /// header here thus proves that no image header went to the terminal.
     ///
     /// One value of this type keeps its record of handled paths from one call
@@ -3649,10 +3751,11 @@ mod tests {
         fn new() -> Self {
             let image_headers = Rc::new(RefCell::new(Vec::new()));
             let record = Rc::clone(&image_headers);
-            let show_image: ShowImageInTest = Box::new(move |path: &Path, header: &[String]| {
-                record.borrow_mut().push(header.to_vec());
-                read_image_file(path, &a_terminal_that_sends_a_file()).map(|_| ())
-            });
+            let show_image: ShowImageInTest =
+                Box::new(move |path: &Path, source: Vec<u8>, header: &[String]| {
+                    record.borrow_mut().push(header.to_vec());
+                    decode_image(source, path, &a_terminal_that_sends_a_file()).map(|_| ())
+                });
 
             Self {
                 monitor: Monitor::new(show_image),
@@ -3987,8 +4090,8 @@ mod tests {
     /// thus read `Failed to open image file: <path>` and no cause. The error
     /// must show the whole chain, down to the cause that the decoder gives.
     ///
-    /// The expected cause comes from the same read that the image display of
-    /// this test makes, so the test does not copy the words of the decoder.
+    /// The expected cause comes from the same decoder that the image display
+    /// of this test uses, so the test does not copy the words of the decoder.
     /// The file `broken.png` holds text, which starts with no signature of an
     /// image format. The decoder thus takes the format from the extension,
     /// and the decode fails.
@@ -4058,8 +4161,8 @@ mod tests {
     /// `Invalid PNG signature.: Invalid PNG signature.`. A link that only
     /// repeats the end of the link before it tells the user nothing new.
     ///
-    /// The expected cause comes from the same read that the image display of
-    /// this test makes, so the test does not copy the words of the decoder.
+    /// The expected cause comes from the same decoder that the image display
+    /// of this test uses, so the test does not copy the words of the decoder.
     #[test]
     fn an_image_error_in_monitor_mode_names_its_cause_one_time() {
         let directory = TemporaryDirectory::new();
@@ -4088,8 +4191,8 @@ mod tests {
     /// times on one long line. The second copy tells the user nothing new.
     /// The monitor names the path, so the chain of the error must not name it.
     ///
-    /// The expected cause comes from the same read that the image display of
-    /// this test makes, so the test does not copy the words of the decoder.
+    /// The expected cause comes from the same decoder that the image display
+    /// of this test uses, so the test does not copy the words of the decoder.
     /// The test also checks that the cause stays on the line, so a fix that
     /// drops the whole chain makes this test fail.
     #[test]
@@ -4105,7 +4208,10 @@ mod tests {
         let written = monitor.handle(&broken);
 
         assert_eq!(
-            written.stderr.matches(&broken.display().to_string()).count(),
+            written
+                .stderr
+                .matches(&broken.display().to_string())
+                .count(),
             1,
             "the error must name the path {} one time, but it is {:?}",
             broken.display(),
