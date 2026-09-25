@@ -40,9 +40,9 @@ struct Fixture {
     _temp: TempDir,
     /// The clone, where each `nwt` run starts.
     clone: PathBuf,
-    /// The temporary directory that holds the remote, kept alive for the life
-    /// of the clone.
-    _remote: TempDir,
+    /// The temporary directories that hold the remotes, kept alive for the
+    /// life of the clone.
+    _remotes: Vec<TempDir>,
     /// An empty file that each `nwt` run reads as its global and its system
     /// git configuration.
     empty_config: NamedTempFile,
@@ -70,24 +70,7 @@ impl Fixture {
 fn clone_whose_remote_holds(branch: &str) -> Fixture {
     let (remote_temp, source) = init_repo();
     assert!(run_git(&source, &["branch", branch]), "git branch failed");
-    write_file(&source, "later.txt", "later\n");
-    assert!(
-        run_git(&source, &["add", "--", "later.txt"]),
-        "git add failed"
-    );
-    assert!(
-        run_git(
-            &source,
-            &[
-                "-c",
-                "commit.gpgsign=false",
-                "commit",
-                "-m",
-                "move HEAD past the branch"
-            ]
-        ),
-        "git commit failed"
-    );
+    commit_new_file(&source, "later.txt", "move HEAD past the branch");
 
     let bare = remote_temp.path().join("remote.git");
     assert!(
@@ -120,14 +103,35 @@ fn clone_whose_remote_holds(branch: &str) -> Fixture {
     Fixture {
         _temp: temp,
         clone,
-        _remote: remote_temp,
+        _remotes: vec![remote_temp],
         empty_config: NamedTempFile::new().expect("create an empty git configuration"),
     }
 }
 
+/// Write `file` into `repo`, and commit it with `message`.
+///
+/// The file holds its own name and a line break, so each new file gives a tree
+/// that no other commit of the fixture has.
+fn commit_new_file(repo: &Path, file: &str, message: &str) {
+    write_file(repo, file, &format!("{file}\n"));
+    assert!(run_git(repo, &["add", "--", file]), "git add failed");
+    assert!(
+        run_git(
+            repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", message]
+        ),
+        "git commit failed"
+    );
+}
+
 /// The full remote-tracking ref of `branch` on [`REMOTE`].
 fn remote_ref(branch: &str) -> String {
-    format!("refs/remotes/{REMOTE}/{branch}")
+    remote_ref_on(REMOTE, branch)
+}
+
+/// The full remote-tracking ref of `branch` on `remote`.
+fn remote_ref_on(remote: &str, branch: &str) -> String {
+    format!("refs/remotes/{remote}/{branch}")
 }
 
 /// The commit that `rev` names in `repo`.
@@ -359,4 +363,166 @@ fn a_branch_that_no_remote_holds_starts_at_head_without_an_upstream() {
         "a run that tracks nothing must print no {TRACKING_WORD} line, but stderr holds:\n{}",
         lines.join("\n")
     );
+}
+
+/// The second remote of a clone that two remotes give [`REMOTE_BRANCH`].
+const SECOND_REMOTE: &str = "upstream";
+
+/// The exit code of a run that two remotes give the branch, when
+/// `checkout.defaultRemote` picks neither. It is `AMBIGUOUS_REMOTE_BRANCH` in
+/// the `exit_codes` of `nwt`.
+const AMBIGUOUS_REMOTE_BRANCH: i32 = 16;
+
+/// Make a clone whose [`REMOTE`] and [`SECOND_REMOTE`] both hold `branch`, each
+/// at its own commit.
+///
+/// The second remote is a repository of its own. Its `branch` holds a file
+/// that no other commit of the fixture holds, so its commit is neither the
+/// commit of `origin/<branch>` nor `HEAD` of the clone. The clone gets the
+/// second remote through `git remote add` and `git fetch`, as a user adds a
+/// fork. The clone configures no `checkout.defaultRemote`.
+fn clone_whose_two_remotes_hold(branch: &str) -> Fixture {
+    let mut fixture = clone_whose_remote_holds(branch);
+
+    let (second_temp, second) = init_repo();
+    commit_new_file(&second, "upstream.txt", "the work of the second remote");
+    assert!(run_git(&second, &["branch", branch]), "git branch failed");
+
+    let second = second.to_str().expect("utf-8 remote path");
+    assert!(
+        run_git(&fixture.clone, &["remote", "add", SECOND_REMOTE, second]),
+        "git remote add failed"
+    );
+    assert!(
+        run_git(&fixture.clone, &["fetch", "--quiet", SECOND_REMOTE]),
+        "git fetch failed"
+    );
+    fixture._remotes.push(second_temp);
+
+    let second_commit = rev_parse(&fixture.clone, &remote_ref_on(SECOND_REMOTE, branch));
+    assert_ne!(
+        second_commit,
+        rev_parse(&fixture.clone, "HEAD"),
+        "{SECOND_REMOTE}/{branch} must not be at HEAD of the clone"
+    );
+    assert_ne!(
+        second_commit,
+        rev_parse(&fixture.clone, &remote_ref(branch)),
+        "{SECOND_REMOTE}/{branch} must not be at the commit of {REMOTE}/{branch}"
+    );
+
+    fixture
+}
+
+/// Demand that a refused run made nothing in the clone of `fixture`: no
+/// worktrees directory beside the clone, no worktree that git knows about
+/// other than the main worktree, no local branch `branch`, and no
+/// `branch.<branch>.*` configuration.
+///
+/// The temporary directory of the fixture holds only the clone until `nwt`
+/// makes something.
+fn assert_made_nothing(fixture: &Fixture, branch: &str) {
+    let parent = fixture.clone.parent().expect("the clone has a parent");
+    let beside: Vec<String> = fs::read_dir(parent)
+        .expect("read the directory that holds the clone")
+        .map(|entry| {
+            entry
+                .expect("read one directory entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    let clone_name = fixture
+        .clone
+        .file_name()
+        .expect("the clone has a name")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        beside,
+        vec![clone_name],
+        "a refused run must make no worktrees directory"
+    );
+
+    let listed: Vec<PathBuf> = git_stdout(&fixture.clone, &["worktree", "list", "--porcelain"])
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .map(|path| fs::canonicalize(path).expect("resolve a listed worktree"))
+        .collect();
+    assert_eq!(
+        listed,
+        vec![fs::canonicalize(&fixture.clone).expect("resolve the clone")],
+        "a refused run must leave the main worktree as the only worktree"
+    );
+
+    let local = format!("refs/heads/{branch}");
+    assert!(
+        !run_git(&fixture.clone, &["show-ref", "--verify", "--quiet", &local]),
+        "a refused run must make no {local}"
+    );
+
+    let section = format!("branch.{branch}.");
+    let configured = git_stdout(&fixture.clone, &["config", "--local", "--list"]);
+    let written: Vec<&str> = configured
+        .lines()
+        .filter(|line| line.starts_with(&section))
+        .collect();
+    assert!(
+        written.is_empty(),
+        "a refused run must write no {section}* configuration, but the clone holds:\n{}",
+        written.join("\n")
+    );
+}
+
+/// The lines of the refusal when [`REMOTE`] and [`SECOND_REMOTE`] both hold
+/// `branch`, and `checkout.defaultRemote` picks neither.
+fn ambiguous_remote_lines(branch: &str) -> Vec<String> {
+    vec![
+        format!(
+            "Error: more than one remote holds the branch '{branch}', and \
+             checkout.defaultRemote picks none of them:"
+        ),
+        format!("  {REMOTE}/{branch}"),
+        format!("  {SECOND_REMOTE}/{branch}"),
+        "Name the remote to track, and run nwt again:".to_owned(),
+        "  git config checkout.defaultRemote <remote>".to_owned(),
+    ]
+}
+
+/// When two remotes hold `<name>` and `checkout.defaultRemote` picks neither,
+/// `nwt` cannot know which branch the user wants. It refuses with exit 16
+/// before it makes anything. The message names each candidate, and it gives
+/// the command that picks one. Before this refusal, the branch started at
+/// `HEAD` in silence.
+#[test]
+fn two_remotes_that_hold_the_branch_and_no_default_remote_refuse_and_make_nothing() {
+    let fixture = clone_whose_two_remotes_hold(REMOTE_BRANCH);
+
+    let output = run_nwt(&fixture, &["-b", REMOTE_BRANCH]);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stderr_lines(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(AMBIGUOUS_REMOTE_BRANCH),
+        "the run must exit {AMBIGUOUS_REMOTE_BRANCH}.\nstdout:\n{stdout}\nstderr:\n{}",
+        lines.join("\n")
+    );
+    assert!(
+        stdout.is_empty(),
+        "a refused run prints no path. stdout: {stdout:?}"
+    );
+
+    let expected = ambiguous_remote_lines(REMOTE_BRANCH);
+    assert!(
+        lines
+            .windows(expected.len())
+            .any(|window| window == expected.as_slice()),
+        "stderr must hold these lines:\n{}\nbut it holds:\n{}",
+        expected.join("\n"),
+        lines.join("\n")
+    );
+
+    assert_made_nothing(&fixture, REMOTE_BRANCH);
 }
