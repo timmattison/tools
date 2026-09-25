@@ -70,8 +70,18 @@ impl Fixture {
 fn clone_whose_remote_holds(branch: &str) -> Fixture {
     let (remote_temp, source) = init_repo();
     assert!(run_git(&source, &["branch", branch]), "git branch failed");
-    commit_new_file(&source, "later.txt", "move HEAD past the branch");
+    commit_new_files(&source, &["later.txt"], "move HEAD past the branch");
 
+    clone_through_a_bare_remote(remote_temp, &source, branch)
+}
+
+/// Make a bare copy of `source` in `remote_temp`, and a clone of that copy.
+///
+/// `source` must hold `branch` as a local branch at a commit that is not its
+/// checked-out commit. The clone then holds `branch` only as
+/// `origin/<branch>`, and `HEAD` of the clone is not the commit of
+/// `origin/<branch>`.
+fn clone_through_a_bare_remote(remote_temp: TempDir, source: &Path, branch: &str) -> Fixture {
     let bare = remote_temp.path().join("remote.git");
     assert!(
         run_git(
@@ -108,13 +118,16 @@ fn clone_whose_remote_holds(branch: &str) -> Fixture {
     }
 }
 
-/// Write `file` into `repo`, and commit it with `message`.
+/// Write each of `files` into `repo`, and commit them and each staged change
+/// with `message`.
 ///
-/// The file holds its own name and a line break, so each new file gives a tree
-/// that no other commit of the fixture has.
-fn commit_new_file(repo: &Path, file: &str, message: &str) {
-    write_file(repo, file, &format!("{file}\n"));
-    assert!(run_git(repo, &["add", "--", file]), "git add failed");
+/// Each file holds its own path and a line break, so each new file gives a
+/// tree that no other commit of the fixture has.
+fn commit_new_files(repo: &Path, files: &[&str], message: &str) {
+    for file in files {
+        write_file(repo, file, &format!("{file}\n"));
+        assert!(run_git(repo, &["add", "--", file]), "git add failed");
+    }
     assert!(
         run_git(
             repo,
@@ -385,7 +398,7 @@ fn clone_whose_two_remotes_hold(branch: &str) -> Fixture {
     let mut fixture = clone_whose_remote_holds(branch);
 
     let (second_temp, second) = init_repo();
-    commit_new_file(&second, "upstream.txt", "the work of the second remote");
+    commit_new_files(&second, &["upstream.txt"], "the work of the second remote");
     assert!(run_git(&second, &["branch", branch]), "git branch failed");
 
     let second = second.to_str().expect("utf-8 remote path");
@@ -660,4 +673,182 @@ fn a_local_branch_gives_the_branch_exists_error_when_one_remote_holds_it() {
 
     assert_branch_exists_refusal(&output, REMOTE_BRANCH);
     assert_local_branch_untouched(&fixture, REMOTE_BRANCH, &commit);
+}
+
+/// The directory that the remote branch tracks, and that `HEAD` of the clone
+/// does not track.
+const HEAVY_DIR: &str = "heavy";
+
+/// The tracked files under [`HEAVY_DIR`] on the remote branch.
+const HEAVY_FILES: &[&str] = &["heavy/big.txt", "heavy/sub/deep.txt"];
+
+/// The file of the first commit that `init_repo` makes.
+const BASELINE_FILE: &str = "README.md";
+
+/// The tracked files of the remote branch outside [`HEAVY_DIR`].
+const KEPT_FILES: &[&str] = &[BASELINE_FILE, "light.txt"];
+
+/// The directory that `HEAD` of the clone tracks, and that the remote branch
+/// does not track.
+const HEAD_ONLY_DIR: &str = "head-only";
+
+/// The tracked file under [`HEAD_ONLY_DIR`] at `HEAD` of the clone.
+const HEAD_ONLY_FILE: &str = "head-only/big.txt";
+
+/// The exit code of a run that refuses a `--sparse-exclude` value. It is
+/// `INVALID_SPARSE_EXCLUDE` in the `exit_codes` of `nwt`.
+const INVALID_SPARSE_EXCLUDE: i32 = 15;
+
+/// True when git tracks `dir` as a directory at `rev` in `repo`.
+///
+/// `git ls-tree -d --name-only <rev> -- <dir>` prints `dir` for a directory,
+/// and nothing for a file or a missing path.
+fn tracks_directory_at(repo: &Path, rev: &str, dir: &str) -> bool {
+    git_stdout(repo, &["ls-tree", "-d", "--name-only", rev, "--", dir])
+        .lines()
+        .any(|entry| entry == dir)
+}
+
+/// Make a clone whose one remote holds `branch` with [`HEAVY_DIR`], and whose
+/// `HEAD` holds [`HEAD_ONLY_DIR`] in its place.
+///
+/// The remote branch tracks [`KEPT_FILES`] and [`HEAVY_FILES`]. The checked-out
+/// branch of the remote then removes [`HEAVY_DIR`] and adds
+/// [`HEAD_ONLY_FILE`]. So a `--sparse-exclude` check that reads `HEAD` of the
+/// clone gives the opposite answer to a check that reads `origin/<branch>`, for
+/// each of the two directories.
+fn clone_whose_remote_branch_holds_the_heavy_dir(branch: &str) -> Fixture {
+    let (remote_temp, source) = init_repo();
+    let tree: Vec<&str> = KEPT_FILES
+        .iter()
+        .chain(HEAVY_FILES)
+        .copied()
+        .filter(|file| *file != BASELINE_FILE)
+        .collect();
+    commit_new_files(&source, &tree, "add the heavy dir");
+    assert!(run_git(&source, &["branch", branch]), "git branch failed");
+
+    assert!(
+        run_git(&source, &["rm", "-r", "--quiet", "--", HEAVY_DIR]),
+        "git rm failed"
+    );
+    commit_new_files(
+        &source,
+        &[HEAD_ONLY_FILE],
+        "replace the heavy dir with the head-only dir",
+    );
+
+    let fixture = clone_through_a_bare_remote(remote_temp, &source, branch);
+
+    let remote_branch = remote_ref(branch);
+    assert!(
+        tracks_directory_at(&fixture.clone, &remote_branch, HEAVY_DIR)
+            && !tracks_directory_at(&fixture.clone, "HEAD", HEAVY_DIR),
+        "the fixture must track {HEAVY_DIR}/ at {remote_branch} and not at HEAD"
+    );
+    assert!(
+        tracks_directory_at(&fixture.clone, "HEAD", HEAD_ONLY_DIR)
+            && !tracks_directory_at(&fixture.clone, &remote_branch, HEAD_ONLY_DIR),
+        "the fixture must track {HEAD_ONLY_DIR}/ at HEAD and not at {remote_branch}"
+    );
+
+    fixture
+}
+
+/// With `-b <name>` that tracks `<remote>/<name>`, the `--sparse-exclude` check
+/// reads that remote branch, because the files of the new worktree come from
+/// it. So a directory that only the remote branch tracks passes the check.
+///
+/// The worktree does not hold the directory, holds each other tracked file of
+/// the remote branch, and has no change for `git status` to report. It starts
+/// at the remote branch and tracks it. A check that reads `HEAD` of the clone
+/// refuses the run with exit 15, because `HEAD` does not track the directory.
+#[test]
+fn sparse_exclude_with_a_tracked_branch_accepts_a_directory_that_only_the_remote_branch_holds() {
+    let fixture = clone_whose_remote_branch_holds_the_heavy_dir(REMOTE_BRANCH);
+
+    let output = run_nwt(
+        &fixture,
+        &["-b", REMOTE_BRANCH, "--sparse-exclude", HEAVY_DIR],
+    );
+    let worktree = created_worktree(&output);
+
+    assert!(
+        !worktree.join(HEAVY_DIR).exists(),
+        "{HEAVY_DIR}/ must be out of the worktree at {}",
+        worktree.display()
+    );
+    for file in KEPT_FILES {
+        assert!(
+            worktree.join(file).is_file(),
+            "{file} of {REMOTE}/{REMOTE_BRANCH} must be in the worktree at {}",
+            worktree.display()
+        );
+    }
+    let status = git_stdout(&worktree, &["status", "--short"]);
+    assert!(
+        status.is_empty(),
+        "a sparse worktree has no change to report, but git status says:\n{status}"
+    );
+
+    assert_eq!(
+        rev_parse(&worktree, "HEAD"),
+        rev_parse(&fixture.clone, &remote_ref(REMOTE_BRANCH)),
+        "the sparse worktree must start at {REMOTE}/{REMOTE_BRANCH}"
+    );
+    assert_eq!(
+        upstream_of(&fixture.clone, REMOTE_BRANCH),
+        format!("{REMOTE}/{REMOTE_BRANCH}"),
+        "the new branch of a sparse run must track {REMOTE}/{REMOTE_BRANCH}"
+    );
+}
+
+/// The stderr line of a run that refuses `dir`, because git does not track it
+/// as a directory at `at_ref`.
+fn not_tracked_message(dir: &str, at_ref: &str) -> String {
+    format!(
+        "Error: --sparse-exclude '{dir}' is not a directory that git tracks at '{at_ref}'. \
+         Give a directory that git tracks at that ref."
+    )
+}
+
+/// With `-b <name>` that tracks `<remote>/<name>`, a directory that `HEAD` of
+/// the clone tracks and the remote branch does not is refused. The new
+/// worktree has no such directory to exclude.
+///
+/// The run exits 15, prints no path, and names the directory and the short form
+/// of the remote branch, as the user reads it. It refuses before it makes
+/// anything, so no worktree, no branch, and no upstream configuration stay. A
+/// check that reads `HEAD` of the clone accepts the directory, and the run
+/// works.
+#[test]
+fn sparse_exclude_with_a_tracked_branch_refuses_a_directory_that_only_head_holds() {
+    let fixture = clone_whose_remote_branch_holds_the_heavy_dir(REMOTE_BRANCH);
+
+    let output = run_nwt(
+        &fixture,
+        &["-b", REMOTE_BRANCH, "--sparse-exclude", HEAD_ONLY_DIR],
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stderr_lines(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(INVALID_SPARSE_EXCLUDE),
+        "the run must exit {INVALID_SPARSE_EXCLUDE}.\nstdout:\n{stdout}\nstderr:\n{}",
+        lines.join("\n")
+    );
+    assert!(
+        stdout.is_empty(),
+        "a refused run prints no path. stdout: {stdout:?}"
+    );
+
+    let expected = not_tracked_message(HEAD_ONLY_DIR, &format!("{REMOTE}/{REMOTE_BRANCH}"));
+    assert!(
+        lines.contains(&expected),
+        "stderr must hold the line {expected:?}, but it holds:\n{}",
+        lines.join("\n")
+    );
+
+    assert_made_nothing(&fixture, REMOTE_BRANCH);
 }
