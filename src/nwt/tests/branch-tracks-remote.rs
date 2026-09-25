@@ -222,3 +222,30 @@ fn a_branch_that_one_remote_holds_starts_at_that_branch_and_tracks_it() {
         "the new branch must track {REMOTE}/{REMOTE_BRANCH}"
     );
 }
+
+/// Each line that `output` wrote to stderr.
+fn stderr_lines(output: &Output) -> Vec<String> {
+    String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// After a run that tracks a remote branch, stderr holds one line that names
+/// that branch. The line tells the user which start point `nwt` used. It goes
+/// to stderr, because the shell wrapper reads the worktree path from stdout.
+#[test]
+fn a_run_that_tracks_a_remote_branch_names_it_on_stderr() {
+    let fixture = clone_whose_remote_holds(REMOTE_BRANCH);
+
+    let output = run_nwt(&fixture, &["-b", REMOTE_BRANCH]);
+    created_worktree(&output);
+
+    let expected = format!("Tracking {REMOTE}/{REMOTE_BRANCH}");
+    let lines = stderr_lines(&output);
+    assert!(
+        lines.contains(&expected),
+        "stderr must hold the line {expected:?}, but it holds:\n{}",
+        lines.join("\n")
+    );
+}
