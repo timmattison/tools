@@ -353,8 +353,10 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
             .with_context(|| format!("Failed to watch directory: {}", dir.display()))?;
     }
 
-    // Keep track of recently displayed files to avoid duplicates
-    let mut recent_files = HashSet::new();
+    // The monitor decides what one path gives. This loop only gives it the
+    // paths that the watcher reports.
+    let mut monitor =
+        Monitor::new(|path: &Path, header: &[String]| display_image_from_file(path, args, header));
     let mut last_cleanup = Instant::now();
 
     // Monitor for new files
@@ -365,45 +367,15 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
                     match event.kind {
                         notify::EventKind::Create(_) | notify::EventKind::Modify(_) => {
                             for path in event.paths {
-                                if !recent_files.contains(&path) {
-                                    if is_image_file(&path) {
-                                        // The callee prints the two header
-                                        // rows, so the auto-fit path can count
-                                        // them. The first row is empty, which
-                                        // separates this image from the one
-                                        // before it.
-                                        let header = [
-                                            String::new(),
-                                            format!("Found new image: {}", path.display()),
-                                        ];
-                                        match display_image_from_file(&path, args, &header) {
-                                            Ok(_) => {
-                                                recent_files.insert(path.clone());
-                                            }
-                                            Err(e) => {
-                                                eprintln!(
-                                                    "Failed to display image {}: {}",
-                                                    path.display(),
-                                                    e
-                                                );
-                                            }
-                                        }
-                                    } else if is_text_file(&path) {
-                                        println!("\nFound new text file: {}", path.display());
-                                        match display_text_file(&path) {
-                                            Ok(_) => {
-                                                recent_files.insert(path.clone());
-                                            }
-                                            Err(e) => {
-                                                eprintln!(
-                                                    "Failed to display text file {}: {}",
-                                                    path.display(),
-                                                    e
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
+                                // Each call takes a new handle of standard
+                                // output and holds no lock of it. The image
+                                // display prints with `println!`, which takes
+                                // that lock itself.
+                                monitor
+                                    .handle(&path, &mut io::stdout(), &mut io::stderr())
+                                    .with_context(|| {
+                                        format!("Failed to write the output for {}", path.display())
+                                    })?;
                             }
                         }
                         _ => {}
@@ -411,9 +383,9 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Clean up old entries from recent_files periodically
+                // Forget the handled paths periodically
                 if last_cleanup.elapsed() > Duration::from_secs(60) {
-                    recent_files.clear();
+                    monitor.forget_all();
                     last_cleanup = Instant::now();
                 }
             }
@@ -424,6 +396,124 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The handling of each path that monitor mode reports, one path at a time.
+///
+/// The watcher loop in [`monitor_directories`] gives each path that it hears
+/// about to [`Monitor::handle`], and it does nothing else with the path. A
+/// test therefore drives the handling of one path directly, with files in a
+/// temporary directory. It needs no watcher, no terminal, and no wait for an
+/// event.
+///
+/// The type parameter is the display of one image. Production gives a closure
+/// over [`display_image_from_file`], which talks to the terminal. A test gives
+/// a closure that reads the image with [`read_image_file`] and a terminal that
+/// the test states.
+struct Monitor<ShowImage> {
+    /// The paths this run already handled.
+    seen: HashSet<PathBuf>,
+    /// Prints the header lines and then draws one image. Production passes a
+    /// closure over `display_image_from_file`. A test passes a closure that
+    /// reads the image with `read_image_file` and a stated terminal.
+    show_image: ShowImage,
+}
+
+impl<ShowImage> Monitor<ShowImage>
+where
+    ShowImage: FnMut(&Path, &[String]) -> Result<()>,
+{
+    /// Make a monitor that has handled no path.
+    ///
+    /// # Arguments
+    /// * `show_image` - The display of one image. It takes the path of the
+    ///   image and the header lines to print above it. It prints the header
+    ///   lines itself, so the auto-fit path can count their rows.
+    ///
+    /// # Returns
+    /// A monitor that has no path in its record.
+    fn new(show_image: ShowImage) -> Self {
+        Self {
+            seen: HashSet::new(),
+            show_image,
+        }
+    }
+
+    /// Handle one path that the watcher reported.
+    ///
+    /// A path that this run already handled gives no output. An image goes to
+    /// the image display. A path that is not an image and not a video is read
+    /// as text, and the text comes after a header line. A path goes into the
+    /// record only when its display succeeds, so a later event for a path that
+    /// failed tries the path again.
+    ///
+    /// # Arguments
+    /// * `path` - The path that the watcher reported.
+    /// * `out` - The destination of the header and the content of a text file.
+    /// * `err` - The destination of a failure to display the path.
+    ///
+    /// # Returns
+    /// Nothing when every write succeeds. A failure to display the path is not
+    /// an error of this function. It goes to `err` as one line.
+    ///
+    /// # Errors
+    /// An error when a write to `out` or to `err` fails.
+    fn handle(
+        &mut self,
+        path: &Path,
+        out: &mut impl Write,
+        err: &mut impl Write,
+    ) -> io::Result<()> {
+        if self.seen.contains(path) {
+            return Ok(());
+        }
+
+        if is_image_file(path) {
+            // The display prints the two header rows itself, so the auto-fit
+            // path can count them. The first row is empty, which separates
+            // this image from the one before it.
+            let header = [
+                String::new(),
+                format!("Found new image: {}", path.display()),
+            ];
+            match (self.show_image)(path, &header) {
+                Ok(()) => {
+                    self.seen.insert(path.to_path_buf());
+                }
+                Err(error) => {
+                    writeln!(err, "Failed to display image {}: {}", path.display(), error)?;
+                }
+            }
+        } else if is_text_file(path) {
+            writeln!(out, "\nFound new text file: {}", path.display())?;
+            match read_text_file(path) {
+                Ok(contents) => {
+                    out.write_all(contents.as_bytes())?;
+                    out.flush()?;
+                    self.seen.insert(path.to_path_buf());
+                }
+                Err(error) => {
+                    writeln!(
+                        err,
+                        "Failed to display text file {}: {}",
+                        path.display(),
+                        error
+                    )?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Forget every path that this run handled.
+    ///
+    /// Monitor mode does this every 60 seconds, so the record does not grow
+    /// for the whole length of a long run. A path that changes after this call
+    /// gives its output again.
+    fn forget_all(&mut self) {
+        self.seen.clear();
+    }
 }
 
 fn is_video_file(file_path: &Path) -> bool {
@@ -1744,9 +1834,37 @@ fn display_image_from_file(file_path: &Path, args: &Args, header: &[String]) -> 
     )
 }
 
+/// Read the content of a text file.
+///
+/// The file argument of `main` and monitor mode both read a text file through
+/// this function, so the two give the same error for the same file.
+///
+/// # Arguments
+/// * `file_path` - The path of the text file.
+///
+/// # Returns
+/// The content of the file.
+///
+/// # Errors
+/// An error when the file does not open, or when its content is not UTF-8.
+fn read_text_file(file_path: &Path) -> Result<String> {
+    fs::read_to_string(file_path)
+        .with_context(|| format!("Failed to read text file: {}", file_path.display()))
+}
+
+/// Print the content of a text file to standard output.
+///
+/// # Arguments
+/// * `file_path` - The path of the text file.
+///
+/// # Returns
+/// Nothing when the content is on standard output.
+///
+/// # Errors
+/// An error when the file does not read as text, or when the flush of standard
+/// output fails.
 fn display_text_file(file_path: &Path) -> Result<()> {
-    let contents = fs::read_to_string(file_path)
-        .with_context(|| format!("Failed to read text file: {}", file_path.display()))?;
+    let contents = read_text_file(file_path)?;
 
     print!("{}", contents);
     io::stdout().flush().context("Failed to flush output")?;
@@ -2190,6 +2308,8 @@ fn classify_transport(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use termgfx::{AnsweredProtocol, PayloadBudget};
 
@@ -3201,6 +3321,208 @@ mod tests {
             source.as_deref(),
             Some(png.as_slice()),
             "the reader must keep the bytes of a PNG, because the writer sends them as they stand"
+        );
+    }
+
+    // =========================================================================
+    // Tests for Monitor::handle
+    // =========================================================================
+
+    /// A directory of the temporary directory that goes away with the test.
+    ///
+    /// The removal stands in `Drop` for the reason that [`TemporaryFile`]
+    /// gives: an assertion that fails panics before a removal on a later line
+    /// of the test body runs. Each guard makes its own directory, so the files
+    /// of one test never meet the files of a test that runs at the same time.
+    struct TemporaryDirectory(PathBuf);
+
+    impl TemporaryDirectory {
+        /// Make a new, empty directory that no other test uses.
+        ///
+        /// # Returns
+        /// A guard that names the directory and removes it, and all that it
+        /// holds, at the end of the test.
+        fn new() -> Self {
+            let path = unique_temporary_path("ic-monitor", "dir");
+            fs::create_dir(&path).expect("a new directory in the temporary directory");
+
+            Self(path)
+        }
+
+        /// The path that the directory stands at.
+        ///
+        /// # Returns
+        /// The path of the directory, which holds while the guard lives.
+        fn path(&self) -> &Path {
+            &self.0
+        }
+
+        /// Write `bytes` to a file of this directory.
+        ///
+        /// # Arguments
+        /// * `name` - The name of the file in this directory.
+        /// * `bytes` - The bytes to write.
+        ///
+        /// # Returns
+        /// The path of the file.
+        fn file_of(&self, name: &str, bytes: &[u8]) -> PathBuf {
+            let path = self.path().join(name);
+            fs::write(&path, bytes).expect("a write to the temporary directory");
+
+            path
+        }
+    }
+
+    impl Drop for TemporaryDirectory {
+        fn drop(&mut self) {
+            // The removal reports to nobody, for the reason that the `Drop` of
+            // `TemporaryFile` gives.
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// What one call of [`Monitor::handle`] wrote.
+    ///
+    /// The two fields together are the whole output of one path. A test that
+    /// expects no output compares against [`Written::default`], so the
+    /// failure message shows every byte that the path gave.
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct Written {
+        /// The text that went to standard output.
+        stdout: String,
+        /// The text that went to standard error.
+        stderr: String,
+    }
+
+    /// The display of one image that a test gives to a [`Monitor`].
+    type ShowImageInTest = Box<dyn FnMut(&Path, &[String]) -> Result<()>>;
+
+    /// A [`Monitor`] that a test drives, and a record of each image display.
+    ///
+    /// The display of production asks the terminal of whoever runs the suite
+    /// what it can draw, and then it draws into that terminal. The display here
+    /// reads the image with [`read_image_file`] and a terminal that the test
+    /// states, and it draws nothing. It keeps the header lines of each call,
+    /// because the display of production prints them. A test that finds no
+    /// header here thus proves that no image header went to the terminal.
+    ///
+    /// One value of this type keeps its record of handled paths from one call
+    /// of [`MonitorUnderTest::handle`] to the next, as monitor mode does. A
+    /// test that handles one path two times uses one value.
+    struct MonitorUnderTest {
+        /// The monitor that the test drives.
+        monitor: Monitor<ShowImageInTest>,
+        /// The header lines of each call of the image display, in order.
+        image_headers: Rc<RefCell<Vec<Vec<String>>>>,
+    }
+
+    impl MonitorUnderTest {
+        /// Make a monitor that has handled no path and displayed no image.
+        ///
+        /// # Returns
+        /// The monitor, with an empty record of image displays.
+        fn new() -> Self {
+            let image_headers = Rc::new(RefCell::new(Vec::new()));
+            let record = Rc::clone(&image_headers);
+            let show_image: ShowImageInTest = Box::new(move |path: &Path, header: &[String]| {
+                record.borrow_mut().push(header.to_vec());
+                read_image_file(path, &a_terminal_that_sends_a_file()).map(|_| ())
+            });
+
+            Self {
+                monitor: Monitor::new(show_image),
+                image_headers,
+            }
+        }
+
+        /// Handle one path, and give back what the monitor wrote.
+        ///
+        /// # Arguments
+        /// * `path` - The path that the watcher reports.
+        ///
+        /// # Returns
+        /// The text that went to standard output and to standard error. A
+        /// byte that is not UTF-8 shows as the replacement character, so a
+        /// test that expects no output still prints what it got.
+        fn handle(&mut self, path: &Path) -> Written {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            self.monitor
+                .handle(path, &mut stdout, &mut stderr)
+                .expect("a write to memory succeeds");
+
+            Written {
+                stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            }
+        }
+
+        /// The header lines of each call of the image display.
+        ///
+        /// # Returns
+        /// One element for each call, in the order of the calls. An empty
+        /// list means that no path reached the image display.
+        fn image_headers(&self) -> Vec<Vec<String>> {
+            self.image_headers.borrow().clone()
+        }
+    }
+
+    /// A new text file in monitor mode gives a header and then the text.
+    ///
+    /// This is the outcome that monitor mode exists for, and the fixes of
+    /// <https://github.com/timmattison/tools/issues/526> keep it. A fix that
+    /// ignores too much, such as every path that it does not know, makes this
+    /// test fail. The expected output is exact, so a change to the header or to
+    /// the text makes this test fail too.
+    #[test]
+    fn a_new_text_file_in_monitor_mode_gives_a_header_and_the_text() {
+        let directory = TemporaryDirectory::new();
+        let note = directory.file_of("note.txt", b"hello\n");
+        let mut monitor = MonitorUnderTest::new();
+
+        let written = monitor.handle(&note);
+
+        assert_eq!(
+            written,
+            Written {
+                stdout: format!("\nFound new text file: {}\nhello\n", note.display()),
+                stderr: String::new(),
+            },
+            "a new text file must give its header and its text, and no failure"
+        );
+        assert!(
+            monitor.image_headers().is_empty(),
+            "a text file must not reach the image display, but it got {:?}",
+            monitor.image_headers()
+        );
+    }
+
+    /// A new image in monitor mode goes to the image display with its header.
+    ///
+    /// The image display prints the header itself, so the auto-fit path can
+    /// count its rows. The header is an empty row, which separates this image
+    /// from the one before it, and then the path. A fix that ignores too much,
+    /// such as every path that it does not open as text, makes this test fail.
+    #[test]
+    fn a_new_image_in_monitor_mode_goes_to_the_image_display_with_its_header() {
+        let directory = TemporaryDirectory::new();
+        let picture = directory.file_of("picture.png", &picture_bytes_in(image::ImageFormat::Png));
+        let mut monitor = MonitorUnderTest::new();
+
+        let written = monitor.handle(&picture);
+
+        assert_eq!(
+            written,
+            Written::default(),
+            "an image that displays must give no text of its own"
+        );
+        assert_eq!(
+            monitor.image_headers(),
+            vec![vec![
+                String::new(),
+                format!("Found new image: {}", picture.display())
+            ]],
+            "an image must reach the image display one time, with its header"
         );
     }
 
