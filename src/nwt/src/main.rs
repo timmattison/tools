@@ -753,7 +753,8 @@ fn parse_sparse_excludes(raw: &[String]) -> Result<Vec<SparseExcludeDir>, Sparse
     Ok(dirs)
 }
 
-/// The ref that a new worktree checks out when the user gives no `-c <ref>`.
+/// The ref that a new worktree checks out for
+/// [`WorktreeSource::NewBranchAtHead`].
 ///
 /// `git worktree add <path> -b <branch>` starts the branch at `HEAD` of the
 /// worktree it runs in, and `nwt` runs it in the main worktree.
@@ -761,9 +762,10 @@ const SPARSE_DEFAULT_REF: &str = "HEAD";
 
 /// Ask git whether it tracks `dir` as a directory at `tree_ref`.
 ///
-/// `tree_ref` is the ref that git reads. `at_ref` is the ref as the user typed
+/// `tree_ref` is the ref that git reads. `at_ref` is the ref as the user reads
 /// it, and each message names it. The two differ for a branch that only a
-/// remote holds (see [`resolve_checkout_ref`]).
+/// remote holds (see [`resolve_checkout_ref`] and
+/// [`WorktreeSource::NewBranchTracking`]).
 ///
 /// The command is
 /// `git --literal-pathspecs ls-tree -z -d --name-only <tree_ref> -- <dir>`, in
@@ -842,6 +844,228 @@ fn sparse_check_output(
 /// The prefix of every remote-tracking ref.
 const REMOTE_TRACKING_PREFIX: &str = "refs/remotes/";
 
+/// A remote-tracking branch `refs/remotes/<remote>/<branch>`.
+///
+/// [`find_remote_tracking_branch`] makes each value from a ref that git
+/// listed. [`fmt::Display`] gives the short form `<remote>/<branch>`, and each
+/// message of `nwt` names the branch in that form.
+/// [`RemoteTrackingBranch::full_ref`] gives the full ref, and each git command
+/// takes that form. So a tag or a local branch with the name
+/// `<remote>/<branch>` cannot shadow the remote-tracking branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteTrackingBranch {
+    /// The name of the remote, for example `origin`.
+    remote: String,
+    /// The name of the branch on the remote, for example `issue-33`.
+    branch: String,
+}
+
+impl RemoteTrackingBranch {
+    /// Read the remote-tracking branch `name` out of `refname`, a ref that
+    /// `git for-each-ref` listed for the pattern `refs/remotes/*/<name>`.
+    ///
+    /// The part between `refs/remotes/` and `/<name>` is the remote. The
+    /// function removes a prefix and a suffix, and it never cuts at a byte
+    /// offset. So a name with multi-byte characters stays intact.
+    ///
+    /// Returns `None` when `refname` does not have that shape, or when the part
+    /// for the remote is empty.
+    fn from_listed_ref(refname: &str, name: &str) -> Option<Self> {
+        let remote = refname
+            .strip_prefix(REMOTE_TRACKING_PREFIX)?
+            .strip_suffix(name)?
+            .strip_suffix('/')?;
+        if remote.is_empty() {
+            return None;
+        }
+
+        Some(Self {
+            remote: remote.to_owned(),
+            branch: name.to_owned(),
+        })
+    }
+
+    /// The full ref, `refs/remotes/<remote>/<branch>`.
+    fn full_ref(&self) -> String {
+        format!("{REMOTE_TRACKING_PREFIX}{}/{}", self.remote, self.branch)
+    }
+
+    /// The name of the remote.
+    fn remote(&self) -> &str {
+        &self.remote
+    }
+}
+
+impl fmt::Display for RemoteTrackingBranch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.remote, self.branch)
+    }
+}
+
+/// The answer of [`find_remote_tracking_branch`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RemoteTrackingMatch {
+    /// Exactly one remote holds the branch. Or more than one remote holds it,
+    /// and `checkout.defaultRemote` names one of those remotes.
+    One(RemoteTrackingBranch),
+    /// More than one remote holds the branch, and `checkout.defaultRemote`
+    /// picks none of them. The candidates are in the order that
+    /// `git for-each-ref` lists them.
+    Ambiguous(Vec<RemoteTrackingBranch>),
+    /// No remote holds the branch.
+    None,
+}
+
+/// Why [`find_remote_tracking_branch`] could not answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RemoteLookupError {
+    /// Git did not start. `command` names the git subcommand, and `error`
+    /// holds the reason that the operating system gave.
+    NotStarted {
+        command: &'static str,
+        error: String,
+    },
+    /// Git exited with a status that is not zero, so it did not list the
+    /// remote-tracking branches. `command` names the git subcommand, and
+    /// `stderr` holds what git wrote.
+    Failed {
+        command: &'static str,
+        stderr: String,
+    },
+}
+
+impl fmt::Display for RemoteLookupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotStarted { command, error } => write!(
+                f,
+                "could not run git {command} to look for a remote branch: {error}"
+            ),
+            Self::Failed { command, stderr } => write!(
+                f,
+                "git {command} could not list the remote branches: {stderr}"
+            ),
+        }
+    }
+}
+
+impl RemoteLookupError {
+    /// The exit code of `nwt -b <name>` for this failure.
+    ///
+    /// A git that does not start exits [`exit_codes::GIT_COMMAND_ERROR`], as it
+    /// does for `git worktree add`. A git that fails exits
+    /// [`exit_codes::WORKTREE_FAILED`], because the run cannot make the
+    /// worktree that the user asked for.
+    fn exit_code(&self) -> i32 {
+        match self {
+            Self::NotStarted { .. } => exit_codes::GIT_COMMAND_ERROR,
+            Self::Failed { .. } => exit_codes::WORKTREE_FAILED,
+        }
+    }
+}
+
+/// Find the remote-tracking branch `refs/remotes/<remote>/<name>` that the
+/// checkout DWIM of git takes for `name`.
+///
+/// This function mirrors steps 2 and 3 of `unique_tracking_name` in
+/// `checkout.c` of git:
+///
+/// 1. When exactly one ref `refs/remotes/<remote>/<name>` exists, the answer is
+///    [`RemoteTrackingMatch::One`] with that ref.
+/// 2. When more than one such ref exists, `checkout.defaultRemote` names a
+///    remote, and that remote holds one of them, the answer is
+///    [`RemoteTrackingMatch::One`] with the ref of that remote. When
+///    `checkout.defaultRemote` picks none of them, the answer is
+///    [`RemoteTrackingMatch::Ambiguous`] with each candidate.
+/// 3. When no such ref exists, the answer is [`RemoteTrackingMatch::None`].
+///
+/// Two callers use it. [`resolve_checkout_ref`] runs its own first step
+/// (`git rev-parse`) before it, for `-c <name>`. `main` runs it for
+/// `-b <name>`, where a local branch `name` makes git refuse the add, so that
+/// caller needs no first step.
+///
+/// Git finds the remote-tracking branch through the fetch refspec of each
+/// remote. This function reads `refs/remotes/<remote>/<name>`, where the
+/// default refspec puts it. A remote with a different refspec can give a
+/// different answer. The function never fetches. It reads only the refs that
+/// the clone already holds.
+///
+/// Each git child starts from [`production_git_command`].
+///
+/// # Errors
+///
+/// - [`RemoteLookupError::NotStarted`] when git does not start.
+/// - [`RemoteLookupError::Failed`] when `git for-each-ref` exits with a status
+///   that is not zero. A failed listing is not an empty listing, so the
+///   function never reports [`RemoteTrackingMatch::None`] for it.
+fn find_remote_tracking_branch(
+    repo_root: &Path,
+    name: &str,
+) -> Result<RemoteTrackingMatch, RemoteLookupError> {
+    // A `*` in a `for-each-ref` pattern does not match a `/`, so each listed
+    // ref is `refs/remotes/<one remote>/<name>`.
+    let mut list = production_git_command(repo_root);
+    list.args([
+        "for-each-ref",
+        "--format=%(refname)",
+        &format!("{REMOTE_TRACKING_PREFIX}*/{name}"),
+    ]);
+    let listed = remote_lookup_output(list, "for-each-ref")?;
+    if !listed.status.success() {
+        return Err(RemoteLookupError::Failed {
+            command: "for-each-ref",
+            stderr: String::from_utf8_lossy(&listed.stderr).trim().to_owned(),
+        });
+    }
+
+    let listed = String::from_utf8_lossy(&listed.stdout);
+    let mut candidates: Vec<RemoteTrackingBranch> = listed
+        .lines()
+        .filter_map(|refname| RemoteTrackingBranch::from_listed_ref(refname, name))
+        .collect();
+
+    match candidates.len() {
+        0 => return Ok(RemoteTrackingMatch::None),
+        1 => return Ok(RemoteTrackingMatch::One(candidates.remove(0))),
+        _ => {}
+    }
+
+    // Git asks for the default remote only when more than one remote holds
+    // the branch, and so does this function.
+    let mut default_remote = production_git_command(repo_root);
+    default_remote.args(["config", "--get", CHECKOUT_DEFAULT_REMOTE_KEY]);
+    let configured = remote_lookup_output(default_remote, "config")?;
+    if configured.status.success() {
+        let remote = String::from_utf8_lossy(&configured.stdout);
+        let remote = remote.trim_end_matches('\n');
+        if let Some(index) = candidates
+            .iter()
+            .position(|candidate| candidate.remote() == remote)
+        {
+            return Ok(RemoteTrackingMatch::One(candidates.remove(index)));
+        }
+    }
+
+    Ok(RemoteTrackingMatch::Ambiguous(candidates))
+}
+
+/// Run one git child of [`find_remote_tracking_branch`] to its end, with its
+/// output captured.
+///
+/// # Errors
+///
+/// [`RemoteLookupError::NotStarted`], which names `subcommand`, when git does
+/// not start.
+fn remote_lookup_output(
+    mut command: Command,
+    subcommand: &'static str,
+) -> Result<std::process::Output, RemoteLookupError> {
+    command.output().map_err(|e| RemoteLookupError::NotStarted {
+        command: subcommand,
+        error: e.to_string(),
+    })
+}
+
 /// The ref that `git ls-tree` reads for the `-c <name>` that the user typed.
 ///
 /// This function mirrors the checkout DWIM of git (`unique_tracking_name` in
@@ -867,14 +1091,15 @@ const REMOTE_TRACKING_PREFIX: &str = "refs/remotes/";
 ///    function returns `name`, so `git ls-tree` refuses it too, and the run
 ///    exits as a failed add.
 ///
-/// Git finds the remote-tracking branch through the fetch refspec of each
-/// remote. This function reads `refs/remotes/<remote>/<name>`, where the
-/// default refspec puts it. A remote with a different refspec can give a
-/// different answer.
+/// This function runs step 1 itself. [`find_remote_tracking_branch`] holds
+/// steps 2 and 3, and `main` uses the same function for `-b <name>`. So the
+/// two flags find a remote branch with one set of rules.
 ///
 /// # Errors
 ///
-/// [`SparseExcludeError::GitCommand`] when git does not start.
+/// - [`SparseExcludeError::GitCommand`] when git does not start.
+/// - [`SparseExcludeError::UnreadableRef`], which names `name`, when
+///   `git for-each-ref` fails.
 fn resolve_checkout_ref(repo_root: &Path, name: &str) -> Result<String, SparseExcludeError> {
     let mut verify = production_git_command(repo_root);
     verify.args([
@@ -887,57 +1112,60 @@ fn resolve_checkout_ref(repo_root: &Path, name: &str) -> Result<String, SparseEx
         return Ok(name.to_owned());
     }
 
-    // A `*` in a `for-each-ref` pattern does not match a `/`, so each listed
-    // ref is `refs/remotes/<one remote>/<name>`.
-    let mut list = production_git_command(repo_root);
-    list.args([
-        "for-each-ref",
-        "--format=%(refname)",
-        &format!("{REMOTE_TRACKING_PREFIX}*/{name}"),
-    ]);
-    let listed = sparse_check_output(list, "for-each-ref")?;
-    let listed = String::from_utf8_lossy(&listed.stdout);
-    let candidates: Vec<&str> = listed.lines().collect();
-
-    match candidates.as_slice() {
-        [] => return Ok(name.to_owned()),
-        [only] => return Ok((*only).to_owned()),
-        _ => {}
-    }
-
-    // Git asks for the default remote only when more than one remote holds
-    // the branch, and so does this function.
-    let mut default_remote = production_git_command(repo_root);
-    default_remote.args(["config", "--get", CHECKOUT_DEFAULT_REMOTE_KEY]);
-    let configured = sparse_check_output(default_remote, "config")?;
-    if configured.status.success() {
-        let remote = String::from_utf8_lossy(&configured.stdout);
-        let preferred = format!(
-            "{REMOTE_TRACKING_PREFIX}{}/{name}",
-            remote.trim_end_matches('\n')
-        );
-        if candidates.contains(&preferred.as_str()) {
-            return Ok(preferred);
+    let found = find_remote_tracking_branch(repo_root, name).map_err(|e| match e {
+        RemoteLookupError::NotStarted { command, error } => {
+            SparseExcludeError::GitCommand { command, error }
         }
-    }
+        RemoteLookupError::Failed { stderr, .. } => SparseExcludeError::UnreadableRef {
+            at_ref: name.to_owned(),
+            stderr,
+        },
+    })?;
 
-    Ok(name.to_owned())
+    Ok(match found {
+        RemoteTrackingMatch::One(branch) => branch.full_ref(),
+        // Git refuses the add for both, so `git ls-tree` gets the name and
+        // refuses it too.
+        RemoteTrackingMatch::Ambiguous(_) | RemoteTrackingMatch::None => name.to_owned(),
+    })
 }
 
 /// The git configuration key that names the remote whose branch git checks
 /// out when more than one remote holds a branch of the name.
 const CHECKOUT_DEFAULT_REMOTE_KEY: &str = "checkout.defaultRemote";
 
+/// What the new worktree checks out.
+///
+/// `main` builds one value, and it gives the same value to
+/// [`resolve_sparse_excludes`] and to [`try_create_worktree`]. So the check of
+/// `--sparse-exclude` reads the ref that the add checks out.
+#[derive(Debug, Clone, Copy)]
+enum WorktreeSource<'a> {
+    /// `-c <ref>`, with the ref as the user typed it. `git worktree add` sends
+    /// a ref that names no commit through the checkout DWIM of git.
+    Checkout(&'a str),
+    /// A new branch that starts at `HEAD` of the main worktree.
+    NewBranchAtHead,
+    /// A new branch that starts at this remote-tracking branch and tracks it.
+    NewBranchTracking(&'a RemoteTrackingBranch),
+}
+
 /// Parse every `--sparse-exclude` value, and make sure that git tracks each
 /// one as a directory at the ref that the new worktree checks out.
 ///
-/// That ref is `checkout_ref` when the user gives `-c <ref>`, and
-/// [`SPARSE_DEFAULT_REF`] when not. `checkout_ref` goes through
-/// [`resolve_checkout_ref`] first, because `git worktree add` sends a name
-/// that names no commit through the checkout DWIM of git. Each message still
-/// names `checkout_ref` as the user typed it. The check reads the ref and not the disk,
-/// because the files of the new worktree come from the ref. Git runs in
-/// `repo_root`, the main worktree.
+/// `source` gives that ref:
+///
+/// - For [`WorktreeSource::Checkout`], it is the ref of `-c <ref>`. The ref
+///   goes through [`resolve_checkout_ref`] first, because `git worktree add`
+///   sends a name that names no commit through the checkout DWIM of git. Each
+///   message still names the ref as the user typed it.
+/// - For [`WorktreeSource::NewBranchAtHead`], it is [`SPARSE_DEFAULT_REF`].
+/// - For [`WorktreeSource::NewBranchTracking`], it is the full ref of the
+///   remote-tracking branch. Each message names its short form, for example
+///   `origin/issue-33`.
+///
+/// The check reads the ref and not the disk, because the files of the new
+/// worktree come from the ref. Git runs in `repo_root`, the main worktree.
 ///
 /// A sparse pattern for a path that is not a tracked directory excludes
 /// nothing, and git gives no error. Without this check, `nwt` reports success
@@ -958,7 +1186,7 @@ const CHECKOUT_DEFAULT_REMOTE_KEY: &str = "checkout.defaultRemote";
 /// - [`SparseExcludeError::GitCommand`] when git does not start.
 fn resolve_sparse_excludes(
     repo_root: &Path,
-    checkout_ref: Option<&str>,
+    source: WorktreeSource<'_>,
     raw: &[String],
 ) -> Result<Vec<SparseExcludeDir>, SparseExcludeError> {
     let dirs = parse_sparse_excludes(raw)?;
@@ -968,17 +1196,19 @@ fn resolve_sparse_excludes(
         return Ok(dirs);
     }
 
-    let at_ref = checkout_ref.unwrap_or(SPARSE_DEFAULT_REF);
-    let tree_ref = match checkout_ref {
-        Some(name) => resolve_checkout_ref(repo_root, name)?,
-        None => SPARSE_DEFAULT_REF.to_owned(),
+    let (at_ref, tree_ref) = match source {
+        WorktreeSource::Checkout(name) => (name.to_owned(), resolve_checkout_ref(repo_root, name)?),
+        WorktreeSource::NewBranchAtHead => {
+            (SPARSE_DEFAULT_REF.to_owned(), SPARSE_DEFAULT_REF.to_owned())
+        }
+        WorktreeSource::NewBranchTracking(branch) => (branch.to_string(), branch.full_ref()),
     };
 
     for dir in &dirs {
-        if !tracks_directory(repo_root, at_ref, &tree_ref, dir)? {
+        if !tracks_directory(repo_root, &at_ref, &tree_ref, dir)? {
             return Err(SparseExcludeError::NotTrackedDirectory {
                 dir: dir.clone(),
-                at_ref: at_ref.to_owned(),
+                at_ref,
             });
         }
     }
@@ -1920,6 +2150,18 @@ fn run_cleanup_step(mut command: Command) -> Result<(), String> {
 ///
 /// Returns a `WorktreeResult` indicating success or the type of failure.
 ///
+/// `source` gives what the add checks out:
+///
+/// - [`WorktreeSource::Checkout`]: `git worktree add <path> <ref>`.
+/// - [`WorktreeSource::NewBranchAtHead`]:
+///   `git worktree add <path> -b <branch_name>`, which starts the branch at
+///   `HEAD`.
+/// - [`WorktreeSource::NewBranchTracking`]:
+///   `git worktree add --track -b <branch_name> <path> <full ref>`, which
+///   starts the branch at the remote-tracking branch and sets it as the
+///   upstream. The full ref, and not the short form, makes sure that a tag or
+///   a local branch with the name `<remote>/<branch>` cannot shadow it.
+///
 /// When `sparse_excludes` is not empty, the add runs with `--no-checkout`, and
 /// [`apply_sparse_checkout`] then writes the files without those directories.
 /// When that step fails, [`remove_broken_sparse_worktree`] removes what the run
@@ -1968,7 +2210,7 @@ fn try_create_worktree(
     repo_root: &std::path::Path,
     worktree_path: &str,
     branch_name: &str,
-    checkout_ref: Option<&str>,
+    source: WorktreeSource<'_>,
     sparse_excludes: &[SparseExcludeDir],
 ) -> WorktreeResult {
     // A sparse run that breaks removes the directories that the add makes.
@@ -1977,6 +2219,10 @@ fn try_create_worktree(
         None
     } else {
         nearest_existing_ancestor(Path::new(worktree_path))
+    };
+    let checkout_ref = match source {
+        WorktreeSource::Checkout(name) => Some(name),
+        WorktreeSource::NewBranchAtHead | WorktreeSource::NewBranchTracking(_) => None,
     };
     // Git's checkout DWIM can make a local branch for `-c <ref>`. The cleanup
     // deletes that branch only when git said before the add that it was not
@@ -1992,10 +2238,17 @@ fn try_create_worktree(
         // The files wait until the sparse patterns are in place.
         cmd.arg("--no-checkout");
     }
-    if let Some(ref_name) = checkout_ref {
-        cmd.args([worktree_path, ref_name]);
-    } else {
-        cmd.args([worktree_path, "-b", branch_name]);
+    match source {
+        WorktreeSource::Checkout(ref_name) => {
+            cmd.args([worktree_path, ref_name]);
+        }
+        WorktreeSource::NewBranchAtHead => {
+            cmd.args([worktree_path, "-b", branch_name]);
+        }
+        WorktreeSource::NewBranchTracking(remote_branch) => {
+            cmd.args(["--track", "-b", branch_name, worktree_path])
+                .arg(remote_branch.full_ref());
+        }
     }
 
     // Spawn the process with piped stderr so we can both display progress and capture errors.
@@ -2715,16 +2968,38 @@ fn main() {
         }
     };
 
+    // A new branch `<name>` starts at the remote-tracking branch of that name,
+    // and tracks it, when the lookup finds one. The lookup runs before
+    // anything is made, so a lookup that fails makes nothing. It never falls
+    // back to `HEAD` in silence, because a silent fall back hides the mistake.
+    // A run with `-c <ref>`, or with a random name, does no lookup.
+    let tracked_branch: Option<RemoteTrackingBranch> =
+        match (config.checkout.as_deref(), config.branch.as_deref()) {
+            (None, Some(name)) => match find_remote_tracking_branch(&repo_root, name) {
+                Ok(RemoteTrackingMatch::One(branch)) => Some(branch),
+                // More than one remote holds the branch, and
+                // `checkout.defaultRemote` picks none of them. The branch
+                // starts at `HEAD`, as it did before the lookup existed.
+                Ok(RemoteTrackingMatch::Ambiguous(_) | RemoteTrackingMatch::None) => None,
+                Err(e) => {
+                    error!(config.quiet, "Error: {e}");
+                    exit(e.exit_code());
+                }
+            },
+            _ => None,
+        };
+    let source = match (config.checkout.as_deref(), tracked_branch.as_ref()) {
+        (Some(reference), _) => WorktreeSource::Checkout(reference),
+        (None, Some(branch)) => WorktreeSource::NewBranchTracking(branch),
+        (None, None) => WorktreeSource::NewBranchAtHead,
+    };
+
     // Refuse a bad `--sparse-exclude` value before anything is made, so a
     // refusal leaves no directory, no branch, and no `worktrees/<name>`. Git
     // checks each directory at the ref that the new worktree checks out. A
     // ref that git cannot read exits like a failed add, and not like a bad
     // directory.
-    let sparse_excludes = match resolve_sparse_excludes(
-        &repo_root,
-        config.checkout.as_deref(),
-        &cli.sparse_exclude,
-    ) {
+    let sparse_excludes = match resolve_sparse_excludes(&repo_root, source, &cli.sparse_exclude) {
         Ok(dirs) => dirs,
         Err(e) => {
             error!(config.quiet, "Error: {e}");
@@ -2843,7 +3118,7 @@ fn main() {
             &repo_root,
             worktree_path_str,
             branch_name,
-            config.checkout.as_deref(),
+            source,
             &sparse_excludes,
         ) {
             WorktreeResult::Success => {
@@ -4416,7 +4691,7 @@ mod tests {
         let missing = temp.path().join("no-such-repository");
         let raw = vec!["heavy".to_owned()];
 
-        let error = resolve_sparse_excludes(&missing, None, &raw)
+        let error = resolve_sparse_excludes(&missing, WorktreeSource::NewBranchAtHead, &raw)
             .expect_err("a git that does not start must stop the run");
 
         assert!(
@@ -4444,7 +4719,7 @@ mod tests {
         let missing = temp.path().join("no-such-repository");
 
         assert_eq!(
-            resolve_sparse_excludes(&missing, Some("foo"), &[]),
+            resolve_sparse_excludes(&missing, WorktreeSource::Checkout("foo"), &[]),
             Ok(Vec::new())
         );
     }
@@ -4457,7 +4732,7 @@ mod tests {
         let missing = temp.path().join("no-such-repository");
         let raw = vec!["heavy".to_owned()];
 
-        let error = resolve_sparse_excludes(&missing, Some("foo"), &raw)
+        let error = resolve_sparse_excludes(&missing, WorktreeSource::Checkout("foo"), &raw)
             .expect_err("a git that does not start must stop the run");
 
         assert!(
@@ -4467,6 +4742,92 @@ mod tests {
             "the message must name git rev-parse: {error}"
         );
         assert_eq!(error.exit_code(), exit_codes::GIT_COMMAND_ERROR);
+    }
+
+    /// The remote is the part between `refs/remotes/` and `/<name>`, so a name
+    /// with a `/` or with multi-byte characters stays intact in the full ref
+    /// and in the short form.
+    #[test]
+    fn remote_tracking_branch_keeps_a_slash_and_multi_byte_characters() {
+        for (refname, name, remote) in [
+            (
+                "refs/remotes/origin/feature/login",
+                "feature/login",
+                "origin",
+            ),
+            ("refs/remotes/upstream/café", "café", "upstream"),
+        ] {
+            let branch = RemoteTrackingBranch::from_listed_ref(refname, name)
+                .unwrap_or_else(|| panic!("{refname} must hold the branch {name}"));
+
+            assert_eq!(branch.remote(), remote);
+            assert_eq!(branch.full_ref(), refname);
+            assert_eq!(branch.to_string(), format!("{remote}/{name}"));
+        }
+    }
+
+    /// A ref that is not `refs/remotes/<remote>/<name>` gives no branch.
+    #[test]
+    fn remote_tracking_branch_refuses_a_ref_of_another_shape() {
+        for (refname, name) in [
+            ("refs/heads/issue-33", "issue-33"),
+            ("refs/remotes//issue-33", "issue-33"),
+            ("refs/remotes/origin/xissue-33", "issue-33"),
+        ] {
+            assert_eq!(
+                RemoteTrackingBranch::from_listed_ref(refname, name),
+                None,
+                "{refname} must not give the branch {name}"
+            );
+        }
+    }
+
+    /// A git that does not start is a lookup that did not start, and not a
+    /// branch that no remote holds.
+    #[test]
+    fn find_remote_tracking_branch_reports_a_git_that_does_not_start() {
+        let temp = tempfile::TempDir::new().expect("create a temporary directory");
+        let missing = temp.path().join("no-such-repository");
+
+        let error = find_remote_tracking_branch(&missing, "issue-33")
+            .expect_err("a git that does not start must stop the lookup");
+
+        assert!(
+            matches!(
+                error,
+                RemoteLookupError::NotStarted {
+                    command: "for-each-ref",
+                    ..
+                }
+            ),
+            "the error must be NotStarted for for-each-ref, got {error:?}"
+        );
+        assert_eq!(error.exit_code(), exit_codes::GIT_COMMAND_ERROR);
+    }
+
+    /// A listing that git refuses is a failed lookup, and not a branch that no
+    /// remote holds. So `-b <name>` does not fall back to `HEAD` in silence.
+    ///
+    /// A new temporary directory is not a repository, so
+    /// `git for-each-ref` exits with a status that is not zero there.
+    #[test]
+    fn find_remote_tracking_branch_reports_a_failed_listing() {
+        let temp = tempfile::TempDir::new().expect("create a temporary directory");
+
+        let error = find_remote_tracking_branch(temp.path(), "issue-33")
+            .expect_err("a failed listing must stop the lookup");
+
+        assert!(
+            matches!(
+                error,
+                RemoteLookupError::Failed {
+                    command: "for-each-ref",
+                    ..
+                }
+            ),
+            "the error must be Failed for for-each-ref, got {error:?}"
+        );
+        assert_eq!(error.exit_code(), exit_codes::WORKTREE_FAILED);
     }
 
     /// Parse each of `raw` into a directory, or panic.
