@@ -3843,6 +3843,76 @@ mod tests {
         );
     }
 
+    /// An image that does not display gives an error that names the cause,
+    /// and a later event tries the image again.
+    ///
+    /// Monitor mode printed the error of the image display with the plain
+    /// format of `anyhow`, which shows only the outermost context. The user
+    /// thus read `Failed to open image file: <path>` and no cause. The error
+    /// must show the whole chain, down to the cause that the decoder gives.
+    ///
+    /// The expected cause comes from the same read that the image display of
+    /// this test makes, so the test does not copy the words of the decoder.
+    /// The file `broken.png` holds text, which starts with no signature of an
+    /// image format. The decoder thus takes the format from the extension,
+    /// and the decode fails.
+    ///
+    /// An image that fails stays out of the record on purpose. A program that
+    /// writes an image gives an event before the write is complete, and the
+    /// part of the image does not decode. A later event decodes the complete
+    /// image. So the second event calls the image display again and reports
+    /// again.
+    #[test]
+    fn an_image_that_does_not_display_gives_an_error_that_names_the_cause_at_each_event() {
+        let directory = TemporaryDirectory::new();
+        let broken = directory.file_of("broken.png", &b"no picture here\n".repeat(4));
+        let cause = read_image_file(&broken, &a_terminal_that_sends_a_file())
+            .expect_err("bytes with no image signature do not decode as a PNG")
+            .root_cause()
+            .to_string();
+        let header = vec![
+            String::new(),
+            format!("Found new image: {}", broken.display()),
+        ];
+        let mut monitor = MonitorUnderTest::new();
+
+        let first = monitor.handle(&broken);
+        let headers_after_first = monitor.image_headers();
+        let second = monitor.handle(&broken);
+
+        assert_eq!(
+            first.stdout, "",
+            "an image that does not display must give no text of its own on stdout"
+        );
+        let lines: Vec<&str> = first.stderr.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "an image that does not display must give exactly one line of error, but it gave {:?}",
+            first.stderr
+        );
+        assert!(
+            lines[0].contains(&broken.display().to_string()) && lines[0].contains(&cause),
+            "the error must name the path {} and the cause {cause:?}, but it is {:?}",
+            broken.display(),
+            lines[0]
+        );
+        assert_eq!(
+            headers_after_first,
+            vec![header.clone()],
+            "the image must reach the image display one time, with its header"
+        );
+        assert_eq!(
+            second, first,
+            "a later event must try the image again and report the same error again"
+        );
+        assert_eq!(
+            monitor.image_headers(),
+            vec![header.clone(), header],
+            "a later event must call the image display again"
+        );
+    }
+
     // =========================================================================
     // Tests for ensure_file_exists
     // =========================================================================
