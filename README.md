@@ -2830,6 +2830,56 @@ Three rules govern the value:
 
 nwt reads the key with `git config --get`, which reads every scope. The answer can therefore come from the repository's own configuration, from `~/.gitconfig`, or from the system configuration. The repository's own configuration is the place for it: it travels with the repository, and `yadm` already tracks that file.
 
+### Remote branches
+
+A run that makes a new branch first looks for a remote branch of that name. The name comes from `-b <name>`, from the shorthand `-b 33` (branch `issue-33`), or from `branch` in `~/.nwt.toml`. nwt finds `refs/remotes/<remote>/<name>` with the rules of `git checkout`:
+
+| Remote branches of that name | What nwt does |
+|---|---|
+| One | The new branch starts at that remote branch, and it tracks it |
+| More than one, and `checkout.defaultRemote` names the remote of one of them | The new branch starts at the branch of that remote, and it tracks it |
+| More than one, and `checkout.defaultRemote` picks none of them | nwt refuses with exit code 16, and it makes nothing |
+| None | The new branch starts at `HEAD`, as before |
+
+Thus after a fetch, `nwt -b 33` makes the worktree `issue-33` with the work of `origin/issue-33` in it. The branch has `origin/issue-33` as its upstream, so `git pull` and `git status` in the worktree use it with no more setup.
+
+**The refusal.** When more than one remote holds the branch, nwt cannot know which one to track. It does not start at `HEAD` in silence, because a silent fall back hides the mistake. It names each candidate and the command that sets the key:
+
+```text
+Error: more than one remote holds the branch 'issue-33', and checkout.defaultRemote picks none of them:
+  origin/issue-33
+  upstream/issue-33
+Name the remote to track, and run nwt again:
+  git config checkout.defaultRemote <remote>
+```
+
+**Output.** Stdout holds only the path of the worktree. After a run that tracks a remote branch, nwt prints this line to stderr:
+
+```text
+Tracking origin/issue-33
+```
+
+Git writes its own report (`branch 'issue-33' set up to track 'origin/issue-33'.`) to stdout, and nwt keeps stdout for the path. So this line is the only report of the start point. `-q`/`--quiet` hides it.
+
+**Fetch first.** nwt does not fetch. It reads only the remote branches that the clone already holds. Run `git fetch` first:
+
+```bash
+git fetch
+nwt -b 33
+```
+
+A fetch needs the network, and it can stop to ask for credentials, so nwt leaves the fetch to you. A branch that the remote got after your last fetch is not in the clone, and the new branch then starts at `HEAD`.
+
+**Sparse worktrees.** With `--sparse-exclude`, nwt checks each directory at the remote branch, because the files of the new worktree come from it (see Sparse worktrees below). A refusal names the remote branch, for example `origin/issue-33`.
+
+**What stays the same.**
+
+- When a local branch of that name exists, nwt does not look. It refuses with the error that it gave before, that the branch already exists, and it exits 7.
+- The directory name does not change. `nwt -b issue-33` makes the directory `issue-33`.
+- A run with a random name does no lookup, and `-c <ref>` does not change.
+
+**Fetch refspec.** nwt finds each remote branch at `refs/remotes/<remote>/<name>`, where the default fetch refspec puts it. A remote with a different fetch refspec can give a different result.
+
 ### Env File Copying
 
 After creating the worktree, nwt copies untracked `.env` files from the main worktree into the new one, preserving their relative paths, so development settings that aren't committed to git are there immediately. Two patterns are copied: `.env` exactly, and anything starting with `.env.` (`.env.local`, `.env.development`, and so on). Nothing else is — `.envrc` (direnv) and `.environment` don't match the pattern, and any file tracked by git is skipped, since git already puts it in the new worktree.

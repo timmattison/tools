@@ -1432,6 +1432,46 @@ WHERE WORKTREES GO:
     stops with exit code 12, and it makes nothing. It never falls back to the
     default, because a silent fall back hides the mistake.
 
+REMOTE BRANCHES:
+    A run that makes a new branch first looks for a remote branch of that name. The
+    name comes from -b NAME, from the shorthand '-b 33' (branch 'issue-33'), or from
+    'branch' in ~/.nwt.toml. nwt finds 'refs/remotes/REMOTE/NAME' with the rules of
+    'git checkout':
+
+      - One remote holds the branch. The new branch starts at that remote branch,
+        and it tracks it.
+      - More than one remote holds the branch. The remote that the git configuration
+        key 'checkout.defaultRemote' names gives the start point.
+      - More than one remote holds the branch, and checkout.defaultRemote picks none
+        of them. nwt exits 16, and it makes nothing.
+      - No remote holds the branch. The new branch starts at HEAD, as before.
+
+    The refusal names each candidate and the command that sets the key:
+
+        Error: more than one remote holds the branch 'issue-33', and checkout.defaultRemote picks none of them:
+          origin/issue-33
+          upstream/issue-33
+        Name the remote to track, and run nwt again:
+          git config checkout.defaultRemote <remote>
+
+    After a run that tracks a remote branch, nwt prints this line to stderr:
+
+        Tracking origin/issue-33
+
+    nwt does not show the report of git ('set up to track'), so this line is the
+    only report. --quiet hides it.
+
+    nwt does not fetch. It reads only the remote branches that the clone already
+    holds. Run 'git fetch' first. A fetch needs the network, and it can stop to ask
+    for credentials.
+
+    When a local branch of that name exists, nwt does not look. It refuses with the
+    error that it gave before: the branch already exists. The directory name does
+    not change, so 'nwt -b issue-33' makes the directory 'issue-33'.
+
+    nwt finds each remote branch at 'refs/remotes/REMOTE/NAME', so a remote with a
+    different fetch refspec can give a different result.
+
 CONFIGURATION:
     Default values can be set in ~/.nwt.toml. CLI arguments override config values.
 
