@@ -458,7 +458,8 @@ where
     ///   includes a text file or an image that goes away before its read.
     /// * Monitor mode ignores a binary file that is not an image. It gives no
     ///   output. A file is binary when its bytes are not valid UTF-8, or when
-    ///   they hold a NUL byte.
+    ///   they hold a control character other than tab, line feed, and
+    ///   carriage return, such as a NUL byte or the escape character.
     /// * Monitor mode ignores an empty file. It gives no output. The watcher
     ///   often reports a new file before the program writes to it, and a later
     ///   event shows the text or the image.
@@ -698,7 +699,9 @@ enum NextEvent {
 /// The header comes after the read, when the bytes are known to be text. A
 /// file can go away between the check in [`Monitor::handle`] and the read, and
 /// an empty file or a binary file holds no text, so none of them gives a
-/// header. [`read_new_text_file`] decides which files hold text to show.
+/// header. [`read_new_text_file`] decides which files hold text to show. It
+/// gives back no text that holds a terminal control character, so the text
+/// goes to `out` unchanged.
 ///
 /// # Arguments
 /// * `path` - The path of the file.
@@ -2140,9 +2143,11 @@ fn display_image_with_header(
 /// of `main` does not come here: a file that the user names must read as text,
 /// or `ic` fails.
 ///
-/// A file is binary when its bytes are not valid UTF-8, or when they hold a
-/// NUL byte. Bytes that are only NUL bytes are valid UTF-8, so the check for a
-/// NUL byte is necessary. A text file never holds a NUL byte.
+/// A file is text when its bytes are valid UTF-8 and [`is_plain_text`] accepts
+/// the decoded text. Every other file is binary, and monitor mode ignores it.
+/// A decode alone is not sufficient. Bytes that are only NUL bytes are valid
+/// UTF-8, and so are the bytes of an escape sequence. The rule thus looks at
+/// each character after the decode.
 ///
 /// An empty file holds nothing to show either. A program makes a file before
 /// it writes the text, so the watcher often reports the file while it is
@@ -2171,11 +2176,41 @@ fn read_new_text_file(path: &Path) -> io::Result<Option<String>> {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
 
-    if bytes.is_empty() || bytes.contains(&0) {
+    if bytes.is_empty() {
         return Ok(None);
     }
 
-    Ok(String::from_utf8(bytes).ok())
+    Ok(String::from_utf8(bytes)
+        .ok()
+        .filter(|text| is_plain_text(text)))
+}
+
+/// Decide whether decoded text is plain text that monitor mode can write to
+/// the terminal.
+///
+/// Text is plain when it holds no control character other than tab, line
+/// feed, and carriage return. A control character is a character of the
+/// Unicode `Cc` category: C0 (U+0000 to U+001F), DEL (U+007F), and C1 (U+0080
+/// to U+009F). A NUL byte is a control character, so plain text never holds
+/// one.
+///
+/// In monitor mode the user does not choose the file. Any program can put a
+/// file in a watched directory, such as `~/Downloads`. The escape character
+/// starts a terminal control sequence, and such a sequence can write the
+/// clipboard, set the title, or move the cursor to fake output. Some
+/// terminals read the C1 characters U+009B and U+009D as the start of such a
+/// sequence in UTF-8 too, so the rule includes C1.
+///
+/// # Arguments
+/// * `text` - The decoded text of a file.
+///
+/// # Returns
+/// `true` when the text holds no control character other than tab, line feed,
+/// and carriage return. `false` when it holds a different control character.
+fn is_plain_text(text: &str) -> bool {
+    !text
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\t' | '\n' | '\r'))
 }
 
 /// Read an image that monitor mode found, and decide whether to show it.
@@ -4038,7 +4073,8 @@ mod tests {
     ///
     /// The file `blob.bin` holds bytes that are not valid UTF-8. The file
     /// `zeros.dat` holds only NUL bytes. These bytes are valid UTF-8, so the
-    /// rule must see a NUL byte, not only a failure to decode.
+    /// rule must see a NUL byte as a control character, not only a failure to
+    /// decode.
     #[test]
     fn a_new_binary_file_in_monitor_mode_gives_no_output() {
         let directory = TemporaryDirectory::new();
