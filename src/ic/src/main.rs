@@ -514,7 +514,15 @@ where
                     self.seen.insert(path.to_path_buf());
                 }
                 Err(error) => {
-                    writeln!(err, "Failed to display image {}: {}", path.display(), error)?;
+                    // The alternate format shows the whole chain of the
+                    // error. The plain format shows only the outermost
+                    // context, which names the path and no cause.
+                    writeln!(
+                        err,
+                        "Failed to display image {}: {:#}",
+                        path.display(),
+                        error
+                    )?;
                 }
             }
         } else if is_text_file(path) {
