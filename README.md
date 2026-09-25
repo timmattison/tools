@@ -473,13 +473,15 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
 - crap (Claude, Resume Anywhere Please)
   - Resume a Claude Code session from wherever you are. Given a session id, `crap` looks the
     session up under `~/.claude/projects`, recovers the directory it originally ran in, `cd`s
-    there, and re-launches Claude with `--resume <id>` — preferring your `clauded` alias if you
-    have one, otherwise plain `claude`. If the original directory no longer exists — or exists but
-    can't be entered from your account — it tells you and stops, pointing you at `crap --here <id>`
-    to fork it where you stand instead; and it refuses to resume a session that's already open in
-    another running process (pass `--force` to override) so two processes can't corrupt the same
-    session log. With `--here` it brings the session into the *current* directory instead, resuming
-    it as a forked (new-id) session so you can carry its context into a different working tree.
+    there, and re-launches Claude with `--resume <id>` — through the launcher that you name in
+    `CRAP_LAUNCHER` (for example `export CRAP_LAUNCHER=c`), else through your `clauded` alias or
+    command if you have one, otherwise through plain `claude`. If the original directory no
+    longer exists — or exists but can't be entered from your account — it tells you and stops,
+    pointing you at `crap --here <id>` to fork it where you stand instead; and it refuses to
+    resume a session that's already open in another running process (pass `--force` to override)
+    so two processes can't corrupt the same session log. With `--here` it brings the session into
+    the *current* directory instead, resuming it as a forked (new-id) session so you can carry its
+    context into a different working tree.
     After you gave the fork new input, the shell function prints
     `Resume this fork with: crap <new-id>` when Claude exits. Thus you know the id of the fork and
     not only the id of the original. If
@@ -3363,7 +3365,23 @@ crap 57570685-2d64-4431-8ab6-c021a12fa1af   # cd into that session's dir and res
 
 The session id is the name of the `.jsonl` file under `~/.claude/projects/<project>/`. `crap` reads the directory from the session log itself (the sanitized project folder name is lossy), so it always lands in the real original path.
 
-If you have a `clauded` alias or command (e.g. `claude --dangerously-skip-permissions`), `crap` uses it; otherwise it falls back to plain `claude`. If the session's original directory no longer exists, `crap` prints an error and stops without launching anything.
+If the session's original directory no longer exists, `crap` prints an error and stops without launching anything.
+
+### Choose the launcher: `CRAP_LAUNCHER`
+
+The `crap` shell function starts Claude through a launcher. Each time it runs, it picks the launcher in this order:
+
+1. `CRAP_LAUNCHER`, when you set it and it is not empty. The value is shell text, and the function evaluates it when it runs. Thus an alias, a shell function, or a command with flags of its own (for example `claude --dangerously-skip-permissions`) works. Claude gets its arguments after the value.
+2. A `clauded` alias, function, or command, when one exists.
+3. Plain `claude`.
+
+```bash
+export CRAP_LAUNCHER=c   # start Claude through your `c` alias
+```
+
+`crap` does not guess at a short name such as `c`. Many users give `c` to a command that is not Claude, for example `clear`, `code`, or a `cd` helper. Set `CRAP_LAUNCHER` to use such a name.
+
+A fork always passes `--session-id <new-id>`. Thus a launcher that keeps the session id in its own argv lets a Zellij resurrect resume the fork, and not fork the original session again.
 
 ### Resume in the current directory: `--here`
 
@@ -3569,7 +3587,7 @@ crap --status --json | jq -r '.[] | select(.state == "waiting-for-user") | .sess
 
 ### Shell Integration
 
-Because a program can't change its parent shell's working directory — and can't see shell aliases such as `clauded` — `crap` ships as a shell function. Install it once:
+Because a program can't change its parent shell's working directory — and can't see the shell alias that `CRAP_LAUNCHER` can name — `crap` ships as a shell function. Install it once:
 
 ```bash
 crap --shell-setup
@@ -3584,6 +3602,20 @@ Then run `source ~/.zshrc` (or `~/.bashrc`), or open a new terminal. After that,
 If you prefer to add it manually, add this to your `~/.bashrc` or `~/.zshrc`:
 
 ```bash
+# Start Claude with the argv in "$@". CRAP_LAUNCHER holds the launcher as shell
+# text: an alias, a function, or a command with flags. Else clauded starts
+# Claude when it exists, else plain claude does. A shell does not expand an
+# alias in a function body that it parsed before the alias existed, and eval
+# parses the text when this function runs.
+function __crap_launch() {
+    if [ -n "${CRAP_LAUNCHER:-}" ]; then
+        eval "$CRAP_LAUNCHER"' "$@"'
+    elif command -v clauded >/dev/null 2>&1; then
+        eval 'clauded "$@"'
+    else
+        claude "$@"
+    fi
+}
 function crap() {
     # These flags make the binary print to stdout and exit 0 without mutating
     # the parent shell: --status queries, --help/-h/--version/-V emit
@@ -3645,14 +3677,12 @@ function crap() {
         # Build the resume argv: always --fork-session, so the original
         # transcript is left untouched, and always --session-id with the id
         # that the binary supplied, so the fork id is known after Claude exits.
+        # A launcher in CRAP_LAUNCHER that keeps that id in its own argv then
+        # resumes the fork after a Zellij resurrect, not the original.
         # The earlier "command crap" call has already consumed the function's
         # own arguments, so reusing the positional parameters here is safe.
         set -- --resume "$__crap_session" --fork-session --session-id "$__crap_newid"
-        if command -v clauded >/dev/null 2>&1; then
-            eval 'clauded "$@"'
-        else
-            claude "$@"
-        fi
+        __crap_launch "$@"
         if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
             kill "$__crap_watcher" 2>/dev/null
             rm -f -- "$__crap_link"
@@ -3670,11 +3700,7 @@ function crap() {
     __crap_session=${__crap_out%%$'\n'*}
     __crap_dir=${__crap_out#*$'\n'}
     cd -- "$__crap_dir" || return 1
-    if command -v clauded >/dev/null 2>&1; then
-        eval 'clauded --resume "$__crap_session"'
-    else
-        claude --resume "$__crap_session"
-    fi
+    __crap_launch --resume "$__crap_session"
 }
 ```
 
@@ -3694,7 +3720,7 @@ The function always resumes a fork with `--resume <session-id> --fork-session --
 
 After the cleanup, the function prints `Resume this fork with: crap <new-id>`. It prints this line only when `crap --status <new-id>` finds the fork. Claude saves the fork only after your first new input. Thus, if you exit a fork at once, the function prints no line.
 
-The function sends `--status`, `--help`, `-h`, `--version`, `-V`, and `--shell-setup` directly to the binary. These flags do not change the parent shell, and their output must go to the terminal. The function forwards `"$@"`, so flags such as `--force` and `--here` get to the binary. The `eval` is intentional. A shell does not expand aliases in a function body, so the `eval` makes sure that the function uses a `clauded` alias. The `command crap` calls get to the binary, not to the function of the same name.
+The function sends `--status`, `--help`, `-h`, `--version`, `-V`, and `--shell-setup` directly to the binary. These flags do not change the parent shell, and their output must go to the terminal. The function forwards `"$@"`, so flags such as `--force` and `--here` get to the binary. Both paths start Claude through `__crap_launch`, so the launcher choice is in one place. The `eval` in `__crap_launch` is intentional. A shell does not expand an alias in a function body that it parsed before the alias existed. `eval` parses the launcher text when the function runs, so an alias that `CRAP_LAUNCHER` names expands, and the flags of a launcher become separate words. The `command crap` calls get to the binary, not to the function of the same name.
 
 ### Exit Codes
 

@@ -97,11 +97,12 @@
 //! enforces by allowlisting every program the binary may spawn.
 //!
 //! Because a binary cannot change its parent shell's working directory (nor see
-//! shell aliases such as `clauded`), the user-facing `crap` command is a shell
-//! function installed via `crap --shell-setup`. This binary resolves the session
-//! id — printing the original directory to resume from, or (for `--here`, and
-//! for a cross-user hit) importing the transcript into the right project folder
-//! and printing what the function should run and clean up.
+//! the shell alias that `CRAP_LAUNCHER` can name), the user-facing `crap`
+//! command is a shell function installed via `crap --shell-setup`. This binary
+//! resolves the session id — printing the original directory to resume from,
+//! or (for `--here`, and for a cross-user hit) importing the transcript into
+//! the right project folder and printing what the function should run and
+//! clean up.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -1630,11 +1631,18 @@ fn format_fork_at_output(
 ///
 /// `crap` shadows the binary, so the function reaches the binary explicitly via
 /// `command crap`, forwarding all arguments (so flags like `--force` and
-/// `--here` work). `clauded` is resolved through `eval` so that an alias of that
-/// name is expanded at call time (shell aliases are otherwise not expanded
-/// inside function bodies); if no `clauded` exists, plain `claude` is used. If
-/// the binary exits non-zero (session not found, already running, …) its message
-/// is shown and the function does nothing further.
+/// `--here` work). The helper `__crap_launch` starts Claude, with the same argv
+/// on every path. It starts Claude through the shell text in `CRAP_LAUNCHER`
+/// when that variable is set and not empty, else through `clauded` when that
+/// name exists, else through plain `claude`. The function never guesses at a
+/// generic name such as `c`, because many users give `c` to a command that is
+/// not Claude. The helper evaluates the launcher through `eval`, so an alias is
+/// expanded at call time (shell aliases are otherwise not expanded inside
+/// function bodies), and a launcher with flags of its own works. A launcher
+/// that keeps the session id in its own argv lets a Zellij resurrect resume a
+/// fork, because the fork argv pins the fork id. If the binary exits non-zero
+/// (session not found, already running, …) its message is shown and the
+/// function does nothing further.
 ///
 /// The binary speaks one of three output shapes:
 ///
@@ -1669,6 +1677,20 @@ fn format_fork_at_output(
 /// the same lookup as `crap <new-id>`. So the line shows exactly when
 /// `crap <new-id>` can resume the fork.
 const SHELL_CODE: &str = r#"
+# Start Claude with the argv in "$@". CRAP_LAUNCHER holds the launcher as shell
+# text: an alias, a function, or a command with flags. Else clauded starts
+# Claude when it exists, else plain claude does. A shell does not expand an
+# alias in a function body that it parsed before the alias existed, and eval
+# parses the text when this function runs.
+function __crap_launch() {
+    if [ -n "${CRAP_LAUNCHER:-}" ]; then
+        eval "$CRAP_LAUNCHER"' "$@"'
+    elif command -v clauded >/dev/null 2>&1; then
+        eval 'clauded "$@"'
+    else
+        claude "$@"
+    fi
+}
 function crap() {
     # These flags make the binary print to stdout and exit 0 without mutating
     # the parent shell: --status queries, --help/-h/--version/-V emit
@@ -1730,14 +1752,12 @@ function crap() {
         # Build the resume argv: always --fork-session, so the original
         # transcript is left untouched, and always --session-id with the id
         # that the binary supplied, so the fork id is known after Claude exits.
+        # A launcher in CRAP_LAUNCHER that keeps that id in its own argv then
+        # resumes the fork after a Zellij resurrect, not the original.
         # The earlier "command crap" call has already consumed the function's
         # own arguments, so reusing the positional parameters here is safe.
         set -- --resume "$__crap_session" --fork-session --session-id "$__crap_newid"
-        if command -v clauded >/dev/null 2>&1; then
-            eval 'clauded "$@"'
-        else
-            claude "$@"
-        fi
+        __crap_launch "$@"
         if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
             kill "$__crap_watcher" 2>/dev/null
             rm -f -- "$__crap_link"
@@ -1755,11 +1775,7 @@ function crap() {
     __crap_session=${__crap_out%%$'\n'*}
     __crap_dir=${__crap_out#*$'\n'}
     cd -- "$__crap_dir" || return 1
-    if command -v clauded >/dev/null 2>&1; then
-        eval 'clauded --resume "$__crap_session"'
-    else
-        claude --resume "$__crap_session"
-    fi
+    __crap_launch --resume "$__crap_session"
 }
 "#;
 
@@ -4315,8 +4331,10 @@ mod tests {
         // is the remainder (so a path with embedded newlines stays whole).
         assert!(SHELL_CODE.contains("__crap_session=${__crap_out%%$'\\n'*}"));
         assert!(SHELL_CODE.contains("__crap_dir=${__crap_out#*$'\\n'}"));
-        assert!(SHELL_CODE.contains("clauded --resume"));
-        assert!(SHELL_CODE.contains("claude --resume"));
+        // Both paths start Claude through the one launcher helper.
+        assert!(SHELL_CODE.contains("function __crap_launch()"));
+        assert!(SHELL_CODE.contains("__crap_launch --resume \"$__crap_session\""));
+        assert!(SHELL_CODE.contains("__crap_launch \"$@\""));
     }
 
     #[test]
@@ -4374,13 +4392,75 @@ mod tests {
         );
     }
 
+    /// A shell that sources the real [`SHELL_CODE`] in a test.
+    #[cfg(unix)]
+    #[derive(Clone, Copy)]
+    enum TestShell {
+        Bash,
+        /// Started with `-f`, so it reads no startup file.
+        Zsh,
+    }
+
+    /// The directories that hold the tools that the shell function and the
+    /// fakes use: `find`, `wc`, `cat`, `basename`, and the shells.
+    ///
+    /// A test does not inherit `PATH`. A `c` or a `clauded` in a directory of
+    /// the developer then cannot answer for a fake that the test leaves out on
+    /// purpose.
+    #[cfg(unix)]
+    const SYSTEM_PATH: &str = "/usr/bin:/bin";
+
+    /// Builds the command that runs `script` in `shell`, with `fake_dir` as
+    /// the working directory and first on `PATH`, before [`SYSTEM_PATH`].
+    ///
+    /// The command inherits no environment. The shell function picks its
+    /// launcher from `CRAP_LAUNCHER`, and `bash -c` sources the file that
+    /// `BASH_ENV` names, so a value that the developer exports would make a
+    /// test pass or fail by who runs it. A test that wants `CRAP_LAUNCHER`
+    /// sets it on the command that this function returns.
+    ///
+    /// Each shell has its own `Command::new` literal, so the spawn guard in
+    /// `crap_never_escalates_privilege_itself` sees both programs.
+    #[cfg(unix)]
+    fn shell_command(shell: TestShell, fake_dir: &Path, script: &str) -> std::process::Command {
+        use std::process::Command;
+
+        let mut command = match shell {
+            TestShell::Bash => Command::new("bash"),
+            TestShell::Zsh => {
+                let mut zsh = Command::new("zsh");
+                zsh.arg("-f");
+                zsh
+            }
+        };
+        command
+            .env_clear()
+            .env("PATH", format!("{}:{SYSTEM_PATH}", fake_dir.display()))
+            .current_dir(fake_dir)
+            .arg("-c")
+            .arg(script);
+        command
+    }
+
+    /// The lines of `file`, or no lines when the file does not exist. A fake
+    /// that did not run writes no file.
+    #[cfg(unix)]
+    fn recorded_lines(file: &Path) -> Vec<String> {
+        fs::read_to_string(file)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
     /// Sources `SHELL_CODE` in a real `bash`, with a fake `crap` binary (and
-    /// fake `claude`/`clauded`) ahead of it on `PATH`, then runs `crap <args>`.
+    /// fake `claude`, `clauded`, and `c`) ahead of it on `PATH`, then runs
+    /// `crap <args>`.
     ///
     /// The fake binary mimics clap: informational flags print a recognizable
     /// marker to stdout and exit 0; anything else emits a `<session>\n<dir>`
-    /// resume target. Returns the captured stdout plus whether the `claude`
-    /// stub was invoked (it drops a marker file when called).
+    /// resume target. Returns the captured stdout plus whether a launcher
+    /// stub was invoked (each one drops the same marker file when called).
     ///
     /// Each call gets its own `tempfile::TempDir` (an `O_EXCL` random name) so
     /// concurrent runs of this test never share a directory. A pid+nanos name is
@@ -4389,7 +4469,6 @@ mod tests {
     #[cfg(unix)]
     fn run_shell_function(args: &str) -> (String, bool) {
         use std::os::unix::fs::PermissionsExt;
-        use std::process::Command;
 
         let temp = tempfile::TempDir::new().unwrap();
         let dir = temp.path();
@@ -4406,28 +4485,23 @@ mod tests {
             esac\n\
             printf 'session-xyz\\n/tmp/crap-resume-dir\\n'\n";
 
-        // Fake `claude`/`clauded`: record that a resume was attempted.
+        // Fake `claude`, `clauded`, and `c`: record that a resume was attempted.
         let marker_q = shellquote::shell_quote(&claude_marker.to_string_lossy());
         let fake_claude = format!("#!/bin/sh\n: > {marker_q}\n");
 
         for (name, body) in [
             ("crap", fake_crap.to_string()),
             ("claude", fake_claude.clone()),
-            ("clauded", fake_claude),
+            ("clauded", fake_claude.clone()),
+            ("c", fake_claude),
         ] {
             let path = dir.join(name);
             fs::write(&path, body).unwrap();
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let base_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{base_path}", dir.display());
         let script = format!("{SHELL_CODE}\ncrap {args}\n");
-
-        let output = Command::new("bash")
-            .env("PATH", new_path)
-            .arg("-c")
-            .arg(&script)
+        let output = shell_command(TestShell::Bash, dir, &script)
             .output()
             .expect("bash should be available");
 
@@ -4462,14 +4536,68 @@ mod tests {
         }
     }
 
+    /// The launchers that one run of the shell function can reach: the fakes
+    /// on `PATH` in addition to the fake `claude`, and the value of
+    /// `CRAP_LAUNCHER`.
+    #[cfg(unix)]
+    #[derive(Clone, Copy, Debug)]
+    struct Launchers {
+        /// A fake named `c` is on `PATH`.
+        c: bool,
+        /// A fake named `clauded` is on `PATH`.
+        clauded: bool,
+        /// The value of `CRAP_LAUNCHER`, or `None` to leave it unset.
+        crap_launcher: Option<&'static str>,
+    }
+
+    #[cfg(unix)]
+    impl Launchers {
+        /// Only the fake `claude` is on `PATH`, and `CRAP_LAUNCHER` is unset.
+        const PLAIN_CLAUDE: Self = Self {
+            c: false,
+            clauded: false,
+            crap_launcher: None,
+        };
+
+        /// A fake `clauded` is on `PATH`, and `CRAP_LAUNCHER` is unset.
+        const CLAUDED: Self = Self {
+            c: false,
+            clauded: true,
+            crap_launcher: None,
+        };
+
+        /// A fake `c` is on `PATH`, and `CRAP_LAUNCHER` is unset. For many
+        /// users `c` is `clear`, `code`, or a `cd` helper, not Claude.
+        const UNNAMED_C: Self = Self {
+            c: true,
+            clauded: false,
+            crap_launcher: None,
+        };
+
+        /// `CRAP_LAUNCHER=c`, with a fake `c` and a fake `clauded` both on
+        /// `PATH`.
+        const NAMED_C: Self = Self {
+            c: true,
+            clauded: true,
+            crap_launcher: Some("c"),
+        };
+
+        /// One case for each branch of the launcher choice: `CRAP_LAUNCHER`,
+        /// then `clauded`, then plain `claude`.
+        const EVERY_BRANCH: [Self; 3] = [Self::NAMED_C, Self::CLAUDED, Self::PLAIN_CLAUDE];
+    }
+
     /// What one run of the shell function in a fork mode left behind.
     #[cfg(unix)]
     struct ForkShellRun {
-        /// The arguments that the fake `claude` or `clauded` got, in order.
+        /// The arguments that the fake launcher got, in order.
         claude_args: Vec<String>,
-        /// The directory that the fake `claude` or `clauded` ran in. It is
-        /// canonicalized while the temp directory still exists.
+        /// The directory that the fake launcher ran in. It is canonicalized
+        /// while the temp directory still exists.
         claude_cwd: PathBuf,
+        /// The name of the fake that ran: `c`, `clauded`, or `claude`. It is
+        /// empty when no fake ran.
+        launcher: String,
         /// What the shell function wrote to standard output.
         stdout: String,
     }
@@ -4493,26 +4621,29 @@ mod tests {
     /// error to stderr and exits 1. The real binary does the same when it
     /// finds, or does not find, the transcript of `<id>`.
     ///
-    /// The fake `claude` (and the fake `clauded`, when `provide_clauded` is
-    /// true) records its arguments and the directory it ran in. When
-    /// `save_fork` is true, it also saves the id that follows `--session-id`.
-    /// That is how the fakes show a fork that Claude saved: the real Claude
-    /// writes the fork transcript only after the first new input.
+    /// The fake `claude` is always on `PATH`. The fakes `c` and `clauded` are
+    /// on `PATH` as `launchers` says, and `CRAP_LAUNCHER` holds the value that
+    /// `launchers` gives. The fakes are identical except for their name. Each
+    /// one records its arguments, the directory it ran in, and its own name.
+    /// When `save_fork` is true, it also saves the id that follows
+    /// `--session-id`. That is how the fakes show a fork that Claude saved:
+    /// the real Claude writes the fork transcript only after the first new
+    /// input.
     #[cfg(unix)]
     fn run_fork_shell_function(
         dir: &Path,
         args: &str,
         wire: &str,
-        provide_clauded: bool,
+        launchers: Launchers,
         save_fork: bool,
     ) -> ForkShellRun {
         use std::os::unix::fs::PermissionsExt;
-        use std::process::Command;
 
         let wire_file = dir.join("crap_wire");
         let saved_fork = dir.join("saved_fork");
         let args_file = dir.join("claude_args");
         let pwd_file = dir.join("claude_pwd");
+        let launcher_file = dir.join("launcher");
         fs::write(&wire_file, wire).unwrap();
 
         // Each path goes into a `/bin/sh` script, so each one is one quoted
@@ -4521,6 +4652,7 @@ mod tests {
         let saved_q = shellquote::shell_quote(&saved_fork.to_string_lossy());
         let args_q = shellquote::shell_quote(&args_file.to_string_lossy());
         let pwd_q = shellquote::shell_quote(&pwd_file.to_string_lossy());
+        let launcher_q = shellquote::shell_quote(&launcher_file.to_string_lossy());
 
         // Fake `crap`: `--status <id>` finds only the fork that the fake
         // `claude` saved. Any other call prints the wire output.
@@ -4537,8 +4669,9 @@ mod tests {
              cat {wire_q}\n"
         );
 
-        // Fake `claude`/`clauded`: record the argv and the cwd. When the fork
-        // is saved, also save the id that follows `--session-id`.
+        // Fake `claude`, `clauded`, and `c`: record the argv, the cwd, and its
+        // own name. When the fork is saved, also save the id that follows
+        // `--session-id`.
         let save_step = if save_fork {
             format!(
                 "prev=\n\
@@ -4553,10 +4686,15 @@ mod tests {
             String::new()
         };
         let fake_claude =
-            format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {args_q}\npwd > {pwd_q}\n{save_step}");
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {args_q}\npwd > {pwd_q}\nbasename \"$0\" > {launcher_q}\n{save_step}"
+            );
 
         let mut tools = vec![("crap", fake_crap), ("claude", fake_claude.clone())];
-        if provide_clauded {
+        if launchers.c {
+            tools.push(("c", fake_claude.clone()));
+        }
+        if launchers.clauded {
             tools.push(("clauded", fake_claude));
         }
         for (name, body) in tools {
@@ -4565,34 +4703,30 @@ mod tests {
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let base_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{base_path}", dir.display());
         let script = format!("{SHELL_CODE}\ncrap {args}\n");
-
-        let output = Command::new("bash")
-            .env("PATH", new_path)
-            .current_dir(dir)
-            .arg("-c")
-            .arg(&script)
-            .output()
-            .expect("bash should be available");
+        let mut command = shell_command(TestShell::Bash, dir, &script);
+        if let Some(value) = launchers.crap_launcher {
+            command.env("CRAP_LAUNCHER", value);
+        }
+        let output = command.output().expect("bash should be available");
         assert!(
             output.status.success(),
-            "the shell function failed for `crap {args}`: {}",
+            "the shell function failed for `crap {args}` ({launchers:?}): {}",
             String::from_utf8_lossy(&output.stderr)
         );
 
-        let claude_args = fs::read_to_string(&args_file)
-            .unwrap_or_default()
-            .lines()
-            .map(str::to_string)
-            .collect();
+        let claude_args = recorded_lines(&args_file);
         let pwd = fs::read_to_string(&pwd_file).unwrap_or_default();
+        let launcher = fs::read_to_string(&launcher_file)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
         let claude_cwd = std::fs::canonicalize(pwd.trim())
             .expect("claude should have recorded the directory it ran in");
         ForkShellRun {
             claude_args,
             claude_cwd,
+            launcher,
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         }
     }
@@ -4604,7 +4738,7 @@ mod tests {
     /// Runs the shell function on here-mode output from a fake `crap`. The
     /// third field is `fork_id_field`, and the link field is
     /// `__CRAP_NO_LINK__`, so the symlink watcher does not start. See
-    /// [`run_fork_shell_function`] for the fakes, `provide_clauded`, and
+    /// [`run_fork_shell_function`] for the fakes, `launchers`, and
     /// `save_fork`.
     ///
     /// Each call gets its own `tempfile::TempDir` (an `O_EXCL` random name) so
@@ -4614,7 +4748,7 @@ mod tests {
     #[cfg(unix)]
     fn run_here_shell_function(
         fork_id_field: &str,
-        provide_clauded: bool,
+        launchers: Launchers,
         save_fork: bool,
     ) -> ForkShellRun {
         let temp = tempfile::TempDir::new().unwrap();
@@ -4626,7 +4760,7 @@ mod tests {
             temp.path(),
             &format!("--here {FAKE_ORIGINAL_SESSION}"),
             &wire,
-            provide_clauded,
+            launchers,
             save_fork,
         )
     }
@@ -4641,19 +4775,19 @@ mod tests {
     #[test]
     fn shell_function_pins_forced_new_id_via_session_id() {
         // When the binary supplies a forced id, the resume must fork *and* pin
-        // the fork to that id with `--session-id`, on both the `clauded` and the
-        // plain `claude` dispatch paths.
-        for provide_clauded in [true, false] {
-            let run = run_here_shell_function(FORCED_NEW_ID, provide_clauded, true);
+        // the fork to that id with `--session-id`, on each dispatch path:
+        // `CRAP_LAUNCHER`, `clauded`, and plain `claude`.
+        for launchers in Launchers::EVERY_BRANCH {
+            let run = run_here_shell_function(FORCED_NEW_ID, launchers, true);
             assert!(
                 run.claude_args.iter().any(|a| a == "--fork-session"),
-                "must still fork (clauded={provide_clauded}); got {:?}",
+                "must still fork ({launchers:?}); got {:?}",
                 run.claude_args
             );
             assert_eq!(
                 run.pinned_fork_id(),
                 Some(FORCED_NEW_ID),
-                "the forced id must follow --session-id (clauded={provide_clauded}); got {:?}",
+                "the forced id must follow --session-id ({launchers:?}); got {:?}",
                 run.claude_args
             );
         }
@@ -4677,7 +4811,7 @@ mod tests {
     /// fake `crap`. The third field is `fork_id_field`, the link field is
     /// `__CRAP_NO_LINK__` (so no watcher or cleanup runs), and the last field
     /// names a real `orig-cwd` directory. See [`run_fork_shell_function`] for
-    /// the fakes, `provide_clauded`, and `save_fork`.
+    /// the fakes, `launchers`, and `save_fork`.
     ///
     /// Returns the run and the canonicalized `orig-cwd`. The helper
     /// canonicalizes it **before** the temp dir is dropped, so the caller can
@@ -4689,7 +4823,7 @@ mod tests {
     #[cfg(unix)]
     fn run_fork_at_shell_function(
         fork_id_field: &str,
-        provide_clauded: bool,
+        launchers: Launchers,
         save_fork: bool,
     ) -> (ForkShellRun, PathBuf) {
         let temp = tempfile::TempDir::new().unwrap();
@@ -4704,7 +4838,7 @@ mod tests {
             temp.path(),
             &format!("{FAKE_ORIGINAL_SESSION} --user someone"),
             &wire,
-            provide_clauded,
+            launchers,
             save_fork,
         );
         // Canonicalize while `temp` is still alive — it drops (removing the
@@ -4719,7 +4853,7 @@ mod tests {
         // Cross-user default resume: the function must `cd` into the session's
         // original directory and then fork it (`--resume <id> --fork-session`),
         // leaving the foreign transcript untouched.
-        let (run, orig) = run_fork_at_shell_function(GENERATED_FORK_ID, true, true);
+        let (run, orig) = run_fork_at_shell_function(GENERATED_FORK_ID, Launchers::NAMED_C, true);
         assert!(
             run.claude_args.iter().any(|a| a == "--resume")
                 && run.claude_args.iter().any(|a| a == "--fork-session"),
@@ -4758,9 +4892,9 @@ mod tests {
     fn shell_function_reports_the_fork_id_after_a_here_fork() {
         // `crap --here` forks to a new id. Without the report, the user later
         // resumes the old id and loses the work of the fork (#511).
-        for provide_clauded in [true, false] {
-            let run = run_here_shell_function(GENERATED_FORK_ID, provide_clauded, true);
-            assert_reports_the_pinned_fork_id(&run, &format!("here, clauded={provide_clauded}"));
+        for launchers in Launchers::EVERY_BRANCH {
+            let run = run_here_shell_function(GENERATED_FORK_ID, launchers, true);
+            assert_reports_the_pinned_fork_id(&run, &format!("here, {launchers:?}"));
         }
     }
 
@@ -4769,9 +4903,263 @@ mod tests {
     fn shell_function_reports_the_fork_id_after_a_cross_user_fork() {
         // The cross-user default resume forks too, so the user needs the fork
         // id in the same way.
-        for provide_clauded in [true, false] {
-            let (run, _orig) = run_fork_at_shell_function(GENERATED_FORK_ID, provide_clauded, true);
-            assert_reports_the_pinned_fork_id(&run, &format!("fork-at, clauded={provide_clauded}"));
+        for launchers in Launchers::EVERY_BRANCH {
+            let (run, _orig) = run_fork_at_shell_function(GENERATED_FORK_ID, launchers, true);
+            assert_reports_the_pinned_fork_id(&run, &format!("fork-at, {launchers:?}"));
+        }
+    }
+
+    /// The Claude argv of a fork that the fakes send: `--here`, and the
+    /// cross-user default resume.
+    #[cfg(unix)]
+    const FORK_ARGV: [&str; 5] = [
+        "--resume",
+        FAKE_ORIGINAL_SESSION,
+        "--fork-session",
+        "--session-id",
+        GENERATED_FORK_ID,
+    ];
+
+    /// The Claude argv of the default resume that the fakes send.
+    #[cfg(unix)]
+    const RESUME_ARGV: [&str; 2] = ["--resume", FAKE_ORIGINAL_SESSION];
+
+    /// Runs the shell function on default-resume output from a fake `crap`:
+    /// `<session-id>\n<dir>`, where `<dir>` is the temp directory. See
+    /// [`run_fork_shell_function`] for the fakes and `launchers`.
+    #[cfg(unix)]
+    fn run_resume_shell_function(launchers: Launchers) -> ForkShellRun {
+        let temp = tempfile::TempDir::new().unwrap();
+        let wire = format!("{FAKE_ORIGINAL_SESSION}\n{}\n", temp.path().display());
+        // `temp` drops at the end of this scope, removing the directory.
+        run_fork_shell_function(temp.path(), FAKE_ORIGINAL_SESSION, &wire, launchers, false)
+    }
+
+    /// Runs the shell function with `launchers` on each path that starts
+    /// Claude: `--here`, the cross-user fork, and the default resume. Asserts
+    /// that each path started the fake named `expected`, and that the fake got
+    /// `flags` and then the exact Claude argv of the path.
+    #[cfg(unix)]
+    fn assert_launches_through(launchers: Launchers, expected: &str, flags: &[&str]) {
+        let here = run_here_shell_function(GENERATED_FORK_ID, launchers, true);
+        let (fork_at, _orig) = run_fork_at_shell_function(GENERATED_FORK_ID, launchers, true);
+        let resume = run_resume_shell_function(launchers);
+        for (run, path, claude_argv) in [
+            (&here, "here", &FORK_ARGV[..]),
+            (&fork_at, "fork-at", &FORK_ARGV[..]),
+            (&resume, "resume", &RESUME_ARGV[..]),
+        ] {
+            let argv: Vec<&str> = flags.iter().chain(claude_argv).copied().collect();
+            assert_eq!(
+                run.launcher, expected,
+                "the launcher that started Claude ({path}, {launchers:?})"
+            );
+            assert_eq!(
+                run.claude_args, argv,
+                "the argv of `{expected}` ({path}, {launchers:?})"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_function_starts_claude_through_crap_launcher() {
+        // `CRAP_LAUNCHER` names the launcher, and it outranks a `clauded`. A
+        // launcher that keeps the session id in its own argv lets a Zellij
+        // resurrect resume a fork and not fork the original again, so the
+        // Claude argv must get to it unchanged.
+        assert_launches_through(Launchers::NAMED_C, "c", &[]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_function_puts_the_flags_of_crap_launcher_before_the_claude_argv() {
+        // `CRAP_LAUNCHER` is shell text. The function evaluates it when it
+        // runs, so a command with flags of its own works, and the Claude argv
+        // comes after those flags.
+        let launchers = Launchers {
+            crap_launcher: Some("c --every-launch"),
+            ..Launchers::NAMED_C
+        };
+        assert_launches_through(launchers, "c", &["--every-launch"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_function_never_runs_a_c_that_crap_launcher_does_not_name() {
+        // Many users give `c` to a command that is not Claude: `clear`,
+        // `code`, or a `cd` helper. A `c` on `PATH` is not an opt-in, so
+        // without `CRAP_LAUNCHER` the function starts plain `claude`.
+        assert_launches_through(Launchers::UNNAMED_C, "claude", &[]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_function_starts_claude_through_clauded_when_crap_launcher_is_unset() {
+        // A user who sets no `CRAP_LAUNCHER` keeps the behavior from before
+        // the variable: a `clauded`, often with flags of its own, starts
+        // Claude. An empty `CRAP_LAUNCHER` is the same as no `CRAP_LAUNCHER`,
+        // and a `c` on `PATH` does not change that.
+        assert_launches_through(Launchers::CLAUDED, "clauded", &[]);
+        let empty = Launchers {
+            c: true,
+            crap_launcher: Some(""),
+            ..Launchers::CLAUDED
+        };
+        assert_launches_through(empty, "clauded", &[]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_function_starts_plain_claude_when_no_launcher_is_configured() {
+        assert_launches_through(Launchers::PLAIN_CLAUDE, "claude", &[]);
+    }
+
+    /// What the fakes recorded in one zsh run of the shell function, where `c`
+    /// is an alias for a recorder that is not Claude.
+    #[cfg(unix)]
+    struct ZshAliasRun {
+        /// The path through the function: `here` or `resume`.
+        path: &'static str,
+        /// The Claude argv that this path passes.
+        claude_argv: &'static [&'static str],
+        /// The arguments that the recorder behind the alias got. It is empty
+        /// when the alias did not run.
+        alias_got: Vec<String>,
+        /// The arguments that the fake `claude` got. It is empty when the fake
+        /// `claude` did not run.
+        claude_got: Vec<String>,
+    }
+
+    /// Sources `SHELL_CODE` in `zsh -f` after
+    /// `alias c='<recorder> <alias_flags>'`, with `CRAP_LAUNCHER` set to
+    /// `crap_launcher` (or unset), and runs the function once on each path:
+    /// `crap --here <id>`, and the default resume `crap <id>`.
+    ///
+    /// zsh expands an alias when it parses a line, and it parses a function
+    /// body when it defines the function. The alias here comes before the
+    /// function, as it does in a typical rc file.
+    ///
+    /// The fake `crap` prints the wire output of the path, and `--status`
+    /// finds no fork. The recorder behind the alias and the fake `claude` each
+    /// record their arguments in a file of their own. Each path gets its own
+    /// `tempfile::TempDir`.
+    #[cfg(unix)]
+    fn run_zsh_with_a_c_alias(alias_flags: &str, crap_launcher: Option<&str>) -> Vec<ZshAliasRun> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut runs = Vec::new();
+        for (path, claude_argv) in [("here", &FORK_ARGV[..]), ("resume", &RESUME_ARGV[..])] {
+            let temp = tempfile::TempDir::new().unwrap();
+            let dir = temp.path();
+            let (args, wire) = if path == "here" {
+                (
+                    format!("--here {FAKE_ORIGINAL_SESSION}"),
+                    format!(
+                        "{HERE_SENTINEL}\n{FAKE_ORIGINAL_SESSION}\n{GENERATED_FORK_ID}\n{NO_LINK_SENTINEL}\n"
+                    ),
+                )
+            } else {
+                (
+                    FAKE_ORIGINAL_SESSION.to_string(),
+                    format!("{FAKE_ORIGINAL_SESSION}\n{}\n", dir.display()),
+                )
+            };
+            let wire_file = dir.join("crap_wire");
+            let alias_file = dir.join("alias_args");
+            let claude_file = dir.join("claude_args");
+            fs::write(&wire_file, wire).unwrap();
+
+            let wire_q = shellquote::shell_quote(&wire_file.to_string_lossy());
+            let recorder = |file: &Path| {
+                let file_q = shellquote::shell_quote(&file.to_string_lossy());
+                format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {file_q}\n")
+            };
+            let fake_crap =
+                format!("#!/bin/sh\nif [ \"$1\" = \"--status\" ]; then exit 1; fi\ncat {wire_q}\n");
+            for (name, body) in [
+                ("crap", fake_crap),
+                ("not-claude", recorder(&alias_file)),
+                ("claude", recorder(&claude_file)),
+            ] {
+                let fake = dir.join(name);
+                fs::write(&fake, body).unwrap();
+                fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+
+            // An alias value that ends in a space makes zsh expand the next
+            // word as an alias too, so the value has no trailing space.
+            let target_q = shellquote::shell_quote(&dir.join("not-claude").to_string_lossy());
+            let alias_text = format!("{target_q} {alias_flags}");
+            let alias_value = shellquote::shell_quote(alias_text.trim_end());
+            let script = format!("alias c={alias_value}\n{SHELL_CODE}\ncrap {args}\n");
+            let mut command = shell_command(TestShell::Zsh, dir, &script);
+            if let Some(value) = crap_launcher {
+                command.env("CRAP_LAUNCHER", value);
+            }
+            let output = command.output().expect("zsh should be available");
+            assert!(
+                output.status.success(),
+                "the shell function failed in zsh ({path}): {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+
+            runs.push(ZshAliasRun {
+                path,
+                claude_argv,
+                alias_got: recorded_lines(&alias_file),
+                claude_got: recorded_lines(&claude_file),
+            });
+        }
+        runs
+    }
+
+    /// The reproduction of review R-20260925T173639Z#I1: a user whose `c` is
+    /// `alias c=clear`, and who sets no `CRAP_LAUNCHER`. `command -v c` finds
+    /// the alias, so a function that probes the name `c` clears the screen
+    /// and never starts Claude. The function must start plain `claude`.
+    #[cfg(unix)]
+    #[test]
+    fn shell_function_never_runs_a_c_alias_that_crap_launcher_does_not_name_in_zsh() {
+        for run in run_zsh_with_a_c_alias("", None) {
+            assert!(
+                run.alias_got.is_empty(),
+                "the `c` alias ran ({}); it got {:?}",
+                run.path,
+                run.alias_got
+            );
+            assert_eq!(
+                run.claude_got, run.claude_argv,
+                "plain `claude` must start ({})",
+                run.path
+            );
+        }
+    }
+
+    /// `CRAP_LAUNCHER=c`, where `c` is a zsh alias with flags of its own, for
+    /// example `alias c='my-launcher --dangerously-skip-permissions --'`. The
+    /// function evaluates `CRAP_LAUNCHER` when it runs, so the alias expands
+    /// then. The Claude argv comes after the flags of the alias.
+    #[cfg(unix)]
+    #[test]
+    fn shell_function_expands_a_crap_launcher_alias_at_call_time_in_zsh() {
+        for run in run_zsh_with_a_c_alias("--every-launch --", Some("c")) {
+            let argv: Vec<&str> = ["--every-launch", "--"]
+                .iter()
+                .chain(run.claude_argv)
+                .copied()
+                .collect();
+            assert_eq!(
+                run.alias_got, argv,
+                "Claude must start through the `c` alias, after the flags of the alias ({})",
+                run.path
+            );
+            assert!(
+                run.claude_got.is_empty(),
+                "plain `claude` must not start ({}); it got {:?}",
+                run.path,
+                run.claude_got
+            );
         }
     }
 
@@ -4781,8 +5169,9 @@ mod tests {
         // Claude writes the fork transcript only after the first new input. A
         // fork that the user leaves at once has no transcript, so
         // `crap <fork-id>` cannot resume it, and the line must not show.
-        let here = run_here_shell_function(GENERATED_FORK_ID, true, false);
-        let (fork_at, _orig) = run_fork_at_shell_function(GENERATED_FORK_ID, true, false);
+        let here = run_here_shell_function(GENERATED_FORK_ID, Launchers::NAMED_C, false);
+        let (fork_at, _orig) =
+            run_fork_at_shell_function(GENERATED_FORK_ID, Launchers::NAMED_C, false);
         for (run, mode) in [(&here, "here"), (&fork_at, "fork-at")] {
             // The fork was still pinned, so only the missing transcript stops
             // the line.
@@ -4833,7 +5222,7 @@ mod tests {
                     format!("{FAKE_ORIGINAL_SESSION} --user someone"),
                 )
             };
-            let run = run_fork_shell_function(temp.path(), &args, &wire, true, true);
+            let run = run_fork_shell_function(temp.path(), &args, &wire, Launchers::NAMED_C, true);
 
             assert!(
                 link.symlink_metadata().is_err(),
@@ -4864,7 +5253,7 @@ mod tests {
             &dir,
             &format!("--here {FAKE_ORIGINAL_SESSION}"),
             &wire,
-            true,
+            Launchers::NAMED_C,
             true,
         );
 
@@ -5439,13 +5828,14 @@ mod tests {
     /// the word `sudo` in guidance text, so a future edit could slide from
     /// *printing* a command to *running* one without anyone noticing. This test
     /// is the enforcement point. Every program the binary spawns must appear in
-    /// `ALLOWED` below — `ps`, the liveness probe in `pid_is_alive`, and `bash`,
-    /// which the shell-integration tests use to source the real function — so
-    /// adding a spawn is a deliberate act that has to edit this list, in a diff
-    /// a reviewer will see. None of them may be an escalation binary. The shell
-    /// function `--shell-setup` writes into the user's rc file is held to the
-    /// same rule: an escalation there would be `crap` escalating just as surely
-    /// as spawning one, only with the user's own shell doing it.
+    /// `ALLOWED` below — `ps`, the liveness probe in `pid_is_alive`, and `bash`
+    /// and `zsh`, which the shell-integration tests use to source the real
+    /// function — so adding a spawn is a deliberate act that has to edit this
+    /// list, in a diff a reviewer will see. None of them may be an escalation
+    /// binary. The shell function `--shell-setup` writes into the user's rc
+    /// file is held to the same rule: an escalation there would be `crap`
+    /// escalating just as surely as spawning one, only with the user's own
+    /// shell doing it.
     ///
     /// Both matchers are mutation-tested against synthetic violations before
     /// they are pointed at the real thing, because a guard that has never been
@@ -5486,7 +5876,7 @@ mod tests {
             "the scan found no spawns at all — `crap` does spawn `ps`, so the matcher is broken"
         );
 
-        const ALLOWED: [&str; 2] = ["ps", "bash"];
+        const ALLOWED: [&str; 3] = ["ps", "bash", "zsh"];
         for program in &programs {
             assert!(
                 ALLOWED.contains(&program.as_str()),
