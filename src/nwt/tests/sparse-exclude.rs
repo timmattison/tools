@@ -1776,27 +1776,21 @@ fn nothing_the_hook_step_writes_to_stdout_reaches_the_stdout_of_nwt() {
 /// The exit code `nwt` returns when a git command cannot start.
 const GIT_COMMAND_ERROR: i32 = 6;
 
-/// A `git hook run` that cannot start exits 6, as each git command that cannot
-/// start does. The message names the post-checkout step and says that the new
-/// worktree stays.
-///
-/// The sparse files are in the worktree when the hook step starts, so the run
-/// keeps the worktree, as it keeps a worktree whose hook fails. The shell
-/// wrapper gets no path, so only the message tells the user where the worktree
-/// is.
+/// Run `nwt -b <branch> --sparse-exclude heavy` in `repo`, with a git whose
+/// `git hook run` cannot start, and hand back what it wrote.
 ///
 /// The fake git removes itself after `git rev-parse HEAD`, the last sparse
 /// step, and the `PATH` of the child holds only the directory of the fake. So
 /// the start of `git hook run` finds no `git`.
+///
+/// The helper demands exit 6 and an empty stdout, and hands back the worktree
+/// that the run keeps.
 #[cfg(unix)]
-#[test]
-fn a_hook_step_that_cannot_start_says_that_the_worktree_stays() {
-    let (_temp, repo) = repo_with_heavy_dir();
+fn run_nwt_whose_hook_step_cannot_start(repo: &Path, branch: &str) -> (Output, PathBuf) {
     let fake = FakeGit::vanishing_after_the_head_lookup();
-    let branch = unique_branch("hook-cannot-start");
 
-    let output = nwt_command(&repo)
-        .args(["-b", &branch, "--sparse-exclude", HEAVY_DIR])
+    let output = nwt_command(repo)
+        .args(["-b", branch, "--sparse-exclude", HEAVY_DIR])
         .args(["--no-copy-env", "--no-bootstrap-hooks"])
         .env("PATH", fake.alone_on_path())
         .output()
@@ -1815,8 +1809,28 @@ fn a_hook_step_that_cannot_start_says_that_the_worktree_stays() {
         "a failed run prints no path. stdout: {stdout:?}"
     );
 
-    let worktree = expected_worktree(&repo, &branch);
+    let worktree = expected_worktree(repo, branch);
     assert_sparse_worktree(&worktree, HEAVY_DIR, KEPT_FILES);
+    (output, worktree)
+}
+
+/// A `git hook run` that cannot start exits 6, as each git command that cannot
+/// start does. The message names the post-checkout step and says that the new
+/// worktree stays.
+///
+/// The sparse files are in the worktree when the hook step starts, so the run
+/// keeps the worktree, as it keeps a worktree whose hook fails. The shell
+/// wrapper gets no path, so only the message tells the user where the worktree
+/// is.
+#[cfg(unix)]
+#[test]
+fn a_hook_step_that_cannot_start_says_that_the_worktree_stays() {
+    let (_temp, repo) = repo_with_heavy_dir();
+    let branch = unique_branch("hook-cannot-start");
+
+    let (output, worktree) = run_nwt_whose_hook_step_cannot_start(&repo, &branch);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
     for named in [
         "post-checkout".to_owned(),
         format!("The new worktree stays at '{}'.", worktree.display()),
@@ -1826,6 +1840,73 @@ fn a_hook_step_that_cannot_start_says_that_the_worktree_stays() {
             "stderr must hold {named:?}:\n{stderr}"
         );
     }
+}
+
+/// The start of the error line of a sparse run whose `git hook run` cannot
+/// start.
+#[cfg(unix)]
+const HOOK_NOT_STARTED_ERROR: &str = "Error: git could not start the post-checkout hook step";
+
+/// A tracked sparse run whose `git hook run` cannot start keeps the worktree
+/// and its tracking branch. So stderr names the tracked branch, after the
+/// error line that says where the worktree stays.
+///
+/// The clone holds [`REMOTE_ONLY_BRANCH`] only as `origin/foo`, so
+/// `nwt -b foo` makes a local `foo` that tracks `origin/foo`. Git reports that
+/// upstream on its stdout, and `nwt` sends that stream to null. The `Tracking`
+/// line is thus the only report of the start point, on this path as on a run
+/// that works. The upstream configuration proves that the run took the remote
+/// branch, so a missing line is a missing report and not a run that tracked
+/// nothing.
+#[cfg(unix)]
+#[test]
+fn a_tracked_hook_step_that_cannot_start_names_the_tracked_branch_after_the_error() {
+    let (_source_temp, source) = source_with_a_heavy_remote_branch();
+    let (_temp, clone) = clone_of(&source);
+    assert_only_a_remote_holds_the_branch(&clone);
+
+    let (output, _worktree) = run_nwt_whose_hook_step_cannot_start(&clone, REMOTE_ONLY_BRANCH);
+
+    let mut upstream = branch_configuration(&clone, REMOTE_ONLY_BRANCH);
+    upstream.sort();
+    assert_eq!(
+        upstream,
+        vec![
+            format!("branch.{REMOTE_ONLY_BRANCH}.merge=refs/heads/{REMOTE_ONLY_BRANCH}"),
+            format!("branch.{REMOTE_ONLY_BRANCH}.remote=origin"),
+        ],
+        "the kept branch must track origin/{REMOTE_ONLY_BRANCH}"
+    );
+
+    let lines: Vec<&str> = std::str::from_utf8(&output.stderr)
+        .expect("utf-8 stderr")
+        .lines()
+        .collect();
+    let tracking = format!("Tracking origin/{REMOTE_ONLY_BRANCH}");
+    let error_at = lines
+        .iter()
+        .position(|line| line.starts_with(HOOK_NOT_STARTED_ERROR))
+        .unwrap_or_else(|| {
+            panic!(
+                "stderr must hold a line that starts with {HOOK_NOT_STARTED_ERROR:?}, but it \
+                 holds:\n{}",
+                lines.join("\n")
+            )
+        });
+    let tracking_at = lines
+        .iter()
+        .position(|line| *line == tracking)
+        .unwrap_or_else(|| {
+            panic!(
+                "stderr must hold the line {tracking:?}, but it holds:\n{}",
+                lines.join("\n")
+            )
+        });
+    assert!(
+        error_at < tracking_at,
+        "the line {tracking:?} must come after the error line, but stderr holds:\n{}",
+        lines.join("\n")
+    );
 }
 
 /// In a repository whose object ids are SHA-256, the hook of a sparse run gets

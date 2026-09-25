@@ -926,3 +926,142 @@ fn sparse_exclude_with_a_tracked_branch_refuses_a_directory_that_only_head_holds
 
     assert_made_nothing(&fixture, REMOTE_BRANCH);
 }
+
+/// The exit status of the `post-checkout` hook that fails.
+///
+/// The value is not 1, so a run that reports the status of the hook is
+/// distinguishable from a run that reports a generic failure.
+#[cfg(unix)]
+const HOOK_EXIT_STATUS: i32 = 3;
+
+/// The start of the error line of a sparse run whose `post-checkout` hook
+/// fails.
+#[cfg(unix)]
+const HOOK_FAILED_ERROR: &str = "Error: the post-checkout hook failed";
+
+/// Make the clone of [`clone_whose_remote_branch_holds_the_heavy_dir`], give
+/// it a `post-checkout` hook that exits [`HOOK_EXIT_STATUS`], and run
+/// `nwt -b issue-33 --sparse-exclude heavy` with `extra` arguments in it.
+///
+/// The hook lives in a directory beside the clone, so it goes away with the
+/// fixture. A sparse run adds the worktree with `--no-checkout`, which runs no
+/// hook, so the one hook run is the `git hook run` of `nwt`.
+#[cfg(unix)]
+fn run_tracked_sparse_nwt_whose_hook_fails(extra: &[&str]) -> (Fixture, Output) {
+    let fixture = clone_whose_remote_branch_holds_the_heavy_dir(REMOTE_BRANCH);
+    let hooks = fixture
+        .clone
+        .parent()
+        .expect("the clone has a parent")
+        .join("hooks");
+    fs::create_dir(&hooks).unwrap_or_else(|e| panic!("create {}: {e}", hooks.display()));
+    support::install_post_checkout_hook(
+        &fixture.clone,
+        &hooks,
+        &format!("exit {HOOK_EXIT_STATUS}\n"),
+    );
+
+    let mut arguments = vec!["-b", REMOTE_BRANCH, "--sparse-exclude", HEAVY_DIR];
+    arguments.extend_from_slice(extra);
+    let output = run_nwt(&fixture, &arguments);
+    (fixture, output)
+}
+
+/// Demand that `output` is a tracked sparse run whose `post-checkout` hook
+/// failed, and that the run kept what git made: exit 7, no path on stdout,
+/// the sparse worktree `issue-33`, and the branch `issue-33` with
+/// `origin/issue-33` as its upstream.
+///
+/// The upstream proves that the run took the remote branch as its start
+/// point, so a missing `Tracking` line is a missing report and not a run that
+/// tracked nothing.
+#[cfg(unix)]
+fn assert_the_failed_hook_kept_the_tracked_worktree(fixture: &Fixture, output: &Output) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stderr_lines(output);
+    assert_eq!(
+        output.status.code(),
+        Some(WORKTREE_FAILED),
+        "a failed post-checkout hook is a worktree failure.\nstdout:\n{stdout}\nstderr:\n{}",
+        lines.join("\n")
+    );
+    assert!(
+        stdout.is_empty(),
+        "a failed run prints no path, so the shell wrapper stays put. stdout: {stdout:?}"
+    );
+
+    let worktree = fixture.worktrees_dir().join(REMOTE_BRANCH);
+    assert!(
+        worktree.is_dir(),
+        "the run keeps the worktree that the hook ran in: {}",
+        worktree.display()
+    );
+    assert!(
+        !worktree.join(HEAVY_DIR).exists(),
+        "the kept worktree stays sparse: {}",
+        worktree.display()
+    );
+    assert_eq!(
+        upstream_of(&fixture.clone, REMOTE_BRANCH),
+        format!("{REMOTE}/{REMOTE_BRANCH}"),
+        "the kept branch must track {REMOTE}/{REMOTE_BRANCH}"
+    );
+}
+
+/// A tracked sparse run whose `post-checkout` hook fails keeps the worktree
+/// and its tracking branch. So stderr names the tracked branch, after the
+/// error line that says where the worktree stays.
+///
+/// Git reports the upstream it set on its stdout, and `nwt` sends that stream
+/// to null. The `Tracking` line is thus the only report of the start point,
+/// on this path as on a run that works.
+#[cfg(unix)]
+#[test]
+fn a_tracked_sparse_run_whose_hook_fails_names_the_tracked_branch_after_the_error() {
+    let (fixture, output) = run_tracked_sparse_nwt_whose_hook_fails(&[]);
+    assert_the_failed_hook_kept_the_tracked_worktree(&fixture, &output);
+
+    let lines = stderr_lines(&output);
+    let tracking = format!("{TRACKING_WORD} {REMOTE}/{REMOTE_BRANCH}");
+    let error_at = lines
+        .iter()
+        .position(|line| line.starts_with(HOOK_FAILED_ERROR))
+        .unwrap_or_else(|| {
+            panic!(
+                "stderr must hold a line that starts with {HOOK_FAILED_ERROR:?}, but it \
+                 holds:\n{}",
+                lines.join("\n")
+            )
+        });
+    let tracking_at = lines
+        .iter()
+        .position(|line| *line == tracking)
+        .unwrap_or_else(|| {
+            panic!(
+                "stderr must hold the line {tracking:?}, but it holds:\n{}",
+                lines.join("\n")
+            )
+        });
+    assert!(
+        error_at < tracking_at,
+        "the line {tracking:?} must come after the error line, but stderr holds:\n{}",
+        lines.join("\n")
+    );
+}
+
+/// `--quiet` suppresses the line that names the tracked branch when the
+/// `post-checkout` hook of a tracked sparse run fails, as it does after a run
+/// that works. The run still keeps the worktree and its tracking branch.
+#[cfg(unix)]
+#[test]
+fn quiet_prints_no_tracking_line_when_the_hook_of_a_tracked_sparse_run_fails() {
+    let (fixture, output) = run_tracked_sparse_nwt_whose_hook_fails(&["--quiet"]);
+    assert_the_failed_hook_kept_the_tracked_worktree(&fixture, &output);
+
+    let lines = stderr_lines(&output);
+    assert!(
+        !lines.iter().any(|line| line.starts_with(TRACKING_WORD)),
+        "--quiet must print no {TRACKING_WORD} line, but stderr holds:\n{}",
+        lines.join("\n")
+    );
+}
