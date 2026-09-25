@@ -5347,6 +5347,83 @@ mod tests {
         }
     }
 
+    /// The two documents of the remote lookup of a new branch: the REMOTE
+    /// BRANCHES section of `--help`, and the `### Remote branches` section
+    /// inside the `## nwt` section of the README.
+    ///
+    /// `include_str!` stays in `#[cfg(test)]`, so the README goes into the test
+    /// binary only and not into the `nwt` that ships.
+    fn remote_branch_doc_sections() -> (String, &'static str) {
+        use clap::CommandFactory;
+
+        let long_about = Cli::command()
+            .get_long_about()
+            .expect("nwt sets long_about")
+            .to_string();
+        let help_section =
+            doc_section(&long_about, "\nREMOTE BRANCHES:\n", "\nCONFIGURATION:\n").to_owned();
+        let nwt_section = doc_section(
+            include_str!("../../../README.md"),
+            "\n## nwt (new worktree)\n",
+            "\n## ",
+        );
+        let readme_section = doc_section(nwt_section, "\n### Remote branches\n", "\n### ");
+        (help_section, readme_section)
+    }
+
+    /// The `Tracking` line and the refusal of a branch that more than one
+    /// remote holds show as samples in two documents. The REMOTE BRANCHES
+    /// section of `--help` holds them, and so does the `### Remote branches`
+    /// section of the README. Each document also names `git fetch`, because
+    /// `nwt` reads only the remote-tracking branches that the clone holds.
+    ///
+    /// The samples are copies, and only the functions run. So this test builds
+    /// the `Tracking` line with [`tracking_notice`], and the refusal with the
+    /// [`fmt::Display`] of [`NewBranchStartError::AmbiguousRemoteBranch`]
+    /// after the `Error: ` that `main` puts in front of it. Each line of each
+    /// sample, without its indentation, must be a line of its own in each
+    /// document. Change the wording in the code alone, and this test fails and
+    /// names the document that did not change.
+    #[test]
+    fn test_help_and_readme_samples_match_the_remote_branch_lines() {
+        const FETCH: &str = "git fetch";
+
+        let remote_branch = |remote: &str| RemoteTrackingBranch {
+            remote: remote.to_owned(),
+            branch: "issue-33".to_owned(),
+        };
+        let notice = tracking_notice(&remote_branch("origin"));
+        let refusal = NewBranchStartError::AmbiguousRemoteBranch {
+            branch: "issue-33".to_owned(),
+            candidates: vec![remote_branch("origin"), remote_branch("upstream")],
+        };
+        let refusal = format!("Error: {refusal}");
+
+        let (help_section, readme_section) = remote_branch_doc_sections();
+
+        for sample in std::iter::once(notice.as_str()).chain(refusal.lines()) {
+            let sample = sample.trim();
+            assert!(
+                has_sample_line(&help_section, sample),
+                "the REMOTE BRANCHES section of --help must hold the runtime line: {sample}"
+            );
+            assert!(
+                has_sample_line(readme_section, sample),
+                "the ### Remote branches section of README.md must hold the runtime line: \
+                 {sample}"
+            );
+        }
+
+        assert!(
+            join_lines(&help_section).contains(FETCH),
+            "the REMOTE BRANCHES section of --help must name {FETCH:?}"
+        );
+        assert!(
+            join_lines(readme_section).contains(FETCH),
+            "the ### Remote branches section of README.md must name {FETCH:?}"
+        );
+    }
+
     // One mutation fixture for each rule of `escape_sparse_pattern`. Remove one
     // rule from the function, and exactly one of these tests fails. Each input
     // holds the character two times where it can, so a rule that escapes only
