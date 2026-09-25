@@ -1479,15 +1479,20 @@ fn a_failed_read_tree_removes_what_the_run_made() {
 /// local branch that git's checkout DWIM made, when `git read-tree -mu HEAD`
 /// fails.
 ///
-/// `git worktree add <path> foo` makes a local `foo` that tracks `origin/foo`.
-/// That branch did not exist before the run, so the run made it, and the
-/// cleanup takes it back with the worktree.
+/// `git worktree add <path> foo` makes a local `foo` that tracks `origin/foo`,
+/// and writes `branch.foo.remote` and `branch.foo.merge`. The branch did not
+/// exist before the run, so the run made it and its upstream configuration,
+/// and the cleanup takes all three back with the worktree.
 #[cfg(unix)]
 #[test]
 fn a_failed_read_tree_deletes_the_branch_that_the_checkout_dwim_made() {
     let (_source_temp, source) = source_with_a_heavy_remote_branch();
     let (temp, clone) = clone_of(&source);
     assert_only_a_remote_holds_the_branch(&clone);
+    assert!(
+        branch_configuration(&clone, REMOTE_ONLY_BRANCH).is_empty(),
+        "the fixture clone must hold no branch.{REMOTE_ONLY_BRANCH}.* configuration"
+    );
     let before = local_branches(&clone);
     let fake = FakeGit::refusing(&["read-tree"]);
 
@@ -1499,11 +1504,19 @@ fn a_failed_read_tree_deletes_the_branch_that_the_checkout_dwim_made() {
 
     assert_the_failed_step_left_nothing(&temp, &clone, &before, &output);
     assert_only_a_remote_holds_the_branch(&clone);
+    let left = branch_configuration(&clone, REMOTE_ONLY_BRANCH);
+    assert!(
+        left.is_empty(),
+        "the run must remove the upstream configuration that git's checkout DWIM wrote, \
+         but the clone holds:\n{}",
+        left.join("\n")
+    );
 }
 
 /// Each `branch.<branch>.*` line of the local configuration of `repo`.
 ///
-/// `git worktree add --track -b <branch>` writes `branch.<branch>.remote` and
+/// `git worktree add --track -b <branch>`, and the checkout DWIM of
+/// `git worktree add <path> <branch>`, write `branch.<branch>.remote` and
 /// `branch.<branch>.merge` there. Only the repository configuration counts, so
 /// a key of the host configuration cannot change the answer.
 #[cfg(unix)]
