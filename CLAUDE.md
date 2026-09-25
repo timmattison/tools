@@ -228,6 +228,7 @@ allowlist.
 - `grime` - `--diff` paint tests, through a pipe and on a terminal
 - `grind` - `--diff` paint tests, through a pipe and on a terminal
 - `gsw` - render, watch, push, and update run tests
+- `nwt` - the usage error that clap gives for the removed `--tmux` flag
 - `prcp` - the `--shell-setup` refusal and help tests
 - `prgz` - render tests of the closing report
 - `swt` - the end-to-end helpers that read stdout and stderr of the binary

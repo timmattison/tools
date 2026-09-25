@@ -8,6 +8,11 @@
 //! Each run gets a fresh, empty home directory. `nwt` reads `~/.nwt.toml` from
 //! the home directory, so the configuration of whoever runs the suite cannot
 //! change a result here.
+//!
+//! Each run also sets `CLICOLOR_FORCE`, and each assertion compares glyphs.
+//! clap paints the argument in a usage error when that variable is set, and
+//! the pre-commit hook sets it. Thus every run of these tests reads the painted
+//! output that the hook reads. See "Colored Output in Tests" in CLAUDE.md.
 
 mod support;
 
@@ -20,6 +25,13 @@ use tempfile::TempDir;
 /// The exit code clap gives a usage error, such as an argument it does not
 /// know.
 const USAGE_ERROR: i32 = 2;
+
+/// The variable that makes clap paint its output when standard error is not a
+/// terminal.
+const CLICOLOR_FORCE: &str = "CLICOLOR_FORCE";
+
+/// The value of [`CLICOLOR_FORCE`] that turns the paint on.
+const PAINT: &str = "1";
 
 /// The exit code `nwt` gives when it cannot use `~/.nwt.toml`. It is
 /// `exit_codes::CONFIG_ERROR` in the binary.
@@ -47,16 +59,22 @@ fn run_nwt_in_home(repo: &Path, home: &Path, args: &[&str]) -> Output {
     nwt_command(repo)
         .args(args)
         .env("HOME", home)
+        .env(CLICOLOR_FORCE, PAINT)
         .output()
         .expect("run the nwt binary")
+}
+
+/// The visible glyphs of `bytes`, with the paint removed.
+fn glyphs(bytes: &[u8]) -> String {
+    testcolor::strip_ansi(&String::from_utf8_lossy(bytes))
 }
 
 /// Standard output and standard error of `output`, for an assertion message.
 fn shown(output: &Output) -> String {
     format!(
         "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
+        glyphs(&output.stdout),
+        glyphs(&output.stderr),
     )
 }
 
@@ -97,7 +115,7 @@ fn tmux_flag_is_a_usage_error() {
     let home = TempDir::new().expect("create the home directory of the run");
 
     let output = run_nwt_in_home(&repo, home.path(), &["--tmux"]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = glyphs(&output.stderr);
 
     assert_eq!(
         output.status.code(),
@@ -143,7 +161,7 @@ fn assert_refuses_tmux_key(value: &str) {
         home.path(),
         &["-b", &branch, "--no-copy-env", "--no-bootstrap-hooks"],
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = glyphs(&output.stderr);
 
     assert_eq!(
         output.status.code(),
