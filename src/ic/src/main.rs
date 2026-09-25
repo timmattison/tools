@@ -4068,6 +4068,81 @@ mod tests {
         );
     }
 
+    /// A new text file that holds terminal control characters in monitor mode
+    /// gives no output.
+    ///
+    /// Monitor mode wrote the text of a new file to the terminal unchanged. A
+    /// file that holds an escape sequence thus controlled the terminal. In
+    /// monitor mode the user does not choose the file. Any program can put a
+    /// file in a watched directory, such as `~/Downloads`. Such a file can
+    /// write the clipboard, set the title, or move the cursor to fake output.
+    ///
+    /// The file `clipboard.txt` holds OSC 52, which writes the clipboard, and
+    /// OSC 0, which sets the title. The file `cursor.txt` holds CSI sequences
+    /// that clear the screen and move the cursor. The file `c1.txt` holds the
+    /// C1 characters for OSC and ST, encoded in UTF-8. Some terminals read
+    /// them as control characters in UTF-8 too, so the rule must see C1 and
+    /// not only C0. The file `delete.txt` holds DEL, which is a control
+    /// character that is not in C0.
+    #[test]
+    fn a_new_text_file_that_holds_terminal_control_characters_gives_no_output() {
+        let directory = TemporaryDirectory::new();
+        let mut monitor = MonitorUnderTest::new();
+
+        let written: Vec<(&str, Written)> = [
+            (
+                "clipboard.txt",
+                b"note\x1b]52;c;cm0gLXJmIH4K\x07\x1b]0;title\x07\n".to_vec(),
+            ),
+            ("cursor.txt", b"ok\x1b[2J\x1b[1;1Hfake prompt $ \n".to_vec()),
+            ("c1.txt", "a\u{9d}52;c;eA==\u{9c}\n".as_bytes().to_vec()),
+            ("delete.txt", b"a\x7fb\n".to_vec()),
+        ]
+        .into_iter()
+        .map(|(name, bytes)| (name, monitor.handle(&directory.file_of(name, &bytes))))
+        .collect();
+
+        assert!(
+            written
+                .iter()
+                .all(|(_, output)| *output == Written::default()),
+            "a new file that holds terminal control characters must give no output, but these files gave output: {written:#?}"
+        );
+        assert!(
+            monitor.image_headers().is_empty(),
+            "a file that holds terminal control characters must not reach the image display, but it got {:?}",
+            monitor.image_headers()
+        );
+    }
+
+    /// A text file with tabs and CRLF line ends shows in monitor mode.
+    ///
+    /// Tab and carriage return are control characters, but plain text holds
+    /// them. A table uses tabs, and a file from Windows ends each line with a
+    /// carriage return and a line feed. The rule that ignores a file with
+    /// terminal control characters must keep these files. A rule that
+    /// ignores every control character makes this test fail.
+    #[test]
+    fn a_text_file_with_tabs_and_crlf_line_ends_shows_in_monitor_mode() {
+        let directory = TemporaryDirectory::new();
+        let table = directory.file_of("table.txt", b"name\tsize\r\nic\t42\r\n");
+        let mut monitor = MonitorUnderTest::new();
+
+        let written = monitor.handle(&table);
+
+        assert_eq!(
+            written,
+            Written {
+                stdout: format!(
+                    "\nFound new text file: {}\nname\tsize\r\nic\t42\r\n",
+                    table.display()
+                ),
+                stderr: String::new(),
+            },
+            "a text file with tabs and CRLF line ends must give its header and its text"
+        );
+    }
+
     /// A text file that is empty at its first event shows its text at a later
     /// event.
     ///
