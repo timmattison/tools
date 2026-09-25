@@ -2145,7 +2145,8 @@ fn display_image_with_header(
 ///
 /// A path that is gone at the read holds nothing to show. [`open_new_file`]
 /// holds that rule for each reader of monitor mode. [`read_text_to_show`]
-/// holds the rule for the content of the file.
+/// holds the rule for the content of the file. It reads the whole file only
+/// when the first block of the file is text.
 ///
 /// # Arguments
 /// * `path` - The path that the watcher reported.
@@ -2167,6 +2168,15 @@ fn read_new_text_file(path: &Path) -> io::Result<Option<String>> {
     read_text_to_show(file)
 }
 
+/// The number of bytes at the start of a file that the text rule of monitor
+/// mode reads before it reads the rest.
+///
+/// [`read_text_to_show`] decides on this first block, and it reads the rest of
+/// the file only when the block is text. The start of a binary file, such as
+/// an archive or a partial download, holds a NUL byte, a byte that is not
+/// UTF-8, or a control character. So 8 KiB is sufficient to find it.
+const FIRST_BLOCK_BYTES: u64 = 8 * 1024;
+
 /// Read the content of a file that monitor mode found, and decide whether it
 /// is text to show.
 ///
@@ -2180,6 +2190,14 @@ fn read_new_text_file(path: &Path) -> io::Result<Option<String>> {
 /// it writes the text, so the watcher often reports the file while it is
 /// still empty. A later event for the file shows the text.
 ///
+/// The rule reads the first [`FIRST_BLOCK_BYTES`] bytes, and it reads the rest
+/// only when [`first_block_can_be_text`] accepts them. A binary file that
+/// grows, such as a `.crdownload` file of a browser, gives an event at each
+/// write. It stays out of the record, so each event reads it again. A read of
+/// the whole file thus used memory to the size of the file at each event.
+/// When the first block is text, the rule applies the full check to the
+/// complete content.
+///
 /// # Arguments
 /// * `reader` - The source of the content, such as a file that is open.
 ///
@@ -2191,15 +2209,47 @@ fn read_new_text_file(path: &Path) -> io::Result<Option<String>> {
 /// The error of the read when the content does not read.
 fn read_text_to_show(mut reader: impl Read) -> io::Result<Option<String>> {
     let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes)?;
+    Read::by_ref(&mut reader)
+        .take(FIRST_BLOCK_BYTES)
+        .read_to_end(&mut bytes)?;
 
-    if bytes.is_empty() {
+    if bytes.is_empty() || !first_block_can_be_text(&bytes) {
         return Ok(None);
     }
+
+    reader.read_to_end(&mut bytes)?;
 
     Ok(String::from_utf8(bytes)
         .ok()
         .filter(|text| is_plain_text(text)))
+}
+
+/// Decide whether the first block of a file can be the start of text.
+///
+/// The block can end in part of a character of more than one byte, because the
+/// edge of the block does not follow the edges of the characters. The rest of
+/// that character is after the block. So a block that ends in part of a
+/// character is not binary for that cause, and the rule checks the characters
+/// before that part.
+///
+/// # Arguments
+/// * `block` - The bytes at the start of the file.
+///
+/// # Returns
+/// `true` when the block is valid UTF-8, or valid UTF-8 up to a character that
+/// the block cuts at its end, and [`is_plain_text`] accepts the decoded text.
+/// `false` when the block holds bytes that are not UTF-8 or a control
+/// character that plain text does not hold.
+fn first_block_can_be_text(block: &[u8]) -> bool {
+    match std::str::from_utf8(block) {
+        Ok(text) => is_plain_text(text),
+        // An error with no length is a character that the end of the block
+        // cuts. The bytes before `valid_up_to` are valid UTF-8.
+        Err(error) if error.error_len().is_none() => {
+            std::str::from_utf8(&block[..error.valid_up_to()]).is_ok_and(is_plain_text)
+        }
+        Err(_) => false,
+    }
 }
 
 /// Decide whether decoded text is plain text that monitor mode can write to
