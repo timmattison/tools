@@ -498,6 +498,10 @@ mod exit_codes {
     /// or a path that git does not track as a directory at the ref. `nwt`
     /// refuses it before it makes anything.
     pub const INVALID_SPARSE_EXCLUDE: i32 = 15;
+    /// More than one remote holds the branch that the run makes, and
+    /// `checkout.defaultRemote` picks none of them. `nwt` cannot know which
+    /// branch to track, so it refuses before it makes anything.
+    pub const AMBIGUOUS_REMOTE_BRANCH: i32 = 16;
 }
 
 /// Maximum attempts to find an available directory name before giving up.
@@ -980,9 +984,9 @@ impl RemoteLookupError {
 /// 3. When no such ref exists, the answer is [`RemoteTrackingMatch::None`].
 ///
 /// Two callers use it. [`resolve_checkout_ref`] runs its own first step
-/// (`git rev-parse`) before it, for `-c <name>`. `main` runs it for
-/// `-b <name>`, where a local branch `name` makes git refuse the add, so that
-/// caller needs no first step.
+/// (`git rev-parse`) before it, for `-c <name>`. [`new_branch_start`] runs it
+/// for `-b <name>`, where a local branch `name` makes git refuse the add, so
+/// that caller needs no first step.
 ///
 /// Git finds the remote-tracking branch through the fetch refspec of each
 /// remote. This function reads `refs/remotes/<remote>/<name>`, where the
@@ -1092,8 +1096,8 @@ fn remote_lookup_output(
 ///    exits as a failed add.
 ///
 /// This function runs step 1 itself. [`find_remote_tracking_branch`] holds
-/// steps 2 and 3, and `main` uses the same function for `-b <name>`. So the
-/// two flags find a remote branch with one set of rules.
+/// steps 2 and 3, and [`new_branch_start`] uses the same function for
+/// `-b <name>`. So the two flags find a remote branch with one set of rules.
 ///
 /// # Errors
 ///
@@ -1133,6 +1137,101 @@ fn resolve_checkout_ref(repo_root: &Path, name: &str) -> Result<String, SparseEx
 /// The git configuration key that names the remote whose branch git checks
 /// out when more than one remote holds a branch of the name.
 const CHECKOUT_DEFAULT_REMOTE_KEY: &str = "checkout.defaultRemote";
+
+/// Why [`new_branch_start`] gives no start point for a new branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NewBranchStartError {
+    /// More than one remote holds the branch, and `checkout.defaultRemote`
+    /// picks none of them. `branch` is the name of the new branch.
+    /// `candidates` holds each remote-tracking branch of that name, in the
+    /// order that `git for-each-ref` lists them.
+    AmbiguousRemoteBranch {
+        branch: String,
+        candidates: Vec<RemoteTrackingBranch>,
+    },
+    /// [`find_remote_tracking_branch`] could not answer.
+    Lookup(RemoteLookupError),
+}
+
+impl fmt::Display for NewBranchStartError {
+    /// The message after `Error: `.
+    ///
+    /// For [`NewBranchStartError::AmbiguousRemoteBranch`], the message has
+    /// more than one line. It names each candidate on a line of its own, and
+    /// it ends with the command that names the remote to track.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AmbiguousRemoteBranch { branch, candidates } => {
+                writeln!(
+                    f,
+                    "more than one remote holds the branch '{branch}', and \
+                     {CHECKOUT_DEFAULT_REMOTE_KEY} picks none of them:"
+                )?;
+                for candidate in candidates {
+                    writeln!(f, "  {candidate}")?;
+                }
+                writeln!(f, "Name the remote to track, and run nwt again:")?;
+                write!(f, "  git config {CHECKOUT_DEFAULT_REMOTE_KEY} <remote>")
+            }
+            Self::Lookup(e) => e.fmt(f),
+        }
+    }
+}
+
+impl NewBranchStartError {
+    /// The exit code of `nwt -b <name>` for this refusal.
+    ///
+    /// An ambiguous branch exits [`exit_codes::AMBIGUOUS_REMOTE_BRANCH`]. A
+    /// lookup that could not answer exits with the code of
+    /// [`RemoteLookupError::exit_code`].
+    fn exit_code(&self) -> i32 {
+        match self {
+            Self::AmbiguousRemoteBranch { .. } => exit_codes::AMBIGUOUS_REMOTE_BRANCH,
+            Self::Lookup(e) => e.exit_code(),
+        }
+    }
+}
+
+/// The remote-tracking branch where the new branch `name` starts, and that
+/// it tracks. `None` means that the new branch starts at `HEAD` of the main
+/// worktree.
+///
+/// `main` calls this for each run that makes a new branch `name`: `-b <name>`,
+/// the bare-number shorthand, and `branch` in `~/.nwt.toml`. The rules are the
+/// rules of the checkout DWIM of git, through [`find_remote_tracking_branch`]:
+///
+/// 1. When exactly one remote holds `name`, or `checkout.defaultRemote` picks
+///    one of the remotes that hold it, the answer is that remote-tracking
+///    branch.
+/// 2. When more than one remote holds `name`, and `checkout.defaultRemote`
+///    picks none of them, the function refuses.
+/// 3. When no remote holds `name`, the answer is `None`.
+///
+/// The function never falls back to `HEAD` in silence, because a silent fall
+/// back hides the mistake. `main` calls it before it makes anything, so a
+/// refusal makes nothing.
+///
+/// # Errors
+///
+/// - [`NewBranchStartError::AmbiguousRemoteBranch`] when more than one remote
+///   holds `name`, and `checkout.defaultRemote` picks none of them.
+/// - [`NewBranchStartError::Lookup`] when [`find_remote_tracking_branch`]
+///   cannot answer.
+fn new_branch_start(
+    repo_root: &Path,
+    name: &str,
+) -> Result<Option<RemoteTrackingBranch>, NewBranchStartError> {
+    match find_remote_tracking_branch(repo_root, name).map_err(NewBranchStartError::Lookup)? {
+        RemoteTrackingMatch::One(branch) => Ok(Some(branch)),
+        RemoteTrackingMatch::Ambiguous(candidates) => {
+            Err(NewBranchStartError::AmbiguousRemoteBranch {
+                branch: name.to_owned(),
+                candidates,
+            })
+        }
+        RemoteTrackingMatch::None => Ok(None),
+    }
+}
 
 /// What the new worktree checks out.
 ///
@@ -2980,17 +3079,13 @@ fn main() {
 
     // A new branch `<name>` starts at the remote-tracking branch of that name,
     // and tracks it, when the lookup finds one. The lookup runs before
-    // anything is made, so a lookup that fails makes nothing. It never falls
-    // back to `HEAD` in silence, because a silent fall back hides the mistake.
-    // A run with `-c <ref>`, or with a random name, does no lookup.
+    // anything is made, so a refusal makes nothing. It never falls back to
+    // `HEAD` in silence, because a silent fall back hides the mistake. A run
+    // with `-c <ref>`, or with a random name, does no lookup.
     let tracked_branch: Option<RemoteTrackingBranch> =
         match (config.checkout.as_deref(), config.branch.as_deref()) {
-            (None, Some(name)) => match find_remote_tracking_branch(&repo_root, name) {
-                Ok(RemoteTrackingMatch::One(branch)) => Some(branch),
-                // More than one remote holds the branch, and
-                // `checkout.defaultRemote` picks none of them. The branch
-                // starts at `HEAD`, as it did before the lookup existed.
-                Ok(RemoteTrackingMatch::Ambiguous(_) | RemoteTrackingMatch::None) => None,
+            (None, Some(name)) => match new_branch_start(&repo_root, name) {
+                Ok(start) => start,
                 Err(e) => {
                     error!(config.quiet, "Error: {e}");
                     exit(e.exit_code());
@@ -4181,6 +4276,7 @@ mod tests {
             exit_codes::TMUX_NOT_RUNNING,
             exit_codes::SHELL_SETUP_ERROR,
             exit_codes::INVALID_SPARSE_EXCLUDE,
+            exit_codes::AMBIGUOUS_REMOTE_BRANCH,
         ];
 
         let mut sorted = codes.to_vec();
