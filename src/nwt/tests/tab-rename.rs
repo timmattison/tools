@@ -15,6 +15,7 @@
 mod support;
 
 use support::{init_repo, nanos, nwt_command, FakeMultiplexer};
+use tempfile::TempDir;
 
 /// Positive control: inside zellij with no opt-out, `nwt` renames the tab.
 ///
@@ -91,17 +92,32 @@ fn tmux_invocation_has_name_flag(recorded: &str) -> bool {
     recorded.split_whitespace().any(|token| token == "-n")
 }
 
-/// Positive control: inside tmux with no opt-out, `nwt --tmux` opens the new
-/// window named after the worktree (`-n <tab>`). Proves the recorder captures
-/// the tmux path and locks the interactive behavior.
+/// A fresh home directory whose `~/.nwt.toml` sets `tmux = true`.
+///
+/// Issue #527 removed the `--tmux` flag, and the `tmux` key of the
+/// configuration file is now the one way to reach the tmux path. The home
+/// directory is new for each test, so the `~/.nwt.toml` of whoever runs the
+/// suite cannot change the result.
+fn home_with_tmux_config() -> TempDir {
+    let home = TempDir::new().expect("create the home directory of the run");
+    std::fs::write(home.path().join(".nwt.toml"), "tmux = true\n")
+        .expect("write the .nwt.toml of the run");
+    home
+}
+
+/// Positive control: inside tmux with no opt-out, `nwt` with `tmux = true`
+/// opens the new window named after the worktree (`-n <tab>`). Proves the
+/// recorder captures the tmux path and locks the interactive behavior.
 #[test]
 fn tmux_window_named_without_optout() {
     let fake = FakeMultiplexer::new();
     let (_temp, repo) = init_repo();
+    let home = home_with_tmux_config();
     let branch = format!("tmuxwin-{}-{}", std::process::id(), nanos());
 
     let output = nwt_command(&repo)
-        .args(["-b", &branch, "--tmux"])
+        .args(["-b", &branch])
+        .env("HOME", home.path())
         .env("PATH", fake.path_env())
         .env("TMUX", "/fake/tmux-socket,0,0")
         // Exercise only the tmux path: don't let an inherited ZELLIJ also fire a
@@ -114,13 +130,13 @@ fn tmux_window_named_without_optout() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "nwt --tmux should succeed.\nstderr: {stderr}"
+        "nwt with tmux = true should succeed.\nstderr: {stderr}"
     );
 
     let recorded = fake.recorded();
     assert!(
         recorded.contains("new-window"),
-        "nwt --tmux must open a tmux window.\nrecorded: {recorded:?}"
+        "nwt with tmux = true must open a tmux window.\nrecorded: {recorded:?}"
     );
     assert!(
         tmux_invocation_has_name_flag(&recorded),
@@ -134,16 +150,18 @@ fn tmux_window_named_without_optout() {
 
 /// Setting `NWT_NO_TAB_RENAME` drops the `-n <tab>` window name from the
 /// `tmux new-window` invocation (tmux then auto-names the window). The window is
-/// still opened — the opt-out only suppresses the rename, not the `--tmux`
+/// still opened — the opt-out only suppresses the rename, not the `tmux = true`
 /// behavior.
 #[test]
 fn tmux_window_name_dropped_by_optout() {
     let fake = FakeMultiplexer::new();
     let (_temp, repo) = init_repo();
+    let home = home_with_tmux_config();
     let branch = format!("tmuxwin-optout-{}-{}", std::process::id(), nanos());
 
     let output = nwt_command(&repo)
-        .args(["-b", &branch, "--tmux"])
+        .args(["-b", &branch])
+        .env("HOME", home.path())
         .env("PATH", fake.path_env())
         .env("TMUX", "/fake/tmux-socket,0,0")
         .env_remove("ZELLIJ")
@@ -154,13 +172,13 @@ fn tmux_window_name_dropped_by_optout() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "nwt --tmux should still succeed.\nstderr: {stderr}"
+        "nwt with tmux = true should still succeed.\nstderr: {stderr}"
     );
 
     let recorded = fake.recorded();
     assert!(
         recorded.contains("new-window"),
-        "nwt --tmux must still open a tmux window (opt-out only drops the name).\nrecorded: {recorded:?}"
+        "nwt with tmux = true must still open a tmux window (opt-out only drops the name).\nrecorded: {recorded:?}"
     );
     assert!(
         !tmux_invocation_has_name_flag(&recorded),

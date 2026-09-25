@@ -289,7 +289,7 @@ fn merge_config(cli: &Cli, config: Option<NwtConfig>) -> MergedConfig {
         // See function-level doc comment for rationale.
         quiet: cli.quiet || config.quiet,
         run: cli.run.clone().or(config.run),
-        tmux: cli.tmux || config.tmux,
+        tmux: config.tmux,
     }
 }
 
@@ -1315,21 +1315,6 @@ struct Cli {
     #[arg(long)]
     run: Option<String>,
 
-    /// Create a new tmux window for the worktree.
-    ///
-    /// Opens a new tmux window with the working directory set to the worktree.
-    /// The window is named after the worktree directory (e.g., "adjective-noun").
-    ///
-    /// When combined with --run, the command runs in an interactive shell
-    /// (`$SHELL -ic`), so aliases and shell functions are available. This assumes
-    /// your shell supports `-i` (interactive) and `-c` (command) flags, which is
-    /// true for bash, zsh, fish, and most POSIX-compatible shells.
-    ///
-    /// Note: tmux is typically only available on Unix systems (Linux, macOS).
-    /// This option will fail on Windows unless tmux is installed via WSL or similar.
-    #[arg(long)]
-    tmux: bool,
-
     /// Disable copying untracked .env files to the new worktree.
     ///
     /// By default, nwt copies untracked .env files (e.g., .env, .env.local,
@@ -1391,7 +1376,7 @@ struct Cli {
     ///
     /// To activate after installation, run `source ~/.zshrc` (or `~/.bashrc`)
     /// or open a new terminal.
-    #[arg(long, conflicts_with_all = ["branch", "checkout", "quiet", "run", "tmux", "no_copy_env", "no_bootstrap_hooks", "random_directory", "sparse_exclude"])]
+    #[arg(long, conflicts_with_all = ["branch", "checkout", "quiet", "run", "no_copy_env", "no_bootstrap_hooks", "random_directory", "sparse_exclude"])]
     shell_setup: bool,
 }
 
@@ -4015,39 +4000,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_tmux_option_parses() {
-        use clap::CommandFactory;
-        let cmd = Cli::command();
-
-        // Parsing with --tmux should succeed
-        let result = cmd.try_get_matches_from(["nwt", "--tmux"]);
-        assert!(result.is_ok(), "Should accept --tmux option");
-
-        let matches = result.unwrap();
-        assert!(matches.get_flag("tmux"), "Should set tmux flag");
-    }
-
-    #[test]
-    fn test_cli_tmux_with_run() {
-        use clap::CommandFactory;
-        let cmd = Cli::command();
-
-        // --tmux can be combined with --run
-        let result = cmd.try_get_matches_from(["nwt", "--tmux", "--run", "npm install"]);
-        assert!(result.is_ok(), "Should accept --tmux with --run");
-    }
-
-    #[test]
-    fn test_cli_tmux_with_branch() {
-        use clap::CommandFactory;
-        let cmd = Cli::command();
-
-        // --tmux can be combined with --branch
-        let result = cmd.try_get_matches_from(["nwt", "--tmux", "--branch", "feature/test"]);
-        assert!(result.is_ok(), "Should accept --tmux with --branch");
-    }
-
-    #[test]
     fn test_cli_no_copy_env_parses() {
         use clap::CommandFactory;
         let cmd = Cli::command();
@@ -4231,19 +4183,6 @@ mod tests {
         assert!(
             result.is_err(),
             "Should fail when both --shell-setup and --branch are provided"
-        );
-    }
-
-    #[test]
-    fn test_cli_shell_setup_conflicts_with_tmux() {
-        use clap::CommandFactory;
-        let cmd = Cli::command();
-
-        // --shell-setup conflicts with --tmux
-        let result = cmd.try_get_matches_from(["nwt", "--shell-setup", "--tmux"]);
-        assert!(
-            result.is_err(),
-            "Should fail when both --shell-setup and --tmux are provided"
         );
     }
 
@@ -5074,7 +5013,6 @@ mod tests {
                 no_bootstrap_hooks: false,
                 quiet: true,
                 run: None,
-                tmux: false,
                 shell_setup: false,
                 sparse_exclude: Vec::new(),
             };
@@ -5094,11 +5032,7 @@ mod tests {
             assert!(merged.quiet); // CLI --quiet flag was set, so quiet=true
             assert!(merged.copy_env); // config has true, CLI didn't disable
 
-            // Boolean flags use OR logic: cli.tmux || config.tmux
-            // Since CLI didn't specify --tmux (so cli.tmux=false, the default),
-            // the config value (tmux=true) is used via the OR. This is the expected
-            // behavior documented in merge_config(). See that function's doc comment
-            // for the full rationale on why we don't support --no-tmux to override.
+            // The CLI has no tmux flag, so the config value (tmux=true) passes through.
             assert!(merged.tmux);
 
             assert_eq!(merged.run, Some("npm install".to_string())); // Config provides default
@@ -5114,7 +5048,6 @@ mod tests {
                 no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
-                tmux: false,
                 shell_setup: false,
                 sparse_exclude: Vec::new(),
             };
@@ -5147,7 +5080,6 @@ mod tests {
                 no_bootstrap_hooks: false,
                 quiet: true,
                 run: None,
-                tmux: false,
                 shell_setup: false,
                 sparse_exclude: Vec::new(),
             };
@@ -5171,7 +5103,6 @@ mod tests {
                 no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
-                tmux: false,
                 shell_setup: false,
                 sparse_exclude: Vec::new(),
             };
@@ -5200,7 +5131,6 @@ mod tests {
                 no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
-                tmux: false,
                 shell_setup: false,
                 sparse_exclude: Vec::new(),
             };
@@ -5230,7 +5160,6 @@ mod tests {
                 no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
-                tmux: false,
                 shell_setup: false,
                 sparse_exclude: Vec::new(),
             };
@@ -5249,7 +5178,6 @@ mod tests {
                 no_bootstrap_hooks: true, // CLI disables
                 quiet: false,
                 run: None,
-                tmux: false,
                 shell_setup: false,
                 sparse_exclude: Vec::new(),
             };
@@ -5277,7 +5205,6 @@ mod tests {
                 no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
-                tmux: false,
                 shell_setup: false,
                 sparse_exclude: Vec::new(),
             };
