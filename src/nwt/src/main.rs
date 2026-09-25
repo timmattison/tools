@@ -3155,9 +3155,11 @@ fn main() {
                 // Git reports the upstream it set on stdout, and that stream
                 // goes to null. So this line is the one report of the start
                 // point. The shell wrapper reads the path from stdout, so the
-                // line goes to stderr.
+                // line goes to stderr. `--quiet` suppresses it.
                 if let WorktreeSource::NewBranchTracking(branch) = source {
-                    eprintln!("{}", tracking_notice(branch));
+                    if !config.quiet {
+                        eprintln!("{}", tracking_notice(branch));
+                    }
                 }
 
                 // The shell wrapper reads the path from stdout, so the notice
