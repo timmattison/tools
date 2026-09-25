@@ -603,3 +603,61 @@ fn a_local_branch_gives_the_branch_exists_error_even_when_two_remotes_hold_it() 
     assert_branch_exists_refusal(&output, REMOTE_BRANCH);
     assert_local_branch_untouched(&fixture, REMOTE_BRANCH, &commit);
 }
+
+/// When two remotes hold `<name>`, `checkout.defaultRemote` names the remote
+/// whose branch the new branch starts at and tracks, as it does for the
+/// checkout DWIM of git. The clone states the key in its own configuration,
+/// because each run reads an empty global and system configuration.
+#[test]
+fn checkout_default_remote_picks_the_branch_that_two_remotes_hold() {
+    let fixture = clone_whose_two_remotes_hold(REMOTE_BRANCH);
+    assert!(
+        run_git(
+            &fixture.clone,
+            &["config", "checkout.defaultRemote", SECOND_REMOTE]
+        ),
+        "git config failed"
+    );
+
+    let output = run_nwt(&fixture, &["-b", REMOTE_BRANCH]);
+    let worktree = created_worktree(&output);
+
+    assert_worktree_is_named(&fixture, &worktree, REMOTE_BRANCH);
+    assert_eq!(
+        rev_parse(&worktree, "HEAD"),
+        rev_parse(&fixture.clone, &remote_ref_on(SECOND_REMOTE, REMOTE_BRANCH)),
+        "the worktree must start at {SECOND_REMOTE}/{REMOTE_BRANCH}"
+    );
+    assert_eq!(
+        upstream_of(&fixture.clone, REMOTE_BRANCH),
+        format!("{SECOND_REMOTE}/{REMOTE_BRANCH}"),
+        "the new branch must track {SECOND_REMOTE}/{REMOTE_BRANCH}"
+    );
+
+    let expected = format!("{TRACKING_WORD} {SECOND_REMOTE}/{REMOTE_BRANCH}");
+    let lines = stderr_lines(&output);
+    assert!(
+        lines.contains(&expected),
+        "stderr must hold the line {expected:?}, but it holds:\n{}",
+        lines.join("\n")
+    );
+}
+
+/// When one remote holds `<name>` and a local branch `<name>` exists, the
+/// run gives the branch-exists error that it gave before the lookup existed.
+/// The local branch keeps its commit, and it gets no upstream.
+#[test]
+fn a_local_branch_gives_the_branch_exists_error_when_one_remote_holds_it() {
+    let fixture = clone_whose_remote_holds(REMOTE_BRANCH);
+    let commit = make_local_branch(&fixture, REMOTE_BRANCH);
+    assert_ne!(
+        commit,
+        rev_parse(&fixture.clone, &remote_ref(REMOTE_BRANCH)),
+        "the local branch must not be at the commit of {REMOTE}/{REMOTE_BRANCH}"
+    );
+
+    let output = run_nwt(&fixture, &["-b", REMOTE_BRANCH]);
+
+    assert_branch_exists_refusal(&output, REMOTE_BRANCH);
+    assert_local_branch_untouched(&fixture, REMOTE_BRANCH, &commit);
+}
