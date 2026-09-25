@@ -4337,6 +4337,29 @@ mod tests {
         );
     }
 
+    /// The reader of a new image ignores a path that is gone at the read.
+    ///
+    /// [`Monitor::handle`] checks the path before the read, and a path that is
+    /// gone at that check gives no output. A program can also remove or rename
+    /// the file after the check and before the read. The screenshot tool of
+    /// macOS writes a temporary `.Screenshot` file and then renames it. The
+    /// reader must then ignore the path as the check does, and not report the
+    /// failure of the read. No test of `handle` reaches that gap, because the
+    /// gap is too short to hit on purpose. So this test calls the reader
+    /// directly, with a path that no file holds.
+    #[test]
+    fn the_image_reader_ignores_a_path_that_is_gone_at_the_read() {
+        let directory = TemporaryDirectory::new();
+        let gone = directory.path().join(".Screenshot 1.png");
+
+        let read = read_new_image_file(&gone);
+
+        assert!(
+            matches!(read, Ok(None)),
+            "an image that is gone at the read must be ignored, but the reader gave {read:?}"
+        );
+    }
+
     // =========================================================================
     // Tests for ensure_file_exists
     // =========================================================================
