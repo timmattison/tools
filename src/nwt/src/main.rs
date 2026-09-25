@@ -4353,6 +4353,39 @@ mod tests {
         );
     }
 
+    /// A new branch that more than one remote holds, with no default remote
+    /// that picks one, exits 16, and `--help` says so.
+    ///
+    /// A script that runs `nwt` reads the EXIT CODES list to tell this refusal
+    /// from a failed add. The entry is built from the constant, so a change of
+    /// the value without a change of the help text fails here.
+    #[test]
+    fn test_exit_codes_section_lists_ambiguous_remote_branch() {
+        use clap::CommandFactory;
+
+        assert_eq!(
+            exit_codes::AMBIGUOUS_REMOTE_BRANCH,
+            16,
+            "issue #528 gives a new branch that more than one remote holds exit code 16"
+        );
+
+        let long_about = Cli::command()
+            .get_long_about()
+            .expect("nwt sets long_about")
+            .to_string();
+        let (_, section) = long_about
+            .split_once("EXIT CODES:")
+            .expect("--help has an EXIT CODES section");
+        let entry = format!(
+            "{} More than one remote holds the new branch",
+            exit_codes::AMBIGUOUS_REMOTE_BRANCH
+        );
+        assert!(
+            section.lines().any(|line| line.trim() == entry),
+            "the EXIT CODES section of --help must list {entry:?}:\n{section}"
+        );
+    }
+
     #[test]
     fn test_contains_control_chars_normal_strings() {
         // Normal strings should not contain control characters
