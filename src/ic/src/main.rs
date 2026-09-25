@@ -441,12 +441,20 @@ where
 
     /// Handle one path that the watcher reported.
     ///
-    /// A path that this run already handled gives no output. A path that is
-    /// not a regular file, such as a directory, gives no output. An image goes
-    /// to the image display. A path that is not an image and not a video is
-    /// read as text, and the text comes after a header line. A path goes into
-    /// the record only when its display succeeds, so a later event for a path
-    /// that failed tries the path again.
+    /// These are the outcomes:
+    ///
+    /// * A path that this run already handled gives no output.
+    /// * Monitor mode ignores a path that is not a regular file, such as a
+    ///   directory. It gives no output.
+    /// * Monitor mode ignores a path that is gone. It gives no output. This
+    ///   includes a text file that goes away before its read.
+    /// * An image goes to the image display.
+    /// * A path that is not an image and not a video is read as text. The text
+    ///   comes after a header line.
+    ///
+    /// A path goes into the record only when its display succeeds. A path that
+    /// monitor mode ignores, or whose display fails, stays out of the record,
+    /// so a later event for the path tries it again.
     ///
     /// # Arguments
     /// * `path` - The path that the watcher reported.
@@ -475,8 +483,15 @@ where
         // open of a FIFO waits for a writer and monitor mode then stops.
         // `fs::metadata` follows a symbolic link, so a link to a regular file
         // counts as a regular file.
-        if fs::metadata(path).is_ok_and(|metadata| !metadata.is_file()) {
-            return Ok(());
+        //
+        // A path that is gone gives no output either. A program often writes
+        // a temporary file and then renames or removes it, so the event for
+        // that file arrives after it is gone. A different failure of this
+        // check goes on to the display, and the display reports it.
+        match fs::metadata(path) {
+            Ok(metadata) if !metadata.is_file() => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Ok(_) | Err(_) => {}
         }
 
         if is_image_file(path) {
@@ -496,13 +511,16 @@ where
                 }
             }
         } else if is_text_file(path) {
-            writeln!(out, "\nFound new text file: {}", path.display())?;
-            match read_text_file(path) {
-                Ok(contents) => {
+            // The header comes after the read. A file can go away between the
+            // check above and the read, and such a file gives no header.
+            match read_new_text_file(path) {
+                Ok(Some(contents)) => {
+                    writeln!(out, "\nFound new text file: {}", path.display())?;
                     out.write_all(contents.as_bytes())?;
                     out.flush()?;
                     self.seen.insert(path.to_path_buf());
                 }
+                Ok(None) => {}
                 Err(error) => {
                     writeln!(
                         err,
@@ -1845,22 +1863,30 @@ fn display_image_from_file(file_path: &Path, args: &Args, header: &[String]) -> 
     )
 }
 
-/// Read the content of a text file.
+/// Read a text file that monitor mode found, and decide whether to show it.
 ///
-/// The file argument of `main` and monitor mode both read a text file through
-/// this function, so the two give the same error for the same file.
+/// Monitor mode hears about each file that a program writes, and some of those
+/// files are gone before the read. A file that is gone holds nothing to show,
+/// so it is not a failure. The file argument of `main` does not come here: a
+/// file that the user names must read as text, or `ic` fails.
 ///
 /// # Arguments
-/// * `file_path` - The path of the text file.
+/// * `path` - The path that the watcher reported.
 ///
 /// # Returns
-/// The content of the file.
+/// `Some` with the content of the file when monitor mode shows it. `None` when
+/// monitor mode ignores the file, because the file is gone.
 ///
 /// # Errors
-/// An error when the file does not open, or when its content is not UTF-8.
-fn read_text_file(file_path: &Path) -> Result<String> {
-    fs::read_to_string(file_path)
-        .with_context(|| format!("Failed to read text file: {}", file_path.display()))
+/// The error of the read when the file does not read for a different cause,
+/// such as a permission that the user does not have. The error does not name
+/// the path, because the caller puts the path in front of it.
+fn read_new_text_file(path: &Path) -> io::Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 /// Print the content of a text file to standard output.
@@ -1872,10 +1898,11 @@ fn read_text_file(file_path: &Path) -> Result<String> {
 /// Nothing when the content is on standard output.
 ///
 /// # Errors
-/// An error when the file does not read as text, or when the flush of standard
-/// output fails.
+/// An error when the file does not open, when its content is not UTF-8, or
+/// when the flush of standard output fails.
 fn display_text_file(file_path: &Path) -> Result<()> {
-    let contents = read_text_file(file_path)?;
+    let contents = fs::read_to_string(file_path)
+        .with_context(|| format!("Failed to read text file: {}", file_path.display()))?;
 
     print!("{}", contents);
     io::stdout().flush().context("Failed to flush output")?;
