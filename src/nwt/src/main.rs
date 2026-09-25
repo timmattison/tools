@@ -4043,6 +4043,60 @@ mod tests {
         cmd.status().map(|s| s.success()).unwrap_or(false)
     }
 
+    /// Make a directory that git refuses as a repository, inside a repository
+    /// that the fixture makes in `temp`, and hand the directory back.
+    ///
+    /// A new temporary directory is not always outside a repository. Git
+    /// searches upward from the directory it starts in, and a `TMPDIR` inside
+    /// a clone puts each new temporary directory inside that clone. So this
+    /// fixture puts the directory inside a repository on purpose, and each
+    /// test that uses it meets that case on every run.
+    ///
+    /// A `.git` file in the directory names a git directory that does not
+    /// exist. Git stops its upward search at that file and exits with the
+    /// status 128 ("not a git repository"), wherever `temp` is. Thus the pass
+    /// of a test that uses the fixture does not depend on `TMPDIR`.
+    ///
+    /// The enclosing repository gives a different answer to each query that
+    /// the tests ask. A search that goes past the `.git` file thus fails each
+    /// test, and does not let it pass for the wrong reason:
+    ///
+    /// - `git for-each-ref` succeeds there.
+    /// - `git ls-files` lists a file inside the directory.
+    /// - `core.hooksPath` names a directory that is missing from the
+    ///   directory.
+    ///
+    /// Each git child goes through [`run_git`], so it sheds the inherited git
+    /// environment and changes only the fixture repository. The fixture takes
+    /// a `TempDir` and not a path, so it cannot run `git init` in a directory
+    /// that a person owns.
+    fn not_a_repository_inside_a_repository(temp: &tempfile::TempDir) -> PathBuf {
+        const TRACKED_FILE: &str = "tracked.txt";
+
+        let dir = temp.path().join("not-a-repository");
+        let missing_git_dir = temp.path().join("no-such-git-directory");
+
+        assert!(
+            run_git(temp.path(), &["init", "--quiet"]),
+            "git init failed"
+        );
+        fs::create_dir(&dir).expect("create the directory");
+        fs::write(dir.join(TRACKED_FILE), "tracked\n").expect("write the tracked file");
+        assert!(run_git(&dir, &["add", TRACKED_FILE]), "git add failed");
+        assert!(
+            run_git(temp.path(), &["config", "core.hooksPath", ".husky/_"]),
+            "git config failed"
+        );
+
+        fs::write(
+            dir.join(".git"),
+            format!("gitdir: {}\n", missing_git_dir.display()),
+        )
+        .expect("write the .git file");
+
+        dir
+    }
+
     #[test]
     fn test_generate_docker_name_format() {
         let mut generator = Generator::default();
@@ -5042,13 +5096,17 @@ mod tests {
     /// A listing that git refuses is a failed lookup, and not a branch that no
     /// remote holds. So `-b <name>` does not fall back to `HEAD` in silence.
     ///
-    /// A new temporary directory is not a repository, so
-    /// `git for-each-ref` exits with a status that is not zero there.
+    /// The lookup runs in the directory of
+    /// [`not_a_repository_inside_a_repository`]. Git refuses that directory
+    /// as a repository, so `git for-each-ref` exits with the status 128 there.
+    /// The directory is inside a repository where the listing succeeds, so a
+    /// lookup that reached that repository answers `None` and fails the test.
     #[test]
     fn find_remote_tracking_branch_reports_a_failed_listing() {
         let temp = tempfile::TempDir::new().expect("create a temporary directory");
+        let not_a_repository = not_a_repository_inside_a_repository(&temp);
 
-        let error = find_remote_tracking_branch(temp.path(), "issue-33")
+        let error = find_remote_tracking_branch(&not_a_repository, "issue-33")
             .expect_err("a failed listing must stop the lookup");
 
         assert!(
@@ -6342,12 +6400,19 @@ mod tests {
             );
         }
 
+        /// A directory that git refuses as a repository has no tracked files.
+        ///
+        /// The directory comes from [`not_a_repository_inside_a_repository`],
+        /// so `git ls-files` exits with the status 128 there, and the empty
+        /// set comes from the failure arm. The enclosing repository tracks a
+        /// file inside the directory, so a query that reached it gives a set
+        /// that is not empty and fails the test.
         #[test]
         fn test_get_tracked_files_empty_for_non_git() {
             let temp = TempDir::new().expect("Failed to create temp dir");
+            let not_a_repository = not_a_repository_inside_a_repository(&temp);
 
-            // Non-git directory should return empty set
-            let tracked = get_tracked_files(temp.path());
+            let tracked = get_tracked_files(&not_a_repository);
             assert!(
                 tracked.is_empty(),
                 "Non-git directory should have no tracked files"
@@ -7556,15 +7621,21 @@ mod tests {
             );
         }
 
+        /// Fail-safe: in a directory that git refuses as a repository,
+        /// `git config` exits with the status 128, and the check answers
+        /// `None`. It never panics or blocks.
+        ///
+        /// The directory comes from [`not_a_repository_inside_a_repository`].
+        /// The enclosing repository sets `core.hooksPath` to a directory that
+        /// is missing, so a query that reached it answers `Some` and fails the
+        /// test.
         #[test]
         fn test_non_git_dir_returns_none() {
-            // Fail-safe: outside a git repo, `git config` errors. We must never
-            // panic or block — just return None.
             let dir = TempDir::new().expect("Failed to create temp dir");
-            // No git init.
+            let not_a_repository = not_a_repository_inside_a_repository(&dir);
 
             assert_eq!(
-                missing_hooks_path(dir.path()),
+                missing_hooks_path(&not_a_repository),
                 None,
                 "A non-git directory must yield None (fail-safe)"
             );
