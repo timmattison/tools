@@ -539,13 +539,14 @@ where
                 error,
                 next_event,
             } => {
-                // The alternate format shows the whole chain of the error. The
-                // plain format shows only the outermost context, which can
-                // name the path and no cause.
+                // The line shows the whole chain of the error. The plain
+                // format of `anyhow` shows only the outermost context, which
+                // can name the path and no cause.
                 writeln!(
                     err,
-                    "Failed to display {what} {}: {error:#}",
-                    path.display()
+                    "Failed to display {what} {}: {}",
+                    path.display(),
+                    error_chain_text(&error)
                 )?;
                 if next_event == NextEvent::GivesNoOutput {
                     self.seen.insert(path.to_path_buf());
@@ -609,11 +610,42 @@ enum DisplayOutcome {
     Failed {
         /// The kind of the path, as the failure message names it.
         what: &'static str,
-        /// The failure. The message shows its whole chain.
+        /// The failure. The message shows its whole chain through
+        /// [`error_chain_text`].
         error: anyhow::Error,
         /// What a later event for the path gives.
         next_event: NextEvent,
     },
+}
+
+/// Write the chain of an error as one line, and name each cause one time.
+///
+/// The alternate format of `anyhow` joins every link of the chain with `: `.
+/// Some errors write their cause into their own message and also give the
+/// cause as the next link. The decoder of the `image` crate does this, so the
+/// alternate format prints `Invalid PNG signature.: Invalid PNG signature.`.
+/// This function drops a link when the link before it already ends with the
+/// same text. Such a link tells the user nothing new.
+///
+/// # Arguments
+/// * `error` - The error to write.
+///
+/// # Returns
+/// The links of the chain, from the outermost context to the cause, joined
+/// with `: `.
+fn error_chain_text(error: &anyhow::Error) -> String {
+    let mut links: Vec<String> = Vec::new();
+    for link in error.chain().map(ToString::to_string) {
+        if links
+            .last()
+            .is_some_and(|previous| previous.ends_with(&link))
+        {
+            continue;
+        }
+        links.push(link);
+    }
+
+    links.join(": ")
 }
 
 /// What a later event gives for a path whose display failed.
