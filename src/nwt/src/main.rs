@@ -5255,6 +5255,40 @@ mod tests {
         }
     }
 
+    /// One name for each character that `git rev-parse` reads as revision
+    /// syntax: `~`, `^` and `:`. After `refs/remotes/origin/`, each name
+    /// names an object of `origin/<GLOB_FIXTURE_BRANCH>`: the commit itself
+    /// for `~0` and `^0`, and its tree for a trailing `:`.
+    const REVISION_NAMES: [&str; 3] = ["issue-33~0", "issue-33^0", "issue-33:"];
+
+    /// `git rev-parse` reads `~`, `^` and `:` as revision syntax, and not as
+    /// parts of a ref name. Git refuses each of those characters in a ref
+    /// name, so no remote-tracking branch has such a name, and the lookup
+    /// answers [`RemoteTrackingMatch::None`] for each name that holds one.
+    ///
+    /// After `refs/remotes/origin/`, each name below names an object of
+    /// `origin/issue-33`. The test states that first, so a name that names
+    /// nothing cannot make the test pass for the wrong reason.
+    #[test]
+    fn find_remote_tracking_branch_never_reads_the_name_as_a_revision() {
+        let temp = tempfile::TempDir::new().expect("create a temporary directory");
+        let clone = clone_holding_remote_branch(&temp);
+
+        for name in REVISION_NAMES {
+            let revision = format!("{REMOTE_TRACKING_PREFIX}origin/{name}");
+            assert!(
+                run_git(&clone, &["rev-parse", "--verify", "--quiet", &revision]),
+                "git rev-parse must read {revision:?} as an object of origin/{GLOB_FIXTURE_BRANCH}"
+            );
+
+            assert_eq!(
+                find_remote_tracking_branch(&clone, name),
+                Ok(RemoteTrackingMatch::None),
+                "no remote-tracking branch has the name {name:?}"
+            );
+        }
+    }
+
     /// The answer for a name that git refuses as a ref name is known before
     /// git runs, so the lookup asks git nothing. A git that cannot answer
     /// then cannot turn that answer into a failure.
