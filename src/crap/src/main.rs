@@ -5588,12 +5588,12 @@ mod tests {
     /// is the enforcement point. Every program the binary spawns must appear in
     /// `ALLOWED` below — `ps`, the liveness probe in `pid_is_alive`, and `bash`
     /// and `zsh`, which the shell-integration tests use to source the real
-    /// function — so
-    /// adding a spawn is a deliberate act that has to edit this list, in a diff
-    /// a reviewer will see. None of them may be an escalation binary. The shell
-    /// function `--shell-setup` writes into the user's rc file is held to the
-    /// same rule: an escalation there would be `crap` escalating just as surely
-    /// as spawning one, only with the user's own shell doing it.
+    /// function — so adding a spawn is a deliberate act that has to edit this
+    /// list, in a diff a reviewer will see. None of them may be an escalation
+    /// binary. The shell function `--shell-setup` writes into the user's rc
+    /// file is held to the same rule: an escalation there would be `crap`
+    /// escalating just as surely as spawning one, only with the user's own
+    /// shell doing it.
     ///
     /// Both matchers are mutation-tested against synthetic violations before
     /// they are pointed at the real thing, because a guard that has never been
