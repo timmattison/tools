@@ -29,6 +29,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -407,7 +408,17 @@ pub fn install_post_checkout_hook(repo: &Path, hooks_dir: &Path, body: &str) {
 /// Tests that deliberately *exercise* the tab rename (see [`FakeMultiplexer`])
 /// re-add `ZELLIJ` on the returned command; because that `.env(...)` call runs
 /// after the scrub here, it wins for that child.
-pub fn nwt_command(repo: &Path) -> Command {
+///
+/// The child also gets an empty home directory of its own as `HOME`, and no
+/// `XDG_CONFIG_HOME`. `nwt` reads `~/.nwt.toml`, and its git reads
+/// `~/.gitconfig` and `$XDG_CONFIG_HOME/git/config`, so an inherited value
+/// hands the child the configuration of whoever runs the suite. One key there
+/// (a `~/.nwt.toml` that nwt refuses, an empty `nwt.worktreesDir`) stops every
+/// run with exit code 12. A test that needs a home of its own sets `HOME` on
+/// the returned command, and that later `.env(...)` call wins.
+/// `tests/isolated-home.rs` holds this rule.
+pub fn nwt_command(repo: &Path) -> NwtCommand {
+    let home = TempDir::new().expect("create the empty home directory of the nwt child");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_nwt"));
     cmd.current_dir(repo)
         .stdin(Stdio::null())
@@ -415,14 +426,50 @@ pub fn nwt_command(repo: &Path) -> Command {
         // can't make the spawned nwt rename the user's real tab. Tests that
         // deliberately exercise the tab rename re-add ZELLIJ after calling
         // this (a later `.env(..)` wins).
-        .env_remove("ZELLIJ");
+        .env_remove("ZELLIJ")
+        // Keep the configuration of the developer away from the child. With
+        // XDG_CONFIG_HOME gone, git looks for its user configuration under
+        // HOME, which is empty.
+        .env("HOME", home.path())
+        .env_remove("XDG_CONFIG_HOME");
     // Same idea for git: a hook exports these, `cargo test` inherits them, and
     // GIT_DIR beats `current_dir`. Left in place, the spawned nwt would add its
     // worktree to the real repo, write objects into it, or run under config the
     // launching shell injected. Shed by prefix, never by name — see `run_git`
     // above, and `gitscratch::shed_inherited_git_environment` for the rule.
     shed_inherited_git_environment(&mut cmd);
-    cmd
+    NwtCommand {
+        command: cmd,
+        _home: home,
+    }
+}
+
+/// A [`Command`] that runs the real `nwt` binary, together with the empty home
+/// directory that [`nwt_command`] gives the child.
+///
+/// It dereferences to the [`Command`], so a test builds and runs it exactly as
+/// it builds and runs a `Command`. The home directory lives as long as this
+/// value and is deleted with it. Thus run the child while the value lives:
+/// call `output()` or `status()` on it, or at the end of a chain that starts
+/// from it. A child from `spawn()` that outlives the value loses its home.
+pub struct NwtCommand {
+    command: Command,
+    /// Owns the home directory; dropping the command deletes it.
+    _home: TempDir,
+}
+
+impl Deref for NwtCommand {
+    type Target = Command;
+
+    fn deref(&self) -> &Command {
+        &self.command
+    }
+}
+
+impl DerefMut for NwtCommand {
+    fn deref_mut(&mut self) -> &mut Command {
+        &mut self.command
+    }
 }
 
 /// A fake `zellij` executable that records every invocation instead of

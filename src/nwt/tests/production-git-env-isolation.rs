@@ -43,11 +43,11 @@ mod support;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use support::{
     clone_of, difference, git_stdout, init_repo, nanos, nwt_command, repo_with_files, run_git,
-    snapshot, Snapshot,
+    snapshot, NwtCommand, Snapshot,
 };
 
 /// The suffix `nwt` adds to the repository name to name the directory that
@@ -123,7 +123,7 @@ fn expected_worktrees_dir(main_worktree: &Path) -> PathBuf {
 /// Every variable goes on the child, never on this process: a sibling test
 /// thread spawns git of its own, and a process-wide variable would aim it at
 /// the decoy.
-fn hostile_nwt_command(source: &Path, decoy: &Path) -> Command {
+fn hostile_nwt_command(source: &Path, decoy: &Path) -> NwtCommand {
     let decoy_git_dir = decoy.join(".git");
     let mut command = nwt_command(source);
     command
