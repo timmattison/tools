@@ -35,11 +35,12 @@
 //!
 //! Four tools in this workspace built the same string, and only one of them
 //! had tests. `gsw` quotes the command it asks an interactive shell to run,
-//! `nwt` quotes the command it hands to tmux, `swt` quotes the path of a
-//! `.swt-check` override and the command lines it prints for a human, and
-//! `aws2env` quotes each credential value it prints. A rule that lives in
-//! four places drifts apart, and the copy that drifts is the copy nobody
-//! tested.
+//! `swt` quotes the path of a `.swt-check` override and the command lines it
+//! prints for a human, and `aws2env` quotes each credential value it prints.
+//! `nwt` quoted the command it handed to tmux, until #527 removed that run
+//! path. It now quotes the worktree path and the branch in the cleanup
+//! commands it prints. A rule that lives in four places drifts apart, and the
+//! copy that drifts is the copy nobody tested.
 //!
 //! `aws2env` keeps one rule of its own above this one. It prints a value that
 //! holds only letters, digits and a few safe punctuation marks without

@@ -450,10 +450,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
 - nwt
   - New Worktree - Creates a new git worktree with a randomly generated Docker-style name
     (e.g., "absurd-rock", "zesty-penguin"). Supports config files (~/.nwt.toml), custom branch
-    names, checking out existing refs, running commands after creation, opening worktrees
-    in new tmux windows, and sparse worktrees without a heavy tracked directory
-    (`--sparse-exclude`). Worktrees are created in a `{repo-name}-worktrees` directory alongside
-    the repository.
+    names, checking out existing refs, running commands after creation, and sparse worktrees
+    without a heavy tracked directory (`--sparse-exclude`). Worktrees are created in a
+    `{repo-name}-worktrees` directory alongside the repository.
   - To install: `cargo install --git https://github.com/timmattison/tools nwt`
 - cwt
   - Change Worktree - Navigate between the git worktrees of a repository and of the
@@ -2764,7 +2763,6 @@ nwt                           # Create worktree with random name
 nwt -b feature-branch         # Create with specific branch name
 nwt -c main                   # Check out existing ref
 nwt --run "pnpm install"      # Run command after creation
-nwt --tmux                    # Open in new tmux window
 nwt --sparse-exclude assets   # Leave the tracked directory assets/ out
 ```
 
@@ -2774,7 +2772,6 @@ nwt --sparse-exclude assets   # Leave the tracked directory assets/ out
 - `--random-directory`: Use a random directory name even when `--branch` is given (by default the branch name doubles as the directory name)
 - `-c, --checkout <REF>`: Check out an existing branch/tag/commit instead of creating a new branch
 - `--run <COMMAND>`: Run a command in the new worktree after creation
-- `--tmux`: Open the new worktree in a new tmux window (Unix only)
 - `--no-copy-env`: Skip copying untracked `.env` files from the main worktree into the new one
 - `--no-bootstrap-hooks`: Skip the package-manager install that regenerates git hooks (see Hook Bootstrap below)
 - `--sparse-exclude <DIR>`: Make the new worktree a sparse checkout without the tracked directory `<DIR>`, a path relative to the root of the repository. Use the flag one time for each directory. Only the new worktree is sparse, and `git sparse-checkout disable` in it writes the directories back. nwt refuses a `<DIR>` that git does not track as a directory at the ref, with exit code 15, before it makes anything (see Sparse worktrees below)
@@ -2794,9 +2791,6 @@ checkout = "main"
 
 # Default command to run after creation
 run = "pnpm install"
-
-# Open in tmux by default
-tmux = true
 
 # Suppress output by default
 quiet = false
@@ -2912,7 +2906,7 @@ Disable copying for a single invocation with `--no-copy-env`, or set `copy_env =
 
 After creating the worktree, if `package.json` at the worktree root declares a `prepare` script (the husky convention), nwt runs the project's package manager install so git-hook managers regenerate their hooks directory. This matters because `core.hooksPath` often points at a gitignored, generated directory (e.g. `.husky/_`) that a freshly created worktree doesn't have — without the install, git finds no hooks directory and silently runs nothing, so every commit bypasses lint/typecheck/test gates. The package manager is chosen by the `packageManager` field, then a lockfile, then pnpm. Repos without a `prepare` script are unaffected — no install is run.
 
-Disable the install for a single invocation with `--no-bootstrap-hooks`, or set `bootstrap_hooks = false` in `~/.nwt.toml` to disable it by default. When a synchronous `--run` command (without `--tmux`) already invokes a package manager install (e.g. `--run "pnpm install"`), nwt skips its own bootstrap install so dependencies are installed once, not twice. As a safety net, nwt verifies the effective `core.hooksPath` directory actually exists and prints a loud warning if it doesn't — whether bootstrap was skipped, failed, or didn't apply — since that missing directory is the only signal that commits in the new worktree would otherwise be ungated. When you pass a synchronous `--run` command (without `--tmux`), this check runs *after* that command finishes, so a `--run` that installs hooks (e.g. `pnpm install`) can create the directory before the check looks — no false alarm. With `--tmux`, the `--run` command runs asynchronously inside the new window, so the check necessarily runs before tmux is spawned.
+Disable the install for a single invocation with `--no-bootstrap-hooks`, or set `bootstrap_hooks = false` in `~/.nwt.toml` to disable it by default. When a `--run` command already invokes a package manager install (e.g. `--run "pnpm install"`), nwt skips its own bootstrap install so dependencies are installed once, not twice. As a safety net, nwt verifies the effective `core.hooksPath` directory actually exists and prints a loud warning if it doesn't — whether bootstrap was skipped, failed, or didn't apply — since that missing directory is the only signal that commits in the new worktree would otherwise be ungated. When you pass a `--run` command, this check runs *after* that command finishes, so a `--run` that installs hooks (e.g. `pnpm install`) can create the directory before the check looks — no false alarm.
 
 ### Sparse worktrees
 
@@ -2989,11 +2983,6 @@ Create a worktree for issue 33 whose branch `issue-33` tracks `origin/issue-33`:
 ```bash
 git fetch
 nwt -b 33
-```
-
-Create worktree and open in tmux:
-```bash
-nwt --tmux --run "code ."
 ```
 
 ## cwt (change worktree)

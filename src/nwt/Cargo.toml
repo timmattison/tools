@@ -35,6 +35,10 @@ walkdir.workspace = true
 # `tests/detached-git-dir.rs` builds its repositories with `DetachedGitDirRepo`.
 gitscratch = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
+# For `strip_ansi`: clap paints its usage errors when `CLICOLOR_FORCE` is set,
+# and `tests/tmux-removed.rs` compares the glyphs of one. See "Colored Output in
+# Tests" in CLAUDE.md.
+testcolor.workspace = true
 
 [lints]
 workspace = true

@@ -228,6 +228,7 @@ allowlist.
 - `grime` - `--diff` paint tests, through a pipe and on a terminal
 - `grind` - `--diff` paint tests, through a pipe and on a terminal
 - `gsw` - render, watch, push, and update run tests
+- `nwt` - the usage error that clap gives for the removed `--tmux` flag
 - `prcp` - the `--shell-setup` refusal and help tests
 - `prgz` - render tests of the closing report
 - `swt` - the end-to-end helpers that read stdout and stderr of the binary
@@ -272,7 +273,8 @@ full path, `shellquote::shell_quote(...)`, where the call site sits behind a
 - `crap` - the paths that the tests of the shell function put into the fake
   scripts
 - `gsw` - the command it asks an interactive shell to run
-- `nwt` - the shell and the command it hands to tmux
+- `nwt` - the worktree path and the branch in the cleanup commands it prints
+  when it cannot remove a broken sparse worktree
 - `popstop` - the state directory in the stop command that a refusal prints
 - `swt` - the path of a `.swt-check` override, and the command lines it prints
   for a person to paste

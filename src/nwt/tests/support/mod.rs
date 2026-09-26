@@ -2,13 +2,13 @@
 //!
 //! Every integration test that drives the real `nwt` binary goes through this
 //! module instead of building a [`Command`] by hand. Centralising the spawn is
-//! what closes issue #283: `nwt` renames the *current* terminal-multiplexer tab
-//! whenever `ZELLIJ`/`TMUX` is present, so a test that inherits the multiplexer
-//! env (because the suite was launched from inside zellij/tmux) would hijack the
-//! user's real tab. [`nwt_command`] scrubs that env so the spawned binary never
-//! believes it is inside a multiplexer, and [`FakeMultiplexer`] lets the
-//! dedicated tab-rename tests *simulate* the multiplexer with a recording fake
-//! so they can assert exactly when a rename does and does not fire.
+//! what closes issue #283: `nwt` renames the *current* zellij tab whenever
+//! `ZELLIJ` is present, so a test that inherits that variable (because the
+//! suite was launched from inside zellij) would hijack the user's real tab.
+//! [`nwt_command`] removes `ZELLIJ` so the spawned binary never believes it is
+//! inside zellij, and [`FakeMultiplexer`] lets the dedicated tab-rename tests
+//! *simulate* zellij with a recording fake so they can assert exactly when a
+//! rename does and does not fire.
 //!
 //! The same class of escape exists for git, and
 //! [`gitscratch::shed_inherited_git_environment`] is the single answer to it:
@@ -448,8 +448,8 @@ fn private_home() -> &'static Path {
 /// This is the single, mandatory entrance every integration test uses to spawn
 /// `nwt`. It sets the working directory to `repo` and nulls stdin (so an
 /// unexpected prompt can't hang the suite), and — crucially for issue #283 — it
-/// scrubs the terminal-multiplexer environment from the child so a suite
-/// launched from inside zellij/tmux can never hijack the user's real tab.
+/// removes `ZELLIJ` from the child so a suite launched from inside zellij can
+/// never hijack the user's real tab.
 ///
 /// It likewise sheds the whole inherited `GIT_*` family via
 /// [`gitscratch::shed_inherited_git_environment`], so the spawned `nwt` — which
@@ -459,9 +459,10 @@ fn private_home() -> &'static Path {
 /// environment injected. Both scrubs guard the same class of bug: a fixture
 /// reaching out and acting on the developer's real session.
 ///
-/// `ZELLIJ`/`TMUX` stay named one at a time because they are not a prefix
-/// family — there is no `MULTIPLEXER_*` to sweep — while the git variables are,
-/// which is why they get the prefix rule instead of a list.
+/// `ZELLIJ` stays named because it is one name, not a prefix family: `nwt`
+/// reads that one variable to decide whether it runs inside zellij. The git
+/// variables are a family, which is why they get the prefix rule instead of a
+/// list.
 ///
 /// It also points `HOME` at [`private_home`], and removes `XDG_CONFIG_HOME`.
 /// The same class of bug comes in through the home: `nwt` reads `~/.nwt.toml`,
@@ -474,22 +475,20 @@ fn private_home() -> &'static Path {
 /// `tests/private-home.rs` holds this rule, also with a run of the binary under
 /// a hostile home.
 ///
-/// Tests that deliberately *exercise* the multiplexer behaviour (see
-/// [`FakeMultiplexer`]) re-add `ZELLIJ`/`TMUX` on the returned command; because
-/// those `.env(...)` calls run after the scrub here, they win for that child.
-/// A test that needs a home of its own sets `HOME` on the returned command in
-/// the same way, and wins for the same reason
-/// (`tests/worktrees-dir-override.rs`).
+/// Tests that deliberately *exercise* the tab rename (see [`FakeMultiplexer`])
+/// re-add `ZELLIJ` on the returned command; because that `.env(...)` call runs
+/// after the scrub here, it wins for that child. A test that needs a home of
+/// its own sets `HOME` on the returned command in the same way, and wins for
+/// the same reason (`tests/worktrees-dir-override.rs`).
 pub fn nwt_command(repo: &Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_nwt"));
     cmd.current_dir(repo)
         .stdin(Stdio::null())
-        // Issue #283: strip the terminal-multiplexer env so a suite launched
-        // from inside zellij/tmux can't make the spawned nwt rename the user's
-        // real tab. Tests that deliberately exercise the multiplexer behavior
-        // re-add ZELLIJ/TMUX after calling this (a later `.env(..)` wins).
-        .env_remove("ZELLIJ")
-        .env_remove("TMUX");
+        // Issue #283: strip ZELLIJ so a suite launched from inside zellij
+        // can't make the spawned nwt rename the user's real tab. Tests that
+        // deliberately exercise the tab rename re-add ZELLIJ after calling
+        // this (a later `.env(..)` wins).
+        .env_remove("ZELLIJ");
     // Same idea for git: a hook exports these, `cargo test` inherits them, and
     // GIT_DIR beats `current_dir`. Left in place, the spawned nwt would add its
     // worktree to the real repo, write objects into it, or run under config the
@@ -503,22 +502,22 @@ pub fn nwt_command(repo: &Path) -> Command {
     cmd
 }
 
-/// A pair of fake `zellij`/`tmux` executables that record every invocation
-/// instead of touching the real multiplexer.
+/// A fake `zellij` executable that records every invocation instead of
+/// touching the real multiplexer.
 ///
 /// The dedicated tab-rename tests need to answer "did `nwt` try to rename the
 /// tab?" without actually renaming the tester's real tab — which matters
 /// because the suite is frequently run *from inside* a live zellij session
-/// (that is the very bug). [`FakeMultiplexer`] writes throwaway `zellij` and
-/// `tmux` scripts into a temp dir; a test prepends [`path_env`](Self::path_env)
-/// to the child's `PATH` so `nwt`'s `Command::new("zellij")` /
-/// `Command::new("tmux")` resolve to the fakes. Each fake appends its argv to a
-/// recorder file and exits `0`, so the real socket is never contacted and
-/// [`recorded`](Self::recorded) reports exactly what `nwt` attempted.
+/// (that is the very bug). [`FakeMultiplexer`] writes a throwaway `zellij`
+/// script into a temp dir; a test prepends [`path_env`](Self::path_env) to the
+/// child's `PATH` so `nwt`'s `Command::new("zellij")` resolves to the fake. The
+/// fake appends its argv to a recorder file and exits `0`, so the real socket
+/// is never contacted and [`recorded`](Self::recorded) reports exactly what
+/// `nwt` attempted.
 ///
-/// Unix-only: the fakes are POSIX `sh` scripts marked executable via the Unix
-/// permission bits. zellij and tmux are Unix-only anyway, so the tab-hijack
-/// this guards against can only occur there.
+/// Unix-only: the fake is a POSIX `sh` script marked executable via the Unix
+/// permission bits. zellij is Unix-only anyway, so the tab-hijack this guards
+/// against can only occur there.
 #[cfg(unix)]
 pub struct FakeMultiplexer {
     /// Owns the temp dir; dropping it deletes the fakes and the recorder.
@@ -529,8 +528,8 @@ pub struct FakeMultiplexer {
 
 #[cfg(unix)]
 impl FakeMultiplexer {
-    /// Creates the temp dir, writes executable fake `zellij`/`tmux` scripts into
-    /// it, and points them at a shared recorder file.
+    /// Creates the temp dir, writes an executable fake `zellij` script into it,
+    /// and points the script at a recorder file.
     pub fn new() -> Self {
         use std::os::unix::fs::PermissionsExt;
 
@@ -538,24 +537,23 @@ impl FakeMultiplexer {
         let bin_dir = dir.path().to_path_buf();
         let recorder = bin_dir.join("invocations.log");
 
-        for tool in ["zellij", "tmux"] {
-            let script_path = bin_dir.join(tool);
-            // POSIX sh that appends `<tool> <args>` to the recorder, then exits 0
-            // so the spawning `nwt` believes the multiplexer command succeeded.
-            // `"$*"` joins the args with spaces, which is all the substring-based
-            // assertions need (tab names never contain spaces).
-            let script = format!(
-                "#!/bin/sh\nprintf '%s %s\\n' '{tool}' \"$*\" >> '{recorder}'\nexit 0\n",
-                recorder = recorder.display()
-            );
-            std::fs::write(&script_path, script).expect("Failed to write fake multiplexer script");
-            let mut perms = std::fs::metadata(&script_path)
-                .expect("Failed to stat fake multiplexer script")
-                .permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script_path, perms)
-                .expect("Failed to mark fake multiplexer script executable");
-        }
+        let tool = "zellij";
+        let script_path = bin_dir.join(tool);
+        // POSIX sh that appends `<tool> <args>` to the recorder, then exits 0
+        // so the spawning `nwt` believes the zellij command succeeded.
+        // `"$*"` joins the args with spaces, which is all the substring-based
+        // assertions need (tab names never contain spaces).
+        let script = format!(
+            "#!/bin/sh\nprintf '%s %s\\n' '{tool}' \"$*\" >> '{recorder}'\nexit 0\n",
+            recorder = recorder.display()
+        );
+        std::fs::write(&script_path, script).expect("Failed to write fake multiplexer script");
+        let mut perms = std::fs::metadata(&script_path)
+            .expect("Failed to stat fake multiplexer script")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script_path, perms)
+            .expect("Failed to mark fake multiplexer script executable");
 
         Self {
             _dir: dir,
@@ -565,8 +563,8 @@ impl FakeMultiplexer {
     }
 
     /// A `PATH` value with the fake bin dir prepended to the inherited `PATH`, so
-    /// the fakes shadow any real `zellij`/`tmux` while real tools (e.g. `git`,
-    /// which `nwt` shells out to) still resolve normally.
+    /// the fake shadows any real `zellij` while real tools (e.g. `git`, which
+    /// `nwt` shells out to) still resolve normally.
     pub fn path_env(&self) -> std::ffi::OsString {
         let mut joined = std::ffi::OsString::from(&self.bin_dir);
         if let Some(existing) = std::env::var_os("PATH") {
@@ -576,8 +574,8 @@ impl FakeMultiplexer {
         joined
     }
 
-    /// Every recorded invocation, newline-separated. Empty string if no fake was
-    /// ever invoked (the recorder file is only created on first write).
+    /// Every recorded invocation, newline-separated. Empty string if the fake was
+    /// never invoked (the recorder file is only created on first write).
     pub fn recorded(&self) -> String {
         std::fs::read_to_string(&self.recorder).unwrap_or_default()
     }

@@ -2,7 +2,7 @@
 //! integration test that spawns the real `nwt` binary does so through this
 //! builder, and the builder must scrub the environment that would otherwise let
 //! the spawned `nwt` reach out of its fixture and act on the developer's real
-//! session — the terminal multiplexer (whose tab it would rename) and the whole
+//! session — `ZELLIJ` (which would make it rename the user's tab) and the whole
 //! `GIT_*` family (which would point its `git worktree add`, its object writes
 //! and its config reads at the developer's real repository).
 //!
@@ -15,9 +15,9 @@
 //! names the builder never mentions by name, and demands that every one of them
 //! is scheduled for removal.
 //!
-//! `ZELLIJ`/`TMUX` stay named explicitly because they are not a prefix family:
-//! there is no `MULTIPLEXER_*` to sweep, and the tab-rename tests deliberately
-//! re-add them on the returned command.
+//! `ZELLIJ` stays named explicitly because it is one name, not a prefix family:
+//! `nwt` reads that one variable to decide whether it runs inside zellij, and
+//! the tab-rename tests deliberately re-add it on the returned command.
 //!
 //! This inspects the builder's configured environment directly via
 //! `Command::get_envs`, so it is deterministic and cross-platform — no process
@@ -57,10 +57,6 @@ const REQUIRED_REMOVALS: &[(&str, &str)] = &[
     (
         "ZELLIJ",
         "the spawned nwt would believe it is inside zellij and rename the user's real tab",
-    ),
-    (
-        "TMUX",
-        "the spawned nwt would believe it is inside tmux and rename the user's real window",
     ),
     (
         "GIT_DIR",

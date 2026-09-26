@@ -71,18 +71,9 @@ const WORKTREES_DIR_KEY: &str = "nwt.worktreesDir";
 /// Shell code to be installed by --shell-setup.
 ///
 /// This function wraps the nwt binary and automatically changes to the new worktree
-/// directory after creation. When --tmux is specified, it skips the cd since the
-/// worktree opens in a new tmux window.
+/// directory after creation.
 const SHELL_CODE: &str = r#"
 function nwt() {
-    # If --tmux is specified, don't cd (worktree opens in new tmux window)
-    case " $* " in
-        *" --tmux "* | *" --tmux")
-            command nwt "$@"
-            return $?
-            ;;
-    esac
-
     # Capture the worktree path and cd to it
     local dir
     dir=$(command nwt "$@")
@@ -137,9 +128,13 @@ struct NwtConfig {
     /// Default command to run after worktree creation.
     run: Option<String>,
 
-    /// Open worktree in tmux by default.
-    #[serde(default)]
-    tmux: bool,
+    /// The removed `tmux` key (#527). nwt no longer supports tmux.
+    ///
+    /// The slot stays so that a config that still sets the key gets a message
+    /// that says why, instead of serde's bare "unknown field `tmux`". The slot
+    /// accepts a value of any type, and `validate_config` refuses every one.
+    #[serde(default, rename = "tmux")]
+    removed_tmux: Option<serde::de::IgnoredAny>,
 }
 
 impl Default for NwtConfig {
@@ -158,7 +153,7 @@ impl Default for NwtConfig {
             bootstrap_hooks: true, // Must match default_bootstrap_hooks()
             quiet: false,          // Must match #[serde(default)] (false)
             run: None,
-            tmux: false, // Must match #[serde(default)] (false)
+            removed_tmux: None, // Must match #[serde(default)] (None)
         }
     }
 }
@@ -207,7 +202,6 @@ struct MergedConfig {
     bootstrap_hooks: bool,
     quiet: bool,
     run: Option<String>,
-    tmux: bool,
 }
 
 /// Returns the path to the config file.
@@ -239,8 +233,17 @@ fn load_config() -> Result<Option<NwtConfig>, ConfigError> {
     Ok(Some(config))
 }
 
-/// Validates the config file for conflicting options.
+/// The refusal of a config file that still sets the removed `tmux` key.
+const REMOVED_TMUX_KEY_MESSAGE: &str =
+    "nwt no longer supports tmux (removed in #527). Delete the `tmux` key from the config file.";
+
+/// Validates the config file for conflicting options and removed keys.
 fn validate_config(config: &NwtConfig) -> Result<(), ConfigError> {
+    if config.removed_tmux.is_some() {
+        return Err(ConfigError::Validation(
+            REMOVED_TMUX_KEY_MESSAGE.to_string(),
+        ));
+    }
     if config.branch.is_some() && config.checkout.is_some() {
         return Err(ConfigError::Validation(
             "branch and checkout cannot both be set in config file".to_string(),
@@ -255,14 +258,14 @@ fn validate_config(config: &NwtConfig) -> Result<(), ConfigError> {
 ///
 /// # Boolean Flag Merging Design Decision
 ///
-/// Boolean flags (`quiet`, `tmux`) use OR logic: `cli.flag || config.flag`. This means:
-/// - If CLI specifies `--quiet` or `--tmux`, the flag is enabled (CLI wins).
+/// The boolean flag `quiet` uses OR logic: `cli.quiet || config.quiet`. This means:
+/// - If CLI specifies `--quiet`, the flag is enabled (CLI wins).
 /// - If CLI doesn't specify the flag, the config file value is used.
 /// - **Limitation**: Users cannot disable a config file's `true` value from CLI.
 ///
 /// This is an intentional design choice, not a bug:
 /// 1. **Standard CLI convention**: Most tools (git, docker, etc.) use this pattern.
-///    Adding `--no-quiet`/`--no-tmux` flags adds CLI complexity for a rare use case.
+///    Adding a `--no-quiet` flag adds CLI complexity for a rare use case.
 /// 2. **Simple mental model**: "CLI flags enable features" is easier to understand
 ///    than "CLI flags toggle features based on config state".
 /// 3. **Workaround exists**: Users who need to temporarily disable a config default
@@ -287,11 +290,10 @@ fn merge_config(cli: &Cli, config: Option<NwtConfig>) -> MergedConfig {
         // bootstrap_hooks: config default is true, CLI --no-bootstrap-hooks disables it.
         // Same merge shape as copy_env: CLI disables, otherwise use config value.
         bootstrap_hooks: !cli.no_bootstrap_hooks && config.bootstrap_hooks,
-        // Boolean flags use OR: CLI can enable but not disable config defaults.
+        // The boolean flag uses OR: CLI can enable but not disable the config default.
         // See function-level doc comment for rationale.
         quiet: cli.quiet || config.quiet,
         run: cli.run.clone().or(config.run),
-        tmux: cli.tmux || config.tmux,
     }
 }
 
@@ -375,29 +377,17 @@ fn get_exit_code(status: ExitStatus) -> i32 {
 
 /// Checks if a string contains any ASCII control characters.
 ///
-/// Control characters (0x00-0x1F and 0x7F) can cause unexpected behavior
-/// in terminal applications like tmux when used in window names.
+/// Control characters are the bytes 0x00-0x1F and 0x7F.
+/// [`SparseExcludeDir::parse`] uses this check to refuse a `--sparse-exclude`
+/// value that holds one, before the value reaches git. A sparse pattern file
+/// holds one pattern on each line, so a line break in a value makes two
+/// patterns.
 ///
-/// # Why ASCII-only, not full Unicode control characters (U+0080-U+009F)?
-///
-/// We only check ASCII control characters because:
-/// 1. The `names` crate generates only lowercase ASCII letters and hyphens,
-///    so Unicode control characters cannot appear in generated names.
-/// 2. Even if a future version allowed Unicode, the C1 control characters
-///    (U+0080-U+009F) are extremely rare in practice and tmux handles them
-///    by displaying replacement characters rather than causing terminal issues.
-/// 3. Using `char::is_control()` would add overhead for a theoretical edge case
-///    that cannot occur with the current name generator.
+/// The check reads bytes, so it finds only the ASCII control characters. A C1
+/// control character (U+0080-U+009F) is two bytes in UTF-8, and neither byte is
+/// a line break, so git reads it as part of one pattern.
 fn contains_control_chars(s: &str) -> bool {
     s.bytes().any(|b| b < 0x20 || b == 0x7F)
-}
-
-/// Checks if the current process is running inside a tmux session.
-///
-/// This is determined by the presence of the `TMUX` environment variable,
-/// which tmux sets automatically when a shell is spawned inside it.
-fn is_running_in_tmux() -> bool {
-    std::env::var("TMUX").is_ok()
 }
 
 /// Checks if the current process is running inside a Zellij session.
@@ -408,16 +398,16 @@ fn is_running_in_zellij() -> bool {
     std::env::var("ZELLIJ").is_ok()
 }
 
-/// Returns true if tab/window renaming has been explicitly disabled via the
+/// Returns true if tab renaming has been explicitly disabled via the
 /// `NWT_NO_TAB_RENAME` environment variable.
 ///
-/// Renaming the current tab/window is an interactive convenience: when `nwt`
+/// Renaming the current tab is an interactive convenience: when `nwt`
 /// runs inside a terminal multiplexer it retargets the *current* tab to the new
 /// worktree's short name. That is what a human wants when they run
 /// `nwt -b issue-42`, but catastrophic when something *else* runs `nwt` while
 /// sharing the user's multiplexer session — most notably `nwt`'s own
 /// integration tests, which shell out to the real binary. If such a child
-/// inherits `ZELLIJ`/`TMUX`, the rename hijacks whatever tab the runner is
+/// inherits `ZELLIJ`, the rename hijacks whatever tab the runner is
 /// sitting in (issue #283).
 ///
 /// This env var is the belt-and-suspenders safety net: even if a test or script
@@ -445,7 +435,7 @@ fn rename_zellij_tab(name: &str) {
 ///
 /// # Exit Code Design Decision: Why --run passes through the command's exit code
 ///
-/// When `--run` is used without `--tmux`, we pass through the command's exit code
+/// When `--run` is used, we pass through the command's exit code
 /// directly. This means exit codes 1-8 from the user's command will shadow nwt's
 /// own error codes. This is intentional:
 ///
@@ -484,15 +474,16 @@ mod exit_codes {
     pub const INVALID_PATH_ENCODING: i32 = 8;
     /// Command specified with --run failed to execute (not the command's own exit code)
     pub const RUN_COMMAND_FAILED: i32 = 9;
-    /// Tmux command failed to execute
-    pub const TMUX_FAILED: i32 = 10;
-    // Note: Exit code 11 is reserved (previously INVALID_WINDOW_NAME, now a debug assertion)
+    // Note: Exit code 10 is reserved (previously TMUX_FAILED; nwt removed its
+    // tmux support in #527)
+    // Note: Exit code 11 is reserved (previously INVALID_WINDOW_NAME, later a
+    // debug assertion that #527 removed)
     /// Configuration error: an invalid `~/.nwt.toml` (bad TOML, failed
     /// validation), or a `nwt.worktreesDir` git configuration key that is set to
     /// an empty value and therefore names no directory.
     pub const CONFIG_ERROR: i32 = 12;
-    /// Tmux option specified but not running inside tmux
-    pub const TMUX_NOT_RUNNING: i32 = 13;
+    // Note: Exit code 13 is reserved (previously TMUX_NOT_RUNNING; nwt removed
+    // its tmux support in #527)
     /// Shell setup failed
     pub const SHELL_SETUP_ERROR: i32 = 14;
     /// `nwt` refuses a `--sparse-exclude` value: an empty value, an absolute
@@ -1644,7 +1635,6 @@ CONFIGURATION:
         copy_env = false       # disable .env file copying
         bootstrap_hooks = true # run package-manager install to set up git hooks
         quiet = false
-        tmux = true
         run = \"pnpm install\"
 
 ENV FILE COPYING:
@@ -1714,18 +1704,16 @@ HOOK BOOTSTRAP:
     bootstrap_hooks = false in ~/.nwt.toml to disable it by default. Repos without
     a 'prepare' script are unaffected — no install is run.
 
-    When a synchronous --run command (without --tmux) already invokes a package
-    manager install (e.g. --run \"pnpm install\"), nwt skips its own bootstrap
-    install so the install runs once, not twice.
+    When a --run command already invokes a package manager install (e.g.
+    --run \"pnpm install\"), nwt skips its own bootstrap install so the install
+    runs once, not twice.
 
     As a safety net, nwt verifies the effective 'core.hooksPath' directory
     actually exists, and prints a loud warning if it does not — whether bootstrap
-    was skipped, failed, or didn't apply. When you pass a synchronous --run
-    command (without --tmux), this check runs AFTER that command finishes, so a
-    --run that installs hooks (e.g. \"pnpm install\") gets the chance to create the
-    directory before the check looks — no false alarm. With --tmux the --run
-    command runs asynchronously inside the new window, so the check necessarily
-    runs before tmux is spawned. Git silently runs no hooks when that directory
+    was skipped, failed, or didn't apply. When you pass a --run command, this
+    check runs AFTER that command finishes, so a --run that installs hooks (e.g.
+    \"pnpm install\") gets the chance to create the directory before the check
+    looks — no false alarm. Git silently runs no hooks when that directory
     is missing, so this warning is the only signal that commits in the new
     worktree would otherwise be ungated. Because that signal must never be
     invisible, this warning is printed to stderr even with --quiet.
@@ -1814,8 +1802,6 @@ EXAMPLES:
     nwt -c main                      # Checkout existing 'main' branch
     nwt -c v1.0.0                    # Checkout a tag
     nwt --run \"npm install\"          # Run a command after creation
-    nwt --tmux                       # Open worktree in a new tmux window
-    nwt --tmux --run \"npm install\"   # Run command in a new tmux window
     nwt --no-copy-env                # Skip copying .env files
     nwt --no-bootstrap-hooks         # Skip running install to set up git hooks
     nwt --sparse-exclude assets      # Leave the tracked directory assets/ out
@@ -1823,8 +1809,7 @@ EXAMPLES:
 
 SHELL INTEGRATION:
     Run 'nwt --shell-setup' to install a shell function that automatically
-    changes to the new worktree directory after creation. The shell function
-    skips the cd when --tmux is used (since the worktree opens in a new window).
+    changes to the new worktree directory after creation.
 
 EXIT CODES:
     0  Success
@@ -1836,9 +1821,7 @@ EXIT CODES:
     7  Git worktree creation failed
     8  Path contains non-UTF8 characters
     9  Command specified with --run failed
-    10 Tmux command failed
     12 Config file error (invalid TOML, validation failed)
-    13 Not running inside tmux (--tmux specified)
     14 Shell setup failed
     15 Invalid --sparse-exclude directory
     16 More than one remote holds the new branch"
@@ -1885,13 +1868,10 @@ struct Cli {
 
     /// Run a command in the worktree directory after creation.
     ///
-    /// When used alone, executes via `sh -c` on Unix or `cmd /C` on Windows.
-    /// Shell aliases are NOT available in this mode.
+    /// Executes via `sh -c` on Unix or `cmd /C` on Windows.
+    /// Shell aliases are NOT available.
     ///
-    /// When combined with --tmux, the command runs in an interactive shell
-    /// (`$SHELL -ic`), so aliases and shell functions ARE available.
-    ///
-    /// Exit codes: When --run is used without --tmux, the command's exit code is
+    /// Exit codes: When --run is used, the command's exit code is
     /// passed through directly. This means exit codes 1-8 may shadow nwt's own
     /// error codes. Use --quiet if you need to distinguish command failures from
     /// nwt errors (nwt won't print errors in quiet mode, but the command might).
@@ -1900,21 +1880,6 @@ struct Cli {
     /// Security: Should only contain trusted input as commands are executed directly.
     #[arg(long)]
     run: Option<String>,
-
-    /// Create a new tmux window for the worktree.
-    ///
-    /// Opens a new tmux window with the working directory set to the worktree.
-    /// The window is named after the worktree directory (e.g., "adjective-noun").
-    ///
-    /// When combined with --run, the command runs in an interactive shell
-    /// (`$SHELL -ic`), so aliases and shell functions are available. This assumes
-    /// your shell supports `-i` (interactive) and `-c` (command) flags, which is
-    /// true for bash, zsh, fish, and most POSIX-compatible shells.
-    ///
-    /// Note: tmux is typically only available on Unix systems (Linux, macOS).
-    /// This option will fail on Windows unless tmux is installed via WSL or similar.
-    #[arg(long)]
-    tmux: bool,
 
     /// Disable copying untracked .env files to the new worktree.
     ///
@@ -1972,12 +1937,9 @@ struct Cli {
     /// Adds a shell function to your ~/.zshrc or ~/.bashrc that wraps nwt
     /// and automatically changes directory to the new worktree after creation.
     ///
-    /// When --tmux is used, the shell function skips the cd (since the worktree
-    /// opens in a new tmux window).
-    ///
     /// To activate after installation, run `source ~/.zshrc` (or `~/.bashrc`)
     /// or open a new terminal.
-    #[arg(long, conflicts_with_all = ["branch", "checkout", "quiet", "run", "tmux", "no_copy_env", "no_bootstrap_hooks", "random_directory", "sparse_exclude"])]
+    #[arg(long, conflicts_with_all = ["branch", "checkout", "quiet", "run", "no_copy_env", "no_bootstrap_hooks", "random_directory", "sparse_exclude"])]
     shell_setup: bool,
 }
 
@@ -2079,12 +2041,12 @@ fn join_branch_args(args: &[String]) -> String {
     }
 }
 
-/// Shortens a worktree name for use as a tab/window name in terminal multiplexers.
+/// Shortens a worktree name for use as a Zellij tab name.
 ///
 /// Converts `issue-<digits>` prefixes to `#<digits>` to save space in tab bars.
 /// All other names are returned unchanged.
 ///
-/// This shortening is applied to both Zellij tab names and tmux window names.
+/// This shortening applies to Zellij tab names only.
 /// The worktree directory and branch names are never modified.
 fn shorten_tab_name(name: &str) -> String {
     if let Some(rest) = name.strip_prefix("issue-") {
@@ -3285,19 +3247,6 @@ fn main() {
     // Merge CLI args with config file - CLI takes precedence
     let config = merge_config(&cli, file_config);
 
-    // Early check: if tmux option is specified but we're not running in tmux, refuse to proceed
-    if config.tmux && !is_running_in_tmux() {
-        error!(
-            config.quiet,
-            "Error: --tmux option specified but not running inside tmux"
-        );
-        error!(
-            config.quiet,
-            "Please run this command from within a tmux session, or remove the --tmux option."
-        );
-        exit(exit_codes::TMUX_NOT_RUNNING);
-    }
-
     // Find the main git repo root (resolves to main repo even from worktree).
     //
     // Git answers this, rather than a walk of the file system for a `.git`
@@ -3475,23 +3424,10 @@ fn main() {
             &sparse_excludes,
         ) {
             WorktreeResult::Success => {
-                // Compute shortened tab name for terminal multiplexers.
+                // Compute the shortened name for the Zellij tab.
                 // This converts "issue-123-fix-bug" to "#123-fix-bug" to save
                 // space in tab bars. The directory/branch names are unaffected.
                 let tab_name = shorten_tab_name(&dir_name);
-
-                if config.tmux {
-                    // Directory names are safe for tmux window names because:
-                    // - Random names (from names crate): only lowercase ASCII letters and hyphens
-                    // - Branch-based names: sanitized to only allow alphanumeric, hyphen, underscore, dot
-                    // Control characters cannot appear in either case. This is a debug assertion
-                    // to catch any future regression, not a runtime check.
-                    debug_assert!(
-                        !contains_control_chars(&dir_name),
-                        "Directory name contains control characters: {:?}",
-                        dir_name
-                    );
-                }
 
                 println!("{}", worktree_path.display());
 
@@ -3522,19 +3458,16 @@ fn main() {
 
                 // Bootstrap git hooks (e.g. husky's gitignored .husky/_) so they
                 // fire in this fresh worktree. Must run AFTER stdout's worktree
-                // path is printed and BEFORE any --run/tmux execution. A failure
+                // path is printed and BEFORE any --run execution. A failure
                 // here never aborts worktree creation — the worktree is valid,
                 // just (possibly) ungated; bootstrap_hooks warns and continues.
                 //
-                // Dedup: skip our own bootstrap install when a SYNCHRONOUS --run
-                // (no --tmux) already invokes a package manager's install, so a
-                // user's documented `--run "pnpm install"` doesn't pay for a full
-                // install twice. We only skip for the synchronous path because the
-                // just-deferred ungated-worktree safety net re-checks AFTER that
-                // run and still catches a run that fails to create the hooks dir.
-                // For --tmux the run is async and the check is pre-spawn, so
-                // skipping bootstrap there would guarantee a false-positive
-                // warning — tmux+run keeps bootstrapping.
+                // Dedup: skip our own bootstrap install when --run already
+                // invokes a package manager's install, so a user's documented
+                // `--run "pnpm install"` doesn't pay for a full install twice.
+                // The run is synchronous, and the deferred ungated-worktree
+                // safety net re-checks AFTER it, so a run that fails to create
+                // the hooks dir still gets the warning.
                 //
                 // The skip (and its notice) only make sense when a bootstrap was
                 // actually pending: gate on `detect_hook_bootstrap`. In a repo
@@ -3542,11 +3475,10 @@ fn main() {
                 // announcing a "skip" there would imply something was skipped when
                 // nothing would have run. When nothing is pending we fall through
                 // to `bootstrap_hooks`, which no-ops silently.
-                let skip_bootstrap_for_run = !config.tmux
-                    && config
-                        .run
-                        .as_deref()
-                        .is_some_and(run_command_installs_dependencies)
+                let skip_bootstrap_for_run = config
+                    .run
+                    .as_deref()
+                    .is_some_and(run_command_installs_dependencies)
                     && detect_hook_bootstrap(&worktree_path).is_some();
                 if config.bootstrap_hooks {
                     if skip_bootstrap_for_run {
@@ -3561,119 +3493,22 @@ fn main() {
 
                 // Ungated-worktree safety net (issue #275). The placement of this
                 // check depends on the execution mode below — see
-                // `warn_if_hooks_missing`'s placement contract. A synchronous
-                // `--run` command can be the thing that creates the missing hooks
-                // directory, so for that path we defer the check until AFTER the
-                // command finishes; for the no-run and tmux paths we check here
-                // (tmux runs its --run command asynchronously, so we can't re-check
-                // after it).
-                let defer_hooks_check = config.run.is_some() && !config.tmux;
+                // `warn_if_hooks_missing`'s placement contract. A `--run` command
+                // can be the thing that creates the missing hooks directory, so
+                // for that path we defer the check until AFTER the command
+                // finishes; without --run we check here.
+                let defer_hooks_check = config.run.is_some();
                 if !defer_hooks_check {
                     warn_if_hooks_missing(&worktree_path);
                 }
 
-                // Execute tmux and/or run commands
-                if config.tmux {
-                    #[cfg(unix)]
-                    {
-                        // Create a new tmux window.
-                        // Note: tab_name is passed directly to tmux as an argument (not through
-                        // a shell), so it doesn't need shell escaping. Control characters are
-                        // validated above via debug_assert. Directory names are safe because they're
-                        // either random (adjective-noun from names crate) or sanitized branch names.
-                        let mut tmux_args: Vec<String> =
-                            vec!["new-window".into(), "-c".into(), worktree_path_str.into()];
-
-                        // Name the new window after the worktree, unless tab/window
-                        // renaming is explicitly disabled (issue #283). Without `-n`,
-                        // tmux auto-names the window after the running command — the
-                        // standard non-renaming behavior — so a test or script that
-                        // sets NWT_NO_TAB_RENAME can't retarget the user's window.
-                        if !tab_rename_disabled() {
-                            tmux_args.push("-n".into());
-                            tmux_args.push(tab_name);
-                        }
-
-                        // If --run is specified, wrap the command in an interactive shell
-                        // so that aliases and shell functions are available.
-                        if let Some(ref cmd) = config.run {
-                            // Get the user's shell, defaulting to /bin/sh if SHELL is not set.
-                            // We escape the shell path to prevent injection attacks from
-                            // malicious SHELL environment variables.
-                            //
-                            // # Why /bin/sh fallback is acceptable
-                            //
-                            // When SHELL is unset, we fall back to /bin/sh. While /bin/sh with
-                            // -ic won't load user aliases (since POSIX sh has no ~/.shrc), this
-                            // is acceptable because:
-                            // 1. SHELL is almost always set on Unix systems - it's required by
-                            //    POSIX and set by login(1), sshd, and terminal emulators.
-                            // 2. If SHELL is unset, the user likely doesn't have shell aliases
-                            //    configured anyway, so there's nothing to load.
-                            // 3. The command itself will still execute correctly; only aliases
-                            //    and shell functions won't be available.
-                            // 4. This matches the behavior of tools like `tmux` itself, which
-                            //    also falls back to /bin/sh when SHELL is unset.
-                            let shell =
-                                std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-                            // Use -ic to start an interactive shell that loads rc files.
-                            // This ensures aliases and shell functions are available.
-                            // Note: This assumes $SHELL supports -i (interactive) and -c (command)
-                            // flags, which is true for bash, zsh, fish, and most POSIX shells.
-                            // Exotic shells that don't support these flags will fail with a clear
-                            // error message from the shell itself.
-                            // Both the shell path and command are quoted for
-                            // safety, by the one quoter the workspace shares.
-                            // The full path keeps a non-Unix build free of an
-                            // unused import, because this arm is Unix-only.
-                            tmux_args.push(format!(
-                                "{} -ic {}",
-                                shellquote::shell_quote(&shell),
-                                shellquote::shell_quote(cmd)
-                            ));
-                        }
-
-                        match Command::new("tmux")
-                            .args(&tmux_args)
-                            .stdout(Stdio::inherit())
-                            .stderr(Stdio::inherit())
-                            .status()
-                        {
-                            Ok(status) => {
-                                if !status.success() {
-                                    // Use TMUX_FAILED for consistency. The worktree was created
-                                    // successfully; this exit code indicates tmux itself failed,
-                                    // not the user's --run command (which runs inside tmux).
-                                    error!(
-                                        config.quiet,
-                                        "tmux exited with code {}",
-                                        get_exit_code(status)
-                                    );
-                                    exit(exit_codes::TMUX_FAILED);
-                                }
-                            }
-                            Err(e) => {
-                                error!(config.quiet, "Error running tmux: {}", e);
-                                exit(exit_codes::TMUX_FAILED);
-                            }
-                        }
-                    }
-
-                    // On Windows, --tmux is not supported (tmux is Unix-only)
-                    #[cfg(windows)]
-                    {
-                        error!(
-                            config.quiet,
-                            "Error: --tmux is not supported on Windows. tmux is a Unix-only terminal multiplexer."
-                        );
-                        exit(exit_codes::TMUX_FAILED);
-                    }
-                } else if let Some(ref cmd) = config.run {
-                    // Run command directly (no tmux). The ungated-worktree safety
-                    // net was deferred above so the command gets a chance to create
-                    // the hooks directory first (e.g. `pnpm install` regenerating
-                    // `.husky/_`). Re-check on EVERY outcome before exiting — a
-                    // failing run command must not swallow the warning.
+                // Run the --run command, if any, in the new worktree.
+                if let Some(ref cmd) = config.run {
+                    // The ungated-worktree safety net was deferred above so the
+                    // command gets a chance to create the hooks directory first
+                    // (e.g. `pnpm install` regenerating `.husky/_`). Re-check on
+                    // EVERY outcome before exiting — a failing run command must
+                    // not swallow the warning.
                     match run_shell_command(cmd, &worktree_path) {
                         ShellCommandResult::Success => {
                             warn_if_hooks_missing(&worktree_path);
@@ -4146,16 +3981,12 @@ fn missing_hooks_path(worktree: &Path) -> Option<String> {
 /// command can be the very thing that creates the missing directory (e.g.
 /// `pnpm install` regenerating `.husky/_`):
 ///
-/// - Synchronous `--run` (no `--tmux`): call this AFTER `run_shell_command`
+/// - Synchronous `--run`: call this AFTER `run_shell_command`
 ///   completes, on every outcome (success, failure, execution error) before any
 ///   `exit`. Checking before the run would be a false alarm when the run is
 ///   about to fix the directory; a failing run must still not swallow the
 ///   warning.
-/// - `--tmux` (with or without `--run`): call this BEFORE spawning tmux. The run
-///   command executes inside the tmux window, asynchronously from nwt's
-///   perspective, so nwt can't re-check after it — the pre-spawn check is the
-///   best available signal.
-/// - No `--run` and no `--tmux`: call this right after hook bootstrap; nothing
+/// - No `--run`: call this right after hook bootstrap; nothing
 ///   could fix the directory later.
 fn warn_if_hooks_missing(worktree: &Path) {
     if let Some(hooks_path) = missing_hooks_path(worktree) {
@@ -4484,7 +4315,6 @@ mod tests {
             bootstrap_hooks: true,
             quiet: false,
             run: None,
-            tmux: false,
         };
         assert_eq!(get_branch_name(&config, "random-name"), "feature/test");
     }
@@ -4498,7 +4328,6 @@ mod tests {
             bootstrap_hooks: true,
             quiet: false,
             run: None,
-            tmux: false,
         };
         assert_eq!(get_branch_name(&config, "random-name"), "random-name");
     }
@@ -4573,9 +4402,7 @@ mod tests {
             exit_codes::WORKTREE_FAILED,
             exit_codes::INVALID_PATH_ENCODING,
             exit_codes::RUN_COMMAND_FAILED,
-            exit_codes::TMUX_FAILED,
             exit_codes::CONFIG_ERROR,
-            exit_codes::TMUX_NOT_RUNNING,
             exit_codes::SHELL_SETUP_ERROR,
             exit_codes::INVALID_SPARSE_EXCLUDE,
             exit_codes::AMBIGUOUS_REMOTE_BRANCH,
@@ -4738,39 +4565,6 @@ mod tests {
         // --run can be combined with --checkout
         let result = cmd.try_get_matches_from(["nwt", "--checkout", "main", "--run", "npm ci"]);
         assert!(result.is_ok(), "Should accept --run with --checkout");
-    }
-
-    #[test]
-    fn test_cli_tmux_option_parses() {
-        use clap::CommandFactory;
-        let cmd = Cli::command();
-
-        // Parsing with --tmux should succeed
-        let result = cmd.try_get_matches_from(["nwt", "--tmux"]);
-        assert!(result.is_ok(), "Should accept --tmux option");
-
-        let matches = result.unwrap();
-        assert!(matches.get_flag("tmux"), "Should set tmux flag");
-    }
-
-    #[test]
-    fn test_cli_tmux_with_run() {
-        use clap::CommandFactory;
-        let cmd = Cli::command();
-
-        // --tmux can be combined with --run
-        let result = cmd.try_get_matches_from(["nwt", "--tmux", "--run", "npm install"]);
-        assert!(result.is_ok(), "Should accept --tmux with --run");
-    }
-
-    #[test]
-    fn test_cli_tmux_with_branch() {
-        use clap::CommandFactory;
-        let cmd = Cli::command();
-
-        // --tmux can be combined with --branch
-        let result = cmd.try_get_matches_from(["nwt", "--tmux", "--branch", "feature/test"]);
-        assert!(result.is_ok(), "Should accept --tmux with --branch");
     }
 
     #[test]
@@ -4957,19 +4751,6 @@ mod tests {
         assert!(
             result.is_err(),
             "Should fail when both --shell-setup and --branch are provided"
-        );
-    }
-
-    #[test]
-    fn test_cli_shell_setup_conflicts_with_tmux() {
-        use clap::CommandFactory;
-        let cmd = Cli::command();
-
-        // --shell-setup conflicts with --tmux
-        let result = cmd.try_get_matches_from(["nwt", "--shell-setup", "--tmux"]);
-        assert!(
-            result.is_err(),
-            "Should fail when both --shell-setup and --tmux are provided"
         );
     }
 
@@ -6019,12 +5800,10 @@ mod tests {
             let toml = r#"
                 branch = "feature/test"
                 quiet = true
-                tmux = false
             "#;
             let config: NwtConfig = toml::from_str(toml).expect("Should parse valid config");
             assert_eq!(config.branch, Some("feature/test".to_string()));
             assert!(config.quiet);
-            assert!(!config.tmux);
             assert!(config.run.is_none());
             assert!(config.checkout.is_none());
         }
@@ -6034,13 +5813,11 @@ mod tests {
             let toml = r#"
                 branch = "my-branch"
                 quiet = true
-                tmux = true
                 run = "npm install"
             "#;
             let config: NwtConfig = toml::from_str(toml).expect("Should parse valid config");
             assert_eq!(config.branch, Some("my-branch".to_string()));
             assert!(config.quiet);
-            assert!(config.tmux);
             assert_eq!(config.run, Some("npm install".to_string()));
         }
 
@@ -6054,7 +5831,6 @@ mod tests {
             assert!(config.bootstrap_hooks); // defaults to true
             assert!(!config.quiet);
             assert!(config.run.is_none());
-            assert!(!config.tmux);
         }
 
         #[test]
@@ -6107,8 +5883,8 @@ mod tests {
                 "run default mismatch between impl Default and serde"
             );
             assert_eq!(
-                serde_defaults.tmux, manual_defaults.tmux,
-                "tmux default mismatch between impl Default and serde"
+                serde_defaults.removed_tmux, manual_defaults.removed_tmux,
+                "removed_tmux default mismatch between impl Default and serde"
             );
         }
 
@@ -6129,7 +5905,7 @@ mod tests {
                 bootstrap_hooks: true,
                 quiet: false,
                 run: None,
-                tmux: false,
+                removed_tmux: None,
             };
             let result = validate_config(&config);
             assert!(result.is_err(), "Should reject branch+checkout conflict");
@@ -6144,7 +5920,7 @@ mod tests {
                 bootstrap_hooks: true,
                 quiet: false,
                 run: None,
-                tmux: false,
+                removed_tmux: None,
             };
             let result = validate_config(&config);
             assert!(result.is_ok(), "Should accept config with only branch");
@@ -6159,7 +5935,7 @@ mod tests {
                 bootstrap_hooks: true,
                 quiet: false,
                 run: None,
-                tmux: false,
+                removed_tmux: None,
             };
             let result = validate_config(&config);
             assert!(result.is_ok(), "Should accept config with only checkout");
@@ -6175,7 +5951,6 @@ mod tests {
                 no_bootstrap_hooks: false,
                 quiet: true,
                 run: None,
-                tmux: false,
                 shell_setup: false,
                 sparse_exclude: Vec::new(),
             };
@@ -6186,7 +5961,7 @@ mod tests {
                 bootstrap_hooks: true,
                 quiet: false,
                 run: Some("npm install".to_string()),
-                tmux: true,
+                removed_tmux: None,
             };
             let merged = merge_config(&cli, Some(config));
 
@@ -6194,14 +5969,6 @@ mod tests {
             assert_eq!(merged.branch, Some("cli-branch".to_string()));
             assert!(merged.quiet); // CLI --quiet flag was set, so quiet=true
             assert!(merged.copy_env); // config has true, CLI didn't disable
-
-            // Boolean flags use OR logic: cli.tmux || config.tmux
-            // Since CLI didn't specify --tmux (so cli.tmux=false, the default),
-            // the config value (tmux=true) is used via the OR. This is the expected
-            // behavior documented in merge_config(). See that function's doc comment
-            // for the full rationale on why we don't support --no-tmux to override.
-            assert!(merged.tmux);
-
             assert_eq!(merged.run, Some("npm install".to_string())); // Config provides default
         }
 
@@ -6215,7 +5982,6 @@ mod tests {
                 no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
-                tmux: false,
                 shell_setup: false,
                 sparse_exclude: Vec::new(),
             };
@@ -6226,7 +5992,7 @@ mod tests {
                 bootstrap_hooks: true,
                 quiet: true,
                 run: Some("make build".to_string()),
-                tmux: true,
+                removed_tmux: None,
             };
             let merged = merge_config(&cli, Some(config));
 
@@ -6234,7 +6000,6 @@ mod tests {
             assert_eq!(merged.branch, Some("config-branch".to_string()));
             assert!(merged.copy_env);
             assert!(merged.quiet);
-            assert!(merged.tmux);
             assert_eq!(merged.run, Some("make build".to_string()));
         }
 
@@ -6248,7 +6013,6 @@ mod tests {
                 no_bootstrap_hooks: false,
                 quiet: true,
                 run: None,
-                tmux: false,
                 shell_setup: false,
                 sparse_exclude: Vec::new(),
             };
@@ -6258,7 +6022,6 @@ mod tests {
             assert_eq!(merged.branch, Some("my-branch".to_string()));
             assert!(merged.copy_env); // default is true
             assert!(merged.quiet);
-            assert!(!merged.tmux);
             assert!(merged.run.is_none());
         }
 
@@ -6272,7 +6035,6 @@ mod tests {
                 no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
-                tmux: false,
                 shell_setup: false,
                 sparse_exclude: Vec::new(),
             };
@@ -6283,7 +6045,7 @@ mod tests {
                 bootstrap_hooks: true,
                 quiet: false,
                 run: None,
-                tmux: false,
+                removed_tmux: None,
             };
             let merged = merge_config(&cli, Some(config));
 
@@ -6301,7 +6063,6 @@ mod tests {
                 no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
-                tmux: false,
                 shell_setup: false,
                 sparse_exclude: Vec::new(),
             };
@@ -6312,7 +6073,7 @@ mod tests {
                 bootstrap_hooks: true,
                 quiet: false,
                 run: None,
-                tmux: false,
+                removed_tmux: None,
             };
             let merged = merge_config(&cli, Some(config));
 
@@ -6331,7 +6092,6 @@ mod tests {
                 no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
-                tmux: false,
                 shell_setup: false,
                 sparse_exclude: Vec::new(),
             };
@@ -6350,7 +6110,6 @@ mod tests {
                 no_bootstrap_hooks: true, // CLI disables
                 quiet: false,
                 run: None,
-                tmux: false,
                 shell_setup: false,
                 sparse_exclude: Vec::new(),
             };
@@ -6361,7 +6120,7 @@ mod tests {
                 bootstrap_hooks: true, // config enables
                 quiet: false,
                 run: None,
-                tmux: false,
+                removed_tmux: None,
             };
             let merged = merge_config(&cli, Some(config));
             assert!(!merged.bootstrap_hooks);
@@ -6378,7 +6137,6 @@ mod tests {
                 no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
-                tmux: false,
                 shell_setup: false,
                 sparse_exclude: Vec::new(),
             };
@@ -6389,7 +6147,7 @@ mod tests {
                 bootstrap_hooks: false, // config disables
                 quiet: false,
                 run: None,
-                tmux: false,
+                removed_tmux: None,
             };
             let merged = merge_config(&cli, Some(config));
             assert!(!merged.bootstrap_hooks);
@@ -6425,7 +6183,7 @@ mod tests {
 
         #[test]
         fn test_exit_code_config_error_is_unique() {
-            // Ensure CONFIG_ERROR, TMUX_NOT_RUNNING, and SHELL_SETUP_ERROR don't conflict with other exit codes
+            // Ensure CONFIG_ERROR and SHELL_SETUP_ERROR don't conflict with other exit codes
             let codes = [
                 exit_codes::NOT_IN_REPO,
                 exit_codes::INVALID_REPO_NAME,
@@ -6435,9 +6193,7 @@ mod tests {
                 exit_codes::WORKTREE_FAILED,
                 exit_codes::INVALID_PATH_ENCODING,
                 exit_codes::RUN_COMMAND_FAILED,
-                exit_codes::TMUX_FAILED,
                 exit_codes::CONFIG_ERROR,
-                exit_codes::TMUX_NOT_RUNNING,
                 exit_codes::SHELL_SETUP_ERROR,
             ];
 
@@ -6448,7 +6204,7 @@ mod tests {
             assert_eq!(
                 sorted.len(),
                 codes.len(),
-                "All exit codes including CONFIG_ERROR, TMUX_NOT_RUNNING, and SHELL_SETUP_ERROR should be unique"
+                "All exit codes including CONFIG_ERROR and SHELL_SETUP_ERROR should be unique"
             );
         }
     }

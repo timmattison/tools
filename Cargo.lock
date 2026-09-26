@@ -5620,6 +5620,7 @@ dependencies = [
  "shellquote",
  "shellsetup",
  "tempfile",
+ "testcolor",
  "toml",
  "walkdir",
 ]
