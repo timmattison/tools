@@ -1596,9 +1596,14 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     or a paragraph under a `Blocked by` or `Depends on` heading, or a block that starts with that
     label, as in `**Blocked by:** #12`. A heading is a block too, so `## Blocked by #12` names #12
     on the line of the heading. The URL of an issue or a pull request of the repository, as in
-    `https://github.com/owner/name/issues/12`, names #12 the same way, and a URL of another
-    repository names nothing. Only the numbers at the start of a block count, so `It can run
-    beside #169.` under the heading blocks nothing. A phrase in the middle of a sentence counts
+    `https://github.com/owner/name/issues/12`, names #12 the same way, and so does `owner/name#12`.
+    Both forms ignore the case of the owner and the name, and either form of another repository
+    names nothing. Only the numbers at the start of a block count, so `It can run beside #169.`
+    under the heading blocks nothing. A paragraph after the list names nothing when words follow its
+    numbers, because an author writes notes on a list after it. So `#79 also changes the view.`
+    under the list blocks nothing. But `#79` alone, a paragraph with its own label, and a paragraph
+    under a later heading still name their numbers. In a section that holds no list, `#79 also
+    changes the view.` names #79. A phrase in the middle of a sentence counts
     for nothing either, because a line of a tracker such as `#12 (blocked by #11)` says what blocks
     another issue. A number struck through, as in `~~#21~~`, counts for nothing, because an author
     strikes a blocker through to take it back. A number inside an HTML comment, as in

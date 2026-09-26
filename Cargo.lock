@@ -9820,6 +9820,7 @@ dependencies = [
  "colored",
  "indicatif",
  "libc",
+ "regex",
  "serde_json",
  "tempfile",
  "termsize",
