@@ -3832,6 +3832,7 @@ fn bootstrap_hooks(worktree: &Path, quiet: bool) -> bool {
     // so the user reads such a prompt as a command that stalls with nothing on
     // the screen.
     let mut command = Command::new(program);
+    shed_inherited_git_environment_keeping_user_intent(&mut command);
 
     let status = command
         .args(args)
