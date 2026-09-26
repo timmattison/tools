@@ -48,6 +48,15 @@
 //! `git rev-parse`. The other has two remotes and a `checkout.defaultRemote`,
 //! and it holds all four.
 //!
+//! The copy of untracked `.env` files adds one git child, `git ls-files`,
+//! which names the files that the source tracks. Every other test here turns
+//! the copy off with `--no-copy-env`, so one more test leaves it on. That child
+//! only reads too, so the test measures the answer and not only the damage.
+//! Its decoy tracks `.env.local`, and its source holds an untracked
+//! `.env.local`. A `git ls-files` that reads the decoy names that file as
+//! tracked. The run then does not copy the file of the source, and the new
+//! worktree does not hold it.
+//!
 //! Every variable below is set on the **child command**, and nothing here
 //! touches the environment of this process. Cargo runs the tests of one binary
 //! on parallel threads, so a process-wide variable would aim the git children
@@ -63,7 +72,7 @@ use std::process::{Command, Output};
 
 use support::{
     clone_of, difference, git_stdout, init_repo, nanos, nwt_command, repo_with_files, run_git,
-    snapshot, Snapshot,
+    snapshot, write_file, Snapshot,
 };
 
 /// The suffix `nwt` adds to the repository name to name the directory that
@@ -641,6 +650,79 @@ fn checkout_default_remote_is_read_from_the_repository_nwt_stands_in() {
 
     let worktree = watch.assert_untouched(&output, Some(&branch));
     assert_tracks(&fixture.clone, &worktree, &branch, SECOND_REMOTE);
+}
+
+/// The `.env` file that the source of the copy run holds untracked, and that
+/// the decoy of that run tracks.
+///
+/// The name matches `.env.*`, so the copy takes the file when the source does
+/// not track it.
+const UNTRACKED_ENV_FILE: &str = ".env.local";
+
+/// Whether the repository at `repo` tracks `file`.
+fn tracks(repo: &Path, file: &str) -> bool {
+    run_git(repo, &["ls-files", "--error-unmatch", "--", file])
+}
+
+/// The `.env` copy reads the tracked files of the repository `nwt` stands in,
+/// and leaves the repository the environment names untouched.
+///
+/// The copy takes each `.env` file that the source does not track, and one
+/// `git ls-files` names the tracked files. `get_tracked_files` joins each name
+/// that it prints onto the source. That child only reads, so the decoy stays
+/// byte-identical also when the child reads it, and the test must measure the
+/// answer. The decoy tracks [`UNTRACKED_ENV_FILE`], and the source holds a file
+/// of that name that it does not track. A `git ls-files` that reads the decoy
+/// names the file as tracked, so the run does not copy it, and the new worktree
+/// does not hold it.
+///
+/// The file of the source holds bytes that no other run holds, and the file of
+/// the decoy holds other bytes. So the last assertion also fails when a run
+/// copies some other file to that name.
+///
+/// Every other test in this file turns the copy off with `--no-copy-env`. This
+/// test leaves it on, which is the default: the private home of
+/// [`nwt_command`] holds no `.nwt.toml` that turns it off.
+#[test]
+fn the_env_copy_reads_the_tracked_files_of_the_repository_nwt_stands_in() {
+    let (_source_temp, source) = init_repo();
+    let source_contents = format!("SOURCE_ONLY={}-{}\n", std::process::id(), nanos());
+    write_file(&source, UNTRACKED_ENV_FILE, &source_contents);
+    assert!(
+        !tracks(&source, UNTRACKED_ENV_FILE),
+        "the fixture source must not track {UNTRACKED_ENV_FILE}"
+    );
+
+    // The decoy commits the file. Without that, a `git ls-files` that reads the
+    // decoy names nothing the copy looks for, and the test passes for a spawn
+    // that sheds nothing.
+    let (_decoy_temp, decoy) = repo_with_files(&[UNTRACKED_ENV_FILE]);
+    assert!(
+        tracks(&decoy, UNTRACKED_ENV_FILE),
+        "the fixture decoy must track {UNTRACKED_ENV_FILE}"
+    );
+
+    let watch = DecoyWatch::before_the_run(&source, &decoy);
+    let branch = unique_branch("hostile-copy-env");
+
+    let output = hostile_nwt_command(&source, &decoy)
+        .args(["-b", &branch, "--no-bootstrap-hooks"])
+        .output()
+        .expect("run the nwt binary");
+
+    let worktree = watch.assert_untouched(&output, Some(&branch));
+    let copied = fs::read_to_string(worktree.join(UNTRACKED_ENV_FILE)).ok();
+    assert_eq!(
+        copied.as_deref(),
+        Some(source_contents.as_str()),
+        "the new worktree at {} must hold the untracked {UNTRACKED_ENV_FILE} of {}, with the \
+         same bytes. A leaked environment made `git ls-files` read the index of the other \
+         repository, so nwt took that file for a tracked file and did not copy it. The user \
+         expects every untracked .env file in the new worktree.\nnwt stderr:\n{}",
+        worktree.display(),
+        source.display(),
+        String::from_utf8_lossy(&output.stderr),
+    );
 }
 
 /// A `GIT_CONFIG_GLOBAL` the user stated must still reach the check that reads
