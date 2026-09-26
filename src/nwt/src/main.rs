@@ -2735,6 +2735,7 @@ fn get_tracked_files(repo_root: &Path) -> HashSet<PathBuf> {
     // four name how git authenticates to a remote, which `ls-files` never
     // reaches.
     let mut command = Command::new("git");
+    shed_inherited_git_environment_keeping_user_intent(&mut command);
 
     let output = command.args(["ls-files"]).current_dir(repo_root).output();
 
