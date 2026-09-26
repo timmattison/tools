@@ -34,21 +34,29 @@
 //!
 //! `#3, #4 and #5` and `#5 (test-taking UI)` are blockers, and so is the URL
 //! of an issue or a pull request of the repository, as in
-//! `https://github.com/owner/name/issues/5`. A block that starts with a word is
-//! prose about other work, so `It can run beside #169.` under the heading names
-//! no blocker. A paragraph that wraps is one block, so a line that
-//! happens to start with a number is still inside that prose. A number struck
-//! through, as in `~~#21~~`, counts for nothing, because an author strikes a
-//! blocker through to take it back. The tildes of a block pair as GitHub pairs
-//! them ([`Strikes`] gives the rule and the Markdown it leaves out), so the item
-//! `~~#21 ~~ #22` starts with tildes and names no blocker.
+//! `https://github.com/owner/name/issues/5`. A number written with the owner and
+//! the name of the repository, as in `owner/name#5`, counts as its number too. A
+//! tool that moves issues between two repositories writes every reference in
+//! that form. The comparison of the owner and the name ignores case, as for the
+//! URL. A number of another repository, in either long form, names nothing.
+//!
+//! A block that starts with a word is prose about other work, so
+//! `It can run beside #169.` under the heading names no blocker. A paragraph
+//! that wraps is one block, so a line that happens to start with a number is
+//! still inside that prose. A number struck through, as in `~~#21~~`, counts
+//! for nothing, because an author strikes a blocker through to take it back.
+//! The tildes of a block pair as GitHub pairs them ([`Strikes`] gives the rule
+//! and the Markdown it leaves out), so the item `~~#21 ~~ #22` starts with
+//! tildes and names no blocker.
 //!
 //! This reader acts on what it reads: a blocker it names can refuse a plan. So a
 //! phrase in the middle of a sentence is not read, because a line of a tracker
 //! such as `#12 — Click to open *blocked by #11*` says what blocks another issue.
 //!
-//! The gather script of the `plan-parallel-work` skill reads the same blocks,
-//! and its table of forms stands beside the table of this module.
+//! The gather script of the `plan-parallel-work` skill reads the same blocks:
+//! `.claude/skills/plan-parallel-work/scripts/parse-issue.ts` in
+//! timmattison/dotfiles. The two readers must agree. Its table of forms,
+//! `dependency-sections.test.ts`, stands beside the table of this module.
 
 use crate::chain::IssueNumber;
 use crate::github::Repo;
@@ -169,12 +177,13 @@ struct Item<'a> {
 /// the body writes them, each one once.
 ///
 /// `repo` is the repository of the issue. A block names a blocker as a number,
-/// as in `#51`, or as the URL of an issue or a pull request of `repo`, as in
-/// `https://github.com/owner/name/issues/51`.
+/// as in `#51`, as a number written with the owner and the name of `repo`, as
+/// in `owner/name#51`, or as the URL of an issue or a pull request of `repo`, as
+/// in `https://github.com/owner/name/issues/51`.
 ///
-/// A number or a URL of another repository is read past and names nothing, and
-/// so is a span struck through and a number GitHub cannot give an issue: zero,
-/// or one too large for a `u64`.
+/// A number of another repository, in either long form, is read past and names
+/// nothing. So is a span struck through, and so is a number GitHub cannot give
+/// an issue: zero, or one too large for a `u64`.
 ///
 /// A heading ends or opens a section before the walk reads its own text. So a
 /// heading that ends a section names nothing unless it starts with a label.
@@ -486,7 +495,8 @@ fn is_word(c: char) -> bool {
 /// emoji), the zero width joiner, and the emoji selector.
 ///
 /// A tilde is not decoration. It can open a span struck through, and
-/// [`read_past`] reads past that span, so a struck label or number names nothing.
+/// [`Strikes::after`] reads past that span, so a struck label or number names
+/// nothing.
 fn is_decoration(c: char) -> bool {
     c.is_whitespace()
         || matches!(
@@ -535,7 +545,7 @@ fn head_of(text: &str, repo: &Repo) -> (bool, Vec<IssueNumber>) {
         if let Some((number, after)) = reference(rest, repo) {
             numbers.extend(number);
             rest = after;
-        } else if let Some(after) = read_past(rest, &strikes) {
+        } else if let Some(after) = strikes.after(rest) {
             rest = after;
         } else {
             break;
@@ -549,7 +559,7 @@ fn head_of(text: &str, repo: &Repo) -> (bool, Vec<IssueNumber>) {
         rest = undecorated(rest);
         if let Some(after) = separator(rest) {
             rest = after;
-        } else if reference(rest, repo).is_none() && read_past(rest, &strikes).is_none() {
+        } else if reference(rest, repo).is_none() && strikes.after(rest).is_none() {
             break;
         }
     }
@@ -568,15 +578,18 @@ fn without_task_box(text: &str) -> &str {
         .unwrap_or(text)
 }
 
-/// The number of this repository `text` starts with, as `#51` or as the URL of
-/// an issue of `repo`, and the text after it, or `None` when it starts with
-/// neither.
+/// The number of this repository `text` starts with, and the text after it, or
+/// `None` when it starts with no number.
 ///
-/// The number is `None` for a URL of another repository, and when GitHub
-/// cannot give an issue that number. The text after it still comes back, so
-/// the caller reads past it.
+/// A number arrives in three written forms: `#51`, `owner/name#51`, and the URL
+/// of an issue of `repo`. The number is `None` when the owner and the name of a
+/// long form are those of another repository, and when GitHub cannot give an
+/// issue that number. The text after it still comes back, so the caller reads
+/// past it.
 fn reference<'a>(text: &'a str, repo: &Repo) -> Option<(Option<IssueNumber>, &'a str)> {
-    local_reference(text).or_else(|| url_reference(text, repo))
+    local_reference(text)
+        .or_else(|| qualified_reference(text, repo))
+        .or_else(|| url_reference(text, repo))
 }
 
 /// The number `text` starts with, written as `#51`, and the text after it, or
@@ -597,6 +610,29 @@ fn local_reference(text: &str) -> Option<(Option<IssueNumber>, &str)> {
         return None;
     }
     Some((digits.parse().ok().and_then(IssueNumber::new), after))
+}
+
+/// The number `text` starts with, written with the owner and the name of its
+/// repository as in `timmattison/example#51`, and the text after it, or `None`
+/// when it starts with no such number.
+///
+/// The owner and the name are runs of the characters [`is_name`] accepts, with
+/// a slash between them. The `#51` after them follows the rule of
+/// [`local_reference`], so `owner/name#51a` is no number.
+///
+/// The number is `None` when the owner and the name are not those of `repo`,
+/// and when GitHub cannot give an issue that number. The comparison ignores
+/// ASCII case, as GitHub does. The text after it still comes back, so the
+/// caller reads past it.
+fn qualified_reference<'a>(text: &'a str, repo: &Repo) -> Option<(Option<IssueNumber>, &'a str)> {
+    let (owner, after_owner) = segment(text, is_name)?;
+    let after_name = after_owner.trim_start_matches(is_name);
+    let name = after_owner.get(..after_owner.len() - after_name.len())?;
+    if name.is_empty() {
+        return None;
+    }
+    let (number, after) = local_reference(after_name)?;
+    Some((number.filter(|_| repo.is_named(owner, name)), after))
 }
 
 /// The number of the URL of an issue or a pull request that `text` starts
@@ -646,9 +682,8 @@ fn url_reference<'a>(text: &'a str, repo: &Repo) -> Option<(Option<IssueNumber>,
     {
         return None;
     }
-    let same = owner.eq_ignore_ascii_case(repo.owner()) && name.eq_ignore_ascii_case(repo.name());
     let number = digits.parse().ok().and_then(IssueNumber::new);
-    Some((number.filter(|_| same), after))
+    Some((number.filter(|_| repo.is_named(owner, name)), after))
 }
 
 /// The run of characters at the start of `text` that `is_part` accepts, and
@@ -677,31 +712,6 @@ fn is_name(c: char) -> bool {
 /// issue, as in `#issuecomment-7` or `#discussion_r12`.
 fn is_fragment(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '-')
-}
-
-/// The text after the number of another repository `text` starts with, as in
-/// `timmattison/muxiavelli#294`, or `None` when it starts with none.
-fn other_reference(text: &str) -> Option<&str> {
-    let after_owner = text.trim_start_matches(is_name);
-    if after_owner.len() == text.len() {
-        return None;
-    }
-    let name = after_owner.strip_prefix('/')?;
-    let after_name = name.trim_start_matches(is_name);
-    if after_name.len() == name.len() {
-        return None;
-    }
-    local_reference(after_name).map(|(_, after)| after)
-}
-
-/// The text after what `text` starts with that names nothing and that a list
-/// continues past, or `None` when it starts with no such thing: a number of
-/// another repository, or a span struck through.
-///
-/// `strikes` holds the strikes of the block, and `text` is the end of that
-/// block.
-fn read_past<'a>(text: &'a str, strikes: &Strikes<'a>) -> Option<&'a str> {
-    other_reference(text).or_else(|| strikes.after(text))
 }
 
 /// The text after the parenthesis that closes the one `text` opens with, or

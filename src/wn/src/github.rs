@@ -147,7 +147,8 @@ impl Repo {
         &self.name
     }
 
-    /// Whether `other` names the same repository as this one.
+    /// Whether `owner` and `name` are the owner and the name of this
+    /// repository.
     ///
     /// GitHub names a repository without regard to letter case, so
     /// `TimMattison/Tools` and `timmattison/tools` are one repository. GitHub
@@ -155,11 +156,24 @@ impl Repo {
     /// a name, and [`Repo::parse`] refuses every other character, so ASCII
     /// case is the whole rule.
     ///
+    /// Use this function when the owner and the name arrive as text, such as a
+    /// reference in the body of an issue. A text that holds a character GitHub
+    /// permits in no name names another repository, so the answer is `false`.
+    #[must_use]
+    pub fn is_named(&self, owner: &str, name: &str) -> bool {
+        self.owner.eq_ignore_ascii_case(owner) && self.name.eq_ignore_ascii_case(name)
+    }
+
+    /// Whether `other` names the same repository as this one.
+    ///
+    /// The comparison is that of [`Repo::is_named`], so it ignores ASCII case,
+    /// as GitHub does.
+    ///
     /// The derived `PartialEq` compares the letters as they are written. Use
     /// this function to find out whether two texts are about one repository.
     #[must_use]
     pub fn is_same_repository(&self, other: &Repo) -> bool {
-        self.owner.eq_ignore_ascii_case(&other.owner) && self.name.eq_ignore_ascii_case(&other.name)
+        self.is_named(&other.owner, &other.name)
     }
 }
 
