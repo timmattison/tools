@@ -189,8 +189,8 @@ struct Args {
     #[clap(long)]
     adaptive_fps: bool,
 
-    /// Monitor directories for new images and display them automatically
-    #[clap(long)]
+    /// Monitor directories for new images and text files, and show them automatically
+    #[clap(long, value_name = "DIR")]
     monitor: Vec<PathBuf>,
 
     /// Report whether this session can display an image, then exit. Exit code 0
@@ -333,7 +333,7 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
         }
     }
 
-    println!("Monitoring directories for new images:");
+    println!("Monitoring directories for new images and text files:");
     for dir in directories {
         println!("  - {}", dir.display());
     }
@@ -353,8 +353,14 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
             .with_context(|| format!("Failed to watch directory: {}", dir.display()))?;
     }
 
-    // Keep track of recently displayed files to avoid duplicates
-    let mut recent_files = HashSet::new();
+    // The monitor decides what one path gives. This loop only gives it the
+    // paths that the watcher reports. The monitor reads the bytes of an image
+    // itself, so the display decodes them and names no path in an error.
+    let mut monitor = Monitor::new(|path: &Path, source: Vec<u8>, header: &[String]| {
+        display_image_with_header(args, header, |capabilities| {
+            decode_image(source, path, capabilities)
+        })
+    });
     let mut last_cleanup = Instant::now();
 
     // Monitor for new files
@@ -365,45 +371,15 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
                     match event.kind {
                         notify::EventKind::Create(_) | notify::EventKind::Modify(_) => {
                             for path in event.paths {
-                                if !recent_files.contains(&path) {
-                                    if is_image_file(&path) {
-                                        // The callee prints the two header
-                                        // rows, so the auto-fit path can count
-                                        // them. The first row is empty, which
-                                        // separates this image from the one
-                                        // before it.
-                                        let header = [
-                                            String::new(),
-                                            format!("Found new image: {}", path.display()),
-                                        ];
-                                        match display_image_from_file(&path, args, &header) {
-                                            Ok(_) => {
-                                                recent_files.insert(path.clone());
-                                            }
-                                            Err(e) => {
-                                                eprintln!(
-                                                    "Failed to display image {}: {}",
-                                                    path.display(),
-                                                    e
-                                                );
-                                            }
-                                        }
-                                    } else if is_text_file(&path) {
-                                        println!("\nFound new text file: {}", path.display());
-                                        match display_text_file(&path) {
-                                            Ok(_) => {
-                                                recent_files.insert(path.clone());
-                                            }
-                                            Err(e) => {
-                                                eprintln!(
-                                                    "Failed to display text file {}: {}",
-                                                    path.display(),
-                                                    e
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
+                                // Each call takes a new handle of standard
+                                // output and holds no lock of it. The image
+                                // display prints with `println!`, which takes
+                                // that lock itself.
+                                monitor
+                                    .handle(&path, &mut io::stdout(), &mut io::stderr())
+                                    .with_context(|| {
+                                        format!("Failed to write the output for {}", path.display())
+                                    })?;
                             }
                         }
                         _ => {}
@@ -411,9 +387,9 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Clean up old entries from recent_files periodically
+                // Forget the handled paths periodically
                 if last_cleanup.elapsed() > Duration::from_secs(60) {
-                    recent_files.clear();
+                    monitor.forget_all();
                     last_cleanup = Instant::now();
                 }
             }
@@ -424,6 +400,346 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The handling of each path that monitor mode reports, one path at a time.
+///
+/// The watcher loop in [`monitor_directories`] gives each path that it hears
+/// about to [`Monitor::handle`], and it does nothing else with the path. A
+/// test therefore drives the handling of one path directly, with files in a
+/// temporary directory. It needs no watcher, no terminal, and no wait for an
+/// event.
+///
+/// The type parameter is the display of one image. The monitor reads the bytes
+/// of the image itself, and the display decodes those bytes. Production gives a
+/// closure over [`display_image_with_header`] and [`decode_image`], which talks
+/// to the terminal. A test gives a closure that decodes the bytes with
+/// [`decode_image`] and a terminal that the test states.
+struct Monitor<ShowImage> {
+    /// The paths this run already handled.
+    seen: HashSet<PathBuf>,
+    /// Prints the header lines, then decodes the bytes of one image and draws
+    /// it. Production passes a closure over `display_image_with_header` and
+    /// `decode_image`. A test passes a closure that decodes the bytes with
+    /// `decode_image` and a stated terminal.
+    show_image: ShowImage,
+}
+
+impl<ShowImage> Monitor<ShowImage>
+where
+    ShowImage: FnMut(&Path, Vec<u8>, &[String]) -> Result<()>,
+{
+    /// Make a monitor that has handled no path.
+    ///
+    /// # Arguments
+    /// * `show_image` - The display of one image. It takes the path of the
+    ///   image, the bytes that the monitor read from that path, and the header
+    ///   lines to print above the image. It prints the header lines itself, so
+    ///   the auto-fit path can count their rows. It decodes the bytes and does
+    ///   not open the path, and its error does not name the path.
+    ///
+    /// # Returns
+    /// A monitor that has no path in its record.
+    fn new(show_image: ShowImage) -> Self {
+        Self {
+            seen: HashSet::new(),
+            show_image,
+        }
+    }
+
+    /// Handle one path that the watcher reported.
+    ///
+    /// These are the outcomes:
+    ///
+    /// * A path that is in the record gives no output.
+    /// * Monitor mode ignores a path that is not a regular file, such as a
+    ///   directory. It gives no output.
+    /// * Monitor mode ignores a path that is gone. It gives no output. This
+    ///   includes a text file or an image that goes away before its read.
+    /// * Monitor mode ignores a binary file that is not an image. It gives no
+    ///   output. A file is binary when its bytes are not valid UTF-8, or when
+    ///   they hold a control character other than tab, line feed, and
+    ///   carriage return, such as a NUL byte or the escape character.
+    /// * Monitor mode ignores an empty file. It gives no output. The watcher
+    ///   often reports a new file before the program writes to it, and a later
+    ///   event shows the text or the image.
+    /// * Monitor mode ignores a video. It gives no output.
+    /// * The monitor reads the bytes of an image, and the bytes go to the image
+    ///   display.
+    /// * A path that is not an image and not a video is read as text. The text
+    ///   comes after a header line.
+    /// * A display that fails gives one line on `err`. The line names the path
+    ///   one time, and then the whole chain of the error, down to its cause.
+    ///
+    /// The record decides what a later event for the same path gives:
+    ///
+    /// * A path that monitor mode shows goes into the record. A program that
+    ///   writes a file gives many events, and the user sees the file one time.
+    /// * A text file whose read fails goes into the record. A read that fails
+    ///   for a cause such as a missing permission fails again at each later
+    ///   event, so the error prints one time.
+    /// * A path that monitor mode ignores stays out of the record. A later
+    ///   event can find something to show, such as the text or the image that
+    ///   a program writes into a file that was empty.
+    /// * An image whose read or display fails stays out of the record. The
+    ///   watcher reports an image before the program completes the write, and
+    ///   an image that is not complete does not decode. A later event tries the
+    ///   image again, so each failure prints its error.
+    ///
+    /// [`Monitor::forget_all`] empties the record. A path gives its output
+    /// again at the first event after that call.
+    ///
+    /// # Arguments
+    /// * `path` - The path that the watcher reported.
+    /// * `out` - The destination of the header and the content of a text file.
+    /// * `err` - The destination of a failure to display the path.
+    ///
+    /// # Returns
+    /// Nothing when every write succeeds. A failure to display the path is not
+    /// an error of this function. It goes to `err` as one line.
+    ///
+    /// # Errors
+    /// An error when a write to `out` or to `err` fails.
+    fn handle(
+        &mut self,
+        path: &Path,
+        out: &mut impl Write,
+        err: &mut impl Write,
+    ) -> io::Result<()> {
+        if self.seen.contains(path) {
+            return Ok(());
+        }
+
+        // Only a regular file holds an image or text. A directory, a FIFO, a
+        // socket, or a device gives no output, and it does not go into the
+        // record. This check stands before any open of the path, because an
+        // open of a FIFO waits for a writer and monitor mode then stops.
+        // `fs::metadata` follows a symbolic link, so a link to a regular file
+        // counts as a regular file.
+        //
+        // A path that is gone gives no output either. A program often writes
+        // a temporary file and then renames or removes it, so the event for
+        // that file arrives after it is gone. The program can also remove the
+        // file after this check. So each reader of monitor mode applies the
+        // same rule again at its open, through `open_new_file`. A different
+        // failure of this check goes on to the display, and the display
+        // reports it.
+        match fs::metadata(path) {
+            Ok(metadata) if !metadata.is_file() => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Ok(_) | Err(_) => {}
+        }
+
+        let outcome = if is_image_file(path) {
+            self.show_new_image(path)
+        } else if is_text_file(path) {
+            show_new_text_file(path, out)?
+        } else {
+            // A video goes to no display in monitor mode.
+            DisplayOutcome::Ignored
+        };
+
+        // Each display gives its outcome, and this match alone records the
+        // path and reports a failure. The rule of the record and the format
+        // of a failure thus stand in one place.
+        match outcome {
+            DisplayOutcome::Shown => {
+                self.seen.insert(path.to_path_buf());
+            }
+            DisplayOutcome::Ignored => {}
+            DisplayOutcome::Failed {
+                what,
+                error,
+                next_event,
+            } => {
+                // The line shows the whole chain of the error. The plain
+                // format of `anyhow` shows only the outermost context, which
+                // can name the path and no cause.
+                writeln!(
+                    err,
+                    "Failed to display {what} {}: {}",
+                    path.display(),
+                    error_chain_text(&error)
+                )?;
+                if next_event == NextEvent::GivesNoOutput {
+                    self.seen.insert(path.to_path_buf());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Read one image that monitor mode found, and give its bytes to the image
+    /// display.
+    ///
+    /// The monitor reads the bytes itself, and the display decodes them. The
+    /// line of a failure in [`Monitor::handle`] names the path, so no link of
+    /// the error names it again. A reader of a path puts the path into its
+    /// context, as [`read_image_file`] does, and the user then reads the path
+    /// two times on one line.
+    ///
+    /// # Arguments
+    /// * `path` - The path of the image.
+    ///
+    /// # Returns
+    /// [`DisplayOutcome::Shown`] when the display succeeds.
+    /// [`DisplayOutcome::Ignored`] when the file is gone or empty. A later
+    /// event for an empty file shows the image. [`read_new_image_file`] decides
+    /// which files hold an image to show.
+    /// [`DisplayOutcome::Failed`] when the read or the display fails, and a
+    /// later event tries the image again. The watcher reports an image before
+    /// the program completes the write, and an image that is not complete does
+    /// not decode. A later event decodes the complete image.
+    fn show_new_image(&mut self, path: &Path) -> DisplayOutcome {
+        // A failure of the read and a failure of the display give the same
+        // outcome, so one match holds the rule of the record for both. The
+        // error of the read is the error of the operating system, which does
+        // not name the path.
+        let shown = match read_new_image_file(path) {
+            Ok(Some(source)) => {
+                // The display prints the two header rows itself, so the
+                // auto-fit path can count them. The first row is empty, which
+                // separates this image from the one before it.
+                let header = [
+                    String::new(),
+                    format!("Found new image: {}", path.display()),
+                ];
+                (self.show_image)(path, source, &header)
+            }
+            // An image that is gone or empty gives no header. It stays out of
+            // the record on purpose. A program makes the file before it
+            // writes the bytes, so a later event for the file shows the image.
+            Ok(None) => return DisplayOutcome::Ignored,
+            Err(error) => Err(error.into()),
+        };
+        match shown {
+            Ok(()) => DisplayOutcome::Shown,
+            Err(error) => DisplayOutcome::Failed {
+                what: "image",
+                error,
+                next_event: NextEvent::TriesAgain,
+            },
+        }
+    }
+
+    /// Forget every path that this run handled.
+    ///
+    /// Monitor mode does this every 60 seconds, so the record does not grow
+    /// for the whole length of a long run. A path that changes after this call
+    /// gives its output again.
+    fn forget_all(&mut self) {
+        self.seen.clear();
+    }
+}
+
+/// What the display of one path gave at one event of monitor mode.
+///
+/// Each display in [`Monitor::handle`] gives one of these, and `handle` alone
+/// records the path and reports a failure.
+enum DisplayOutcome {
+    /// The path went to the display. It goes into the record.
+    Shown,
+    /// The path holds nothing to show at this event. It gives no output, and
+    /// it stays out of the record.
+    Ignored,
+    /// The display of the path failed.
+    Failed {
+        /// The kind of the path, as the failure message names it.
+        what: &'static str,
+        /// The failure. The message shows its whole chain through
+        /// [`error_chain_text`].
+        error: anyhow::Error,
+        /// What a later event for the path gives.
+        next_event: NextEvent,
+    },
+}
+
+/// Write the chain of an error as one line, and name each cause one time.
+///
+/// The alternate format of `anyhow` joins every link of the chain with `: `.
+/// Some errors write their cause into their own message and also give the
+/// cause as the next link. The decoder of the `image` crate does this, so the
+/// alternate format prints `Invalid PNG signature.: Invalid PNG signature.`.
+/// This function drops a link when the link before it already ends with the
+/// same text. Such a link tells the user nothing new.
+///
+/// # Arguments
+/// * `error` - The error to write.
+///
+/// # Returns
+/// The links of the chain, from the outermost context to the cause, joined
+/// with `: `.
+fn error_chain_text(error: &anyhow::Error) -> String {
+    let mut links: Vec<String> = Vec::new();
+    for link in error.chain().map(ToString::to_string) {
+        if links
+            .last()
+            .is_some_and(|previous| previous.ends_with(&link))
+        {
+            continue;
+        }
+        links.push(link);
+    }
+
+    links.join(": ")
+}
+
+/// What a later event gives for a path whose display failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NextEvent {
+    /// The path stays out of the record, so a later event tries it again.
+    TriesAgain,
+    /// The path goes into the record, so a later event gives no output.
+    GivesNoOutput,
+}
+
+/// Show a text file that monitor mode found, after a header line.
+///
+/// The header comes after the read, when the bytes are known to be text. A
+/// file can go away between the check in [`Monitor::handle`] and the read, and
+/// an empty file or a binary file holds no text, so none of them gives a
+/// header. [`read_new_text_file`] decides which files hold text to show. It
+/// gives back no text that holds a terminal control character, so the text
+/// goes to `out` unchanged.
+///
+/// # Arguments
+/// * `path` - The path of the file.
+/// * `out` - The destination of the header and the text.
+///
+/// # Returns
+/// [`DisplayOutcome::Shown`] when the header and the text are on `out`.
+/// [`DisplayOutcome::Ignored`] when the file is gone, empty, or binary.
+/// [`DisplayOutcome::Failed`] when the read fails for a different cause, and a
+/// later event gives no output.
+///
+/// # Errors
+/// An error when a write to `out` fails.
+fn show_new_text_file(path: &Path, out: &mut impl Write) -> io::Result<DisplayOutcome> {
+    match read_new_text_file(path) {
+        Ok(Some(contents)) => {
+            writeln!(out, "\nFound new text file: {}", path.display())?;
+            out.write_all(contents.as_bytes())?;
+            out.flush()?;
+            Ok(DisplayOutcome::Shown)
+        }
+        // An empty file and a binary file stay out of the record on purpose.
+        // A program writes a text file after it makes it, so the file can be
+        // empty at its first event. A text file that a program is in the
+        // middle of writing can also end in half of a character of more than
+        // one byte, so that file is not UTF-8 now. A later event for either
+        // file shows it when it is complete.
+        Ok(None) => Ok(DisplayOutcome::Ignored),
+        // A read that fails for a cause such as a missing permission fails
+        // again at each later event, and a program that writes a file gives
+        // many events. So the path goes into the record, and its error prints
+        // one time.
+        Err(error) => Ok(DisplayOutcome::Failed {
+            what: "text file",
+            error: error.into(),
+            next_event: NextEvent::GivesNoOutput,
+        }),
+    }
 }
 
 fn is_video_file(file_path: &Path) -> bool {
@@ -1643,6 +1959,47 @@ fn draw_progress_bar(
 
 /// Read an image file, and give back the picture and the bytes of the file.
 ///
+/// This is the read of the file argument of `main`. It reads the bytes of the
+/// file, and [`decode_image`] makes the picture out of them. Each failure names
+/// the path in its context, because the error of `ic file.png` is the whole
+/// output of the run, and nothing else names the path to the user.
+///
+/// # Arguments
+/// * `file_path` - The path of the image file.
+/// * `capabilities` - What the terminal of this run does. The caller reads the
+///   terminal one time and states it here, so this read never depends on the
+///   terminal of whoever runs it.
+///
+/// # Returns
+/// The picture, and the bytes it came out of for a file that this terminal
+/// takes as it stands. [`None`] in place of the bytes for every other file and
+/// every other terminal. [`decode_image`] holds that rule.
+///
+/// # Errors
+/// An error when the file does not open, or when it holds no image. The
+/// outermost context of each error is `Failed to open image file: <path>`.
+fn read_image_file(
+    file_path: &Path,
+    capabilities: &Capabilities,
+) -> Result<(DynamicImage, Option<Vec<u8>>)> {
+    // One closure gives the context of both failures, so the two texts cannot
+    // drift apart. The closure holds only a reference, so it is `Copy`, and
+    // each `with_context` takes its own copy.
+    let failure = || format!("Failed to open image file: {}", file_path.display());
+
+    let source = fs::read(file_path).with_context(failure)?;
+
+    decode_image(source, file_path, capabilities).with_context(failure)
+}
+
+/// Make a picture out of the bytes of an image file, and keep the bytes when
+/// this terminal sends them as they stand.
+///
+/// The error of this function starts at the error of the decoder, and it does
+/// not name the file. Monitor mode puts the path at the start of its failure
+/// line, so a path in this error names the path two times on one line.
+/// [`read_image_file`] adds the path for the file argument of `main`.
+///
 /// The bytes travel beside the picture because `termgfx` sends a file it can
 /// carry as it stands: a JPEG on a disk is already a JPEG, and an encoder that
 /// read it and wrote it out again would throw a second helping of the picture
@@ -1667,9 +2024,12 @@ fn draw_progress_bar(
 /// second protocol carries a file.
 ///
 /// # Arguments
-/// * `file_path` - The path of the image file.
+/// * `source` - The bytes of the image file.
+/// * `name` - The path of the image file. The decoder takes the format from
+///   its extension when the first bytes name no format. This function does not
+///   open the path.
 /// * `capabilities` - What the terminal of this run does. The caller reads the
-///   terminal one time and states it here, so this read never depends on the
+///   terminal one time and states it here, so this decode never depends on the
 ///   terminal of whoever runs it.
 ///
 /// # Returns
@@ -1678,30 +2038,25 @@ fn draw_progress_bar(
 /// every other terminal.
 ///
 /// # Errors
-/// An error when the file does not open, or when it holds no image.
-fn read_image_file(
-    file_path: &Path,
+/// An error when the bytes hold no image. The chain of the error starts at the
+/// error of the decoder, and no link names the path.
+fn decode_image(
+    source: Vec<u8>,
+    name: &Path,
     capabilities: &Capabilities,
 ) -> Result<(DynamicImage, Option<Vec<u8>>)> {
-    let source = fs::read(file_path)
-        .with_context(|| format!("Failed to open image file: {}", file_path.display()))?;
-
     // The decoder reads the format out of the first bytes of the file, and it
     // takes the extension of the name where those bytes name nothing. That is
     // what `image::open` does with a path, and this reads the same file the
-    // same way out of the memory it already holds.
+    // same way out of the memory that already holds it.
     let mut reader = image::ImageReader::new(io::Cursor::new(&source));
-    if let Ok(format) = image::ImageFormat::from_path(file_path) {
+    if let Ok(format) = image::ImageFormat::from_path(name) {
         reader.set_format(format);
     }
 
-    let img = reader
-        .with_guessed_format()
-        .with_context(|| format!("Failed to open image file: {}", file_path.display()))?
-        .decode()
-        .with_context(|| format!("Failed to open image file: {}", file_path.display()))?;
+    let img = reader.with_guessed_format()?.decode()?;
 
-    // A file that the writer cannot send drops here, at the end of the read,
+    // A file that the writer cannot send drops here, at the end of the decode,
     // and the caller holds the picture alone.
     let source = capabilities.travels_as_it_stands(&source).then_some(source);
 
@@ -1710,11 +2065,9 @@ fn read_image_file(
 
 /// Print a header and then display an image file.
 ///
-/// The function prints the header itself and then counts the rows that it
-/// printed. The count and the print can therefore never drift apart, so a
-/// caller cannot print a header and forget to pay for the rows. A header line
-/// that is wider than the terminal wraps onto more than one row, so the count
-/// comes from the display width of each line and not from the number of lines.
+/// This is the display of the file argument of `main`. It reads the file with
+/// [`read_image_file`], so each error names the path.
+/// [`display_image_with_header`] prints the header and counts its rows.
 ///
 /// # Arguments
 /// * `file_path` - The path of the image file.
@@ -1722,8 +2075,47 @@ fn read_image_file(
 /// * `header` - The lines to print above the image, one line per element.
 ///
 /// # Returns
+/// Nothing when the image is on the terminal.
+///
+/// # Errors
 /// An error when the file does not open as an image, or when the display fails.
 fn display_image_from_file(file_path: &Path, args: &Args, header: &[String]) -> Result<()> {
+    display_image_with_header(args, header, |capabilities| {
+        read_image_file(file_path, capabilities)
+    })
+}
+
+/// Print a header, get a picture from `load`, and then display the picture.
+///
+/// The function prints the header itself and then counts the rows that it
+/// printed. The count and the print can therefore never drift apart, so a
+/// caller cannot print a header and forget to pay for the rows. A header line
+/// that is wider than the terminal wraps onto more than one row, so the count
+/// comes from the display width of each line and not from the number of lines.
+///
+/// The two displays of an image file share this body. The file argument of
+/// `main` gives a `load` that reads the file with [`read_image_file`]. Monitor
+/// mode reads the bytes itself, and it gives a `load` that decodes them with
+/// [`decode_image`]. The header prints before `load` runs, for both callers.
+///
+/// # Arguments
+/// * `args` - The command line arguments.
+/// * `header` - The lines to print above the image, one line per element.
+/// * `load` - Gives the picture, and the bytes it came out of when this
+///   terminal sends them as they stand. It takes what the terminal of this run
+///   does.
+///
+/// # Returns
+/// Nothing when the image is on the terminal.
+///
+/// # Errors
+/// The error of `load` when it gives no picture, or an error when the display
+/// fails.
+fn display_image_with_header(
+    args: &Args,
+    header: &[String],
+    load: impl FnOnce(&Capabilities) -> Result<(DynamicImage, Option<Vec<u8>>)>,
+) -> Result<()> {
     for line in header {
         println!("{line}");
     }
@@ -1732,7 +2124,7 @@ fn display_image_from_file(file_path: &Path, args: &Args, header: &[String]) -> 
     // `display_image` below takes that same answer out of the memory of
     // `termgfx`. So this call costs no round trip of its own.
     let capabilities = Capabilities::detect_by_asking();
-    let (img, source) = read_image_file(file_path, &capabilities)?;
+    let (img, source) = load(&capabilities)?;
 
     let (term_width, _) = terminal_cells();
     display_image(
@@ -1744,6 +2136,237 @@ fn display_image_from_file(file_path: &Path, args: &Args, header: &[String]) -> 
     )
 }
 
+/// Read a text file that monitor mode found, and decide whether to show it.
+///
+/// Monitor mode hears about each file that a program writes, and many of those
+/// files hold no text to show. Such a file is not a failure. The file argument
+/// of `main` does not come here: a file that the user names must read as text,
+/// or `ic` fails.
+///
+/// A path that is gone at the read holds nothing to show. [`open_new_file`]
+/// holds that rule for each reader of monitor mode. [`read_text_to_show`]
+/// holds the rule for the content of the file. It reads the whole file only
+/// when the first block of the file is text.
+///
+/// # Arguments
+/// * `path` - The path that the watcher reported.
+///
+/// # Returns
+/// `Some` with the content of the file when monitor mode shows it. `None` when
+/// monitor mode ignores the file, because the file is gone, it is empty, or it
+/// is binary.
+///
+/// # Errors
+/// The error of the open or the read when the file does not read for a
+/// different cause, such as a permission that the user does not have. The
+/// error does not name the path, because the caller puts the path in front of
+/// it.
+fn read_new_text_file(path: &Path) -> io::Result<Option<String>> {
+    let Some(file) = open_new_file(path)? else {
+        return Ok(None);
+    };
+    read_text_to_show(file)
+}
+
+/// The number of bytes at the start of a file that the text rule of monitor
+/// mode reads before it reads the rest.
+///
+/// [`read_text_to_show`] decides on this first block, and it reads the rest of
+/// the file only when the block is text. The start of a binary file, such as
+/// an archive or a partial download, holds a NUL byte, a byte that is not
+/// UTF-8, or a control character. So 8 KiB is sufficient to find it.
+const FIRST_BLOCK_BYTES: u64 = 8 * 1024;
+
+/// Read the content of a file that monitor mode found, and decide whether it
+/// is text to show.
+///
+/// Content is text when its bytes are valid UTF-8 and [`is_plain_text`]
+/// accepts the decoded text. All other content is binary, and monitor mode
+/// ignores it. A decode alone is not sufficient. Bytes that are only NUL bytes
+/// are valid UTF-8, and so are the bytes of an escape sequence. The rule thus
+/// looks at each character after the decode.
+///
+/// Empty content holds nothing to show either. A program makes a file before
+/// it writes the text, so the watcher often reports the file while it is
+/// still empty. A later event for the file shows the text.
+///
+/// The rule reads the first [`FIRST_BLOCK_BYTES`] bytes, and it reads the rest
+/// only when [`first_block_can_be_text`] accepts them. A binary file that
+/// grows, such as a `.crdownload` file of a browser, gives an event at each
+/// write. It stays out of the record, so each event reads it again. A read of
+/// the whole file thus used memory to the size of the file at each event.
+/// When the first block is text, the rule applies the full check to the
+/// complete content.
+///
+/// # Arguments
+/// * `reader` - The source of the content, such as a file that is open.
+///
+/// # Returns
+/// `Some` with the content when monitor mode shows it. `None` when monitor
+/// mode ignores the content, because it is empty or it is binary.
+///
+/// # Errors
+/// The error of the read when the content does not read.
+fn read_text_to_show(mut reader: impl Read) -> io::Result<Option<String>> {
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut reader)
+        .take(FIRST_BLOCK_BYTES)
+        .read_to_end(&mut bytes)?;
+
+    if bytes.is_empty() || !first_block_can_be_text(&bytes) {
+        return Ok(None);
+    }
+
+    reader.read_to_end(&mut bytes)?;
+
+    Ok(String::from_utf8(bytes)
+        .ok()
+        .filter(|text| is_plain_text(text)))
+}
+
+/// Decide whether the first block of a file can be the start of text.
+///
+/// The block can end in part of a character of more than one byte, because the
+/// edge of the block does not follow the edges of the characters. The rest of
+/// that character is after the block. So a block that ends in part of a
+/// character is not binary for that cause, and the rule checks the characters
+/// before that part.
+///
+/// # Arguments
+/// * `block` - The bytes at the start of the file.
+///
+/// # Returns
+/// `true` when the block is valid UTF-8, or valid UTF-8 up to a character that
+/// the block cuts at its end, and [`is_plain_text`] accepts the decoded text.
+/// `false` when the block holds bytes that are not UTF-8 or a control
+/// character that plain text does not hold.
+fn first_block_can_be_text(block: &[u8]) -> bool {
+    match std::str::from_utf8(block) {
+        Ok(text) => is_plain_text(text),
+        // An error with no length is a character that the end of the block
+        // cuts. The bytes before `valid_up_to` are valid UTF-8.
+        Err(error) if error.error_len().is_none() => {
+            std::str::from_utf8(&block[..error.valid_up_to()]).is_ok_and(is_plain_text)
+        }
+        Err(_) => false,
+    }
+}
+
+/// Decide whether decoded text is plain text that monitor mode can write to
+/// the terminal.
+///
+/// Text is plain when it holds no control character other than tab, line
+/// feed, and carriage return. A control character is a character of the
+/// Unicode `Cc` category: C0 (U+0000 to U+001F), DEL (U+007F), and C1 (U+0080
+/// to U+009F). A NUL byte is a control character, so plain text never holds
+/// one.
+///
+/// In monitor mode the user does not choose the file. Any program can put a
+/// file in a watched directory, such as `~/Downloads`. The escape character
+/// starts a terminal control sequence, and such a sequence can write the
+/// clipboard, set the title, or move the cursor to fake output. Some
+/// terminals read the C1 characters U+009B and U+009D as the start of such a
+/// sequence in UTF-8 too, so the rule includes C1.
+///
+/// # Arguments
+/// * `text` - The decoded text of a file.
+///
+/// # Returns
+/// `true` when the text holds no control character other than tab, line feed,
+/// and carriage return. `false` when it holds a different control character.
+fn is_plain_text(text: &str) -> bool {
+    !text
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\t' | '\n' | '\r'))
+}
+
+/// Read an image that monitor mode found, and decide whether to show it.
+///
+/// A program such as `curl -o`, an editor, or a screenshot tool makes a file
+/// before it writes the bytes. The watcher thus often reports an image while
+/// it is still empty. An empty file holds no image to decode, so it is not a
+/// failure. A later event for the file shows the image.
+///
+/// The decision uses the bytes that the read gave, not a check of the size
+/// before the read. A program can write to the file between such a check and
+/// the read.
+///
+/// A path that is gone at the read holds no image either. The screenshot tool
+/// of macOS writes a temporary file and then renames it, so the event for the
+/// temporary name arrives after the file is gone. [`open_new_file`] holds that
+/// rule for each reader of monitor mode.
+///
+/// # Arguments
+/// * `path` - The path that the watcher reported.
+///
+/// # Returns
+/// `Some` with the bytes of the file when monitor mode shows it. `None` when
+/// monitor mode ignores the file, because the file is gone or it is empty.
+///
+/// # Errors
+/// The error of the open or the read when the file does not read for a
+/// different cause, such as a permission that the user does not have. The
+/// error does not name the path, because the caller puts the path in front of
+/// it.
+fn read_new_image_file(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    let Some(mut file) = open_new_file(path)? else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(bytes))
+}
+
+/// Open a file that monitor mode found, and ignore a path that is gone.
+///
+/// A program often writes a temporary file and then renames or removes it. The
+/// event for such a file arrives after the file is gone, so a path that is gone
+/// is not a failure. [`Monitor::handle`] checks the path before the read, but
+/// the program can rename or remove the file after that check. So each reader
+/// of monitor mode applies the rule again here, on the result of the open.
+///
+/// The open is the one step where the file can go away. On Unix, a file that
+/// is open stays readable after a rename or a removal of its path. The read
+/// after the open thus gives the bytes of the file.
+///
+/// The rule looks only at the error of this open. An error of kind `NotFound`
+/// from a different step, such as the display, does not show that the path is
+/// gone. Monitor mode reports such an error.
+///
+/// # Arguments
+/// * `path` - The path that the watcher reported.
+///
+/// # Returns
+/// `Some` with the open file. `None` when no file is at the path.
+///
+/// # Errors
+/// The error of the open when the open fails for a different cause, such as a
+/// permission that the user does not have. The error does not name the path,
+/// because the caller puts the path in front of it.
+fn open_new_file(path: &Path) -> io::Result<Option<fs::File>> {
+    match fs::File::open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Print the content of a text file to standard output.
+///
+/// # Arguments
+/// * `file_path` - The path of the text file.
+///
+/// # Returns
+/// Nothing when the content is on standard output.
+///
+/// # Errors
+/// An error when the file does not open, when its content is not UTF-8, or
+/// when the flush of standard output fails.
 fn display_text_file(file_path: &Path) -> Result<()> {
     let contents = fs::read_to_string(file_path)
         .with_context(|| format!("Failed to read text file: {}", file_path.display()))?;
@@ -1757,13 +2380,13 @@ fn display_text_file(file_path: &Path) -> Result<()> {
 /// Read one image out of `reader`, and give back the picture and the bytes.
 ///
 /// This is the read of the standard input path, and it keeps the bytes of a
-/// file by the rule that [`read_image_file`] keeps them by. One rule serves
-/// both readers: a rule that reached the reader of a path alone would hold 36
+/// file by the rule that [`decode_image`] keeps them by. One rule serves
+/// both readers: a rule that reached the decoder of a file alone would hold 36
 /// megabytes of dead bytes for `ic < photograph.bmp`, which is the case that
 /// the rule exists for.
 ///
 /// The read stands apart from the display of the picture for the reason
-/// [`read_image_file`] stands apart from [`display_image_from_file`]: a test
+/// [`decode_image`] stands apart from [`display_image_with_header`]: a test
 /// reads a picture out of bytes it built itself, where a test of the display
 /// would draw into the terminal of whoever runs it.
 ///
@@ -2190,6 +2813,8 @@ fn classify_transport(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use termgfx::{AnsweredProtocol, PayloadBudget};
 
@@ -3201,6 +3826,876 @@ mod tests {
             source.as_deref(),
             Some(png.as_slice()),
             "the reader must keep the bytes of a PNG, because the writer sends them as they stand"
+        );
+    }
+
+    // =========================================================================
+    // Tests for Monitor::handle
+    // =========================================================================
+
+    /// A directory of the temporary directory that goes away with the test.
+    ///
+    /// The removal stands in `Drop` for the reason that [`TemporaryFile`]
+    /// gives: an assertion that fails panics before a removal on a later line
+    /// of the test body runs. Each guard makes its own directory, so the files
+    /// of one test never meet the files of a test that runs at the same time.
+    struct TemporaryDirectory(PathBuf);
+
+    impl TemporaryDirectory {
+        /// Make a new, empty directory that no other test uses.
+        ///
+        /// # Returns
+        /// A guard that names the directory and removes it, and all that it
+        /// holds, at the end of the test.
+        fn new() -> Self {
+            let path = unique_temporary_path("ic-monitor", "dir");
+            fs::create_dir(&path).expect("a new directory in the temporary directory");
+
+            Self(path)
+        }
+
+        /// The path that the directory stands at.
+        ///
+        /// # Returns
+        /// The path of the directory, which holds while the guard lives.
+        fn path(&self) -> &Path {
+            &self.0
+        }
+
+        /// Write `bytes` to a file of this directory.
+        ///
+        /// # Arguments
+        /// * `name` - The name of the file in this directory.
+        /// * `bytes` - The bytes to write.
+        ///
+        /// # Returns
+        /// The path of the file.
+        fn file_of(&self, name: &str, bytes: &[u8]) -> PathBuf {
+            let path = self.path().join(name);
+            fs::write(&path, bytes).expect("a write to the temporary directory");
+
+            path
+        }
+
+        /// Make a new, empty directory in this directory.
+        ///
+        /// # Arguments
+        /// * `name` - The name of the new directory in this directory.
+        ///
+        /// # Returns
+        /// The path of the new directory.
+        fn directory(&self, name: &str) -> PathBuf {
+            let path = self.path().join(name);
+            fs::create_dir(&path).expect("a new directory in the temporary directory");
+
+            path
+        }
+    }
+
+    impl Drop for TemporaryDirectory {
+        fn drop(&mut self) {
+            // The removal reports to nobody, for the reason that the `Drop` of
+            // `TemporaryFile` gives.
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// What one call of [`Monitor::handle`] wrote.
+    ///
+    /// The two fields together are the whole output of one path. A test that
+    /// expects no output compares against [`Written::default`], so the
+    /// failure message shows every byte that the path gave.
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct Written {
+        /// The text that went to standard output.
+        stdout: String,
+        /// The text that went to standard error.
+        stderr: String,
+    }
+
+    /// The display of one image that a test gives to a [`Monitor`]. It takes
+    /// the path of the image, the bytes that the monitor read, and the header
+    /// lines.
+    type ShowImageInTest = Box<dyn FnMut(&Path, Vec<u8>, &[String]) -> Result<()>>;
+
+    /// A [`Monitor`] that a test drives, and a record of each image display.
+    ///
+    /// The display of production asks the terminal of whoever runs the suite
+    /// what it can draw, and then it draws into that terminal. The display here
+    /// decodes the bytes that the monitor read with [`decode_image`] and a
+    /// terminal that the test states, and it draws nothing. Production decodes
+    /// the bytes with the same function. The display here keeps the header
+    /// lines of each call, because the display of production prints them. A test that finds no
+    /// header here thus proves that no image header went to the terminal.
+    ///
+    /// One value of this type keeps its record of handled paths from one call
+    /// of [`MonitorUnderTest::handle`] to the next, as monitor mode does. A
+    /// test that handles one path two times uses one value.
+    struct MonitorUnderTest {
+        /// The monitor that the test drives.
+        monitor: Monitor<ShowImageInTest>,
+        /// The header lines of each call of the image display, in order.
+        image_headers: Rc<RefCell<Vec<Vec<String>>>>,
+    }
+
+    impl MonitorUnderTest {
+        /// Make a monitor that has handled no path and displayed no image.
+        ///
+        /// # Returns
+        /// The monitor, with an empty record of image displays.
+        fn new() -> Self {
+            let image_headers = Rc::new(RefCell::new(Vec::new()));
+            let record = Rc::clone(&image_headers);
+            let show_image: ShowImageInTest =
+                Box::new(move |path: &Path, source: Vec<u8>, header: &[String]| {
+                    record.borrow_mut().push(header.to_vec());
+                    decode_image(source, path, &a_terminal_that_sends_a_file()).map(|_| ())
+                });
+
+            Self {
+                monitor: Monitor::new(show_image),
+                image_headers,
+            }
+        }
+
+        /// Handle one path, and give back what the monitor wrote.
+        ///
+        /// # Arguments
+        /// * `path` - The path that the watcher reports.
+        ///
+        /// # Returns
+        /// The text that went to standard output and to standard error. A
+        /// byte that is not UTF-8 shows as the replacement character, so a
+        /// test that expects no output still prints what it got.
+        fn handle(&mut self, path: &Path) -> Written {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            self.monitor
+                .handle(path, &mut stdout, &mut stderr)
+                .expect("a write to memory succeeds");
+
+            Written {
+                stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            }
+        }
+
+        /// The header lines of each call of the image display.
+        ///
+        /// # Returns
+        /// One element for each call, in the order of the calls. An empty
+        /// list means that no path reached the image display.
+        fn image_headers(&self) -> Vec<Vec<String>> {
+            self.image_headers.borrow().clone()
+        }
+    }
+
+    /// A new text file in monitor mode gives a header and then the text.
+    ///
+    /// This is the outcome that monitor mode exists for, and the fixes of
+    /// <https://github.com/timmattison/tools/issues/526> keep it. A fix that
+    /// ignores too much, such as every path that it does not know, makes this
+    /// test fail. The expected output is exact, so a change to the header or to
+    /// the text makes this test fail too.
+    #[test]
+    fn a_new_text_file_in_monitor_mode_gives_a_header_and_the_text() {
+        let directory = TemporaryDirectory::new();
+        let note = directory.file_of("note.txt", b"hello\n");
+        let mut monitor = MonitorUnderTest::new();
+
+        let written = monitor.handle(&note);
+
+        assert_eq!(
+            written,
+            Written {
+                stdout: format!("\nFound new text file: {}\nhello\n", note.display()),
+                stderr: String::new(),
+            },
+            "a new text file must give its header and its text, and no failure"
+        );
+        assert!(
+            monitor.image_headers().is_empty(),
+            "a text file must not reach the image display, but it got {:?}",
+            monitor.image_headers()
+        );
+    }
+
+    /// A new image in monitor mode goes to the image display with its header.
+    ///
+    /// The image display prints the header itself, so the auto-fit path can
+    /// count its rows. The header is an empty row, which separates this image
+    /// from the one before it, and then the path. A fix that ignores too much,
+    /// such as every path that it does not open as text, makes this test fail.
+    #[test]
+    fn a_new_image_in_monitor_mode_goes_to_the_image_display_with_its_header() {
+        let directory = TemporaryDirectory::new();
+        let picture = directory.file_of("picture.png", &picture_bytes_in(image::ImageFormat::Png));
+        let mut monitor = MonitorUnderTest::new();
+
+        let written = monitor.handle(&picture);
+
+        assert_eq!(
+            written,
+            Written::default(),
+            "an image that displays must give no text of its own"
+        );
+        assert_eq!(
+            monitor.image_headers(),
+            vec![vec![
+                String::new(),
+                format!("Found new image: {}", picture.display())
+            ]],
+            "an image must reach the image display one time, with its header"
+        );
+    }
+
+    /// A new directory in monitor mode gives no output.
+    ///
+    /// The watcher reports a new directory with a create event, as it reports
+    /// a new file. Monitor mode routed each path by its extension alone, so a
+    /// directory went to the text display. That display printed a header and
+    /// then a failure, and each later event for the directory printed the
+    /// failure again. A directory holds no text and no image, so the correct
+    /// outcome is no output at all.
+    ///
+    /// The directory `album.png` holds the rule to the image display too. The
+    /// extension of an image in its name does not make a directory an image.
+    #[test]
+    fn a_new_directory_in_monitor_mode_gives_no_output() {
+        let directory = TemporaryDirectory::new();
+        let mut monitor = MonitorUnderTest::new();
+
+        let written: Vec<(&str, Written)> = ["subdir", "album.png"]
+            .into_iter()
+            .map(|name| (name, monitor.handle(&directory.directory(name))))
+            .collect();
+
+        assert!(
+            written
+                .iter()
+                .all(|(_, output)| *output == Written::default()),
+            "a new directory must give no output, but these directories gave output: {written:#?}"
+        );
+        assert!(
+            monitor.image_headers().is_empty(),
+            "a directory must not reach the image display, but it got {:?}",
+            monitor.image_headers()
+        );
+    }
+
+    /// A path that is gone at the time of its handling gives no output.
+    ///
+    /// A program often writes a temporary file and then renames or removes
+    /// it. macOS writes a screenshot under a hidden temporary name, such as
+    /// `.Screenshot 1.png`, and then renames it. The event for the temporary
+    /// name thus arrives after the file is gone. Monitor mode printed a header
+    /// and a failure for such a text path, and it sent such an image path to
+    /// the image display. A path that is gone holds nothing to show, so the
+    /// correct outcome is no output at all.
+    ///
+    /// The file `note.tmp` holds the rule to the text display, and the file
+    /// `.Screenshot 1.png` holds it to the image display. The test makes each
+    /// file and then removes it, as the program that wrote it does.
+    #[test]
+    fn a_path_that_is_gone_in_monitor_mode_gives_no_output() {
+        let directory = TemporaryDirectory::new();
+        let mut monitor = MonitorUnderTest::new();
+
+        let written: Vec<(&str, Written)> = [
+            ("note.tmp", b"a draft\n".to_vec()),
+            (
+                ".Screenshot 1.png",
+                picture_bytes_in(image::ImageFormat::Png),
+            ),
+        ]
+        .into_iter()
+        .map(|(name, bytes)| {
+            let path = directory.file_of(name, &bytes);
+            fs::remove_file(&path).expect("a removal of a file in the temporary directory");
+            (name, monitor.handle(&path))
+        })
+        .collect();
+
+        assert!(
+            written
+                .iter()
+                .all(|(_, output)| *output == Written::default()),
+            "a path that is gone must give no output, but these paths gave output: {written:#?}"
+        );
+        assert!(
+            monitor.image_headers().is_empty(),
+            "a path that is gone must not reach the image display, but it got {:?}",
+            monitor.image_headers()
+        );
+    }
+
+    /// A new binary file in monitor mode gives no output.
+    ///
+    /// Monitor mode reads each path that is not an image and not a video as
+    /// text. A binary file, such as a database, an archive, or a lock file,
+    /// holds no text to show. Monitor mode reported a failure for a file that
+    /// is not UTF-8, and it printed a header and then the raw bytes for a file
+    /// that holds NUL bytes. Neither output helps the user, so the correct
+    /// outcome is no output at all.
+    ///
+    /// The file `blob.bin` holds bytes that are not valid UTF-8. The file
+    /// `zeros.dat` holds only NUL bytes. These bytes are valid UTF-8, so the
+    /// rule must see a NUL byte as a control character, not only a failure to
+    /// decode.
+    #[test]
+    fn a_new_binary_file_in_monitor_mode_gives_no_output() {
+        let directory = TemporaryDirectory::new();
+        let mut monitor = MonitorUnderTest::new();
+
+        let written: Vec<(&str, Written)> = [
+            (
+                "blob.bin",
+                vec![0xff, 0xfe, 0x80, 0x81, 0xc0, 0xc1, 0xf5, 0x41, 0x0a],
+            ),
+            ("zeros.dat", vec![0x00; 64]),
+        ]
+        .into_iter()
+        .map(|(name, bytes)| (name, monitor.handle(&directory.file_of(name, &bytes))))
+        .collect();
+
+        assert!(
+            written
+                .iter()
+                .all(|(_, output)| *output == Written::default()),
+            "a new binary file must give no output, but these files gave output: {written:#?}"
+        );
+        assert!(
+            monitor.image_headers().is_empty(),
+            "a binary file must not reach the image display, but it got {:?}",
+            monitor.image_headers()
+        );
+    }
+
+    /// A new text file that holds terminal control characters in monitor mode
+    /// gives no output.
+    ///
+    /// Monitor mode wrote the text of a new file to the terminal unchanged. A
+    /// file that holds an escape sequence thus controlled the terminal. In
+    /// monitor mode the user does not choose the file. Any program can put a
+    /// file in a watched directory, such as `~/Downloads`. Such a file can
+    /// write the clipboard, set the title, or move the cursor to fake output.
+    ///
+    /// The file `clipboard.txt` holds OSC 52, which writes the clipboard, and
+    /// OSC 0, which sets the title. The file `cursor.txt` holds CSI sequences
+    /// that clear the screen and move the cursor. The file `c1.txt` holds the
+    /// C1 characters for OSC and ST, encoded in UTF-8. Some terminals read
+    /// them as control characters in UTF-8 too, so the rule must see C1 and
+    /// not only C0. The file `delete.txt` holds DEL, which is a control
+    /// character that is not in C0.
+    #[test]
+    fn a_new_text_file_that_holds_terminal_control_characters_gives_no_output() {
+        let directory = TemporaryDirectory::new();
+        let mut monitor = MonitorUnderTest::new();
+
+        let written: Vec<(&str, Written)> = [
+            (
+                "clipboard.txt",
+                b"note\x1b]52;c;cm0gLXJmIH4K\x07\x1b]0;title\x07\n".to_vec(),
+            ),
+            ("cursor.txt", b"ok\x1b[2J\x1b[1;1Hfake prompt $ \n".to_vec()),
+            ("c1.txt", "a\u{9d}52;c;eA==\u{9c}\n".as_bytes().to_vec()),
+            ("delete.txt", b"a\x7fb\n".to_vec()),
+        ]
+        .into_iter()
+        .map(|(name, bytes)| (name, monitor.handle(&directory.file_of(name, &bytes))))
+        .collect();
+
+        assert!(
+            written
+                .iter()
+                .all(|(_, output)| *output == Written::default()),
+            "a new file that holds terminal control characters must give no output, but these files gave output: {written:#?}"
+        );
+        assert!(
+            monitor.image_headers().is_empty(),
+            "a file that holds terminal control characters must not reach the image display, but it got {:?}",
+            monitor.image_headers()
+        );
+    }
+
+    /// A text file with tabs and CRLF line ends shows in monitor mode.
+    ///
+    /// Tab and carriage return are control characters, but plain text holds
+    /// them. A table uses tabs, and a file from Windows ends each line with a
+    /// carriage return and a line feed. The rule that ignores a file with
+    /// terminal control characters must keep these files. A rule that
+    /// ignores every control character makes this test fail.
+    #[test]
+    fn a_text_file_with_tabs_and_crlf_line_ends_shows_in_monitor_mode() {
+        let directory = TemporaryDirectory::new();
+        let table = directory.file_of("table.txt", b"name\tsize\r\nic\t42\r\n");
+        let mut monitor = MonitorUnderTest::new();
+
+        let written = monitor.handle(&table);
+
+        assert_eq!(
+            written,
+            Written {
+                stdout: format!(
+                    "\nFound new text file: {}\nname\tsize\r\nic\t42\r\n",
+                    table.display()
+                ),
+                stderr: String::new(),
+            },
+            "a text file with tabs and CRLF line ends must give its header and its text"
+        );
+    }
+
+    /// A text file that is empty at its first event shows its text at a later
+    /// event.
+    ///
+    /// A program that writes a file makes it first, and the watcher reports
+    /// the new empty file before the program writes the text. Monitor mode
+    /// showed the empty file as a header with no text, put the path into the
+    /// record, and then ignored the event that the write gave. The user thus
+    /// never saw the text. An empty file holds nothing to show, so the first
+    /// event gives no output, and the path stays out of the record.
+    ///
+    /// One monitor handles the path two times, as monitor mode does. The
+    /// expected output of the second event is exact, so a header without the
+    /// text makes this test fail too.
+    #[test]
+    fn a_text_file_that_is_empty_at_its_first_event_shows_its_text_at_a_later_event() {
+        let directory = TemporaryDirectory::new();
+        let note = directory.file_of("note.txt", b"");
+        let mut monitor = MonitorUnderTest::new();
+
+        let first = monitor.handle(&note);
+        fs::write(&note, b"hello\n").expect("a write to the temporary directory");
+        let second = monitor.handle(&note);
+
+        assert_eq!(
+            first,
+            Written::default(),
+            "an empty text file must give no output"
+        );
+        assert_eq!(
+            second,
+            Written {
+                stdout: format!("\nFound new text file: {}\nhello\n", note.display()),
+                stderr: String::new(),
+            },
+            "a later event must show the text that the file holds now"
+        );
+        assert!(
+            monitor.image_headers().is_empty(),
+            "a text file must not reach the image display, but it got {:?}",
+            monitor.image_headers()
+        );
+    }
+
+    /// An image that is empty at its first event shows at a later event.
+    ///
+    /// A program such as `curl -o shot.png`, an editor, or a screenshot tool
+    /// makes the file first, and the watcher reports the new empty file before
+    /// the program writes the bytes. Monitor mode sent the empty file to the
+    /// image display. Each event then gave a header on standard output and an
+    /// `unexpected end of file` error on standard error. An empty file holds
+    /// nothing to show, so the first event gives no output, and the path stays
+    /// out of the record.
+    ///
+    /// One monitor handles the path two times, as monitor mode does. The
+    /// second event must reach the image display exactly one time. The empty
+    /// event thus did not reach the display, and it did not put the path into
+    /// the record.
+    #[test]
+    fn an_image_that_is_empty_at_its_first_event_shows_at_a_later_event() {
+        let directory = TemporaryDirectory::new();
+        let shot = directory.file_of("shot.png", b"");
+        let mut monitor = MonitorUnderTest::new();
+
+        let first = monitor.handle(&shot);
+        let headers_after_first = monitor.image_headers();
+        fs::write(&shot, picture_bytes_in(image::ImageFormat::Png))
+            .expect("a write to the temporary directory");
+        let second = monitor.handle(&shot);
+
+        assert_eq!(
+            first,
+            Written::default(),
+            "an empty image must give no output"
+        );
+        assert!(
+            headers_after_first.is_empty(),
+            "an empty image must not reach the image display, but it got {headers_after_first:?}"
+        );
+        assert_eq!(
+            second,
+            Written::default(),
+            "an image that displays must give no text of its own"
+        );
+        assert_eq!(
+            monitor.image_headers(),
+            vec![vec![
+                String::new(),
+                format!("Found new image: {}", shot.display())
+            ]],
+            "a later event must reach the image display one time, with its header"
+        );
+    }
+
+    /// A text file that does not read for a different cause gives one error,
+    /// and the error names the cause.
+    ///
+    /// A file that the user has no permission to read is not gone, not empty,
+    /// and not binary, so monitor mode reports it. Monitor mode kept such a
+    /// path out of the record, so each later event for the path printed the
+    /// same error again. A program that writes a file gives many events, so
+    /// the user saw one error many times. The error of one path must print one
+    /// time.
+    ///
+    /// The expected cause is the text that the operating system gives for the
+    /// same read. The test thus does not depend on the words of one operating
+    /// system. A user that ignores permissions, such as root, reads the file,
+    /// and the test then has nothing to prove. It says so and stops.
+    ///
+    /// The directory guard removes the file at the end, because the removal of
+    /// a file needs the permissions of its directory and not those of the file.
+    #[cfg(unix)]
+    #[test]
+    fn a_text_file_that_does_not_read_gives_one_error_that_names_the_cause() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TemporaryDirectory::new();
+        let secret = directory.file_of("secret.txt", b"hello\n");
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o000))
+            .expect("a change of the permissions of a file in the temporary directory");
+        let cause = match fs::read(&secret) {
+            Ok(_) => {
+                eprintln!(
+                    "skipped: this user reads a file that has no permissions, so the read cannot fail"
+                );
+                return;
+            }
+            Err(error) => error.to_string(),
+        };
+        let mut monitor = MonitorUnderTest::new();
+
+        let first = monitor.handle(&secret);
+        let second = monitor.handle(&secret);
+
+        assert_eq!(
+            first.stdout, "",
+            "a text file that does not read must give no header and no text"
+        );
+        let lines: Vec<&str> = first.stderr.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "a text file that does not read must give exactly one line of error, but it gave {:?}",
+            first.stderr
+        );
+        assert!(
+            lines[0].contains(&secret.display().to_string()) && lines[0].contains(&cause),
+            "the error must name the path {} and the cause {cause:?}, but it is {:?}",
+            secret.display(),
+            lines[0]
+        );
+        assert_eq!(
+            second,
+            Written::default(),
+            "a later event for the same path must not print the error again"
+        );
+    }
+
+    /// An image that does not display gives an error that names the cause,
+    /// and a later event tries the image again.
+    ///
+    /// Monitor mode printed the error of the image display with the plain
+    /// format of `anyhow`, which shows only the outermost context. The user
+    /// thus read `Failed to open image file: <path>` and no cause. The error
+    /// must show the whole chain, down to the cause that the decoder gives.
+    ///
+    /// The expected cause comes from the same decoder that the image display
+    /// of this test uses, so the test does not copy the words of the decoder.
+    /// The file `broken.png` holds text, which starts with no signature of an
+    /// image format. The decoder thus takes the format from the extension,
+    /// and the decode fails.
+    ///
+    /// An image that fails stays out of the record on purpose. A program that
+    /// writes an image gives an event before the write is complete, and the
+    /// part of the image does not decode. A later event decodes the complete
+    /// image. So the second event calls the image display again and reports
+    /// again.
+    #[test]
+    fn an_image_that_does_not_display_gives_an_error_that_names_the_cause_at_each_event() {
+        let directory = TemporaryDirectory::new();
+        let broken = directory.file_of("broken.png", &b"no picture here\n".repeat(4));
+        let cause = read_image_file(&broken, &a_terminal_that_sends_a_file())
+            .expect_err("bytes with no image signature do not decode as a PNG")
+            .root_cause()
+            .to_string();
+        let header = vec![
+            String::new(),
+            format!("Found new image: {}", broken.display()),
+        ];
+        let mut monitor = MonitorUnderTest::new();
+
+        let first = monitor.handle(&broken);
+        let headers_after_first = monitor.image_headers();
+        let second = monitor.handle(&broken);
+
+        assert_eq!(
+            first.stdout, "",
+            "an image that does not display must give no text of its own on stdout"
+        );
+        let lines: Vec<&str> = first.stderr.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "an image that does not display must give exactly one line of error, but it gave {:?}",
+            first.stderr
+        );
+        assert!(
+            lines[0].contains(&broken.display().to_string()) && lines[0].contains(&cause),
+            "the error must name the path {} and the cause {cause:?}, but it is {:?}",
+            broken.display(),
+            lines[0]
+        );
+        assert_eq!(
+            headers_after_first,
+            vec![header.clone()],
+            "the image must reach the image display one time, with its header"
+        );
+        assert_eq!(
+            second, first,
+            "a later event must try the image again and report the same error again"
+        );
+        assert_eq!(
+            monitor.image_headers(),
+            vec![header.clone(), header],
+            "a later event must call the image display again"
+        );
+    }
+
+    /// An image error in monitor mode names its cause one time.
+    ///
+    /// The decoder of the `image` crate writes its cause into its own message,
+    /// such as `Format error decoding Png: Invalid PNG signature.`, and it also
+    /// gives that cause as the next link of the chain. The alternate format of
+    /// `anyhow` prints each link, so the user read the cause two times, as
+    /// `Invalid PNG signature.: Invalid PNG signature.`. A link that only
+    /// repeats the end of the link before it tells the user nothing new.
+    ///
+    /// The expected cause comes from the same decoder that the image display
+    /// of this test uses, so the test does not copy the words of the decoder.
+    #[test]
+    fn an_image_error_in_monitor_mode_names_its_cause_one_time() {
+        let directory = TemporaryDirectory::new();
+        let broken = directory.file_of("broken.png", &b"no picture here\n".repeat(4));
+        let cause = read_image_file(&broken, &a_terminal_that_sends_a_file())
+            .expect_err("bytes with no image signature do not decode as a PNG")
+            .root_cause()
+            .to_string();
+        let mut monitor = MonitorUnderTest::new();
+
+        let written = monitor.handle(&broken);
+
+        assert_eq!(
+            written.stderr.matches(&cause).count(),
+            1,
+            "the error must name the cause {cause:?} one time, but it is {:?}",
+            written.stderr
+        );
+    }
+
+    /// An image error in monitor mode names its path one time.
+    ///
+    /// The line of a failure starts with the path of the image. The chain of
+    /// the error then started with the context of the file reader, which is
+    /// `Failed to open image file: <path>`. So the user read the path two
+    /// times on one long line. The second copy tells the user nothing new.
+    /// The monitor names the path, so the chain of the error must not name it.
+    ///
+    /// The expected cause comes from the same decoder that the image display
+    /// of this test uses, so the test does not copy the words of the decoder.
+    /// The test also checks that the cause stays on the line, so a fix that
+    /// drops the whole chain makes this test fail.
+    #[test]
+    fn an_image_error_in_monitor_mode_names_its_path_one_time() {
+        let directory = TemporaryDirectory::new();
+        let broken = directory.file_of("broken.png", &b"no picture here\n".repeat(4));
+        let cause = read_image_file(&broken, &a_terminal_that_sends_a_file())
+            .expect_err("bytes with no image signature do not decode as a PNG")
+            .root_cause()
+            .to_string();
+        let mut monitor = MonitorUnderTest::new();
+
+        let written = monitor.handle(&broken);
+
+        assert_eq!(
+            written
+                .stderr
+                .matches(&broken.display().to_string())
+                .count(),
+            1,
+            "the error must name the path {} one time, but it is {:?}",
+            broken.display(),
+            written.stderr
+        );
+        assert!(
+            written.stderr.contains(&cause),
+            "the error must still name the cause {cause:?}, but it is {:?}",
+            written.stderr
+        );
+    }
+
+    /// The reader of a new text file ignores a path that is gone at the read.
+    ///
+    /// [`Monitor::handle`] checks the path before the read, and a path that is
+    /// gone at that check gives no output. A program can also remove the file
+    /// after the check and before the read. The reader must then ignore the
+    /// path as the check does, and not report the failure of the read. No test
+    /// of `handle` reaches that gap, because the gap is too short to hit on
+    /// purpose. So this test calls the reader directly, with a path that no
+    /// file holds.
+    #[test]
+    fn the_text_reader_ignores_a_path_that_is_gone_at_the_read() {
+        let directory = TemporaryDirectory::new();
+        let gone = directory.path().join("gone.txt");
+
+        let read = read_new_text_file(&gone);
+
+        assert!(
+            matches!(read, Ok(None)),
+            "a path that is gone at the read must be ignored, but the reader gave {read:?}"
+        );
+    }
+
+    /// The reader of a new image ignores a path that is gone at the read.
+    ///
+    /// [`Monitor::handle`] checks the path before the read, and a path that is
+    /// gone at that check gives no output. A program can also remove or rename
+    /// the file after the check and before the read. The screenshot tool of
+    /// macOS writes a temporary `.Screenshot` file and then renames it. The
+    /// reader must then ignore the path as the check does, and not report the
+    /// failure of the read. No test of `handle` reaches that gap, because the
+    /// gap is too short to hit on purpose. So this test calls the reader
+    /// directly, with a path that no file holds.
+    #[test]
+    fn the_image_reader_ignores_a_path_that_is_gone_at_the_read() {
+        let directory = TemporaryDirectory::new();
+        let gone = directory.path().join(".Screenshot 1.png");
+
+        let read = read_new_image_file(&gone);
+
+        assert!(
+            matches!(read, Ok(None)),
+            "an image that is gone at the read must be ignored, but the reader gave {read:?}"
+        );
+    }
+
+    /// A reader that fails at each read.
+    ///
+    /// A test puts this reader after the bytes that the text rule can take. A
+    /// rule that reads past those bytes thus gets an error.
+    struct ReaderThatFails;
+
+    impl Read for ReaderThatFails {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("the reader read past the first block"))
+        }
+    }
+
+    /// The text rule of monitor mode reads only the first block of a binary
+    /// file.
+    ///
+    /// The rule read the whole file before it decided that the file is binary.
+    /// An ignored file stays out of the record, so a later event reads it
+    /// again. A browser writes a download, such as a `.crdownload` file, in
+    /// many steps, and each step gives an event. So each event read the whole
+    /// partial file again, and memory use rose to the size of the file at each
+    /// event.
+    ///
+    /// Each reader of this test gives a start of 64 KiB and then fails. A rule
+    /// that reads past its first block thus gives an error, not `None`. So
+    /// 64 KiB bounds the size of the first block that the rule can take. Each
+    /// start is binary. The first start holds NUL bytes, as the start of an
+    /// archive or a partial download does. The second start holds bytes that
+    /// are not UTF-8. The third start holds an escape sequence and then text.
+    #[test]
+    fn the_text_rule_reads_only_the_first_block_of_a_binary_file() {
+        const START_BYTES: usize = 64 * 1024;
+        let mut escape = b"\x1b[2J".to_vec();
+        escape.resize(START_BYTES, b'a');
+
+        let reads: Vec<(&str, io::Result<Option<String>>)> = [
+            ("NUL bytes", vec![0_u8; START_BYTES]),
+            ("bytes that are not UTF-8", vec![0xff_u8; START_BYTES]),
+            ("an escape sequence", escape),
+        ]
+        .into_iter()
+        .map(|(name, start)| {
+            (
+                name,
+                read_text_to_show(io::Cursor::new(start).chain(ReaderThatFails)),
+            )
+        })
+        .collect();
+
+        let not_ignored: Vec<&(&str, io::Result<Option<String>>)> = reads
+            .iter()
+            .filter(|(_, read)| !matches!(read, Ok(None)))
+            .collect();
+        assert!(
+            not_ignored.is_empty(),
+            "a binary start must be ignored after the first block, but the rule gave: {not_ignored:#?}"
+        );
+    }
+
+    /// A text file larger than the first block shows whole in monitor mode.
+    ///
+    /// The text rule decides on a first block of the file, and then it reads
+    /// the rest. The text of this file is the character `日`, which is three
+    /// bytes in UTF-8. No power of two divides by three, so a character sits
+    /// across each block edge that is a power of two. A rule that ignores a
+    /// block that ends in part of a character makes this test fail. A rule
+    /// that shows only the first block makes this test fail too.
+    #[test]
+    fn a_text_file_larger_than_the_first_block_shows_whole_in_monitor_mode() {
+        let directory = TemporaryDirectory::new();
+        let text = format!("{}\n", "日".repeat(30_000));
+        let large = directory.file_of("large.txt", text.as_bytes());
+        let mut monitor = MonitorUnderTest::new();
+
+        let written = monitor.handle(&large);
+
+        assert_eq!(
+            written,
+            Written {
+                stdout: format!("\nFound new text file: {}\n{text}", large.display()),
+                stderr: String::new(),
+            },
+            "a text file larger than the first block must give its header and all of its text"
+        );
+    }
+
+    /// A file with text at the start and a NUL byte later gives no output.
+    ///
+    /// The text rule decides on a first block of the file, and a first block
+    /// of text is not sufficient. The NUL byte of this file is after 64 KiB of
+    /// text, so it is not in the first block. The rule must apply the full
+    /// check to the complete content. A rule that decides on the first block
+    /// alone makes this test fail.
+    #[test]
+    fn a_file_with_text_at_the_start_and_a_nul_byte_later_gives_no_output() {
+        let directory = TemporaryDirectory::new();
+        let mut bytes = "a".repeat(64 * 1024).into_bytes();
+        bytes.extend_from_slice(b"\0\n");
+        let late_nul = directory.file_of("late-nul.txt", &bytes);
+        let mut monitor = MonitorUnderTest::new();
+
+        let written = monitor.handle(&late_nul);
+
+        assert_eq!(
+            written,
+            Written::default(),
+            "a file with a NUL byte after its first block must give no output"
         );
     }
 
