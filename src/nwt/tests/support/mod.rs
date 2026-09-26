@@ -19,6 +19,13 @@
 //! caller in this repository is broken the same way by the same environment.
 //! That function explains why a list is the bug.
 //!
+//! The third escape is the home directory. `nwt` reads `~/.nwt.toml`, and its
+//! git children read `~/.gitconfig`. A host file with `quiet = true` removes
+//! each stderr line that a test reads, and a host file with `checkout = ...`
+//! sends each run through `-c`. [`nwt_command`] gives the child a home
+//! directory that is private to the test process, so no configuration of the
+//! host home can change an answer. `tests/private-home.rs` holds that rule.
+//!
 //! Each integration test file is compiled as its own crate that pulls this
 //! module in via `mod support;`, so not every binary uses every helper — hence
 //! the crate-level dead-code allowance below.
@@ -31,6 +38,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gitscratch::shed_inherited_git_environment;
@@ -111,7 +119,8 @@ fn record(root: &Path, dir: &Path, into: &mut Snapshot) {
 ///
 /// Each decoy test of `tests/production-git-env-isolation.rs` takes a snapshot
 /// of the decoy before and after its run: the plain `-b` run, the sparse `-b`
-/// run, and the sparse `-c` run. The helpers live here, so each of those tests
+/// run, the sparse `-c` run, and the two `-b` runs that track a remote branch.
+/// The helpers live here, so each of those tests
 /// reads the decoy with one rule, and a later test file that needs a decoy
 /// reads it with the same rule.
 pub fn snapshot(root: &Path) -> Snapshot {
@@ -174,6 +183,9 @@ pub fn difference(before: &Snapshot, after: &Snapshot) -> Vec<String> {
 /// With them gone git falls back to the host's `~/.gitconfig` and
 /// `/etc/gitconfig` exactly as it does in a normal shell, so settings the
 /// fixtures rely on — `init.defaultBranch` among them — still apply.
+///
+/// That is true of the git of the fixture only. [`nwt_command`] gives the `nwt`
+/// child a private home, so the git children of `nwt` read no `~/.gitconfig`.
 pub fn run_git(dir: &Path, args: &[&str]) -> bool {
     let mut cmd = Command::new("git");
     shed_inherited_git_environment(&mut cmd);
@@ -357,7 +369,9 @@ pub fn clone_of(source: &Path) -> (TempDir, PathBuf) {
 /// The fixture sets `core.hooksPath` in the repository, and does not write into
 /// `.git/hooks`. The host `~/.gitconfig` can set a global `core.hooksPath`, and
 /// git then ignores `.git/hooks`. A value in the repository configuration
-/// overrides the global value.
+/// overrides the global value. The private home of [`nwt_command`] already
+/// keeps the host value away from the `nwt` child, but the git of the fixture
+/// still reads it. The value in the repository gives both the same hook.
 ///
 /// Unix only: the hook is a POSIX `sh` script that the Unix permission bits
 /// make executable.
@@ -383,6 +397,52 @@ pub fn install_post_checkout_hook(repo: &Path, hooks_dir: &Path, body: &str) {
     );
 }
 
+/// The prefix of the name of each private home that [`private_home`] makes.
+const PRIVATE_HOME_PREFIX: &str = "nwt-home-";
+
+/// The home directory that each `nwt` child of this test process gets.
+///
+/// The directory is empty when this function makes it, so it holds no
+/// `.nwt.toml`, no `.gitconfig` and no `.config/git/config`. `nwt` reads its
+/// configuration file through `dirs::home_dir`, which reads `HOME`, and git
+/// reads its global configuration from the same home. The value must be a real
+/// path: `dirs::home_dir` takes an empty `HOME` as no value and falls back to
+/// the home in the password database, which is the home of the host.
+///
+/// The choices, and why:
+///
+/// - **One directory for each process, made once through a [`OnceLock`].** A
+///   directory for each call has no owner: a [`Command`] cannot keep a
+///   [`TempDir`] alive, so each call would leave one directory behind. A
+///   static is never dropped either, so the one directory of a process also
+///   stays. One for each process keeps that to a few directories for each run.
+/// - **Under `CARGO_TARGET_TMPDIR`.** Cargo sets that path at compile time for
+///   each integration test. It lies in the target directory, so `cargo clean`
+///   removes what a run leaves, and nothing collects in the temporary directory
+///   of the system.
+/// - **A name that carries the process id and a nanosecond clock reading.** Two
+///   copies of one test binary can run at the same time, and a fixed name would
+///   give them one shared home. [`fs::create_dir`] refuses a name that already
+///   exists, so a collision fails loudly and never shares a home.
+///
+/// # Panics
+///
+/// Panics when the directory cannot be made.
+fn private_home() -> &'static Path {
+    static HOME: OnceLock<PathBuf> = OnceLock::new();
+    HOME.get_or_init(|| {
+        let parent = Path::new(env!("CARGO_TARGET_TMPDIR"));
+        fs::create_dir_all(parent).unwrap_or_else(|e| panic!("create {}: {e}", parent.display()));
+        let home = parent.join(format!(
+            "{PRIVATE_HOME_PREFIX}{}-{}",
+            std::process::id(),
+            nanos()
+        ));
+        fs::create_dir(&home).unwrap_or_else(|e| panic!("create {}: {e}", home.display()));
+        home
+    })
+}
+
 /// Builds a [`Command`] that runs the real `nwt` binary against `repo`.
 ///
 /// This is the single, mandatory entrance every integration test uses to spawn
@@ -403,9 +463,23 @@ pub fn install_post_checkout_hook(repo: &Path, hooks_dir: &Path, body: &str) {
 /// family — there is no `MULTIPLEXER_*` to sweep — while the git variables are,
 /// which is why they get the prefix rule instead of a list.
 ///
+/// It also points `HOME` at [`private_home`], and removes `XDG_CONFIG_HOME`.
+/// The same class of bug comes in through the home: `nwt` reads `~/.nwt.toml`,
+/// so a host file with `quiet = true` removes each stderr line that a test
+/// reads, and a host file with `checkout = ...` sends each run through `-c`.
+/// The git children of `nwt` read `~/.gitconfig`, and
+/// `$XDG_CONFIG_HOME/git/config` when that variable is set. With the variable
+/// gone, git reads `$HOME/.config/git/config`, which is in the private home. So
+/// no configuration of the host home can change an answer of the suite.
+/// `tests/private-home.rs` holds this rule, also with a run of the binary under
+/// a hostile home.
+///
 /// Tests that deliberately *exercise* the multiplexer behaviour (see
 /// [`FakeMultiplexer`]) re-add `ZELLIJ`/`TMUX` on the returned command; because
 /// those `.env(...)` calls run after the scrub here, they win for that child.
+/// A test that needs a home of its own sets `HOME` on the returned command in
+/// the same way, and wins for the same reason
+/// (`tests/worktrees-dir-override.rs`).
 pub fn nwt_command(repo: &Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_nwt"));
     cmd.current_dir(repo)
@@ -422,6 +496,10 @@ pub fn nwt_command(repo: &Path) -> Command {
     // launching shell injected. Shed by prefix, never by name — see `run_git`
     // above, and `gitscratch::shed_inherited_git_environment` for the rule.
     shed_inherited_git_environment(&mut cmd);
+    // Same idea for the home: nwt reads ~/.nwt.toml, and its git children read
+    // ~/.gitconfig and $XDG_CONFIG_HOME/git/config. See `private_home` above.
+    cmd.env("HOME", private_home())
+        .env_remove("XDG_CONFIG_HOME");
     cmd
 }
 
