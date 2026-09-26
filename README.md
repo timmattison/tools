@@ -2768,7 +2768,7 @@ nwt --sparse-exclude assets   # Leave the tracked directory assets/ out
 
 ### Options
 
-- `-b, --branch <NAME>`: Create worktree with specific branch name instead of random name
+- `-b, --branch <NAME>`: Create worktree with specific branch name instead of random name. When no local branch of that name exists and the clone has a remote branch of that name, the new branch starts at the remote branch and tracks it. Run `git fetch` first (see Remote branches below)
 - `--random-directory`: Use a random directory name even when `--branch` is given (by default the branch name doubles as the directory name)
 - `-c, --checkout <REF>`: Check out an existing branch/tag/commit instead of creating a new branch
 - `--run <COMMAND>`: Run a command in the new worktree after creation
@@ -2824,6 +2824,64 @@ Three rules govern the value:
 
 nwt reads the key with `git config --get`, which reads every scope. The answer can therefore come from the repository's own configuration, from `~/.gitconfig`, or from the system configuration. The repository's own configuration is the place for it: it travels with the repository, and `yadm` already tracks that file.
 
+### Remote branches
+
+A run that makes a new branch first looks for a remote branch of that name. The name comes from `-b <name>`, from the shorthand `-b 33` (branch `issue-33`), or from `branch` in `~/.nwt.toml`. nwt finds it with the rules of `git checkout`. A remote holds the branch when a fetch refspec of that remote maps `refs/heads/<name>` to a ref that the clone holds. With the default refspec, that ref is `refs/remotes/<remote>/<name>`.
+
+| Remotes that hold the branch | What nwt does |
+|---|---|
+| One | The new branch starts at that remote branch, and it tracks it |
+| More than one, and `checkout.defaultRemote` names the remote of one of them | The new branch starts at the branch of that remote, and it tracks it |
+| More than one, and `checkout.defaultRemote` picks none of them | nwt refuses with exit code 16, and it makes nothing |
+| None | The new branch starts at `HEAD`, as before |
+
+Thus after a fetch, `nwt -b 33` makes the worktree `issue-33` with the work of `origin/issue-33` in it. The branch has `origin/issue-33` as its upstream, so `git pull` and `git status` in the worktree use it with no more setup.
+
+**The refusal.** When more than one remote holds the branch, nwt cannot know which one to track. It does not start at `HEAD` in silence, because a silent fall back hides the mistake. It names each candidate and the command that sets the key:
+
+```text
+Error: more than one remote holds the branch 'issue-33', and checkout.defaultRemote picks none of them:
+  origin/issue-33
+  upstream/issue-33
+Name the remote to track, and run nwt again:
+  git config checkout.defaultRemote <remote>
+```
+
+**Output.** Stdout holds only the path of the worktree. After a run that tracks a remote branch, nwt prints this line to stderr:
+
+```text
+Tracking origin/issue-33
+```
+
+Git writes its own report (`branch 'issue-33' set up to track 'origin/issue-33'.`) to stdout, and nwt keeps stdout for the path. So this line is the only report of the start point. `-q`/`--quiet` hides it.
+
+**Fetch first.** nwt does not fetch. It reads only the remote branches that the clone already holds. Run `git fetch` first:
+
+```bash
+git fetch
+nwt -b 33
+```
+
+A fetch needs the network, and it can stop to ask for credentials, so nwt leaves the fetch to you. A branch that the remote got after your last fetch is not in the clone, and the new branch then starts at `HEAD`.
+
+**Sparse worktrees.** With `--sparse-exclude`, nwt checks each directory at the remote branch, because the files of the new worktree come from it (see Sparse worktrees below). A refusal names the remote branch, for example `origin/issue-33`.
+
+**What stays the same.**
+
+- When a local branch of that name exists, nwt does not look. It refuses with the error that it gave before, that the branch already exists, and it exits 7.
+- The directory name does not change. `nwt -b issue-33` makes the directory `issue-33`.
+- A run with a random name does no lookup, and `-c <ref>` does not change.
+
+**Fetch refspec.** nwt reads the fetch refspecs of each remote from the git configuration, as `git checkout` does. With `+refs/heads/*:refs/remotes/mirror/heads/*`, nwt finds the branch at `refs/remotes/mirror/heads/issue-33`, and the `Tracking` line names it `mirror/heads/issue-33`. nwt names a ref outside `refs/remotes/` in full. When the name of a candidate in the refusal does not start with the name of its remote, the refusal adds the remote, so that you know what to give `checkout.defaultRemote`:
+
+```text
+  mirror/heads/issue-33 (remote origin)
+```
+
+A remote branch that no fetch refspec maps is stale, for example after `git remote set-branches`. nwt ignores it, as git does, and a remote without a fetch refspec gives no branch.
+
+**Negative refspecs.** A negative refspec such as `^refs/heads/issue-33` keeps its remote from giving the branch, and the new branch then starts at `HEAD`. `git checkout` differs here: after a pattern refspec, it takes the stale `origin/issue-33` and sets no upstream. `git worktree add --track`, which nwt runs, refuses that ref, so nwt honors the negative refspec. For `-c <name>` with `--sparse-exclude`, nwt then finds no remote branch, and the run exits 7, where `-c <name>` without the flag takes the stale ref.
+
 ### Env File Copying
 
 After creating the worktree, nwt copies untracked `.env` files from the main worktree into the new one, preserving their relative paths, so development settings that aren't committed to git are there immediately. Two patterns are copied: `.env` exactly, and anything starting with `.env.` (`.env.local`, `.env.development`, and so on). Nothing else is — `.envrc` (direnv) and `.environment` don't match the pattern, and any file tracked by git is skipped, since git already puts it in the new worktree.
@@ -2868,7 +2926,7 @@ nwt -b issue-12 --sparse-exclude assets/video --sparse-exclude fixtures/large
 | A path that is not a directory that git tracks at the ref the worktree checks out: a missing path, a file, or a directory that is only on disk | 15 |
 | A value that passes the first row, when git cannot read the ref (for example, a `-c <ref>` that does not exist) | 7 |
 
-The check reads the ref and not the disk, because the files of the new worktree come from the ref. For a `-c <branch>` that only a remote holds, git makes a local branch that tracks the remote branch. nwt then checks the remote branch that git picks: the branch of the one remote that holds it, or of the remote that `checkout.defaultRemote` names. nwt finds that branch at `refs/remotes/<remote>/<branch>`, where the default fetch refspec puts it. A remote with a different fetch refspec can give a different result.
+The check reads the ref and not the disk, because the files of the new worktree come from the ref. For a `-c <branch>` that only a remote holds, git makes a local branch that tracks the remote branch. nwt then checks the remote branch that git picks: the branch of the one remote that holds it, or of the remote that `checkout.defaultRemote` names. For a `-b <name>` that tracks a remote branch, nwt checks the remote branch where the new branch starts. In both cases, nwt finds the remote branch through the fetch refspec of each remote (see Remote branches above).
 
 **Scope.** Only the new worktree is sparse. Git keeps its sparse settings in `.git/worktrees/<name>/config.worktree` and `.git/worktrees/<name>/info/sparse-checkout`. The main worktree, the other worktrees, and later worktrees that nwt makes without the flag stay full.
 
@@ -2919,6 +2977,12 @@ nwt --run "pnpm install"
 Create a worktree from an existing branch:
 ```bash
 nwt -c feature-branch
+```
+
+Create a worktree for issue 33 whose branch `issue-33` tracks `origin/issue-33`:
+```bash
+git fetch
+nwt -b 33
 ```
 
 ## cwt (change worktree)

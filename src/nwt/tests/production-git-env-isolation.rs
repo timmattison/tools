@@ -32,6 +32,22 @@
 //! `post-checkout` hook, and one with `-c` for a branch that only a remote
 //! holds.
 //!
+//! `-b <name>` looks for a remote branch of that name before it makes
+//! anything, and that lookup adds four git children. `git show-ref` asks
+//! whether a local branch `<name>` exists. `git config --get-regexp` reads the
+//! fetch refspec of each remote, and `git rev-parse --verify` asks whether each
+//! mapped ref exists. When more than one remote holds the name,
+//! `git config --get checkout.defaultRemote` names the remote to take. Each of
+//! the four only reads, so it leaves the decoy byte-identical also when it
+//! reads the decoy. So two more tests measure the answer of the lookup, and not
+//! only the damage. Their decoy holds a local branch `<name>`, no remote, and no
+//! `checkout.defaultRemote`.
+//! A child that reads that decoy gets another answer than the clone gives, and
+//! the run then starts the branch at `HEAD` or refuses. One test has one
+//! remote, and it holds `git show-ref`, `git config --get-regexp` and
+//! `git rev-parse`. The other has two remotes and a `checkout.defaultRemote`,
+//! and it holds all four.
+//!
 //! Every variable below is set on the **child command**, and nothing here
 //! touches the environment of this process. Cargo runs the tests of one binary
 //! on parallel threads, so a process-wide variable would aim the git children
@@ -43,11 +59,11 @@ mod support;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Command, Output};
 
 use support::{
     clone_of, difference, git_stdout, init_repo, nanos, nwt_command, repo_with_files, run_git,
-    snapshot, NwtCommand, Snapshot,
+    snapshot, Snapshot,
 };
 
 /// The suffix `nwt` adds to the repository name to name the directory that
@@ -123,7 +139,7 @@ fn expected_worktrees_dir(main_worktree: &Path) -> PathBuf {
 /// Every variable goes on the child, never on this process: a sibling test
 /// thread spawns git of its own, and a process-wide variable would aim it at
 /// the decoy.
-fn hostile_nwt_command(source: &Path, decoy: &Path) -> NwtCommand {
+fn hostile_nwt_command(source: &Path, decoy: &Path) -> Command {
     let decoy_git_dir = decoy.join(".git");
     let mut command = nwt_command(source);
     command
@@ -414,6 +430,217 @@ fn a_sparse_checkout_of_a_remote_branch_leaves_the_repository_the_environment_na
         REMOTE_ONLY_BRANCH,
         "the worktree must check out the local {REMOTE_ONLY_BRANCH} that git's DWIM makes"
     );
+}
+
+/// The first remote of a clone, as `git clone` names it.
+const ORIGIN: &str = "origin";
+
+/// The second remote of the clone that two remotes give the branch.
+const SECOND_REMOTE: &str = "upstream";
+
+/// The file that the checked-out branch of the second remote adds, so that its
+/// branch commit is not a commit of the first remote.
+const SECOND_REMOTE_FILE: &str = "upstream.txt";
+
+/// A clone that holds a branch only as a remote-tracking branch, with the
+/// temporary directories that hold it and its remotes.
+struct RemoteBranchClone {
+    /// The temporary directory that holds only the clone and, after the run,
+    /// its worktrees directory.
+    _temp: tempfile::TempDir,
+    /// The clone, where `nwt` runs.
+    clone: PathBuf,
+    /// The temporary directories of the remotes, kept alive for the life of
+    /// the clone.
+    _remotes: Vec<tempfile::TempDir>,
+}
+
+/// The commit that `rev` names in `repo`.
+fn commit_of(repo: &Path, rev: &str) -> String {
+    git_stdout(repo, &["rev-parse", "--verify", rev])
+        .trim_end()
+        .to_owned()
+}
+
+/// Make a clone whose [`ORIGIN`] holds `branch`, which the clone holds only as
+/// `origin/<branch>`.
+///
+/// `branch` stays at the first commit of the source, and the checked-out
+/// branch of the source gets a second commit. So `HEAD` of the clone is not the
+/// commit of `origin/<branch>`, and a run that starts the branch at `HEAD`
+/// gives another commit than a run that tracks the remote branch.
+fn clone_whose_origin_holds(branch: &str) -> RemoteBranchClone {
+    let (origin_temp, origin) = repo_with_files(&[KEPT_FILE]);
+    assert!(
+        run_git(&origin, &["branch", branch, "HEAD~1"]),
+        "git branch failed"
+    );
+    let (temp, clone) = clone_of(&origin);
+
+    let local = format!("refs/heads/{branch}");
+    assert!(
+        !run_git(&clone, &["show-ref", "--verify", "--quiet", &local]),
+        "the fixture clone must not hold {local}"
+    );
+    assert_ne!(
+        head_commit(&clone),
+        commit_of(&clone, &format!("refs/remotes/{ORIGIN}/{branch}")),
+        "{ORIGIN}/{branch} must not be at HEAD of the clone"
+    );
+
+    RemoteBranchClone {
+        _temp: temp,
+        clone,
+        _remotes: vec![origin_temp],
+    }
+}
+
+/// Make a clone whose [`ORIGIN`] and [`SECOND_REMOTE`] both hold `branch`, each
+/// at its own commit, and whose own configuration names [`SECOND_REMOTE`] as
+/// `checkout.defaultRemote`.
+///
+/// With two candidates, the lookup reads `checkout.defaultRemote`. The clone
+/// states it, so a lookup that reads the clone takes `upstream/<branch>`.
+fn clone_whose_two_remotes_hold(branch: &str) -> RemoteBranchClone {
+    let mut fixture = clone_whose_origin_holds(branch);
+
+    let (second_temp, second) = repo_with_files(&[SECOND_REMOTE_FILE]);
+    assert!(run_git(&second, &["branch", branch]), "git branch failed");
+    let second = second.to_str().expect("utf-8 remote path");
+    assert!(
+        run_git(&fixture.clone, &["remote", "add", SECOND_REMOTE, second]),
+        "git remote add failed"
+    );
+    assert!(
+        run_git(&fixture.clone, &["fetch", "--quiet", SECOND_REMOTE]),
+        "git fetch failed"
+    );
+    assert!(
+        run_git(
+            &fixture.clone,
+            &["config", "checkout.defaultRemote", SECOND_REMOTE]
+        ),
+        "git config failed"
+    );
+    fixture._remotes.push(second_temp);
+
+    let second_commit = commit_of(
+        &fixture.clone,
+        &format!("refs/remotes/{SECOND_REMOTE}/{branch}"),
+    );
+    assert_ne!(
+        second_commit,
+        head_commit(&fixture.clone),
+        "{SECOND_REMOTE}/{branch} must not be at HEAD of the clone"
+    );
+    assert_ne!(
+        second_commit,
+        commit_of(&fixture.clone, &format!("refs/remotes/{ORIGIN}/{branch}")),
+        "{SECOND_REMOTE}/{branch} must not be at the commit of {ORIGIN}/{branch}"
+    );
+
+    fixture
+}
+
+/// Make the decoy repository, and give it a local branch `branch`.
+///
+/// The lookup of `-b <branch>` reads four answers, and the decoy gives a
+/// different answer to each of them than the clone gives. It holds `branch`
+/// as a local branch, so a `git show-ref` that reads it finds the branch and
+/// skips the lookup. It holds no remote, so a `git config --get-regexp` that
+/// reads it finds no fetch refspec, and a `git rev-parse` that reads it finds
+/// no mapped ref. It states no `checkout.defaultRemote`, so a
+/// `git config --get` that reads it picks no remote.
+fn decoy_that_holds_the_branch(branch: &str) -> (tempfile::TempDir, PathBuf) {
+    let (temp, decoy) = init_repo();
+    assert!(run_git(&decoy, &["branch", branch]), "git branch failed");
+    (temp, decoy)
+}
+
+/// Run `nwt -b <branch>` in `clone` with the hostile environment aimed at
+/// `decoy`, and hand back what it wrote.
+///
+/// The run reads an empty global and system configuration, so a
+/// `checkout.defaultRemote` of the host cannot give the lookup an answer that
+/// the clone did not state.
+fn hostile_tracking_run(clone: &Path, decoy: &Path, branch: &str) -> Output {
+    let empty_config = tempfile::NamedTempFile::new().expect("create an empty git configuration");
+    hostile_nwt_command(clone, decoy)
+        .args(["-b", branch, "--no-copy-env", "--no-bootstrap-hooks"])
+        .env("GIT_CONFIG_GLOBAL", empty_config.path())
+        .env("GIT_CONFIG_SYSTEM", empty_config.path())
+        .output()
+        .expect("run the nwt binary")
+}
+
+/// Demand that the worktree at `worktree` starts at `<remote>/<branch>` of
+/// `clone`, and that the local `branch` of `clone` tracks that branch.
+fn assert_tracks(clone: &Path, worktree: &Path, branch: &str, remote: &str) {
+    assert_eq!(
+        head_commit(worktree),
+        commit_of(clone, &format!("refs/remotes/{remote}/{branch}")),
+        "the worktree must start at {remote}/{branch} of the clone. A lookup child that reads \
+         the decoy gets another answer there, and the run starts the branch at HEAD"
+    );
+    assert_eq!(
+        git_stdout(
+            clone,
+            &[
+                "rev-parse",
+                "--abbrev-ref",
+                &format!("{branch}@{{upstream}}")
+            ]
+        )
+        .trim_end(),
+        format!("{remote}/{branch}"),
+        "the new branch must track {remote}/{branch}"
+    );
+}
+
+/// A `-b <branch>` run that tracks a remote branch reads the lookup from the
+/// repository it stands in, and leaves the repository the environment names
+/// untouched.
+///
+/// Before it makes anything, the run asks `git show-ref` whether a local
+/// `<branch>` exists, and asks `git config --get-regexp` and `git rev-parse`
+/// which remote holds `<branch>`. Each only reads, so the decoy stays
+/// byte-identical also when a child reads it. The decoy of
+/// [`decoy_that_holds_the_branch`] thus gives each child another answer, and
+/// a child that reads it starts the branch at `HEAD` of the clone. `HEAD` is
+/// not the commit of `origin/<branch>`, so [`assert_tracks`] fails then.
+#[test]
+fn a_branch_that_tracks_a_remote_branch_reads_the_repository_nwt_stands_in() {
+    let branch = unique_branch("hostile-track");
+    let fixture = clone_whose_origin_holds(&branch);
+    let (_decoy_temp, decoy) = decoy_that_holds_the_branch(&branch);
+
+    let watch = DecoyWatch::before_the_run(&fixture.clone, &decoy);
+    let output = hostile_tracking_run(&fixture.clone, &decoy, &branch);
+
+    let worktree = watch.assert_untouched(&output, Some(&branch));
+    assert_tracks(&fixture.clone, &worktree, &branch, ORIGIN);
+}
+
+/// When two remotes hold `<branch>`, the run reads `checkout.defaultRemote`
+/// from the repository it stands in, and leaves the repository the environment
+/// names untouched.
+///
+/// The clone names [`SECOND_REMOTE`], and the decoy names no remote. A
+/// `git config --get checkout.defaultRemote` that reads the decoy picks none
+/// of the two candidates, and the run refuses with exit 16. The test also
+/// holds `git show-ref`, `git config --get-regexp` and `git rev-parse`, as the
+/// test above does.
+#[test]
+fn checkout_default_remote_is_read_from_the_repository_nwt_stands_in() {
+    let branch = unique_branch("hostile-default-remote");
+    let fixture = clone_whose_two_remotes_hold(&branch);
+    let (_decoy_temp, decoy) = decoy_that_holds_the_branch(&branch);
+
+    let watch = DecoyWatch::before_the_run(&fixture.clone, &decoy);
+    let output = hostile_tracking_run(&fixture.clone, &decoy, &branch);
+
+    let worktree = watch.assert_untouched(&output, Some(&branch));
+    assert_tracks(&fixture.clone, &worktree, &branch, SECOND_REMOTE);
 }
 
 /// A `GIT_CONFIG_GLOBAL` the user stated must still reach the check that reads
