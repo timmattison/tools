@@ -1096,6 +1096,54 @@ mod tests {
             body: "## Blocked by\n\n- #99999999999999999999999\n",
             numbers: &[],
         },
+        // A number written with the owner and the name of its repository. A tool
+        // that moves issues between two repositories writes every reference so.
+        Case { name: "a number written with the repository", body: "## Blocked by\n\n- timmattison/example#233\n", numbers: &[233] },
+        Case {
+            name: "a number written with the repository in another case",
+            body: "## Blocked by\n\n- TimMattison/Example#233\n",
+            numbers: &[233],
+        },
+        Case {
+            name: "two numbers written with the repository in one item",
+            body: "## Blocked by\n\n- timmattison/example#234\n- timmattison/example#235, timmattison/example#236\n",
+            numbers: &[234, 235, 236],
+        },
+        Case {
+            name: "a bold label with numbers written with the repository, then a choice",
+            body: "**Blocked by timmattison/example#179, timmattison/example#180, and one of timmattison/example#181 or timmattison/example#182.**\n",
+            numbers: &[179, 180],
+        },
+        Case {
+            name: "a number written with the repository beside a bare number",
+            body: "## Blocked by\n\n- timmattison/example#51 and #52\n",
+            numbers: &[51, 52],
+        },
+        Case {
+            name: "a number of another repository, then a number written with the repository",
+            body: "## Blocked by\n\n- timmattison/muxiavelli#294, timmattison/example#5\n",
+            numbers: &[5],
+        },
+        Case {
+            name: "a number written with the repository and an annotation after it",
+            body: "## Blocked by\n\n- **timmattison/example#79** \u{2014} measure the close deferral\n",
+            numbers: &[79],
+        },
+        Case {
+            name: "a number written with the repository that a word character follows",
+            body: "## Blocked by\n\n- timmattison/example#51a\n",
+            numbers: &[],
+        },
+        Case {
+            name: "a number written with the repository whose number is zero",
+            body: "## Blocked by\n\n- timmattison/example#0\n",
+            numbers: &[],
+        },
+        Case {
+            name: "a number written with a repository whose name only starts the same",
+            body: "## Blocked by\n\n- timmattison/example-data#5\n",
+            numbers: &[],
+        },
         // A label at the start of a block, with no heading.
         Case { name: "a bold label with a colon", body: "**Blocked by:** #12\n", numbers: &[12] },
         Case {
