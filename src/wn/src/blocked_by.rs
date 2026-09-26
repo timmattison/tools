@@ -861,6 +861,16 @@ mod tests {
             numbers: &[9],
         },
         Case {
+            name: "a sentence inside a list item after a blank line",
+            body: "## Blocked by\n\n- The solver\n\n    #9 lands first.\n",
+            numbers: &[9],
+        },
+        Case {
+            name: "a sentence of the outer item after a nested item",
+            body: "## Blocked by\n\n- A\n\n    - #6\n\n  #7 lands too.\n",
+            numbers: &[6, 7],
+        },
+        Case {
             name: "indented code inside a list item after a blank line",
             body: "## Blocked by\n\n- The solver\n\n      #9\n",
             numbers: &[],
@@ -921,6 +931,89 @@ mod tests {
             name: "a list item whose second line starts with a number",
             body: "## Blocked by\n\n- The slope solver, which lands in\n  #168 first\n",
             numbers: &[],
+        },
+        // A paragraph after the list is commentary on the list. Two issues of
+        // timmattison/megarepo list #77 as their blocker, and each one then says
+        // of the other, in a paragraph under the list, "#79 also changes the
+        // view." The two issues then blocked each other.
+        Case {
+            name: "a paragraph after the list that starts with a number",
+            body: "## Blocked by\n\n- #77. It builds the view.\n\n#79 also changes the view. The order of the two is free.\n",
+            numbers: &[77],
+        },
+        Case {
+            name: "a paragraph after the list that starts with a number written with the repository",
+            body: "## Blocked by\n\n- #77\n\ntimmattison/example#79 also changes the view.\n",
+            numbers: &[77],
+        },
+        Case {
+            name: "a paragraph after a numbered list",
+            body: "## Blocked by\n\n1. #77\n\n#79 also changes the view.\n",
+            numbers: &[77],
+        },
+        Case {
+            name: "a paragraph after a list in a block quote",
+            body: "## Blocked by\n\n> - #77\n>\n> #79 also changes the view.\n",
+            numbers: &[77],
+        },
+        Case {
+            name: "a paragraph after the prose that ends the list",
+            body: "## Blocked by\n\n- #77\n\nA note on the order.\n\n#79 also changes the view.\n",
+            numbers: &[77],
+        },
+        // The paragraphs a section still reads.
+        Case {
+            name: "a paragraph after the list that holds a number alone",
+            body: "## Blocked by\n\n- #11\n\n#12\n",
+            numbers: &[11, 12],
+        },
+        Case {
+            name: "a paragraph after the list that holds numbers and an annotation",
+            body: "## Blocked by\n\n- #11\n\n#12 and #13 (the slope).\n",
+            numbers: &[11, 12, 13],
+        },
+        Case {
+            name: "a paragraph after the list whose words stand in an HTML comment",
+            body: "## Blocked by\n\n- #11\n\n#12 <!-- it lands first -->\n",
+            numbers: &[11, 12],
+        },
+        Case {
+            name: "a sentence that names the blocker in a section that holds no list",
+            body: "## Blocked by the detection half\n\nThe probe reads no answer.\n\n#471 and timmattison/other#78 cover that half.\n",
+            numbers: &[471],
+        },
+        Case {
+            name: "a paragraph before the list",
+            body: "## Blocked by\n\n#12 lands first.\n\n- #13\n",
+            numbers: &[12, 13],
+        },
+        Case {
+            name: "a paragraph under a subheading after the list",
+            body: "## Blocked by\n\n- #11\n\n### After the solver\n\n#12 lands last.\n",
+            numbers: &[11, 12],
+        },
+        Case {
+            name: "a paragraph under the next section after the list",
+            body: "## Blocked by\n\n- #11\n\n## Depends on\n\n#12 holds the schema.\n",
+            numbers: &[11, 12],
+        },
+        Case {
+            name: "a paragraph with a label of its own after the list",
+            body: "## Blocked by\n\n- #11\n\n**Blocked by:** #12 as well.\n",
+            numbers: &[11, 12],
+        },
+        // The other reader tests for a letter or a digit with `[\p{L}\p{N}]`.
+        // `char::is_alphanumeric` also reads these two marks as alphabetic, so
+        // these rows keep the two readers on one set.
+        Case {
+            name: "a paragraph after the list whose mark after the number is a circled letter",
+            body: "## Blocked by\n\n- #11\n\n#12 \u{24b6}\n",
+            numbers: &[11, 12],
+        },
+        Case {
+            name: "a paragraph after the list whose mark after the number is a combining mark",
+            body: "## Blocked by\n\n- #11\n\n#12 \u{345}\n",
+            numbers: &[11, 12],
         },
         Case { name: "no blocker at all", body: "## Blocked by\n\nNone - can start immediately.\n", numbers: &[] },
         Case {
