@@ -53,10 +53,44 @@
 //! phrase in the middle of a sentence is not read, because a line of a tracker
 //! such as `#12 — Click to open *blocked by #11*` says what blocks another issue.
 //!
+//! # A sentence under the list is commentary
+//!
+//! An author writes the list of blockers first, and notes on the list after it.
+//! Issues #78 and #79 of timmattison/megarepo each list #77. Each one then says
+//! of the other, in a paragraph under the list, `#79 also changes the view.` A
+//! reader that takes the number at the start of that paragraph makes the two
+//! issues block each other, and `wn` then sees a cycle.
+//!
+//! So a text block is commentary, and names no blocker, when all four of these
+//! conditions are true:
+//!
+//! 1. It stands outside every list item. A paragraph indented to the content
+//!    column of an item is part of that item.
+//! 2. A list stands between the last heading and the block. So a heading after
+//!    the list stops this rule for the blocks under that heading.
+//! 3. It carries no label of its own. `**Blocked by:** #12` after the list
+//!    still names #12.
+//! 4. A letter or a digit follows its numbers, outside an HTML comment. The
+//!    words of an annotation in parentheses do not count. So `#12`,
+//!    `#12 and #13 (the slope).` and `#12 <!-- note -->` after the list still
+//!    name their numbers.
+//!
+//! A section that holds no list still reads a sentence. timmattison/tools#473
+//! writes `#471 and timmattison/mosh-rs#78 cover that half.` under
+//! `## Blocked by the detection half`, and that section holds no list. So #471
+//! blocks it.
+//!
+//! # A second reader reads the same blocks
+//!
 //! The gather script of the `plan-parallel-work` skill reads the same blocks:
 //! `.claude/skills/plan-parallel-work/scripts/parse-issue.ts` in
 //! timmattison/dotfiles. The two readers must agree. Its table of forms,
 //! `dependency-sections.test.ts`, stands beside the table of this module.
+
+use std::ops::Range;
+use std::sync::LazyLock;
+
+use regex::Regex;
 
 use crate::chain::IssueNumber;
 use crate::github::Repo;
@@ -84,7 +118,8 @@ const TAB_WIDTH: usize = 4;
 /// The fewest marks that open a code fence.
 const FENCE_MARKS: usize = 3;
 
-/// The text a line starts with to open an HTML comment.
+/// The text that opens an HTML comment. A line that starts with it opens a
+/// comment block, and in the text of a block it opens an inline comment.
 const COMMENT_OPEN: &str = "<!--";
 
 /// The text that closes an HTML comment.
@@ -114,7 +149,13 @@ enum Block {
     /// A heading, its level, and its text with the marks taken off.
     Heading { level: usize, text: String },
     /// A paragraph or a list item, with the lines that continue it.
-    Text(String),
+    Text {
+        /// The lines of the block, joined by line breaks.
+        text: String,
+        /// Whether the block is a list item or stands inside one. A paragraph
+        /// indented to the content column of an item stands inside it.
+        in_list: bool,
+    },
 }
 
 /// Whether a block that is still taking lines is a paragraph or a list item.
@@ -130,6 +171,8 @@ enum Kind {
 struct Open {
     kind: Kind,
     lines: Vec<String>,
+    /// Whether the block is a list item or stands inside one.
+    in_list: bool,
 }
 
 /// A column of a line, counted from zero.
@@ -187,29 +230,42 @@ struct Item<'a> {
 ///
 /// A heading ends or opens a section before the walk reads its own text. So a
 /// heading that ends a section names nothing unless it starts with a label.
+///
+/// A paragraph after a list is commentary on that list. It names nothing when a
+/// letter or a digit follows its numbers. So `#79 also changes the view.` under
+/// a list names no blocker, and `#79` alone does. A paragraph keeps its numbers
+/// when a heading stands between the list and the paragraph, or when the
+/// paragraph starts with a label. The module doc gives the whole rule.
 #[must_use]
 pub fn read(body: &str, repo: &Repo) -> Vec<IssueNumber> {
     let mut numbers: Vec<IssueNumber> = Vec::new();
     // The level of the heading whose section the walk stands in.
     let mut section: Option<usize> = None;
+    // Whether a list stands between the last heading and the block.
+    let mut list_above = false;
     for block in blocks_of(body) {
-        let (level, text) = match block {
-            Block::Heading { level, text } => (Some(level), text),
-            Block::Text(text) => (None, text),
+        let (level, text, in_list) = match block {
+            Block::Heading { level, text } => (Some(level), text, false),
+            Block::Text { text, in_list } => (None, text, in_list),
         };
-        let (labelled, named) = head_of(&text, repo);
+        let head = head_of(&text, repo);
         if let Some(level) = level {
+            list_above = false;
             if section.is_some_and(|open| level <= open) {
                 section = None;
             }
-            if section.is_none() && labelled {
+            if section.is_none() && head.labelled {
                 section = Some(level);
             }
-        }
-        if section.is_none() && !labelled {
+        } else if in_list {
+            list_above = true;
+        } else if list_above && !head.labelled && head.words_after {
             continue;
         }
-        for number in named {
+        if section.is_none() && !head.labelled {
+            continue;
+        }
+        for number in head.numbers {
             if !numbers.contains(&number) {
                 numbers.push(number);
             }
@@ -231,6 +287,10 @@ pub fn read(body: &str, repo: &Repo) -> Vec<IssueNumber> {
 /// code only at [`CODE_INDENT`] columns past that column. A line indented less
 /// than the column, or a line at another quote depth, ends the item. A line that
 /// continues the open paragraph or item changes no list.
+///
+/// A list item is a block in a list. A paragraph that a line indented into an
+/// open item starts is in a list too, because it is part of that item. A
+/// paragraph that a line outside every item starts is not.
 ///
 /// An HTML comment starts at a line that opens with [`COMMENT_OPEN`] and ends at
 /// the first line that holds [`COMMENT_CLOSE`], which can be the line that opens
@@ -330,6 +390,7 @@ fn blocks_of(body: &str) -> Vec<Block> {
                 Some(Open {
                     kind: Kind::Paragraph,
                     lines,
+                    ..
                 }) => blocks.push(Block::Heading {
                     level,
                     text: lines.join(" "),
@@ -350,15 +411,19 @@ fn blocks_of(body: &str) -> Vec<Block> {
             open = Some(Open {
                 kind: Kind::Item,
                 lines: vec![text.trim().to_string()],
+                in_list: true,
             });
             continue;
         }
         match &mut open {
             Some(block) => block.lines.push(line.trim().to_string()),
             None => {
+                // The line did not continue a block, so `items` now holds only
+                // the items that the line is indented into.
                 open = Some(Open {
                     kind: Kind::Paragraph,
                     lines: vec![line.trim().to_string()],
+                    in_list: !items.is_empty(),
                 });
             }
         }
@@ -371,7 +436,10 @@ fn blocks_of(body: &str) -> Vec<Block> {
 /// `blocks`.
 fn close(open: &mut Option<Open>, blocks: &mut Vec<Block>) {
     if let Some(block) = open.take() {
-        blocks.push(Block::Text(block.lines.join("\n")));
+        blocks.push(Block::Text {
+            text: block.lines.join("\n"),
+            in_list: block.in_list,
+        });
     }
 }
 
@@ -525,9 +593,25 @@ fn after_label(text: &str) -> Option<&str> {
     })
 }
 
-/// Whether the text of a block starts with a label, and the numbers at its
-/// start. `repo` is the repository of the issue.
-fn head_of(text: &str, repo: &Repo) -> (bool, Vec<IssueNumber>) {
+/// What the start of the text of a block says.
+struct Head {
+    /// Whether the text starts with a label.
+    labelled: bool,
+    /// The numbers at the start of the text.
+    numbers: Vec<IssueNumber>,
+    /// Whether a letter or a digit follows those numbers, outside an HTML
+    /// comment. It is false when the text starts with no number.
+    words_after: bool,
+}
+
+/// What the start of `text`, the text of a block, says. `repo` is the
+/// repository of the issue.
+///
+/// The numbers end where the list of references, strikes, annotations and
+/// separators at the start of the text ends. A letter or a digit after that
+/// point makes the block a sentence. An annotation in parentheses after a
+/// number is part of the list, so its words do not count.
+fn head_of(text: &str, repo: &Repo) -> Head {
     let strikes = Strikes::of(text);
     let mut rest = undecorated(without_task_box(text));
     let labelled = match after_label(rest) {
@@ -540,6 +624,9 @@ fn head_of(text: &str, repo: &Repo) -> (bool, Vec<IssueNumber>) {
     };
 
     let mut numbers: Vec<IssueNumber> = Vec::new();
+    // The byte offset in `text` where the last reference, strike, or
+    // annotation that the walk read ends. Every `rest` is a suffix of `text`.
+    let mut span_end: usize = 0;
     loop {
         rest = undecorated(rest);
         if let Some((number, after)) = reference(rest, repo) {
@@ -550,10 +637,12 @@ fn head_of(text: &str, repo: &Repo) -> (bool, Vec<IssueNumber>) {
         } else {
             break;
         }
+        span_end = text.len() - rest.len();
         rest = rest.trim_start_matches([' ', '\t']);
         if rest.starts_with('(') {
             if let Some(after) = after_group(rest) {
                 rest = after;
+                span_end = text.len() - rest.len();
             }
         }
         rest = undecorated(rest);
@@ -563,7 +652,75 @@ fn head_of(text: &str, repo: &Repo) -> (bool, Vec<IssueNumber>) {
             break;
         }
     }
-    (labelled, numbers)
+    let words_after = !numbers.is_empty() && words_from(text, span_end);
+    Head {
+        labelled,
+        numbers,
+        words_after,
+    }
+}
+
+/// The test for a letter or a digit: a character of the Unicode general
+/// category L or N.
+///
+/// The other reader, `parse-issue.ts`, tests with `/[\p{L}\p{N}]/u`, and the
+/// two readers must test the same set. [`char::is_alphanumeric`] tests a
+/// different set. It reads the Alphabetic property, which also holds the
+/// Other_Alphabetic code points, such as the combining mark U+0345 and the
+/// circled letter U+24B6. Those are not in L or N.
+static LETTER_OR_DIGIT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[\p{L}\p{N}]").expect("LETTER_OR_DIGIT is a valid regex"));
+
+/// Whether a letter or a digit stands in `text` at the byte offset `from` or
+/// after it, outside the HTML comments of `text`.
+///
+/// [`LETTER_OR_DIGIT`] gives the set of letters and digits.
+fn words_from(text: &str, from: usize) -> bool {
+    let has_words = |start: usize, end: usize| {
+        text.get(start..end)
+            .is_some_and(|part| LETTER_OR_DIGIT.is_match(part))
+    };
+    let mut at = from;
+    for comment in comments_of(text) {
+        if comment.end <= at {
+            continue;
+        }
+        if comment.start > at && has_words(at, comment.start) {
+            return true;
+        }
+        at = comment.end;
+    }
+    has_words(at, text.len())
+}
+
+/// The byte ranges of the HTML comments in `text`, in order.
+///
+/// A comment opens at [`COMMENT_OPEN`] and ends after the first
+/// [`COMMENT_CLOSE`] that starts at the end of that [`COMMENT_OPEN`] or after
+/// it. A [`COMMENT_OPEN`] that nothing closes is text. No later
+/// [`COMMENT_OPEN`] can close then either, so the scan stops there.
+///
+/// The scan starts at the start of `text`. So a comment that opens inside an
+/// annotation and closes after it still hides its words. The other reader also
+/// skips code spans in this scan. This reader does not, because its model of a
+/// block leaves code spans out, as the module doc of `strike.rs` says.
+fn comments_of(text: &str) -> Vec<Range<usize>> {
+    let mut comments: Vec<Range<usize>> = Vec::new();
+    let mut from: usize = 0;
+    while let Some(open) = text.get(from..).and_then(|rest| rest.find(COMMENT_OPEN)) {
+        let start = from + open;
+        let after_open = start + COMMENT_OPEN.len();
+        let Some(close) = text
+            .get(after_open..)
+            .and_then(|rest| rest.find(COMMENT_CLOSE))
+        else {
+            break;
+        };
+        let end = after_open + close + COMMENT_CLOSE.len();
+        comments.push(start..end);
+        from = end;
+    }
+    comments
 }
 
 /// `text` with the box of a task list item taken off its front.
