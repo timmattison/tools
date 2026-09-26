@@ -57,6 +57,16 @@
 //! tracked. The run then does not copy the file of the source, and the new
 //! worktree does not hold it.
 //!
+//! The hook bootstrap adds one child that is not git: the install of the
+//! package manager. The install runs the `prepare` script, and that script
+//! runs git. Every other test here turns the bootstrap off with
+//! `--no-bootstrap-hooks`, so one more test leaves it on. A fake `pnpm`, first
+//! on the `PATH` of the child, stands in for the install. It writes one key
+//! with `git config`, and it records the `GIT_SSH_COMMAND` that it gets. So that
+//! test holds both halves of the rule for the install child. The write must
+//! land in the source and not in the decoy, and the `GIT_SSH_COMMAND` that the
+//! user states must reach the install.
+//!
 //! Every variable below is set on the **child command**, and nothing here
 //! touches the environment of this process. Cargo runs the tests of one binary
 //! on parallel threads, so a process-wide variable would aim the git children
@@ -722,6 +732,174 @@ fn the_env_copy_reads_the_tracked_files_of_the_repository_nwt_stands_in() {
         worktree.display(),
         source.display(),
         String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+/// The manifest file that `nwt` reads to decide whether a new worktree needs
+/// the hook bootstrap.
+#[cfg(unix)]
+const PACKAGE_JSON: &str = "package.json";
+
+/// A manifest that makes `nwt` run `pnpm install` in the new worktree.
+///
+/// A non-empty `scripts.prepare` asks for the install. The corepack
+/// `packageManager` field names pnpm, and that field comes before each other
+/// rule of `detect_hook_bootstrap`.
+#[cfg(unix)]
+const BOOTSTRAP_MANIFEST: &str =
+    r#"{"scripts": {"prepare": "husky"}, "packageManager": "pnpm@9.0.0"}"#;
+
+/// The program that `nwt` runs for [`BOOTSTRAP_MANIFEST`], and so the name of
+/// the fake.
+#[cfg(unix)]
+const FAKE_PACKAGE_MANAGER: &str = "pnpm";
+
+/// The configuration key that the fake install writes with `git config`.
+#[cfg(unix)]
+const BOOTSTRAP_PROBE_KEY: &str = "nwt.bootstrapprobe";
+
+/// The value that the fake install writes to [`BOOTSTRAP_PROBE_KEY`].
+#[cfg(unix)]
+const BOOTSTRAP_PROBE_VALUE: &str = "written";
+
+/// What the fake install records when no `GIT_SSH_COMMAND` reaches it.
+#[cfg(unix)]
+const NO_SSH_COMMAND: &str = "unset";
+
+/// Write an executable fake [`FAKE_PACKAGE_MANAGER`] into `bin_dir`.
+///
+/// The fake does two things, one for each half of the rule. First, it writes
+/// the `GIT_SSH_COMMAND` that it gets, or [`NO_SSH_COMMAND`], to `record`.
+/// Then it runs `git config` [`BOOTSTRAP_PROBE_KEY`] [`BOOTSTRAP_PROBE_VALUE`]
+/// in its working directory, which is the new worktree, and exits with the
+/// status of that git. A real `prepare` script runs git in the same way, for
+/// example `git config core.hooksPath .husky/_`.
+///
+/// # Panics
+///
+/// Panics when `record` is not UTF-8, or when the fake cannot be written or
+/// made executable.
+#[cfg(unix)]
+fn install_fake_package_manager(bin_dir: &Path, record: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let record = shellquote::shell_quote(record.to_str().expect("utf-8 record path"));
+    let script = format!(
+        "#!/bin/sh\n\
+         printf '%s' \"${{GIT_SSH_COMMAND-{NO_SSH_COMMAND}}}\" > {record}\n\
+         exec git config {BOOTSTRAP_PROBE_KEY} {BOOTSTRAP_PROBE_VALUE}\n"
+    );
+    let fake = bin_dir.join(FAKE_PACKAGE_MANAGER);
+    fs::write(&fake, script).unwrap_or_else(|e| panic!("write {}: {e}", fake.display()));
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755))
+        .unwrap_or_else(|e| panic!("make {} executable: {e}", fake.display()));
+}
+
+/// The hook bootstrap install acts on the repository `nwt` stands in, and gets
+/// the `GIT_SSH_COMMAND` that the user states.
+///
+/// A new worktree whose `package.json` holds a `prepare` script gets a
+/// package-manager install, and the lifecycle scripts of that install run git.
+/// The install is a child of `nwt` like each git child, so it gets the same
+/// rule: shed the whole `GIT_` prefix, and keep the six names of
+/// `gitscratch::USER_INTENT_GIT_ENVIRONMENT`. This test holds both halves for
+/// that child.
+///
+/// The fake of [`install_fake_package_manager`] runs `git config` in the new
+/// worktree. A linked worktree shares the configuration of its repository, so
+/// with the shed that write lands in the configuration of the source. With a
+/// leak, `GIT_DIR` sends the write into the configuration of the decoy, and
+/// [`DecoyWatch::assert_untouched`] finds the change.
+///
+/// Every other test in this file turns the bootstrap off with
+/// `--no-bootstrap-hooks`. This test leaves it on, which is the default: the
+/// private home of [`nwt_command`] holds no `.nwt.toml` that turns it off.
+#[cfg(unix)]
+#[test]
+fn the_hook_bootstrap_install_acts_on_the_repository_nwt_stands_in() {
+    // The source commits the manifest, so the new worktree checks it out.
+    let (_source_temp, source) = init_repo();
+    write_file(&source, PACKAGE_JSON, BOOTSTRAP_MANIFEST);
+    assert!(
+        run_git(&source, &["add", "--", PACKAGE_JSON]),
+        "git add failed"
+    );
+    assert!(
+        run_git(
+            &source,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add the manifest"
+            ]
+        ),
+        "git commit failed"
+    );
+    let (_decoy_temp, decoy) = init_repo();
+
+    let fake_bin = tempfile::TempDir::new().expect("create the fake bin directory");
+    let records = tempfile::TempDir::new().expect("create the record directory");
+    let record = records.path().join("git-ssh-command.txt");
+    install_fake_package_manager(fake_bin.path(), &record);
+
+    // A value that no other run holds, so the record cannot match by chance.
+    let ssh_command = format!(
+        "ssh -o SetEnv=NWT_BOOTSTRAP_SENTINEL={}-{}",
+        std::process::id(),
+        nanos()
+    );
+
+    let watch = DecoyWatch::before_the_run(&source, &decoy);
+    let branch = unique_branch("hostile-bootstrap");
+
+    let output = hostile_nwt_command(&source, &decoy)
+        .args(["-b", &branch, "--no-copy-env"])
+        .env("PATH", support::path_with_first(fake_bin.path()))
+        .env("GIT_SSH_COMMAND", &ssh_command)
+        .output()
+        .expect("run the nwt binary");
+
+    watch.assert_untouched(&output, Some(&branch));
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    // The control against a vacuous pass. An install that never ran, or a git
+    // in it that failed, also leaves the decoy byte-identical. The key in the
+    // configuration of the source proves that the install ran and that its git
+    // reached the source.
+    let probe = git_stdout(
+        &source,
+        &[
+            "config",
+            "--local",
+            "--get",
+            "--default",
+            "",
+            BOOTSTRAP_PROBE_KEY,
+        ],
+    );
+    assert_eq!(
+        probe.trim_end(),
+        BOOTSTRAP_PROBE_VALUE,
+        "the fake {FAKE_PACKAGE_MANAGER} install must run in the new worktree and write \
+         {BOOTSTRAP_PROBE_KEY} into the configuration of {}. The key is not there, so the \
+         install did not run, or its git did not reach the source.\nnwt stderr:\n{stderr}",
+        source.display(),
+    );
+
+    // The keep half. A sweep that sheds everything passes each assertion above,
+    // and drops this variable. A user who holds a non-default SSH key then gets
+    // an authentication failure from each install that fetches a private git
+    // dependency.
+    let recorded = fs::read_to_string(&record).ok();
+    assert_eq!(
+        recorded.as_deref(),
+        Some(ssh_command.as_str()),
+        "the install must get the GIT_SSH_COMMAND that the user states. It got another value \
+         (\"{NO_SSH_COMMAND}\" means none). Without it, an install that fetches a private git \
+         dependency cannot authenticate the way the shell of the user does.\nnwt \
+         stderr:\n{stderr}",
     );
 }
 

@@ -119,8 +119,9 @@ fn record(root: &Path, dir: &Path, into: &mut Snapshot) {
 ///
 /// Each decoy test of `tests/production-git-env-isolation.rs` takes a snapshot
 /// of the decoy before and after its run: the plain `-b` run, the sparse `-b`
-/// run, the sparse `-c` run, the two `-b` runs that track a remote branch, and
-/// the `-b` run that copies an untracked `.env` file.
+/// run, the sparse `-c` run, the two `-b` runs that track a remote branch, the
+/// `-b` run that copies an untracked `.env` file, and the `-b` run that
+/// bootstraps the hooks with a fake `pnpm`.
 /// The helpers live here, so each of those tests
 /// reads the decoy with one rule, and a later test file that needs a decoy
 /// reads it with the same rule.
@@ -565,14 +566,9 @@ impl FakeMultiplexer {
 
     /// A `PATH` value with the fake bin dir prepended to the inherited `PATH`, so
     /// the fake shadows any real `zellij` while real tools (e.g. `git`, which
-    /// `nwt` shells out to) still resolve normally.
+    /// `nwt` shells out to) still resolve normally. See [`path_with_first`].
     pub fn path_env(&self) -> std::ffi::OsString {
-        let mut joined = std::ffi::OsString::from(&self.bin_dir);
-        if let Some(existing) = std::env::var_os("PATH") {
-            joined.push(":");
-            joined.push(existing);
-        }
-        joined
+        path_with_first(&self.bin_dir)
     }
 
     /// Every recorded invocation, newline-separated. Empty string if the fake was
@@ -587,4 +583,22 @@ impl Default for FakeMultiplexer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// A `PATH` value with `dir` first, and the `PATH` of this test process after
+/// it.
+///
+/// A test sets this value on the child command, and never on this process. A
+/// fake program in `dir` then shadows the real program of that name for the
+/// child, and every other program (`git`, `sh`) still resolves.
+///
+/// Unix only: the separator is `:`, and each fake is a POSIX `sh` script.
+#[cfg(unix)]
+pub fn path_with_first(dir: &Path) -> std::ffi::OsString {
+    let mut joined = std::ffi::OsString::from(dir);
+    if let Some(existing) = std::env::var_os("PATH") {
+        joined.push(":");
+        joined.push(existing);
+    }
+    joined
 }
