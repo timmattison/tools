@@ -1025,8 +1025,11 @@ fn the_hooks_check_reads_the_repository_nwt_stands_in() {
 /// stale inherits the new name, and the cost of that is a repository written
 /// into by mistake.
 ///
-/// Nothing hostile is set here. The point is the opposite of the test above:
-/// one variable, stated by the user, that must survive.
+/// This test is the opposite of
+/// [`the_hooks_check_reads_the_repository_nwt_stands_in`]. That test sets a
+/// hostile environment and demands that the check sheds it. This test sets
+/// nothing hostile and demands that the check keeps one variable that the
+/// user states.
 #[test]
 fn a_stated_global_configuration_still_reaches_the_hooks_check() {
     let (temp, repo) = init_repo();
