@@ -1335,6 +1335,22 @@ impl FakeGit {
     }
 }
 
+/// The shared `PATH` value refuses a directory that holds the `PATH`
+/// separator.
+///
+/// Such a directory splits into two entries in the value. The fake in it then
+/// does not shadow the real program, and a test that uses the fake passes for
+/// the wrong reason. The refusal makes that test fail loudly instead.
+///
+/// The directory does not exist. The helper reads no file, so parallel runs of
+/// this test share nothing.
+#[cfg(unix)]
+#[test]
+#[should_panic(expected = "join the PATH value")]
+fn path_with_first_refuses_a_directory_that_holds_the_separator() {
+    let _ = support::path_with_first(Path::new("/nonexistent/holds:the-separator"));
+}
+
 /// Run `nwt` in `repo` with `arguments`, without the `.env` copy and the hook
 /// bootstrap, with `fake` first on the `PATH` of the child, and hand back what
 /// it wrote.
