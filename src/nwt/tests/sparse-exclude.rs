@@ -1325,13 +1325,9 @@ impl FakeGit {
     }
 
     /// A `PATH` value with the directory of the fake first, and the `PATH` of
-    /// this test process after it.
+    /// this test process after it. See [`support::path_with_first`].
     fn path_env(&self) -> std::ffi::OsString {
-        let mut dirs = vec![self.dir.path().to_path_buf()];
-        if let Some(existing) = std::env::var_os("PATH") {
-            dirs.extend(std::env::split_paths(&existing));
-        }
-        std::env::join_paths(dirs).expect("join the PATH value")
+        support::path_with_first(self.dir.path())
     }
 }
 

@@ -592,13 +592,20 @@ impl Default for FakeMultiplexer {
 /// fake program in `dir` then shadows the real program of that name for the
 /// child, and every other program (`git`, `sh`) still resolves.
 ///
-/// Unix only: the separator is `:`, and each fake is a POSIX `sh` script.
+/// The standard library splits and joins the value, so the separator is the
+/// separator of the platform. Unix only: each fake is a POSIX `sh` script.
+///
+/// # Panics
+///
+/// Panics when `dir` holds the `PATH` separator of the platform. Such a
+/// directory splits into two entries in the value, so the fake in it does not
+/// shadow the real program, and the test that uses it passes for the wrong
+/// reason.
 #[cfg(unix)]
 pub fn path_with_first(dir: &Path) -> std::ffi::OsString {
-    let mut joined = std::ffi::OsString::from(dir);
+    let mut dirs = vec![dir.to_path_buf()];
     if let Some(existing) = std::env::var_os("PATH") {
-        joined.push(":");
-        joined.push(existing);
+        dirs.extend(std::env::split_paths(&existing));
     }
-    joined
+    std::env::join_paths(dirs).expect("join the PATH value")
 }
