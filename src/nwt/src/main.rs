@@ -3920,6 +3920,7 @@ fn missing_hooks_path(worktree: &Path) -> Option<String> {
     // `GIT_CONFIG_SYSTEM` stay, because a user states those on purpose and this
     // query predicts what git reads at commit time — see the function doc.
     let mut command = Command::new("git");
+    shed_inherited_git_environment_keeping_user_intent(&mut command);
 
     let output = command
         .args(["config", "--type=path", "core.hooksPath"])
