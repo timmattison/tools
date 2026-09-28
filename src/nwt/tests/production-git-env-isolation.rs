@@ -67,6 +67,13 @@
 //! land in the source and not in the decoy, and the `GIT_SSH_COMMAND` that the
 //! user states must reach the install.
 //!
+//! The check for an ungated worktree adds one git child. `missing_hooks_path`
+//! runs `git config --type=path core.hooksPath` in the new worktree. That child
+//! only reads too, so one more test measures the answer and not only the
+//! damage. Its source sets `core.hooksPath` to a directory that is not there,
+//! and its decoy sets no `core.hooksPath`. A child that reads the decoy finds
+//! no key. The run then does not warn that the new worktree runs no hooks.
+//!
 //! Every variable below is set on the **child command**, and nothing here
 //! touches the environment of this process. Cargo runs the tests of one binary
 //! on parallel threads, so a process-wide variable would aim the git children
@@ -900,6 +907,104 @@ fn the_hook_bootstrap_install_acts_on_the_repository_nwt_stands_in() {
          (\"{NO_SSH_COMMAND}\" means none). Without it, an install that fetches a private git \
          dependency cannot authenticate the way the shell of the user does.\nnwt \
          stderr:\n{stderr}",
+    );
+}
+
+/// The value of [`HOOKS_PATH_KEY`] that the configuration of the repository at
+/// `repo` sets, or an empty string when it sets none.
+///
+/// It reads the file of the repository only. That file is the step that a
+/// child of `nwt` reads from the source with the shed, and from the decoy with
+/// a leak.
+fn local_hooks_path(repo: &Path) -> String {
+    git_stdout(
+        repo,
+        &[
+            "config",
+            "--local",
+            "--get",
+            "--default",
+            "",
+            HOOKS_PATH_KEY,
+        ],
+    )
+    .trim_end()
+    .to_owned()
+}
+
+/// The check for an ungated worktree reads [`HOOKS_PATH_KEY`] from the
+/// repository `nwt` stands in, and the run leaves the repository the
+/// environment names untouched.
+///
+/// `missing_hooks_path` runs `git config --type=path core.hooksPath` in the new
+/// worktree. A linked worktree shares the configuration of its repository, so
+/// with the shed that child reads the key of the source. The child only reads,
+/// so the decoy stays byte-identical also when the child reads it, and the test
+/// must measure the answer. The source sets the key to a directory that is not
+/// there, and the decoy sets no key. A child that reads the decoy finds no key,
+/// so the run does not warn, and stderr does not name the path of the source.
+///
+/// This is the shed half of the check. The test below holds the keep half.
+#[test]
+fn the_hooks_check_reads_the_repository_nwt_stands_in() {
+    let (source_temp, source) = init_repo();
+    let (_decoy_temp, decoy) = init_repo();
+
+    // A hooks directory that is not there, in the configuration of the source
+    // only. Git runs no hook at all in that case, and says nothing about it,
+    // which is what `nwt` warns for.
+    let absent_hooks_dir = source_temp.path().join(ABSENT_HOOKS_DIR);
+    let stated = absent_hooks_dir
+        .to_str()
+        .expect("utf-8 absent hooks directory");
+    assert!(
+        run_git(&source, &["config", HOOKS_PATH_KEY, stated]),
+        "git config {HOOKS_PATH_KEY} failed"
+    );
+
+    // The preconditions. A source that sets no key gives no warning, and a
+    // decoy that sets the same key gives the same warning. In both cases the
+    // test passes for a spawn that sheds nothing.
+    assert!(
+        !absent_hooks_dir.exists(),
+        "the fixture hooks directory {stated} must not exist"
+    );
+    assert_eq!(
+        local_hooks_path(&source),
+        stated,
+        "the fixture source must set {HOOKS_PATH_KEY} to {stated}"
+    );
+    assert_eq!(
+        local_hooks_path(&decoy),
+        "",
+        "the fixture decoy must set no {HOOKS_PATH_KEY}"
+    );
+
+    let watch = DecoyWatch::before_the_run(&source, &decoy);
+    let branch = unique_branch("hostile-hooks-check");
+
+    let output = hostile_nwt_command(&source, &decoy)
+        .args(["-b", &branch, "--no-copy-env", "--no-bootstrap-hooks"])
+        .output()
+        .expect("run the nwt binary");
+
+    watch.assert_untouched(&output, Some(&branch));
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    // Git prints a path value back as the configuration file spells it, so the
+    // warning names the path as written rather than as resolved.
+    assert!(
+        stderr.contains(stated),
+        "nwt must read {HOOKS_PATH_KEY} from the repository it stands in, and warn that \
+         {stated} is not there. A leaked environment made `git config` read the configuration \
+         of the other repository, which sets no {HOOKS_PATH_KEY}. A run that a hook starts \
+         thus reads the hooks setting of the repository of that hook, and reports an ungated \
+         worktree as gated.\nnwt stdout:\n{stdout}\nnwt stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(HOOKS_PATH_KEY),
+        "the warning must name the key the user has to fix, and it reads:\n{stderr}"
     );
 }
 
