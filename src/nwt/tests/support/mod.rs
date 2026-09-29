@@ -120,11 +120,14 @@ fn record(root: &Path, dir: &Path, into: &mut Snapshot) {
 /// Each decoy test of `tests/production-git-env-isolation.rs` takes a snapshot
 /// of the decoy before and after its run: the plain `-b` run, the sparse `-b`
 /// run, the sparse `-c` run, the two `-b` runs that track a remote branch, the
-/// `-b` run that copies an untracked `.env` file, and the `-b` run that
-/// bootstraps the hooks with a fake `pnpm`.
+/// `-b` run that copies an untracked `.env` file, the `-b` run that
+/// bootstraps the hooks with a fake `pnpm`, the `-b` run that reads the hooks
+/// setting, and the `-b` run that links a child repository.
 /// The helpers live here, so each of those tests
 /// reads the decoy with one rule, and a later test file that needs a decoy
-/// reads it with the same rule.
+/// reads it with the same rule. `tests/link-children.rs` reads a child
+/// repository with the same rule, before a run and after
+/// `git worktree remove --force` of the new worktree.
 pub fn snapshot(root: &Path) -> Snapshot {
     let mut held = Snapshot::new();
     record(root, root, &mut held);

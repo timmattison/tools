@@ -74,6 +74,16 @@
 //! and its decoy sets no `core.hooksPath`. A child that reads the decoy finds
 //! no key. The run then does not warn that the new worktree runs no hooks.
 //!
+//! The link of each child repository (issue #537) adds two git children, both
+//! in the new worktree. `git check-ignore -q` asks whether git ignores the path
+//! of a child. For a child that git does not ignore,
+//! `git check-ignore -v -z --stdin` asks which rule matches the directory form
+//! of that path. Both only read, so one more test measures the answer and not
+//! only the damage. Its source is a container whose committed `.gitignore`
+//! ignores the child `vial`, and its decoy has no such rule. A child that reads
+//! the decoy gets the answer that git does not ignore the path, or an error.
+//! The run then makes no link, and it warns.
+//!
 //! Every variable below is set on the **child command**, and nothing here
 //! touches the environment of this process. Cargo runs the tests of one binary
 //! on parallel threads, so a process-wide variable would aim the git children
@@ -88,8 +98,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use support::{
-    clone_of, difference, git_stdout, init_repo, nanos, nwt_command, repo_with_files, run_git,
-    snapshot, write_file, Snapshot,
+    clone_of, container, difference, git_stdout, init_repo, nanos, nwt_command, repo_with_files,
+    run_git, snapshot, write_file, Snapshot,
 };
 
 /// The suffix `nwt` adds to the repository name to name the directory that
@@ -1081,5 +1091,80 @@ fn a_stated_global_configuration_still_reaches_the_hooks_check() {
     assert!(
         stderr.contains(HOOKS_PATH_KEY),
         "the warning must name the key the user has to fix, and it reads:\n{stderr}"
+    );
+}
+
+/// The child repository of the source of the link test.
+const LINKED_CHILD: &str = "vial";
+
+/// The `.gitignore` rule of the source that ignores [`LINKED_CHILD`] at the
+/// root. It also ignores a symlink of that name.
+const IGNORE_LINKED_CHILD: &str = "/vial";
+
+/// The start of each warning that `nwt` prints.
+const WARNING_PREFIX: &str = "Warning:";
+
+/// The link of a child repository reads the ignore rules of the repository
+/// `nwt` stands in, and the run leaves the repository the environment names
+/// untouched.
+///
+/// `link_children` runs `git check-ignore -q` in the new worktree. For a child
+/// that git does not ignore, it then runs `git check-ignore -v -z --stdin`.
+/// Both children only read, so the decoy stays byte-identical also when a
+/// child reads it, and the test must measure the answer. The committed
+/// `.gitignore` of the source ignores [`LINKED_CHILD`], and the decoy has no
+/// such rule. A `git check-ignore` that reads the decoy says that git does not
+/// ignore the path, or it fails, because the new worktree is outside the work
+/// tree of the decoy. Either way the run makes no link, and it warns.
+#[test]
+fn the_child_link_reads_the_ignore_rules_of_the_repository_nwt_stands_in() {
+    let (_source_temp, source) = container(&[IGNORE_LINKED_CHILD], &[LINKED_CHILD]);
+    let (_decoy_temp, decoy) = init_repo();
+
+    // The preconditions. A decoy that also ignores the child gives the same
+    // link, and the test then passes for a spawn that sheds nothing.
+    assert!(
+        run_git(&source, &["check-ignore", "-q", "--", LINKED_CHILD]),
+        "the fixture source must ignore {LINKED_CHILD}"
+    );
+    assert!(
+        !run_git(&decoy, &["check-ignore", "-q", "--", LINKED_CHILD]),
+        "the fixture decoy must not ignore {LINKED_CHILD}"
+    );
+
+    let watch = DecoyWatch::before_the_run(&source, &decoy);
+    let branch = unique_branch("hostile-link-children");
+
+    let output = hostile_nwt_command(&source, &decoy)
+        .args(["-b", &branch, "--no-copy-env", "--no-bootstrap-hooks"])
+        .output()
+        .expect("run the nwt binary");
+
+    let worktree = watch.assert_untouched(&output, Some(&branch));
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let link = worktree.join(LINKED_CHILD);
+    let target = fs::read_link(&link).unwrap_or_else(|e| {
+        panic!(
+            "{} must be a symlink to the child of {}, and it is not ({e}). A leaked environment \
+             made `git check-ignore` read the ignore rules of the other repository, so nwt made \
+             no link.\nnwt stderr:\n{stderr}",
+            link.display(),
+            source.display(),
+        )
+    });
+    assert_eq!(
+        canonical(&target),
+        canonical(&source.join(LINKED_CHILD)),
+        "{} must point at the child of the source",
+        link.display()
+    );
+    let warnings: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.starts_with(WARNING_PREFIX))
+        .collect();
+    assert!(
+        warnings.is_empty(),
+        "the run must print no warning, and it printed:\n{}",
+        warnings.join("\n")
     );
 }
