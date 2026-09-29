@@ -35,10 +35,12 @@
 //! points at a directory. So `vial/` does not ignore the link at `vial`, and
 //! `git check-ignore -v -- vial` names no pattern, because no pattern matches.
 //! Thus, when git does not ignore `<name>`, this module asks a second question
-//! about `<name>/`, before a link exists. When a rule that ends with `/` matches
-//! that form, the warning names the rule, its file, and its line, and it gives
-//! the fix `/<name>`. Otherwise nothing ignores the child, and the warning gives
-//! only the fix.
+//! about `<name>/`, before a link exists. The order matters, because git
+//! refuses a question about `<name>/` when a symlink is at `<name>` ("beyond a
+//! symbolic link"). When a rule that ends with `/` matches that form, the
+//! warning names the rule, its file, and its line, and it gives the fix
+//! `/<name>`. Otherwise nothing ignores the child, and the warning gives only
+//! the fix.
 //!
 //! When git gives no answer to the first question, this module makes no link.
 //! The warning then repeats the first line of the error of git, or the error
