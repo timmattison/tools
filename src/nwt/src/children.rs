@@ -40,7 +40,14 @@
 //! the fix `/<name>`. Otherwise nothing ignores the child, and the warning gives
 //! only the fix.
 //!
-//! `-q` removes the line for each link, the line for each path that is already
+//! When git gives no answer to the first question, this module makes no link.
+//! The warning then repeats the first line of the error of git, or the error
+//! when git does not start.
+//!
+//! Thus a child without a link gets one of three warnings: the rule that
+//! matches only a directory, no rule at all, or the error of git. A symlink
+//! that fails gives a fourth, with the error of the operating system. `-q`
+//! removes the line for each link, the line for each path that is already
 //! there, and the summary. It does not remove a warning, because a warning
 //! names a defect in the repository.
 //!
@@ -102,6 +109,14 @@ const ROOT_ANCHOR: &str = "/";
 /// The ignore file that the warning tells the user to change.
 const IGNORE_FILE: &str = ".gitignore";
 
+/// The start of the reason for a child when git exits with a status that is
+/// not 0 or 1. The error of git follows it.
+const GIT_FAILED_REASON: &str = "git check-ignore failed:";
+
+/// The start of the reason for a child when git does not start. The error of
+/// the operating system follows it.
+const GIT_DID_NOT_START_REASON: &str = "git check-ignore did not start:";
+
 /// What happened to one child of the main worktree.
 ///
 /// Each variant other than [`Outcome::Linked`] makes no link.
@@ -116,7 +131,7 @@ enum Outcome {
     NotIgnored(Option<DirectoryOnlyRule>),
     /// Git gave no answer. It did not start, or it exited with a status that
     /// is not 0 or 1.
-    NoAnswer,
+    NoAnswer(GitFailure),
     /// Git ignores the path, but the symlink could not be made, with this
     /// error.
     LinkFailed(io::Error),
@@ -161,21 +176,32 @@ fn link_child(worktree: &Path, name: &OsStr, target: &Path) -> Outcome {
         return Outcome::AlreadyThere;
     }
 
-    match check_ignore_status(worktree, name) {
-        Some(CHECK_IGNORE_IGNORED) => {}
-        Some(CHECK_IGNORE_NOT_IGNORED) => {
+    match check_ignore(worktree, name) {
+        Ok(IgnoreAnswer::Ignored) => {}
+        Ok(IgnoreAnswer::NotIgnored) => {
             return Outcome::NotIgnored(directory_rule_of(worktree, name));
         }
-        _ => return Outcome::NoAnswer,
+        Err(failure) => return Outcome::NoAnswer(failure),
     }
 
     link_outcome(make_directory_link(target, &link))
 }
 
+/// The answer of git to the question whether it ignores a path.
+enum IgnoreAnswer {
+    /// Git ignores the path, so a link there is safe.
+    Ignored,
+    /// Git does not ignore the path, so a link there shows as untracked.
+    NotIgnored,
+}
+
 /// Why git gave no answer to the question whether it ignores a path.
+///
+/// The text of each variant is the reason of the warning for the child.
 enum GitFailure {
     /// Git exited with a status that is not 0 or 1, or a signal stopped it.
-    /// The text is the first line of its stderr.
+    /// The text is the first line of its stderr, or the exit status when its
+    /// stderr holds no text.
     Failed(String),
     /// Git did not start, with this error.
     DidNotStart(io::Error),
@@ -183,15 +209,23 @@ enum GitFailure {
 
 impl fmt::Display for GitFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = (self, f);
-        Ok(())
+        match self {
+            GitFailure::Failed(text) => write!(f, "{GIT_FAILED_REASON} {text}"),
+            GitFailure::DidNotStart(error) => write!(f, "{GIT_DID_NOT_START_REASON} {error}"),
+        }
     }
 }
 
 /// The first line of `stderr` that holds text, without the space around it.
+///
+/// Git writes the error on its first line, and a hint can follow it. Returns
+/// `None` when `stderr` holds no text.
 fn first_line_of(stderr: &[u8]) -> Option<String> {
-    let _ = stderr;
-    None
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
 }
 
 /// The outcome of the attempt to make a symlink, from its `result`.
@@ -207,20 +241,35 @@ fn link_outcome(result: io::Result<()>) -> Outcome {
     }
 }
 
-/// The exit status of `git check-ignore -q -- ./<name>` in `worktree`.
+/// The answer of `git check-ignore -q -- ./<name>` in `worktree`.
 ///
-/// Returns `None` when git does not start, or when a signal stops it.
+/// The status 0 says that git ignores the path, and the status 1 says that it
+/// does not.
+///
+/// # Errors
+///
+/// Returns [`GitFailure::DidNotStart`] when git does not start, and
+/// [`GitFailure::Failed`] for each other status or for a signal.
 ///
 /// The command goes through [`production_git_command`], which sheds the
 /// inherited `GIT_` environment. An inherited `GIT_DIR` or `GIT_INDEX_FILE`
 /// otherwise aims the question at another repository. The output is captured,
-/// so nothing that git writes reaches the stdout of `nwt`.
-fn check_ignore_status(worktree: &Path, name: &OsStr) -> Option<i32> {
+/// so nothing that git writes reaches the stdout of `nwt`, and the error of git
+/// can go into the warning.
+fn check_ignore(worktree: &Path, name: &OsStr) -> Result<IgnoreAnswer, GitFailure> {
     let mut command = production_git_command(worktree);
     command
         .args(["check-ignore", "-q", "--"])
         .arg(pathspec_of(name));
-    command.output().ok()?.status.code()
+    let output = command.output().map_err(GitFailure::DidNotStart)?;
+
+    match output.status.code() {
+        Some(CHECK_IGNORE_IGNORED) => Ok(IgnoreAnswer::Ignored),
+        Some(CHECK_IGNORE_NOT_IGNORED) => Ok(IgnoreAnswer::NotIgnored),
+        _ => Err(GitFailure::Failed(
+            first_line_of(&output.stderr).unwrap_or_else(|| output.status.to_string()),
+        )),
+    }
 }
 
 /// The pathspec that names the entry `name` at the root of the worktree.
@@ -343,8 +392,8 @@ fn report(name: &OsStr, target: &Path, outcome: &Outcome, quiet: bool) {
             let reason = not_ignored_reason(name, rule.as_ref());
             eprintln!("{}", not_linked_line(name, &reason));
         }
+        Outcome::NoAnswer(failure) => eprintln!("{}", not_linked_line(name, failure)),
         Outcome::LinkFailed(error) => eprintln!("{}", not_linked_line(name, error)),
-        Outcome::NoAnswer => {}
     }
 }
 
