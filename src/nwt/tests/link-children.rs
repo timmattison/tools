@@ -1038,3 +1038,32 @@ fn only_a_directory_that_holds_git_is_a_child() {
         run.stderr
     );
 }
+
+/// `nwt` in a linked worktree links the children of the main worktree, and not
+/// the links of the worktree it runs in.
+///
+/// The first run makes the worktree W1, and W1 holds the link [`VIAL`]. The
+/// second run starts in W1. W1 holds a `vial` that looks like a child, because
+/// the link reaches a directory that holds `.git`. A run that reads the
+/// children of the checkout it stands in thus links `W2/vial` to `W1/vial`, a
+/// chain through W1. That chain breaks when W1 goes away. The target must be
+/// the main worktree that git names, joined with the child, and the new
+/// worktree must land beside the main worktree.
+#[test]
+fn a_run_from_a_linked_worktree_links_the_children_of_the_main_worktree() {
+    let (temp, repo) = container(&[IGNORE_VIAL], &[VIAL]);
+    let main = main_worktree(&repo);
+    let first = successful_run(&temp, &repo, &unique_branch("first"), &[], None);
+    assert_linked(&first.worktree, &main, &repo, VIAL);
+    let second_branch = unique_branch("second");
+
+    let second = successful_run(&temp, &first.worktree, &second_branch, &[], None);
+
+    assert_linked(&second.worktree, &main, &repo, VIAL);
+    assert_eq!(
+        linked_lines(&second.stderr),
+        vec![linked_line(&main, VIAL).as_str(), SUMMARY_OF_ONE],
+        "stderr must name the target in the main worktree, but it reads:\n{}",
+        second.stderr
+    );
+}
