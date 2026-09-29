@@ -30,6 +30,20 @@
 //! it into the container. Git gives the same answer before the link exists, so
 //! this module asks first and never makes a link that git does not ignore.
 //!
+//! The trap is a pattern with a trailing slash, such as `vial/`. It matches
+//! only a directory, and git sees a symlink as a file, even when the symlink
+//! points at a directory. So `vial/` does not ignore the link at `vial`, and
+//! `git check-ignore -v -- vial` names no pattern, because no pattern matches.
+//! Thus, when git does not ignore `<name>`, this module asks a second question
+//! about `<name>/`, before a link exists. When a rule that ends with `/` matches
+//! that form, the warning names the rule, its file, and its line, and it gives
+//! the fix `/<name>`. Otherwise nothing ignores the child, and the warning gives
+//! only the fix.
+//!
+//! `-q` removes the line for each link, the line for each path that is already
+//! there, and the summary. It does not remove a warning, because a warning
+//! names a defect in the repository.
+//!
 //! The target of each link is absolute: the main worktree that git names,
 //! joined with the name of the child. Git keeps worktree paths absolute too, so
 //! a relative link gives no more safety.
@@ -39,8 +53,9 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
+use std::process::Stdio;
 
 use crate::production_git_command;
 
@@ -70,6 +85,23 @@ const ALREADY_THERE_PREFIX: &str = "Not linked:";
 /// Why a child whose path the new worktree already holds has no link.
 const ALREADY_THERE_REASON: &str = "the new worktree already holds this path";
 
+/// The byte that ends each field of `git check-ignore -z`, and each path of
+/// its input.
+const FIELD_END: u8 = 0;
+
+/// The end of a path or a pattern that names only a directory.
+const DIRECTORY_SUFFIX: &[u8] = b"/";
+
+/// The start of a pattern that is a negation.
+const NEGATION_PREFIX: &[u8] = b"!";
+
+/// The start of a pattern that matches only at the root of the worktree. Such
+/// a pattern without a trailing slash also matches a symlink.
+const ROOT_ANCHOR: &str = "/";
+
+/// The ignore file that the warning tells the user to change.
+const IGNORE_FILE: &str = ".gitignore";
+
 /// What happened to one child of the main worktree.
 ///
 /// Each variant other than [`Outcome::Linked`] makes no link.
@@ -79,8 +111,9 @@ enum Outcome {
     /// Something was already at the path of the link, and it stays as it was.
     AlreadyThere,
     /// Git does not ignore the path in the new worktree, so a link there shows
-    /// as untracked.
-    NotIgnored,
+    /// as untracked. The rule is there when a rule matches only the directory
+    /// form of the path, which is the trap of a trailing slash.
+    NotIgnored(Option<DirectoryOnlyRule>),
     /// Git gave no answer. It did not start, or it exited with a status that
     /// is not 0 or 1.
     NoAnswer,
@@ -130,7 +163,9 @@ fn link_child(worktree: &Path, name: &OsStr, target: &Path) -> Outcome {
 
     match check_ignore_status(worktree, name) {
         Some(CHECK_IGNORE_IGNORED) => {}
-        Some(CHECK_IGNORE_NOT_IGNORED) => return Outcome::NotIgnored,
+        Some(CHECK_IGNORE_NOT_IGNORED) => {
+            return Outcome::NotIgnored(directory_rule_of(worktree, name));
+        }
         _ => return Outcome::NoAnswer,
     }
 
@@ -188,12 +223,81 @@ struct DirectoryOnlyRule {
     pattern: String,
 }
 
+/// Ask git in `worktree` which rule matches `./<name>/`, the directory form of
+/// the child, and hand back that rule when it matches only a directory.
+///
+/// The caller asks only after git said that it does not ignore `./<name>`, and
+/// before a link exists. With a symlink at `<name>`, git refuses the question
+/// ("beyond a symbolic link"). The question goes through
+/// `git check-ignore -v -z --stdin`, because `-z` works only with `--stdin`.
+/// With `-z`, git reads the path as it is, and it writes each field of the
+/// answer with a NUL byte after it.
+///
+/// Returns `None` when no rule matches, when the rule does not match only a
+/// directory, or when git fails. Each of those cases gets the same warning. The
+/// command goes through [`production_git_command`], as the first question
+/// does, and each stream is captured.
+fn directory_rule_of(worktree: &Path, name: &OsStr) -> Option<DirectoryOnlyRule> {
+    let mut command = production_git_command(worktree);
+    command
+        .args(["check-ignore", "-v", "-z", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().ok()?;
+
+    // The closure takes stdin and drops it, which closes the pipe. Git then
+    // reads the end of its input, and the wait below cannot stop on it.
+    let written = child
+        .stdin
+        .take()
+        .is_some_and(|mut stdin| stdin.write_all(&directory_query_of(name)).is_ok());
+    let output = child.wait_with_output().ok()?;
+
+    if !written || !output.status.success() {
+        return None;
+    }
+    directory_only_rule(&output.stdout)
+}
+
+/// The input of `git check-ignore -z --stdin` that asks about the directory
+/// form of `name`: `./<name>/`, and the NUL byte that ends a path.
+///
+/// The bytes of the name go to git as they are, so a name that is not UTF-8
+/// also reaches git unchanged.
+fn directory_query_of(name: &OsStr) -> Vec<u8> {
+    let mut query = CURRENT_DIRECTORY_PREFIX.as_bytes().to_vec();
+    query.extend_from_slice(name.as_encoded_bytes());
+    query.extend_from_slice(DIRECTORY_SUFFIX);
+    query.push(FIELD_END);
+    query
+}
+
 /// The rule that `stdout` names, when that rule matches only a directory.
 ///
-/// `stdout` is the output of `git check-ignore -v -z --stdin` for one path.
+/// `stdout` is the output of `git check-ignore -v -z --stdin` for one path. A
+/// match is one record of four fields: the source, the line, the pattern, and
+/// the path. A NUL byte ends each field, so a `:` in the source stays in the
+/// source. A pattern that matches only a directory ends with `/`. A pattern
+/// that starts with `!` is a negation, and it ignores nothing.
+///
+/// Returns `None` for no output, for a record that is not complete, and for a
+/// pattern that does not match only a directory.
 fn directory_only_rule(stdout: &[u8]) -> Option<DirectoryOnlyRule> {
-    let _ = stdout;
-    None
+    let record = stdout.strip_suffix(&[FIELD_END])?;
+    let fields: Vec<&[u8]> = record.split(|byte| *byte == FIELD_END).collect();
+    let [source, line, pattern, _path] = fields.as_slice() else {
+        return None;
+    };
+    if !pattern.ends_with(DIRECTORY_SUFFIX) || pattern.starts_with(NEGATION_PREFIX) {
+        return None;
+    }
+
+    Some(DirectoryOnlyRule {
+        source: String::from_utf8_lossy(source).into_owned(),
+        line: String::from_utf8_lossy(line).into_owned(),
+        pattern: String::from_utf8_lossy(pattern).into_owned(),
+    })
 }
 
 /// Write the line for one child to stderr.
@@ -213,8 +317,35 @@ fn report(name: &OsStr, target: &Path, outcome: &Outcome, quiet: bool) {
                 eprintln!("{}", already_there_line(name));
             }
         }
+        Outcome::NotIgnored(rule) => {
+            let reason = not_ignored_reason(name, rule.as_ref());
+            eprintln!("{}", not_linked_line(name, &reason));
+        }
         Outcome::LinkFailed(error) => eprintln!("{}", not_linked_line(name, error)),
-        Outcome::NotIgnored | Outcome::NoAnswer => {}
+        Outcome::NoAnswer => {}
+    }
+}
+
+/// Why the child `name`, which git does not ignore, has no link.
+///
+/// `rule` is the rule that matches only the directory form of the path. The
+/// reason then names that rule, because the user thinks it ignores the child.
+/// Without such a rule, nothing ignores the child, and the reason gives only
+/// the fix.
+fn not_ignored_reason(name: &OsStr, rule: Option<&DirectoryOnlyRule>) -> String {
+    let name = name.to_string_lossy();
+    match rule {
+        Some(DirectoryOnlyRule {
+            source,
+            line,
+            pattern,
+        }) => format!(
+            "{source}:{line} has '{pattern}', which matches only a directory, and git sees \
+             a symlink as a file. Write '{ROOT_ANCHOR}{name}' to link it"
+        ),
+        None => format!(
+            "git does not ignore this path. Add '{ROOT_ANCHOR}{name}' to {IGNORE_FILE} to link it"
+        ),
     }
 }
 
