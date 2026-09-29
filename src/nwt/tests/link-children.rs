@@ -1465,3 +1465,114 @@ fn a_forced_removal_of_the_worktree_keeps_the_child() {
         "the child must keep its git directory and its HEAD"
     );
 }
+
+/// The submodule that the submodule fixture adds at the root of a repository.
+const VENDOR_LIB: &str = "vendor-lib";
+
+/// The mode that the index of git gives a gitlink, the entry of a submodule.
+const GITLINK_MODE: &str = "160000";
+
+/// The option of git that lets `git submodule add` clone a repository through
+/// the local file system. Git refuses that transport for a submodule by
+/// default.
+const ALLOW_FILE_PROTOCOL: [&str; 2] = ["-c", "protocol.file.allow=always"];
+
+/// Add a new repository as the submodule [`VENDOR_LIB`] at the root of `repo`,
+/// and commit it. Hand back the temporary directory that holds the source of
+/// the submodule (keep it alive).
+///
+/// A submodule holds a `.git` file, as a linked worktree does, so it looks
+/// like a child. The index of `repo` holds it as a gitlink, so it is not one.
+///
+/// # Panics
+///
+/// Panics when a path is not UTF-8, when a git command fails, or when the
+/// index of `repo` does not hold [`VENDOR_LIB`] as a gitlink.
+fn add_submodule(repo: &Path) -> TempDir {
+    let (source_temp, source) = init_repo();
+    let mut args = ALLOW_FILE_PROTOCOL.to_vec();
+    args.extend([
+        "submodule",
+        "add",
+        "--quiet",
+        source.to_str().expect("utf-8 submodule source path"),
+        VENDOR_LIB,
+    ]);
+    assert!(
+        run_git(repo, &args),
+        "git submodule add {VENDOR_LIB} failed in {}",
+        repo.display()
+    );
+    commit(repo, "add the submodule");
+
+    let submodule = repo.join(VENDOR_LIB);
+    assert!(
+        submodule.join(".git").is_file(),
+        "{} must hold the .git file of a submodule",
+        submodule.display()
+    );
+    let staged = git_stdout(repo, &["ls-files", "--stage", "--", VENDOR_LIB]);
+    assert!(
+        staged.starts_with(GITLINK_MODE),
+        "the index must hold {VENDOR_LIB} as a gitlink, but it holds:\n{staged}"
+    );
+    source_temp
+}
+
+/// A submodule at the root of a repository is not a child, and it gets no link
+/// and no line.
+///
+/// The submodule holds a `.git` file, so it is a candidate. `git worktree add`
+/// makes an empty directory for it in the new worktree. Without a rule for a
+/// submodule, `nwt` then prints `Not linked: vendor-lib (the new worktree
+/// already holds this path)`, a line about a link that it was never going to
+/// make. The repository is not a container, so the run must print no line
+/// about links at all.
+#[test]
+fn a_submodule_is_not_a_child() {
+    let (temp, repo) = init_repo();
+    let _source = add_submodule(&repo);
+    let branch = unique_branch("submodule");
+
+    let run = successful_run(&temp, &repo, &branch, &[], None);
+
+    assert!(
+        lines_naming(&run.stderr, VENDOR_LIB).is_empty(),
+        "stderr must not name the submodule {VENDOR_LIB}, but it reads:\n{}",
+        run.stderr
+    );
+    assert_no_link_and_no_line(&run);
+}
+
+/// A container with an ignored child and a submodule links the child only.
+///
+/// The submodule is not a child, so it gets no link and no line, and the
+/// summary counts one link.
+#[test]
+fn a_container_with_a_submodule_links_only_the_child() {
+    let (temp, repo) = container(&[IGNORE_VIAL], &[VIAL]);
+    let _source = add_submodule(&repo);
+    let main = main_worktree(&repo);
+    let branch = unique_branch("container-submodule");
+
+    let run = successful_run(&temp, &repo, &branch, &[], None);
+
+    assert_linked(&run.worktree, &main, &repo, VIAL);
+    assert_eq!(
+        symlinks_in(&run.worktree),
+        vec![VIAL.to_string()],
+        "{} must hold the link of {VIAL} and no other symlink",
+        run.worktree.display()
+    );
+    assert_eq!(
+        linked_lines(&run.stderr),
+        vec![linked_line(&main, VIAL).as_str(), SUMMARY_OF_ONE],
+        "stderr must name only the link of {VIAL}, but it reads:\n{}",
+        run.stderr
+    );
+    assert!(
+        lines_naming(&run.stderr, VENDOR_LIB).is_empty(),
+        "stderr must not name the submodule {VENDOR_LIB}, but it reads:\n{}",
+        run.stderr
+    );
+}
