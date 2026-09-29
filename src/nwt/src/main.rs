@@ -4652,6 +4652,37 @@ mod tests {
         assert!(result.is_ok(), "Should accept --no-copy-env with --branch");
     }
 
+    /// Issue #537: `--no-link-children` turns the child links off for one run.
+    #[test]
+    fn test_cli_no_link_children_parses() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        let result = cmd.try_get_matches_from(["nwt", "--no-link-children"]);
+        assert!(result.is_ok(), "Should accept --no-link-children option");
+
+        let matches = result.unwrap();
+        assert!(
+            matches.get_flag("no_link_children"),
+            "Should set no_link_children flag"
+        );
+    }
+
+    /// Issue #537: `--no-link-children` goes with `--branch`, as each run that
+    /// makes a worktree does.
+    #[test]
+    fn test_cli_no_link_children_with_branch() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        let result =
+            cmd.try_get_matches_from(["nwt", "--no-link-children", "--branch", "feature/test"]);
+        assert!(
+            result.is_ok(),
+            "Should accept --no-link-children with --branch"
+        );
+    }
+
     #[test]
     fn test_cli_random_directory_parses() {
         use clap::CommandFactory;
@@ -4781,6 +4812,20 @@ mod tests {
         assert!(
             result.is_err(),
             "Should fail when both --shell-setup and --no-copy-env are provided"
+        );
+    }
+
+    /// Issue #537: `--shell-setup` makes no worktree, so it refuses
+    /// `--no-link-children`.
+    #[test]
+    fn test_cli_shell_setup_conflicts_with_no_link_children() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        let result = cmd.try_get_matches_from(["nwt", "--shell-setup", "--no-link-children"]);
+        assert!(
+            result.is_err(),
+            "Should fail when both --shell-setup and --no-link-children are provided"
         );
     }
 
@@ -5902,6 +5947,24 @@ mod tests {
             assert!(config.copy_env); // unrelated field keeps its default
         }
 
+        /// Issue #537: a config file without `link_children` keeps the child
+        /// links on.
+        #[test]
+        fn test_parse_config_link_children_defaults_to_true() {
+            let config: NwtConfig = toml::from_str("").expect("Should parse empty config");
+            assert!(config.link_children);
+        }
+
+        /// Issue #537: `link_children = false` parses, and turns the child
+        /// links off.
+        #[test]
+        fn test_parse_config_link_children_false() {
+            let toml = "link_children = false";
+            let config: NwtConfig = toml::from_str(toml).expect("Should parse valid config");
+            assert!(!config.link_children);
+            assert!(config.copy_env); // unrelated field keeps its default
+        }
+
         /// Verifies that `NwtConfig::default()` produces the same values as serde defaults.
         ///
         /// This test exists to catch bugs where someone adds a new field to `NwtConfig`
@@ -5932,6 +5995,10 @@ mod tests {
             assert_eq!(
                 serde_defaults.bootstrap_hooks, manual_defaults.bootstrap_hooks,
                 "bootstrap_hooks default mismatch between impl Default and serde"
+            );
+            assert_eq!(
+                serde_defaults.link_children, manual_defaults.link_children,
+                "link_children default mismatch between impl Default and serde"
             );
             assert_eq!(
                 serde_defaults.quiet, manual_defaults.quiet,
@@ -6227,6 +6294,56 @@ mod tests {
             };
             let merged = merge_config(&cli, Some(config));
             assert!(!merged.bootstrap_hooks);
+        }
+
+        /// A `Cli` with no flag set, for the merge tests of `link_children`.
+        fn cli_without_flags() -> Cli {
+            Cli {
+                branch: None,
+                random_directory: false,
+                checkout: None,
+                no_copy_env: false,
+                no_link_children: false,
+                no_bootstrap_hooks: false,
+                quiet: false,
+                run: None,
+                shell_setup: false,
+                sparse_exclude: Vec::new(),
+            }
+        }
+
+        /// Issue #537: with no flag and no config file, the child links are on.
+        #[test]
+        fn test_merge_link_children_default_is_true() {
+            let merged = merge_config(&cli_without_flags(), None);
+            assert!(merged.link_children);
+        }
+
+        /// Issue #537: `--no-link-children` overrides `link_children = true`.
+        #[test]
+        fn test_merge_no_link_children_disables() {
+            let cli = Cli {
+                no_link_children: true, // CLI disables
+                ..cli_without_flags()
+            };
+            let config = NwtConfig {
+                link_children: true, // config enables
+                ..NwtConfig::default()
+            };
+            let merged = merge_config(&cli, Some(config));
+            assert!(!merged.link_children);
+        }
+
+        /// Issue #537: `link_children = false` holds when the CLI does not ask
+        /// for the links.
+        #[test]
+        fn test_merge_config_link_children_false() {
+            let config = NwtConfig {
+                link_children: false, // config disables
+                ..NwtConfig::default()
+            };
+            let merged = merge_config(&cli_without_flags(), Some(config));
+            assert!(!merged.link_children);
         }
 
         #[test]
