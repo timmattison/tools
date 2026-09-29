@@ -53,6 +53,10 @@ const WORKTREE_LINE_PREFIX: &str = "worktree ";
 /// The first word of each line that reports a link.
 const LINKED_WORD: &str = "Linked";
 
+/// The word that each line about a link holds, in lower case. The line for a
+/// link starts with `Linked`, and a warning holds `not linked`.
+const LINKED_WORD_LOWER: &str = "linked";
+
 /// The summary after a run that links two children.
 const SUMMARY_OF_TWO: &str = "Linked 2 child repositories from the main worktree";
 
@@ -310,6 +314,27 @@ fn quiet_keeps_the_links_and_removes_their_lines() {
     assert!(
         linked_lines(&run.stderr).is_empty(),
         "-q must remove each {LINKED_WORD} line, but stderr reads:\n{}",
+        run.stderr
+    );
+}
+
+/// A repository without children gets no link and no new line. Every other
+/// test of the output of `nwt` depends on this rule.
+#[test]
+fn a_repository_without_children_prints_nothing_new() {
+    let (temp, repo) = init_repo();
+    let branch = unique_branch("no-children");
+
+    let run = successful_run(&temp, &repo, &branch, &[], None);
+
+    let mentions: Vec<&str> = run
+        .stderr
+        .lines()
+        .filter(|line| line.to_lowercase().contains(LINKED_WORD_LOWER))
+        .collect();
+    assert!(
+        mentions.is_empty(),
+        "a repository without children must print no line about links, but stderr reads:\n{}",
         run.stderr
     );
 }
