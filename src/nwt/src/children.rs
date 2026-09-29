@@ -29,7 +29,7 @@
 //! The shell wrapper reads the worktree path from stdout, so each line of this
 //! module goes to stderr, and the git child writes into a captured buffer.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io;
 use std::path::Path;
@@ -42,6 +42,12 @@ const CHECK_IGNORE_IGNORED: i32 = 0;
 /// The exit status of `git check-ignore -q` for a path that git does not
 /// ignore.
 const CHECK_IGNORE_NOT_IGNORED: i32 = 1;
+
+/// The start of a pathspec that names an entry at the root of the worktree.
+///
+/// Git reads a leading `:` in a pathspec as magic. With this prefix, git reads
+/// each name as a path.
+const CURRENT_DIRECTORY_PREFIX: &str = "./";
 
 /// The first word of each line that reports a link.
 const LINKED_WORD: &str = "Linked";
@@ -109,7 +115,7 @@ fn link_child(worktree: &Path, name: &OsStr, target: &Path) -> Outcome {
     }
 }
 
-/// The exit status of `git check-ignore -q -- <name>` in `worktree`.
+/// The exit status of `git check-ignore -q -- ./<name>` in `worktree`.
 ///
 /// Returns `None` when git does not start, or when a signal stops it.
 ///
@@ -119,8 +125,21 @@ fn link_child(worktree: &Path, name: &OsStr, target: &Path) -> Outcome {
 /// so nothing that git writes reaches the stdout of `nwt`.
 fn check_ignore_status(worktree: &Path, name: &OsStr) -> Option<i32> {
     let mut command = production_git_command(worktree);
-    command.args(["check-ignore", "-q", "--"]).arg(name);
+    command
+        .args(["check-ignore", "-q", "--"])
+        .arg(pathspec_of(name));
     command.output().ok()?.status.code()
+}
+
+/// The pathspec that names the entry `name` at the root of the worktree.
+///
+/// Git reads a leading `:` in a pathspec as magic, so a bare `:vial` asks
+/// about `vial`. [`CURRENT_DIRECTORY_PREFIX`] stops that. The name stays an
+/// [`OsStr`], so a name that is not UTF-8 reaches git as it is.
+fn pathspec_of(name: &OsStr) -> OsString {
+    let mut pathspec = OsString::from(CURRENT_DIRECTORY_PREFIX);
+    pathspec.push(name);
+    pathspec
 }
 
 /// Write the line for one child to stderr.
