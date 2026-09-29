@@ -2849,6 +2849,14 @@ fn copy_env_file(source: &Path, dest: &Path) -> io::Result<()> {
 /// 1. Gets all tracked files from git in a single call (for performance)
 /// 2. Walks the main repo looking for `.env` or `.env.*` files (e.g., `.env.local`)
 /// 3. Skips the `.git` directory, tracked files, and unrelated dotfiles like `.envrc`.
+///    The walk does not go into a directory below the root that holds a `.git`
+///    entry (see [`repowalker::holds_git_entry`]). Such a directory is a child
+///    repository, and its `.env` files belong to the child. The index of the
+///    parent does not list them, thus without this rule the copy takes each one
+///    as untracked, even one that the child tracks. The copy then makes a real
+///    directory in the worktree that holds only `.env` files. The rule applies
+///    whether or not the child is linked into the worktree, because a directory
+///    that holds only `.env` files is not a usable child.
 ///    It also skips each untracked file under a directory of `excluded`, the
 ///    `--sparse-exclude` directories of the new worktree, because a copy makes that
 ///    directory in the worktree again. Each such skip counts in
@@ -2892,7 +2900,14 @@ fn copy_untracked_env_files(
             // Skip directories listed in SKIP_DIRECTORIES for performance.
             // See the constant definition for rationale.
             let name = e.file_name().to_string_lossy();
-            !SKIP_DIRECTORIES.contains(&name.as_ref())
+            if SKIP_DIRECTORIES.contains(&name.as_ref()) {
+                return false;
+            }
+            // Do not go into a child repository. The index of the parent does
+            // not list the files of a child, thus each `.env` of a child looks
+            // untracked here. The root is the main worktree, and it holds its
+            // own `.git`, so the rule starts below the root.
+            !(e.depth() > 0 && e.file_type().is_dir() && repowalker::holds_git_entry(e.path()))
         })
         .filter_map(|e| e.ok())
     {
