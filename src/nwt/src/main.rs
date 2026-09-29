@@ -3459,7 +3459,7 @@ fn main() {
                 // worktree (issue #537). This step comes before the .env copy.
                 // The copy does not go into a child, and the .env files of a
                 // child reach the worktree through the link.
-                children::link_children(&repo_root, &worktree_path);
+                children::link_children(&repo_root, &worktree_path, config.quiet);
 
                 // Copy untracked .env files from main worktree to new worktree
                 if config.copy_env {

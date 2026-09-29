@@ -65,9 +65,10 @@ enum Outcome {
 ///
 /// `main_worktree` is the main worktree that git names, and `worktree` is the
 /// new worktree. The function writes one line to stderr for each link, and a
-/// summary when it made at least one link. A main worktree without children
-/// gives no link and no line.
-pub(crate) fn link_children(main_worktree: &Path, worktree: &Path) {
+/// summary when it made at least one link. `quiet` removes those lines, and
+/// the links still exist. A main worktree without children gives no link and
+/// no line.
+pub(crate) fn link_children(main_worktree: &Path, worktree: &Path, quiet: bool) {
     let mut linked = 0_usize;
 
     for child in repowalker::child_repositories(main_worktree) {
@@ -80,10 +81,10 @@ pub(crate) fn link_children(main_worktree: &Path, worktree: &Path) {
         if matches!(outcome, Outcome::Linked) {
             linked += 1;
         }
-        report(name, &target, &outcome);
+        report(name, &target, &outcome, quiet);
     }
 
-    if linked > 0 {
+    if linked > 0 && !quiet {
         eprintln!("{}", summary_line(linked));
     }
 }
@@ -118,9 +119,15 @@ fn check_ignore_status(worktree: &Path, name: &OsStr) -> Option<i32> {
 }
 
 /// Write the line for one child to stderr.
-fn report(name: &OsStr, target: &Path, outcome: &Outcome) {
+///
+/// `quiet` removes the line that reports a link.
+fn report(name: &OsStr, target: &Path, outcome: &Outcome, quiet: bool) {
     match outcome {
-        Outcome::Linked => eprintln!("{}", linked_line(name, target)),
+        Outcome::Linked => {
+            if !quiet {
+                eprintln!("{}", linked_line(name, target));
+            }
+        }
         Outcome::NotIgnored | Outcome::NoAnswer | Outcome::LinkFailed => {}
     }
 }
