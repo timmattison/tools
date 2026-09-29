@@ -63,6 +63,18 @@ const SUMMARY_OF_TWO: &str = "Linked 2 child repositories from the main worktree
 /// The summary after a run that links one child.
 const SUMMARY_OF_ONE: &str = "Linked 1 child repository from the main worktree";
 
+/// The start of the warning for a child that `nwt` did not link.
+const NOT_LINKED_PREFIX: &str = "Warning: not linked:";
+
+/// The body of a `post-checkout` hook that removes the write permission of the
+/// new worktree. The hook runs with the new worktree as its working directory.
+#[cfg(unix)]
+const READ_ONLY_HOOK: &str = "chmod a-w .\n";
+
+/// The mode that gives the owner of a directory the write permission again.
+#[cfg(unix)]
+const WRITABLE_MODE: u32 = 0o755;
+
 /// The directory that holds the worktrees of the repository that
 /// `support::init_repo` makes. That repository is `<temp>/repo`.
 const WORKTREES_DIR_NAME: &str = "repo-worktrees";
@@ -335,6 +347,60 @@ fn a_repository_without_children_prints_nothing_new() {
     assert!(
         mentions.is_empty(),
         "a repository without children must print no line about links, but stderr reads:\n{}",
+        run.stderr
+    );
+}
+
+/// Give the owner the write permission on a directory again when the value
+/// goes out of scope.
+///
+/// The temporary directory cannot delete the contents of a directory without
+/// that permission. The value restores it also after a failed assertion.
+#[cfg(unix)]
+struct WritableAgain(PathBuf);
+
+#[cfg(unix)]
+impl Drop for WritableAgain {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+
+        // The directory is not there when the run failed before git made it,
+        // and then there is nothing to restore.
+        let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(WRITABLE_MODE));
+    }
+}
+
+/// A symlink that cannot be made gives no link, and a warning that names the
+/// child and the error. `-q` keeps the warning, because a missing link is a
+/// defect that the user must see.
+///
+/// A `post-checkout` hook removes the write permission of the new worktree, so
+/// the symlink fails with the permission error of the operating system. The
+/// test takes the expected error from the same failed operation.
+#[cfg(unix)]
+#[test]
+fn a_link_that_fails_gives_a_warning_that_quiet_keeps() {
+    let (temp, repo) = container(&[IGNORE_VIAL_QMK], &[VIAL_QMK]);
+    let hooks = TempDir::new().expect("create the hooks directory");
+    support::install_post_checkout_hook(&repo, hooks.path(), READ_ONLY_HOOK);
+    let main = main_worktree(&repo);
+    let branch = unique_branch("read-only");
+    let _writable = WritableAgain(temp.path().join(WORKTREES_DIR_NAME).join(&branch));
+
+    let run = successful_run(&temp, &repo, &branch, &[QUIET], None);
+
+    let link = run.worktree.join(VIAL_QMK);
+    assert!(
+        fs::symlink_metadata(&link).is_err(),
+        "{} must not exist after the link failed",
+        link.display()
+    );
+    let error = std::os::unix::fs::symlink(main.join(VIAL_QMK), &link)
+        .expect_err("the hook must leave the worktree read-only");
+    let warning = format!("{NOT_LINKED_PREFIX} {VIAL_QMK} ({error})");
+    assert!(
+        run.stderr.lines().any(|line| line == warning),
+        "stderr must hold the line {warning:?}, but it reads:\n{}",
         run.stderr
     );
 }
