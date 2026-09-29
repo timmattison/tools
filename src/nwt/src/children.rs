@@ -172,6 +172,28 @@ fn link_child(worktree: &Path, name: &OsStr, target: &Path) -> Outcome {
     link_outcome(make_directory_link(target, &link))
 }
 
+/// Why git gave no answer to the question whether it ignores a path.
+enum GitFailure {
+    /// Git exited with a status that is not 0 or 1, or a signal stopped it.
+    /// The text is the first line of its stderr.
+    Failed(String),
+    /// Git did not start, with this error.
+    DidNotStart(io::Error),
+}
+
+impl fmt::Display for GitFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let _ = (self, f);
+        Ok(())
+    }
+}
+
+/// The first line of `stderr` that holds text, without the space around it.
+fn first_line_of(stderr: &[u8]) -> Option<String> {
+    let _ = stderr;
+    None
+}
+
 /// The outcome of the attempt to make a symlink, from its `result`.
 ///
 /// A path can appear after the read of [`link_child`] and before the symlink.
@@ -494,6 +516,66 @@ mod tests {
         assert_eq!(
             directory_only_rule(b"/tmp/a:b/.gitignore\x0012\x00**/vial/\x00./vial/\x00"),
             rule("/tmp/a:b/.gitignore", "12", "**/vial/")
+        );
+    }
+
+    /// The first line of the stderr of git is the error, and a hint can follow
+    /// it.
+    #[test]
+    fn the_first_line_of_stderr_is_the_error() {
+        assert_eq!(
+            first_line_of(b"fatal: not a git repository\nhint: run git init\n"),
+            Some("fatal: not a git repository".to_string())
+        );
+    }
+
+    /// The line loses the space around it, and the line break of Windows.
+    #[test]
+    fn the_first_line_of_stderr_loses_the_space_around_it() {
+        assert_eq!(
+            first_line_of(b"  fatal: padded \t\r\n"),
+            Some("fatal: padded".to_string())
+        );
+    }
+
+    /// A blank line before the error does not hide the error.
+    #[test]
+    fn a_blank_line_before_the_error_is_skipped() {
+        assert_eq!(
+            first_line_of(b"\n  \nfatal: after blank lines\n"),
+            Some("fatal: after blank lines".to_string())
+        );
+    }
+
+    /// A stderr that holds no text gives no line.
+    #[test]
+    fn a_stderr_without_text_gives_no_line() {
+        assert_eq!(first_line_of(b""), None);
+        assert_eq!(first_line_of(b" \n\t\n"), None);
+    }
+
+    /// The warning for a git that failed repeats the error of git.
+    #[test]
+    fn the_warning_for_a_git_that_failed_repeats_its_error() {
+        let failure = GitFailure::Failed("fatal: not a git repository".to_string());
+
+        assert_eq!(
+            not_linked_line(OsStr::new("vial"), &failure),
+            "Warning: not linked: vial (git check-ignore failed: fatal: not a git repository)"
+        );
+    }
+
+    /// The warning for a git that did not start names the error of the
+    /// operating system.
+    #[test]
+    fn the_warning_for_a_git_that_did_not_start_names_the_error() {
+        let error = io::Error::from(io::ErrorKind::NotFound);
+        let expected =
+            format!("Warning: not linked: vial (git check-ignore did not start: {error})");
+
+        assert_eq!(
+            not_linked_line(OsStr::new("vial"), &GitFailure::DidNotStart(error)),
+            expected
         );
     }
 }

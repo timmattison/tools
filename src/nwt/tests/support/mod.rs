@@ -236,6 +236,40 @@ pub fn git_stdout(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+/// Runs a git command in `dir` that must fail, and hands back its standard
+/// error.
+///
+/// A test that expects `nwt` to repeat an error of git takes the text from the
+/// same failed command, and does not copy a message that changes between
+/// versions of git. The command sheds the whole inherited `GIT_*` family
+/// through [`gitscratch::shed_inherited_git_environment`], as [`run_git`] and
+/// [`git_stdout`] do.
+///
+/// # Panics
+///
+/// Panics if git cannot be spawned or exits zero. The panic message carries
+/// the command and its standard output.
+pub fn git_failure_stderr(dir: &Path, args: &[&str]) -> String {
+    let mut cmd = Command::new("git");
+    shed_inherited_git_environment(&mut cmd);
+
+    let output = cmd
+        .args(args)
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
+
+    assert!(
+        !output.status.success(),
+        "git {args:?} must fail in {}, but it wrote:\n{}",
+        dir.display(),
+        String::from_utf8_lossy(&output.stdout),
+    );
+
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
 /// Nanosecond timestamp for building process-unique, parallel-safe names.
 ///
 /// Test branch/worktree names are keyed on `std::process::id()` + this value so

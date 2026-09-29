@@ -113,6 +113,20 @@ const DIRECTORY_ONLY_WARNING: &str = "Warning: not linked: vial (.gitignore:1 ha
 const NO_PATTERN_WARNING: &str =
     "Warning: not linked: vial (git does not ignore this path. Add '/vial' to .gitignore to link it)";
 
+/// The words between the child and the error of git, in the warning for a
+/// child that git gives no answer about.
+#[cfg(unix)]
+const GIT_FAILED_REASON: &str = "git check-ignore failed:";
+
+/// The flag that stops the `.env` copy.
+#[cfg(unix)]
+const NO_COPY_ENV: &str = "--no-copy-env";
+
+/// A name in the temporary directory of a fixture that nothing makes. A broken
+/// `.git` file names it as the git directory.
+#[cfg(unix)]
+const MISSING_GIT_DIR: &str = "missing-git-dir";
+
 /// The flag that turns the links off for one run.
 const NO_LINK_CHILDREN: &str = "--no-link-children";
 
@@ -926,4 +940,46 @@ fn a_child_that_no_pattern_ignores_gives_a_warning_with_the_fix() {
     let (temp, repo) = container(&[IGNORE_VIAL_QMK], &[VIAL, VIAL_QMK]);
 
     assert_not_linked_with_warning(&temp, &repo, "no-pattern", NO_PATTERN_WARNING);
+}
+
+/// A child that git gives no answer about gets no link, and a warning that
+/// repeats the error of git. `-q` keeps the warning, and the run still
+/// succeeds.
+///
+/// A `post-checkout` hook writes a `.git` file into the new worktree that names
+/// a git directory that does not exist. Each later git command in the new
+/// worktree then fails with "not a git repository" and the status 128. The
+/// `.env` copy and the hook bootstrap stay off, and the check for a missing
+/// hooks directory ignores a git that fails, so nothing else stops the run.
+/// The test takes the expected error from the same failed question.
+#[cfg(unix)]
+#[test]
+fn a_git_that_gives_no_answer_gives_a_warning_that_quiet_keeps() {
+    let (temp, repo) = container(&[IGNORE_VIAL], &[VIAL]);
+    let missing = temp.path().join(MISSING_GIT_DIR);
+    let body = format!(
+        "printf 'gitdir: %s\\n' {} > .git\n",
+        shellquote::shell_quote(missing.to_str().expect("utf-8 git directory path"))
+    );
+    let hooks = TempDir::new().expect("create the hooks directory");
+    support::install_post_checkout_hook(&repo, hooks.path(), &body);
+
+    for extra in [&[NO_COPY_ENV][..], &[NO_COPY_ENV, QUIET][..]] {
+        let branch = unique_branch("no-answer");
+
+        let run = successful_run(&temp, &repo, &branch, extra, None);
+
+        assert_not_there(&run.worktree, VIAL);
+        let git_error = support::git_failure_stderr(
+            &run.worktree,
+            &["check-ignore", "-q", "--", &format!("./{VIAL}")],
+        );
+        let first_line = git_error
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or_else(|| panic!("git wrote no error in {}", run.worktree.display()));
+        let warning = format!("{NOT_LINKED_PREFIX} {VIAL} ({GIT_FAILED_REASON} {first_line})");
+        assert_only_line_naming(&run.stderr, VIAL, &warning);
+    }
 }
