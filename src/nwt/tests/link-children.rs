@@ -16,6 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
+use gitscratch::testing::DetachedGitDirRepo;
 use support::{git_stdout, init_repo, nanos, nwt_command, run_git, write_file};
 use tempfile::TempDir;
 
@@ -188,6 +189,14 @@ const WRITABLE_MODE: u32 = 0o755;
 /// The directory that holds the worktrees of the repository that
 /// `support::init_repo` makes. That repository is `<temp>/repo`.
 const WORKTREES_DIR_NAME: &str = "repo-worktrees";
+
+/// The suffix that `nwt` adds to the name of the main worktree, to name the
+/// directory that holds each new worktree.
+const WORKTREES_SUFFIX: &str = "-worktrees";
+
+/// The name of the bare repository that the bare fixture clones into its
+/// temporary directory.
+const BARE_REPO_NAME: &str = "bare.git";
 
 /// Resolve a path before an assertion compares it.
 ///
@@ -372,15 +381,43 @@ fn successful_run(
     successful_start(temp, repo, Start::NewBranch(branch), extra, home)
 }
 
-/// Run `nwt` as [`run_nwt`] does, and prove that it succeeded and that its
-/// stdout holds only the path of the new worktree.
+/// Run `nwt` in `repo` as [`successful_start_in`] does, for a main worktree that
+/// `support::init_repo` makes. Its worktrees go into `<temp>/repo-worktrees`.
+fn successful_start(
+    temp: &TempDir,
+    repo: &Path,
+    start: Start<'_>,
+    extra: &[&str],
+    home: Option<&Path>,
+) -> Run {
+    let worktrees_dir = canonical(temp.path()).join(WORKTREES_DIR_NAME);
+    successful_start_in(&worktrees_dir, repo, start, extra, home)
+}
+
+/// The directory that holds each worktree of the main worktree `main`, as
+/// `nwt` names it: the name of `main` and [`WORKTREES_SUFFIX`], beside `main`.
+///
+/// The result is resolved, as [`successful_start_in`] needs it.
+fn worktrees_dir_beside(main: &Path) -> PathBuf {
+    let main = canonical(main);
+    let name = main
+        .file_name()
+        .unwrap_or_else(|| panic!("{} has no name", main.display()))
+        .to_string_lossy()
+        .into_owned();
+    main.with_file_name(format!("{name}{WORKTREES_SUFFIX}"))
+}
+
+/// Run `nwt` as [`run_nwt`] does, and prove that it succeeded, that its stdout
+/// holds only the path of the new worktree, and that the new worktree is in
+/// `worktrees_dir`. `worktrees_dir` must be resolved.
 ///
 /// The shell wrapper does `dir=$(command nwt "$@")`, so any other line on
 /// stdout breaks the `cd` into the worktree. A run with `-b` names the
 /// directory after the branch. A run with `-c` gives the directory a random
 /// name, so the proof then reads only the directory that holds it.
-fn successful_start(
-    temp: &TempDir,
+fn successful_start_in(
+    worktrees_dir: &Path,
     repo: &Path,
     start: Start<'_>,
     extra: &[&str],
@@ -404,7 +441,6 @@ fn successful_start(
         "stdout must hold only the worktree path, and stderr reads:\n{stderr}"
     );
     let worktree = PathBuf::from(printed);
-    let worktrees_dir = canonical(temp.path()).join(WORKTREES_DIR_NAME);
     match start {
         Start::NewBranch(_) => assert_eq!(
             canonical(&worktree),
@@ -413,7 +449,7 @@ fn successful_start(
         ),
         Start::Checkout(_) => assert_eq!(
             canonical(&worktree).parent(),
-            Some(worktrees_dir.as_path()),
+            Some(worktrees_dir),
             "nwt printed a path that is not in the directory of the worktrees"
         ),
     }
@@ -540,16 +576,20 @@ fn a_repository_without_children_prints_nothing_new() {
 
     let run = successful_run(&temp, &repo, &branch, &[], None);
 
-    let mentions: Vec<&str> = run
-        .stderr
-        .lines()
-        .filter(|line| line.to_lowercase().contains(LINKED_WORD_LOWER))
-        .collect();
     assert!(
-        mentions.is_empty(),
+        lines_about_links(&run.stderr).is_empty(),
         "a repository without children must print no line about links, but stderr reads:\n{}",
         run.stderr
     );
+}
+
+/// The lines of `stderr` that hold [`LINKED_WORD_LOWER`] in any case: each line
+/// for a link, each summary, and each warning `not linked`.
+fn lines_about_links(stderr: &str) -> Vec<&str> {
+    stderr
+        .lines()
+        .filter(|line| line.to_lowercase().contains(LINKED_WORD_LOWER))
+        .collect()
 }
 
 /// Give the owner the write permission on a directory again when the value
@@ -1066,4 +1106,172 @@ fn a_run_from_a_linked_worktree_links_the_children_of_the_main_worktree() {
         "stderr must name the target in the main worktree, but it reads:\n{}",
         second.stderr
     );
+}
+
+/// The names of the entries of `worktree` that are symlinks, in order.
+///
+/// `nwt` makes each link at the root of the new worktree, so the root is the
+/// only level to read. The type of each entry comes from the entry itself, and
+/// not from what a link points at.
+fn symlinks_in(worktree: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(worktree)
+        .unwrap_or_else(|e| panic!("read {}: {e}", worktree.display()))
+        .map(|entry| {
+            entry.unwrap_or_else(|e| panic!("read an entry of {}: {e}", worktree.display()))
+        })
+        .filter(|entry| {
+            entry
+                .file_type()
+                .unwrap_or_else(|e| panic!("read the type of {}: {e}", entry.path().display()))
+                .is_symlink()
+        })
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Prove that `run` made no link and printed no line about links. The line
+/// for a link, the summary, and each warning `not linked` all count.
+fn assert_no_link_and_no_line(run: &Run) {
+    assert_eq!(
+        symlinks_in(&run.worktree),
+        Vec::<String>::new(),
+        "{} must hold no symlink",
+        run.worktree.display()
+    );
+    assert!(
+        lines_about_links(&run.stderr).is_empty(),
+        "the run must print no line about links, but stderr reads:\n{}",
+        run.stderr
+    );
+}
+
+/// Give the work tree of `repo` the child repository [`VIAL`], and commit a
+/// `.gitignore` that ignores it.
+///
+/// The work tree stands in for the home directory of the user, and git names
+/// the git directory as the main worktree. The git directory holds no child,
+/// so `nwt` must link nothing. The child in the work tree is the bait. A run
+/// that reads the work tree finds it, and the committed rule makes git in the
+/// new worktree ignore it, so such a run makes a link and does not only warn.
+///
+/// # Panics
+///
+/// Panics when a write or a git command fails, when git does not ignore
+/// [`VIAL`] in the work tree, or when git does not name the git directory as
+/// the main worktree.
+fn put_an_ignored_child_in_the_work_tree(repo: &DetachedGitDirRepo) {
+    write_file(repo.work_tree(), IGNORE_FILE, &format!("{IGNORE_VIAL}\n"));
+    repo.git(&["add", "--", IGNORE_FILE]);
+    repo.git(&["commit", "-q", "-m", "ignore the child"]);
+    make_child(repo.work_tree(), VIAL);
+
+    // The fixture panics when git exits with a status that is not 0, and
+    // `check-ignore -q` gives 0 only for a path that git ignores.
+    repo.git(&["check-ignore", "-q", "--", VIAL]);
+    assert_eq!(
+        canonical(&main_worktree(repo.git_dir())),
+        canonical(repo.git_dir()),
+        "git must name the git directory as the main worktree"
+    );
+}
+
+/// Run `nwt -b` in the git directory of `repo`, after
+/// [`put_an_ignored_child_in_the_work_tree`]. Prove that the run succeeds,
+/// that the new worktree lands beside the git directory, and that the run
+/// makes no link and prints no line about links.
+fn assert_a_detached_git_directory_links_nothing(repo: &DetachedGitDirRepo, label: &str) {
+    put_an_ignored_child_in_the_work_tree(repo);
+    let branch = unique_branch(label);
+
+    let run = successful_start_in(
+        &worktrees_dir_beside(repo.git_dir()),
+        repo.git_dir(),
+        Start::NewBranch(&branch),
+        &[],
+        None,
+    );
+
+    assert_no_link_and_no_line(&run);
+}
+
+/// A detached git directory inside its work tree, the shape of `yadm`, gives
+/// no link and no error (#439).
+///
+/// The main worktree is the git directory, and a git directory holds no child.
+/// The work tree is the home directory of the user, so a run that links the
+/// children of the work tree links each repository in that home.
+#[test]
+fn a_nested_git_directory_links_nothing_and_gives_no_error() {
+    let repo = DetachedGitDirRepo::nested();
+
+    assert_a_detached_git_directory_links_nothing(&repo, "nested-no-link");
+}
+
+/// A detached git directory beside its work tree gives no link and no error,
+/// for the same reason as the nested shape.
+#[test]
+fn a_git_directory_beside_its_work_tree_links_nothing_and_gives_no_error() {
+    let repo = DetachedGitDirRepo::beside();
+
+    assert_a_detached_git_directory_links_nothing(&repo, "beside-no-link");
+}
+
+/// A bare clone of a repository that `support::init_repo` makes, and the
+/// temporary directory that holds both (keep it alive).
+///
+/// The clone goes into the temporary directory of the source. `nwt` puts the
+/// worktrees of a bare repository beside it, so they also land in that
+/// temporary directory, and go away with it.
+/// `gitscratch::testing::TestRepo::bare_clone` makes the bare repository the
+/// temporary directory itself, so the worktrees of a run then stay behind in
+/// the temporary directory of the system.
+///
+/// # Panics
+///
+/// Panics when a path is not UTF-8, or when `git clone --bare` fails.
+fn bare_repository() -> (TempDir, PathBuf) {
+    let (temp, source) = init_repo();
+    let bare = temp.path().join(BARE_REPO_NAME);
+    assert!(
+        run_git(
+            temp.path(),
+            &[
+                "clone",
+                "--quiet",
+                "--bare",
+                source.to_str().expect("utf-8 source path"),
+                bare.to_str().expect("utf-8 bare repository path"),
+            ]
+        ),
+        "git clone --bare failed"
+    );
+    (temp, bare)
+}
+
+/// A bare repository gives no link and no error.
+///
+/// A bare repository has no work tree, so git names the repository directory
+/// as the main worktree. That directory holds no child.
+#[test]
+fn a_bare_repository_links_nothing_and_gives_no_error() {
+    let (_temp, bare) = bare_repository();
+    let main = main_worktree(&bare);
+    assert_eq!(
+        canonical(&main),
+        canonical(&bare),
+        "git must name the bare repository as the main worktree"
+    );
+    let branch = unique_branch("bare-no-link");
+
+    let run = successful_start_in(
+        &worktrees_dir_beside(&main),
+        &bare,
+        Start::NewBranch(&branch),
+        &[],
+        None,
+    );
+
+    assert_no_link_and_no_line(&run);
 }
