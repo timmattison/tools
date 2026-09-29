@@ -1563,8 +1563,9 @@ fn sparse_exclude_notice(excluded: &[SparseExcludeDir]) -> String {
 #[command(
     long_about = "Creates a git worktree in a '{repo-name}-worktrees' directory alongside \
 the repository. Generates Docker-style random names (adjective-noun) for both the directory \
-and branch unless overridden. Automatically copies untracked .env files from the main \
-worktree to preserve development settings.
+and branch unless overridden. Links each child repository of the main worktree into the new \
+worktree. Automatically copies untracked .env files from the main worktree to preserve \
+development settings.
 
 WHERE WORKTREES GO:
     By default, a new worktree lands in '{repo-name}-worktrees', beside the main
@@ -1649,9 +1650,80 @@ CONFIGURATION:
     Example config file:
         branch = \"feature/default\"
         copy_env = false       # disable .env file copying
+        link_children = true   # link child repositories into new worktrees
         bootstrap_hooks = true # run package-manager install to set up git hooks
         quiet = false
         run = \"pnpm install\"
+
+CHILD REPOSITORY LINKS:
+    Some repositories are containers. A container tracks the map of a workspace. Each
+    real repository sits one level below it, and .gitignore keeps that repository out
+    of the history of the container. Such a repository is a child repository, or a
+    child. cwt calls a container and its children a family.
+
+    'git worktree add' writes only tracked files, so a new worktree of a container
+    holds no child. Thus after 'git worktree add', and before the .env copy, nwt links
+    each child of the main worktree into the new worktree. Each link is a symbolic
+    link:
+
+        <new worktree>/<name> -> <main worktree>/<name>
+
+    The link gives the new worktree the one real checkout of each child. nwt makes no
+    clone, no branch, and no remote.
+
+    A child is a directory one level below the main worktree that holds a .git entry:
+    a .git directory, or the .git file of a linked worktree. A directory without a
+    .git entry, a file, and a child of a child get no link and no line.
+
+    A link that git does not ignore shows as untracked, and 'git add -A' commits it
+    into the container. So nwt asks git in the new worktree if git ignores <name>. Git
+    gives the same answer before the link exists. Thus nwt asks first, and it never
+    makes a link that git does not ignore.
+
+    A pattern with a trailing slash matches only a directory, and git sees a link as
+    a file. Thus 'vial/' ignores the child in the main worktree, but it does not
+    ignore the link. '/vial' and 'vial' ignore both. To link a child, write the
+    pattern as '/<name>'.
+
+    When the new worktree already holds something at <name>, nwt does not change it.
+    The new branch can track that path, or a post-checkout hook can make it. A broken
+    link also counts. nwt prints one line:
+
+        Not linked: vial (the new worktree already holds this path)
+
+    The target of each link is absolute: the main worktree that git names, joined with
+    the name of the child. Thus nwt in a linked worktree links the children of the
+    main worktree. A repository that keeps its git directory apart from the work tree,
+    and a bare repository, get no link. Git names the git directory as the main
+    worktree, and a git directory holds no child.
+
+    nwt prints one line to stderr for each link, and a summary when it makes at least
+    one link:
+
+        Linked vial-qmk -> /Users/me/code/keyboards/vial-qmk
+        Linked zmk-config-corne -> /Users/me/code/keyboards/zmk-config-corne
+        Linked 2 child repositories from the main worktree
+
+    A child that gets no link gets a warning, and the other children still get their
+    links. When the pattern for the child matches only a directory, the warning names
+    that pattern, its file, and its line. When no pattern matches, the warning says
+    so. Both warnings give the fix:
+
+        Warning: not linked: vial (.gitignore:1 has 'vial/', which matches only a directory, and git sees a symlink as a file. Write '/vial' to link it)
+        Warning: not linked: vial (git does not ignore this path. Add '/vial' to .gitignore to link it)
+
+    When git gives no answer, the warning repeats the first line of the error of git.
+    When nwt cannot make the link, the warning gives the error of the operating
+    system.
+
+    --quiet removes the 'Linked' lines, the summary, and the 'Not linked:' lines. It
+    does not remove a warning, because a warning names a defect in the repository.
+
+    'git worktree remove', 'git worktree remove --force', and 'rm -rf' of the worktree
+    each delete the link only. The child and its files stay unchanged.
+
+    To turn the links off for one run, use --no-link-children. To turn them off by
+    default, set link_children = false in ~/.nwt.toml.
 
 ENV FILE COPYING:
     By default, nwt copies untracked .env files from the main worktree to the new worktree,
@@ -1701,6 +1773,11 @@ ENV FILE COPYING:
     worktree of such a repository, and no work tree is below that path. nwt finds no
     .env file there and copies none. The work tree of such a repository is your home
     directory, and the .env files there are not the new worktree's to take.
+
+    The copy does not go into a nested repository: a directory below the root that
+    holds a .git entry. The .env files of a child belong to that child, and they reach
+    the new worktree through the link (see CHILD REPOSITORY LINKS). This rule applies
+    with --no-link-children too.
 
     Use --no-copy-env to disable this for a single invocation, or set copy_env = false
     in ~/.nwt.toml to disable it by default.
@@ -1819,6 +1896,7 @@ EXAMPLES:
     nwt -c v1.0.0                    # Checkout a tag
     nwt --run \"npm install\"          # Run a command after creation
     nwt --no-copy-env                # Skip copying .env files
+    nwt --no-link-children           # Do not link child repositories
     nwt --no-bootstrap-hooks         # Skip running install to set up git hooks
     nwt --sparse-exclude assets      # Leave the tracked directory assets/ out
     nwt --shell-setup                # Install shell integration for auto-cd
@@ -1923,8 +2001,8 @@ struct Cli {
     /// A child repository is a directory one level below the main worktree that
     /// holds a `.git` entry. By default, nwt links each child into the new
     /// worktree, as the symlink `<worktree>/<name>` -> `<main worktree>/<name>`.
-    /// The new worktree then uses the one real checkout of each child, so no
-    /// clone, branch, or remote is duplicated.
+    /// The new worktree then uses the one real checkout of each child, and nwt
+    /// makes no clone, no branch, and no remote.
     ///
     /// nwt makes a link only when git ignores that path in the new worktree,
     /// because `git add -A` commits a link that git does not ignore. Write the
@@ -1932,7 +2010,8 @@ struct Cli {
     /// directory, and git sees a symlink as a file.
     ///
     /// Use this flag to disable the links for a single invocation, or set
-    /// `link_children = false` in ~/.nwt.toml to disable them by default.
+    /// `link_children = false` in ~/.nwt.toml to disable them by default. The
+    /// CHILD REPOSITORY LINKS section of --help gives the rules and the output.
     #[arg(long)]
     no_link_children: bool,
 
@@ -5654,6 +5733,65 @@ mod tests {
             join_lines(readme_section).contains(FETCH),
             "the ### Remote branches section of README.md must name {FETCH:?}"
         );
+    }
+
+    /// The two documents of the child repository links: the CHILD REPOSITORY
+    /// LINKS section of `--help`, and the `### Child Repository Links` section
+    /// inside the `## nwt` section of the README.
+    ///
+    /// `include_str!` stays in `#[cfg(test)]`, so the README goes into the test
+    /// binary only and not into the `nwt` that ships.
+    fn child_link_doc_sections() -> (String, &'static str) {
+        use clap::CommandFactory;
+
+        let long_about = Cli::command()
+            .get_long_about()
+            .expect("nwt sets long_about")
+            .to_string();
+        let help_section = doc_section(
+            &long_about,
+            "\nCHILD REPOSITORY LINKS:\n",
+            "\nENV FILE COPYING:\n",
+        )
+        .to_owned();
+        let nwt_section = doc_section(
+            include_str!("../../../README.md"),
+            "\n## nwt (new worktree)\n",
+            "\n## ",
+        );
+        let readme_section = doc_section(nwt_section, "\n### Child Repository Links\n", "\n### ");
+        (help_section, readme_section)
+    }
+
+    /// The lines that report the child repository links show as samples in two
+    /// documents. The CHILD REPOSITORY LINKS section of `--help` holds them,
+    /// and so does the `### Child Repository Links` section of the README.
+    ///
+    /// The samples are copies, and only the functions run. So this test takes
+    /// each line from [`children::sample_lines`], which builds it with the
+    /// function that prints it. Each document must hold each line as a line of
+    /// its own. Change the wording in the code alone, and this test fails and
+    /// names the document that did not change.
+    ///
+    /// The samples name the main worktree `/Users/me/code/keyboards`. Windows
+    /// joins a path with `\`, so the test runs on Unix only.
+    #[cfg(unix)]
+    #[test]
+    fn test_help_and_readme_samples_match_the_child_link_lines() {
+        let (help_section, readme_section) = child_link_doc_sections();
+
+        for sample in children::sample_lines(Path::new("/Users/me/code/keyboards")) {
+            assert!(
+                has_sample_line(&help_section, &sample),
+                "the CHILD REPOSITORY LINKS section of --help must hold the runtime line: \
+                 {sample}"
+            );
+            assert!(
+                has_sample_line(readme_section, &sample),
+                "the ### Child Repository Links section of README.md must hold the runtime \
+                 line: {sample}"
+            );
+        }
     }
 
     // One mutation fixture for each rule of `escape_sparse_pattern`. Remove one

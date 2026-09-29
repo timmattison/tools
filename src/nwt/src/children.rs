@@ -454,6 +454,37 @@ fn summary_line(linked: usize) -> String {
     format!("{LINKED_WORD} {linked} {noun} from the main worktree")
 }
 
+/// The lines of this module that the documents of `nwt` show as samples, for
+/// children of `main_worktree`.
+///
+/// The CHILD REPOSITORY LINKS section of `--help` and the `### Child Repository
+/// Links` section of the README hold these samples. Each line comes from the
+/// function that prints it, so a test can hold each document to the code. The
+/// samples are: two links, their summary, the line for a path that is already
+/// there, and the two warnings for a child that git does not ignore.
+#[cfg(test)]
+pub(crate) fn sample_lines(main_worktree: &Path) -> Vec<String> {
+    let vial = OsStr::new("vial");
+    let rule = DirectoryOnlyRule {
+        source: IGNORE_FILE.to_string(),
+        line: "1".to_string(),
+        pattern: "vial/".to_string(),
+    };
+
+    let mut lines: Vec<String> = ["vial-qmk", "zmk-config-corne"]
+        .iter()
+        .map(|name| linked_line(OsStr::new(name), &main_worktree.join(name)))
+        .collect();
+    lines.push(summary_line(2));
+    lines.push(already_there_line(vial));
+    lines.push(not_linked_line(
+        vial,
+        &not_ignored_reason(vial, Some(&rule)),
+    ));
+    lines.push(not_linked_line(vial, &not_ignored_reason(vial, None)));
+    lines
+}
+
 /// Make the symlink `link` that points at the directory `target`.
 #[cfg(unix)]
 fn make_directory_link(target: &Path, link: &Path) -> io::Result<()> {
