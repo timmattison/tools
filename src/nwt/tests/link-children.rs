@@ -110,7 +110,13 @@ fn container(ignore_lines: &[&str], children: &[&str]) -> (TempDir, PathBuf) {
     assert!(
         run_git(
             &repo,
-            &["-c", "commit.gpgsign=false", "commit", "-m", "ignore the children"]
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "ignore the children"
+            ]
         ),
         "git commit failed"
     );

@@ -15,6 +15,7 @@ use serde::Deserialize;
 use shellsetup::ShellIntegration;
 use walkdir::WalkDir;
 
+mod children;
 mod refspec;
 
 /// Directories to skip when copying .env files.
@@ -3453,6 +3454,12 @@ fn main() {
                 if !sparse_excludes.is_empty() && !config.quiet {
                     eprintln!("{}", sparse_exclude_notice(&sparse_excludes));
                 }
+
+                // Link each child repository of the main worktree into the new
+                // worktree (issue #537). This step comes before the .env copy.
+                // The copy does not go into a child, and the .env files of a
+                // child reach the worktree through the link.
+                children::link_children(&repo_root, &worktree_path);
 
                 // Copy untracked .env files from main worktree to new worktree
                 if config.copy_env {
