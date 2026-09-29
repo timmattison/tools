@@ -47,6 +47,41 @@ pub fn is_git_worktree(dir: &Path) -> bool {
     false
 }
 
+/// Tells if `dir` holds a `.git` entry.
+///
+/// Git puts a `.git` directory at the root of a main worktree and a `.git` file
+/// at the root of a linked worktree. So this function examines only the name,
+/// and not the type of the entry. It follows a symbolic link, thus a link named
+/// `.git` counts when its target exists.
+///
+/// [`child_repositories`] applies this test to each directory below the one it
+/// reads. `cwt` also applies it to find the repository above a checkout.
+pub fn holds_git_entry(dir: &Path) -> bool {
+    let _ = dir;
+    false
+}
+
+/// Finds the child repositories of `dir`.
+///
+/// A child repository is a directory one level below `dir` that holds a `.git`
+/// entry, as [`holds_git_entry`] tells it. A main worktree and a linked worktree
+/// are both children. A directory without a `.git` entry is not a child, and a
+/// file is not a child.
+///
+/// The search does not go below the first level. A child of a child is not a
+/// child of `dir`, and it is not in the result.
+///
+/// The result is sorted by path. When `dir` does not exist, or the function
+/// cannot read it, the result is empty.
+///
+/// `cwt` and `nwt` both call this function, so the two tools use one definition
+/// of a child. `cwt` lists the worktrees of each child with the worktrees of the
+/// parent. `nwt` links each child into a new worktree of the parent.
+pub fn child_repositories(dir: &Path) -> Vec<PathBuf> {
+    let _ = dir;
+    Vec::new()
+}
+
 /// Finds the root of the main git repository, even when called from a worktree.
 ///
 /// Unlike `find_git_repo()` which returns the current worktree directory if inside one,
@@ -461,6 +496,70 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("create temp dir");
 
         assert!(find_repo_context_at(dir.path()).is_none());
+    }
+
+    /// The name of the entry that marks a checkout. The tests write it out, so
+    /// a wrong name in the code under test makes them fail.
+    const DOT_GIT: &str = ".git";
+
+    /// Builds a container directory that holds each kind of entry the child
+    /// rule must tell apart:
+    ///
+    /// - `alpha` holds a `.git` file, as a linked worktree does.
+    /// - `beta` holds a `.git` directory, as a main worktree does.
+    /// - `plain` is a directory without a `.git` entry.
+    /// - `file.txt` is a file.
+    /// - `alpha/grandchild` holds a `.git` directory. It is a child of a child.
+    fn container() -> tempfile::TempDir {
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let root = dir.path();
+
+        fs::create_dir_all(root.join("beta").join(DOT_GIT)).expect("create beta/.git");
+        fs::create_dir_all(root.join("alpha").join("grandchild").join(DOT_GIT))
+            .expect("create alpha/grandchild/.git");
+        fs::write(root.join("alpha").join(DOT_GIT), "gitdir: /nowhere\n")
+            .expect("write alpha/.git");
+        fs::create_dir_all(root.join("plain")).expect("create plain");
+        fs::write(root.join("file.txt"), "not a directory\n").expect("write file.txt");
+
+        dir
+    }
+
+    #[test]
+    fn the_children_are_the_directories_one_level_down_that_hold_a_git_entry() {
+        let dir = container();
+        let root = dir.path();
+
+        // `plain` and `file.txt` hold no `.git` entry. `alpha/grandchild` is a
+        // child of a child. So only `alpha` and `beta` are children, in path
+        // order.
+        assert_eq!(
+            child_repositories(root),
+            vec![root.join("alpha"), root.join("beta")]
+        );
+    }
+
+    #[test]
+    fn a_directory_that_does_not_exist_has_no_children() {
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+
+        assert!(child_repositories(&dir.path().join("missing")).is_empty());
+    }
+
+    #[test]
+    fn a_git_directory_and_a_git_file_are_both_git_entries() {
+        let dir = container();
+        let root = dir.path();
+
+        assert!(holds_git_entry(&root.join("alpha")), "a .git file counts");
+        assert!(
+            holds_git_entry(&root.join("beta")),
+            "a .git directory counts"
+        );
+        assert!(
+            !holds_git_entry(&root.join("plain")),
+            "a directory without a .git entry does not count"
+        );
     }
 
     #[test]
