@@ -370,6 +370,92 @@ pub fn repo_with_files(files: &[&str]) -> (TempDir, PathBuf) {
     (temp, repo)
 }
 
+/// The file that tells git which paths to ignore.
+pub const IGNORE_FILE: &str = ".gitignore";
+
+/// The file that each child repository of a fixture holds.
+pub const CHILD_FILE: &str = "README.md";
+
+/// Make the child repository `name` in `repo`, with one file in it.
+///
+/// # Panics
+///
+/// Panics when the directory cannot be made, or `git init` fails.
+pub fn make_child(repo: &Path, name: &str) {
+    let child = repo.join(name);
+    fs::create_dir(&child).unwrap_or_else(|e| panic!("create {}: {e}", child.display()));
+    assert!(
+        run_git(&child, &["init"]),
+        "git init failed in {}",
+        child.display()
+    );
+    write_file(&child, CHILD_FILE, &format!("{name}\n"));
+}
+
+/// A container repository whose committed `.gitignore` holds `ignore_lines`,
+/// with one child repository for each name of `children`.
+///
+/// The tests of the links to child repositories (issue #537) build each
+/// container with this function, so each of them reads one fixture.
+///
+/// Hand back the temporary directory (keep it alive) and the container.
+///
+/// # Panics
+///
+/// Panics when a write or a git command fails.
+pub fn container(ignore_lines: &[&str], children: &[&str]) -> (TempDir, PathBuf) {
+    let (temp, repo) = init_repo();
+
+    let mut ignore = ignore_lines.join("\n");
+    ignore.push('\n');
+    write_file(&repo, IGNORE_FILE, &ignore);
+    assert!(
+        run_git(&repo, &["add", "--", IGNORE_FILE]),
+        "git add {IGNORE_FILE} failed"
+    );
+    commit(&repo, "ignore the children");
+
+    for child in children {
+        make_child(&repo, child);
+    }
+
+    (temp, repo)
+}
+
+/// The options that [`commit`] gives git before the subcommand.
+///
+/// A child that [`make_child`] makes has no identity of its own, so the
+/// identity comes from here, and not from the configuration of the host.
+/// `maintenance.auto=false` stops the `git maintenance run --auto` that a
+/// commit starts. That process writes a lock file into the repository after
+/// the commit returns, so a snapshot of the repository then holds a path that
+/// appears and vanishes on its own.
+pub const COMMIT_OPTIONS: [&str; 8] = [
+    "-c",
+    "user.name=Test User",
+    "-c",
+    "user.email=test@example.com",
+    "-c",
+    "commit.gpgsign=false",
+    "-c",
+    "maintenance.auto=false",
+];
+
+/// Commit what `repo` has staged, with `message`, with [`COMMIT_OPTIONS`].
+///
+/// # Panics
+///
+/// Panics when `git commit` fails.
+pub fn commit(repo: &Path, message: &str) {
+    let mut args = COMMIT_OPTIONS.to_vec();
+    args.extend(["commit", "-m", message]);
+    assert!(
+        run_git(repo, &args),
+        "git commit -m {message:?} failed in {}",
+        repo.display()
+    );
+}
+
 /// Clone `source` into a new temporary directory, and hand back the temporary
 /// directory (keep it alive) and the clone.
 ///
