@@ -134,7 +134,12 @@ fn link_child(worktree: &Path, name: &OsStr, target: &Path) -> Outcome {
         _ => return Outcome::NoAnswer,
     }
 
-    match make_directory_link(target, &link) {
+    link_outcome(make_directory_link(target, &link))
+}
+
+/// The outcome of the attempt to make a symlink, from its `result`.
+fn link_outcome(result: io::Result<()>) -> Outcome {
+    match result {
         Ok(()) => Outcome::Linked,
         Err(error) => Outcome::LinkFailed(error),
     }
@@ -234,4 +239,41 @@ fn make_directory_link(target: &Path, link: &Path) -> io::Result<()> {
 #[cfg(windows)]
 fn make_directory_link(target: &Path, link: &Path) -> io::Result<()> {
     std::os::windows::fs::symlink_dir(target, link)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A path that appears after the read, and before the symlink, is a path
+    /// that the new worktree already holds. The operating system gives the
+    /// error of kind `AlreadyExists` for it, and the outcome keeps that path.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_onto_a_path_that_appeared_is_already_there() {
+        let temp = tempfile::TempDir::new().expect("create a temporary directory");
+        let link = temp.path().join("vial");
+        std::fs::write(&link, "made by a race\n").expect("write the file at the link path");
+
+        let outcome = link_outcome(make_directory_link(temp.path(), &link));
+
+        assert!(
+            matches!(outcome, Outcome::AlreadyThere),
+            "a symlink onto a path that is there must give the outcome AlreadyThere"
+        );
+    }
+
+    /// An error of another kind stays a failure, with the same error.
+    #[test]
+    fn a_link_error_of_another_kind_stays_a_failure() {
+        let outcome = link_outcome(Err(io::Error::from(io::ErrorKind::PermissionDenied)));
+
+        assert!(
+            matches!(
+                &outcome,
+                Outcome::LinkFailed(error) if error.kind() == io::ErrorKind::PermissionDenied
+            ),
+            "an error that is not AlreadyExists must give the outcome LinkFailed"
+        );
+    }
 }
