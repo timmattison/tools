@@ -15,11 +15,10 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use colored::Colorize;
+use repowalker::{child_repositories, holds_git_entry};
 
 use crate::ascent::{climb, main_branch_rank};
-use crate::worktree::{
-    canonical, is_checkout, list_worktrees, paths_equal, RepoWorktrees, Worktree,
-};
+use crate::worktree::{canonical, list_worktrees, paths_equal, RepoWorktrees, Worktree};
 
 /// The indent that puts a worktree under its repository heading.
 const GROUP_INDENT: &str = "  ";
@@ -134,8 +133,8 @@ impl Family {
             }
 
             // The children are read together but claimed one at a time, in the
-            // order `child_repo_dirs` sorted them: claiming is what decides a
-            // repository's place in the listing and which of two repositories
+            // order `child_repositories` sorted them: claiming is what decides
+            // a repository's place in the listing and which of two repositories
             // owns a worktree they both name, so it stays on this thread.
             for (child, listing) in read_children(&anchor_dir) {
                 match listing {
@@ -524,25 +523,9 @@ impl Family {
 fn anchor_of(main_worktree: &Path) -> PathBuf {
     let parent = main_worktree.parent();
     match parent {
-        Some(parent) if is_checkout(parent) => parent.to_path_buf(),
+        Some(parent) if holds_git_entry(parent) => parent.to_path_buf(),
         _ => main_worktree.to_path_buf(),
     }
-}
-
-/// The directories one level below `dir` that are git repositories or worktrees,
-/// sorted by name.
-fn child_repo_dirs(dir: &Path) -> Vec<PathBuf> {
-    let Ok(read) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-
-    let mut children: Vec<PathBuf> = read
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir() && is_checkout(path))
-        .collect();
-    children.sort();
-    children
 }
 
 /// How many child repositories are read at once.
@@ -560,7 +543,7 @@ const SCAN_WIDTH: usize = 32;
 /// What a repository whose scan did not finish is told to the user as.
 const SCAN_DIED: &str = "the scan of this repository did not finish";
 
-/// Reads every child repository of `dir`, in the order [`child_repo_dirs`]
+/// Reads every child repository of `dir`, in the order [`child_repositories`]
 /// sorted them.
 ///
 /// A repository is read by asking `git` for its worktrees, and the answer takes
@@ -569,7 +552,7 @@ const SCAN_DIED: &str = "the scan of this repository did not finish";
 /// a family of children about what one child costs. The order the caller sees
 /// is the order it would see from reading them one at a time.
 fn read_children(dir: &Path) -> Vec<(PathBuf, Result<RepoWorktrees, String>)> {
-    let children = child_repo_dirs(dir);
+    let children = child_repositories(dir);
     let mut listings = Vec::with_capacity(children.len());
 
     for wave in children.chunks(SCAN_WIDTH) {
