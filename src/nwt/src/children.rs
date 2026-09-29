@@ -13,19 +13,29 @@
 //!
 //! [`repowalker::child_repositories`] finds the candidates, so `nwt` and `cwt`
 //! start from one definition: a directory one level below the main worktree
-//! that holds a `.git` entry. `nwt` then removes each worktree of this
-//! repository, because a worktree of this repository is not a child. The
-//! setting `nwt.worktreesDir '.'` puts each worktree one level below the main
-//! worktree, and each one holds a `.git` file. `git worktree add` makes the new
-//! worktree before this module runs, so without that step the new worktree
-//! gets a link to itself, a loop that a tool which follows links reads without
-//! end. [`NotChildren`] holds the entries to remove, and `git worktree list`
-//! names them. A linked worktree of another repository stays a child.
+//! that holds a `.git` entry. `nwt` then removes two kinds of candidate that
+//! are not children. [`NotChildren`] holds them.
 //!
-//! This module asks git for the worktrees only when a candidate exists, so a
+//! - A worktree of this repository. The setting `nwt.worktreesDir '.'` puts
+//!   each worktree one level below the main worktree, and each one holds a
+//!   `.git` file. `git worktree add` makes the new worktree before this module
+//!   runs, so without this step the new worktree gets a link to itself, a loop
+//!   that a tool which follows links reads without end. `git worktree list`
+//!   names each worktree. A linked worktree of another repository stays a
+//!   child.
+//! - A submodule. It holds a `.git` file, but this repository tracks it, so
+//!   this repository is not a container of it. `git worktree add` makes an
+//!   empty directory for each submodule. Without this step, each run in such a
+//!   repository prints a line about a link that `nwt` never makes. The index of
+//!   the main worktree holds a submodule as a gitlink (mode `160000`), and
+//!   `git ls-files --stage` names each one. A child that git ignores is not in
+//!   the index, so it stays a child.
+//!
+//! This module asks git for these entries only when a candidate exists, so a
 //! repository without candidates starts no git process here. When git gives
-//! no list, this module cannot tell a child from a worktree, and it makes no
-//! link. One warning then repeats the first line of the error of git.
+//! no answer to one of the two questions, this module cannot tell a child from
+//! an entry that is not a child, and it makes no link. One warning then
+//! repeats the first line of the error of git.
 //!
 //! First, this module reads the path `<worktree>/<name>`. When something is
 //! already there, the module does not change it and asks git nothing. The new
@@ -63,8 +73,8 @@
 //! that fails gives a fourth, with the error of the operating system. `-q`
 //! removes the line for each link, the line for each path that is already
 //! there, and the summary. It does not remove a warning, because a warning
-//! names a defect in the repository. The warning for a run without a list of
-//! worktrees stays too.
+//! names a defect in the repository. The warning for a run that cannot tell
+//! the children apart stays too.
 //!
 //! The target of each link is absolute: the main worktree that git names,
 //! joined with the name of the child. Git keeps worktree paths absolute too, so
@@ -144,8 +154,32 @@ const WORKTREE_LIST_OPTIONS: [&str; 2] = ["--porcelain", "-z"];
 /// `git worktree list --porcelain -z`. The path of the worktree follows it.
 const WORKTREE_FIELD_PREFIX: &[u8] = b"worktree ";
 
+/// The words of the subcommand of git that names each entry of the index.
+const LS_FILES: GitSubcommand = &["ls-files"];
+
+/// The options that make `git ls-files` write the mode, the object, and the
+/// stage before the path of each entry, with a NUL byte after each record. The
+/// `--` makes git read each word after it as a pathspec.
+const LS_FILES_OPTIONS: [&str; 3] = ["--stage", "-z", "--"];
+
+/// The mode that the index gives a gitlink, which is the entry of a
+/// submodule.
+const GITLINK_MODE: &[u8] = b"160000";
+
+/// The byte that ends the mode and the object in each record of
+/// `git ls-files --stage -z`.
+const STAGE_FIELD_END: u8 = b' ';
+
+/// The byte that ends the stage and starts the path in each record of
+/// `git ls-files --stage -z`.
+const STAGE_PATH_START: u8 = b'\t';
+
+/// The byte that separates the directories of a path in the index. Git writes
+/// this byte on each operating system.
+const INDEX_PATH_SEPARATOR: u8 = b'/';
+
 /// The warning for a run that makes no link, because git gave no list of the
-/// worktrees. The reason in parentheses follows it.
+/// worktrees or of the submodules. The reason in parentheses follows it.
 const NO_CHILD_LINKED: &str =
     "Warning: no child linked, because nwt cannot tell which directories are children";
 
@@ -189,7 +223,7 @@ pub(crate) fn link_children(main_worktree: &Path, worktree: &Path, quiet: bool) 
     if candidates.is_empty() {
         return;
     }
-    let not_children = match NotChildren::of(main_worktree, worktree) {
+    let not_children = match NotChildren::of(main_worktree, worktree, &candidates) {
         Ok(not_children) => not_children,
         Err(failure) => {
             eprintln!("{}", no_child_linked_line(&failure));
@@ -373,8 +407,9 @@ fn check_ignore(worktree: &Path, name: &OsStr) -> Result<IgnoreAnswer, GitFailur
 ///
 /// [`repowalker::child_repositories`] finds each directory one level below the
 /// main worktree that holds a `.git` entry. Some of those directories are not
-/// children, and this set holds them. [`link_children`] skips each candidate
-/// that this set holds, with no line.
+/// children, and this set holds them: each worktree of this repository, and
+/// each submodule. [`link_children`] skips each candidate that this set holds,
+/// with no line.
 ///
 /// Each path is canonical, so a path that reaches a directory through a
 /// symlink matches the path that reaches it directly. On macOS, `/var` is a
@@ -384,25 +419,39 @@ struct NotChildren(HashSet<PathBuf>);
 
 impl NotChildren {
     /// The entries of `main_worktree` that are not children, when `worktree` is
-    /// the new worktree.
+    /// the new worktree and `candidates` are the candidates of
+    /// [`repowalker::child_repositories`].
     ///
-    /// A worktree of this repository is not a child. `git worktree list` in
-    /// `main_worktree` names each worktree, and the new worktree comes from
-    /// `worktree` too, with no question to git. A linked worktree of another
-    /// repository holds a `.git` file too, but git does not name it here, so it
-    /// stays a child.
+    /// Two kinds of entry are not children:
+    ///
+    /// - A worktree of this repository. `git worktree list` in `main_worktree`
+    ///   names each worktree, and the new worktree comes from `worktree` too,
+    ///   with no question to git. A linked worktree of another repository holds
+    ///   a `.git` file too, but git does not name it here, so it stays a child.
+    /// - A submodule. The index of `main_worktree` holds it as a gitlink, so
+    ///   this repository tracks it. `git ls-files` in `main_worktree` names
+    ///   each one. A child that git ignores is not in the index, so it stays a
+    ///   child.
     ///
     /// Each kind of entry that is not a child goes into the one chain below, so
     /// [`link_children`] reads one set and makes one pass.
     ///
     /// # Errors
     ///
-    /// Returns the [`GitFailure`] of `git worktree list`. Without the list, a
-    /// child and a worktree look the same.
-    fn of(main_worktree: &Path, worktree: &Path) -> Result<Self, GitFailure> {
+    /// Returns the [`GitFailure`] of `git worktree list`, or of `git ls-files`.
+    /// Without either answer, a child looks the same as an entry that is not a
+    /// child.
+    fn of(
+        main_worktree: &Path,
+        worktree: &Path,
+        candidates: &[PathBuf],
+    ) -> Result<Self, GitFailure> {
         let worktrees = worktree_paths(main_worktree)?;
+        let submodules = gitlink_paths(main_worktree, candidates)?;
         Ok(Self::from_paths(
-            std::iter::once(worktree.to_path_buf()).chain(worktrees),
+            std::iter::once(worktree.to_path_buf())
+                .chain(worktrees)
+                .chain(submodules),
         ))
     }
 
@@ -462,6 +511,69 @@ fn worktree_paths_of(stdout: &[u8]) -> Vec<PathBuf> {
         .split(|byte| *byte == FIELD_END)
         .filter_map(|field| field.strip_prefix(WORKTREE_FIELD_PREFIX))
         .map(path_of_bytes)
+        .collect()
+}
+
+/// The path of each submodule at the root of `main_worktree` whose name is the
+/// name of one of `candidates`, as `git ls-files --stage -z` in
+/// `main_worktree` names it.
+///
+/// The index of `main_worktree` holds a submodule as a gitlink. Git writes
+/// each path relative to `main_worktree`, so the function joins each one onto
+/// `main_worktree`.
+///
+/// Each name of `candidates` goes to git as a pathspec, so git lists only the
+/// entries at those paths, and not each file of a large index. Git can read a
+/// name that holds `*` or `[` as a pattern. Git still names the entry whose
+/// path is that name. Another match gets into the result only when it is a
+/// gitlink at the root, and such an entry is a submodule too.
+///
+/// # Errors
+///
+/// Returns a [`GitFailure`] when git does not start, or when it exits with a
+/// status that is not 0. The command goes through [`production_git_command`],
+/// as the question for the worktrees does, and each stream is captured.
+fn gitlink_paths(main_worktree: &Path, candidates: &[PathBuf]) -> Result<Vec<PathBuf>, GitFailure> {
+    let mut command = production_git_command(main_worktree);
+    command.args(LS_FILES).args(LS_FILES_OPTIONS).args(
+        candidates
+            .iter()
+            .filter_map(|candidate| candidate.file_name())
+            .map(pathspec_of),
+    );
+    let output = captured_output(command, LS_FILES)?;
+
+    if !output.status.success() {
+        return Err(GitFailure::failed(LS_FILES, &output));
+    }
+    Ok(gitlink_names_of(&output.stdout)
+        .into_iter()
+        .map(|name| main_worktree.join(name))
+        .collect())
+}
+
+/// The name of each gitlink at the root of the index that `stdout` names, in
+/// order.
+///
+/// `stdout` is the output of `git ls-files --stage -z`. Each record is
+/// `<mode> <object> <stage>`, a tab, and the path, with a NUL byte after it. A
+/// NUL byte cannot occur in a path, so a space, a tab, or a line break in a
+/// path stays in the path.
+///
+/// Only a record with the mode [`GITLINK_MODE`] names a submodule. A path that
+/// holds [`INDEX_PATH_SEPARATOR`] is below the root, and a child is one level
+/// below the main worktree, so such a path is not in the result.
+fn gitlink_names_of(stdout: &[u8]) -> Vec<PathBuf> {
+    stdout
+        .split(|byte| *byte == FIELD_END)
+        .filter_map(|record| {
+            let mut parts = record.splitn(2, |byte| *byte == STAGE_PATH_START);
+            let stage_fields = parts.next()?;
+            let path = parts.next()?;
+            let mode = stage_fields.split(|byte| *byte == STAGE_FIELD_END).next()?;
+            let at_root = !path.is_empty() && !path.contains(&INDEX_PATH_SEPARATOR);
+            (mode == GITLINK_MODE && at_root).then(|| path_of_bytes(path))
+        })
         .collect()
 }
 
@@ -647,7 +759,7 @@ fn not_linked_line(name: &OsStr, reason: &dyn fmt::Display) -> String {
 }
 
 /// The warning for a run that makes no link, because git gave no list of the
-/// worktrees, with `failure`.
+/// worktrees or of the submodules, with `failure`.
 fn no_child_linked_line(failure: &GitFailure) -> String {
     format!("{NO_CHILD_LINKED} ({failure})")
 }
@@ -679,7 +791,7 @@ fn summary_line(linked: usize) -> String {
 /// function that prints it, so a test can hold each document to the code. The
 /// samples are: two links, their summary, the line for a path that is already
 /// there, the two warnings for a child that git does not ignore, and the
-/// warning for a run without a list of worktrees.
+/// warning for a run without a list of the worktrees.
 #[cfg(test)]
 pub(crate) fn sample_lines(main_worktree: &Path) -> Vec<String> {
     let vial = OsStr::new("vial");
@@ -998,6 +1110,114 @@ mod tests {
         assert_eq!(
             worktree_paths_of(b"worktree /srv/caf\xe9\0detached\0\0"),
             vec![PathBuf::from(OsStr::from_bytes(b"/srv/caf\xe9"))]
+        );
+    }
+
+    /// One record of `git ls-files --stage -z` for a gitlink at the root names
+    /// that submodule.
+    #[test]
+    fn a_gitlink_at_the_root_is_held() {
+        assert_eq!(
+            gitlink_names_of(b"160000 ebdbb8a9f3cf8a958d98ba22ce1fb583aa205c41 0\tvendor-lib\0"),
+            vec![PathBuf::from("vendor-lib")]
+        );
+    }
+
+    /// A regular file is not a submodule, also when its name is a child name.
+    #[test]
+    fn a_regular_file_is_not_held() {
+        assert_eq!(
+            gitlink_names_of(b"100644 8252902be650a026ddc167a216a6fadc10ff2a2c 0\tvendor-lib\0"),
+            Vec::<PathBuf>::new()
+        );
+    }
+
+    /// A gitlink below the root is not one level below the main worktree, so
+    /// no candidate is that submodule.
+    #[test]
+    fn a_gitlink_below_the_root_is_not_held() {
+        assert_eq!(
+            gitlink_names_of(b"160000 ebdbb8a9f3cf8a958d98ba22ce1fb583aa205c41 0\ta/b\0"),
+            Vec::<PathBuf>::new()
+        );
+    }
+
+    /// The mode comes from the first field only. A path that spells the mode
+    /// does not make its record a gitlink.
+    #[test]
+    fn a_path_that_spells_the_mode_is_not_held() {
+        assert_eq!(
+            gitlink_names_of(b"100644 8252902be650a026ddc167a216a6fadc10ff2a2c 0\t160000\0"),
+            Vec::<PathBuf>::new()
+        );
+    }
+
+    /// Each gitlink at the root of a listing is held, in order, and each other
+    /// record is not. A gitlink in a conflict holds a stage that is not 0, and
+    /// it is still a submodule.
+    #[test]
+    fn each_gitlink_at_the_root_of_a_listing_is_held() {
+        let stdout = b"100644 8252902be650a026ddc167a216a6fadc10ff2a2c 0\t.gitmodules\0\
+            160000 ebdbb8a9f3cf8a958d98ba22ce1fb583aa205c41 0\tfirst\0\
+            100644 587be6b4c3f93f93c489c0111bba5596147a26cb 0\td/f\0\
+            160000 1111111111111111111111111111111111111111 2\tsecond\0\
+            160000 2222222222222222222222222222222222222222 3\tsecond\0";
+
+        assert_eq!(
+            gitlink_names_of(stdout),
+            vec![
+                PathBuf::from("first"),
+                PathBuf::from("second"),
+                PathBuf::from("second"),
+            ]
+        );
+    }
+
+    /// A NUL byte ends each record, and the first tab starts the path, so a
+    /// space, a tab, and a line break stay in the path.
+    #[test]
+    fn a_gitlink_path_with_a_space_stays_whole() {
+        assert_eq!(
+            gitlink_names_of(
+                b"160000 ebdbb8a9f3cf8a958d98ba22ce1fb583aa205c41 0\tmy vendor\tlib\nnew\0"
+            ),
+            vec![PathBuf::from("my vendor\tlib\nnew")]
+        );
+    }
+
+    /// A path that is not UTF-8 reaches the set as the bytes that git wrote.
+    #[cfg(unix)]
+    #[test]
+    fn a_gitlink_path_that_is_not_utf8_stays_as_git_wrote_it() {
+        use std::os::unix::ffi::OsStrExt;
+
+        assert_eq!(
+            gitlink_names_of(b"160000 ebdbb8a9f3cf8a958d98ba22ce1fb583aa205c41 0\tcaf\xe9\0"),
+            vec![PathBuf::from(OsStr::from_bytes(b"caf\xe9"))]
+        );
+    }
+
+    /// No output holds no submodule, and a record without a tab is not a
+    /// record of `git ls-files --stage`.
+    #[test]
+    fn no_output_holds_no_gitlink() {
+        assert_eq!(gitlink_names_of(b""), Vec::<PathBuf>::new());
+        assert_eq!(
+            gitlink_names_of(b"160000 ebdbb8a9f3cf8a958d98ba22ce1fb583aa205c41 0\0"),
+            Vec::<PathBuf>::new()
+        );
+    }
+
+    /// A run without a list of the submodules makes no link, and its one
+    /// warning repeats the error of `git ls-files`.
+    #[test]
+    fn the_warning_for_an_ls_files_that_failed_repeats_its_error() {
+        let failure = failed(LS_FILES, "fatal: index file corrupt");
+
+        assert_eq!(
+            no_child_linked_line(&failure),
+            "Warning: no child linked, because nwt cannot tell which directories are children \
+             (git ls-files failed: fatal: index file corrupt)"
         );
     }
 

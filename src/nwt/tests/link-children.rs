@@ -18,8 +18,8 @@ use std::process::Output;
 
 use gitscratch::testing::DetachedGitDirRepo;
 use support::{
-    commit, container, git_stdout, init_repo, make_child, nanos, nwt_command, run_git, write_file,
-    CHILD_FILE, IGNORE_FILE,
+    commit, container, git_failure_stderr, git_stdout, init_repo, make_child, nanos, nwt_command,
+    run_git, write_file, CHILD_FILE, IGNORE_FILE,
 };
 use tempfile::TempDir;
 
@@ -1573,6 +1573,54 @@ fn a_container_with_a_submodule_links_only_the_child() {
     assert!(
         lines_naming(&run.stderr, VENDOR_LIB).is_empty(),
         "stderr must not name the submodule {VENDOR_LIB}, but it reads:\n{}",
+        run.stderr
+    );
+}
+
+/// The index of the main worktree, relative to the main worktree.
+const MAIN_INDEX: &str = ".git/index";
+
+/// The start of the warning for a run that makes no link, because `nwt`
+/// cannot tell which directories are children. The reason in parentheses
+/// follows it.
+const NO_CHILD_LINKED: &str =
+    "Warning: no child linked, because nwt cannot tell which directories are children";
+
+/// A run whose `git ls-files` gives no answer makes no link, and it prints one
+/// warning that repeats the first line of the error of git. `-q` keeps the
+/// warning.
+///
+/// Without the list of the submodules, `nwt` cannot tell a child from a
+/// submodule. The fixture writes bytes that are not an index over the index of
+/// the main worktree. `git worktree list` and `git worktree add` do not read
+/// that index, so the run still makes the new worktree. The child [`VIAL`] is
+/// the bait: git ignores it, so a run that does not ask `git ls-files` links
+/// it.
+#[test]
+fn an_ls_files_that_gives_no_answer_links_nothing_and_warns_once() {
+    let (temp, repo) = container(&[IGNORE_VIAL], &[VIAL]);
+    let index = repo.join(MAIN_INDEX);
+    fs::write(&index, "not an index").unwrap_or_else(|e| panic!("write {}: {e}", index.display()));
+    let error = git_failure_stderr(&repo, &["ls-files", "--stage"]);
+    let first_line = error
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_else(|| panic!("git ls-files wrote no error for a broken index"));
+    let branch = unique_branch("broken-index");
+
+    let run = successful_run(&temp, &repo, &branch, &[QUIET], None);
+
+    assert_eq!(
+        symlinks_in(&run.worktree),
+        Vec::<String>::new(),
+        "{} must hold no symlink",
+        run.worktree.display()
+    );
+    assert_eq!(
+        lines_about_links(&run.stderr),
+        vec![format!("{NO_CHILD_LINKED} (git ls-files failed: {first_line})").as_str()],
+        "stderr must hold one warning about the links, but it reads:\n{}",
         run.stderr
     );
 }

@@ -1673,13 +1673,18 @@ CHILD REPOSITORY LINKS:
 
     A child is a directory one level below the main worktree that holds a .git entry:
     a .git directory, or the .git file of a linked worktree of another repository. A
-    directory without a .git entry, a file, a child of a child, and a worktree of this
-    repository get no link and no line.
+    directory without a .git entry, a file, a child of a child, a worktree of this
+    repository, and a submodule get no link and no line.
 
     A worktree of this repository is not a child, and 'git worktree list' names each
     one. 'nwt.worktreesDir' set to '.' puts each worktree one level below the main
     worktree, the new worktree too. Without this rule, the new worktree gets a link
     to itself, and a tool that follows links reads that loop without end.
+
+    A submodule is not a child. It holds a .git file, but this repository tracks it,
+    and 'git worktree add' makes an empty directory for it. The index of the main
+    worktree holds each submodule as a gitlink, and 'git ls-files' names each one. A
+    child that git ignores is not in the index, so it stays a child.
 
     A link that git does not ignore shows as untracked, and 'git add -A' commits it
     into the container. So nwt asks git in the new worktree if git ignores <name>. Git
@@ -1722,9 +1727,10 @@ CHILD REPOSITORY LINKS:
     When nwt cannot make the link, the warning gives the error of the operating
     system.
 
-    When git gives no list of the worktrees, nwt cannot tell a child from a worktree
-    of this repository. nwt then makes no link, and it prints one warning that repeats
-    the first line of the error of git:
+    When git gives no list of the worktrees or of the submodules, nwt cannot tell a
+    child from an entry that is not a child. nwt then makes no link, and it prints one
+    warning that repeats the first line of the error of git, after 'git worktree list
+    failed:' or 'git ls-files failed:':
 
         Warning: no child linked, because nwt cannot tell which directories are children (git worktree list failed: fatal: not a git repository)
 
@@ -2011,9 +2017,9 @@ struct Cli {
     /// Disable the links to the child repositories of the main worktree.
     ///
     /// A child repository is a directory one level below the main worktree that
-    /// holds a `.git` entry. A worktree of this repository is not a child. By
-    /// default, nwt links each child into the new worktree, as the symlink
-    /// `<worktree>/<name>` -> `<main worktree>/<name>`.
+    /// holds a `.git` entry. A worktree of this repository and a submodule are
+    /// not children. By default, nwt links each child into the new worktree, as
+    /// the symlink `<worktree>/<name>` -> `<main worktree>/<name>`.
     /// The new worktree then uses the one real checkout of each child, and nwt
     /// makes no clone, no branch, and no remote.
     ///

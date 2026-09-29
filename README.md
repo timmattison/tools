@@ -2906,12 +2906,13 @@ Thus after `git worktree add`, and before the `.env` copy, nwt links each child 
 
 The link gives the new worktree the one real checkout of each child. nwt makes no clone, no branch, and no remote. A branch then exists only in a repository that the work changes.
 
-**Which entries are children.** A child is a directory one level below the main worktree that holds a `.git` entry. The entry is a `.git` directory, or the `.git` file of a linked worktree of another repository. `cwt` finds its candidates with the same rule. nwt then skips each worktree of this repository, because such a worktree is not a child. `git worktree list` names those worktrees. These entries get no link and no line:
+**Which entries are children.** A child is a directory one level below the main worktree that holds a `.git` entry. The entry is a `.git` directory, or the `.git` file of a linked worktree of another repository. `cwt` finds its candidates with the same rule. nwt then skips each worktree of this repository and each submodule, because neither is a child. `git worktree list` names those worktrees, and `git ls-files` names those submodules. These entries get no link and no line:
 
 - A directory without a `.git` entry
 - A file
 - A child of a child
 - A worktree of this repository. `nwt.worktreesDir` set to `.` (see [Where worktrees go](#where-worktrees-go)) puts each worktree one level below the main worktree, the new worktree too. Without this rule, the new worktree gets a link to itself, and a tool that follows links reads that loop without end.
+- A submodule. It holds a `.git` file, but this repository tracks it, so this repository is not a container of it. `git worktree add` makes an empty directory for each submodule. Without this rule, each run in such a repository prints a line about a link that nwt never makes. The index of the main worktree holds each submodule as a gitlink (mode `160000`). A child that git ignores is not in the index, so it stays a child.
 
 **When a child gets a link.** A link that git does not ignore shows as untracked in `git status`, and `git add -A` commits it into the container. So nwt asks git in the new worktree if git ignores `<name>`. The new worktree can hold a `.gitignore` that is different from the one in the main worktree, so nwt asks there. Git gives the same answer before the link exists. Thus nwt asks first, and it never makes a link that git does not ignore.
 
@@ -2954,7 +2955,7 @@ Warning: not linked: vial (git does not ignore this path. Add '/vial' to .gitign
 
 When git gives no answer, the warning repeats the first line of the error of git, after `git check-ignore failed:`. When nwt cannot make the link, the warning gives the error of the operating system.
 
-When git gives no list of the worktrees, nwt cannot tell a child from a worktree of this repository. nwt then makes no link, and it prints one warning that repeats the first line of the error of git:
+When git gives no list of the worktrees or of the submodules, nwt cannot tell a child from an entry that is not a child. nwt then makes no link, and it prints one warning that repeats the first line of the error of git, after `git worktree list failed:` or `git ls-files failed:`:
 
 ```text
 Warning: no child linked, because nwt cannot tell which directories are children (git worktree list failed: fatal: not a git repository)
