@@ -35,6 +35,35 @@ for entry in walker.walk_with_walkdir() {
 }
 ```
 
+## Child Repositories
+
+A container repository keeps other repositories one level below it. Each of
+these is a child repository. `child_repositories(dir)` finds them.
+
+A child repository is a directory one level below `dir` that holds a `.git`
+entry. The entry is a `.git` directory for a main worktree, or a `.git` file for
+a linked worktree. `holds_git_entry(dir)` tells if a directory holds one. It
+follows a symbolic link.
+
+The search does not go below the first level. A child of a child is not a
+child. The result is sorted by path. A directory that does not exist, or that
+the function cannot read, has no children.
+
+```rust
+use repowalker::{child_repositories, holds_git_entry};
+use std::path::Path;
+
+let container = Path::new("/code/workspace");
+if holds_git_entry(container) {
+    for child in child_repositories(container) {
+        println!("Child: {}", child.display());
+    }
+}
+```
+
+`cwt` and `nwt` both call these functions, so the two tools use one definition
+of a child.
+
 ## Configuration Options
 
 - `skip_node_modules(bool)`: Skip node_modules directories (default: true)
@@ -45,6 +74,10 @@ for entry in walker.walk_with_walkdir() {
 ## Used By
 
 This library is used by several tools in this repository:
+- `cwt`: Find the child repositories of a container, to list their worktrees
+  with the worktrees of the container
+- `nwt`: Find the child repositories of a container, to link them into each new
+  worktree of the container
 - `goup`: Update Go dependencies across a repository
 - `polish`: Update Rust crate dependencies across a repository
 - `nodeup`: Update Node.js dependencies across a repository
