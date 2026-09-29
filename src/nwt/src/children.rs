@@ -138,9 +138,14 @@ fn link_child(worktree: &Path, name: &OsStr, target: &Path) -> Outcome {
 }
 
 /// The outcome of the attempt to make a symlink, from its `result`.
+///
+/// A path can appear after the read of [`link_child`] and before the symlink.
+/// The error of kind `AlreadyExists` then gives [`Outcome::AlreadyThere`], as
+/// the read does. Each other error gives [`Outcome::LinkFailed`].
 fn link_outcome(result: io::Result<()>) -> Outcome {
     match result {
         Ok(()) => Outcome::Linked,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Outcome::AlreadyThere,
         Err(error) => Outcome::LinkFailed(error),
     }
 }
