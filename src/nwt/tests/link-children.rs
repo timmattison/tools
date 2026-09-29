@@ -100,6 +100,19 @@ const ALREADY_THERE_PREFIX: &str = "Not linked:";
 /// Why a child whose path the new worktree already holds has no link.
 const ALREADY_THERE_REASON: &str = "the new worktree already holds this path";
 
+/// A `.gitignore` pattern that ignores the directory [`VIAL`], and not a
+/// symlink of that name. Git sees a symlink as a file.
+const DIRECTORY_ONLY_VIAL: &str = "vial/";
+
+/// The warning for [`VIAL`] when line 1 of `.gitignore` is
+/// [`DIRECTORY_ONLY_VIAL`], as issue #537 gives it.
+const DIRECTORY_ONLY_WARNING: &str = "Warning: not linked: vial (.gitignore:1 has 'vial/', \
+     which matches only a directory, and git sees a symlink as a file. Write '/vial' to link it)";
+
+/// The warning for [`VIAL`] when no pattern matches it, as issue #537 gives it.
+const NO_PATTERN_WARNING: &str =
+    "Warning: not linked: vial (git does not ignore this path. Add '/vial' to .gitignore to link it)";
+
 /// The flag that turns the links off for one run.
 const NO_LINK_CHILDREN: &str = "--no-link-children";
 
@@ -868,4 +881,49 @@ fn a_broken_symlink_from_a_post_checkout_hook_stays_and_one_line_says_so() {
         missing.display()
     );
     assert_only_line_naming(&run.stderr, VIAL, &already_there_line(VIAL));
+}
+
+/// Run `nwt` in `repo` once without `-q` and once with it, and prove each
+/// time that [`VIAL`] has no link, that `warning` is the only line about it,
+/// and that [`VIAL_QMK`] still has its link.
+///
+/// `-q` keeps the warning, because the warning names a defect in the
+/// repository. [`VIAL`] comes before [`VIAL_QMK`] in the order of the names,
+/// so the link of [`VIAL_QMK`] proves that one child without a link does not
+/// stop the others.
+fn assert_not_linked_with_warning(temp: &TempDir, repo: &Path, label: &str, warning: &str) {
+    let main = main_worktree(repo);
+
+    for extra in [&[][..], &[QUIET][..]] {
+        let branch = unique_branch(label);
+
+        let run = successful_run(temp, repo, &branch, extra, None);
+
+        assert_not_there(&run.worktree, VIAL);
+        assert_only_line_naming(&run.stderr, VIAL, warning);
+        assert_linked(&run.worktree, &main, repo, VIAL_QMK);
+    }
+}
+
+/// A child that only a pattern with a trailing slash ignores gets no link, and
+/// a warning that names the pattern, its file, its line, and the fix.
+///
+/// Git sees a symlink as a file, so `vial/` does not ignore a link at `vial`.
+/// The first question to git thus says that git does not ignore the path. The
+/// second question asks about `vial/`, which the pattern matches, so git names
+/// the pattern.
+#[test]
+fn a_pattern_with_a_trailing_slash_gives_a_warning_that_names_it() {
+    let (temp, repo) = container(&[DIRECTORY_ONLY_VIAL, IGNORE_VIAL_QMK], &[VIAL, VIAL_QMK]);
+
+    assert_not_linked_with_warning(&temp, &repo, "slash", DIRECTORY_ONLY_WARNING);
+}
+
+/// A child that no pattern ignores gets no link, and a warning that gives the
+/// fix.
+#[test]
+fn a_child_that_no_pattern_ignores_gives_a_warning_with_the_fix() {
+    let (temp, repo) = container(&[IGNORE_VIAL_QMK], &[VIAL, VIAL_QMK]);
+
+    assert_not_linked_with_warning(&temp, &repo, "no-pattern", NO_PATTERN_WARNING);
 }

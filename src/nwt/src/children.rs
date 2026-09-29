@@ -177,6 +177,25 @@ fn pathspec_of(name: &OsStr) -> OsString {
     pathspec
 }
 
+/// A rule of an ignore file that matches only a directory, as git names it.
+#[derive(Debug, PartialEq, Eq)]
+struct DirectoryOnlyRule {
+    /// The file that holds the rule, as git names it.
+    source: String,
+    /// The number of the line of the rule in `source`.
+    line: String,
+    /// The pattern, as `source` holds it.
+    pattern: String,
+}
+
+/// The rule that `stdout` names, when that rule matches only a directory.
+///
+/// `stdout` is the output of `git check-ignore -v -z --stdin` for one path.
+fn directory_only_rule(stdout: &[u8]) -> Option<DirectoryOnlyRule> {
+    let _ = stdout;
+    None
+}
+
 /// Write the line for one child to stderr.
 ///
 /// `quiet` removes the line that reports a link, and the line for a path that
@@ -279,6 +298,71 @@ mod tests {
                 Outcome::LinkFailed(error) if error.kind() == io::ErrorKind::PermissionDenied
             ),
             "an error that is not AlreadyExists must give the outcome LinkFailed"
+        );
+    }
+
+    /// The rule that [`directory_only_rule`] gives for `source`, `line`, and
+    /// `pattern`.
+    fn rule(source: &str, line: &str, pattern: &str) -> Option<DirectoryOnlyRule> {
+        Some(DirectoryOnlyRule {
+            source: source.to_string(),
+            line: line.to_string(),
+            pattern: pattern.to_string(),
+        })
+    }
+
+    /// One record of four fields, each one followed by a NUL byte, names the
+    /// source, the line, and the pattern of the rule.
+    #[test]
+    fn one_match_names_the_rule() {
+        assert_eq!(
+            directory_only_rule(b".gitignore\x001\x00vial/\x00./vial/\x00"),
+            rule(".gitignore", "1", "vial/")
+        );
+    }
+
+    /// Git writes nothing when no rule matches.
+    #[test]
+    fn no_output_names_no_rule() {
+        assert_eq!(directory_only_rule(b""), None);
+    }
+
+    /// A record that stops before its fourth field names no rule.
+    #[test]
+    fn a_truncated_record_names_no_rule() {
+        assert_eq!(directory_only_rule(b".gitignore\x001\x00vial/\x00"), None);
+        assert_eq!(
+            directory_only_rule(b".gitignore\x001\x00vial/\x00./vial/"),
+            None
+        );
+    }
+
+    /// A pattern without a trailing slash also matches a symlink, so it is not
+    /// the trap.
+    #[test]
+    fn a_pattern_without_a_trailing_slash_names_no_rule() {
+        assert_eq!(
+            directory_only_rule(b".gitignore\x001\x00*\x00./vial/\x00"),
+            None
+        );
+    }
+
+    /// A negation does not ignore the directory, so it is not the trap.
+    #[test]
+    fn a_negation_names_no_rule() {
+        assert_eq!(
+            directory_only_rule(b".gitignore\x001\x00!vial/\x00./vial/\x00"),
+            None
+        );
+    }
+
+    /// The fields are separated by NUL bytes, so a `:` in the source stays in
+    /// the source.
+    #[test]
+    fn a_source_that_holds_a_colon_stays_whole() {
+        assert_eq!(
+            directory_only_rule(b"/tmp/a:b/.gitignore\x0012\x00**/vial/\x00./vial/\x00"),
+            rule("/tmp/a:b/.gitignore", "12", "**/vial/")
         );
     }
 }
