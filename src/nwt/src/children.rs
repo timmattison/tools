@@ -30,6 +30,7 @@
 //! module goes to stderr, and the git child writes into a captured buffer.
 
 use std::ffi::OsStr;
+use std::fmt;
 use std::io;
 use std::path::Path;
 
@@ -45,6 +46,9 @@ const CHECK_IGNORE_NOT_IGNORED: i32 = 1;
 /// The first word of each line that reports a link.
 const LINKED_WORD: &str = "Linked";
 
+/// The start of the warning for a child that has no link.
+const NOT_LINKED_PREFIX: &str = "Warning: not linked:";
+
 /// What happened to one child of the main worktree.
 ///
 /// Each variant other than [`Outcome::Linked`] makes no link.
@@ -57,8 +61,9 @@ enum Outcome {
     /// Git gave no answer. It did not start, or it exited with a status that
     /// is not 0 or 1.
     NoAnswer,
-    /// Git ignores the path, but the symlink could not be made.
-    LinkFailed,
+    /// Git ignores the path, but the symlink could not be made, with this
+    /// error.
+    LinkFailed(io::Error),
 }
 
 /// Link each child repository of `main_worktree` into `worktree`.
@@ -100,7 +105,7 @@ fn link_child(worktree: &Path, name: &OsStr, target: &Path) -> Outcome {
 
     match make_directory_link(target, &worktree.join(name)) {
         Ok(()) => Outcome::Linked,
-        Err(_) => Outcome::LinkFailed,
+        Err(error) => Outcome::LinkFailed(error),
     }
 }
 
@@ -120,7 +125,8 @@ fn check_ignore_status(worktree: &Path, name: &OsStr) -> Option<i32> {
 
 /// Write the line for one child to stderr.
 ///
-/// `quiet` removes the line that reports a link.
+/// `quiet` removes the line that reports a link. It does not remove a warning,
+/// because a missing link is a defect that the user must see.
 fn report(name: &OsStr, target: &Path, outcome: &Outcome, quiet: bool) {
     match outcome {
         Outcome::Linked => {
@@ -128,8 +134,14 @@ fn report(name: &OsStr, target: &Path, outcome: &Outcome, quiet: bool) {
                 eprintln!("{}", linked_line(name, target));
             }
         }
-        Outcome::NotIgnored | Outcome::NoAnswer | Outcome::LinkFailed => {}
+        Outcome::LinkFailed(error) => eprintln!("{}", not_linked_line(name, error)),
+        Outcome::NotIgnored | Outcome::NoAnswer => {}
     }
+}
+
+/// The warning for the child `name`, which has no link because of `reason`.
+fn not_linked_line(name: &OsStr, reason: &dyn fmt::Display) -> String {
+    format!("{NOT_LINKED_PREFIX} {} ({reason})", name.to_string_lossy())
 }
 
 /// The line that reports the link of the child `name` to `target`.
