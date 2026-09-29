@@ -2778,6 +2778,7 @@ nwt --sparse-exclude assets   # Leave the tracked directory assets/ out
 - `-c, --checkout <REF>`: Check out an existing branch/tag/commit instead of creating a new branch
 - `--run <COMMAND>`: Run a command in the new worktree after creation
 - `--no-copy-env`: Skip copying untracked `.env` files from the main worktree into the new one
+- `--no-link-children`: Do not link the child repositories of the main worktree into the new worktree. By default, nwt links each child that git ignores in the new worktree, as a symlink to the child in the main worktree. `link_children = false` in `~/.nwt.toml` turns the links off by default
 - `--no-bootstrap-hooks`: Skip the package-manager install that regenerates git hooks (see Hook Bootstrap below)
 - `--sparse-exclude <DIR>`: Make the new worktree a sparse checkout without the tracked directory `<DIR>`, a path relative to the root of the repository. Use the flag one time for each directory. Only the new worktree is sparse, and `git sparse-checkout disable` in it writes the directories back. nwt refuses a `<DIR>` that git does not track as a directory at the ref, with exit code 15, before it makes anything (see Sparse worktrees below)
 - `--shell-setup`: Install shell integration for auto-cd into new worktrees (conflicts with all other flags)

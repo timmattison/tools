@@ -99,6 +99,11 @@ fn default_bootstrap_hooks() -> bool {
     true
 }
 
+/// Returns the default value for link_children (true).
+fn default_link_children() -> bool {
+    true
+}
+
 /// Configuration file schema for nwt.
 ///
 /// All fields are optional - only set what you need to override defaults.
@@ -121,6 +126,11 @@ struct NwtConfig {
     /// git-hook directories (e.g. husky's `.husky/_`). Defaults to true.
     #[serde(default = "default_bootstrap_hooks")]
     bootstrap_hooks: bool,
+
+    /// Link each child repository of the main worktree into the new worktree.
+    /// Defaults to true if not specified.
+    #[serde(default = "default_link_children")]
+    link_children: bool,
 
     /// Enable quiet mode by default.
     #[serde(default)]
@@ -152,6 +162,7 @@ impl Default for NwtConfig {
             checkout: None,
             copy_env: true,        // Must match default_copy_env()
             bootstrap_hooks: true, // Must match default_bootstrap_hooks()
+            link_children: true,   // Must match default_link_children()
             quiet: false,          // Must match #[serde(default)] (false)
             run: None,
             removed_tmux: None, // Must match #[serde(default)] (None)
@@ -201,6 +212,7 @@ struct MergedConfig {
     checkout: Option<String>,
     copy_env: bool,
     bootstrap_hooks: bool,
+    link_children: bool,
     quiet: bool,
     run: Option<String>,
 }
@@ -291,6 +303,9 @@ fn merge_config(cli: &Cli, config: Option<NwtConfig>) -> MergedConfig {
         // bootstrap_hooks: config default is true, CLI --no-bootstrap-hooks disables it.
         // Same merge shape as copy_env: CLI disables, otherwise use config value.
         bootstrap_hooks: !cli.no_bootstrap_hooks && config.bootstrap_hooks,
+        // link_children: config default is true, CLI --no-link-children disables it.
+        // Same merge shape as copy_env: CLI disables, otherwise use config value.
+        link_children: !cli.no_link_children && config.link_children,
         // The boolean flag uses OR: CLI can enable but not disable the config default.
         // See function-level doc comment for rationale.
         quiet: cli.quiet || config.quiet,
@@ -1903,6 +1918,24 @@ struct Cli {
     #[arg(long)]
     no_copy_env: bool,
 
+    /// Disable the links to the child repositories of the main worktree.
+    ///
+    /// A child repository is a directory one level below the main worktree that
+    /// holds a `.git` entry. By default, nwt links each child into the new
+    /// worktree, as the symlink `<worktree>/<name>` -> `<main worktree>/<name>`.
+    /// The new worktree then uses the one real checkout of each child, so no
+    /// clone, branch, or remote is duplicated.
+    ///
+    /// nwt makes a link only when git ignores that path in the new worktree,
+    /// because `git add -A` commits a link that git does not ignore. Write the
+    /// pattern as `/<name>`. A pattern with a trailing slash matches only a
+    /// directory, and git sees a symlink as a file.
+    ///
+    /// Use this flag to disable the links for a single invocation, or set
+    /// `link_children = false` in ~/.nwt.toml to disable them by default.
+    #[arg(long)]
+    no_link_children: bool,
+
     /// Disable running the package manager's install to bootstrap git hooks.
     ///
     /// By default, after creating the worktree, nwt detects a `prepare` script
@@ -1940,7 +1973,7 @@ struct Cli {
     ///
     /// To activate after installation, run `source ~/.zshrc` (or `~/.bashrc`)
     /// or open a new terminal.
-    #[arg(long, conflicts_with_all = ["branch", "checkout", "quiet", "run", "no_copy_env", "no_bootstrap_hooks", "random_directory", "sparse_exclude"])]
+    #[arg(long, conflicts_with_all = ["branch", "checkout", "quiet", "run", "no_copy_env", "no_link_children", "no_bootstrap_hooks", "random_directory", "sparse_exclude"])]
     shell_setup: bool,
 }
 
@@ -3459,7 +3492,9 @@ fn main() {
                 // worktree (issue #537). This step comes before the .env copy.
                 // The copy does not go into a child, and the .env files of a
                 // child reach the worktree through the link.
-                children::link_children(&repo_root, &worktree_path, config.quiet);
+                if config.link_children {
+                    children::link_children(&repo_root, &worktree_path, config.quiet);
+                }
 
                 // Copy untracked .env files from main worktree to new worktree
                 if config.copy_env {
@@ -4335,6 +4370,7 @@ mod tests {
             checkout: None,
             copy_env: true,
             bootstrap_hooks: true,
+            link_children: true,
             quiet: false,
             run: None,
         };
@@ -4348,6 +4384,7 @@ mod tests {
             checkout: None,
             copy_env: true,
             bootstrap_hooks: true,
+            link_children: true,
             quiet: false,
             run: None,
         };
@@ -5925,6 +5962,7 @@ mod tests {
                 checkout: Some("main".to_string()),
                 copy_env: true,
                 bootstrap_hooks: true,
+                link_children: true,
                 quiet: false,
                 run: None,
                 removed_tmux: None,
@@ -5940,6 +5978,7 @@ mod tests {
                 checkout: None,
                 copy_env: true,
                 bootstrap_hooks: true,
+                link_children: true,
                 quiet: false,
                 run: None,
                 removed_tmux: None,
@@ -5955,6 +5994,7 @@ mod tests {
                 checkout: Some("main".to_string()),
                 copy_env: true,
                 bootstrap_hooks: true,
+                link_children: true,
                 quiet: false,
                 run: None,
                 removed_tmux: None,
@@ -5970,6 +6010,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_link_children: false,
                 no_bootstrap_hooks: false,
                 quiet: true,
                 run: None,
@@ -5981,6 +6022,7 @@ mod tests {
                 checkout: None,
                 copy_env: true,
                 bootstrap_hooks: true,
+                link_children: true,
                 quiet: false,
                 run: Some("npm install".to_string()),
                 removed_tmux: None,
@@ -6001,6 +6043,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_link_children: false,
                 no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
@@ -6012,6 +6055,7 @@ mod tests {
                 checkout: None,
                 copy_env: true,
                 bootstrap_hooks: true,
+                link_children: true,
                 quiet: true,
                 run: Some("make build".to_string()),
                 removed_tmux: None,
@@ -6032,6 +6076,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_link_children: false,
                 no_bootstrap_hooks: false,
                 quiet: true,
                 run: None,
@@ -6054,6 +6099,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: true, // CLI disables
+                no_link_children: false,
                 no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
@@ -6065,6 +6111,7 @@ mod tests {
                 checkout: None,
                 copy_env: true, // config enables
                 bootstrap_hooks: true,
+                link_children: true,
                 quiet: false,
                 run: None,
                 removed_tmux: None,
@@ -6082,6 +6129,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_link_children: false,
                 no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
@@ -6093,6 +6141,7 @@ mod tests {
                 checkout: None,
                 copy_env: false, // config disables
                 bootstrap_hooks: true,
+                link_children: true,
                 quiet: false,
                 run: None,
                 removed_tmux: None,
@@ -6111,6 +6160,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_link_children: false,
                 no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
@@ -6129,6 +6179,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_link_children: false,
                 no_bootstrap_hooks: true, // CLI disables
                 quiet: false,
                 run: None,
@@ -6140,6 +6191,7 @@ mod tests {
                 checkout: None,
                 copy_env: true,
                 bootstrap_hooks: true, // config enables
+                link_children: true,
                 quiet: false,
                 run: None,
                 removed_tmux: None,
@@ -6156,6 +6208,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_link_children: false,
                 no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
@@ -6167,6 +6220,7 @@ mod tests {
                 checkout: None,
                 copy_env: true,
                 bootstrap_hooks: false, // config disables
+                link_children: true,
                 quiet: false,
                 run: None,
                 removed_tmux: None,
