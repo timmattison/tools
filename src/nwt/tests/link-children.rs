@@ -68,6 +68,38 @@ const IGNORE_COLON_CHILD: &str = "/:vial";
 /// `package.json`, and the flag keeps each run short.
 const NO_BOOTSTRAP_HOOKS: &str = "--no-bootstrap-hooks";
 
+/// The flag that makes a new branch for the new worktree.
+const NEW_BRANCH_FLAG: &str = "-b";
+
+/// The flag that checks out a branch that exists in the new worktree.
+const CHECKOUT_FLAG: &str = "-c";
+
+/// A file that a side branch tracks below the directory [`VIAL`].
+const TRACKED_FILE: &str = "vial/tracked.txt";
+
+/// The name of [`TRACKED_FILE`] in its directory.
+const TRACKED_FILE_NAME: &str = "tracked.txt";
+
+/// The content of [`TRACKED_FILE`].
+const TRACKED_CONTENT: &str = "tracked by the side branch\n";
+
+/// The content of the file [`VIAL`] that a `post-checkout` hook writes into
+/// the new worktree.
+#[cfg(unix)]
+const HOOK_FILE_CONTENT: &str = "made by the post-checkout hook\n";
+
+/// A name in the temporary directory of a fixture that nothing makes. A broken
+/// symlink points at it.
+#[cfg(unix)]
+const MISSING_TARGET: &str = "missing-target";
+
+/// The start of the line for a child whose path the new worktree already
+/// holds. The line is not a warning, because nothing is wrong.
+const ALREADY_THERE_PREFIX: &str = "Not linked:";
+
+/// Why a child whose path the new worktree already holds has no link.
+const ALREADY_THERE_REASON: &str = "the new worktree already holds this path";
+
 /// The flag that turns the links off for one run.
 const NO_LINK_CHILDREN: &str = "--no-link-children";
 
@@ -160,24 +192,63 @@ fn container(ignore_lines: &[&str], children: &[&str]) -> (TempDir, PathBuf) {
         run_git(&repo, &["add", "--", IGNORE_FILE]),
         "git add {IGNORE_FILE} failed"
     );
-    assert!(
-        run_git(
-            &repo,
-            &[
-                "-c",
-                "commit.gpgsign=false",
-                "commit",
-                "-m",
-                "ignore the children"
-            ]
-        ),
-        "git commit failed"
-    );
+    commit(&repo, "ignore the children");
 
     for child in children {
         make_child(&repo, child);
     }
 
+    (temp, repo)
+}
+
+/// Commit what `repo` has staged, with `message`.
+///
+/// # Panics
+///
+/// Panics when `git commit` fails.
+fn commit(repo: &Path, message: &str) {
+    assert!(
+        run_git(
+            repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", message]
+        ),
+        "git commit -m {message:?} failed in {}",
+        repo.display()
+    );
+}
+
+/// A container whose `.gitignore` ignores `/vial`, whose main worktree holds
+/// the child repository [`VIAL`], and whose branch `side` tracks
+/// [`TRACKED_FILE`].
+///
+/// The fixture commits the file on `side` before the child exists. `git add
+/// -f` takes the file past the ignore rule. Back on the first branch, git
+/// removes the file and its directory, and `git init` then makes the child in
+/// the same place. Thus the main worktree holds a child, and a worktree of
+/// `side` holds a real directory at the same path.
+///
+/// # Panics
+///
+/// Panics when a write or a git command fails.
+fn container_with_tracked_directory(side: &str) -> (TempDir, PathBuf) {
+    let (temp, repo) = container(&[IGNORE_VIAL], &[]);
+
+    assert!(
+        run_git(&repo, &["checkout", "-q", "-b", side]),
+        "git checkout -b {side} failed"
+    );
+    write_file(&repo, TRACKED_FILE, TRACKED_CONTENT);
+    assert!(
+        run_git(&repo, &["add", "-f", "--", TRACKED_FILE]),
+        "git add -f {TRACKED_FILE} failed"
+    );
+    commit(&repo, "track a file where the main worktree holds a child");
+    assert!(
+        run_git(&repo, &["checkout", "-q", "-"]),
+        "git checkout of the first branch failed"
+    );
+
+    make_child(&repo, VIAL);
     (temp, repo)
 }
 
@@ -194,14 +265,43 @@ fn main_worktree(repo: &Path) -> PathBuf {
     PathBuf::from(main)
 }
 
-/// Run `nwt -b <branch> --no-bootstrap-hooks <extra>` in `repo`.
+/// The branch of the new worktree, and how `nwt` gets it.
+#[derive(Clone, Copy)]
+enum Start<'a> {
+    /// `-b <branch>` makes the branch, and names the directory after it.
+    NewBranch(&'a str),
+    /// `-c <branch>` checks out a branch that exists, in a directory with a
+    /// random name.
+    Checkout(&'a str),
+}
+
+impl<'a> Start<'a> {
+    /// The flag that gives the branch to `nwt`.
+    fn flag(self) -> &'static str {
+        match self {
+            Start::NewBranch(_) => NEW_BRANCH_FLAG,
+            Start::Checkout(_) => CHECKOUT_FLAG,
+        }
+    }
+
+    /// The name of the branch.
+    fn branch(self) -> &'a str {
+        match self {
+            Start::NewBranch(branch) | Start::Checkout(branch) => branch,
+        }
+    }
+}
+
+/// Run `nwt <start> --no-bootstrap-hooks <extra>` in `repo`.
 ///
 /// `home`, when it is there, becomes the home directory of the child. It wins
 /// over the private home of `support::nwt_command`, because this call sets
 /// `HOME` after that function sets it.
-fn run_nwt(repo: &Path, branch: &str, extra: &[&str], home: Option<&Path>) -> Output {
+fn run_nwt(repo: &Path, start: Start<'_>, extra: &[&str], home: Option<&Path>) -> Output {
     let mut command = nwt_command(repo);
-    command.args(["-b", branch, NO_BOOTSTRAP_HOOKS]).args(extra);
+    command
+        .args([start.flag(), start.branch(), NO_BOOTSTRAP_HOOKS])
+        .args(extra);
     if let Some(home) = home {
         command.env("HOME", home);
     }
@@ -216,11 +316,8 @@ struct Run {
     stderr: String,
 }
 
-/// Run `nwt` as [`run_nwt`] does, and prove that it succeeded and that its
-/// stdout holds only the path of the new worktree.
-///
-/// The shell wrapper does `dir=$(command nwt "$@")`, so any other line on
-/// stdout breaks the `cd` into the worktree.
+/// Run `nwt -b <branch>` as [`run_nwt`] does, and prove that it succeeded and
+/// that its stdout holds only the path of the new worktree.
 fn successful_run(
     temp: &TempDir,
     repo: &Path,
@@ -228,13 +325,31 @@ fn successful_run(
     extra: &[&str],
     home: Option<&Path>,
 ) -> Run {
-    let output = run_nwt(repo, branch, extra, home);
+    successful_start(temp, repo, Start::NewBranch(branch), extra, home)
+}
+
+/// Run `nwt` as [`run_nwt`] does, and prove that it succeeded and that its
+/// stdout holds only the path of the new worktree.
+///
+/// The shell wrapper does `dir=$(command nwt "$@")`, so any other line on
+/// stdout breaks the `cd` into the worktree. A run with `-b` names the
+/// directory after the branch. A run with `-c` gives the directory a random
+/// name, so the proof then reads only the directory that holds it.
+fn successful_start(
+    temp: &TempDir,
+    repo: &Path,
+    start: Start<'_>,
+    extra: &[&str],
+    home: Option<&Path>,
+) -> Run {
+    let output = run_nwt(repo, start, extra, home);
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let (flag, branch) = (start.flag(), start.branch());
 
     assert!(
         output.status.success(),
-        "nwt -b {branch} {extra:?} failed in {}:\n{stdout}\n{stderr}",
+        "nwt {flag} {branch} {extra:?} failed in {}:\n{stdout}\n{stderr}",
         repo.display()
     );
 
@@ -245,11 +360,19 @@ fn successful_run(
         "stdout must hold only the worktree path, and stderr reads:\n{stderr}"
     );
     let worktree = PathBuf::from(printed);
-    assert_eq!(
-        canonical(&worktree),
-        canonical(temp.path()).join(WORKTREES_DIR_NAME).join(branch),
-        "nwt printed a path that is not the new worktree"
-    );
+    let worktrees_dir = canonical(temp.path()).join(WORKTREES_DIR_NAME);
+    match start {
+        Start::NewBranch(_) => assert_eq!(
+            canonical(&worktree),
+            worktrees_dir.join(branch),
+            "nwt printed a path that is not the new worktree"
+        ),
+        Start::Checkout(_) => assert_eq!(
+            canonical(&worktree).parent(),
+            Some(worktrees_dir.as_path()),
+            "nwt printed a path that is not in the directory of the worktrees"
+        ),
+    }
 
     Run { worktree, stderr }
 }
@@ -557,4 +680,192 @@ fn the_env_file_of_a_child_makes_no_directory_without_links() {
     let run = successful_run(&temp, &repo, &branch, &[NO_LINK_CHILDREN], None);
 
     assert_not_there(&run.worktree, VIAL);
+}
+
+/// The lines of `stderr` that hold the child `name` as a word.
+///
+/// A word is a run of characters between spaces. The line for a link names the
+/// target path too, and that path is a different word.
+fn lines_naming<'a>(stderr: &'a str, name: &str) -> Vec<&'a str> {
+    stderr
+        .lines()
+        .filter(|line| line.split_whitespace().any(|word| word == name))
+        .collect()
+}
+
+/// The line for the child `name`, whose path the new worktree already holds.
+fn already_there_line(name: &str) -> String {
+    format!("{ALREADY_THERE_PREFIX} {name} ({ALREADY_THERE_REASON})")
+}
+
+/// Prove that `stderr` holds `expected`, and no other line that names the child
+/// `name`.
+fn assert_only_line_naming(stderr: &str, name: &str, expected: &str) {
+    assert_eq!(
+        lines_naming(stderr, name),
+        vec![expected],
+        "stderr must hold one line about {name}, but it reads:\n{stderr}"
+    );
+}
+
+/// A directory that the branch of the new worktree tracks stays as git wrote
+/// it, and one line says that the child has no link.
+///
+/// `nwt -c <side>` checks out the branch that
+/// [`container_with_tracked_directory`] makes, so git writes [`TRACKED_FILE`]
+/// into the new worktree. Git does not ignore a directory that holds a tracked
+/// file. Thus the check for a path that is already there comes before the
+/// question to git. Without it, this child gets a warning about `.gitignore`,
+/// and `.gitignore` is correct.
+#[test]
+fn a_tracked_directory_stays_and_one_line_says_so() {
+    let side = unique_branch("side");
+    let (temp, repo) = container_with_tracked_directory(&side);
+
+    let run = successful_start(&temp, &repo, Start::Checkout(&side), &[], None);
+
+    let dir = run.worktree.join(VIAL);
+    let kind = fs::symlink_metadata(&dir)
+        .unwrap_or_else(|e| panic!("{} is not there: {e}", dir.display()))
+        .file_type();
+    assert!(kind.is_dir(), "{} must stay a directory", dir.display());
+    let names: Vec<String> = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|e| panic!("read an entry of {}: {e}", dir.display()))
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec![TRACKED_FILE_NAME],
+        "{} must hold only the tracked file",
+        dir.display()
+    );
+    let tracked = dir.join(TRACKED_FILE_NAME);
+    assert_eq!(
+        fs::read_to_string(&tracked).unwrap_or_else(|e| panic!("read {}: {e}", tracked.display())),
+        TRACKED_CONTENT,
+        "the tracked file must stay as git wrote it"
+    );
+    assert_only_line_naming(&run.stderr, VIAL, &already_there_line(VIAL));
+}
+
+/// The body of a `post-checkout` hook that writes the regular file [`VIAL`]
+/// into the new worktree.
+#[cfg(unix)]
+fn file_hook_body() -> String {
+    format!(
+        "printf '%s' {} > {VIAL}\n",
+        shellquote::shell_quote(HOOK_FILE_CONTENT)
+    )
+}
+
+/// A container with the ignored child [`VIAL`], and a `post-checkout` hook with
+/// `body`.
+///
+/// Hand back the temporary directories of the container and of the hook (keep
+/// both alive) and the container.
+#[cfg(unix)]
+fn container_with_hook(body: &str) -> (TempDir, TempDir, PathBuf) {
+    let (temp, repo) = container(&[IGNORE_VIAL], &[VIAL]);
+    let hooks = TempDir::new().expect("create the hooks directory");
+    support::install_post_checkout_hook(&repo, hooks.path(), body);
+    (temp, hooks, repo)
+}
+
+/// Prove that `<worktree>/vial` is the regular file that [`file_hook_body`]
+/// writes.
+#[cfg(unix)]
+fn assert_hook_file(worktree: &Path) {
+    let file = worktree.join(VIAL);
+    let kind = fs::symlink_metadata(&file)
+        .unwrap_or_else(|e| panic!("{} is not there: {e}", file.display()))
+        .file_type();
+    assert!(
+        kind.is_file(),
+        "{} must stay a regular file",
+        file.display()
+    );
+    assert_eq!(
+        fs::read_to_string(&file).unwrap_or_else(|e| panic!("read {}: {e}", file.display())),
+        HOOK_FILE_CONTENT,
+        "the file must stay as the hook wrote it"
+    );
+}
+
+/// A regular file that a `post-checkout` hook writes at the path of a child
+/// stays as the hook wrote it, and one line says that the child has no link.
+///
+/// Git runs the hook in the new worktree during `git worktree add`, so the file
+/// is there before `nwt` links the children. `/vial` ignores the file.
+#[cfg(unix)]
+#[test]
+fn a_file_from_a_post_checkout_hook_stays_and_one_line_says_so() {
+    let (temp, _hooks, repo) = container_with_hook(&file_hook_body());
+    let branch = unique_branch("hook-file");
+
+    let run = successful_run(&temp, &repo, &branch, &[], None);
+
+    assert_hook_file(&run.worktree);
+    assert_only_line_naming(&run.stderr, VIAL, &already_there_line(VIAL));
+}
+
+/// `-q` removes the line for a path that the new worktree already holds,
+/// because that line names no defect. The path stays.
+#[cfg(unix)]
+#[test]
+fn quiet_removes_the_line_for_a_path_that_is_already_there() {
+    let (temp, _hooks, repo) = container_with_hook(&file_hook_body());
+    let branch = unique_branch("hook-file-quiet");
+
+    let run = successful_run(&temp, &repo, &branch, &[QUIET], None);
+
+    assert_hook_file(&run.worktree);
+    assert!(
+        lines_naming(&run.stderr, VIAL).is_empty(),
+        "-q must remove each line about {VIAL}, but stderr reads:\n{}",
+        run.stderr
+    );
+}
+
+/// A broken symlink that a `post-checkout` hook makes at the path of a child
+/// stays as the hook made it, and one line says that the child has no link.
+///
+/// The symlink points at a path that does not exist. A check that follows the
+/// link sees nothing there, so `nwt` must read the entry itself.
+#[cfg(unix)]
+#[test]
+fn a_broken_symlink_from_a_post_checkout_hook_stays_and_one_line_says_so() {
+    let (temp, repo) = container(&[IGNORE_VIAL], &[VIAL]);
+    let missing = temp.path().join(MISSING_TARGET);
+    let body = format!(
+        "ln -s {} {VIAL}\n",
+        shellquote::shell_quote(missing.to_str().expect("utf-8 target path"))
+    );
+    let hooks = TempDir::new().expect("create the hooks directory");
+    support::install_post_checkout_hook(&repo, hooks.path(), &body);
+    let branch = unique_branch("hook-broken-link");
+
+    let run = successful_run(&temp, &repo, &branch, &[], None);
+
+    let link = run.worktree.join(VIAL);
+    let kind = fs::symlink_metadata(&link)
+        .unwrap_or_else(|e| panic!("{} is not there: {e}", link.display()))
+        .file_type();
+    assert!(kind.is_symlink(), "{} must stay a symlink", link.display());
+    assert_eq!(
+        fs::read_link(&link).unwrap_or_else(|e| panic!("read link {}: {e}", link.display())),
+        missing,
+        "the symlink must keep the target that the hook gave it"
+    );
+    assert!(
+        fs::symlink_metadata(&missing).is_err(),
+        "the target {} must not exist",
+        missing.display()
+    );
+    assert_only_line_naming(&run.stderr, VIAL, &already_there_line(VIAL));
 }
