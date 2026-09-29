@@ -198,6 +198,19 @@ const WORKTREES_SUFFIX: &str = "-worktrees";
 /// temporary directory.
 const BARE_REPO_NAME: &str = "bare.git";
 
+/// A file that the child of the removal test commits, in a nested directory.
+const CHILD_NESTED_FILE: &str = "keymaps/default/keymap.c";
+
+/// A file that the child of the removal test holds untracked.
+const CHILD_UNTRACKED_FILE: &str = "notes.txt";
+
+/// A file that the child of the removal test holds untracked, in a nested
+/// directory.
+const CHILD_UNTRACKED_NESTED_FILE: &str = "build/out/firmware.hex";
+
+/// The `HEAD` file of the git directory of a child, as a snapshot names it.
+const CHILD_GIT_HEAD: &str = ".git/HEAD";
+
 /// Resolve a path before an assertion compares it.
 ///
 /// Every fixture lives under a temporary directory that macOS reaches through a
@@ -254,17 +267,35 @@ fn container(ignore_lines: &[&str], children: &[&str]) -> (TempDir, PathBuf) {
     (temp, repo)
 }
 
-/// Commit what `repo` has staged, with `message`.
+/// The options that [`commit`] gives git before the subcommand.
+///
+/// A child that [`make_child`] makes has no identity of its own, so the
+/// identity comes from here, and not from the configuration of the host.
+/// `maintenance.auto=false` stops the `git maintenance run --auto` that a
+/// commit starts. That process writes a lock file into the repository after
+/// the commit returns, so a snapshot of the repository then holds a path that
+/// appears and vanishes on its own.
+const COMMIT_OPTIONS: [&str; 8] = [
+    "-c",
+    "user.name=Test User",
+    "-c",
+    "user.email=test@example.com",
+    "-c",
+    "commit.gpgsign=false",
+    "-c",
+    "maintenance.auto=false",
+];
+
+/// Commit what `repo` has staged, with `message`, with [`COMMIT_OPTIONS`].
 ///
 /// # Panics
 ///
 /// Panics when `git commit` fails.
 fn commit(repo: &Path, message: &str) {
+    let mut args = COMMIT_OPTIONS.to_vec();
+    args.extend(["commit", "-m", message]);
     assert!(
-        run_git(
-            repo,
-            &["-c", "commit.gpgsign=false", "commit", "-m", message]
-        ),
+        run_git(repo, &args),
         "git commit -m {message:?} failed in {}",
         repo.display()
     );
@@ -1274,4 +1305,98 @@ fn a_bare_repository_links_nothing_and_gives_no_error() {
     );
 
     assert_no_link_and_no_line(&run);
+}
+
+/// Give the child [`VIAL`] of `repo` real work: a commit of [`CHILD_FILE`] and
+/// [`CHILD_NESTED_FILE`], and the untracked files [`CHILD_UNTRACKED_FILE`] and
+/// [`CHILD_UNTRACKED_NESTED_FILE`]. Hand back the child.
+///
+/// # Panics
+///
+/// Panics when a write or a git command fails.
+fn give_the_child_work(repo: &Path) -> PathBuf {
+    let child = repo.join(VIAL);
+    write_file(&child, CHILD_NESTED_FILE, "// the keymap of the child\n");
+    assert!(
+        run_git(&child, &["add", "--", CHILD_FILE, CHILD_NESTED_FILE]),
+        "git add failed in {}",
+        child.display()
+    );
+    commit(&child, "the work of the child");
+    write_file(
+        &child,
+        CHILD_UNTRACKED_FILE,
+        "notes that git does not track\n",
+    );
+    write_file(&child, CHILD_UNTRACKED_NESTED_FILE, "a build output\n");
+    child
+}
+
+/// `git worktree remove --force` of a worktree with a link removes the link
+/// only. The child and each of its files stay as they were.
+///
+/// `--force` removes a worktree that holds changes, so a removal that follows
+/// the link deletes the work of the child. That work is real, and the new
+/// worktree does not hold a copy of it. The child holds a committed file, a
+/// committed file in a nested directory, and two untracked files, one of them
+/// in a nested directory. The test reads each path of the child, with its
+/// bytes, before the run and after the removal. `git rev-parse HEAD` in the
+/// child then proves that its `.git` still works.
+#[test]
+fn a_forced_removal_of_the_worktree_keeps_the_child() {
+    let (temp, repo) = container(&[IGNORE_VIAL], &[VIAL]);
+    let child = give_the_child_work(&repo);
+    let head_before = git_stdout(&child, &["rev-parse", "HEAD"]);
+    let before = support::snapshot(&child);
+    for path in [
+        CHILD_FILE,
+        CHILD_NESTED_FILE,
+        CHILD_UNTRACKED_FILE,
+        CHILD_UNTRACKED_NESTED_FILE,
+        CHILD_GIT_HEAD,
+    ] {
+        assert!(
+            before.contains_key(path),
+            "the snapshot of the child must hold {path}, but it holds: {:?}",
+            before.keys().collect::<Vec<_>>()
+        );
+    }
+    let main = main_worktree(&repo);
+    let branch = unique_branch("remove-force");
+    let run = successful_run(&temp, &repo, &branch, &[], None);
+    assert_linked(&run.worktree, &main, &repo, VIAL);
+
+    let removed = run_git(
+        &repo,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            run.worktree.to_str().expect("utf-8 worktree path"),
+        ],
+    );
+
+    assert!(
+        removed,
+        "git worktree remove --force {} failed",
+        run.worktree.display()
+    );
+    assert!(
+        fs::symlink_metadata(&run.worktree).is_err(),
+        "{} must be gone after the removal",
+        run.worktree.display()
+    );
+    let changed = support::difference(&before, &support::snapshot(&child));
+    assert!(
+        changed.is_empty(),
+        "the removal of the worktree changed {} path(s) of the child {}:\n{}",
+        changed.len(),
+        child.display(),
+        changed.join("\n")
+    );
+    assert_eq!(
+        git_stdout(&child, &["rev-parse", "HEAD"]),
+        head_before,
+        "the child must keep its git directory and its HEAD"
+    );
 }
