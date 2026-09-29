@@ -15,6 +15,14 @@
 //! use one definition of a child: a directory one level below the main
 //! worktree that holds a `.git` entry.
 //!
+//! First, this module reads the path `<worktree>/<name>`. When something is
+//! already there, the module does not change it and asks git nothing. The new
+//! branch can track that path, or a `post-checkout` hook can make it. The read
+//! does not follow a symlink, so a broken symlink also counts. The read comes
+//! before the question to git, because git does not ignore a directory that
+//! holds a tracked file. Without the read, such a path gets a warning about
+//! `.gitignore`, and `.gitignore` is correct.
+//!
 //! Before it makes a link, this module asks git in the **new** worktree
 //! whether git ignores the path. The new worktree can hold a `.gitignore` that
 //! differs from the main worktree, so the question goes to the new worktree. A
@@ -55,12 +63,21 @@ const LINKED_WORD: &str = "Linked";
 /// The start of the warning for a child that has no link.
 const NOT_LINKED_PREFIX: &str = "Warning: not linked:";
 
+/// The start of the line for a child whose path the new worktree already
+/// holds. The line is not a warning, because nothing is wrong.
+const ALREADY_THERE_PREFIX: &str = "Not linked:";
+
+/// Why a child whose path the new worktree already holds has no link.
+const ALREADY_THERE_REASON: &str = "the new worktree already holds this path";
+
 /// What happened to one child of the main worktree.
 ///
 /// Each variant other than [`Outcome::Linked`] makes no link.
 enum Outcome {
     /// The link exists now.
     Linked,
+    /// Something was already at the path of the link, and it stays as it was.
+    AlreadyThere,
     /// Git does not ignore the path in the new worktree, so a link there shows
     /// as untracked.
     NotIgnored,
@@ -75,10 +92,10 @@ enum Outcome {
 /// Link each child repository of `main_worktree` into `worktree`.
 ///
 /// `main_worktree` is the main worktree that git names, and `worktree` is the
-/// new worktree. The function writes one line to stderr for each link, and a
-/// summary when it made at least one link. `quiet` removes those lines, and
-/// the links still exist. A main worktree without children gives no link and
-/// no line.
+/// new worktree. The function writes one line to stderr for each link, one line
+/// for each child whose path the new worktree already holds, and a summary when
+/// it made at least one link. `quiet` removes those lines, and the links still
+/// exist. A main worktree without children gives no link and no line.
 pub(crate) fn link_children(main_worktree: &Path, worktree: &Path, quiet: bool) {
     let mut linked = 0_usize;
 
@@ -100,16 +117,24 @@ pub(crate) fn link_children(main_worktree: &Path, worktree: &Path, quiet: bool) 
     }
 }
 
-/// Ask git whether it ignores `name` in `worktree`, and when it does, make the
-/// symlink `<worktree>/<name>` -> `target`.
+/// Make the symlink `<worktree>/<name>` -> `target` when nothing is at that
+/// path and git ignores it.
+///
+/// The read of the path comes first, and it does not follow a symlink. A path
+/// that is already there stays as it was, and git gets no question.
 fn link_child(worktree: &Path, name: &OsStr, target: &Path) -> Outcome {
+    let link = worktree.join(name);
+    if link.symlink_metadata().is_ok() {
+        return Outcome::AlreadyThere;
+    }
+
     match check_ignore_status(worktree, name) {
         Some(CHECK_IGNORE_IGNORED) => {}
         Some(CHECK_IGNORE_NOT_IGNORED) => return Outcome::NotIgnored,
         _ => return Outcome::NoAnswer,
     }
 
-    match make_directory_link(target, &worktree.join(name)) {
+    match make_directory_link(target, &link) {
         Ok(()) => Outcome::Linked,
         Err(error) => Outcome::LinkFailed(error),
     }
@@ -144,8 +169,9 @@ fn pathspec_of(name: &OsStr) -> OsString {
 
 /// Write the line for one child to stderr.
 ///
-/// `quiet` removes the line that reports a link. It does not remove a warning,
-/// because a missing link is a defect that the user must see.
+/// `quiet` removes the line that reports a link, and the line for a path that
+/// is already there. It does not remove a warning, because a missing link is a
+/// defect that the user must see.
 fn report(name: &OsStr, target: &Path, outcome: &Outcome, quiet: bool) {
     match outcome {
         Outcome::Linked => {
@@ -153,9 +179,22 @@ fn report(name: &OsStr, target: &Path, outcome: &Outcome, quiet: bool) {
                 eprintln!("{}", linked_line(name, target));
             }
         }
+        Outcome::AlreadyThere => {
+            if !quiet {
+                eprintln!("{}", already_there_line(name));
+            }
+        }
         Outcome::LinkFailed(error) => eprintln!("{}", not_linked_line(name, error)),
         Outcome::NotIgnored | Outcome::NoAnswer => {}
     }
+}
+
+/// The line for the child `name`, whose path the new worktree already holds.
+fn already_there_line(name: &OsStr) -> String {
+    format!(
+        "{ALREADY_THERE_PREFIX} {} ({ALREADY_THERE_REASON})",
+        name.to_string_lossy()
+    )
 }
 
 /// The warning for the child `name`, which has no link because of `reason`.
