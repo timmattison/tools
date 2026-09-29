@@ -39,6 +39,15 @@ const IGNORE_VIAL_QMK: &str = "/vial-qmk";
 /// ignores a symlink of that name.
 const IGNORE_ZMK_CONFIG: &str = "/zmk-config-corne";
 
+/// A child whose name starts with the pathspec magic character of git.
+#[cfg(unix)]
+const COLON_CHILD: &str = ":vial";
+
+/// The `.gitignore` pattern that ignores [`COLON_CHILD`] at the root. It does
+/// not ignore `vial`.
+#[cfg(unix)]
+const IGNORE_COLON_CHILD: &str = "/:vial";
+
 /// The flag that stops a package manager install. No test here has a
 /// `package.json`, and the flag keeps each run short.
 const NO_BOOTSTRAP_HOOKS: &str = "--no-bootstrap-hooks";
@@ -401,6 +410,30 @@ fn a_link_that_fails_gives_a_warning_that_quiet_keeps() {
     assert!(
         run.stderr.lines().any(|line| line == warning),
         "stderr must hold the line {warning:?}, but it reads:\n{}",
+        run.stderr
+    );
+}
+
+/// Git gets the real name of a child whose name starts with `:`.
+///
+/// Git reads a leading `:` in a pathspec as magic, so a bare `:vial` asks
+/// about `vial`. The `.gitignore` ignores `/:vial` and nothing else, so only a
+/// question about the real name gets the answer that git ignores the path.
+/// Windows does not permit `:` in a file name.
+#[cfg(unix)]
+#[test]
+fn a_name_that_starts_with_a_colon_goes_to_git_as_a_path() {
+    let (temp, repo) = container(&[IGNORE_COLON_CHILD], &[COLON_CHILD]);
+    let main = main_worktree(&repo);
+    let branch = unique_branch("colon");
+
+    let run = successful_run(&temp, &repo, &branch, &[], None);
+
+    assert_linked(&run.worktree, &main, &repo, COLON_CHILD);
+    assert_eq!(
+        linked_lines(&run.stderr),
+        vec![linked_line(&main, COLON_CHILD).as_str(), SUMMARY_OF_ONE],
+        "stderr must name the link and then the count, but it reads:\n{}",
         run.stderr
     );
 }
