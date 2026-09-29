@@ -208,6 +208,18 @@ const CHILD_UNTRACKED_NESTED_FILE: &str = "build/out/firmware.hex";
 /// The `HEAD` file of the git directory of a child, as a snapshot names it.
 const CHILD_GIT_HEAD: &str = ".git/HEAD";
 
+/// The git configuration key that names the directory of the worktrees.
+const WORKTREES_DIR_KEY: &str = "nwt.worktreesDir";
+
+/// The value of [`WORKTREES_DIR_KEY`] that puts each new worktree one level
+/// below the main worktree. A relative value is relative to the main worktree.
+const WORKTREES_DIR_HERE: &str = ".";
+
+/// The `.gitignore` patterns that ignore each entry at the root, except the
+/// `.gitignore` itself. They ignore each child, and each worktree that
+/// [`WORKTREES_DIR_HERE`] puts at the root.
+const IGNORE_ALL_AT_ROOT: [&str; 2] = ["/*", "!/.gitignore"];
+
 /// Resolve a path before an assertion compares it.
 ///
 /// Every fixture lives under a temporary directory that macOS reaches through a
@@ -1028,6 +1040,94 @@ fn only_a_directory_that_holds_git_is_a_child() {
         "stderr must name only the link of {VIAL}, but it reads:\n{}",
         run.stderr
     );
+}
+
+/// Prove that `run` linked only the child [`VIAL`] of `main`: the new worktree
+/// holds no other symlink, no symlink reaches a worktree of `worktrees`, the
+/// only lines that start with `Linked` are the link of [`VIAL`] and the
+/// summary of one, and no line names the directory of a worktree of
+/// `worktrees`.
+///
+/// `worktrees` holds each worktree of the repository that exists at the end of
+/// the run, the new worktree too.
+fn assert_only_the_child_is_linked(run: &Run, main: &Path, repo: &Path, worktrees: &[&Path]) {
+    assert_linked(&run.worktree, main, repo, VIAL);
+    assert_eq!(
+        symlinks_in(&run.worktree),
+        vec![VIAL.to_string()],
+        "{} must hold the link of {VIAL} and no other symlink",
+        run.worktree.display()
+    );
+
+    let worktrees: Vec<PathBuf> = worktrees.iter().map(|path| canonical(path)).collect();
+    for name in symlinks_in(&run.worktree) {
+        let link = run.worktree.join(&name);
+        let reached = canonical(&link);
+        assert!(
+            !worktrees.contains(&reached),
+            "{} reaches the worktree {}, and a worktree of the repository is not a child",
+            link.display(),
+            reached.display()
+        );
+    }
+
+    assert_eq!(
+        linked_lines(&run.stderr),
+        vec![linked_line(main, VIAL).as_str(), SUMMARY_OF_ONE],
+        "stderr must name only the link of {VIAL}, but it reads:\n{}",
+        run.stderr
+    );
+    for worktree in &worktrees {
+        let name = worktree
+            .file_name()
+            .unwrap_or_else(|| panic!("{} has no name", worktree.display()))
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            lines_naming(&run.stderr, &name).is_empty(),
+            "stderr must not name the worktree {name}, but it reads:\n{}",
+            run.stderr
+        );
+    }
+}
+
+/// A worktree of the repository is not a child, also when it sits one level
+/// below the main worktree and holds a `.git` file.
+///
+/// [`WORKTREES_DIR_HERE`] puts each new worktree at the root of the main
+/// worktree, and [`IGNORE_ALL_AT_ROOT`] makes git ignore it there. `git worktree
+/// add` makes the new worktree before `nwt` links the children. So a run that
+/// takes each directory with a `.git` entry as a child links the new worktree
+/// into itself, a loop that a tool which follows links reads without end. The
+/// second run also links the first worktree. Each run must link only the real
+/// child [`VIAL`], and print no line about a worktree.
+#[test]
+fn a_worktree_of_the_repository_is_not_a_child() {
+    let (_temp, repo) = container(&IGNORE_ALL_AT_ROOT, &[VIAL]);
+    assert!(
+        run_git(&repo, &["config", WORKTREES_DIR_KEY, WORKTREES_DIR_HERE]),
+        "git config {WORKTREES_DIR_KEY} {WORKTREES_DIR_HERE} failed"
+    );
+    let main = main_worktree(&repo);
+    let worktrees_dir = canonical(&repo);
+
+    let first = successful_start_in(
+        &worktrees_dir,
+        &repo,
+        Start::NewBranch(&unique_branch("first")),
+        &[],
+        None,
+    );
+    assert_only_the_child_is_linked(&first, &main, &repo, &[&first.worktree]);
+
+    let second = successful_start_in(
+        &worktrees_dir,
+        &repo,
+        Start::NewBranch(&unique_branch("second")),
+        &[],
+        None,
+    );
+    assert_only_the_child_is_linked(&second, &main, &repo, &[&first.worktree, &second.worktree]);
 }
 
 /// `nwt` in a linked worktree links the children of the main worktree, and not
