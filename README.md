@@ -2906,11 +2906,12 @@ Thus after `git worktree add`, and before the `.env` copy, nwt links each child 
 
 The link gives the new worktree the one real checkout of each child. nwt makes no clone, no branch, and no remote. A branch then exists only in a repository that the work changes.
 
-**Which entries are children.** A child is a directory one level below the main worktree that holds a `.git` entry. The entry is a `.git` directory, or the `.git` file of a linked worktree. `cwt` uses the same rule. These entries get no link and no line:
+**Which entries are children.** A child is a directory one level below the main worktree that holds a `.git` entry. The entry is a `.git` directory, or the `.git` file of a linked worktree of another repository. `cwt` finds its candidates with the same rule. nwt then skips each worktree of this repository, because such a worktree is not a child. `git worktree list` names those worktrees. These entries get no link and no line:
 
 - A directory without a `.git` entry
 - A file
 - A child of a child
+- A worktree of this repository. `nwt.worktreesDir` set to `.` (see [Where worktrees go](#where-worktrees-go)) puts each worktree one level below the main worktree, the new worktree too. Without this rule, the new worktree gets a link to itself, and a tool that follows links reads that loop without end.
 
 **When a child gets a link.** A link that git does not ignore shows as untracked in `git status`, and `git add -A` commits it into the container. So nwt asks git in the new worktree if git ignores `<name>`. The new worktree can hold a `.gitignore` that is different from the one in the main worktree, so nwt asks there. Git gives the same answer before the link exists. Thus nwt asks first, and it never makes a link that git does not ignore.
 
@@ -2952,6 +2953,12 @@ Warning: not linked: vial (git does not ignore this path. Add '/vial' to .gitign
 ```
 
 When git gives no answer, the warning repeats the first line of the error of git, after `git check-ignore failed:`. When nwt cannot make the link, the warning gives the error of the operating system.
+
+When git gives no list of the worktrees, nwt cannot tell a child from a worktree of this repository. nwt then makes no link, and it prints one warning that repeats the first line of the error of git:
+
+```text
+Warning: no child linked, because nwt cannot tell which directories are children (git worktree list failed: fatal: not a git repository)
+```
 
 `-q`/`--quiet` removes the `Linked` lines, the summary, and the `Not linked:` lines. It does not remove a warning, because a warning names a defect in the repository.
 

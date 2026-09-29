@@ -1672,8 +1672,14 @@ CHILD REPOSITORY LINKS:
     clone, no branch, and no remote.
 
     A child is a directory one level below the main worktree that holds a .git entry:
-    a .git directory, or the .git file of a linked worktree. A directory without a
-    .git entry, a file, and a child of a child get no link and no line.
+    a .git directory, or the .git file of a linked worktree of another repository. A
+    directory without a .git entry, a file, a child of a child, and a worktree of this
+    repository get no link and no line.
+
+    A worktree of this repository is not a child, and 'git worktree list' names each
+    one. 'nwt.worktreesDir' set to '.' puts each worktree one level below the main
+    worktree, the new worktree too. Without this rule, the new worktree gets a link
+    to itself, and a tool that follows links reads that loop without end.
 
     A link that git does not ignore shows as untracked, and 'git add -A' commits it
     into the container. So nwt asks git in the new worktree if git ignores <name>. Git
@@ -1715,6 +1721,12 @@ CHILD REPOSITORY LINKS:
     When git gives no answer, the warning repeats the first line of the error of git.
     When nwt cannot make the link, the warning gives the error of the operating
     system.
+
+    When git gives no list of the worktrees, nwt cannot tell a child from a worktree
+    of this repository. nwt then makes no link, and it prints one warning that repeats
+    the first line of the error of git:
+
+        Warning: no child linked, because nwt cannot tell which directories are children (git worktree list failed: fatal: not a git repository)
 
     --quiet removes the 'Linked' lines, the summary, and the 'Not linked:' lines. It
     does not remove a warning, because a warning names a defect in the repository.
@@ -1999,8 +2011,9 @@ struct Cli {
     /// Disable the links to the child repositories of the main worktree.
     ///
     /// A child repository is a directory one level below the main worktree that
-    /// holds a `.git` entry. By default, nwt links each child into the new
-    /// worktree, as the symlink `<worktree>/<name>` -> `<main worktree>/<name>`.
+    /// holds a `.git` entry. A worktree of this repository is not a child. By
+    /// default, nwt links each child into the new worktree, as the symlink
+    /// `<worktree>/<name>` -> `<main worktree>/<name>`.
     /// The new worktree then uses the one real checkout of each child, and nwt
     /// makes no clone, no branch, and no remote.
     ///

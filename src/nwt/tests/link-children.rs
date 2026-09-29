@@ -1130,6 +1130,51 @@ fn a_worktree_of_the_repository_is_not_a_child() {
     assert_only_the_child_is_linked(&second, &main, &repo, &[&first.worktree, &second.worktree]);
 }
 
+/// A linked worktree of another repository, one level below the main
+/// worktree, is a child, and it gets a link.
+///
+/// Such a worktree holds a `.git` file, as each worktree of the container does.
+/// `git worktree list` in the container does not name it, so `nwt` must not
+/// skip each directory whose `.git` entry is a file.
+#[test]
+fn a_linked_worktree_of_another_repository_is_a_child() {
+    let (temp, repo) = container(&[IGNORE_VIAL], &[]);
+    let (_other_temp, other) = init_repo();
+    let vial = repo.join(VIAL);
+    assert!(
+        run_git(
+            &other,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                &unique_branch("other"),
+                vial.to_str().expect("utf-8 child path"),
+            ]
+        ),
+        "git worktree add {} failed",
+        vial.display()
+    );
+    assert!(
+        vial.join(".git").is_file(),
+        "{} must hold the .git file of a linked worktree",
+        vial.display()
+    );
+    let main = main_worktree(&repo);
+    let branch = unique_branch("other-worktree");
+
+    let run = successful_run(&temp, &repo, &branch, &[], None);
+
+    assert_linked(&run.worktree, &main, &repo, VIAL);
+    assert_eq!(
+        linked_lines(&run.stderr),
+        vec![linked_line(&main, VIAL).as_str(), SUMMARY_OF_ONE],
+        "stderr must name the link of {VIAL}, but it reads:\n{}",
+        run.stderr
+    );
+}
+
 /// `nwt` in a linked worktree links the children of the main worktree, and not
 /// the links of the worktree it runs in.
 ///

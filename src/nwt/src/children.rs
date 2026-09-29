@@ -11,9 +11,21 @@
 //! clone, no branch, and no remote is duplicated, and a branch exists only in
 //! a repository that the work changes.
 //!
-//! [`repowalker::child_repositories`] finds the children, so `nwt` and `cwt`
-//! use one definition of a child: a directory one level below the main
-//! worktree that holds a `.git` entry.
+//! [`repowalker::child_repositories`] finds the candidates, so `nwt` and `cwt`
+//! start from one definition: a directory one level below the main worktree
+//! that holds a `.git` entry. `nwt` then removes each worktree of this
+//! repository, because a worktree of this repository is not a child. The
+//! setting `nwt.worktreesDir '.'` puts each worktree one level below the main
+//! worktree, and each one holds a `.git` file. `git worktree add` makes the new
+//! worktree before this module runs, so without that step the new worktree
+//! gets a link to itself, a loop that a tool which follows links reads without
+//! end. [`NotChildren`] holds the entries to remove, and `git worktree list`
+//! names them. A linked worktree of another repository stays a child.
+//!
+//! This module asks git for the worktrees only when a candidate exists, so a
+//! repository without candidates starts no git process here. When git gives
+//! no list, this module cannot tell a child from a worktree, and it makes no
+//! link. One warning then repeats the first line of the error of git.
 //!
 //! First, this module reads the path `<worktree>/<name>`. When something is
 //! already there, the module does not change it and asks git nothing. The new
@@ -51,7 +63,8 @@
 //! that fails gives a fourth, with the error of the operating system. `-q`
 //! removes the line for each link, the line for each path that is already
 //! there, and the summary. It does not remove a warning, because a warning
-//! names a defect in the repository.
+//! names a defect in the repository. The warning for a run without a list of
+//! worktrees stays too.
 //!
 //! The target of each link is absolute: the main worktree that git names,
 //! joined with the name of the child. Git keeps worktree paths absolute too, so
@@ -60,11 +73,13 @@
 //! The shell wrapper reads the worktree path from stdout, so each line of this
 //! module goes to stderr, and the git child writes into a captured buffer.
 
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::fs;
 use std::io::{self, Write};
-use std::path::Path;
-use std::process::Stdio;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
 
 use crate::production_git_command;
 
@@ -111,13 +126,31 @@ const ROOT_ANCHOR: &str = "/";
 /// The ignore file that the warning tells the user to change.
 const IGNORE_FILE: &str = ".gitignore";
 
-/// The start of the reason for a child when git exits with a status that is
-/// not 0 or 1. The error of git follows it.
-const GIT_FAILED_REASON: &str = "git check-ignore failed:";
+/// The words of the subcommand of git that asks whether git ignores a path.
+///
+/// Git reads these words, and the warning for a git that gives no answer names
+/// them, so the two cannot differ.
+const CHECK_IGNORE: GitSubcommand = &["check-ignore"];
 
-/// The start of the reason for a child when git does not start. The error of
-/// the operating system follows it.
-const GIT_DID_NOT_START_REASON: &str = "git check-ignore did not start:";
+/// The words of the subcommand of git that names each worktree of the
+/// repository.
+const WORKTREE_LIST: GitSubcommand = &["worktree", "list"];
+
+/// The options that make `git worktree list` write one field for each line of
+/// its porcelain format, with a NUL byte after each field.
+const WORKTREE_LIST_OPTIONS: [&str; 2] = ["--porcelain", "-z"];
+
+/// The start of the field that names a worktree in the output of
+/// `git worktree list --porcelain -z`. The path of the worktree follows it.
+const WORKTREE_FIELD_PREFIX: &[u8] = b"worktree ";
+
+/// The warning for a run that makes no link, because git gave no list of the
+/// worktrees. The reason in parentheses follows it.
+const NO_CHILD_LINKED: &str =
+    "Warning: no child linked, because nwt cannot tell which directories are children";
+
+/// The words of a subcommand of git, in the order that git reads them.
+type GitSubcommand = &'static [&'static str];
 
 /// What happened to one child of the main worktree.
 ///
@@ -146,10 +179,30 @@ enum Outcome {
 /// for each child whose path the new worktree already holds, and a summary when
 /// it made at least one link. `quiet` removes those lines, and the links still
 /// exist. A main worktree without children gives no link and no line.
+///
+/// Each candidate that [`NotChildren`] holds gets no link and no line, because
+/// it is not a child. The function asks git for [`NotChildren`] only when a
+/// candidate exists. When git gives no answer, the function makes no link, and
+/// it writes one warning that `quiet` does not remove.
 pub(crate) fn link_children(main_worktree: &Path, worktree: &Path, quiet: bool) {
+    let candidates = repowalker::child_repositories(main_worktree);
+    if candidates.is_empty() {
+        return;
+    }
+    let not_children = match NotChildren::of(main_worktree, worktree) {
+        Ok(not_children) => not_children,
+        Err(failure) => {
+            eprintln!("{}", no_child_linked_line(&failure));
+            return;
+        }
+    };
+
     let mut linked = 0_usize;
 
-    for child in repowalker::child_repositories(main_worktree) {
+    for child in candidates {
+        if not_children.holds(&child) {
+            continue;
+        }
         let Some(name) = child.file_name() else {
             continue;
         };
@@ -197,11 +250,20 @@ enum IgnoreAnswer {
     NotIgnored,
 }
 
-/// Why git gave no answer to the question whether it ignores a path.
+/// Why a subcommand of git gave no answer.
 ///
-/// The text of each variant is the reason of the warning for the child.
-enum GitFailure {
-    /// Git exited with a status that is not 0 or 1, or a signal stopped it.
+/// The text is the reason of a warning: `git <subcommand> failed: <error>`, or
+/// `git <subcommand> did not start: <error>`.
+struct GitFailure {
+    /// The subcommand that gave no answer.
+    subcommand: GitSubcommand,
+    /// What went wrong.
+    cause: FailureCause,
+}
+
+/// What went wrong when a subcommand of git gave no answer.
+enum FailureCause {
+    /// Git exited with a status that is not an answer, or a signal stopped it.
     /// The text is the first line of its stderr, or the exit status when its
     /// stderr holds no text.
     Failed(String),
@@ -209,13 +271,45 @@ enum GitFailure {
     DidNotStart(io::Error),
 }
 
-impl fmt::Display for GitFailure {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            GitFailure::Failed(text) => write!(f, "{GIT_FAILED_REASON} {text}"),
-            GitFailure::DidNotStart(error) => write!(f, "{GIT_DID_NOT_START_REASON} {error}"),
+impl GitFailure {
+    /// The failure of `subcommand`, whose `output` holds a status that is not
+    /// an answer.
+    ///
+    /// The text is the first line of the stderr of git, because git writes the
+    /// error there. It is the exit status when that stderr holds no text.
+    fn failed(subcommand: GitSubcommand, output: &Output) -> Self {
+        let text = first_line_of(&output.stderr).unwrap_or_else(|| output.status.to_string());
+        Self {
+            subcommand,
+            cause: FailureCause::Failed(text),
         }
     }
+}
+
+impl fmt::Display for GitFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let subcommand = self.subcommand.join(" ");
+        match &self.cause {
+            FailureCause::Failed(text) => write!(f, "git {subcommand} failed: {text}"),
+            FailureCause::DidNotStart(error) => {
+                write!(f, "git {subcommand} did not start: {error}")
+            }
+        }
+    }
+}
+
+/// Run `command`, which runs the git `subcommand`, to its end with each stream
+/// captured, and hand back its output.
+///
+/// # Errors
+///
+/// Returns a [`GitFailure`] with [`FailureCause::DidNotStart`] when git does not
+/// start.
+fn captured_output(mut command: Command, subcommand: GitSubcommand) -> Result<Output, GitFailure> {
+    command.output().map_err(|error| GitFailure {
+        subcommand,
+        cause: FailureCause::DidNotStart(error),
+    })
 }
 
 /// The first line of `stderr` that holds text, without the space around it.
@@ -250,8 +344,9 @@ fn link_outcome(result: io::Result<()>) -> Outcome {
 ///
 /// # Errors
 ///
-/// Returns [`GitFailure::DidNotStart`] when git does not start, and
-/// [`GitFailure::Failed`] for each other status or for a signal.
+/// Returns a [`GitFailure`] with [`FailureCause::DidNotStart`] when git does
+/// not start, and with [`FailureCause::Failed`] for each other status or for a
+/// signal.
 ///
 /// The command goes through [`production_git_command`], which sheds the
 /// inherited `GIT_` environment. An inherited `GIT_DIR` or `GIT_INDEX_FILE`
@@ -261,17 +356,132 @@ fn link_outcome(result: io::Result<()>) -> Outcome {
 fn check_ignore(worktree: &Path, name: &OsStr) -> Result<IgnoreAnswer, GitFailure> {
     let mut command = production_git_command(worktree);
     command
-        .args(["check-ignore", "-q", "--"])
+        .args(CHECK_IGNORE)
+        .args(["-q", "--"])
         .arg(pathspec_of(name));
-    let output = command.output().map_err(GitFailure::DidNotStart)?;
+    let output = captured_output(command, CHECK_IGNORE)?;
 
     match output.status.code() {
         Some(CHECK_IGNORE_IGNORED) => Ok(IgnoreAnswer::Ignored),
         Some(CHECK_IGNORE_NOT_IGNORED) => Ok(IgnoreAnswer::NotIgnored),
-        _ => Err(GitFailure::Failed(
-            first_line_of(&output.stderr).unwrap_or_else(|| output.status.to_string()),
-        )),
+        _ => Err(GitFailure::failed(CHECK_IGNORE, &output)),
     }
+}
+
+/// The entries one level below the main worktree that hold a `.git` entry, and
+/// that are not children.
+///
+/// [`repowalker::child_repositories`] finds each directory one level below the
+/// main worktree that holds a `.git` entry. Some of those directories are not
+/// children, and this set holds them. [`link_children`] skips each candidate
+/// that this set holds, with no line.
+///
+/// Each path is canonical, so a path that reaches a directory through a
+/// symlink matches the path that reaches it directly. On macOS, `/var` is a
+/// symlink to `/private/var`. A path that cannot be made canonical stays as it
+/// is.
+struct NotChildren(HashSet<PathBuf>);
+
+impl NotChildren {
+    /// The entries of `main_worktree` that are not children, when `worktree` is
+    /// the new worktree.
+    ///
+    /// A worktree of this repository is not a child. `git worktree list` in
+    /// `main_worktree` names each worktree, and the new worktree comes from
+    /// `worktree` too, with no question to git. A linked worktree of another
+    /// repository holds a `.git` file too, but git does not name it here, so it
+    /// stays a child.
+    ///
+    /// Each kind of entry that is not a child goes into the one chain below, so
+    /// [`link_children`] reads one set and makes one pass.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`GitFailure`] of `git worktree list`. Without the list, a
+    /// child and a worktree look the same.
+    fn of(main_worktree: &Path, worktree: &Path) -> Result<Self, GitFailure> {
+        let worktrees = worktree_paths(main_worktree)?;
+        Ok(Self::from_paths(
+            std::iter::once(worktree.to_path_buf()).chain(worktrees),
+        ))
+    }
+
+    /// The set of `paths`, each one canonical.
+    fn from_paths(paths: impl IntoIterator<Item = PathBuf>) -> Self {
+        Self(
+            paths
+                .into_iter()
+                .map(|path| canonical_or_raw(&path))
+                .collect(),
+        )
+    }
+
+    /// Whether the candidate `path` is an entry that is not a child.
+    fn holds(&self, path: &Path) -> bool {
+        self.0.contains(&canonical_or_raw(path))
+    }
+}
+
+/// The canonical form of `path`, or `path` as it is when it cannot be made
+/// canonical.
+///
+/// `git worktree list` can name a worktree whose directory is gone. Such a path
+/// cannot be made canonical, and no candidate reaches it.
+fn canonical_or_raw(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// The path of each worktree of the repository at `main_worktree`, as
+/// `git worktree list --porcelain -z` names it.
+///
+/// # Errors
+///
+/// Returns a [`GitFailure`] when git does not start, or when it exits with a
+/// status that is not 0. The command goes through [`production_git_command`],
+/// as the question about an ignored path does, and each stream is captured.
+fn worktree_paths(main_worktree: &Path) -> Result<Vec<PathBuf>, GitFailure> {
+    let mut command = production_git_command(main_worktree);
+    command.args(WORKTREE_LIST).args(WORKTREE_LIST_OPTIONS);
+    let output = captured_output(command, WORKTREE_LIST)?;
+
+    if !output.status.success() {
+        return Err(GitFailure::failed(WORKTREE_LIST, &output));
+    }
+    Ok(worktree_paths_of(&output.stdout))
+}
+
+/// The path of each worktree that `stdout` names, in order.
+///
+/// `stdout` is the output of `git worktree list --porcelain -z`. Each field of
+/// a record ends with a NUL byte, and an empty field ends the record. The first
+/// field of each record is `worktree <path>`, and no other field starts with
+/// that label. A NUL byte cannot occur in a path, so a space or a line break in
+/// a path stays in the path.
+fn worktree_paths_of(stdout: &[u8]) -> Vec<PathBuf> {
+    stdout
+        .split(|byte| *byte == FIELD_END)
+        .filter_map(|field| field.strip_prefix(WORKTREE_FIELD_PREFIX))
+        .map(path_of_bytes)
+        .collect()
+}
+
+/// The path that git wrote as `bytes`.
+///
+/// Git writes a path as the bytes that the operating system gives it, so a
+/// path that is not UTF-8 stays as it is.
+#[cfg(unix)]
+fn path_of_bytes(bytes: &[u8]) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+
+    PathBuf::from(OsStr::from_bytes(bytes))
+}
+
+/// The path that git wrote as `bytes`.
+///
+/// Git for Windows writes each path as UTF-8.
+#[cfg(not(unix))]
+fn path_of_bytes(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
 }
 
 /// The pathspec that names the entry `name` at the root of the worktree.
@@ -313,7 +523,8 @@ struct DirectoryOnlyRule {
 fn directory_rule_of(worktree: &Path, name: &OsStr) -> Option<DirectoryOnlyRule> {
     let mut command = production_git_command(worktree);
     command
-        .args(["check-ignore", "-v", "-z", "--stdin"])
+        .args(CHECK_IGNORE)
+        .args(["-v", "-z", "--stdin"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -435,6 +646,12 @@ fn not_linked_line(name: &OsStr, reason: &dyn fmt::Display) -> String {
     format!("{NOT_LINKED_PREFIX} {} ({reason})", name.to_string_lossy())
 }
 
+/// The warning for a run that makes no link, because git gave no list of the
+/// worktrees, with `failure`.
+fn no_child_linked_line(failure: &GitFailure) -> String {
+    format!("{NO_CHILD_LINKED} ({failure})")
+}
+
 /// The line that reports the link of the child `name` to `target`.
 fn linked_line(name: &OsStr, target: &Path) -> String {
     format!(
@@ -461,7 +678,8 @@ fn summary_line(linked: usize) -> String {
 /// Links` section of the README hold these samples. Each line comes from the
 /// function that prints it, so a test can hold each document to the code. The
 /// samples are: two links, their summary, the line for a path that is already
-/// there, and the two warnings for a child that git does not ignore.
+/// there, the two warnings for a child that git does not ignore, and the
+/// warning for a run without a list of worktrees.
 #[cfg(test)]
 pub(crate) fn sample_lines(main_worktree: &Path) -> Vec<String> {
     let vial = OsStr::new("vial");
@@ -482,8 +700,16 @@ pub(crate) fn sample_lines(main_worktree: &Path) -> Vec<String> {
         &not_ignored_reason(vial, Some(&rule)),
     ));
     lines.push(not_linked_line(vial, &not_ignored_reason(vial, None)));
+    lines.push(no_child_linked_line(&GitFailure {
+        subcommand: WORKTREE_LIST,
+        cause: FailureCause::Failed(SAMPLE_GIT_ERROR.to_string()),
+    }));
     lines
 }
+
+/// The error of git in the samples of the documents.
+#[cfg(test)]
+const SAMPLE_GIT_ERROR: &str = "fatal: not a git repository";
 
 /// Make the symlink `link` that points at the directory `target`.
 #[cfg(unix)]
@@ -636,10 +862,27 @@ mod tests {
         assert_eq!(first_line_of(b" \n\t\n"), None);
     }
 
+    /// The failure of the git `subcommand` that exited with a status that is
+    /// not an answer, and wrote `text` as its error.
+    fn failed(subcommand: GitSubcommand, text: &str) -> GitFailure {
+        GitFailure {
+            subcommand,
+            cause: FailureCause::Failed(text.to_string()),
+        }
+    }
+
+    /// The failure of the git `subcommand` that did not start, with `error`.
+    fn did_not_start(subcommand: GitSubcommand, error: io::Error) -> GitFailure {
+        GitFailure {
+            subcommand,
+            cause: FailureCause::DidNotStart(error),
+        }
+    }
+
     /// The warning for a git that failed repeats the error of git.
     #[test]
     fn the_warning_for_a_git_that_failed_repeats_its_error() {
-        let failure = GitFailure::Failed("fatal: not a git repository".to_string());
+        let failure = failed(CHECK_IGNORE, "fatal: not a git repository");
 
         assert_eq!(
             not_linked_line(OsStr::new("vial"), &failure),
@@ -656,8 +899,135 @@ mod tests {
             format!("Warning: not linked: vial (git check-ignore did not start: {error})");
 
         assert_eq!(
-            not_linked_line(OsStr::new("vial"), &GitFailure::DidNotStart(error)),
+            not_linked_line(OsStr::new("vial"), &did_not_start(CHECK_IGNORE, error)),
             expected
         );
+    }
+
+    /// A run without a list of worktrees makes no link, and its one warning
+    /// repeats the error of `git worktree list`.
+    #[test]
+    fn the_warning_for_a_worktree_list_that_failed_repeats_its_error() {
+        let failure = failed(WORKTREE_LIST, "fatal: not a git repository");
+
+        assert_eq!(
+            no_child_linked_line(&failure),
+            "Warning: no child linked, because nwt cannot tell which directories are children \
+             (git worktree list failed: fatal: not a git repository)"
+        );
+    }
+
+    /// A run whose `git worktree list` did not start makes no link, and its one
+    /// warning names the error of the operating system.
+    #[test]
+    fn the_warning_for_a_worktree_list_that_did_not_start_names_the_error() {
+        let error = io::Error::from(io::ErrorKind::NotFound);
+        let expected = format!(
+            "Warning: no child linked, because nwt cannot tell which directories are children \
+             (git worktree list did not start: {error})"
+        );
+
+        assert_eq!(
+            no_child_linked_line(&did_not_start(WORKTREE_LIST, error)),
+            expected
+        );
+    }
+
+    /// A git that fails with no text on its stderr gives its exit status as
+    /// the error.
+    #[cfg(unix)]
+    #[test]
+    fn a_failure_without_stderr_names_the_exit_status() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let output = Output {
+            status: std::process::ExitStatus::from_raw(128 << 8),
+            stdout: Vec::new(),
+            stderr: b" \n".to_vec(),
+        };
+
+        assert_eq!(
+            GitFailure::failed(WORKTREE_LIST, &output).to_string(),
+            format!("git worktree list failed: {}", output.status)
+        );
+    }
+
+    /// Each record of `git worktree list --porcelain -z` names one worktree,
+    /// in order. The fields after the path are not paths, and the record of a
+    /// bare repository names its directory too.
+    #[test]
+    fn each_record_of_the_worktree_list_names_one_worktree() {
+        let stdout = b"worktree /srv/keyboards.git\0bare\0\0\
+            worktree /srv/keyboards/first\0HEAD 1111111111111111111111111111111111111111\0\
+            branch refs/heads/first\0\0\
+            worktree /srv/keyboards/second\0HEAD 2222222222222222222222222222222222222222\0\
+            detached\0locked worktree /srv/elsewhere\0\0";
+
+        assert_eq!(
+            worktree_paths_of(stdout),
+            vec![
+                PathBuf::from("/srv/keyboards.git"),
+                PathBuf::from("/srv/keyboards/first"),
+                PathBuf::from("/srv/keyboards/second"),
+            ]
+        );
+    }
+
+    /// A NUL byte ends each field, so a space and a line break stay in the
+    /// path.
+    #[test]
+    fn a_worktree_path_with_a_space_stays_whole() {
+        assert_eq!(
+            worktree_paths_of(b"worktree /srv/my keyboards/new\nline\0HEAD 1\0detached\0\0"),
+            vec![PathBuf::from("/srv/my keyboards/new\nline")]
+        );
+    }
+
+    /// No output names no worktree.
+    #[test]
+    fn no_output_names_no_worktree() {
+        assert_eq!(worktree_paths_of(b""), Vec::<PathBuf>::new());
+    }
+
+    /// A path that is not UTF-8 reaches the set as the bytes that git wrote.
+    #[cfg(unix)]
+    #[test]
+    fn a_worktree_path_that_is_not_utf8_stays_as_git_wrote_it() {
+        use std::os::unix::ffi::OsStrExt;
+
+        assert_eq!(
+            worktree_paths_of(b"worktree /srv/caf\xe9\0detached\0\0"),
+            vec![PathBuf::from(OsStr::from_bytes(b"/srv/caf\xe9"))]
+        );
+    }
+
+    /// A candidate that reaches an entry through a symlink matches the entry,
+    /// because each path is canonical. On macOS, the temporary directory itself
+    /// sits below the symlink `/var`.
+    #[cfg(unix)]
+    #[test]
+    fn an_entry_reached_through_a_symlink_is_held() {
+        let temp = tempfile::TempDir::new().expect("create a temporary directory");
+        let worktree = temp.path().join("first");
+        fs::create_dir(&worktree).expect("create the worktree directory");
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(temp.path(), &alias).expect("make the symlink");
+
+        let not_children = NotChildren::from_paths([worktree]);
+
+        assert!(not_children.holds(&alias.join("first")));
+        assert!(!not_children.holds(&temp.path().join("vial")));
+    }
+
+    /// A path that cannot be made canonical, such as a worktree whose
+    /// directory is gone, stays in the set as it is.
+    #[test]
+    fn a_path_that_is_gone_is_held_as_it_is() {
+        let temp = tempfile::TempDir::new().expect("create a temporary directory");
+        let gone = temp.path().join("gone");
+
+        let not_children = NotChildren::from_paths([gone.clone()]);
+
+        assert!(not_children.holds(&gone));
     }
 }
