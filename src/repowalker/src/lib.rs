@@ -47,6 +47,9 @@ pub fn is_git_worktree(dir: &Path) -> bool {
     false
 }
 
+/// The name of the entry that git puts at the root of a checkout.
+const GIT_ENTRY: &str = ".git";
+
 /// Tells if `dir` holds a `.git` entry.
 ///
 /// Git puts a `.git` directory at the root of a main worktree and a `.git` file
@@ -57,8 +60,7 @@ pub fn is_git_worktree(dir: &Path) -> bool {
 /// [`child_repositories`] applies this test to each directory below the one it
 /// reads. `cwt` also applies it to find the repository above a checkout.
 pub fn holds_git_entry(dir: &Path) -> bool {
-    let _ = dir;
-    false
+    dir.join(GIT_ENTRY).exists()
 }
 
 /// Finds the child repositories of `dir`.
@@ -78,8 +80,17 @@ pub fn holds_git_entry(dir: &Path) -> bool {
 /// of a child. `cwt` lists the worktrees of each child with the worktrees of the
 /// parent. `nwt` links each child into a new worktree of the parent.
 pub fn child_repositories(dir: &Path) -> Vec<PathBuf> {
-    let _ = dir;
-    Vec::new()
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+
+    let mut children: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir() && holds_git_entry(path))
+        .collect();
+    children.sort();
+    children
 }
 
 /// Finds the root of the main git repository, even when called from a worktree.
