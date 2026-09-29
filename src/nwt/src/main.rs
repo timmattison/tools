@@ -6459,6 +6459,136 @@ mod tests {
             );
         }
 
+        /// Issue #537: the walk does not go into a child repository.
+        ///
+        /// `vial/` holds a `.git` directory, thus it is a child repository, and
+        /// its `.env` belongs to the child. The parent index does not list the
+        /// files of a child, so the copy took that `.env` as untracked and made
+        /// a real `vial/` in the worktree that held only `.env` files.
+        #[test]
+        fn test_skips_child_repository_with_git_directory() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), "vial/.git/HEAD", "ref: refs/heads/main\n");
+            create_file(source.path(), "vial/.env", "CHILD=1");
+
+            let summary = copy_untracked_env_files(source.path(), dest.path(), &[], true);
+
+            assert!(
+                dest.path().join("vial").symlink_metadata().is_err(),
+                "The copy must not make vial/ in the worktree, because vial/ is a child repository"
+            );
+            assert_eq!(
+                summary,
+                EnvCopySummary {
+                    copied: 0,
+                    kept: 0,
+                    skipped: 0
+                },
+                "The .env of a child repository is not the parent's to copy"
+            );
+        }
+
+        /// Issue #537: a `.git` file also makes a child repository.
+        ///
+        /// A linked worktree holds a `.git` file, not a `.git` directory. The
+        /// walk does not go into `wt/`, and the copy does not make `wt/` in the
+        /// worktree.
+        #[test]
+        fn test_skips_child_repository_with_git_file() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), "wt/.git", "gitdir: /nowhere\n");
+            create_file(source.path(), "wt/.env.local", "CHILD=1");
+
+            let summary = copy_untracked_env_files(source.path(), dest.path(), &[], true);
+
+            assert!(
+                dest.path().join("wt").symlink_metadata().is_err(),
+                "The copy must not make wt/ in the worktree, because wt/ is a child repository"
+            );
+            assert_eq!(
+                summary,
+                EnvCopySummary {
+                    copied: 0,
+                    kept: 0,
+                    skipped: 0
+                },
+                "The .env.local of a linked worktree is not the parent's to copy"
+            );
+        }
+
+        /// Issue #537: the rule applies at each depth below the root.
+        ///
+        /// `packages/lib/` is a child repository two levels down, and the walk
+        /// does not go into it. `packages/api/` is a plain directory of the
+        /// parent, thus its `.env` is copied.
+        #[test]
+        fn test_skips_nested_child_repository() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(
+                source.path(),
+                "packages/lib/.git/HEAD",
+                "ref: refs/heads/main\n",
+            );
+            create_file(source.path(), "packages/lib/.env", "LIB=1");
+            create_file(source.path(), "packages/api/.env", "API=1");
+
+            let summary = copy_untracked_env_files(source.path(), dest.path(), &[], true);
+
+            assert!(
+                file_has_content(dest.path(), "packages/api/.env", "API=1"),
+                "packages/api/ is not a child repository, thus its .env must be copied"
+            );
+            assert!(
+                dest.path().join("packages/lib").symlink_metadata().is_err(),
+                "The copy must not make packages/lib/ in the worktree, because it is a child repository"
+            );
+            assert_eq!(
+                summary,
+                EnvCopySummary {
+                    copied: 1,
+                    kept: 0,
+                    skipped: 0
+                },
+                "Only the .env of the plain directory counts as copied"
+            );
+        }
+
+        /// Issue #537: the rule does not apply to the root of the walk.
+        ///
+        /// The root is the main worktree, and it holds its own `.git`. A rule
+        /// that skips the root copies nothing at all. This test passes before
+        /// the fix, and it guards against a fix that is too broad.
+        #[test]
+        fn test_root_with_git_entry_is_still_walked() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), ".git/HEAD", "ref: refs/heads/main\n");
+            create_file(source.path(), ".env", "ROOT=1");
+
+            let summary = copy_untracked_env_files(source.path(), dest.path(), &[], true);
+
+            assert!(
+                file_has_content(dest.path(), ".env", "ROOT=1"),
+                "The root holds .git, and its .env must still be copied"
+            );
+            assert_eq!(
+                summary,
+                EnvCopySummary {
+                    copied: 1,
+                    kept: 0,
+                    skipped: 0
+                },
+                "The .env of the root counts as copied"
+            );
+        }
+
         #[test]
         fn test_tracked_env_file_not_copied() {
             let source = TempDir::new().expect("Failed to create temp dir");
