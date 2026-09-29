@@ -39,6 +39,22 @@ const IGNORE_VIAL_QMK: &str = "/vial-qmk";
 /// ignores a symlink of that name.
 const IGNORE_ZMK_CONFIG: &str = "/zmk-config-corne";
 
+/// A child that holds an untracked `.env`, as the issue names it.
+const VIAL: &str = "vial";
+
+/// The `.gitignore` pattern that ignores [`VIAL`] at the root.
+const IGNORE_VIAL: &str = "/vial";
+
+/// The file that the `.env` copy takes.
+const ENV_FILE: &str = ".env";
+
+/// The content of the `.env` of a child.
+const CHILD_ENV: &str = "CHILD=1\n";
+
+/// The start of the line that the `.env` copy prints for a destination that is
+/// already there.
+const KEPT_EXISTING: &str = "Kept existing:";
+
 /// A child whose name starts with the pathspec magic character of git.
 #[cfg(unix)]
 const COLON_CHILD: &str = ":vial";
@@ -494,4 +510,51 @@ fn the_config_key_turns_the_links_off() {
         "{LINKS_OFF_CONFIG:?} must stop each {LINKED_WORD} line, but stderr reads:\n{}",
         run.stderr
     );
+}
+
+/// A container with the ignored child [`VIAL`], and an untracked `.env` in the
+/// child.
+fn container_with_child_env() -> (TempDir, PathBuf) {
+    let (temp, repo) = container(&[IGNORE_VIAL], &[VIAL]);
+    write_file(&repo.join(VIAL), ENV_FILE, CHILD_ENV);
+    (temp, repo)
+}
+
+/// The `.env` of a linked child reaches the worktree through the link. The
+/// `.env` copy does not go into the child, so it prints no `Kept existing:`
+/// line for a file that the link already gives, and the file of the child
+/// stays as it was.
+#[test]
+fn the_env_file_of_a_linked_child_stays_in_the_child() {
+    let (temp, repo) = container_with_child_env();
+    let main = main_worktree(&repo);
+    let branch = unique_branch("env-linked");
+
+    let run = successful_run(&temp, &repo, &branch, &[], None);
+
+    assert_linked(&run.worktree, &main, &repo, VIAL);
+    assert!(
+        !run.stderr.contains(KEPT_EXISTING),
+        "the .env copy must not go through the link into the child, but stderr reads:\n{}",
+        run.stderr
+    );
+    let env_path = repo.join(VIAL).join(ENV_FILE);
+    assert_eq!(
+        fs::read_to_string(&env_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", env_path.display())),
+        CHILD_ENV,
+        "the .env of the child must stay as it was"
+    );
+}
+
+/// Without links, the `.env` of a child makes no directory in the worktree. A
+/// directory that holds only `.env` files is not a usable child.
+#[test]
+fn the_env_file_of_a_child_makes_no_directory_without_links() {
+    let (temp, repo) = container_with_child_env();
+    let branch = unique_branch("env-unlinked");
+
+    let run = successful_run(&temp, &repo, &branch, &[NO_LINK_CHILDREN], None);
+
+    assert_not_there(&run.worktree, VIAL);
 }
