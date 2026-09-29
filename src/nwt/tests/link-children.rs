@@ -43,6 +43,9 @@ const IGNORE_ZMK_CONFIG: &str = "/zmk-config-corne";
 /// `package.json`, and the flag keeps each run short.
 const NO_BOOTSTRAP_HOOKS: &str = "--no-bootstrap-hooks";
 
+/// The flag that removes the lines that report on the run.
+const QUIET: &str = "-q";
+
 /// The prefix of the line that names a worktree in `git worktree list
 /// --porcelain`.
 const WORKTREE_LINE_PREFIX: &str = "worktree ";
@@ -285,6 +288,28 @@ fn one_linked_child_gets_the_singular_summary() {
         linked_lines(&run.stderr),
         vec![linked_line(&main, VIAL_QMK).as_str(), SUMMARY_OF_ONE],
         "stderr must name the link and then the count, but it reads:\n{}",
+        run.stderr
+    );
+}
+
+/// `-q` removes the line for each link and the summary, and the links still
+/// exist.
+#[test]
+fn quiet_keeps_the_links_and_removes_their_lines() {
+    let (temp, repo) = container(
+        &[IGNORE_VIAL_QMK, IGNORE_ZMK_CONFIG],
+        &[VIAL_QMK, ZMK_CONFIG],
+    );
+    let main = main_worktree(&repo);
+    let branch = unique_branch("quiet");
+
+    let run = successful_run(&temp, &repo, &branch, &[QUIET], None);
+
+    assert_linked(&run.worktree, &main, &repo, VIAL_QMK);
+    assert_linked(&run.worktree, &main, &repo, ZMK_CONFIG);
+    assert!(
+        linked_lines(&run.stderr).is_empty(),
+        "-q must remove each {LINKED_WORD} line, but stderr reads:\n{}",
         run.stderr
     );
 }
