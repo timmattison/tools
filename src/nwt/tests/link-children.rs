@@ -52,6 +52,15 @@ const IGNORE_COLON_CHILD: &str = "/:vial";
 /// `package.json`, and the flag keeps each run short.
 const NO_BOOTSTRAP_HOOKS: &str = "--no-bootstrap-hooks";
 
+/// The flag that turns the links off for one run.
+const NO_LINK_CHILDREN: &str = "--no-link-children";
+
+/// The name of the config file of `nwt` in the home directory.
+const CONFIG_FILE: &str = ".nwt.toml";
+
+/// A config file that turns the links off by default.
+const LINKS_OFF_CONFIG: &str = "link_children = false\n";
+
 /// The flag that removes the lines that report on the run.
 const QUIET: &str = "-q";
 
@@ -434,6 +443,55 @@ fn a_name_that_starts_with_a_colon_goes_to_git_as_a_path() {
         linked_lines(&run.stderr),
         vec![linked_line(&main, COLON_CHILD).as_str(), SUMMARY_OF_ONE],
         "stderr must name the link and then the count, but it reads:\n{}",
+        run.stderr
+    );
+}
+
+/// Prove that nothing exists at `<worktree>/<name>`: no link, no directory, and
+/// no file.
+fn assert_not_there(worktree: &Path, name: &str) {
+    let path = worktree.join(name);
+    assert!(
+        fs::symlink_metadata(&path).is_err(),
+        "{} must not exist",
+        path.display()
+    );
+}
+
+/// `--no-link-children` makes no link and prints no line about links.
+#[test]
+fn the_flag_turns_the_links_off() {
+    let (temp, repo) = container(&[IGNORE_VIAL_QMK], &[VIAL_QMK]);
+    let branch = unique_branch("flag-off");
+
+    let run = successful_run(&temp, &repo, &branch, &[NO_LINK_CHILDREN], None);
+
+    assert_not_there(&run.worktree, VIAL_QMK);
+    assert!(
+        linked_lines(&run.stderr).is_empty(),
+        "{NO_LINK_CHILDREN} must print no {LINKED_WORD} line, but stderr reads:\n{}",
+        run.stderr
+    );
+}
+
+/// `link_children = false` in `~/.nwt.toml` makes no link and prints no line
+/// about links.
+///
+/// The config file goes into a home directory that this test owns. The shared
+/// private home of `support` stays empty, so no other test reads this file.
+#[test]
+fn the_config_key_turns_the_links_off() {
+    let (temp, repo) = container(&[IGNORE_VIAL_QMK], &[VIAL_QMK]);
+    let home = TempDir::new().expect("create the home directory of the run");
+    write_file(home.path(), CONFIG_FILE, LINKS_OFF_CONFIG);
+    let branch = unique_branch("config-off");
+
+    let run = successful_run(&temp, &repo, &branch, &[], Some(home.path()));
+
+    assert_not_there(&run.worktree, VIAL_QMK);
+    assert!(
+        linked_lines(&run.stderr).is_empty(),
+        "{LINKS_OFF_CONFIG:?} must stop each {LINKED_WORD} line, but stderr reads:\n{}",
         run.stderr
     );
 }
