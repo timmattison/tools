@@ -122,6 +122,23 @@ const GIT_FAILED_REASON: &str = "git check-ignore failed:";
 #[cfg(unix)]
 const NO_COPY_ENV: &str = "--no-copy-env";
 
+/// A directory of the main worktree that holds no `.git` entry.
+const PLAIN_DIR: &str = "plain";
+
+/// A regular file of the main worktree.
+const PLAIN_FILE: &str = "file.txt";
+
+/// A directory of the main worktree that holds no `.git` entry, and that holds
+/// the child repository [`INNER`].
+const OUTER_DIR: &str = "outer";
+
+/// A child repository of [`OUTER_DIR`], and thus a child of a child.
+const INNER: &str = "inner";
+
+/// The `.gitignore` patterns that ignore [`PLAIN_DIR`], [`PLAIN_FILE`],
+/// [`VIAL`], and [`OUTER_DIR`] at the root.
+const IGNORE_NOT_CHILDREN: [&str; 4] = ["/plain", "/file.txt", IGNORE_VIAL, "/outer"];
+
 /// A name in the temporary directory of a fixture that nothing makes. A broken
 /// `.git` file names it as the git directory.
 #[cfg(unix)]
@@ -982,4 +999,42 @@ fn a_git_that_gives_no_answer_gives_a_warning_that_quiet_keeps() {
         let warning = format!("{NOT_LINKED_PREFIX} {VIAL} ({GIT_FAILED_REASON} {first_line})");
         assert_only_line_naming(&run.stderr, VIAL, &warning);
     }
+}
+
+/// Only a directory one level below the main worktree that holds a `.git`
+/// entry is a child. A directory without `.git`, a regular file, and a child
+/// of a child get no link and no line, even when `.gitignore` ignores each of
+/// them.
+///
+/// [`INNER`] is a repository, but it sits below [`OUTER_DIR`], which is not
+/// one. `nwt` links the children of the main worktree only, and not a child of
+/// a child.
+#[test]
+fn only_a_directory_that_holds_git_is_a_child() {
+    let (temp, repo) = container(&IGNORE_NOT_CHILDREN, &[VIAL]);
+    write_file(&repo.join(PLAIN_DIR), CHILD_FILE, "not a repository\n");
+    write_file(&repo, PLAIN_FILE, "a file\n");
+    let outer = repo.join(OUTER_DIR);
+    fs::create_dir(&outer).unwrap_or_else(|e| panic!("create {}: {e}", outer.display()));
+    make_child(&outer, INNER);
+    let main = main_worktree(&repo);
+    let branch = unique_branch("not-children");
+
+    let run = successful_run(&temp, &repo, &branch, &[], None);
+
+    assert_linked(&run.worktree, &main, &repo, VIAL);
+    for name in [PLAIN_DIR, PLAIN_FILE, OUTER_DIR, INNER] {
+        assert_not_there(&run.worktree, name);
+        assert!(
+            lines_naming(&run.stderr, name).is_empty(),
+            "stderr must not name {name}, but it reads:\n{}",
+            run.stderr
+        );
+    }
+    assert_eq!(
+        linked_lines(&run.stderr),
+        vec![linked_line(&main, VIAL).as_str(), SUMMARY_OF_ONE],
+        "stderr must name only the link of {VIAL}, but it reads:\n{}",
+        run.stderr
+    );
 }
