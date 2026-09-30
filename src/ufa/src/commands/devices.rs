@@ -374,6 +374,10 @@ async fn get_all_device_stats(
     let devices_path = format!("sites/{}/devices", site_id);
     let devices: Vec<Device> = fetch_all(client, &devices_path).await?;
 
+    #[expect(
+        clippy::print_stdout,
+        reason = "a note on stdout; review R-20260930T002206Z moves it to stderr"
+    )]
     if devices.is_empty() {
         println!("No devices found on this site.");
         return Ok(());
@@ -399,7 +403,13 @@ async fn get_all_device_stats(
         })
         .collect();
 
-    println!("{}", render_all_device_stats(&stats_rows, output_format)?);
+    #[allow(
+        clippy::print_stdout,
+        reason = "the statistics are the document the user asked for"
+    )]
+    {
+        println!("{}", render_all_device_stats(&stats_rows, output_format)?);
+    }
 
     Ok(())
 }
@@ -472,7 +482,13 @@ async fn restart_device(
     let action = DeviceAction::Restart;
 
     let _: serde_json::Value = client.post(&path, &action).await?;
-    println!("Device restart initiated successfully");
+    #[expect(
+        clippy::print_stdout,
+        reason = "a status sentence on stdout; review R-20260930T002206Z moves it to stderr"
+    )]
+    {
+        println!("Device restart initiated successfully");
+    }
     Ok(())
 }
 
@@ -490,7 +506,13 @@ async fn power_cycle_port(
     let action = PortAction::PowerCycle;
 
     let _: serde_json::Value = client.post(&path, &action).await?;
-    println!("Port power cycle initiated successfully");
+    #[expect(
+        clippy::print_stdout,
+        reason = "a status sentence on stdout; review R-20260930T002206Z moves it to stderr"
+    )]
+    {
+        println!("Port power cycle initiated successfully");
+    }
     Ok(())
 }
 

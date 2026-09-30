@@ -269,7 +269,13 @@ async fn delete_voucher(
     let path = format!("sites/{}/hotspot/vouchers/{}", site_id, voucher_id);
     let result: VoucherDeletionResults = client.delete(&path).await?;
 
-    println!("Deleted {} voucher(s)", result.vouchers_deleted);
+    #[expect(
+        clippy::print_stdout,
+        reason = "a status sentence on stdout; review R-20260930T002206Z moves it to stderr"
+    )]
+    {
+        println!("Deleted {} voucher(s)", result.vouchers_deleted);
+    }
     Ok(())
 }
 
@@ -374,6 +380,10 @@ async fn delete_vouchers_filtered(
     })
     .await?;
 
+    #[expect(
+        clippy::print_stdout,
+        reason = "four notes on stdout, one for each outcome; review R-20260930T002206Z moves them to stderr"
+    )]
     match outcome {
         DeletionOutcome::NoMatches => {
             println!("No vouchers match that filter; nothing to delete.");

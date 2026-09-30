@@ -130,6 +130,10 @@ fn leaf_to_string(value: &serde_json::Value) -> String {
     }
 }
 
+#[allow(
+    clippy::print_stdout,
+    reason = "this prints the document the user asked for, which is what standard output carries"
+)]
 pub fn print_output<T>(data: &T, format: OutputFormat) -> Result<()>
 where
     T: Serialize + ?Sized,
@@ -185,6 +189,10 @@ where
 }
 
 // Specific implementation for vectors with Tabled items
+#[allow(
+    clippy::print_stdout,
+    reason = "this prints the document the user asked for, which is what standard output carries"
+)]
 pub fn print_vec_table<T>(data: &[T], format: OutputFormat) -> Result<()>
 where
     T: Serialize + Tabled,
@@ -230,6 +238,10 @@ impl PageListing {
     /// one, so there is a single rule about where a note goes, and it is the
     /// stream this crate already reports on -- the site it picked for the
     /// user, say.
+    #[allow(
+        clippy::print_stdout,
+        reason = "the page is the document the user asked for; the note beside it goes to standard error"
+    )]
     pub fn print(self) {
         println!("{}", self.body);
 

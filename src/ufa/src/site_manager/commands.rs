@@ -118,13 +118,27 @@ pub async fn handle_cloud_command(
         CloudCommand::Hosts => {
             let hosts = client.get_hosts().await?;
 
+            #[expect(
+                clippy::print_stdout,
+                reason = "a note on stdout; review R-20260930T002206Z moves it to stderr"
+            )]
             if hosts.is_empty() {
                 println!("No cloud-managed hosts found.");
                 return Ok(());
             }
 
-            println!("{}", render_hosts(&hosts, output_format)?);
+            #[allow(
+                clippy::print_stdout,
+                reason = "the hosts are the document the user asked for"
+            )]
+            {
+                println!("{}", render_hosts(&hosts, output_format)?);
+            }
 
+            #[expect(
+                clippy::print_stdout,
+                reason = "a note and a hint on stdout; review R-20260930T002206Z moves them to stderr"
+            )]
             if matches!(output_format, OutputFormat::Table) {
                 println!("\nTotal hosts: {}", hosts.len());
                 println!("\nTo get details for a specific host, use: ufa cloud host <id>");
@@ -136,6 +150,10 @@ pub async fn handle_cloud_command(
 
             print_output(&host, output_format)?;
 
+            #[expect(
+                clippy::print_stdout,
+                reason = "a hint on stdout; review R-20260930T002206Z moves it to stderr"
+            )]
             if matches!(output_format, OutputFormat::Table) {
                 println!("\nCloud Console URL:");
                 println!(

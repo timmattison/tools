@@ -269,7 +269,13 @@ async fn authorize_guest(
     };
 
     let _: serde_json::Value = client.post(&path, &action).await?;
-    println!("Guest access authorized successfully");
+    #[expect(
+        clippy::print_stdout,
+        reason = "a status sentence on stdout; review R-20260930T002206Z moves it to stderr"
+    )]
+    {
+        println!("Guest access authorized successfully");
+    }
     Ok(())
 }
 
@@ -283,7 +289,13 @@ async fn unauthorize_guest(
     let action = ClientAction::UnauthorizeGuestAccess;
 
     let _: serde_json::Value = client.post(&path, &action).await?;
-    println!("Guest access unauthorized successfully");
+    #[expect(
+        clippy::print_stdout,
+        reason = "a status sentence on stdout; review R-20260930T002206Z moves it to stderr"
+    )]
+    {
+        println!("Guest access unauthorized successfully");
+    }
     Ok(())
 }
 

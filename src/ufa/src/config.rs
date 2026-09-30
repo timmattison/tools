@@ -382,6 +382,10 @@ impl Config {
     /// Private on purpose: callers go through [`Config::edit`], which reads
     /// what is already on disk first, so no command can blank out a field it
     /// never asked about.
+    #[allow(
+        clippy::print_stdout,
+        reason = "only the setup wizard saves, through Config::edit, and the wizard is a conversation at a terminal with no --output format"
+    )]
     fn save_to(&self, config_path: &Path) -> Result<()> {
         if let Some(config_dir) = config_path.parent() {
             fs::create_dir_all(config_dir).with_context(|| {
@@ -411,6 +415,10 @@ impl Config {
     }
 
     /// Interactive configuration setup
+    #[allow(
+        clippy::print_stdout,
+        reason = "the setup wizard is a conversation at a terminal, and it has no --output format"
+    )]
     pub async fn setup() -> Result<()> {
         println!("🚀 UniFi API Configuration Setup");
         println!("================================\n");
@@ -545,6 +553,10 @@ impl Config {
     /// Only the cloud credential is touched: the controller URL, its
     /// 1Password reference and the TLS choice are loaded from the saved
     /// configuration and written back unchanged.
+    #[allow(
+        clippy::print_stdout,
+        reason = "the setup wizard is a conversation at a terminal, and it has no --output format"
+    )]
     pub fn setup_site_manager() -> Result<()> {
         println!("Setting up UniFi Site Manager (Cloud) API credentials...\n");
 
@@ -564,6 +576,10 @@ impl Config {
 /// Prompt for the Site Manager (cloud) credential.
 ///
 /// The answer is either an `op://` reference, the key itself, or empty to skip.
+#[allow(
+    clippy::print_stdout,
+    reason = "the setup wizard is a conversation at a terminal, and it has no --output format"
+)]
 fn prompt_for_site_manager_key() -> Result<String> {
     println!(
         "Paste the key from the unifi.ui.com API section, or a 1Password reference \
@@ -727,6 +743,10 @@ fn resolve_secret_from(
 }
 
 /// Run network discovery (mDNS + common IPs) and let the user pick.
+#[allow(
+    clippy::print_stdout,
+    reason = "the setup wizard is a conversation at a terminal, and it has no --output format"
+)]
 async fn network_discover_and_select() -> Result<String> {
     let controllers = discover_controllers().await?;
 
@@ -757,6 +777,10 @@ async fn network_discover_and_select() -> Result<String> {
     }
 }
 
+#[allow(
+    clippy::print_stdout,
+    reason = "the setup wizard is a conversation at a terminal, and it has no --output format"
+)]
 async fn get_manual_controller_url() -> Result<String> {
     loop {
         let url = prompt::ask_line(
@@ -796,6 +820,10 @@ async fn get_manual_controller_url() -> Result<String> {
 }
 
 /// Prompt for an API key when no 1Password entry exists.
+#[allow(
+    clippy::print_stdout,
+    reason = "the setup wizard is a conversation at a terminal, and it has no --output format"
+)]
 fn prompt_for_api_key(controller_url: &str) -> Result<Secret> {
     let settings_url = if controller_url.ends_with('/') {
         format!("{controller_url}settings/control-plane/integrations")

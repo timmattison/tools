@@ -55,7 +55,13 @@ impl Console for Stdio {
     }
 
     fn ask(&mut self, question: &str) -> Result<String> {
-        print!("{question}");
+        #[expect(
+            clippy::print_stdout,
+            reason = "a question on stdout; review R-20260930T002206Z moves it to stderr"
+        )]
+        {
+            print!("{question}");
+        }
         io::stdout().flush()?;
 
         let mut line = String::new();
@@ -66,7 +72,13 @@ impl Console for Stdio {
     }
 
     fn tell(&mut self, message: &str) {
-        println!("{message}");
+        #[expect(
+            clippy::print_stdout,
+            reason = "a note on stdout; review R-20260930T002206Z moves it to stderr"
+        )]
+        {
+            println!("{message}");
+        }
     }
 }
 

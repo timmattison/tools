@@ -1,4 +1,10 @@
 #![warn(clippy::unused_async)]
+// Standard output carries the document the user asked for, and nothing else:
+// under `--output json` a program reads that stream, and a sentence on it is a
+// line the program cannot parse. Every note, status sentence, question and hint
+// goes to standard error, in both output formats. `crate::output` prints the
+// document. Any other print to standard output states its reason at the site.
+#![deny(clippy::print_stdout)]
 
 mod chooser;
 mod client;
@@ -316,6 +322,10 @@ async fn main() -> Result<()> {
                 Config::setup().await?;
                 return Ok(());
             }
+            #[allow(
+                clippy::print_stdout,
+                reason = "the path is the document that `ufa config path` answers with"
+            )]
             ConfigCommand::Path => {
                 let path = Config::config_file_path()?;
                 println!("Configuration file path: {}", path.display());
