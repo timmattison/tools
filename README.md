@@ -452,7 +452,8 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     (e.g., "absurd-rock", "zesty-penguin"). Supports config files (~/.nwt.toml), custom branch
     names, checking out existing refs, running commands after creation, and sparse worktrees
     without a heavy tracked directory (`--sparse-exclude`). Worktrees are created in a
-    `{repo-name}-worktrees` directory alongside the repository.
+    `{repo-name}-worktrees` directory alongside the repository. In a container repository,
+    nwt links each child repository of the main worktree into the new worktree.
   - To install: `cargo install --git https://github.com/timmattison/tools nwt`
 - cwt
   - Change Worktree - Navigate between the git worktrees of a repository and of the
@@ -2778,6 +2779,7 @@ nwt --sparse-exclude assets   # Leave the tracked directory assets/ out
 - `-c, --checkout <REF>`: Check out an existing branch/tag/commit instead of creating a new branch
 - `--run <COMMAND>`: Run a command in the new worktree after creation
 - `--no-copy-env`: Skip copying untracked `.env` files from the main worktree into the new one
+- `--no-link-children`: Do not link the child repositories of the main worktree into the new worktree. By default, nwt links each child that git ignores in the new worktree, as a symlink to the child in the main worktree. `link_children = false` in `~/.nwt.toml` turns the links off by default (see Child Repository Links below)
 - `--no-bootstrap-hooks`: Skip the package-manager install that regenerates git hooks (see Hook Bootstrap below)
 - `--sparse-exclude <DIR>`: Make the new worktree a sparse checkout without the tracked directory `<DIR>`, a path relative to the root of the repository. Use the flag one time for each directory. Only the new worktree is sparse, and `git sparse-checkout disable` in it writes the directories back. nwt refuses a `<DIR>` that git does not track as a directory at the ref, with exit code 15, before it makes anything (see Sparse worktrees below)
 - `--shell-setup`: Install shell integration for auto-cd into new worktrees (conflicts with all other flags)
@@ -2802,6 +2804,9 @@ quiet = false
 
 # Copy untracked .env files into new worktrees (default true)
 copy_env = true
+
+# Link each child repository of the main worktree into new worktrees (default true)
+link_children = true
 
 # Run the package manager's install to regenerate git hooks (default true)
 bootstrap_hooks = true
@@ -2887,6 +2892,81 @@ A remote branch that no fetch refspec maps is stale, for example after `git remo
 
 **Negative refspecs.** A negative refspec such as `^refs/heads/issue-33` keeps its remote from giving the branch, and the new branch then starts at `HEAD`. `git checkout` differs here: after a pattern refspec, it takes the stale `origin/issue-33` and sets no upstream. `git worktree add --track`, which nwt runs, refuses that ref, so nwt honors the negative refspec. For `-c <name>` with `--sparse-exclude`, nwt then finds no remote branch, and the run exits 7, where `-c <name>` without the flag takes the stale ref.
 
+### Child Repository Links
+
+Some repositories are containers. A container tracks the map of a workspace. Each real repository sits one level below it, and `.gitignore` keeps that repository out of the history of the container. Such a repository is a child repository, or a child. `cwt` calls a container and its children a [family](#families-of-repositories), with `keyboards/` as the example.
+
+`git worktree add` writes only tracked files, so a new worktree of a container holds no child. Relative paths in the README of the container then point at nothing, and a script or an agent that reads a child finds nothing.
+
+Thus after `git worktree add`, and before the `.env` copy, nwt links each child of the main worktree into the new worktree. Each link is a symbolic link:
+
+```text
+<new worktree>/<name> -> <main worktree>/<name>
+```
+
+The link gives the new worktree the one real checkout of each child. nwt makes no clone, no branch, and no remote. A branch then exists only in a repository that the work changes.
+
+**Which entries are children.** A child is a directory one level below the main worktree that holds a `.git` entry. The entry is a `.git` directory, or the `.git` file of a linked worktree of another repository. `cwt` finds its candidates with the same rule. nwt then skips each worktree of this repository and each submodule, because neither is a child. `git worktree list` names those worktrees, and `git ls-files` names those submodules. These entries get no link and no line:
+
+- A directory without a `.git` entry
+- A file
+- A child of a child
+- A worktree of this repository. `nwt.worktreesDir` set to `.` (see [Where worktrees go](#where-worktrees-go)) puts each worktree one level below the main worktree, the new worktree too. Without this rule, the new worktree gets a link to itself, and a tool that follows links reads that loop without end.
+- A submodule. It holds a `.git` file, but this repository tracks it, so this repository is not a container of it. `git worktree add` makes an empty directory for each submodule. Without this rule, each run in such a repository prints a line about a link that nwt never makes. The index of the main worktree holds each submodule as a gitlink (mode `160000`). A child that git ignores is not in the index, so it stays a child.
+
+**When a child gets a link.** A link that git does not ignore shows as untracked in `git status`, and `git add -A` commits it into the container. So nwt asks git in the new worktree if git ignores `<name>`. The new worktree can hold a `.gitignore` that is different from the one in the main worktree, so nwt asks there. Git gives the same answer before the link exists. Thus nwt asks first, and it never makes a link that git does not ignore.
+
+**The trailing slash.** A pattern with a trailing slash matches only a directory. Git sees a link as a file, also when the link points at a directory. Thus `vial/` ignores the child in the main worktree, but it does not ignore the link in the new worktree:
+
+| Pattern in `.gitignore` | Ignores the child `vial` | Ignores the link `vial` |
+|---|---|---|
+| `vial/` | Yes | No |
+| `/vial` | Yes | Yes |
+| `vial` | Yes | Yes |
+
+To link a child, write the pattern as `/<name>`. The warning below gives this fix.
+
+**A path that is already there.** When the new worktree already holds something at `<name>`, nwt does not change it, and it asks git nothing. The new branch can track that path, or a `post-checkout` hook can make it. A broken link also counts. nwt prints one line. The line is not a warning, because nothing is wrong:
+
+```text
+Not linked: vial (the new worktree already holds this path)
+```
+
+**The target.** The target of each link is absolute. It is the main worktree that git names, joined with the name of the child. Thus nwt in a linked worktree links the children of the main worktree, and each link stays correct when that linked worktree goes away. Git keeps worktree paths absolute too, so a relative link gives no more safety.
+
+A repository that keeps its git directory apart from the work tree (see [Where worktrees go](#where-worktrees-go)) gets no link. A bare repository gets no link either. Git names the git directory as the main worktree of each, and a git directory holds no child. nwt then links nothing and prints nothing.
+
+**Output.** Stdout holds only the path of the worktree. nwt prints one line to stderr for each link, and a summary when it makes at least one link:
+
+```text
+Linked vial-qmk -> /Users/me/code/keyboards/vial-qmk
+Linked zmk-config-corne -> /Users/me/code/keyboards/zmk-config-corne
+Linked 2 child repositories from the main worktree
+```
+
+A repository without children gets no link and no line.
+
+A child that gets no link gets a warning, and the other children still get their links. When the pattern for the child matches only a directory, the warning names that pattern, its file, and its line. When no pattern matches, the warning says so. Both warnings give the fix:
+
+```text
+Warning: not linked: vial (.gitignore:1 has 'vial/', which matches only a directory, and git sees a symlink as a file. Write '/vial' to link it)
+Warning: not linked: vial (git does not ignore this path. Add '/vial' to .gitignore to link it)
+```
+
+When git gives no answer, the warning repeats the first line of the error of git, after `git check-ignore failed:`. When nwt cannot make the link, the warning gives the error of the operating system.
+
+When git gives no list of the worktrees or of the submodules, nwt cannot tell a child from an entry that is not a child. nwt then makes no link, and it prints one warning that repeats the first line of the error of git, after `git worktree list failed:` or `git ls-files failed:`:
+
+```text
+Warning: no child linked, because nwt cannot tell which directories are children (git worktree list failed: fatal: not a git repository)
+```
+
+`-q`/`--quiet` removes the `Linked` lines, the summary, and the `Not linked:` lines. It does not remove a warning, because a warning names a defect in the repository.
+
+**Removal.** `git worktree remove`, `git worktree remove --force`, and `rm -rf` of the worktree each delete the link only. The child and its files stay unchanged.
+
+To turn the links off for one run, use `--no-link-children`. To turn them off by default, set `link_children = false` in `~/.nwt.toml`.
+
 ### Env File Copying
 
 After creating the worktree, nwt copies untracked `.env` files from the main worktree into the new one, preserving their relative paths, so development settings that aren't committed to git are there immediately. Two patterns are copied: `.env` exactly, and anything starting with `.env.` (`.env.local`, `.env.development`, and so on). Nothing else is — `.envrc` (direnv) and `.environment` don't match the pattern, and any file tracked by git is skipped, since git already puts it in the new worktree.
@@ -2904,6 +2984,8 @@ The trade-off: nwt does not parse or merge `.env` files, so when the hook writes
 On Unix, copied `.env` files are created at mode `0600` — owner read/write only — no matter what the source file's mode is. A `0644` `.env` in the main worktree therefore no longer propagates a world-readable secrets file into every worktree. The mode is applied when the file is created, so the copy is never briefly readable by anyone else. Windows has no equivalent mode; everything else behaves the same there.
 
 Some repositories keep the git directory apart from the work tree, which the *Where worktrees go* section above describes. Git names the git directory itself as the main worktree of such a repository, and no work tree is below that path. nwt finds no `.env` file there and copies none. This is deliberate: the work tree of such a repository is your home directory, and the `.env` files there are not the new worktree's to take.
+
+The copy does not go into a nested repository: a directory below the root of the main worktree that holds a `.git` entry. The `.env` files of a child belong to that child, and they reach the new worktree through the link (see [Child Repository Links](#child-repository-links)). This rule applies with `--no-link-children` too. A copy into a child makes a directory that holds only `.env` files, and such a directory is not a usable child.
 
 Disable copying for a single invocation with `--no-copy-env`, or set `copy_env = false` in `~/.nwt.toml` to disable it by default.
 
@@ -3108,7 +3190,8 @@ cd keyboards && cwt
 
 The family is the same from anywhere inside it, so `cwt` gets you out of a child
 repository as easily as it gets you in. Only one level is scanned: a child of a child
-is that child's business.
+is that child's business. `nwt` links the children into each new worktree of the parent
+(see [Child Repository Links](#child-repository-links)).
 
 A directory that looks like a repository but has no worktree to offer — a bare
 repository, which git lists without a HEAD — cannot join the family, because there is

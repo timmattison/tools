@@ -120,11 +120,14 @@ fn record(root: &Path, dir: &Path, into: &mut Snapshot) {
 /// Each decoy test of `tests/production-git-env-isolation.rs` takes a snapshot
 /// of the decoy before and after its run: the plain `-b` run, the sparse `-b`
 /// run, the sparse `-c` run, the two `-b` runs that track a remote branch, the
-/// `-b` run that copies an untracked `.env` file, and the `-b` run that
-/// bootstraps the hooks with a fake `pnpm`.
+/// `-b` run that copies an untracked `.env` file, the `-b` run that
+/// bootstraps the hooks with a fake `pnpm`, the `-b` run that reads the hooks
+/// setting, and the `-b` run that links a child repository.
 /// The helpers live here, so each of those tests
 /// reads the decoy with one rule, and a later test file that needs a decoy
-/// reads it with the same rule.
+/// reads it with the same rule. `tests/link-children.rs` reads a child
+/// repository with the same rule, before a run and after
+/// `git worktree remove --force` of the new worktree.
 pub fn snapshot(root: &Path) -> Snapshot {
     let mut held = Snapshot::new();
     record(root, root, &mut held);
@@ -236,6 +239,40 @@ pub fn git_stdout(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+/// Runs a git command in `dir` that must fail, and hands back its standard
+/// error.
+///
+/// A test that expects `nwt` to repeat an error of git takes the text from the
+/// same failed command, and does not copy a message that changes between
+/// versions of git. The command sheds the whole inherited `GIT_*` family
+/// through [`gitscratch::shed_inherited_git_environment`], as [`run_git`] and
+/// [`git_stdout`] do.
+///
+/// # Panics
+///
+/// Panics if git cannot be spawned or exits zero. The panic message carries
+/// the command and its standard output.
+pub fn git_failure_stderr(dir: &Path, args: &[&str]) -> String {
+    let mut cmd = Command::new("git");
+    shed_inherited_git_environment(&mut cmd);
+
+    let output = cmd
+        .args(args)
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
+
+    assert!(
+        !output.status.success(),
+        "git {args:?} must fail in {}, but it wrote:\n{}",
+        dir.display(),
+        String::from_utf8_lossy(&output.stdout),
+    );
+
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
 /// Nanosecond timestamp for building process-unique, parallel-safe names.
 ///
 /// Test branch/worktree names are keyed on `std::process::id()` + this value so
@@ -334,6 +371,92 @@ pub fn repo_with_files(files: &[&str]) -> (TempDir, PathBuf) {
     );
 
     (temp, repo)
+}
+
+/// The file that tells git which paths to ignore.
+pub const IGNORE_FILE: &str = ".gitignore";
+
+/// The file that each child repository of a fixture holds.
+pub const CHILD_FILE: &str = "README.md";
+
+/// Make the child repository `name` in `repo`, with one file in it.
+///
+/// # Panics
+///
+/// Panics when the directory cannot be made, or `git init` fails.
+pub fn make_child(repo: &Path, name: &str) {
+    let child = repo.join(name);
+    fs::create_dir(&child).unwrap_or_else(|e| panic!("create {}: {e}", child.display()));
+    assert!(
+        run_git(&child, &["init"]),
+        "git init failed in {}",
+        child.display()
+    );
+    write_file(&child, CHILD_FILE, &format!("{name}\n"));
+}
+
+/// A container repository whose committed `.gitignore` holds `ignore_lines`,
+/// with one child repository for each name of `children`.
+///
+/// The tests of the links to child repositories (issue #537) build each
+/// container with this function, so each of them reads one fixture.
+///
+/// Hand back the temporary directory (keep it alive) and the container.
+///
+/// # Panics
+///
+/// Panics when a write or a git command fails.
+pub fn container(ignore_lines: &[&str], children: &[&str]) -> (TempDir, PathBuf) {
+    let (temp, repo) = init_repo();
+
+    let mut ignore = ignore_lines.join("\n");
+    ignore.push('\n');
+    write_file(&repo, IGNORE_FILE, &ignore);
+    assert!(
+        run_git(&repo, &["add", "--", IGNORE_FILE]),
+        "git add {IGNORE_FILE} failed"
+    );
+    commit(&repo, "ignore the children");
+
+    for child in children {
+        make_child(&repo, child);
+    }
+
+    (temp, repo)
+}
+
+/// The options that [`commit`] gives git before the subcommand.
+///
+/// A child that [`make_child`] makes has no identity of its own, so the
+/// identity comes from here, and not from the configuration of the host.
+/// `maintenance.auto=false` stops the `git maintenance run --auto` that a
+/// commit starts. That process writes a lock file into the repository after
+/// the commit returns, so a snapshot of the repository then holds a path that
+/// appears and vanishes on its own.
+pub const COMMIT_OPTIONS: [&str; 8] = [
+    "-c",
+    "user.name=Test User",
+    "-c",
+    "user.email=test@example.com",
+    "-c",
+    "commit.gpgsign=false",
+    "-c",
+    "maintenance.auto=false",
+];
+
+/// Commit what `repo` has staged, with `message`, with [`COMMIT_OPTIONS`].
+///
+/// # Panics
+///
+/// Panics when `git commit` fails.
+pub fn commit(repo: &Path, message: &str) {
+    let mut args = COMMIT_OPTIONS.to_vec();
+    args.extend(["commit", "-m", message]);
+    assert!(
+        run_git(repo, &args),
+        "git commit -m {message:?} failed in {}",
+        repo.display()
+    );
 }
 
 /// Clone `source` into a new temporary directory, and hand back the temporary

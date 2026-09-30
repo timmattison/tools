@@ -15,6 +15,7 @@ use serde::Deserialize;
 use shellsetup::ShellIntegration;
 use walkdir::WalkDir;
 
+mod children;
 mod refspec;
 
 /// Directories to skip when copying .env files.
@@ -98,6 +99,11 @@ fn default_bootstrap_hooks() -> bool {
     true
 }
 
+/// Returns the default value for link_children (true).
+fn default_link_children() -> bool {
+    true
+}
+
 /// Configuration file schema for nwt.
 ///
 /// All fields are optional - only set what you need to override defaults.
@@ -120,6 +126,11 @@ struct NwtConfig {
     /// git-hook directories (e.g. husky's `.husky/_`). Defaults to true.
     #[serde(default = "default_bootstrap_hooks")]
     bootstrap_hooks: bool,
+
+    /// Link each child repository of the main worktree into the new worktree.
+    /// Defaults to true if not specified.
+    #[serde(default = "default_link_children")]
+    link_children: bool,
 
     /// Enable quiet mode by default.
     #[serde(default)]
@@ -151,6 +162,7 @@ impl Default for NwtConfig {
             checkout: None,
             copy_env: true,        // Must match default_copy_env()
             bootstrap_hooks: true, // Must match default_bootstrap_hooks()
+            link_children: true,   // Must match default_link_children()
             quiet: false,          // Must match #[serde(default)] (false)
             run: None,
             removed_tmux: None, // Must match #[serde(default)] (None)
@@ -200,6 +212,7 @@ struct MergedConfig {
     checkout: Option<String>,
     copy_env: bool,
     bootstrap_hooks: bool,
+    link_children: bool,
     quiet: bool,
     run: Option<String>,
 }
@@ -290,6 +303,9 @@ fn merge_config(cli: &Cli, config: Option<NwtConfig>) -> MergedConfig {
         // bootstrap_hooks: config default is true, CLI --no-bootstrap-hooks disables it.
         // Same merge shape as copy_env: CLI disables, otherwise use config value.
         bootstrap_hooks: !cli.no_bootstrap_hooks && config.bootstrap_hooks,
+        // link_children: config default is true, CLI --no-link-children disables it.
+        // Same merge shape as copy_env: CLI disables, otherwise use config value.
+        link_children: !cli.no_link_children && config.link_children,
         // The boolean flag uses OR: CLI can enable but not disable the config default.
         // See function-level doc comment for rationale.
         quiet: cli.quiet || config.quiet,
@@ -1547,8 +1563,9 @@ fn sparse_exclude_notice(excluded: &[SparseExcludeDir]) -> String {
 #[command(
     long_about = "Creates a git worktree in a '{repo-name}-worktrees' directory alongside \
 the repository. Generates Docker-style random names (adjective-noun) for both the directory \
-and branch unless overridden. Automatically copies untracked .env files from the main \
-worktree to preserve development settings.
+and branch unless overridden. Links each child repository of the main worktree into the new \
+worktree. Automatically copies untracked .env files from the main worktree to preserve \
+development settings.
 
 WHERE WORKTREES GO:
     By default, a new worktree lands in '{repo-name}-worktrees', beside the main
@@ -1633,9 +1650,98 @@ CONFIGURATION:
     Example config file:
         branch = \"feature/default\"
         copy_env = false       # disable .env file copying
+        link_children = true   # link child repositories into new worktrees
         bootstrap_hooks = true # run package-manager install to set up git hooks
         quiet = false
         run = \"pnpm install\"
+
+CHILD REPOSITORY LINKS:
+    Some repositories are containers. A container tracks the map of a workspace. Each
+    real repository sits one level below it, and .gitignore keeps that repository out
+    of the history of the container. Such a repository is a child repository, or a
+    child. cwt calls a container and its children a family.
+
+    'git worktree add' writes only tracked files, so a new worktree of a container
+    holds no child. Thus after 'git worktree add', and before the .env copy, nwt links
+    each child of the main worktree into the new worktree. Each link is a symbolic
+    link:
+
+        <new worktree>/<name> -> <main worktree>/<name>
+
+    The link gives the new worktree the one real checkout of each child. nwt makes no
+    clone, no branch, and no remote.
+
+    A child is a directory one level below the main worktree that holds a .git entry:
+    a .git directory, or the .git file of a linked worktree of another repository. A
+    directory without a .git entry, a file, a child of a child, a worktree of this
+    repository, and a submodule get no link and no line.
+
+    A worktree of this repository is not a child, and 'git worktree list' names each
+    one. 'nwt.worktreesDir' set to '.' puts each worktree one level below the main
+    worktree, the new worktree too. Without this rule, the new worktree gets a link
+    to itself, and a tool that follows links reads that loop without end.
+
+    A submodule is not a child. It holds a .git file, but this repository tracks it,
+    and 'git worktree add' makes an empty directory for it. The index of the main
+    worktree holds each submodule as a gitlink, and 'git ls-files' names each one. A
+    child that git ignores is not in the index, so it stays a child.
+
+    A link that git does not ignore shows as untracked, and 'git add -A' commits it
+    into the container. So nwt asks git in the new worktree if git ignores <name>. Git
+    gives the same answer before the link exists. Thus nwt asks first, and it never
+    makes a link that git does not ignore.
+
+    A pattern with a trailing slash matches only a directory, and git sees a link as
+    a file. Thus 'vial/' ignores the child in the main worktree, but it does not
+    ignore the link. '/vial' and 'vial' ignore both. To link a child, write the
+    pattern as '/<name>'.
+
+    When the new worktree already holds something at <name>, nwt does not change it.
+    The new branch can track that path, or a post-checkout hook can make it. A broken
+    link also counts. nwt prints one line:
+
+        Not linked: vial (the new worktree already holds this path)
+
+    The target of each link is absolute: the main worktree that git names, joined with
+    the name of the child. Thus nwt in a linked worktree links the children of the
+    main worktree. A repository that keeps its git directory apart from the work tree,
+    and a bare repository, get no link. Git names the git directory as the main
+    worktree, and a git directory holds no child.
+
+    nwt prints one line to stderr for each link, and a summary when it makes at least
+    one link:
+
+        Linked vial-qmk -> /Users/me/code/keyboards/vial-qmk
+        Linked zmk-config-corne -> /Users/me/code/keyboards/zmk-config-corne
+        Linked 2 child repositories from the main worktree
+
+    A child that gets no link gets a warning, and the other children still get their
+    links. When the pattern for the child matches only a directory, the warning names
+    that pattern, its file, and its line. When no pattern matches, the warning says
+    so. Both warnings give the fix:
+
+        Warning: not linked: vial (.gitignore:1 has 'vial/', which matches only a directory, and git sees a symlink as a file. Write '/vial' to link it)
+        Warning: not linked: vial (git does not ignore this path. Add '/vial' to .gitignore to link it)
+
+    When git gives no answer, the warning repeats the first line of the error of git.
+    When nwt cannot make the link, the warning gives the error of the operating
+    system.
+
+    When git gives no list of the worktrees or of the submodules, nwt cannot tell a
+    child from an entry that is not a child. nwt then makes no link, and it prints one
+    warning that repeats the first line of the error of git, after 'git worktree list
+    failed:' or 'git ls-files failed:':
+
+        Warning: no child linked, because nwt cannot tell which directories are children (git worktree list failed: fatal: not a git repository)
+
+    --quiet removes the 'Linked' lines, the summary, and the 'Not linked:' lines. It
+    does not remove a warning, because a warning names a defect in the repository.
+
+    'git worktree remove', 'git worktree remove --force', and 'rm -rf' of the worktree
+    each delete the link only. The child and its files stay unchanged.
+
+    To turn the links off for one run, use --no-link-children. To turn them off by
+    default, set link_children = false in ~/.nwt.toml.
 
 ENV FILE COPYING:
     By default, nwt copies untracked .env files from the main worktree to the new worktree,
@@ -1685,6 +1791,11 @@ ENV FILE COPYING:
     worktree of such a repository, and no work tree is below that path. nwt finds no
     .env file there and copies none. The work tree of such a repository is your home
     directory, and the .env files there are not the new worktree's to take.
+
+    The copy does not go into a nested repository: a directory below the root that
+    holds a .git entry. The .env files of a child belong to that child, and they reach
+    the new worktree through the link (see CHILD REPOSITORY LINKS). This rule applies
+    with --no-link-children too.
 
     Use --no-copy-env to disable this for a single invocation, or set copy_env = false
     in ~/.nwt.toml to disable it by default.
@@ -1803,6 +1914,7 @@ EXAMPLES:
     nwt -c v1.0.0                    # Checkout a tag
     nwt --run \"npm install\"          # Run a command after creation
     nwt --no-copy-env                # Skip copying .env files
+    nwt --no-link-children           # Do not link child repositories
     nwt --no-bootstrap-hooks         # Skip running install to set up git hooks
     nwt --sparse-exclude assets      # Leave the tracked directory assets/ out
     nwt --shell-setup                # Install shell integration for auto-cd
@@ -1902,6 +2014,26 @@ struct Cli {
     #[arg(long)]
     no_copy_env: bool,
 
+    /// Disable the links to the child repositories of the main worktree.
+    ///
+    /// A child repository is a directory one level below the main worktree that
+    /// holds a `.git` entry. A worktree of this repository and a submodule are
+    /// not children. By default, nwt links each child into the new worktree, as
+    /// the symlink `<worktree>/<name>` -> `<main worktree>/<name>`.
+    /// The new worktree then uses the one real checkout of each child, and nwt
+    /// makes no clone, no branch, and no remote.
+    ///
+    /// nwt makes a link only when git ignores that path in the new worktree,
+    /// because `git add -A` commits a link that git does not ignore. Write the
+    /// pattern as `/<name>`. A pattern with a trailing slash matches only a
+    /// directory, and git sees a symlink as a file.
+    ///
+    /// Use this flag to disable the links for a single invocation, or set
+    /// `link_children = false` in ~/.nwt.toml to disable them by default. The
+    /// CHILD REPOSITORY LINKS section of --help gives the rules and the output.
+    #[arg(long)]
+    no_link_children: bool,
+
     /// Disable running the package manager's install to bootstrap git hooks.
     ///
     /// By default, after creating the worktree, nwt detects a `prepare` script
@@ -1939,7 +2071,7 @@ struct Cli {
     ///
     /// To activate after installation, run `source ~/.zshrc` (or `~/.bashrc`)
     /// or open a new terminal.
-    #[arg(long, conflicts_with_all = ["branch", "checkout", "quiet", "run", "no_copy_env", "no_bootstrap_hooks", "random_directory", "sparse_exclude"])]
+    #[arg(long, conflicts_with_all = ["branch", "checkout", "quiet", "run", "no_copy_env", "no_link_children", "no_bootstrap_hooks", "random_directory", "sparse_exclude"])]
     shell_setup: bool,
 }
 
@@ -2849,6 +2981,14 @@ fn copy_env_file(source: &Path, dest: &Path) -> io::Result<()> {
 /// 1. Gets all tracked files from git in a single call (for performance)
 /// 2. Walks the main repo looking for `.env` or `.env.*` files (e.g., `.env.local`)
 /// 3. Skips the `.git` directory, tracked files, and unrelated dotfiles like `.envrc`.
+///    The walk does not go into a directory below the root that holds a `.git`
+///    entry (see [`repowalker::holds_git_entry`]). Such a directory is a child
+///    repository, and its `.env` files belong to the child. The index of the
+///    parent does not list them, thus without this rule the copy takes each one
+///    as untracked, even one that the child tracks. The copy then makes a real
+///    directory in the worktree that holds only `.env` files. The rule applies
+///    whether or not the child is linked into the worktree, because a directory
+///    that holds only `.env` files is not a usable child.
 ///    It also skips each untracked file under a directory of `excluded`, the
 ///    `--sparse-exclude` directories of the new worktree, because a copy makes that
 ///    directory in the worktree again. Each such skip counts in
@@ -2892,7 +3032,14 @@ fn copy_untracked_env_files(
             // Skip directories listed in SKIP_DIRECTORIES for performance.
             // See the constant definition for rationale.
             let name = e.file_name().to_string_lossy();
-            !SKIP_DIRECTORIES.contains(&name.as_ref())
+            if SKIP_DIRECTORIES.contains(&name.as_ref()) {
+                return false;
+            }
+            // Do not go into a child repository. The index of the parent does
+            // not list the files of a child, thus each `.env` of a child looks
+            // untracked here. The root is the main worktree, and it holds its
+            // own `.git`, so the rule starts below the root.
+            !(e.depth() > 0 && e.file_type().is_dir() && repowalker::holds_git_entry(e.path()))
         })
         .filter_map(|e| e.ok())
     {
@@ -3437,6 +3584,14 @@ fn main() {
                 // goes to stderr.
                 if !sparse_excludes.is_empty() && !config.quiet {
                     eprintln!("{}", sparse_exclude_notice(&sparse_excludes));
+                }
+
+                // Link each child repository of the main worktree into the new
+                // worktree (issue #537). This step comes before the .env copy.
+                // The copy does not go into a child, and the .env files of a
+                // child reach the worktree through the link.
+                if config.link_children {
+                    children::link_children(&repo_root, &worktree_path, config.quiet);
                 }
 
                 // Copy untracked .env files from main worktree to new worktree
@@ -4313,6 +4468,7 @@ mod tests {
             checkout: None,
             copy_env: true,
             bootstrap_hooks: true,
+            link_children: true,
             quiet: false,
             run: None,
         };
@@ -4326,6 +4482,7 @@ mod tests {
             checkout: None,
             copy_env: true,
             bootstrap_hooks: true,
+            link_children: true,
             quiet: false,
             run: None,
         };
@@ -4593,6 +4750,37 @@ mod tests {
         assert!(result.is_ok(), "Should accept --no-copy-env with --branch");
     }
 
+    /// Issue #537: `--no-link-children` turns the child links off for one run.
+    #[test]
+    fn test_cli_no_link_children_parses() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        let result = cmd.try_get_matches_from(["nwt", "--no-link-children"]);
+        assert!(result.is_ok(), "Should accept --no-link-children option");
+
+        let matches = result.unwrap();
+        assert!(
+            matches.get_flag("no_link_children"),
+            "Should set no_link_children flag"
+        );
+    }
+
+    /// Issue #537: `--no-link-children` goes with `--branch`, as each run that
+    /// makes a worktree does.
+    #[test]
+    fn test_cli_no_link_children_with_branch() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        let result =
+            cmd.try_get_matches_from(["nwt", "--no-link-children", "--branch", "feature/test"]);
+        assert!(
+            result.is_ok(),
+            "Should accept --no-link-children with --branch"
+        );
+    }
+
     #[test]
     fn test_cli_random_directory_parses() {
         use clap::CommandFactory;
@@ -4722,6 +4910,20 @@ mod tests {
         assert!(
             result.is_err(),
             "Should fail when both --shell-setup and --no-copy-env are provided"
+        );
+    }
+
+    /// Issue #537: `--shell-setup` makes no worktree, so it refuses
+    /// `--no-link-children`.
+    #[test]
+    fn test_cli_shell_setup_conflicts_with_no_link_children() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        let result = cmd.try_get_matches_from(["nwt", "--shell-setup", "--no-link-children"]);
+        assert!(
+            result.is_err(),
+            "Should fail when both --shell-setup and --no-link-children are provided"
         );
     }
 
@@ -5552,6 +5754,65 @@ mod tests {
         );
     }
 
+    /// The two documents of the child repository links: the CHILD REPOSITORY
+    /// LINKS section of `--help`, and the `### Child Repository Links` section
+    /// inside the `## nwt` section of the README.
+    ///
+    /// `include_str!` stays in `#[cfg(test)]`, so the README goes into the test
+    /// binary only and not into the `nwt` that ships.
+    fn child_link_doc_sections() -> (String, &'static str) {
+        use clap::CommandFactory;
+
+        let long_about = Cli::command()
+            .get_long_about()
+            .expect("nwt sets long_about")
+            .to_string();
+        let help_section = doc_section(
+            &long_about,
+            "\nCHILD REPOSITORY LINKS:\n",
+            "\nENV FILE COPYING:\n",
+        )
+        .to_owned();
+        let nwt_section = doc_section(
+            include_str!("../../../README.md"),
+            "\n## nwt (new worktree)\n",
+            "\n## ",
+        );
+        let readme_section = doc_section(nwt_section, "\n### Child Repository Links\n", "\n### ");
+        (help_section, readme_section)
+    }
+
+    /// The lines that report the child repository links show as samples in two
+    /// documents. The CHILD REPOSITORY LINKS section of `--help` holds them,
+    /// and so does the `### Child Repository Links` section of the README.
+    ///
+    /// The samples are copies, and only the functions run. So this test takes
+    /// each line from [`children::sample_lines`], which builds it with the
+    /// function that prints it. Each document must hold each line as a line of
+    /// its own. Change the wording in the code alone, and this test fails and
+    /// names the document that did not change.
+    ///
+    /// The samples name the main worktree `/Users/me/code/keyboards`. Windows
+    /// joins a path with `\`, so the test runs on Unix only.
+    #[cfg(unix)]
+    #[test]
+    fn test_help_and_readme_samples_match_the_child_link_lines() {
+        let (help_section, readme_section) = child_link_doc_sections();
+
+        for sample in children::sample_lines(Path::new("/Users/me/code/keyboards")) {
+            assert!(
+                has_sample_line(&help_section, &sample),
+                "the CHILD REPOSITORY LINKS section of --help must hold the runtime line: \
+                 {sample}"
+            );
+            assert!(
+                has_sample_line(readme_section, &sample),
+                "the ### Child Repository Links section of README.md must hold the runtime \
+                 line: {sample}"
+            );
+        }
+    }
+
     // One mutation fixture for each rule of `escape_sparse_pattern`. Remove one
     // rule from the function, and exactly one of these tests fails. Each input
     // holds the character two times where it can, so a rule that escapes only
@@ -5843,6 +6104,24 @@ mod tests {
             assert!(config.copy_env); // unrelated field keeps its default
         }
 
+        /// Issue #537: a config file without `link_children` keeps the child
+        /// links on.
+        #[test]
+        fn test_parse_config_link_children_defaults_to_true() {
+            let config: NwtConfig = toml::from_str("").expect("Should parse empty config");
+            assert!(config.link_children);
+        }
+
+        /// Issue #537: `link_children = false` parses, and turns the child
+        /// links off.
+        #[test]
+        fn test_parse_config_link_children_false() {
+            let toml = "link_children = false";
+            let config: NwtConfig = toml::from_str(toml).expect("Should parse valid config");
+            assert!(!config.link_children);
+            assert!(config.copy_env); // unrelated field keeps its default
+        }
+
         /// Verifies that `NwtConfig::default()` produces the same values as serde defaults.
         ///
         /// This test exists to catch bugs where someone adds a new field to `NwtConfig`
@@ -5875,6 +6154,10 @@ mod tests {
                 "bootstrap_hooks default mismatch between impl Default and serde"
             );
             assert_eq!(
+                serde_defaults.link_children, manual_defaults.link_children,
+                "link_children default mismatch between impl Default and serde"
+            );
+            assert_eq!(
                 serde_defaults.quiet, manual_defaults.quiet,
                 "quiet default mismatch between impl Default and serde"
             );
@@ -5903,6 +6186,7 @@ mod tests {
                 checkout: Some("main".to_string()),
                 copy_env: true,
                 bootstrap_hooks: true,
+                link_children: true,
                 quiet: false,
                 run: None,
                 removed_tmux: None,
@@ -5918,6 +6202,7 @@ mod tests {
                 checkout: None,
                 copy_env: true,
                 bootstrap_hooks: true,
+                link_children: true,
                 quiet: false,
                 run: None,
                 removed_tmux: None,
@@ -5933,6 +6218,7 @@ mod tests {
                 checkout: Some("main".to_string()),
                 copy_env: true,
                 bootstrap_hooks: true,
+                link_children: true,
                 quiet: false,
                 run: None,
                 removed_tmux: None,
@@ -5948,6 +6234,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_link_children: false,
                 no_bootstrap_hooks: false,
                 quiet: true,
                 run: None,
@@ -5959,6 +6246,7 @@ mod tests {
                 checkout: None,
                 copy_env: true,
                 bootstrap_hooks: true,
+                link_children: true,
                 quiet: false,
                 run: Some("npm install".to_string()),
                 removed_tmux: None,
@@ -5979,6 +6267,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_link_children: false,
                 no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
@@ -5990,6 +6279,7 @@ mod tests {
                 checkout: None,
                 copy_env: true,
                 bootstrap_hooks: true,
+                link_children: true,
                 quiet: true,
                 run: Some("make build".to_string()),
                 removed_tmux: None,
@@ -6010,6 +6300,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_link_children: false,
                 no_bootstrap_hooks: false,
                 quiet: true,
                 run: None,
@@ -6032,6 +6323,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: true, // CLI disables
+                no_link_children: false,
                 no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
@@ -6043,6 +6335,7 @@ mod tests {
                 checkout: None,
                 copy_env: true, // config enables
                 bootstrap_hooks: true,
+                link_children: true,
                 quiet: false,
                 run: None,
                 removed_tmux: None,
@@ -6060,6 +6353,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_link_children: false,
                 no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
@@ -6071,6 +6365,7 @@ mod tests {
                 checkout: None,
                 copy_env: false, // config disables
                 bootstrap_hooks: true,
+                link_children: true,
                 quiet: false,
                 run: None,
                 removed_tmux: None,
@@ -6089,6 +6384,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_link_children: false,
                 no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
@@ -6107,6 +6403,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_link_children: false,
                 no_bootstrap_hooks: true, // CLI disables
                 quiet: false,
                 run: None,
@@ -6118,6 +6415,7 @@ mod tests {
                 checkout: None,
                 copy_env: true,
                 bootstrap_hooks: true, // config enables
+                link_children: true,
                 quiet: false,
                 run: None,
                 removed_tmux: None,
@@ -6134,6 +6432,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_link_children: false,
                 no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
@@ -6145,12 +6444,63 @@ mod tests {
                 checkout: None,
                 copy_env: true,
                 bootstrap_hooks: false, // config disables
+                link_children: true,
                 quiet: false,
                 run: None,
                 removed_tmux: None,
             };
             let merged = merge_config(&cli, Some(config));
             assert!(!merged.bootstrap_hooks);
+        }
+
+        /// A `Cli` with no flag set, for the merge tests of `link_children`.
+        fn cli_without_flags() -> Cli {
+            Cli {
+                branch: None,
+                random_directory: false,
+                checkout: None,
+                no_copy_env: false,
+                no_link_children: false,
+                no_bootstrap_hooks: false,
+                quiet: false,
+                run: None,
+                shell_setup: false,
+                sparse_exclude: Vec::new(),
+            }
+        }
+
+        /// Issue #537: with no flag and no config file, the child links are on.
+        #[test]
+        fn test_merge_link_children_default_is_true() {
+            let merged = merge_config(&cli_without_flags(), None);
+            assert!(merged.link_children);
+        }
+
+        /// Issue #537: `--no-link-children` overrides `link_children = true`.
+        #[test]
+        fn test_merge_no_link_children_disables() {
+            let cli = Cli {
+                no_link_children: true, // CLI disables
+                ..cli_without_flags()
+            };
+            let config = NwtConfig {
+                link_children: true, // config enables
+                ..NwtConfig::default()
+            };
+            let merged = merge_config(&cli, Some(config));
+            assert!(!merged.link_children);
+        }
+
+        /// Issue #537: `link_children = false` holds when the CLI does not ask
+        /// for the links.
+        #[test]
+        fn test_merge_config_link_children_false() {
+            let config = NwtConfig {
+                link_children: false, // config disables
+                ..NwtConfig::default()
+            };
+            let merged = merge_config(&cli_without_flags(), Some(config));
+            assert!(!merged.link_children);
         }
 
         #[test]
@@ -6456,6 +6806,136 @@ mod tests {
             assert!(
                 !dest.path().join("target/debug/.env").exists(),
                 "target directory contents should be skipped"
+            );
+        }
+
+        /// Issue #537: the walk does not go into a child repository.
+        ///
+        /// `vial/` holds a `.git` directory, thus it is a child repository, and
+        /// its `.env` belongs to the child. The parent index does not list the
+        /// files of a child, so the copy took that `.env` as untracked and made
+        /// a real `vial/` in the worktree that held only `.env` files.
+        #[test]
+        fn test_skips_child_repository_with_git_directory() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), "vial/.git/HEAD", "ref: refs/heads/main\n");
+            create_file(source.path(), "vial/.env", "CHILD=1");
+
+            let summary = copy_untracked_env_files(source.path(), dest.path(), &[], true);
+
+            assert!(
+                dest.path().join("vial").symlink_metadata().is_err(),
+                "The copy must not make vial/ in the worktree, because vial/ is a child repository"
+            );
+            assert_eq!(
+                summary,
+                EnvCopySummary {
+                    copied: 0,
+                    kept: 0,
+                    skipped: 0
+                },
+                "The .env of a child repository is not the parent's to copy"
+            );
+        }
+
+        /// Issue #537: a `.git` file also makes a child repository.
+        ///
+        /// A linked worktree holds a `.git` file, not a `.git` directory. The
+        /// walk does not go into `wt/`, and the copy does not make `wt/` in the
+        /// worktree.
+        #[test]
+        fn test_skips_child_repository_with_git_file() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), "wt/.git", "gitdir: /nowhere\n");
+            create_file(source.path(), "wt/.env.local", "CHILD=1");
+
+            let summary = copy_untracked_env_files(source.path(), dest.path(), &[], true);
+
+            assert!(
+                dest.path().join("wt").symlink_metadata().is_err(),
+                "The copy must not make wt/ in the worktree, because wt/ is a child repository"
+            );
+            assert_eq!(
+                summary,
+                EnvCopySummary {
+                    copied: 0,
+                    kept: 0,
+                    skipped: 0
+                },
+                "The .env.local of a linked worktree is not the parent's to copy"
+            );
+        }
+
+        /// Issue #537: the rule applies at each depth below the root.
+        ///
+        /// `packages/lib/` is a child repository two levels down, and the walk
+        /// does not go into it. `packages/api/` is a plain directory of the
+        /// parent, thus its `.env` is copied.
+        #[test]
+        fn test_skips_nested_child_repository() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(
+                source.path(),
+                "packages/lib/.git/HEAD",
+                "ref: refs/heads/main\n",
+            );
+            create_file(source.path(), "packages/lib/.env", "LIB=1");
+            create_file(source.path(), "packages/api/.env", "API=1");
+
+            let summary = copy_untracked_env_files(source.path(), dest.path(), &[], true);
+
+            assert!(
+                file_has_content(dest.path(), "packages/api/.env", "API=1"),
+                "packages/api/ is not a child repository, thus its .env must be copied"
+            );
+            assert!(
+                dest.path().join("packages/lib").symlink_metadata().is_err(),
+                "The copy must not make packages/lib/ in the worktree, because it is a child repository"
+            );
+            assert_eq!(
+                summary,
+                EnvCopySummary {
+                    copied: 1,
+                    kept: 0,
+                    skipped: 0
+                },
+                "Only the .env of the plain directory counts as copied"
+            );
+        }
+
+        /// Issue #537: the rule does not apply to the root of the walk.
+        ///
+        /// The root is the main worktree, and it holds its own `.git`. A rule
+        /// that skips the root copies nothing at all. This test passes before
+        /// the fix, and it guards against a fix that is too broad.
+        #[test]
+        fn test_root_with_git_entry_is_still_walked() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), ".git/HEAD", "ref: refs/heads/main\n");
+            create_file(source.path(), ".env", "ROOT=1");
+
+            let summary = copy_untracked_env_files(source.path(), dest.path(), &[], true);
+
+            assert!(
+                file_has_content(dest.path(), ".env", "ROOT=1"),
+                "The root holds .git, and its .env must still be copied"
+            );
+            assert_eq!(
+                summary,
+                EnvCopySummary {
+                    copied: 1,
+                    kept: 0,
+                    skipped: 0
+                },
+                "The .env of the root counts as copied"
             );
         }
 
