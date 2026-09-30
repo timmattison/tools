@@ -336,6 +336,19 @@ pub(crate) fn render_with_offset(
 /// Visible gap between the short hash and the subject in a log row.
 const LOG_HASH_SUBJECT_SEP: &str = "  ";
 
+/// The mark of a log row whose commit is only on the current branch
+/// ([`LogEntry::on_branch`]). The ahead count of the header counts these
+/// commits, so the mark shows which rows that count holds.
+///
+/// The mark sits in a gutter of one column at the left of the row, before the
+/// hash. Every other log row shows a blank in that gutter. The gutter is on
+/// every log row, also when no row has the mark. So the hash column does not
+/// move when the first commit lands on a new branch.
+///
+/// The mark is a glyph and not only a color. So it stays visible with no
+/// color: in 8-color mode and in piped output with no escape codes.
+pub(crate) const BRANCH_MARK: char = '▎';
+
 /// Render one commit-log row.
 ///
 /// `age_offset` is added (saturating) to the commit's age before it is
@@ -2740,6 +2753,77 @@ mod tests {
             preceding.chars().all(|c| c == '─' || c.is_whitespace()),
             "line before log section should be a ─ separator: {preceding:?}",
         );
+    }
+
+    // --- the mark of a branch commit -------------------------------------
+    //
+    // Issue #541: the header counts the commits that are only on the current
+    // branch. The log row of each such commit shows `BRANCH_MARK` in a gutter
+    // at its left. Every other log row shows a blank there.
+
+    /// The hash of the commit on the branch in the tests of the mark.
+    const BRANCH_HASH: &str = "abc1234";
+    /// The hash of the commit on the base in the tests of the mark.
+    const BASE_HASH: &str = "def5678";
+
+    /// A log row of a commit that is only on the current branch.
+    fn branch_log_entry(hash: &str, subject: &str, age_secs: u64) -> LogEntry {
+        LogEntry {
+            on_branch: true,
+            ..log_entry(hash, subject, age_secs)
+        }
+    }
+
+    /// A snapshot whose log holds one row of a branch commit with the subject
+    /// `subject`, and one row of a base commit.
+    fn snap_with_a_branch_row(subject: &str) -> Snapshot {
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![
+            branch_log_entry(BRANCH_HASH, subject, 30),
+            log_entry(BASE_HASH, "a commit on the base", 60),
+        ];
+        snap
+    }
+
+    /// The glyphs of the frame of `snap`. The frame is painted with the escape
+    /// codes forced on, and then the codes are taken out.
+    fn painted_glyphs(snap: &Snapshot, o: &RenderOptions) -> String {
+        strip_ansi(&testcolor::with_forced_ansi(|| render(snap, o)))
+    }
+
+    /// The row of `glyphs` that holds `hash`.
+    fn row_with<'a>(glyphs: &'a str, hash: &str) -> &'a str {
+        glyphs
+            .lines()
+            .find(|line| line.contains(hash))
+            .unwrap_or_else(|| panic!("no row holds {hash}:\n{glyphs}"))
+    }
+
+    #[test]
+    fn a_log_row_of_a_branch_commit_shows_the_mark_and_a_row_of_the_base_shows_a_blank() {
+        // Issue #541: the row of a commit that is only on the branch shows
+        // `BRANCH_MARK` in its first column. The row of a base commit shows a
+        // blank there. The glyphs hold no escape code, so the mark stays
+        // visible with no color: in 8-color mode and in piped output.
+        for truecolor in [false, true] {
+            let mut o = opts();
+            o.log_lines = 5;
+            o.truecolor = truecolor;
+
+            let glyphs = painted_glyphs(&snap_with_a_branch_row("a commit on the branch"), &o);
+
+            let marked = row_with(&glyphs, BRANCH_HASH);
+            assert!(
+                marked.starts_with(&format!("{BRANCH_MARK}{BRANCH_HASH}")),
+                "truecolor={truecolor}: the row of a branch commit starts with the mark: \
+                 {marked:?}",
+            );
+            let blank = row_with(&glyphs, BASE_HASH);
+            assert!(
+                blank.starts_with(&format!(" {BASE_HASH}")),
+                "truecolor={truecolor}: the row of a base commit starts with a blank: {blank:?}",
+            );
+        }
     }
 
     // --- truecolor commit-log fade ---------------------------------------
