@@ -23,6 +23,7 @@
 # UNIFI_SITE_MANAGER_API_KEY on every parse -- so tests that call it directly
 # race the tests that write those variables. Parse through
 # `crate::test_support::parse_args_for_test`, which holds the environment lock.
+# `update_from` and `try_update_from` do the same parse into an existing value.
 #
 # The `Parser` trait is one of two routes to that parse, and the ban must name
 # both. `Args::command()` hands back a `clap::Command`, and every `get_matches`
@@ -53,6 +54,8 @@ disallowed-methods = [
 
     { path = "clap::Parser::try_parse_from", reason = "parse through crate::test_support::parse_args_for_test, which holds the environment lock" },
     { path = "clap::Parser::parse_from", reason = "parse through crate::test_support::parse_args_for_test, which holds the environment lock" },
+    { path = "clap::Parser::try_update_from", reason = "parse through crate::test_support::parse_args_for_test, which holds the environment lock" },
+    { path = "clap::Parser::update_from", reason = "parse through crate::test_support::parse_args_for_test, which holds the environment lock" },
     { path = "clap::Command::get_matches", reason = "this reads the real argument vector and the same UNIFI_* variables; parse through crate::test_support::parse_args_for_test, which holds the environment lock" },
     { path = "clap::Command::try_get_matches", reason = "this reads the real argument vector and the same UNIFI_* variables; parse through crate::test_support::parse_args_for_test, which holds the environment lock" },
     { path = "clap::Command::get_matches_from", reason = "the environment fallback belongs to the argument, not to the Parser trait, so this reads UNIFI_* too; parse through crate::test_support::parse_args_for_test" },
