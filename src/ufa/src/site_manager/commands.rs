@@ -1,8 +1,6 @@
 use crate::output::{render_output, render_vec_table, OutputFormat, Report};
 use crate::site_manager::models::Host;
-use crate::site_manager::utils::CLOUD_HOST_ID_DISPLAY_CHARS;
 use crate::site_manager::SiteManagerClient;
-use crate::text::truncate_for_display;
 use anyhow::Result;
 use clap::Subcommand;
 
@@ -47,11 +45,10 @@ impl From<&Host> for HostRow {
         let reported = host.reported_state.as_ref();
 
         Self {
-            // Cloud host ids run to 60-odd characters, which is wider than
-            // every other column put together; cutting them short keeps the
-            // listing readable, on character boundaries so a multi-byte id
-            // from the API cannot be split.
-            id: truncate_for_display(&host.id, CLOUD_HOST_ID_DISPLAY_CHARS),
+            // The whole id, because the hint under the table tells the user
+            // to give it to `ufa cloud host <id>`. A cut id does not identify
+            // a host there.
+            id: host.id.clone(),
             name: reported
                 .and_then(|state| state.name.clone())
                 .unwrap_or_else(|| UNKNOWN.to_string()),
@@ -294,22 +291,6 @@ mod tests {
         );
     }
 
-    /// An id longer than the column budget is cut short on a character
-    /// boundary rather than widening the table or splitting a character.
-    #[test]
-    fn an_over_long_host_id_is_cut_short_for_display() {
-        let mut host = test_host("edge");
-        host.id = "日".repeat(CLOUD_HOST_ID_DISPLAY_CHARS * 2);
-
-        let rendered = render_hosts(&[host], OutputFormat::Table)
-            .expect("rendering the host listing must succeed");
-
-        assert!(
-            rendered.contains(&format!("{}...", "日".repeat(CLOUD_HOST_ID_DISPLAY_CHARS))),
-            "the id must be cut short at its display budget, got:\n{rendered}"
-        );
-    }
-
     /// A host id in the form the Site Manager API gives: a hexadecimal
     /// console identifier, a colon, and a number. It is the sample id of
     /// `USAGE-EXAMPLES.md`, and it has 71 characters.
@@ -334,7 +315,9 @@ mod tests {
         let row = rendered
             .lines()
             .find(|line| line.contains("edge"))
-            .unwrap_or_else(|| panic!("the listing must have a row for the host, got:\n{rendered}"));
+            .unwrap_or_else(|| {
+                panic!("the listing must have a row for the host, got:\n{rendered}")
+            });
         let id_cell = row
             .split(CELL_SEPARATOR)
             .nth(1)

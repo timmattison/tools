@@ -32,18 +32,18 @@ wherever it reads best.
 
 Example output:
 ```
-┌─────────────────────────────┬────────────┬──────────────┬──────────┬─────────────┬─────────┬───────┬─────────────────────┐
-│ ID                          │ Name       │ Model        │ Firmware │ IP Address  │ Type    │ Owner │ Last Seen           │
-├─────────────────────────────┼────────────┼──────────────┼──────────┼─────────────┼─────────┼───────┼─────────────────────┤
-│ 70A741667C3000000000066D... │ Home-UDM   │ UDM-Pro      │ 3.2.9    │ 192.168.1.1 │ console │ true  │ 2024-01-15 10:30:00 │
-│ 900A6F00301100000000074A... │ Office-UDR │ Dream Router │ 3.2.9    │ 192.168.2.1 │ console │ true  │ 2024-01-15 10:45:00 │
-└─────────────────────────────┴────────────┴──────────────┴──────────┴─────────────┴─────────┴───────┴─────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┬────────────┬──────────────┬──────────┬─────────────┬─────────┬───────┬─────────────────────┐
+│ ID                                                                      │ Name       │ Model        │ Firmware │ IP Address  │ Type    │ Owner │ Last Seen           │
+├─────────────────────────────────────────────────────────────────────────┼────────────┼──────────────┼──────────┼─────────────┼─────────┼───────┼─────────────────────┤
+│ 70A741667C3000000000066DC7C00000000006BABC5A000000006289D202:1320847833 │ Home-UDM   │ UDM-Pro      │ 3.2.9    │ 192.168.1.1 │ console │ true  │ 2024-01-15 10:30:00 │
+│ 900A6F00301100000000074A6BA90000000007A3387E0000000063EC9853:123456789  │ Office-UDR │ Dream Router │ 3.2.9    │ 192.168.2.1 │ console │ true  │ 2024-01-15 10:45:00 │
+└─────────────────────────────────────────────────────────────────────────┴────────────┴──────────────┴──────────┴─────────────┴─────────┴───────┴─────────────────────┘
 Total hosts: 2
 To get details for a specific host, use: ufa cloud host <id>
 ```
 
-The IDs are cut short for display; `--output json` answers with them in full, alongside every other
-field the API reported.
+The table shows each ID whole, so you can copy an ID from a row into `ufa cloud host <id>`.
+`--output json` answers with the IDs and with every other field the API reported.
 
 The two lines under the table go to standard error, so `ufa cloud hosts > hosts.txt` writes only
 the table. `ufa cloud host <id>` does the same with the dashboard URL that it shows under its

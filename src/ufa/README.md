@@ -367,15 +367,15 @@ ufa cloud hosts
 ufa cloud hosts --output json
 
 # Look one up, including its unifi.ui.com dashboard URL
-ufa cloud host "70A741667C30...6289D202:1320847833"
+ufa cloud host "70A741667C3000000000066DC7C00000000006BABC5A000000006289D202:1320847833"
 
 # One-off key, without touching the config file
 ufa cloud --site-manager-api-key YOUR_KEY hosts
 ```
 
-Host IDs run to 60-odd characters, so the listing shows them cut short (on character boundaries) to
-keep the table readable. `--output json` answers with the hosts exactly as the API reported them,
-every field intact, rather than only the columns the table shows.
+The listing shows each host ID whole, so you can copy an ID from a row into `ufa cloud host <id>`.
+An ID has about 70 characters, so the table is wide. `--output json` answers with the hosts exactly
+as the API reported them, every field intact, rather than only the columns the table shows.
 
 See [CLOUD.md](CLOUD.md) for console IDs, the full setup options, and example output, and
 [USAGE-EXAMPLES.md](USAGE-EXAMPLES.md) for scripting recipes.
