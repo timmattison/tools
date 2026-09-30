@@ -308,6 +308,11 @@ impl Scripted {
     pub fn told(&self) -> String {
         self.told.join("\n")
     }
+
+    /// Every question put through [`Console::ask`], one question per line.
+    pub fn asked(&self) -> String {
+        self.questions.join("\n")
+    }
 }
 
 #[cfg(test)]

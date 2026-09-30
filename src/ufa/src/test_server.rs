@@ -47,6 +47,9 @@ enum Reply {
     /// Nothing at all. The server keeps the connection open, so a client
     /// waits for an answer rather than reads an end of file.
     Silence,
+    /// Nothing at all. The server closes the connection at once, so a client
+    /// reads an end of file where the answer belongs.
+    HangUp,
 }
 
 /// One request a [`TestServer`] read.
@@ -200,6 +203,22 @@ impl TestServer {
         Self::start(Reply::Silence).await
     }
 
+    /// Start a server that reads each request and closes the connection with
+    /// no answer.
+    ///
+    /// A client gets no HTTP status, the same as from a host that refuses
+    /// the connection. A refused connection is not a test a server can hold
+    /// safely: a socket that is bound and does not listen drops the packets
+    /// on macOS rather than refuses them, and a port that a test frees is a
+    /// port that a parallel test can take.
+    ///
+    /// # Returns
+    ///
+    /// The running server.
+    pub async fn hanging_up() -> Self {
+        Self::start(Reply::HangUp).await
+    }
+
     /// Start a server that answers every request the one way `reply` says.
     ///
     /// # Arguments
@@ -243,7 +262,7 @@ impl TestServer {
                             .find(|(fragment, _)| request.request_line().contains(fragment))
                             .map_or(fallback, |(_, response)| response),
                     ),
-                    Reply::Silence => None,
+                    Reply::Silence | Reply::HangUp => None,
                 };
 
                 recorded
@@ -256,6 +275,9 @@ impl TestServer {
                         let _ = socket.write_all(response.as_bytes()).await;
                         let _ = socket.flush().await;
                     }
+                    // The socket goes out of scope here, which closes the
+                    // connection with no answer on it.
+                    None if matches!(reply, Reply::HangUp) => {}
                     None => held_open.push(socket),
                 }
             }

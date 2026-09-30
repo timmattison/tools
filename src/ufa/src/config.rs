@@ -1,6 +1,6 @@
 use crate::client::UnifiClient;
 use crate::discovery::{discover_controllers, origin_url, validate_user_url};
-use crate::prompt::{self, Stdio};
+use crate::prompt::{self, Console, Stdio};
 use crate::secret::Secret;
 use anyhow::{Context, Result};
 use dirs::config_dir;
@@ -519,23 +519,11 @@ impl Config {
 
         // Test the connection
         println!("\n🔍 Testing connection...");
-        match UnifiClient::new(&controller_url, api_key.expose(), insecure) {
-            Ok(client) => match client.get::<crate::models::ApplicationInfo>("info").await {
-                Ok(info) => {
-                    println!("✅ Successfully connected to UniFi controller!");
-                    println!("   Version: {}", info.application_version);
-                }
-                Err(e) => {
-                    println!("⚠️  Connected but couldn't fetch info: {e}");
-                    println!("   This might be normal if the API key has limited permissions.");
-                }
-            },
-            Err(e) => {
-                println!("❌ Failed to connect: {e}");
-                if !prompt::confirm(&mut Stdio, "\nSave configuration anyway?")? {
-                    anyhow::bail!("Configuration not saved");
-                }
-            }
+        let test = run_connection_test(&controller_url, &api_key, insecure).await;
+        if decide_after_connection_test(test, &mut std::io::stdout(), &mut Stdio)?
+            == SaveDecision::DoNotSave
+        {
+            anyhow::bail!("Configuration not saved");
         }
 
         // Site Manager API Key (optional)
@@ -588,6 +576,103 @@ impl Config {
         }
 
         Ok(())
+    }
+}
+
+/// What the connection test of the setup wizard found.
+enum ConnectionTest {
+    /// No client could be built from the URL and the key.
+    NoClient(anyhow::Error),
+    /// The controller did not give its application info.
+    NoInfo(anyhow::Error),
+    /// The controller gave its application info.
+    Passed {
+        /// The version of the network application on the controller.
+        version: String,
+    },
+}
+
+/// Whether the setup wizard saves the configuration the user gave it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveDecision {
+    /// Save the configuration.
+    Save,
+    /// Stop, and save nothing.
+    DoNotSave,
+}
+
+/// Ask the controller at `controller_url` for its application info.
+///
+/// # Arguments
+///
+/// * `controller_url` - The URL of the controller.
+/// * `api_key` - The key to send.
+/// * `insecure` - Whether to accept a certificate that does not verify.
+///
+/// # Returns
+///
+/// What the test found.
+async fn run_connection_test(
+    controller_url: &str,
+    api_key: &Secret,
+    insecure: bool,
+) -> ConnectionTest {
+    let client = match UnifiClient::new(controller_url, api_key.expose(), insecure) {
+        Ok(client) => client,
+        Err(error) => return ConnectionTest::NoClient(error),
+    };
+
+    match client.get::<crate::models::ApplicationInfo>("info").await {
+        Ok(info) => ConnectionTest::Passed {
+            version: info.application_version,
+        },
+        Err(error) => ConnectionTest::NoInfo(error),
+    }
+}
+
+/// Show what the connection test found, and decide whether setup saves.
+///
+/// # Arguments
+///
+/// * `test` - What the connection test found.
+/// * `out` - Where the result goes. The wizard gives standard output.
+/// * `console` - Where the question goes.
+///
+/// # Returns
+///
+/// Whether to save the configuration.
+///
+/// # Errors
+///
+/// Returns an error if the result cannot be written, or if the question cannot
+/// be answered.
+fn decide_after_connection_test(
+    test: ConnectionTest,
+    out: &mut impl Write,
+    console: &mut impl Console,
+) -> Result<SaveDecision> {
+    match test {
+        ConnectionTest::Passed { version } => {
+            writeln!(out, "✅ Successfully connected to UniFi controller!")?;
+            writeln!(out, "   Version: {version}")?;
+            Ok(SaveDecision::Save)
+        }
+        ConnectionTest::NoInfo(e) => {
+            writeln!(out, "⚠️  Connected but couldn't fetch info: {e}")?;
+            writeln!(
+                out,
+                "   This might be normal if the API key has limited permissions."
+            )?;
+            Ok(SaveDecision::Save)
+        }
+        ConnectionTest::NoClient(e) => {
+            writeln!(out, "❌ Failed to connect: {e}")?;
+            if prompt::confirm(console, "\nSave configuration anyway?")? {
+                Ok(SaveDecision::Save)
+            } else {
+                Ok(SaveDecision::DoNotSave)
+            }
+        }
     }
 }
 
@@ -1761,5 +1846,193 @@ mod tests {
             .expect("a cached key must read without 1Password");
 
         assert_eq!(key, FAKE_CONTROLLER_KEY);
+    }
+}
+
+#[cfg(test)]
+mod connection_test_tests {
+    use super::*;
+    use crate::prompt::Scripted;
+    use crate::test_server::{json_response, json_response_with_status, TestServer};
+    use crate::test_support::FAKE_CONTROLLER_KEY;
+
+    /// The question the wizard puts before it saves a configuration that
+    /// failed its connection test.
+    const SAVE_ANYWAY: &str = "Save configuration anyway?";
+
+    /// Words of the hint that tells the user a key can have limited
+    /// permissions.
+    const PERMISSION_HINT: &str = "limited permissions";
+
+    /// A URL that no client can be built from.
+    const MALFORMED_URL: &str = "not a url";
+
+    /// The version the answering controller gives.
+    const CONTROLLER_VERSION: &str = "9.3.45";
+
+    /// A controller that does not accept the key.
+    fn unauthorized() -> String {
+        json_response_with_status("401 Unauthorized", r#"{"message":"Unauthorized"}"#)
+    }
+
+    /// A controller that accepts the key and refuses the request.
+    fn forbidden() -> String {
+        json_response_with_status("403 Forbidden", r#"{"message":"Forbidden"}"#)
+    }
+
+    /// What the setup wizard shows and decides after it tests
+    /// `controller_url`.
+    ///
+    /// The test is the real one: the real client sends the request, so each
+    /// error arrives in the shape a user sees.
+    ///
+    /// # Arguments
+    ///
+    /// * `controller_url` - The URL the wizard tests.
+    /// * `answers` - What the user types, in order.
+    ///
+    /// # Returns
+    ///
+    /// The decision, the text the wizard showed, and the console, which keeps
+    /// every question it was asked.
+    async fn setup_after_testing(
+        controller_url: &str,
+        answers: &[&str],
+    ) -> (SaveDecision, String, Scripted) {
+        let key = Secret::from(FAKE_CONTROLLER_KEY);
+        let test = run_connection_test(controller_url, &key, false).await;
+
+        let mut out = Vec::new();
+        let mut console = Scripted::terminal(answers);
+        let decision = decide_after_connection_test(test, &mut out, &mut console)
+            .expect("a scripted console answers every question the test scripted");
+
+        (
+            decision,
+            String::from_utf8(out).expect("the wizard writes UTF-8"),
+            console,
+        )
+    }
+
+    /// A failed connection test must not save the configuration without a
+    /// question. A controller that gives no answer, a key the controller does
+    /// not accept and a key without permission each fail the test, the same
+    /// as a URL that no client can be built from.
+    #[tokio::test]
+    async fn every_failed_connection_test_asks_before_it_saves() {
+        let hanging_up = TestServer::hanging_up().await;
+        let unauthorized = TestServer::replying(&unauthorized()).await;
+        let forbidden = TestServer::replying(&forbidden()).await;
+
+        for (case, url) in [
+            ("a URL that no client can be built from", MALFORMED_URL),
+            ("a controller that hangs up", hanging_up.origin()),
+            ("a 401", unauthorized.origin()),
+            ("a 403", forbidden.origin()),
+        ] {
+            let (decision, shown, console) = setup_after_testing(url, &["n\n"]).await;
+
+            assert!(
+                console.asked().contains(SAVE_ANYWAY),
+                "{case} must ask {SAVE_ANYWAY:?}, it asked {:?} and showed {shown:?}",
+                console.asked()
+            );
+            assert_eq!(
+                decision,
+                SaveDecision::DoNotSave,
+                "a no to {SAVE_ANYWAY:?} after {case} must save nothing"
+            );
+        }
+    }
+
+    /// A yes to the question saves the configuration all the same. The user
+    /// can know more than the test, for example about a controller that is
+    /// off today.
+    #[tokio::test]
+    async fn a_yes_saves_after_a_failed_connection_test() {
+        let hanging_up = TestServer::hanging_up().await;
+
+        let (decision, shown, console) = setup_after_testing(hanging_up.origin(), &["y\n"]).await;
+
+        assert!(
+            console.asked().contains(SAVE_ANYWAY),
+            "a controller that hangs up must ask {SAVE_ANYWAY:?}, it showed {shown:?}"
+        );
+        assert_eq!(
+            decision,
+            SaveDecision::Save,
+            "a yes to {SAVE_ANYWAY:?} must save the configuration"
+        );
+    }
+
+    /// The hint about a key with limited permissions fits one answer only: a
+    /// controller that took the key and refused the request (HTTP 403). For
+    /// any other failure it sends the user to the wrong fix.
+    #[tokio::test]
+    async fn the_permission_hint_shows_for_a_403_alone() {
+        let forbidden = TestServer::replying(&forbidden()).await;
+
+        let (_, shown, _) = setup_after_testing(forbidden.origin(), &["n\n"]).await;
+
+        assert!(
+            shown.contains(PERMISSION_HINT),
+            "a 403 must show the permission hint, it showed {shown:?}"
+        );
+
+        let hanging_up = TestServer::hanging_up().await;
+        let unauthorized = TestServer::replying(&unauthorized()).await;
+
+        for (case, url) in [
+            ("a controller that hangs up", hanging_up.origin()),
+            ("a 401", unauthorized.origin()),
+        ] {
+            let (_, shown, _) = setup_after_testing(url, &["n\n"]).await;
+
+            assert!(
+                !shown.contains(PERMISSION_HINT),
+                "{case} must not show the permission hint, it showed {shown:?}"
+            );
+        }
+    }
+
+    /// A controller that gives no answer did not talk to the wizard, and the
+    /// report must not say that it connected.
+    #[tokio::test]
+    async fn a_controller_that_gives_no_answer_is_not_reported_as_connected() {
+        let hanging_up = TestServer::hanging_up().await;
+
+        let (_, shown, _) = setup_after_testing(hanging_up.origin(), &["n\n"]).await;
+
+        assert!(
+            !shown.contains("Connected"),
+            "a controller that hangs up must not be reported as connected, it showed {shown:?}"
+        );
+    }
+
+    /// A controller that answers passes the test, and the wizard goes on
+    /// without a question.
+    #[tokio::test]
+    async fn a_controller_that_answers_is_saved_without_a_question() {
+        let controller = TestServer::replying(&json_response(&format!(
+            r#"{{"applicationVersion":"{CONTROLLER_VERSION}"}}"#
+        )))
+        .await;
+
+        let (decision, shown, console) = setup_after_testing(controller.origin(), &["n\n"]).await;
+
+        assert!(
+            !console.was_asked(),
+            "a passed test has nothing to ask, it asked {:?}",
+            console.asked()
+        );
+        assert_eq!(
+            decision,
+            SaveDecision::Save,
+            "a passed test must save the configuration"
+        );
+        assert!(
+            shown.contains(CONTROLLER_VERSION),
+            "a passed test must show the version of the controller, it showed {shown:?}"
+        );
     }
 }
