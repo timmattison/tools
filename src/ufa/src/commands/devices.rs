@@ -295,7 +295,7 @@ impl<'a> From<&'a DeviceStatsOutcome> for DeviceStatsEntry<'a> {
 
 /// The reason a statistics request failed, with the chain of causes.
 ///
-/// The note on standard error and the JSON entry give the same text.
+/// The note of the report and the JSON entry give the same text.
 ///
 /// # Arguments
 ///
@@ -454,7 +454,8 @@ async fn get_single_device_stats(
 ///
 /// Returns an error if the device list cannot be fetched, or if the answer
 /// cannot be rendered. A failed statistics request for one device is not an
-/// error: its row or its JSON entry says so instead.
+/// error: its row or its JSON entry says so instead, and a note of the report
+/// gives the reason.
 async fn get_all_device_stats(
     client: &UnifiClient,
     site_id: Uuid,
@@ -472,17 +473,7 @@ async fn get_all_device_stats(
     let fetched: Vec<DeviceStatsOutcome> = devices
         .into_iter()
         .zip(statistics)
-        .map(|(device, statistics)| {
-            if let Err(error) = &statistics {
-                eprintln!(
-                    "Failed to fetch statistics for {} ({}): {}",
-                    device.name,
-                    device.id,
-                    failure_reason(error)
-                );
-            }
-            DeviceStatsOutcome { device, statistics }
-        })
+        .map(|(device, statistics)| DeviceStatsOutcome { device, statistics })
         .collect();
 
     all_device_stats_report(&fetched, output_format)
@@ -538,8 +529,9 @@ where
 ///
 /// # Returns
 ///
-/// The rendered statistics, together with the note for a site that holds no
-/// devices.
+/// The rendered statistics, together with their notes: one note for each
+/// device whose statistics request failed, in device order, or the note for a
+/// site that holds no devices.
 ///
 /// # Errors
 ///
@@ -571,7 +563,32 @@ fn all_device_stats_report(fetched: &[DeviceStatsOutcome], format: OutputFormat)
         return Ok(report.with_note("No devices found on this site."));
     }
 
-    Ok(report)
+    Ok(fetched
+        .iter()
+        .filter_map(failure_note)
+        .fold(report, Report::with_note))
+}
+
+/// The note that says the statistics request of one device failed.
+///
+/// # Arguments
+///
+/// * `fetched` - One device, together with the outcome of its statistics
+///   request.
+///
+/// # Returns
+///
+/// The note, which names the device and gives the reason, or `None` when the
+/// request succeeded.
+fn failure_note(fetched: &DeviceStatsOutcome) -> Option<String> {
+    fetched.statistics.as_ref().err().map(|error| {
+        format!(
+            "Failed to fetch statistics for {} ({}): {}",
+            fetched.device.name,
+            fetched.device.id,
+            failure_reason(error)
+        )
+    })
 }
 
 /// Ask the controller to restart a device.

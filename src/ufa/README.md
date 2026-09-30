@@ -281,10 +281,10 @@ error: the argument '--all' cannot be used with '[DEVICE_ID]'
 
 Two different blanks appear in an `--all` table, and they mean different things:
 
-| Cell    | Meaning                                                                         |
-| ------- | ------------------------------------------------------------------------------- |
-| `N/A`   | The device reported no value for that field.                                     |
-| `ERROR` | Its statistics could not be fetched at all. The reason is printed to stderr.     |
+| Cell    | Meaning                                                                                          |
+| ------- | ------------------------------------------------------------------------------------------------ |
+| `N/A`   | The device reported no value for that field.                                                     |
+| `ERROR` | Its statistics could not be fetched at all. A note on stderr, after the table, gives the reason. |
 
 One unreachable device therefore never hides the rest of the site. `--output json` is honoured for
 `--all` as well as for a single device. Under `--all` it prints one object per device, in device
