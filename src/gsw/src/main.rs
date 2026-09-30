@@ -52,7 +52,10 @@ mod worktrees;
     about = "Compact git status watch — event-driven, self-refreshing branch-state view",
     long_about = "Prints a compact, color-coded view of the current branch's state: \
                   commits ahead of (and behind) the base branch, a recent-commit log, and a \
-                  per-file list showing a magnitude bar, +/- counts, and recency. On a TTY it \
+                  per-file list showing a magnitude bar, +/- counts, and recency. In the log, \
+                  a ▎ in the left column marks each commit that is only on the current \
+                  branch: the commits that the ahead count counts. The mark is a glyph, so it \
+                  stays visible with no color. On a TTY it \
                   runs as a self-refreshing watch that repaints on filesystem changes and \
                   re-walks the repository every --refresh-interval seconds, with the \
                   separator under the header showing how stale the screen is and how long \
