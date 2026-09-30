@@ -1309,3 +1309,110 @@ mod listing_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod creation_tests {
+    use super::*;
+    use crate::test_server::{json_response, TestServer, INTEGRATION_API};
+
+    /// The API key a test hands the client. Nothing reads it back.
+    const API_KEY: &str = "an-api-key";
+
+    /// What the controller answers a creation with: the vouchers it made.
+    const ONE_CREATED: &str = r#"{
+        "vouchers": [
+            {
+                "id": "00000000-0000-0000-0000-000000000006",
+                "createdAt": "2026-09-29T00:00:00Z",
+                "name": "lobby café",
+                "code": "1234567890",
+                "authorizedGuestCount": 0,
+                "expired": false,
+                "timeLimitMinutes": 1440
+            }
+        ]
+    }"#;
+
+    /// Run `vouchers create` with `command` against a new controller.
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - The `create` command, as the CLI parsed it.
+    ///
+    /// # Returns
+    ///
+    /// The controller, which holds the request it read, and the site id the
+    /// command named.
+    async fn create_on_a_new_controller(command: VouchersCommand) -> (TestServer, Uuid) {
+        let controller = TestServer::replying(&json_response(ONE_CREATED)).await;
+        let client = UnifiClient::new(controller.origin(), API_KEY, false)
+            .expect("a loopback URL must build a client");
+        let site_id = Uuid::new_v4();
+
+        handle_vouchers_command(command, Some(site_id), &client, OutputFormat::Json)
+            .await
+            .expect("the controller accepted the creation");
+
+        (controller, site_id)
+    }
+
+    /// `vouchers create` with every option set posts each option under its
+    /// own key to the voucher collection of the site the user named.
+    ///
+    /// Every limit is a count, so a limit that goes under the key of another
+    /// limit still compiles. Each option here has a value of its own, so a
+    /// value under the wrong key fails the test. The
+    /// names of the keys come from the UniFi integration API.
+    #[tokio::test]
+    async fn creating_vouchers_with_every_option_posts_each_option_under_its_own_key() {
+        let (controller, site_id) = create_on_a_new_controller(VouchersCommand::Create {
+            count: 3,
+            name: "lobby café".to_string(),
+            time_limit_minutes: 1440,
+            authorized_guest_limit: Some(2),
+            data_usage_limit_mbytes: Some(2048),
+            rx_rate_limit_kbps: Some(4000),
+            tx_rate_limit_kbps: Some(1000),
+        })
+        .await;
+
+        controller.assert_one_json_request(
+            &format!("POST {INTEGRATION_API}/sites/{site_id}/hotspot/vouchers HTTP/1.1"),
+            &serde_json::json!({
+                "count": 3,
+                "name": "lobby café",
+                "timeLimitMinutes": 1440,
+                "authorizedGuestLimit": 2,
+                "dataUsageLimitMBytes": 2048,
+                "rxRateLimitKbps": 4000,
+                "txRateLimitKbps": 1000
+            }),
+        );
+    }
+
+    /// `vouchers create` with only the options it requires posts only those.
+    /// A limit the user did not give is left out of the body, not sent as
+    /// `null`.
+    #[tokio::test]
+    async fn creating_vouchers_with_no_limit_posts_only_the_required_fields() {
+        let (controller, site_id) = create_on_a_new_controller(VouchersCommand::Create {
+            count: 1,
+            name: "lobby café".to_string(),
+            time_limit_minutes: 1440,
+            authorized_guest_limit: None,
+            data_usage_limit_mbytes: None,
+            rx_rate_limit_kbps: None,
+            tx_rate_limit_kbps: None,
+        })
+        .await;
+
+        controller.assert_one_json_request(
+            &format!("POST {INTEGRATION_API}/sites/{site_id}/hotspot/vouchers HTTP/1.1"),
+            &serde_json::json!({
+                "count": 1,
+                "name": "lobby café",
+                "timeLimitMinutes": 1440
+            }),
+        );
+    }
+}

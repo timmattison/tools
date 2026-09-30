@@ -661,7 +661,7 @@ mod listing_tests {
 #[cfg(test)]
 mod action_tests {
     use super::*;
-    use crate::test_server::{empty_json, TestServer};
+    use crate::test_server::{empty_json, TestServer, INTEGRATION_API};
 
     /// The API key a test hands the client. Nothing reads it back.
     const API_KEY: &str = "an-api-key";
@@ -730,6 +730,108 @@ mod action_tests {
                 .any(|note| note.contains("unauthorized successfully")),
             "the note must say the guest access ended, got {:?}",
             report.notes()
+        );
+    }
+
+    /// Send `command` for a site and a client of its own, and return both.
+    ///
+    /// # Arguments
+    ///
+    /// * `controller` - The controller the command goes to.
+    /// * `command` - Builds the command from the id of the client.
+    ///
+    /// # Returns
+    ///
+    /// The site id and the client id the command named.
+    async fn run_for_a_client(
+        controller: &TestServer,
+        command: impl FnOnce(Uuid) -> ClientsCommand,
+    ) -> (Uuid, Uuid) {
+        let site_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+
+        handle_clients_command(
+            command(client_id),
+            Some(site_id),
+            &client_for(controller),
+            OutputFormat::Table,
+        )
+        .await
+        .expect("the controller accepted the action");
+
+        (site_id, client_id)
+    }
+
+    /// `clients authorize-guest` with every limit set posts the
+    /// `AUTHORIZE_GUEST_ACCESS` action with each limit under its own key.
+    ///
+    /// The four limits are all counts, so a limit that goes under the key of
+    /// another limit still compiles. Each limit here has a value of its own,
+    /// so a limit under the wrong key fails the test. The names of the keys
+    /// come from the UniFi integration API.
+    #[tokio::test]
+    async fn authorizing_a_guest_with_every_limit_posts_each_limit_under_its_own_key() {
+        let controller = TestServer::replying(&empty_json()).await;
+
+        let (site_id, client_id) =
+            run_for_a_client(&controller, |client_id| ClientsCommand::AuthorizeGuest {
+                client_id,
+                time_limit_minutes: Some(60),
+                data_usage_limit_mbytes: Some(1024),
+                rx_rate_limit_kbps: Some(2000),
+                tx_rate_limit_kbps: Some(500),
+            })
+            .await;
+
+        controller.assert_one_json_request(
+            &format!("POST {INTEGRATION_API}/sites/{site_id}/clients/{client_id}/actions HTTP/1.1"),
+            &serde_json::json!({
+                "action": "AUTHORIZE_GUEST_ACCESS",
+                "timeLimitMinutes": 60,
+                "dataUsageLimitMBytes": 1024,
+                "rxRateLimitKbps": 2000,
+                "txRateLimitKbps": 500
+            }),
+        );
+    }
+
+    /// `clients authorize-guest` with no limit posts the action alone. A
+    /// limit the user did not give is left out of the body, not sent as
+    /// `null`.
+    #[tokio::test]
+    async fn authorizing_a_guest_with_no_limit_posts_the_action_alone() {
+        let controller = TestServer::replying(&empty_json()).await;
+
+        let (site_id, client_id) =
+            run_for_a_client(&controller, |client_id| ClientsCommand::AuthorizeGuest {
+                client_id,
+                time_limit_minutes: None,
+                data_usage_limit_mbytes: None,
+                rx_rate_limit_kbps: None,
+                tx_rate_limit_kbps: None,
+            })
+            .await;
+
+        controller.assert_one_json_request(
+            &format!("POST {INTEGRATION_API}/sites/{site_id}/clients/{client_id}/actions HTTP/1.1"),
+            &serde_json::json!({ "action": "AUTHORIZE_GUEST_ACCESS" }),
+        );
+    }
+
+    /// `clients unauthorize-guest` posts the `UNAUTHORIZE_GUEST_ACCESS`
+    /// action to the actions path of the client the user named.
+    #[tokio::test]
+    async fn unauthorizing_a_guest_posts_the_unauthorize_action_to_the_client() {
+        let controller = TestServer::replying(&empty_json()).await;
+
+        let (site_id, client_id) = run_for_a_client(&controller, |client_id| {
+            ClientsCommand::UnauthorizeGuest { client_id }
+        })
+        .await;
+
+        controller.assert_one_json_request(
+            &format!("POST {INTEGRATION_API}/sites/{site_id}/clients/{client_id}/actions HTTP/1.1"),
+            &serde_json::json!({ "action": "UNAUTHORIZE_GUEST_ACCESS" }),
         );
     }
 }

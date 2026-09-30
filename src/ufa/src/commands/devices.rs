@@ -958,7 +958,9 @@ mod tests {
 #[cfg(test)]
 mod action_tests {
     use super::*;
-    use crate::test_server::{empty_json, json_response, json_response_with_status, TestServer};
+    use crate::test_server::{
+        empty_json, json_response, json_response_with_status, TestServer, INTEGRATION_API,
+    };
 
     /// The API key a test hands the client. Nothing reads it back.
     const API_KEY: &str = "an-api-key";
@@ -1193,6 +1195,64 @@ mod action_tests {
                 .any(|note| note.contains("power cycle initiated")),
             "the note must say the power cycle started, got {:?}",
             report.notes()
+        );
+    }
+
+    /// `devices restart` posts the `RESTART` action to the actions path of
+    /// the device the user named, under the site the user named.
+    ///
+    /// The assertion reads the request the controller got. A wrong path or a
+    /// wrong action restarts no device, or the wrong one, and nothing but real
+    /// hardware shows it.
+    #[tokio::test]
+    async fn a_restart_posts_the_restart_action_to_the_device() {
+        let controller = TestServer::replying(&empty_json()).await;
+        let site_id = Uuid::new_v4();
+        let device_id = Uuid::new_v4();
+
+        handle_devices_command(
+            DevicesCommand::Restart { device_id },
+            Some(site_id),
+            &client_for(&controller),
+            OutputFormat::Table,
+        )
+        .await
+        .expect("the controller accepted the restart");
+
+        controller.assert_one_json_request(
+            &format!("POST {INTEGRATION_API}/sites/{site_id}/devices/{device_id}/actions HTTP/1.1"),
+            &serde_json::json!({ "action": "RESTART" }),
+        );
+    }
+
+    /// `devices power-cycle-port` posts the `POWER_CYCLE` action to the
+    /// actions path of the one port the user named. The same action on the
+    /// path of the device restarts the whole device.
+    #[tokio::test]
+    async fn a_port_power_cycle_posts_the_power_cycle_action_to_the_port() {
+        const PORT_INDEX: u32 = 7;
+
+        let controller = TestServer::replying(&empty_json()).await;
+        let site_id = Uuid::new_v4();
+        let device_id = Uuid::new_v4();
+
+        handle_devices_command(
+            DevicesCommand::PowerCyclePort {
+                device_id,
+                port_idx: PORT_INDEX,
+            },
+            Some(site_id),
+            &client_for(&controller),
+            OutputFormat::Table,
+        )
+        .await
+        .expect("the controller accepted the power cycle");
+
+        controller.assert_one_json_request(
+            &format!(
+                "POST {INTEGRATION_API}/sites/{site_id}/devices/{device_id}/interfaces/ports/{PORT_INDEX}/actions HTTP/1.1"
+            ),
+            &serde_json::json!({ "action": "POWER_CYCLE" }),
         );
     }
 }

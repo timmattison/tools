@@ -42,6 +42,14 @@ const MAX_BODY_BYTES: usize = 1_048_576;
 /// How much a server reads off a socket at a time.
 const READ_CHUNK_BYTES: usize = 1_024;
 
+/// Where a controller serves the integration API, as the UniFi documentation
+/// gives it.
+///
+/// A test writes the expected path from this text, not from the constant of
+/// the client. An expected path built from the constant of the client passes
+/// whatever that constant says.
+pub const INTEGRATION_API: &str = "/proxy/network/integration/v1";
+
 /// What a [`TestServer`] writes back once it has read a request.
 #[derive(Clone)]
 enum Reply {
@@ -378,6 +386,48 @@ impl TestServer {
             .lock()
             .expect("nothing panics while it holds this lock")
             .clone()
+    }
+
+    /// Assert that this server read one request, with `request_line` and
+    /// with `body` as its JSON body.
+    ///
+    /// The body is compared as a parsed document, so the order of the keys
+    /// and the white space do not change the result. A key that the body
+    /// holds and `body` does not hold fails the assertion, and so does a key
+    /// with a `null` value.
+    ///
+    /// # Arguments
+    ///
+    /// * `request_line` - The whole request line, such as
+    ///   `POST /proxy/network/integration/v1/sites/1/devices/2/actions HTTP/1.1`.
+    /// * `body` - The JSON document the request must carry.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the server read no request or more than one, if the request
+    /// line is different, or if the body is not `body`.
+    #[track_caller]
+    pub fn assert_one_json_request(&self, request_line: &str, body: &serde_json::Value) {
+        let received = self.requests();
+        assert_eq!(
+            received.len(),
+            1,
+            "the command must send exactly one request, got {received:?}"
+        );
+
+        let request = &received[0];
+        assert_eq!(
+            request.request_line(),
+            request_line,
+            "the request must use the right method and path, got {request:?}"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(request.body())
+                .ok()
+                .as_ref(),
+            Some(body),
+            "the controller must get the right JSON body, got {request:?}"
+        );
     }
 }
 
