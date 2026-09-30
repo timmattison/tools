@@ -1561,6 +1561,57 @@ mod tests {
         );
     }
 
+    /// Make one empty commit with the message `subject` on the branch that
+    /// HEAD of the repository at `dir` names.
+    fn commit_empty(dir: &Path, subject: &str) {
+        git(dir, &["commit", "-q", "--allow-empty", "-m", subject]);
+    }
+
+    /// A repository with HEAD on the branch `feature`. The branch has three
+    /// commits, `feature 1` to `feature 3`, on top of the commit of
+    /// [`init_repo`], which `main` names.
+    fn feature_branch_repo() -> TempDir {
+        let dir = init_repo();
+        git(dir.path(), &["checkout", "-q", "-b", "feature"]);
+        for n in 1..=3 {
+            commit_empty(dir.path(), &format!("feature {n}"));
+        }
+        dir
+    }
+
+    /// The subjects of the commits of `log` that are only on the branch,
+    /// newest first.
+    fn marked(log: &super::RecentLog) -> Vec<&str> {
+        log.commits
+            .iter()
+            .filter(|commit| commit.on_branch)
+            .map(|commit| commit.summary.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn recent_log_marks_the_commits_of_a_branch_on_top_of_its_base() {
+        // Issue #541: the header counts the commits that are only on the
+        // branch (`main..feature`). The log marks the same commits. Here the
+        // branch has three commits on top of `main`, so the log marks those
+        // three and not the commit that `main` names.
+        let dir = feature_branch_repo();
+        let repo = open_at(dir.path()).expect("fixture is a worktree repo");
+
+        let log = super::recent_log(&repo, "main", 10);
+
+        assert_eq!(
+            subjects(&log),
+            ["feature 3", "feature 2", "feature 1", "initial"],
+            "the log holds the branch and its base",
+        );
+        assert_eq!(
+            marked(&log),
+            ["feature 3", "feature 2", "feature 1"],
+            "the log marks the three commits that only the branch has",
+        );
+    }
+
     fn statuses(repo: &gix::Repository) -> Vec<(String, FileStatus, bool)> {
         super::collect_changes(repo)
             .unwrap()
