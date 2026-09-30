@@ -2913,6 +2913,54 @@ mod tests {
         }
     }
 
+    /// The escape codes at the start of `line`, before its first glyph.
+    fn leading_codes(line: &str) -> &str {
+        let mut rest = line;
+        while let Some((_, tail)) = rest
+            .strip_prefix("\x1b[")
+            .and_then(|codes| codes.split_once('m'))
+        {
+            rest = tail;
+        }
+        line.strip_suffix(rest).unwrap_or_default()
+    }
+
+    #[test]
+    fn the_mark_takes_the_paint_of_the_header_and_the_blank_takes_none() {
+        // Issue #541: the header counts the commits that the mark shows. So
+        // the mark takes the paint of the header: bold, on the default
+        // foreground, in 8-color mode and in truecolor mode. The blank of a
+        // row of a base commit takes no paint. The codes are forced on, so
+        // the test reads the paint whether it writes to a terminal or not.
+        for truecolor in [false, true] {
+            let mut o = opts();
+            o.log_lines = 5;
+            o.truecolor = truecolor;
+
+            let painted = testcolor::with_forced_ansi(|| {
+                render(&snap_with_a_branch_row("a commit on the branch"), &o)
+            });
+
+            let header = painted.lines().next().unwrap_or_default();
+            let header_codes = leading_codes(header);
+            assert!(
+                !header_codes.is_empty(),
+                "truecolor={truecolor}: the header is painted: {header:?}",
+            );
+            let marked = row_with(&painted, BRANCH_HASH);
+            assert!(
+                marked.starts_with(&format!("{header_codes}{BRANCH_MARK}")),
+                "truecolor={truecolor}: the mark takes the codes {header_codes:?} of the \
+                 header: {marked:?}",
+            );
+            let blank = row_with(&painted, BASE_HASH);
+            assert!(
+                blank.starts_with(LOG_GUTTER_BLANK),
+                "truecolor={truecolor}: the blank gutter takes no paint: {blank:?}",
+            );
+        }
+    }
+
     // --- truecolor commit-log fade ---------------------------------------
     //
     // These tests inspect the `ColoredString::fgcolor` field directly rather
