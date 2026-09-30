@@ -57,25 +57,84 @@ const CONNECTION_CLOSE: &str = "Connection: close";
 /// whatever that constant says.
 pub const INTEGRATION_API: &str = "/proxy/network/integration/v1";
 
+/// What a [`TestServer`] does with one request once it has read it.
+///
+/// A route of [`TestServer::routing`] takes one of these. A raw response
+/// becomes [`Answer::Respond`] through `From<String>`, so a route that
+/// answers keeps the shape `(fragment, json_response(...))`.
+#[derive(Clone, Debug)]
+pub enum Answer {
+    /// Write this raw HTTP response, headers included.
+    Respond(String),
+    /// Write nothing, and close the connection at once. The client reads an
+    /// end of file where the answer belongs, so it gets no HTTP status. This
+    /// is what a client sees from a controller that stops in the middle of a
+    /// run, such as a controller that reboots.
+    HangUp,
+}
+
+impl From<String> for Answer {
+    fn from(response: String) -> Self {
+        Self::Respond(response)
+    }
+}
+
 /// What a [`TestServer`] writes back once it has read a request.
 #[derive(Clone)]
 enum Reply {
-    /// These bytes, exactly as given.
-    Bytes(String),
-    /// The response of the first route whose fragment is in the request
-    /// line, or the fallback when no route matches.
+    /// The same answer to every request.
+    Always(Answer),
+    /// The answer of the first route whose fragment is in the request line,
+    /// or the fallback when no route matches.
     Routes {
-        /// Pairs of a request-line fragment and the raw response for it.
-        routes: Vec<(String, String)>,
+        /// Pairs of a request-line fragment and the answer for it.
+        routes: Vec<(String, Answer)>,
         /// The raw response for a request that no route matches.
         fallback: String,
     },
     /// Nothing at all. The server keeps the connection open, so a client
     /// waits for an answer rather than reads an end of file.
     Silence,
-    /// Nothing at all. The server closes the connection at once, so a client
-    /// reads an end of file where the answer belongs.
+}
+
+/// What the server does with one connection, once it has read the request.
+enum Action<'reply> {
+    /// Write this raw response, then close the connection.
+    Write(&'reply str),
+    /// Close the connection with nothing written on it.
     HangUp,
+    /// Keep the connection open with nothing written on it.
+    HoldOpen,
+}
+
+impl Reply {
+    /// What to do with `request`.
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - The request the server read.
+    ///
+    /// # Returns
+    ///
+    /// The action for the connection that carried `request`.
+    fn action_for(&self, request: &ReceivedRequest) -> Action<'_> {
+        let answer = match self {
+            Self::Always(answer) => answer,
+            Self::Routes { routes, fallback } => match routes
+                .iter()
+                .find(|(fragment, _)| request.request_line().contains(fragment))
+            {
+                Some((_, answer)) => answer,
+                None => return Action::Write(fallback),
+            },
+            Self::Silence => return Action::HoldOpen,
+        };
+
+        match answer {
+            Answer::Respond(response) => Action::Write(response),
+            Answer::HangUp => Action::HangUp,
+        }
+    }
 }
 
 /// One request a [`TestServer`] read.
@@ -251,7 +310,7 @@ impl TestServer {
     ///
     /// The running server.
     pub async fn replying(response: &str) -> Self {
-        Self::start(Reply::Bytes(response.to_string())).await
+        Self::start(Reply::Always(Answer::Respond(response.to_string()))).await
     }
 
     /// Start a server that picks its answer by the request line.
@@ -262,17 +321,24 @@ impl TestServer {
     /// # Arguments
     ///
     /// * `routes` - Pairs of a fragment of the request line, such as a part of
-    ///   the path, and the raw HTTP response for a request whose line holds
-    ///   it. The first pair that matches wins.
+    ///   the path, and the answer for a request whose line holds it. The
+    ///   answer is a raw HTTP response, or an [`Answer`] such as
+    ///   [`Answer::HangUp`]. The first pair that matches wins.
     /// * `fallback` - The raw HTTP response for a request that no route
     ///   matches.
     ///
     /// # Returns
     ///
     /// The running server.
-    pub async fn routing(routes: &[(String, String)], fallback: &str) -> Self {
+    pub async fn routing<A>(routes: &[(String, A)], fallback: &str) -> Self
+    where
+        A: Clone + Into<Answer>,
+    {
         Self::start(Reply::Routes {
-            routes: routes.to_vec(),
+            routes: routes
+                .iter()
+                .map(|(fragment, answer)| (fragment.clone(), answer.clone().into()))
+                .collect(),
             fallback: fallback.to_string(),
         })
         .await
@@ -303,7 +369,7 @@ impl TestServer {
     ///
     /// The running server.
     pub async fn hanging_up() -> Self {
-        Self::start(Reply::HangUp).await
+        Self::start(Reply::Always(Answer::HangUp)).await
     }
 
     /// Start a server that answers every request the one way `reply` says.
@@ -341,32 +407,25 @@ impl TestServer {
                     continue;
                 };
 
-                let response = match &reply {
-                    Reply::Bytes(response) => Some(response),
-                    Reply::Routes { routes, fallback } => Some(
-                        routes
-                            .iter()
-                            .find(|(fragment, _)| request.request_line().contains(fragment))
-                            .map_or(fallback, |(_, response)| response),
-                    ),
-                    Reply::Silence | Reply::HangUp => None,
-                };
+                let action = reply.action_for(&request);
 
                 recorded
                     .lock()
                     .expect("nothing panics while it holds this lock")
                     .push(request);
 
-                match response {
-                    Some(response) => {
+                match action {
+                    Action::Write(response) => {
                         let answer = closing_the_connection(response);
                         let _ = socket.write_all(answer.as_bytes()).await;
                         let _ = socket.flush().await;
                     }
                     // The socket goes out of scope here, which closes the
-                    // connection with no answer on it.
-                    None if matches!(reply, Reply::HangUp) => {}
-                    None => held_open.push(socket),
+                    // connection with no answer on it. The server read the
+                    // whole request first, so the close is an end of file
+                    // and not a reset.
+                    Action::HangUp => {}
+                    Action::HoldOpen => held_open.push(socket),
                 }
             }
         });
@@ -841,6 +900,80 @@ mod tests {
 
             assert_says_it_closes(case, response, &answer);
         }
+    }
+
+    /// The path fragment of the route that hangs up, in the hang-up tests.
+    const GONE: &str = "/gone";
+
+    /// The path fragment of the route that answers, in the hang-up tests.
+    const HERE: &str = "/here";
+
+    /// A server whose route for [`GONE`] hangs up, and whose route for
+    /// [`HERE`] answers with an empty JSON object.
+    ///
+    /// # Returns
+    ///
+    /// The running server.
+    async fn server_with_a_route_that_hangs_up() -> TestServer {
+        TestServer::routing(
+            &[
+                (GONE.to_string(), Answer::HangUp),
+                (HERE.to_string(), empty_json().into()),
+            ],
+            &json_response_with_status("404 Not Found", r#"{"route":"none"}"#),
+        )
+        .await
+    }
+
+    /// A route that hangs up writes no byte at all. A partial answer, such as
+    /// a status line with no head after it, gives some clients a status, and
+    /// the route then stands for a controller that answered.
+    #[tokio::test]
+    async fn a_route_that_hangs_up_writes_nothing_before_it_closes() {
+        let server = server_with_a_route_that_hangs_up().await;
+
+        let answer = raw_answer(&server, GONE).await;
+
+        assert_eq!(
+            answer, "",
+            "a route that hangs up must close the connection with nothing on it"
+        );
+        assert_eq!(
+            server
+                .requests()
+                .iter()
+                .map(ReceivedRequest::request_line)
+                .collect::<Vec<_>>(),
+            vec![format!("GET {GONE} HTTP/1.1")],
+            "the server must record the request it hung up on"
+        );
+    }
+
+    /// A route that hangs up stands for a controller that stopped answering.
+    /// The client must get an error with no HTTP status, and the other routes
+    /// of the same server must still answer.
+    #[tokio::test]
+    async fn a_route_that_hangs_up_gives_the_client_no_status() {
+        let server = server_with_a_route_that_hangs_up().await;
+        let client = UnifiClient::new(server.origin(), API_KEY, false)
+            .expect("a loopback URL must build a client");
+
+        let error = client
+            .get::<serde_json::Value>("sites/a-site/gone")
+            .await
+            .expect_err("a connection closed with no answer is a failure");
+
+        assert_eq!(
+            crate::http::answered_status(&error),
+            None,
+            "a hang-up must give the client no HTTP status, got {error:#}"
+        );
+
+        let answered: serde_json::Value = client
+            .get("sites/a-site/here")
+            .await
+            .expect("the route that answers must still answer");
+        assert_eq!(answered, serde_json::json!({}));
     }
 
     /// Send `body` as the JSON body of a `POST` to a new server.

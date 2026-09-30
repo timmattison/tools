@@ -595,7 +595,7 @@ mod deletion_tests {
     use super::*;
     use crate::prompt::Scripted;
     use crate::test_server::{
-        json_response, json_response_with_status, ReceivedRequest, TestServer,
+        json_response, json_response_with_status, Answer, ReceivedRequest, TestServer,
     };
     use std::cell::Cell;
 
@@ -1082,20 +1082,24 @@ mod deletion_tests {
     ///
     /// # Arguments
     ///
-    /// * `answers` - The raw response to a `DELETE` of each listed voucher,
-    ///   in the order of [`LISTED_IDS`]. A `DELETE` that carries a filter gets
-    ///   [`FILTERED_DELETE_ANSWER`].
+    /// * `answers` - The answer to a `DELETE` of each listed voucher, in the
+    ///   order of [`LISTED_IDS`]: a raw response, or [`Answer::HangUp`] for a
+    ///   controller that closes the connection with no answer. A `DELETE`
+    ///   that carries a filter gets [`FILTERED_DELETE_ANSWER`].
     ///
     /// # Returns
     ///
     /// What the run did.
-    async fn run_confirmed_delete(answers: [String; 3]) -> ConfirmedRun {
+    async fn run_confirmed_delete(answers: [impl Into<Answer>; 3]) -> ConfirmedRun {
         let site_id = Uuid::new_v4();
         let collection = format!("/proxy/network/integration/v1/sites/{site_id}/hotspot/vouchers");
 
-        let mut routes = vec![("GET ".to_string(), json_response(THREE_MATCHING_VOUCHERS))];
+        let mut routes = vec![(
+            "GET ".to_string(),
+            Answer::from(json_response(THREE_MATCHING_VOUCHERS)),
+        )];
         for (id, answer) in LISTED_IDS.iter().zip(answers) {
-            routes.push((format!("DELETE {collection}/{id} "), answer));
+            routes.push((format!("DELETE {collection}/{id} "), answer.into()));
         }
 
         let controller = TestServer::routing(&routes, &json_response(FILTERED_DELETE_ANSWER)).await;
@@ -1243,6 +1247,166 @@ mod deletion_tests {
             Some("Deleted 2 of 3 voucher(s)"),
             "the closing note must show that the total differs from the listed count, got {:?}",
             run.notes()
+        );
+    }
+
+    /// The words that follow the count of the vouchers a stopped run did not
+    /// send, in the note and in the error.
+    const NOT_ATTEMPTED: &str = "voucher(s) were not attempted";
+
+    /// Whether `text` names `count` vouchers as not attempted.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - A note, or the text of the error.
+    /// * `count` - How many vouchers the run did not send.
+    ///
+    /// # Returns
+    ///
+    /// `true` when `text` holds the count directly before [`NOT_ATTEMPTED`].
+    fn names_not_attempted(text: &str, count: usize) -> bool {
+        text.contains(&format!("{count} {NOT_ATTEMPTED}"))
+    }
+
+    /// The text of the error a run returned, with every cause.
+    ///
+    /// # Arguments
+    ///
+    /// * `run` - The run to read.
+    ///
+    /// # Returns
+    ///
+    /// The error text.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the run succeeded.
+    fn error_text(run: &ConfirmedRun) -> String {
+        let error = run
+            .result
+            .as_ref()
+            .expect_err("a run with a failed deletion must fail the command");
+        format!("{error:#}")
+    }
+
+    /// The finding this answers: a controller that stops answering in the
+    /// middle of a run (a reboot, a dropped VPN) made each voucher after it
+    /// wait the full request timeout. Two hundred vouchers was one hundred
+    /// minutes of silence. A failure with no HTTP status stops the run, and
+    /// the vouchers after it are not sent.
+    #[tokio::test]
+    async fn a_controller_that_stops_answering_stops_the_deletion() {
+        let run = run_confirmed_delete([
+            json_response(ONE_DELETED).into(),
+            Answer::HangUp,
+            json_response(ONE_DELETED).into(),
+        ])
+        .await;
+
+        assert_eq!(
+            run.deletions,
+            vec![
+                run.deletion_of(LISTED_IDS[0]),
+                run.deletion_of(LISTED_IDS[1])
+            ],
+            "no deletion may follow a failure with no HTTP status"
+        );
+
+        let error = error_text(&run);
+        assert!(
+            names_not_attempted(&error, 1),
+            "the error must name the count of vouchers that were not attempted, got {error}"
+        );
+
+        let notes = run.notes();
+        assert!(
+            notes.iter().any(|note| note.contains(SECOND_CODE)),
+            "a note must name the voucher whose deletion got no answer, got {notes:?}"
+        );
+        assert_eq!(
+            notes.last().copied(),
+            Some("Deleted 1 of 3 voucher(s)"),
+            "the closing note must stay last, got {notes:?}"
+        );
+        let before_closing = notes.iter().rev().nth(1).copied().unwrap_or_default();
+        assert!(
+            names_not_attempted(before_closing, 1),
+            "the note before the closing note must name the count of vouchers that were not attempted, got {notes:?}"
+        );
+    }
+
+    /// A controller that gives no answer to the first deletion gets no
+    /// other deletion, and every other listed voucher is not attempted.
+    #[tokio::test]
+    async fn no_answer_to_the_first_deletion_attempts_no_other_voucher() {
+        let run = run_confirmed_delete([
+            Answer::HangUp,
+            json_response(ONE_DELETED).into(),
+            json_response(ONE_DELETED).into(),
+        ])
+        .await;
+
+        assert_eq!(
+            run.deletions,
+            vec![run.deletion_of(LISTED_IDS[0])],
+            "no deletion may follow a failure with no HTTP status"
+        );
+
+        let error = error_text(&run);
+        assert!(
+            names_not_attempted(&error, 2),
+            "the error must name the count of vouchers that were not attempted, got {error}"
+        );
+
+        let notes = run.notes();
+        assert!(
+            notes.iter().any(|note| names_not_attempted(note, 2)),
+            "a note must name the count of vouchers that were not attempted, got {notes:?}"
+        );
+        assert_eq!(
+            notes.last().copied(),
+            Some("Deleted 0 of 3 voucher(s)"),
+            "the closing note must stay last, got {notes:?}"
+        );
+    }
+
+    /// A failure with no HTTP status on the last voucher leaves no voucher
+    /// behind it. The run names no voucher as not attempted, and the error
+    /// keeps the form of any other failed deletion.
+    #[tokio::test]
+    async fn no_answer_to_the_last_deletion_names_no_voucher_as_not_attempted() {
+        let run = run_confirmed_delete([
+            json_response(ONE_DELETED).into(),
+            json_response(ONE_DELETED).into(),
+            Answer::HangUp,
+        ])
+        .await;
+
+        let expected: Vec<String> = LISTED_IDS.iter().map(|id| run.deletion_of(id)).collect();
+        assert_eq!(
+            run.deletions, expected,
+            "every listed voucher must get its deletion"
+        );
+
+        let error = error_text(&run);
+        assert!(
+            !error.contains(NOT_ATTEMPTED),
+            "no voucher was left out, so the error must not name any, got {error}"
+        );
+        assert!(
+            error.contains("Could not delete 1 of 3 voucher(s)"),
+            "the error must count the failed deletion, got {error}"
+        );
+
+        let notes = run.notes();
+        assert!(
+            notes.iter().all(|note| !note.contains(NOT_ATTEMPTED)),
+            "no voucher was left out, so no note may name any, got {notes:?}"
+        );
+        assert_eq!(
+            notes.last().copied(),
+            Some("Deleted 2 of 3 voucher(s)"),
+            "the closing note must stay last, got {notes:?}"
         );
     }
 }
