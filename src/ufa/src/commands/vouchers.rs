@@ -456,7 +456,9 @@ fn outcome_report(outcome: DeletionOutcome, match_count: usize) -> Report {
 mod deletion_tests {
     use super::*;
     use crate::prompt::Scripted;
-    use crate::test_server::{json_response, TestServer};
+    use crate::test_server::{
+        json_response, json_response_with_status, ReceivedRequest, TestServer,
+    };
     use std::cell::Cell;
 
     /// How many vouchers the pretend controller holds.
@@ -841,6 +843,262 @@ mod deletion_tests {
         assert!(
             stderr.contains("No vouchers match"),
             "the run must say that nothing matched, on standard error, got:\n{stderr}"
+        );
+    }
+
+    /// Three vouchers, and the whole of what the filter matches.
+    const THREE_MATCHING_VOUCHERS: &str = r#"{
+        "offset": 0, "limit": 200, "count": 3, "totalCount": 3,
+        "data": [
+            {
+                "id": "00000000-0000-0000-0000-000000000001",
+                "createdAt": "2026-07-21T00:00:00Z",
+                "name": "lobby",
+                "code": "1111111111",
+                "authorizedGuestCount": 0,
+                "expired": true,
+                "timeLimitMinutes": 60
+            },
+            {
+                "id": "00000000-0000-0000-0000-000000000002",
+                "createdAt": "2026-07-21T00:00:00Z",
+                "name": "lobby",
+                "code": "2222222222",
+                "authorizedGuestCount": 0,
+                "expired": true,
+                "timeLimitMinutes": 60
+            },
+            {
+                "id": "00000000-0000-0000-0000-000000000003",
+                "createdAt": "2026-07-21T00:00:00Z",
+                "name": "lobby",
+                "code": "3333333333",
+                "authorizedGuestCount": 0,
+                "expired": true,
+                "timeLimitMinutes": 60
+            }
+        ]
+    }"#;
+
+    /// The ids of the three vouchers, in the order the listing gives them.
+    const LISTED_IDS: [&str; 3] = [
+        "00000000-0000-0000-0000-000000000001",
+        "00000000-0000-0000-0000-000000000002",
+        "00000000-0000-0000-0000-000000000003",
+    ];
+
+    /// The code of the second voucher of the listing.
+    const SECOND_CODE: &str = "2222222222";
+
+    /// What the controller answers a `DELETE` that carries a filter. The
+    /// controller evaluates the filter again, so the count is whatever
+    /// matches at that moment, and not the count the user confirmed.
+    const FILTERED_DELETE_ANSWER: &str = r#"{"vouchersDeleted":4}"#;
+
+    /// What the controller answers a deletion that removes no voucher.
+    const NONE_DELETED: &str = r#"{"vouchersDeleted":0}"#;
+
+    /// What the controller answers a deletion of a voucher it does not hold.
+    const VOUCHER_NOT_FOUND: &str =
+        r#"{"statusCode":404,"statusName":"NOT_FOUND","message":"voucher not found"}"#;
+
+    /// The status line of [`VOUCHER_NOT_FOUND`].
+    const NOT_FOUND_STATUS: &str = "404 Not Found";
+
+    /// What a confirmed `delete-filtered` run did.
+    struct ConfirmedRun {
+        /// What the command returned.
+        result: Result<()>,
+        /// Every report the command showed, in the order the user reads them.
+        reports: Vec<Report>,
+        /// The request line of every `DELETE` the controller received, in
+        /// the order it received them.
+        deletions: Vec<String>,
+        /// The path of the voucher collection of the site the run used.
+        collection: String,
+    }
+
+    impl ConfirmedRun {
+        /// Every note the run showed, in the order the user reads them.
+        fn notes(&self) -> Vec<&str> {
+            self.reports
+                .iter()
+                .flat_map(|report| report.notes().iter().map(String::as_str))
+                .collect()
+        }
+
+        /// The request line of a `DELETE` of the voucher `id`.
+        fn deletion_of(&self, id: &str) -> String {
+            format!("DELETE {}/{id} HTTP/1.1", self.collection)
+        }
+    }
+
+    /// Run `delete-filtered` against the three listed vouchers, and say yes
+    /// to the question.
+    ///
+    /// # Arguments
+    ///
+    /// * `answers` - The raw response to a `DELETE` of each listed voucher,
+    ///   in the order of [`LISTED_IDS`]. A `DELETE` that carries a filter gets
+    ///   [`FILTERED_DELETE_ANSWER`].
+    ///
+    /// # Returns
+    ///
+    /// What the run did.
+    async fn run_confirmed_delete(answers: [String; 3]) -> ConfirmedRun {
+        let site_id = Uuid::new_v4();
+        let collection = format!("/proxy/network/integration/v1/sites/{site_id}/hotspot/vouchers");
+
+        let mut routes = vec![("GET ".to_string(), json_response(THREE_MATCHING_VOUCHERS))];
+        for (id, answer) in LISTED_IDS.iter().zip(answers) {
+            routes.push((format!("DELETE {collection}/{id} "), answer));
+        }
+
+        let controller = TestServer::routing(&routes, &json_response(FILTERED_DELETE_ANSWER)).await;
+        let client = UnifiClient::new(controller.origin(), API_KEY, false)
+            .expect("a loopback URL must build a client");
+        let mut console = Scripted::terminal(&["y"]);
+        let mut reports = Vec::new();
+
+        let result = delete_vouchers_filtered(
+            &client,
+            Some(site_id),
+            A_FILTER.to_string(),
+            DeleteOptions::default(),
+            OutputFormat::Table,
+            &mut console,
+            |report| reports.push(report),
+        )
+        .await;
+
+        assert!(console.was_asked(), "the user must have been asked");
+
+        let deletions = controller
+            .requests()
+            .iter()
+            .map(ReceivedRequest::request_line)
+            .filter(|line| line.starts_with("DELETE "))
+            .map(str::to_string)
+            .collect();
+
+        ConfirmedRun {
+            result,
+            reports,
+            deletions,
+            collection,
+        }
+    }
+
+    /// The finding this answers: the `DELETE` carried the filter, so the
+    /// controller evaluated it a second time. A voucher that started to match
+    /// while the user read the table was deleted, and the user never saw it
+    /// or counted it. The vouchers the user confirmed are the vouchers the
+    /// command deletes, one `DELETE` for each id.
+    #[tokio::test]
+    async fn a_confirmed_filtered_delete_deletes_each_listed_voucher_by_id() {
+        let run = run_confirmed_delete([
+            json_response(ONE_DELETED),
+            json_response(ONE_DELETED),
+            json_response(ONE_DELETED),
+        ])
+        .await;
+
+        run.result
+            .as_ref()
+            .expect("the controller deleted every listed voucher");
+
+        let expected: Vec<String> = LISTED_IDS.iter().map(|id| run.deletion_of(id)).collect();
+        assert_eq!(
+            run.deletions, expected,
+            "the command must delete each listed voucher by its id, in list order"
+        );
+        assert!(
+            run.deletions.iter().all(|line| !line.contains("filter")),
+            "no deletion may carry the filter, got {:?}",
+            run.deletions
+        );
+        assert_eq!(
+            run.notes().last().copied(),
+            Some("Deleted 3 voucher(s)"),
+            "the closing note must count the listed vouchers, got {:?}",
+            run.notes()
+        );
+    }
+
+    /// One voucher that the controller cannot delete must not stop the
+    /// deletion of the others. The command names that voucher and fails, so
+    /// a script sees a non-zero exit status.
+    #[tokio::test]
+    async fn a_failed_deletion_still_deletes_the_other_vouchers_and_fails_the_command() {
+        let run = run_confirmed_delete([
+            json_response(ONE_DELETED),
+            json_response_with_status(NOT_FOUND_STATUS, VOUCHER_NOT_FOUND),
+            json_response(ONE_DELETED),
+        ])
+        .await;
+
+        let expected: Vec<String> = LISTED_IDS.iter().map(|id| run.deletion_of(id)).collect();
+        assert_eq!(
+            run.deletions, expected,
+            "a failure must not stop the deletion of the vouchers after it"
+        );
+        assert!(
+            run.result.is_err(),
+            "a deletion that failed for one voucher must fail the command"
+        );
+        assert!(
+            run.notes()
+                .iter()
+                .any(|note| note.contains(SECOND_CODE) && note.contains("voucher not found")),
+            "a note must name the voucher that was not deleted, and why, got {:?}",
+            run.notes()
+        );
+    }
+
+    /// The closing note of a partial deletion says how many of the listed
+    /// vouchers the controller deleted.
+    #[tokio::test]
+    async fn a_partial_deletion_says_how_many_of_the_listed_vouchers_it_deleted() {
+        let run = run_confirmed_delete([
+            json_response(ONE_DELETED),
+            json_response_with_status(NOT_FOUND_STATUS, VOUCHER_NOT_FOUND),
+            json_response(ONE_DELETED),
+        ])
+        .await;
+
+        assert_eq!(
+            run.notes().last().copied(),
+            Some("Deleted 2 of 3 voucher(s)"),
+            "the closing note must compare the deleted count with the listed count, got {:?}",
+            run.notes()
+        );
+    }
+
+    /// The controller answers each deletion with a count. A count other than
+    /// one for a voucher makes the total differ from the listed count, and
+    /// the notes say so and name that voucher.
+    #[tokio::test]
+    async fn a_count_that_differs_from_the_listed_vouchers_is_reported() {
+        let run = run_confirmed_delete([
+            json_response(ONE_DELETED),
+            json_response(NONE_DELETED),
+            json_response(ONE_DELETED),
+        ])
+        .await;
+
+        run.result
+            .as_ref()
+            .expect("every request succeeded, so the command succeeds");
+        assert!(
+            run.notes().iter().any(|note| note.contains(SECOND_CODE)),
+            "a note must name the voucher with the unexpected count, got {:?}",
+            run.notes()
+        );
+        assert_eq!(
+            run.notes().last().copied(),
+            Some("Deleted 2 of 3 voucher(s)"),
+            "the closing note must show that the total differs from the listed count, got {:?}",
+            run.notes()
         );
     }
 }
