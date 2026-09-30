@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::{
     client::UnifiClient,
     models::{Client, ClientAction, Page},
-    output::{print_output, render_page_listing, OutputFormat, PageListing},
+    output::{print_output, render_page_listing, OutputFormat, Report},
     site_helper::get_site_id_or_prompt,
 };
 
@@ -165,7 +165,7 @@ pub async fn handle_clients_command(
             filter,
         } => list_clients(client, site_id, limit, offset, filter, output_format)
             .await
-            .map(PageListing::print),
+            .map(Report::print),
         ClientsCommand::Get { client_id } => {
             get_client(client, site_id, client_id, output_format).await
         }
@@ -175,20 +175,21 @@ pub async fn handle_clients_command(
             data_usage_limit_mbytes,
             rx_rate_limit_kbps,
             tx_rate_limit_kbps,
-        } => {
-            authorize_guest(
-                client,
-                site_id,
-                client_id,
-                time_limit_minutes,
-                data_usage_limit_mbytes,
-                rx_rate_limit_kbps,
-                tx_rate_limit_kbps,
-            )
-            .await
-        }
+        } => authorize_guest(
+            client,
+            site_id,
+            client_id,
+            time_limit_minutes,
+            data_usage_limit_mbytes,
+            rx_rate_limit_kbps,
+            tx_rate_limit_kbps,
+        )
+        .await
+        .map(Report::print),
         ClientsCommand::UnauthorizeGuest { client_id } => {
-            unauthorize_guest(client, site_id, client_id).await
+            unauthorize_guest(client, site_id, client_id)
+                .await
+                .map(Report::print)
         }
     }
 }
@@ -219,7 +220,7 @@ async fn list_clients(
     offset: u64,
     filter: Option<String>,
     output_format: OutputFormat,
-) -> Result<PageListing> {
+) -> Result<Report> {
     let limit_str = limit.to_string();
     let offset_str = offset.to_string();
     let mut params: Vec<(&str, &dyn std::fmt::Display)> =
@@ -250,6 +251,26 @@ async fn get_client(
     Ok(())
 }
 
+/// Ask the controller to authorize guest access for a client.
+///
+/// # Arguments
+///
+/// * `client` - The controller client to send the request with.
+/// * `site_id` - The site the user named, if any.
+/// * `client_id` - The client to authorize.
+/// * `time_limit_minutes` - How long the access lasts, if it is limited.
+/// * `data_usage_limit_mbytes` - How much data the client can use, if it is
+///   limited.
+/// * `rx_rate_limit_kbps` - The download rate limit, if any.
+/// * `tx_rate_limit_kbps` - The upload rate limit, if any.
+///
+/// # Returns
+///
+/// The report that says the controller accepted the request.
+///
+/// # Errors
+///
+/// Returns an error if the site cannot be resolved, or if the request fails.
 async fn authorize_guest(
     client: &UnifiClient,
     site_id: Option<Uuid>,
@@ -258,7 +279,7 @@ async fn authorize_guest(
     data_usage_limit_mbytes: Option<u64>,
     rx_rate_limit_kbps: Option<u64>,
     tx_rate_limit_kbps: Option<u64>,
-) -> Result<()> {
+) -> Result<Report> {
     let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/clients/{}/actions", site_id, client_id);
     let action = ClientAction::AuthorizeGuestAccess {
@@ -269,34 +290,39 @@ async fn authorize_guest(
     };
 
     let _: serde_json::Value = client.post(&path, &action).await?;
-    #[expect(
-        clippy::print_stdout,
-        reason = "a status sentence on stdout; review R-20260930T002206Z moves it to stderr"
-    )]
-    {
-        println!("Guest access authorized successfully");
-    }
-    Ok(())
+    Ok(Report::of_document(
+        "Guest access authorized successfully".to_string(),
+    ))
 }
 
+/// Ask the controller to end the guest access of a client.
+///
+/// # Arguments
+///
+/// * `client` - The controller client to send the request with.
+/// * `site_id` - The site the user named, if any.
+/// * `client_id` - The client whose guest access ends.
+///
+/// # Returns
+///
+/// The report that says the controller accepted the request.
+///
+/// # Errors
+///
+/// Returns an error if the site cannot be resolved, or if the request fails.
 async fn unauthorize_guest(
     client: &UnifiClient,
     site_id: Option<Uuid>,
     client_id: Uuid,
-) -> Result<()> {
+) -> Result<Report> {
     let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/clients/{}/actions", site_id, client_id);
     let action = ClientAction::UnauthorizeGuestAccess;
 
     let _: serde_json::Value = client.post(&path, &action).await?;
-    #[expect(
-        clippy::print_stdout,
-        reason = "a status sentence on stdout; review R-20260930T002206Z moves it to stderr"
-    )]
-    {
-        println!("Guest access unauthorized successfully");
-    }
-    Ok(())
+    Ok(Report::of_document(
+        "Guest access unauthorized successfully".to_string(),
+    ))
 }
 
 #[cfg(test)]
@@ -622,7 +648,8 @@ mod listing_tests {
         .expect("the controller answered the listing");
 
         let notice = listing
-            .notice()
+            .notes()
+            .first()
             .expect("a page short of the stated total must say so");
         assert!(
             notice.contains(TOTAL),
@@ -631,6 +658,82 @@ mod listing_tests {
         assert!(
             notice.contains("--limit") && notice.contains("--offset"),
             "the note must say how to reach the rest, got: {notice}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod action_tests {
+    use super::*;
+    use crate::test_server::{empty_json, TestServer};
+
+    /// The API key a test hands the client. Nothing reads it back.
+    const API_KEY: &str = "an-api-key";
+
+    /// A client for the controller a test runs.
+    fn client_for(controller: &TestServer) -> UnifiClient {
+        UnifiClient::new(controller.origin(), API_KEY, false)
+            .expect("a loopback URL must build a client")
+    }
+
+    /// Guest authorization has no document to give. The sentence that says
+    /// the controller accepted it is a note, so it goes to standard error.
+    #[tokio::test]
+    async fn authorizing_a_guest_reports_on_standard_error_only() {
+        let controller = TestServer::replying(&empty_json()).await;
+
+        let report = authorize_guest(
+            &client_for(&controller),
+            Some(Uuid::new_v4()),
+            Uuid::new_v4(),
+            Some(60),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("the controller accepted the authorization");
+
+        assert_eq!(
+            report.document(),
+            None,
+            "an authorization must put nothing on standard output"
+        );
+        assert!(
+            report
+                .notes()
+                .iter()
+                .any(|note| note.contains("authorized successfully")),
+            "the note must say the guest is authorized, got {:?}",
+            report.notes()
+        );
+    }
+
+    /// The same rule for the end of guest access.
+    #[tokio::test]
+    async fn unauthorizing_a_guest_reports_on_standard_error_only() {
+        let controller = TestServer::replying(&empty_json()).await;
+
+        let report = unauthorize_guest(
+            &client_for(&controller),
+            Some(Uuid::new_v4()),
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("the controller accepted the end of guest access");
+
+        assert_eq!(
+            report.document(),
+            None,
+            "the end of guest access must put nothing on standard output"
+        );
+        assert!(
+            report
+                .notes()
+                .iter()
+                .any(|note| note.contains("unauthorized successfully")),
+            "the note must say the guest access ended, got {:?}",
+            report.notes()
         );
     }
 }

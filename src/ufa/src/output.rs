@@ -201,8 +201,116 @@ where
     Ok(())
 }
 
-/// What a list command shows: one page of a collection, and the note that
-/// says the page is not all of it.
+/// What a command shows: the document the user asked for, and the notes
+/// beside it.
+///
+/// Standard output carries the document and nothing else. `--output json` is
+/// asked for by somebody who reads the answer with a program, and a sentence
+/// on standard output is a line no such program parses. So every note goes to
+/// standard error, in both formats: the part of the collection a page left
+/// out, the collection that holds nothing, the action the controller accepted.
+///
+/// One type holds both halves, so one function decides where each half goes,
+/// and a test reads each half without a capture of the process streams.
+#[must_use = "a report that is never printed tells the user nothing"]
+pub struct Report {
+    /// The document, in the format the user asked for. `None` when the
+    /// command has no document to give.
+    document: Option<String>,
+    /// The notes, in the order the user reads them.
+    notes: Vec<String>,
+}
+
+impl Report {
+    /// A report that holds a document and no note.
+    ///
+    /// # Arguments
+    ///
+    /// * `document` - The rendered document, without a trailing newline.
+    ///
+    /// # Returns
+    ///
+    /// The report.
+    pub fn of_document(document: String) -> Self {
+        Self {
+            document: Some(document),
+            notes: Vec::new(),
+        }
+    }
+
+    /// The document this report prints on standard output.
+    ///
+    /// # Returns
+    ///
+    /// The document, or `None` when the command has no document to give.
+    pub fn document(&self) -> Option<&str> {
+        self.document.as_deref()
+    }
+
+    /// The notes this report prints on standard error.
+    ///
+    /// # Returns
+    ///
+    /// Every note, in the order the user reads them. The slice is empty when
+    /// the report has nothing to say beside its document.
+    pub fn notes(&self) -> &[String] {
+        &self.notes
+    }
+
+    /// Print the report: the document on standard output, each note on
+    /// standard error.
+    ///
+    /// Standard error carries the notes in both formats rather than in one, so
+    /// there is a single rule about where a note goes, and it is the stream
+    /// this crate already reports on -- the site it picked for the user, say.
+    #[allow(
+        clippy::print_stdout,
+        reason = "the document is what the user asked for; the notes beside it go to standard error"
+    )]
+    pub fn print(self) {
+        if let Some(document) = self.document() {
+            println!("{document}");
+        }
+
+        // After the document, not before it: a note is what the user reads
+        // last.
+        for note in self.notes() {
+            eprintln!("{note}");
+        }
+    }
+}
+
+/// Render a whole collection, one row per item, for a command that shows all
+/// of it at once.
+///
+/// # Arguments
+///
+/// * `rows` - The rows to render.
+/// * `format` - The output format the user asked for.
+///
+/// # Returns
+///
+/// The rendered collection. The report holds no document when the collection
+/// holds nothing.
+///
+/// # Errors
+///
+/// Returns an error if the rows cannot be serialized as JSON.
+pub fn render_collection<T>(rows: &[T], format: OutputFormat) -> Result<Report>
+where
+    T: Serialize + Tabled,
+{
+    if rows.is_empty() {
+        return Ok(Report {
+            document: None,
+            notes: Vec::new(),
+        });
+    }
+
+    Ok(Report::of_document(render_vec_table(rows, format)?))
+}
+
+/// Render one page of a collection for a list command.
 ///
 /// A list command asks for a single page on purpose -- `--limit` and
 /// `--offset` are its arguments -- so what comes back is often a slice of
@@ -211,48 +319,6 @@ where
 /// thing that tells the two apart, and it reads the same whichever collection
 /// was listed, so it is decided here instead of in each of the four commands
 /// that list one.
-#[must_use = "a listing that is never printed tells the user nothing"]
-pub struct PageListing {
-    /// The page itself, in the format the user asked for.
-    body: String,
-    /// What the page left out, when it left anything out.
-    notice: Option<String>,
-}
-
-impl PageListing {
-    /// What this listing says about the items it left out.
-    ///
-    /// # Returns
-    ///
-    /// The note, or `None` when the page holds the whole collection.
-    pub fn notice(&self) -> Option<&str> {
-        self.notice.as_deref()
-    }
-
-    /// Print the listing: the page on standard output, the note on standard
-    /// error.
-    ///
-    /// `--output json` is asked for by somebody who reads the answer with a
-    /// program, and a sentence on standard output is a line no such program
-    /// parses. Standard error carries the note in both formats rather than in
-    /// one, so there is a single rule about where a note goes, and it is the
-    /// stream this crate already reports on -- the site it picked for the
-    /// user, say.
-    #[allow(
-        clippy::print_stdout,
-        reason = "the page is the document the user asked for; the note beside it goes to standard error"
-    )]
-    pub fn print(self) {
-        println!("{}", self.body);
-
-        // After the page, not before it: the note is what the user reads last.
-        if let Some(notice) = self.notice() {
-            eprintln!("{notice}");
-        }
-    }
-}
-
-/// Render one page of a collection for a list command.
 ///
 /// # Arguments
 ///
@@ -266,12 +332,12 @@ impl PageListing {
 /// # Errors
 ///
 /// Returns an error if the page cannot be serialized as JSON.
-pub fn render_page_listing<T, R>(page: &Page<T>, format: OutputFormat) -> Result<PageListing>
+pub fn render_page_listing<T, R>(page: &Page<T>, format: OutputFormat) -> Result<Report>
 where
     T: Serialize,
     R: Serialize + Tabled + for<'a> From<&'a T>,
 {
-    let body = match format {
+    let document = match format {
         // The whole page, `totalCount` included: a program that reads this
         // wants the figure itself rather than a sentence about it.
         OutputFormat::Json => render_output(page, format)?,
@@ -281,9 +347,11 @@ where
         }
     };
 
-    Ok(PageListing {
-        body,
-        notice: truncation_notice(page.data.len(), page.total_count, page.offset),
+    Ok(Report {
+        document: Some(document),
+        notes: truncation_notice(page.data.len(), page.total_count, page.offset)
+            .into_iter()
+            .collect(),
     })
 }
 
@@ -561,33 +629,48 @@ mod tests {
         );
     }
 
+    /// The document of a report that must hold one.
+    ///
+    /// # Arguments
+    ///
+    /// * `report` - The report to read.
+    ///
+    /// # Returns
+    ///
+    /// The document the report prints on standard output.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the report holds no document.
+    fn document_of(report: &Report) -> &str {
+        report
+            .document()
+            .unwrap_or_else(|| panic!("the report must hold a document"))
+    }
+
     /// `--output json` is read by a program. The note is a sentence, so it
     /// goes nowhere near the document.
     #[test]
     fn a_json_listing_keeps_the_note_out_of_the_document() {
         let listing = render_page_listing::<Item, ItemRow>(&page_of(2, 100, 0), OutputFormat::Json)
             .expect("rendering a page must succeed");
+        let document = document_of(&listing);
 
-        let parsed: serde_json::Value =
-            serde_json::from_str(&listing.body).unwrap_or_else(|error| {
-                panic!(
-                    "--output json must produce JSON ({error}), got:\n{}",
-                    listing.body
-                )
-            });
+        let parsed: serde_json::Value = serde_json::from_str(document).unwrap_or_else(|error| {
+            panic!("--output json must produce JSON ({error}), got:\n{document}")
+        });
 
         assert_eq!(
             parsed["totalCount"], 100,
-            "the document must carry the figure itself, got:\n{}",
-            listing.body
+            "the document must carry the figure itself, got:\n{document}"
         );
         assert!(
-            listing.notice().is_some(),
+            !listing.notes().is_empty(),
             "two items of a hundred must still be reported as a partial listing"
         );
     }
 
-    /// The table is the body, and the note is not part of it: a run that
+    /// The table is the document, and the note is not part of it: a run that
     /// redirects the table to a file must not find a sentence in the middle of
     /// its rows.
     #[test]
@@ -595,20 +678,90 @@ mod tests {
         let listing =
             render_page_listing::<Item, ItemRow>(&page_of(2, 100, 0), OutputFormat::Table)
                 .expect("rendering a page must succeed");
+        let document = document_of(&listing);
 
         assert!(
-            listing.body.contains(TABLE_CORNER),
-            "the body must stay a table, got:\n{}",
-            listing.body
+            document.contains(TABLE_CORNER),
+            "the document must stay a table, got:\n{document}"
         );
         assert!(
-            !listing.body.contains("--limit"),
-            "the note belongs beside the table, not in it, got:\n{}",
-            listing.body
+            !document.contains("--limit"),
+            "the note belongs beside the table, not in it, got:\n{document}"
         );
         assert!(
-            listing.notice().is_some(),
+            !listing.notes().is_empty(),
             "two items of a hundred must be reported as a partial listing"
+        );
+    }
+
+    /// A program that reads `--output json` gets an array every time. A
+    /// collection with nothing in it is `[]`, so `jq '.[]'` reads no items
+    /// rather than failing on a missing document.
+    #[test]
+    fn an_empty_collection_is_an_empty_array_in_json() {
+        let report = render_collection::<ItemRow>(&[], OutputFormat::Json)
+            .expect("rendering an empty collection must succeed");
+
+        let document = report
+            .document()
+            .unwrap_or_else(|| panic!("--output json must answer with a document, got none"));
+        let parsed: serde_json::Value = serde_json::from_str(document).unwrap_or_else(|error| {
+            panic!("--output json must produce JSON ({error}), got:\n{document}")
+        });
+
+        assert_eq!(
+            parsed,
+            json!([]),
+            "an empty collection must be an empty array, got:\n{document}"
+        );
+    }
+
+    /// A table of headings and no rows tells a person nothing that a note
+    /// cannot say better, so an empty collection draws no table.
+    #[test]
+    fn an_empty_collection_draws_no_table() {
+        let report = render_collection::<ItemRow>(&[], OutputFormat::Table)
+            .expect("rendering an empty collection must succeed");
+
+        assert_eq!(
+            report.document(),
+            None,
+            "an empty collection must not draw a table of headings alone"
+        );
+    }
+
+    /// A collection with items in it renders them all, in both formats.
+    #[test]
+    fn a_collection_renders_every_row() {
+        let rows = vec![
+            ItemRow {
+                name: "ap-lr".to_string(),
+            },
+            ItemRow {
+                name: "switch-8".to_string(),
+            },
+        ];
+
+        let json = render_collection(&rows, OutputFormat::Json)
+            .expect("rendering a collection must succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(document_of(&json)).expect("--output json must produce JSON");
+        assert_eq!(
+            parsed,
+            json!([{ "name": "ap-lr" }, { "name": "switch-8" }]),
+            "every row must reach the document"
+        );
+
+        let table = render_collection(&rows, OutputFormat::Table)
+            .expect("rendering a collection must succeed");
+        let table = document_of(&table);
+        assert!(
+            table.contains(TABLE_CORNER),
+            "the default rendering must be a table, got:\n{table}"
+        );
+        assert!(
+            table.contains("ap-lr") && table.contains("switch-8"),
+            "every row must reach the table, got:\n{table}"
         );
     }
 }

@@ -9,8 +9,7 @@ use crate::{
     device_helper::get_device_id_or_prompt,
     models::{Device, DeviceAction, DeviceDetails, DeviceStatistics, Page, PortAction},
     output::{
-        print_output, print_vec_table, render_page_listing, render_vec_table, OutputFormat,
-        PageListing,
+        print_output, print_vec_table, render_collection, render_page_listing, OutputFormat, Report,
     },
     pagination::fetch_all,
     site_helper::get_site_id_or_prompt,
@@ -252,7 +251,7 @@ pub async fn handle_devices_command(
         DevicesCommand::List { limit, offset } => {
             list_devices(client, site_id, limit, offset, output_format)
                 .await
-                .map(PageListing::print)
+                .map(Report::print)
         }
         DevicesCommand::Get { device_id } => {
             get_device(client, site_id, device_id, output_format).await
@@ -260,11 +259,15 @@ pub async fn handle_devices_command(
         DevicesCommand::Stats { device_id, all } => {
             get_device_stats(client, site_id, device_id, all, output_format).await
         }
-        DevicesCommand::Restart { device_id } => restart_device(client, site_id, device_id).await,
+        DevicesCommand::Restart { device_id } => restart_device(client, site_id, device_id)
+            .await
+            .map(Report::print),
         DevicesCommand::PowerCyclePort {
             device_id,
             port_idx,
-        } => power_cycle_port(client, site_id, device_id, port_idx).await,
+        } => power_cycle_port(client, site_id, device_id, port_idx)
+            .await
+            .map(Report::print),
     }
 }
 
@@ -292,7 +295,7 @@ async fn list_devices(
     limit: u32,
     offset: u64,
     output_format: OutputFormat,
-) -> Result<PageListing> {
+) -> Result<Report> {
     let limit_str = limit.to_string();
     let offset_str = offset.to_string();
     let params: Vec<(&str, &dyn std::fmt::Display)> =
@@ -333,7 +336,9 @@ async fn get_device_stats(
 
     if all {
         // Get stats for all devices
-        get_all_device_stats(client, site_id, output_format).await
+        get_all_device_stats(client, site_id, output_format)
+            .await
+            .map(Report::print)
     } else if let Some(device_id) = device_id {
         // Get stats for specific device
         get_single_device_stats(client, site_id, device_id, output_format).await
@@ -366,22 +371,30 @@ async fn get_single_device_stats(
     Ok(())
 }
 
+/// Fetch and render the statistics of every device on a site.
+///
+/// # Arguments
+///
+/// * `client` - The controller client to fetch the statistics with.
+/// * `site_id` - The site whose devices to report on.
+/// * `output_format` - The output format the user asked for.
+///
+/// # Returns
+///
+/// The rendered statistics, ready to print.
+///
+/// # Errors
+///
+/// Returns an error if the device list cannot be fetched, or if the answer
+/// cannot be rendered. A failed statistics request for one device is not an
+/// error: its row says so instead.
 async fn get_all_device_stats(
     client: &UnifiClient,
     site_id: Uuid,
     output_format: OutputFormat,
-) -> Result<()> {
+) -> Result<Report> {
     let devices_path = format!("sites/{}/devices", site_id);
     let devices: Vec<Device> = fetch_all(client, &devices_path).await?;
-
-    #[expect(
-        clippy::print_stdout,
-        reason = "a note on stdout; review R-20260930T002206Z moves it to stderr"
-    )]
-    if devices.is_empty() {
-        println!("No devices found on this site.");
-        return Ok(());
-    }
 
     let statistics = fetch_device_statistics(&devices, |device| {
         let stats_path = format!("sites/{}/devices/{}/statistics/latest", site_id, device.id);
@@ -403,15 +416,7 @@ async fn get_all_device_stats(
         })
         .collect();
 
-    #[allow(
-        clippy::print_stdout,
-        reason = "the statistics are the document the user asked for"
-    )]
-    {
-        println!("{}", render_all_device_stats(&stats_rows, output_format)?);
-    }
-
-    Ok(())
+    all_device_stats_report(&stats_rows, output_format)
 }
 
 /// Upper bound on statistics requests in flight at once.
@@ -460,44 +465,77 @@ where
 ///
 /// # Returns
 ///
-/// The rendered text, without a trailing newline.
+/// The rendered statistics, together with the note for a site that holds no
+/// devices.
 ///
 /// # Errors
 ///
 /// Returns an error if the rows cannot be serialized.
-fn render_all_device_stats(
+fn all_device_stats_report(
     rows: &[DeviceStatsRowWithName],
     format: OutputFormat,
-) -> Result<String> {
-    render_vec_table(rows, format)
+) -> Result<Report> {
+    if rows.is_empty() {
+        return Ok(Report::of_document(
+            "No devices found on this site.".to_string(),
+        ));
+    }
+
+    render_collection(rows, format)
 }
 
+/// Ask the controller to restart a device.
+///
+/// # Arguments
+///
+/// * `client` - The controller client to send the request with.
+/// * `site_id` - The site the user named, if any.
+/// * `device_id` - The device to restart.
+///
+/// # Returns
+///
+/// The report that says the controller accepted the request.
+///
+/// # Errors
+///
+/// Returns an error if the site cannot be resolved, or if the request fails.
 async fn restart_device(
     client: &UnifiClient,
     site_id: Option<Uuid>,
     device_id: Uuid,
-) -> Result<()> {
+) -> Result<Report> {
     let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/devices/{}/actions", site_id, device_id);
     let action = DeviceAction::Restart;
 
     let _: serde_json::Value = client.post(&path, &action).await?;
-    #[expect(
-        clippy::print_stdout,
-        reason = "a status sentence on stdout; review R-20260930T002206Z moves it to stderr"
-    )]
-    {
-        println!("Device restart initiated successfully");
-    }
-    Ok(())
+    Ok(Report::of_document(
+        "Device restart initiated successfully".to_string(),
+    ))
 }
 
+/// Ask the controller to power cycle one port of a device.
+///
+/// # Arguments
+///
+/// * `client` - The controller client to send the request with.
+/// * `site_id` - The site the user named, if any.
+/// * `device_id` - The device that holds the port.
+/// * `port_idx` - The index of the port to power cycle.
+///
+/// # Returns
+///
+/// The report that says the controller accepted the request.
+///
+/// # Errors
+///
+/// Returns an error if the site cannot be resolved, or if the request fails.
 async fn power_cycle_port(
     client: &UnifiClient,
     site_id: Option<Uuid>,
     device_id: Uuid,
     port_idx: u32,
-) -> Result<()> {
+) -> Result<Report> {
     let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!(
         "sites/{}/devices/{}/interfaces/ports/{}/actions",
@@ -506,14 +544,9 @@ async fn power_cycle_port(
     let action = PortAction::PowerCycle;
 
     let _: serde_json::Value = client.post(&path, &action).await?;
-    #[expect(
-        clippy::print_stdout,
-        reason = "a status sentence on stdout; review R-20260930T002206Z moves it to stderr"
-    )]
-    {
-        println!("Port power cycle initiated successfully");
-    }
-    Ok(())
+    Ok(Report::of_document(
+        "Port power cycle initiated successfully".to_string(),
+    ))
 }
 
 #[cfg(test)]
@@ -562,9 +595,10 @@ mod tests {
     fn all_device_stats_honour_the_json_output_format() {
         let rows = rows_for(&["ap-lr", "switch-8"]);
 
-        let rendered = render_all_device_stats(&rows, OutputFormat::Json)
+        let report = all_device_stats_report(&rows, OutputFormat::Json)
             .expect("rendering the all-devices stats must succeed");
-        let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap_or_else(|error| {
+        let rendered = document_of(&report);
+        let parsed: serde_json::Value = serde_json::from_str(rendered).unwrap_or_else(|error| {
             panic!("--output json must produce JSON ({error}), got:\n{rendered}")
         });
 
@@ -787,8 +821,9 @@ mod tests {
     fn all_device_stats_default_to_a_table() {
         let rows = rows_for(&["ap-lr"]);
 
-        let rendered = render_all_device_stats(&rows, OutputFormat::Table)
+        let report = all_device_stats_report(&rows, OutputFormat::Table)
             .expect("rendering the all-devices stats must succeed");
+        let rendered = document_of(&report);
 
         assert!(
             rendered.contains(TABLE_CORNER),
@@ -797,6 +832,149 @@ mod tests {
         assert!(
             rendered.contains("ap-lr"),
             "the table must name the device, got:\n{rendered}"
+        );
+    }
+
+    /// The document of a report that must hold one.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the report holds no document.
+    fn document_of(report: &Report) -> &str {
+        report
+            .document()
+            .unwrap_or_else(|| panic!("the report must hold a document"))
+    }
+
+    /// A table of headings and no rows tells a person nothing. The sentence
+    /// says it instead, on standard error, so a redirected table stays empty
+    /// rather than holding a sentence.
+    #[test]
+    fn all_device_stats_of_an_empty_site_draw_no_table_and_say_so() {
+        let report = all_device_stats_report(&[], OutputFormat::Table)
+            .expect("rendering the all-devices stats must succeed");
+
+        assert_eq!(
+            report.document(),
+            None,
+            "a site with no devices has no table to draw"
+        );
+        assert!(
+            report
+                .notes()
+                .iter()
+                .any(|note| note.contains("No devices")),
+            "the note must say the site holds no devices, got {:?}",
+            report.notes()
+        );
+    }
+}
+
+#[cfg(test)]
+mod action_tests {
+    use super::*;
+    use crate::test_server::{empty_json, json_response, TestServer};
+
+    /// The API key a test hands the client. Nothing reads it back.
+    const API_KEY: &str = "an-api-key";
+
+    /// The device collection of a site that holds no devices.
+    const NO_DEVICES: &str =
+        r#"{ "offset": 0, "limit": 200, "count": 0, "totalCount": 0, "data": [] }"#;
+
+    /// A client for the controller a test runs.
+    fn client_for(controller: &TestServer) -> UnifiClient {
+        UnifiClient::new(controller.origin(), API_KEY, false)
+            .expect("a loopback URL must build a client")
+    }
+
+    /// `devices stats --all --output json` on a site with no devices is still
+    /// read by a program. The answer is `[]`, so `jq '.[]'` reads no devices
+    /// rather than failing on a sentence, and the sentence goes to standard
+    /// error. This runs the command against a controller, so the site with no
+    /// devices takes the same path as a real run.
+    #[tokio::test]
+    async fn stats_for_every_device_of_an_empty_site_answer_json_with_an_empty_array() {
+        let controller = TestServer::replying(&json_response(NO_DEVICES)).await;
+
+        let report =
+            get_all_device_stats(&client_for(&controller), Uuid::new_v4(), OutputFormat::Json)
+                .await
+                .expect("the controller answered the device list");
+
+        let document = report
+            .document()
+            .unwrap_or_else(|| panic!("--output json must answer with a document, got none"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(document).ok(),
+            Some(serde_json::json!([])),
+            "a site with no devices must answer with an empty array, got:\n{document}"
+        );
+        assert!(
+            report
+                .notes()
+                .iter()
+                .any(|note| note.contains("No devices")),
+            "the note must say the site holds no devices, got {:?}",
+            report.notes()
+        );
+    }
+
+    /// A restart has no document to give. The sentence that says the
+    /// controller accepted it is a note, so it goes to standard error.
+    #[tokio::test]
+    async fn a_restart_reports_on_standard_error_only() {
+        let controller = TestServer::replying(&empty_json()).await;
+
+        let report = restart_device(
+            &client_for(&controller),
+            Some(Uuid::new_v4()),
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("the controller accepted the restart");
+
+        assert_eq!(
+            report.document(),
+            None,
+            "a restart must put nothing on standard output"
+        );
+        assert!(
+            report
+                .notes()
+                .iter()
+                .any(|note| note.contains("restart initiated")),
+            "the note must say the restart started, got {:?}",
+            report.notes()
+        );
+    }
+
+    /// The same rule for a port power cycle.
+    #[tokio::test]
+    async fn a_port_power_cycle_reports_on_standard_error_only() {
+        let controller = TestServer::replying(&empty_json()).await;
+
+        let report = power_cycle_port(
+            &client_for(&controller),
+            Some(Uuid::new_v4()),
+            Uuid::new_v4(),
+            3,
+        )
+        .await
+        .expect("the controller accepted the power cycle");
+
+        assert_eq!(
+            report.document(),
+            None,
+            "a power cycle must put nothing on standard output"
+        );
+        assert!(
+            report
+                .notes()
+                .iter()
+                .any(|note| note.contains("power cycle initiated")),
+            "the note must say the power cycle started, got {:?}",
+            report.notes()
         );
     }
 }
@@ -840,7 +1018,8 @@ mod listing_tests {
             .expect("the controller answered the listing");
 
         let notice = listing
-            .notice()
+            .notes()
+            .first()
             .expect("a page short of the stated total must say so");
         assert!(
             notice.contains(TOTAL),

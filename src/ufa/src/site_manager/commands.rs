@@ -1,4 +1,4 @@
-use crate::output::{print_output, render_output, render_vec_table, OutputFormat};
+use crate::output::{render_output, render_vec_table, OutputFormat, Report};
 use crate::site_manager::models::Host;
 use crate::site_manager::utils::CLOUD_HOST_ID_DISPLAY_CHARS;
 use crate::site_manager::SiteManagerClient;
@@ -117,54 +117,74 @@ pub async fn handle_cloud_command(
     match command {
         CloudCommand::Hosts => {
             let hosts = client.get_hosts().await?;
-
-            #[expect(
-                clippy::print_stdout,
-                reason = "a note on stdout; review R-20260930T002206Z moves it to stderr"
-            )]
-            if hosts.is_empty() {
-                println!("No cloud-managed hosts found.");
-                return Ok(());
-            }
-
-            #[allow(
-                clippy::print_stdout,
-                reason = "the hosts are the document the user asked for"
-            )]
-            {
-                println!("{}", render_hosts(&hosts, output_format)?);
-            }
-
-            #[expect(
-                clippy::print_stdout,
-                reason = "a note and a hint on stdout; review R-20260930T002206Z moves them to stderr"
-            )]
-            if matches!(output_format, OutputFormat::Table) {
-                println!("\nTotal hosts: {}", hosts.len());
-                println!("\nTo get details for a specific host, use: ufa cloud host <id>");
-            }
+            hosts_report(&hosts, output_format)?.print();
         }
 
         CloudCommand::Host { id } => {
             let host = client.get_host(&id).await?;
-
-            print_output(&host, output_format)?;
-
-            #[expect(
-                clippy::print_stdout,
-                reason = "a hint on stdout; review R-20260930T002206Z moves it to stderr"
-            )]
-            if matches!(output_format, OutputFormat::Table) {
-                println!("\nCloud Console URL:");
-                println!(
-                    "https://unifi.ui.com/consoles/{}/network/default/dashboard",
-                    host.id
-                );
-            }
+            host_report(&host, output_format)?.print();
         }
     }
 
     Ok(())
+}
+
+/// The report of `ufa cloud hosts`.
+///
+/// # Arguments
+///
+/// * `hosts` - Every host the account holds.
+/// * `format` - The output format the user asked for.
+///
+/// # Returns
+///
+/// The rendered hosts, together with the notes a person reads beside them.
+///
+/// # Errors
+///
+/// Returns an error if the hosts cannot be serialized.
+fn hosts_report(hosts: &[Host], format: OutputFormat) -> Result<Report> {
+    if hosts.is_empty() {
+        return Ok(Report::of_document(
+            "No cloud-managed hosts found.".to_string(),
+        ));
+    }
+
+    let mut document = render_hosts(hosts, format)?;
+    if matches!(format, OutputFormat::Table) {
+        document.push_str(&format!(
+            "\n\nTotal hosts: {}\n\nTo get details for a specific host, use: ufa cloud host <id>",
+            hosts.len()
+        ));
+    }
+
+    Ok(Report::of_document(document))
+}
+
+/// The report of `ufa cloud host <id>`.
+///
+/// # Arguments
+///
+/// * `host` - The host the user named.
+/// * `format` - The output format the user asked for.
+///
+/// # Returns
+///
+/// The rendered host, together with the notes a person reads beside it.
+///
+/// # Errors
+///
+/// Returns an error if the host cannot be serialized.
+fn host_report(host: &Host, format: OutputFormat) -> Result<Report> {
+    let mut document = render_output(host, format)?;
+    if matches!(format, OutputFormat::Table) {
+        document.push_str(&format!(
+            "\n\nCloud Console URL:\nhttps://unifi.ui.com/consoles/{}/network/default/dashboard",
+            host.id
+        ));
+    }
+
+    Ok(Report::of_document(document))
 }
 
 #[cfg(test)]
@@ -306,6 +326,127 @@ mod tests {
         assert_eq!(
             parsed[0]["isBlocked"], false,
             "--output json must keep every field, got:\n{rendered}"
+        );
+    }
+
+    /// What a report says on standard error, one line for each note.
+    fn stderr_of(report: &Report) -> String {
+        report.notes().join("\n")
+    }
+
+    /// The finding this answers: `ufa cloud hosts --output json` on an
+    /// account with no hosts printed a sentence in place of `[]`, so
+    /// `jq -r '.[] | .id'` failed where it had nothing to read.
+    #[test]
+    fn an_account_with_no_hosts_answers_json_with_an_empty_array() {
+        let report =
+            hosts_report(&[], OutputFormat::Json).expect("rendering the host listing must succeed");
+
+        let document = report
+            .document()
+            .unwrap_or_else(|| panic!("--output json must answer with a document, got none"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(document).ok(),
+            Some(serde_json::json!([])),
+            "an account with no hosts must answer with an empty array, got:\n{document}"
+        );
+        assert!(
+            stderr_of(&report).contains("No cloud-managed hosts"),
+            "the note must say the account holds no hosts, got:\n{}",
+            stderr_of(&report)
+        );
+    }
+
+    /// A table of headings and no rows tells a person nothing. The sentence
+    /// says it instead, on standard error, so a redirected table stays empty
+    /// rather than holding a sentence.
+    #[test]
+    fn an_account_with_no_hosts_draws_no_table_and_says_so() {
+        let report = hosts_report(&[], OutputFormat::Table)
+            .expect("rendering the host listing must succeed");
+
+        assert_eq!(
+            report.document(),
+            None,
+            "an account with no hosts has no table to draw"
+        );
+        assert!(
+            stderr_of(&report).contains("No cloud-managed hosts"),
+            "the note must say the account holds no hosts, got:\n{}",
+            stderr_of(&report)
+        );
+    }
+
+    /// The count and the hint under the table are for a person. They go to
+    /// standard error, so a table redirected to a file holds only the table.
+    #[test]
+    fn the_host_count_and_the_hint_stay_out_of_the_table() {
+        let report = hosts_report(&[test_host("udm-pro")], OutputFormat::Table)
+            .expect("rendering the host listing must succeed");
+
+        let document = report
+            .document()
+            .unwrap_or_else(|| panic!("a listing of one host must draw a table, got none"));
+        assert!(
+            !document.contains("Total hosts") && !document.contains("ufa cloud host <id>"),
+            "the count and the hint belong beside the table, not in it, got:\n{document}"
+        );
+
+        let stderr = stderr_of(&report);
+        assert!(
+            stderr.contains("Total hosts: 1"),
+            "the note must count the hosts, got:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("ufa cloud host <id>"),
+            "the hint must name the command for one host, got:\n{stderr}"
+        );
+    }
+
+    /// `--output json` is read by a program, and a count is a sentence the
+    /// program does not need: the array holds it already.
+    #[test]
+    fn the_json_host_listing_carries_no_note() {
+        let report = hosts_report(&[test_host("udm-pro")], OutputFormat::Json)
+            .expect("rendering the host listing must succeed");
+
+        let document = report
+            .document()
+            .unwrap_or_else(|| panic!("--output json must answer with a document, got none"));
+        assert!(
+            serde_json::from_str::<serde_json::Value>(document).is_ok(),
+            "--output json must produce JSON, got:\n{document}"
+        );
+        assert!(
+            report.notes().is_empty(),
+            "a JSON listing of hosts needs no note, got:\n{}",
+            stderr_of(&report)
+        );
+    }
+
+    /// The dashboard URL of a host is a hint for a person, so it goes to
+    /// standard error and the table holds only the host.
+    #[test]
+    fn the_console_url_of_a_host_stays_out_of_its_table() {
+        let host = test_host("udm-pro");
+
+        let report =
+            host_report(&host, OutputFormat::Table).expect("rendering one host must succeed");
+
+        let document = report
+            .document()
+            .unwrap_or_else(|| panic!("one host must draw a table, got none"));
+        assert!(
+            !document.contains("unifi.ui.com/consoles"),
+            "the dashboard URL belongs beside the table, not in it, got:\n{document}"
+        );
+        assert!(
+            stderr_of(&report).contains(&format!(
+                "https://unifi.ui.com/consoles/{}/network/default/dashboard",
+                host.id
+            )),
+            "the note must give the dashboard URL of the host, got:\n{}",
+            stderr_of(&report)
         );
     }
 }

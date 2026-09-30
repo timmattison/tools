@@ -6,7 +6,9 @@ use uuid::Uuid;
 use crate::{
     client::UnifiClient,
     models::{Page, Voucher, VoucherCreateRequest, VoucherCreateResponse, VoucherDeletionResults},
-    output::{print_output, print_vec_table, render_page_listing, OutputFormat, PageListing},
+    output::{
+        print_output, print_vec_table, render_collection, render_page_listing, OutputFormat, Report,
+    },
     pagination::fetch_all_matching,
     prompt::{self, Approval, Console},
     site_helper::get_site_id_or_prompt,
@@ -140,7 +142,7 @@ pub async fn handle_vouchers_command(
             filter,
         } => list_vouchers(client, site_id, limit, offset, filter, output_format)
             .await
-            .map(PageListing::print),
+            .map(Report::print),
         VouchersCommand::Get { voucher_id } => {
             get_voucher(client, site_id, voucher_id, output_format).await
         }
@@ -164,7 +166,9 @@ pub async fn handle_vouchers_command(
             };
             create_vouchers(client, site_id, request, output_format).await
         }
-        VouchersCommand::Delete { voucher_id } => delete_voucher(client, site_id, voucher_id).await,
+        VouchersCommand::Delete { voucher_id } => delete_voucher(client, site_id, voucher_id)
+            .await
+            .map(Report::print),
         VouchersCommand::DeleteFiltered {
             filter,
             yes,
@@ -174,7 +178,16 @@ pub async fn handle_vouchers_command(
                 assume_yes: yes,
                 dry_run,
             };
-            delete_vouchers_filtered(client, site_id, filter, options, output_format).await
+            delete_vouchers_filtered(
+                client,
+                site_id,
+                filter,
+                options,
+                output_format,
+                &mut prompt::Stdio,
+                Report::print,
+            )
+            .await
         }
     }
 }
@@ -205,7 +218,7 @@ async fn list_vouchers(
     offset: u64,
     filter: Option<String>,
     output_format: OutputFormat,
-) -> Result<PageListing> {
+) -> Result<Report> {
     let limit_str = limit.to_string();
     let offset_str = offset.to_string();
     let mut params: Vec<(&str, &dyn std::fmt::Display)> =
@@ -260,23 +273,34 @@ async fn create_vouchers(
     Ok(())
 }
 
+/// Delete one voucher by its id.
+///
+/// # Arguments
+///
+/// * `client` - The controller client to send the request with.
+/// * `site_id` - The site the user named, if any.
+/// * `voucher_id` - The voucher to delete.
+///
+/// # Returns
+///
+/// The report that says how many vouchers the controller deleted.
+///
+/// # Errors
+///
+/// Returns an error if the site cannot be resolved, or if the request fails.
 async fn delete_voucher(
     client: &UnifiClient,
     site_id: Option<Uuid>,
     voucher_id: Uuid,
-) -> Result<()> {
+) -> Result<Report> {
     let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/hotspot/vouchers/{}", site_id, voucher_id);
     let result: VoucherDeletionResults = client.delete(&path).await?;
 
-    #[expect(
-        clippy::print_stdout,
-        reason = "a status sentence on stdout; review R-20260930T002206Z moves it to stderr"
-    )]
-    {
-        println!("Deleted {} voucher(s)", result.vouchers_deleted);
-    }
-    Ok(())
+    Ok(Report::of_document(format!(
+        "Deleted {} voucher(s)",
+        result.vouchers_deleted
+    )))
 }
 
 /// How much a filtered deletion is allowed to do on its own.
@@ -354,12 +378,34 @@ where
 /// evaluated by the controller: the only way to know what a filter really
 /// selects is to look at what came back, and by the time the API has answered
 /// a `DELETE` it is too late.
+///
+/// The command shows two reports, and the question comes between them: the
+/// matches, and then what the deletion did. `show` receives each report when
+/// the user reads it, so a test sees both without a capture of the process
+/// streams.
+///
+/// # Arguments
+///
+/// * `client` - The controller client to send the requests with.
+/// * `site_id` - The site the user named, if any.
+/// * `filter` - The API's filter expression.
+/// * `options` - The `--yes` / `--dry-run` flags.
+/// * `output_format` - The output format the user asked for.
+/// * `console` - Where the confirmation is put to the user.
+/// * `show` - Receives each report, in the order the user reads them.
+///
+/// # Errors
+///
+/// Returns an error if the site cannot be resolved, if a request fails, if
+/// the confirmation cannot be obtained, or if the matches cannot be rendered.
 async fn delete_vouchers_filtered(
     client: &UnifiClient,
     site_id: Option<Uuid>,
     filter: String,
     options: DeleteOptions,
     output_format: OutputFormat,
+    console: &mut impl Console,
+    mut show: impl FnMut(Report),
 ) -> Result<()> {
     let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/hotspot/vouchers", site_id);
@@ -368,37 +414,42 @@ async fn delete_vouchers_filtered(
         .await
         .context("Failed to list the vouchers the filter matches")?;
 
-    if !matches.is_empty() {
-        let rows: Vec<VoucherRow> = matches.iter().map(VoucherRow::from).collect();
-        print_vec_table(&rows, output_format)?;
-    }
+    let rows: Vec<VoucherRow> = matches.iter().map(VoucherRow::from).collect();
+    show(render_collection(&rows, output_format)?);
 
     let params: Vec<(&str, &dyn std::fmt::Display)> = vec![("filter", &filter)];
-    let outcome = confirm_then_delete(matches.len(), options, &mut prompt::Stdio, || async {
+    let outcome = confirm_then_delete(matches.len(), options, console, || async {
         let result: VoucherDeletionResults = client.delete_with_params(&path, &params).await?;
         Ok(result.vouchers_deleted)
     })
     .await?;
 
-    #[expect(
-        clippy::print_stdout,
-        reason = "four notes on stdout, one for each outcome; review R-20260930T002206Z moves them to stderr"
-    )]
-    match outcome {
-        DeletionOutcome::NoMatches => {
-            println!("No vouchers match that filter; nothing to delete.");
-        }
-        DeletionOutcome::Listed => {
-            println!(
-                "Dry run: {} voucher(s) would be deleted. Re-run without --dry-run to delete them.",
-                matches.len()
-            );
-        }
-        DeletionOutcome::Aborted => println!("Aborted; no vouchers were deleted."),
-        DeletionOutcome::Deleted(deleted) => println!("Deleted {deleted} voucher(s)"),
-    }
+    show(outcome_report(outcome, matches.len()));
 
     Ok(())
+}
+
+/// The report that says what a filtered deletion did.
+///
+/// # Arguments
+///
+/// * `outcome` - What the deletion did.
+/// * `match_count` - How many vouchers the filter matched.
+///
+/// # Returns
+///
+/// The report of the outcome.
+fn outcome_report(outcome: DeletionOutcome, match_count: usize) -> Report {
+    let sentence = match outcome {
+        DeletionOutcome::NoMatches => "No vouchers match that filter; nothing to delete.".to_string(),
+        DeletionOutcome::Listed => format!(
+            "Dry run: {match_count} voucher(s) would be deleted. Re-run without --dry-run to delete them."
+        ),
+        DeletionOutcome::Aborted => "Aborted; no vouchers were deleted.".to_string(),
+        DeletionOutcome::Deleted(deleted) => format!("Deleted {deleted} voucher(s)"),
+    };
+
+    Report::of_document(sentence)
 }
 
 #[cfg(test)]
@@ -554,7 +605,7 @@ mod deletion_tests {
         let site_id = Uuid::new_v4();
         let voucher_id = Uuid::new_v4();
 
-        delete_voucher(&client, Some(site_id), voucher_id)
+        let _report = delete_voucher(&client, Some(site_id), voucher_id)
             .await
             .expect("the controller answered the deletion");
 
@@ -594,6 +645,203 @@ mod deletion_tests {
         assert_eq!(outcome, DeletionOutcome::Listed);
         assert!(!reached.get(), "a dry run must not delete anything");
         assert!(!console.was_asked(), "a dry run has nothing to confirm");
+    }
+
+    /// A voucher deleted by id has no document to give. The count the
+    /// controller answered with is a note, so it goes to standard error.
+    #[tokio::test]
+    async fn deleting_one_voucher_reports_on_standard_error_only() {
+        let controller = TestServer::replying(&json_response(ONE_DELETED)).await;
+        let client = UnifiClient::new(controller.origin(), API_KEY, false)
+            .expect("a loopback URL must build a client");
+
+        let report = delete_voucher(&client, Some(Uuid::new_v4()), Uuid::new_v4())
+            .await
+            .expect("the controller answered the deletion");
+
+        assert_eq!(
+            report.document(),
+            None,
+            "a deletion by id must put nothing on standard output"
+        );
+        assert!(
+            report
+                .notes()
+                .iter()
+                .any(|note| note.contains("Deleted 1 voucher(s)")),
+            "the note must say how many vouchers the controller deleted, got {:?}",
+            report.notes()
+        );
+    }
+
+    /// Every outcome of a filtered deletion is a sentence for a person. Each
+    /// one is a note, and none of them is part of the document, so the list
+    /// of matches under `--output json` stays one document.
+    #[test]
+    fn every_deletion_outcome_is_a_note_and_not_part_of_the_document() {
+        let deleted = u64::try_from(MATCHES).unwrap();
+
+        for (outcome, sentence) in [
+            (DeletionOutcome::NoMatches, "No vouchers match that filter"),
+            (
+                DeletionOutcome::Listed,
+                "Dry run: 7 voucher(s) would be deleted",
+            ),
+            (
+                DeletionOutcome::Aborted,
+                "Aborted; no vouchers were deleted",
+            ),
+            (DeletionOutcome::Deleted(deleted), "Deleted 7 voucher(s)"),
+        ] {
+            let label = format!("{outcome:?}");
+            let report = outcome_report(outcome, MATCHES);
+
+            assert_eq!(
+                report.document(),
+                None,
+                "the {label} outcome must put nothing on standard output"
+            );
+            assert!(
+                report.notes().iter().any(|note| note.contains(sentence)),
+                "the {label} outcome must say {sentence:?}, got {:?}",
+                report.notes()
+            );
+        }
+    }
+
+    /// One voucher, and the whole of what the filter matches.
+    const ONE_MATCHING_VOUCHER: &str = r#"{
+        "offset": 0, "limit": 200, "count": 1, "totalCount": 1,
+        "data": [
+            {
+                "id": "00000000-0000-0000-0000-000000000005",
+                "createdAt": "2026-07-21T00:00:00Z",
+                "name": "lobby",
+                "code": "1234567890",
+                "authorizedGuestCount": 0,
+                "expired": true,
+                "timeLimitMinutes": 60
+            }
+        ]
+    }"#;
+
+    /// A filter that matches no voucher at all.
+    const NO_MATCHING_VOUCHERS: &str =
+        r#"{ "offset": 0, "limit": 200, "count": 0, "totalCount": 0, "data": [] }"#;
+
+    /// The filter a test hands the command. The pretend controller does not
+    /// read it.
+    const A_FILTER: &str = "expired.eq(true)";
+
+    /// Run `delete-filtered` against a controller that answers every request
+    /// with `page`.
+    ///
+    /// # Arguments
+    ///
+    /// * `page` - The JSON document the controller answers with.
+    /// * `options` - The `--yes` / `--dry-run` flags.
+    /// * `format` - The output format the user asked for.
+    ///
+    /// # Returns
+    ///
+    /// Every report the command showed, in the order the user reads them.
+    async fn run_delete_filtered(
+        page: &str,
+        options: DeleteOptions,
+        format: OutputFormat,
+    ) -> Vec<Report> {
+        let controller = TestServer::replying(&json_response(page)).await;
+        let client = UnifiClient::new(controller.origin(), API_KEY, false)
+            .expect("a loopback URL must build a client");
+        let mut console = Scripted::terminal(&[]);
+        let mut reports = Vec::new();
+
+        delete_vouchers_filtered(
+            &client,
+            Some(Uuid::new_v4()),
+            A_FILTER.to_string(),
+            options,
+            format,
+            &mut console,
+            |report| reports.push(report),
+        )
+        .await
+        .expect("the controller answered every request");
+
+        reports
+    }
+
+    /// What a run writes on each stream.
+    ///
+    /// # Arguments
+    ///
+    /// * `reports` - Every report the run showed.
+    ///
+    /// # Returns
+    ///
+    /// Standard output, then standard error, one line for each document and
+    /// each note.
+    fn streams(reports: &[Report]) -> (String, String) {
+        let stdout: Vec<&str> = reports.iter().filter_map(Report::document).collect();
+        let stderr: Vec<&str> = reports
+            .iter()
+            .flat_map(|report| report.notes().iter().map(String::as_str))
+            .collect();
+
+        (stdout.join("\n"), stderr.join("\n"))
+    }
+
+    /// The finding this answers: `delete-filtered --dry-run --output json`
+    /// printed the matches and then a sentence, both on standard output, so
+    /// no program could parse what it wrote.
+    #[tokio::test]
+    async fn a_json_dry_run_writes_only_the_matches_on_standard_output() {
+        let reports = run_delete_filtered(
+            ONE_MATCHING_VOUCHER,
+            DeleteOptions {
+                assume_yes: false,
+                dry_run: true,
+            },
+            OutputFormat::Json,
+        )
+        .await;
+        let (stdout, stderr) = streams(&reports);
+
+        let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|error| {
+            panic!("--output json must write one JSON document ({error}), got:\n{stdout}")
+        });
+        assert_eq!(
+            parsed.as_array().map(Vec::len),
+            Some(1),
+            "the document must list the one match, got:\n{stdout}"
+        );
+        assert!(
+            stderr.contains("Dry run"),
+            "the dry run must say so on standard error, got:\n{stderr}"
+        );
+    }
+
+    /// A filter that matches nothing still answers `--output json` with a
+    /// document: `[]`. Before, the run wrote only a sentence.
+    #[tokio::test]
+    async fn a_json_filter_that_matches_nothing_answers_an_empty_array() {
+        let reports = run_delete_filtered(
+            NO_MATCHING_VOUCHERS,
+            DeleteOptions::default(),
+            OutputFormat::Json,
+        )
+        .await;
+        let (stdout, stderr) = streams(&reports);
+
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&stdout).ok(),
+            Some(serde_json::json!([])),
+            "a filter that matches nothing must answer with an empty array, got:\n{stdout}"
+        );
+        assert!(
+            stderr.contains("No vouchers match"),
+            "the run must say that nothing matched, on standard error, got:\n{stderr}"
+        );
     }
 }
 
@@ -646,7 +894,8 @@ mod listing_tests {
         .expect("the controller answered the listing");
 
         let notice = listing
-            .notice()
+            .notes()
+            .first()
             .expect("a page short of the stated total must say so");
         assert!(
             notice.contains(TOTAL),

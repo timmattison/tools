@@ -300,6 +300,19 @@ enum ConfigCommand {
     Cloud,
 }
 
+/// The report of `ufa config path`.
+///
+/// # Arguments
+///
+/// * `path` - Where the configuration file is, or goes when it is written.
+///
+/// # Returns
+///
+/// The report that gives the path.
+fn config_path_report(path: &std::path::Path) -> output::Report {
+    output::Report::of_document(format!("Configuration file path: {}", path.display()))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // The settings file sits beside the configuration file, and it is read
@@ -322,13 +335,8 @@ async fn main() -> Result<()> {
                 Config::setup().await?;
                 return Ok(());
             }
-            #[allow(
-                clippy::print_stdout,
-                reason = "the path is the document that `ufa config path` answers with"
-            )]
             ConfigCommand::Path => {
-                let path = Config::config_file_path()?;
-                println!("Configuration file path: {}", path.display());
+                config_path_report(&Config::config_file_path()?).print();
                 return Ok(());
             }
             ConfigCommand::Cloud => {
@@ -1273,6 +1281,29 @@ mod help_text_tests {
             TOOL_DESCRIPTION,
             "`ufa -h` must describe the tool and nothing else: everything the \
              first paragraph of the doc comment on `Args` holds is printed here"
+        );
+    }
+}
+
+#[cfg(test)]
+mod config_path_tests {
+    use super::config_path_report;
+    use std::path::Path;
+
+    /// A configuration file path that no test reads or writes.
+    const A_CONFIG_PATH: &str = "/home/someone/.config/ufa/config.toml";
+
+    /// `ufa config path` answers with the path and nothing else, so
+    /// `$(ufa config path)` gives a shell the path itself. A label in front
+    /// of it becomes part of every path a script reads.
+    #[test]
+    fn config_path_answers_with_the_path_alone() {
+        let report = config_path_report(Path::new(A_CONFIG_PATH));
+
+        assert_eq!(
+            report.document(),
+            Some(A_CONFIG_PATH),
+            "standard output must hold the path and nothing else"
         );
     }
 }

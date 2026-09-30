@@ -1,7 +1,7 @@
 use crate::{
     client::UnifiClient,
     models::{Page, Site},
-    output::{render_page_listing, OutputFormat, PageListing},
+    output::{render_page_listing, OutputFormat, Report},
 };
 use anyhow::Result;
 use clap::Subcommand;
@@ -57,7 +57,7 @@ pub async fn handle_sites_command(
             filter,
         } => list_sites(client, limit, offset, filter, output_format)
             .await
-            .map(PageListing::print),
+            .map(Report::print),
     }
 }
 
@@ -84,7 +84,7 @@ async fn list_sites(
     offset: u64,
     filter: Option<String>,
     output_format: OutputFormat,
-) -> Result<PageListing> {
+) -> Result<Report> {
     let limit_str = limit.to_string();
     let offset_str = offset.to_string();
     let mut params: Vec<(&str, &dyn std::fmt::Display)> =
@@ -137,7 +137,8 @@ mod listing_tests {
             .expect("the controller answered the listing");
 
         let notice = listing
-            .notice()
+            .notes()
+            .first()
             .expect("a page short of the stated total must say so");
         assert!(
             notice.contains(TOTAL),
