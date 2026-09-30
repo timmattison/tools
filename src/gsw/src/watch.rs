@@ -6146,6 +6146,7 @@ mod tests {
                         + Duration::from_secs(60)
                             * u32::try_from(n).expect("a test history is short"),
                 ),
+                on_branch: false,
             })
             .collect()
     }

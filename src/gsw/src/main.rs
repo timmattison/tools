@@ -888,6 +888,7 @@ fn fetched_at(recent: repo::RecentLog, now: SystemTime) -> FetchedLog {
                 hash: commit.hash,
                 subject: commit.summary,
                 age,
+                on_branch: false,
             }
         })
         .collect();
@@ -1170,6 +1171,7 @@ mod tests {
                 hash: format!("{SWEEP_HASH_PREFIX}{n:05}"),
                 subject: format!("commit {n}"),
                 age: Some(Duration::from_secs(90)),
+                on_branch: false,
             })
             .collect();
         snap
@@ -1777,6 +1779,7 @@ mod tests {
                     hash: "abc1234".into(),
                     subject: "the newest commit".into(),
                     age: Some(age),
+                    on_branch: false,
                 }]
             })
             .unwrap_or_default();
@@ -1876,11 +1879,13 @@ mod tests {
                 hash: "abc1234".into(),
                 subject: "the newest commit".into(),
                 age: Some(Duration::from_secs(10)),
+                on_branch: false,
             },
             LogEntry {
                 hash: "def5678".into(),
                 subject: "an older commit".into(),
                 age: Some(Duration::from_secs(900)),
+                on_branch: false,
             },
         ];
         assert_eq!(
@@ -1925,6 +1930,7 @@ mod tests {
                 hash: "abc1234".into(),
                 subject: "the newest commit".into(),
                 age: Some(Duration::from_secs(10)),
+                on_branch: false,
             }],
             log_complete: false,
             log_start: None,

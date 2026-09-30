@@ -131,6 +131,20 @@ pub struct LogEntry {
     /// [`UNKNOWN_AGE`] rather than a number, because every number available
     /// here is a lie — `0s` in particular claims the commit landed this second.
     pub age: Option<Duration>,
+    /// The commit is only on the current branch: the start of the log reaches
+    /// it, and the base does not. These are the commits that the ahead count
+    /// of the header counts ([`Snapshot::commits_ahead`]).
+    ///
+    /// It is `false` for every commit when HEAD is on the base, or when the
+    /// base does not resolve. The header then counts zero too.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Issue #541: the log row does not paint the mark yet, so only the tests read it"
+        )
+    )]
+    pub on_branch: bool,
 }
 
 /// One file row in the frame.
@@ -1464,6 +1478,7 @@ mod tests {
             hash: "52ef922".into(),
             subject: "an old commit that has been sitting here for a very long time".into(),
             age: Some(ancient()),
+            on_branch: false,
         }];
         let mut o = opts();
         o.log_lines = 5;
@@ -2352,6 +2367,7 @@ mod tests {
             hash: hash.into(),
             subject: subject.into(),
             age: Some(Duration::from_secs(age_secs)),
+            on_branch: false,
         }
     }
 
@@ -2361,6 +2377,7 @@ mod tests {
             hash: hash.into(),
             subject: subject.into(),
             age: None,
+            on_branch: false,
         }
     }
 
@@ -2472,6 +2489,7 @@ mod tests {
                 hash: format!("h{i:06}"),
                 subject: format!("subj {i}"),
                 age: Some(Duration::from_secs(i * 60)),
+                on_branch: false,
             })
             .collect();
         let mut o = opts();
@@ -2505,6 +2523,7 @@ mod tests {
             hash: "abc1234".into(),
             subject: "really long subject ".repeat(20),
             age: Some(Duration::from_secs(30)),
+            on_branch: false,
         }];
         let mut o = opts();
         o.log_lines = 1;
@@ -3522,6 +3541,7 @@ mod tests {
             hash: "abc1234".into(),
             subject: "test".into(),
             age: Some(Duration::from_secs(100)),
+            on_branch: false,
         }]; // log: "1m40s"
         let mut o = opts();
         o.log_lines = 5; // so the log section renders
@@ -3559,6 +3579,7 @@ mod tests {
                 hash: "abc1234".into(),
                 subject: "test".into(),
                 age: Some(Duration::from_secs(100)),
+                on_branch: false,
             }];
             let mut o = opts();
             o.log_lines = 5;
