@@ -388,6 +388,10 @@ Most commands need a site, and `--site-id` is optional because `ufa` will work i
 `ufa devices stats` treats the device ID the same way: given none, a single device is used
 automatically and several are offered as a prompt.
 
+The table of choices, the question, and the note that names an automatic choice go to standard
+error. So `ufa devices list --output json > devices.json` still asks which site to use, and the
+file holds only the JSON document.
+
 ## Output formats
 
 `--output` is a global option, so it is accepted at any position — `ufa devices list --output json`

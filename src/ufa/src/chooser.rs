@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::{
     client::UnifiClient,
-    output::{print_vec_table, OutputFormat},
+    output::render_table,
     pagination::fetch_all,
     prompt::{self, Console},
 };
@@ -52,7 +52,9 @@ pub trait Choosable: DeserializeOwned {
 /// # Arguments
 ///
 /// * `items` - Everything the controller has of this kind.
-/// * `console` - Where the question is put, if one is needed.
+/// * `console` - Where the choices, the question and the note about an
+///   automatic choice go. The real console puts them on standard error, so
+///   standard output keeps only the document the user asked for.
 ///
 /// # Returns
 ///
@@ -66,16 +68,23 @@ fn choose_from<T: Choosable>(items: &[T], console: &mut impl Console) -> Result<
     match items {
         [] => anyhow::bail!("{}", T::NONE_FOUND),
         [only] => {
-            eprintln!("Using {}: {} ({})", T::NOUN, only.label(), only.id());
+            console.tell(&format!(
+                "Using {}: {} ({})",
+                T::NOUN,
+                only.label(),
+                only.id()
+            ));
             Ok(only.id())
         }
         many => {
-            eprintln!("Multiple {} found:", T::PLURAL);
-            eprintln!();
-
+            // A table, whatever --output says: the choices are for a person
+            // to read, and the document comes after the choice.
             let rows: Vec<T::Row> = many.iter().map(T::Row::from).collect();
-            print_vec_table(&rows, OutputFormat::Table)?;
-            eprintln!();
+            console.tell(&format!(
+                "Multiple {} found:\n\n{}\n",
+                T::PLURAL,
+                render_table(&rows)
+            ));
 
             match prompt::select_one(console, &format!("Select a {}", T::NOUN), many.len())? {
                 Some(index) => Ok(many[index].id()),

@@ -11,6 +11,10 @@
 //! The decisions are pure functions over `(match_count, assume_yes,
 //! is_terminal, response)`; the terminal I/O is a thin [`Console`] around
 //! them, which is what makes "did it even ask?" testable without a tty.
+//!
+//! Every question and every note goes to standard error. Standard output
+//! carries only the document the user asked for, and under `--output json` a
+//! program reads that stream.
 
 use anyhow::{bail, Result};
 use std::io::{self, BufRead, IsTerminal, Write};
@@ -29,7 +33,9 @@ pub enum Approval {
 /// Somewhere the user can be asked something.
 ///
 /// Production answers come from the terminal ([`Stdio`]); tests script them,
-/// which is the only way to assert that a question was *not* asked.
+/// which is the only way to assert that a question was *not* asked. What a
+/// console shows is for a person, so the real one never writes it to
+/// standard output.
 pub trait Console {
     /// Whether the answers are coming from a person at a terminal.
     fn is_terminal(&self) -> bool;
@@ -46,7 +52,8 @@ pub trait Console {
     fn tell(&mut self, message: &str);
 }
 
-/// The real terminal.
+/// The real terminal: answers from standard input, and questions and notes on
+/// standard error.
 pub struct Stdio;
 
 impl Console for Stdio {
@@ -55,14 +62,8 @@ impl Console for Stdio {
     }
 
     fn ask(&mut self, question: &str) -> Result<String> {
-        #[expect(
-            clippy::print_stdout,
-            reason = "a question on stdout; review R-20260930T002206Z moves it to stderr"
-        )]
-        {
-            print!("{question}");
-        }
-        io::stdout().flush()?;
+        eprint!("{question}");
+        io::stderr().flush()?;
 
         let mut line = String::new();
         if io::stdin().lock().read_line(&mut line)? == 0 {
@@ -72,13 +73,7 @@ impl Console for Stdio {
     }
 
     fn tell(&mut self, message: &str) {
-        #[expect(
-            clippy::print_stdout,
-            reason = "a note on stdout; review R-20260930T002206Z moves it to stderr"
-        )]
-        {
-            println!("{message}");
-        }
+        eprintln!("{message}");
     }
 }
 
