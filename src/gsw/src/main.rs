@@ -820,7 +820,9 @@ pub(crate) struct FetchedLog {
     /// The commit that the read started from ([`Snapshot::log_start`]).
     /// `None` when HEAD named no commit.
     pub(crate) start: Option<repo::LogStart>,
-    /// The commits, newest first.
+    /// The commits, newest first. Each entry tells whether its commit is only
+    /// on the branch ([`LogEntry::on_branch`]). The base commit of `start`
+    /// decides that mark.
     pub(crate) entries: Vec<LogEntry>,
     /// `entries` is complete: the walk of the history of `start` reached its
     /// end at or before the limit, so a read from `start` with a higher limit
@@ -834,6 +836,11 @@ pub(crate) struct FetchedLog {
 ///
 /// Returns an empty list when `n == 0` or the repo has no commits. The start
 /// is known at `n == 0` too, as [`repo::recent_log`] resolves it.
+///
+/// An entry is marked when its commit is only on the branch: HEAD reaches it,
+/// and `base` does not ([`LogEntry::on_branch`]). These are the commits that
+/// the header counts as ahead of the base. No entry is marked when HEAD is on
+/// the base, or when `base` does not resolve.
 ///
 /// [`FetchedLog::complete`] tells whether the walk reached the end of the
 /// history, as [`repo::recent_log`] finds it. A history of exactly `n` commits
@@ -864,6 +871,11 @@ fn fetch_head_log(repo: &gix::Repository, base: &str, n: usize) -> FetchedLog {
 /// and more commits of the same history after them
 /// ([`repo::recent_log_from`]). Each age is measured at the instant of this
 /// call.
+///
+/// The marks of the entries ([`LogEntry::on_branch`]) come from the base
+/// commit that `start` recorded, and not from the commit that the base names
+/// now. So the read gives the commits of the walk with the marks of the walk,
+/// also when the base moved after the walk.
 pub(crate) fn fetch_log_from(
     repo: &gix::Repository,
     start: repo::LogStart,
@@ -874,7 +886,8 @@ pub(crate) fn fetch_log_from(
 }
 
 /// The [`FetchedLog`] of `recent`, with the age of each commit measured at
-/// `now`.
+/// `now`. Each entry keeps the mark of its commit
+/// ([`repo::LogCommit::on_branch`]).
 fn fetched_at(recent: repo::RecentLog, now: SystemTime) -> FetchedLog {
     let entries = recent
         .commits
@@ -888,7 +901,7 @@ fn fetched_at(recent: repo::RecentLog, now: SystemTime) -> FetchedLog {
                 hash: commit.hash,
                 subject: commit.summary,
                 age,
-                on_branch: false,
+                on_branch: commit.on_branch,
             }
         })
         .collect();
