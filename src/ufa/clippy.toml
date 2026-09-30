@@ -57,6 +57,8 @@ disallowed-methods = [
     { path = "clap::Command::try_get_matches", reason = "this reads the real argument vector and the same UNIFI_* variables; parse through crate::test_support::parse_args_for_test, which holds the environment lock" },
     { path = "clap::Command::get_matches_from", reason = "the environment fallback belongs to the argument, not to the Parser trait, so this reads UNIFI_* too; parse through crate::test_support::parse_args_for_test" },
     { path = "clap::Command::try_get_matches_from", reason = "the environment fallback belongs to the argument, not to the Parser trait, so this reads UNIFI_* too; parse through crate::test_support::parse_args_for_test" },
+    { path = "clap::Command::get_matches_mut", reason = "this reads the real argument vector and the same UNIFI_* variables; parse through crate::test_support::parse_args_for_test, which holds the environment lock" },
+    { path = "clap::Command::try_get_matches_from_mut", reason = "the environment fallback belongs to the argument, not to the Parser trait, so this reads UNIFI_* too; parse through crate::test_support::parse_args_for_test" },
     { path = "clap::FromArgMatches::from_arg_matches", reason = "the only way to hold an ArgMatches is a banned call above; parse through crate::test_support::parse_args_for_test" },
     { path = "clap::FromArgMatches::from_arg_matches_mut", reason = "the only way to hold an ArgMatches is a banned call above; parse through crate::test_support::parse_args_for_test" },
     { path = "clap::FromArgMatches::update_from_arg_matches", reason = "the only way to hold an ArgMatches is a banned call above; parse through crate::test_support::parse_args_for_test" },
