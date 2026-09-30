@@ -1616,16 +1616,25 @@ mod tests {
         git(dir, &["commit", "-q", "--allow-empty", "-m", subject]);
     }
 
-    /// A repository with HEAD on the branch `feature`. The branch has three
-    /// commits, `feature 1` to `feature 3`, on top of the commit of
-    /// [`init_repo`], which `main` names.
-    fn feature_branch_repo() -> TempDir {
+    /// A repository with HEAD on the branch `feature`. The branch has
+    /// `commits` commits, `feature 1` to `feature <commits>`, on top of the
+    /// commit of [`init_repo`], which `main` names.
+    fn feature_branch_repo(commits: usize) -> TempDir {
         let dir = init_repo();
         git(dir.path(), &["checkout", "-q", "-b", "feature"]);
-        for n in 1..=3 {
+        for n in 1..=commits {
             commit_empty(dir.path(), &format!("feature {n}"));
         }
         dir
+    }
+
+    /// Move `main` of the repository at `dir` to the commit that `feature`
+    /// names, by a fast-forward merge. HEAD stays on `feature`. After this,
+    /// `main` holds every commit of the branch, and the header counts zero.
+    fn fast_forward_main_to_feature(dir: &Path) {
+        git(dir, &["checkout", "-q", "main"]);
+        git(dir, &["merge", "-q", "--ff-only", "feature"]);
+        git(dir, &["checkout", "-q", "feature"]);
     }
 
     /// The subjects of the commits of `log` that are only on the branch,
@@ -1644,7 +1653,7 @@ mod tests {
         // branch (`main..feature`). The log marks the same commits. Here the
         // branch has three commits on top of `main`, so the log marks those
         // three and not the commit that `main` names.
-        let dir = feature_branch_repo();
+        let dir = feature_branch_repo(3);
         let repo = open_at(dir.path()).expect("fixture is a worktree repo");
 
         let log = super::recent_log(&repo, "main", 10);
@@ -1754,7 +1763,7 @@ mod tests {
         // Issue #541: the base names no ref, so the header counts zero. The
         // log uses the same fallback and marks no commit, although the
         // branch has three commits on top of `main`.
-        let dir = feature_branch_repo();
+        let dir = feature_branch_repo(3);
         let repo = open_at(dir.path()).expect("fixture is a worktree repo");
 
         let log = super::recent_log(&repo, "no-such-branch", 10);
@@ -1778,18 +1787,14 @@ mod tests {
         // on a resize. The start keeps the base commit of the walk. So a
         // resize after `main` moved gives the marks of the walk, and not the
         // marks of the moved `main`.
-        let dir = feature_branch_repo();
+        let dir = feature_branch_repo(3);
         let p = dir.path();
         let repo = open_at(p).expect("fixture is a worktree repo");
         let start = super::recent_log(&repo, "main", 1)
             .start
             .expect("HEAD names a commit");
 
-        // `main` takes the three commits of the branch, and HEAD stays on
-        // the branch.
-        git(p, &["checkout", "-q", "main"]);
-        git(p, &["merge", "-q", "--ff-only", "feature"]);
-        git(p, &["checkout", "-q", "feature"]);
+        fast_forward_main_to_feature(p);
 
         assert_eq!(
             marked(&super::recent_log_from(&repo, start, 10)),
@@ -1816,7 +1821,7 @@ mod tests {
         // of `main`. So the walk marks the three rows of the branch and not
         // the row of the commit that `main` names. The header counts the
         // same commits.
-        let dir = feature_branch_repo();
+        let dir = feature_branch_repo(3);
         let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
 
         let snapshot =
@@ -1837,6 +1842,64 @@ mod tests {
             u32::try_from(marked_rows).expect("a small count"),
             snapshot.commits_ahead,
             "the log marks as many rows as the header counts",
+        );
+    }
+
+    #[test]
+    fn a_read_from_the_start_of_a_walk_keeps_the_marks_of_its_rows_after_the_base_moves() {
+        // Issue #541: watch mode caches the log rows of a walk. A resize that
+        // needs more rows reads the log again from the start of the walk,
+        // and the rows of that read replace the cached rows. Here the walk
+        // reads two rows of a branch with four commits on top of `main`.
+        // Then `main` takes the four commits. The read still gives the two
+        // cached rows first with the same marks. It also marks the two new
+        // rows of the branch, and not the commit before the branch.
+        let dir = feature_branch_repo(4);
+        let p = dir.path();
+        let handle = RepoHandle::discover(p).expect("fixture is a worktree repo");
+        let cfg = log_walk_config();
+        let snapshot = crate::collect_snapshot(handle.repo(), &cfg, 2).expect("walk");
+        assert_eq!(
+            row_marks(&snapshot.log),
+            [("feature 4", true), ("feature 3", true)],
+            "the walk marks its two rows",
+        );
+        let start = snapshot.log_start.expect("a walk records its start");
+
+        fast_forward_main_to_feature(p);
+
+        let after_the_move = crate::collect_snapshot(handle.repo(), &cfg, 10).expect("walk");
+        assert_eq!(
+            after_the_move.commits_ahead, 0,
+            "main now holds the branch, so the header of a new walk counts zero",
+        );
+        assert!(
+            after_the_move.log.iter().all(|entry| !entry.on_branch),
+            "a new walk marks no row: {:?}",
+            row_marks(&after_the_move.log),
+        );
+
+        let read = crate::fetch_log_from(handle.repo(), start, 10);
+        let hash_and_mark = |entry: &LogEntry| (entry.hash.clone(), entry.on_branch);
+        assert_eq!(
+            read.entries
+                .iter()
+                .take(snapshot.log.len())
+                .map(hash_and_mark)
+                .collect::<Vec<_>>(),
+            snapshot.log.iter().map(hash_and_mark).collect::<Vec<_>>(),
+            "the read gives the cached rows first, with the same hashes and marks",
+        );
+        assert_eq!(
+            row_marks(&read.entries),
+            [
+                ("feature 4", true),
+                ("feature 3", true),
+                ("feature 2", true),
+                ("feature 1", true),
+                ("initial", false),
+            ],
+            "the read marks the four commits of the branch against the base of the walk",
         );
     }
 
