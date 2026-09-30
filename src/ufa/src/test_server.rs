@@ -131,6 +131,15 @@ impl ReceivedRequest {
             .find(|(header, _)| header == name)
             .map(|(_, value)| value.as_str())
     }
+
+    /// The body of this request, as text.
+    ///
+    /// # Returns
+    ///
+    /// The body, or an empty string when the request carried none.
+    pub fn body(&self) -> &str {
+        ""
+    }
 }
 
 /// An HTTP server for one test.
@@ -441,4 +450,81 @@ pub fn chunked_response(body: &str) -> String {
     response.push_str("0\r\n\r\n");
 
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::UnifiClient;
+
+    /// The API key a test hands the client. Nothing reads it back.
+    const API_KEY: &str = "an-api-key";
+
+    /// Send `body` as the JSON body of a `POST` to a new server.
+    ///
+    /// # Arguments
+    ///
+    /// * `body` - The document the client sends.
+    ///
+    /// # Returns
+    ///
+    /// The one request the server read.
+    async fn post_to_a_server(body: &serde_json::Value) -> ReceivedRequest {
+        let server = TestServer::replying(&empty_json()).await;
+        let client = UnifiClient::new(server.origin(), API_KEY, false)
+            .expect("a loopback URL must build a client");
+
+        let _: serde_json::Value = client
+            .post("sites/a-site/devices/a-device/actions", body)
+            .await
+            .expect("the server answered the request");
+
+        let received = server.requests();
+        assert_eq!(
+            received.len(),
+            1,
+            "one post is one request, got {received:?}"
+        );
+        received[0].clone()
+    }
+
+    /// A test of a command that changes the state of a controller reads the
+    /// body the controller got. The server keeps that body, so the test can
+    /// read it.
+    #[tokio::test]
+    async fn a_posted_json_body_is_kept_as_the_client_sent_it() {
+        let sent = serde_json::json!({ "action": "RESTART" });
+
+        let request = post_to_a_server(&sent).await;
+
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(request.body()).ok(),
+            Some(sent),
+            "the server must keep the body it read, got {request:?}"
+        );
+    }
+
+    /// A body that arrives over more than one read is kept whole. The body
+    /// holds multi-byte characters, so a server that counts characters where
+    /// `Content-Length` counts bytes stops at the wrong place.
+    #[tokio::test]
+    async fn a_body_longer_than_one_read_is_kept_whole() {
+        let sent = serde_json::json!({ "name": "日本語 🎉 café ".repeat(200) });
+        let sent_bytes = sent.to_string().len();
+        assert!(
+            sent_bytes > READ_CHUNK_BYTES * 2,
+            "the body must span more than one read to test the reads"
+        );
+
+        let request = post_to_a_server(&sent).await;
+
+        // The body is too long to print in full, so the message gives the
+        // counts of bytes.
+        let kept = serde_json::from_str::<serde_json::Value>(request.body()).ok();
+        assert!(
+            kept.as_ref() == Some(&sent),
+            "the server must keep every byte of a long body, kept {} of {sent_bytes} bytes",
+            request.body().len()
+        );
+    }
 }
