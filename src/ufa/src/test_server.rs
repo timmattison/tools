@@ -6,6 +6,10 @@
 //! host that never answers. Neither is visible from the client side alone, so
 //! a test needs a server of its own. This is that server.
 //!
+//! The server also keeps the body of each request. A command that changes the
+//! state of a controller says what to do in that body, and a wrong action in
+//! it stays hidden until it runs against real hardware.
+//!
 //! The server binds port zero, so the operating system picks the port. Two
 //! copies of one test therefore never fight over an address.
 
@@ -27,6 +31,13 @@ const HEAD_END: &[u8] = b"\r\n\r\n";
 /// only so a client that never sends the end of the head cannot grow the
 /// buffer without limit.
 const MAX_HEAD_BYTES: usize = 65_536;
+
+/// How much of a request body a server reads before it gives up.
+///
+/// A request this crate makes carries a small JSON document. The bound exists
+/// only so a client that states a very large `Content-Length` cannot grow the
+/// buffer without limit.
+const MAX_BODY_BYTES: usize = 1_048_576;
 
 /// How much a server reads off a socket at a time.
 const READ_CHUNK_BYTES: usize = 1_024;
@@ -59,11 +70,13 @@ pub struct ReceivedRequest {
     request_line: String,
     /// Every header, with the name in lower case.
     headers: Vec<(String, String)>,
+    /// The body, as text. It is empty when the request carried none.
+    body: String,
 }
 
 impl fmt::Debug for ReceivedRequest {
-    /// Show the request the way a server log does: the request line, then
-    /// every header on one line.
+    /// Show the request the way a server log does: the request line, every
+    /// header, and then the body, all on one line.
     ///
     /// A derived form would print the field names and the vector brackets as
     /// well, which is harder to read in the message of a failed assertion
@@ -72,6 +85,9 @@ impl fmt::Debug for ReceivedRequest {
         write!(formatter, "{}", self.request_line)?;
         for (name, value) in &self.headers {
             write!(formatter, " | {name}: {value}")?;
+        }
+        if !self.body.is_empty() {
+            write!(formatter, " | body: {}", self.body)?;
         }
         Ok(())
     }
@@ -86,7 +102,8 @@ impl ReceivedRequest {
     ///
     /// # Returns
     ///
-    /// The request line and every header it carried.
+    /// The request line and every header it carried, with no body. The body
+    /// comes after the head on the socket, and [`Self::with_body`] adds it.
     fn parse(head: &str) -> Self {
         let mut lines = head.split("\r\n");
         let request_line = lines.next().unwrap_or_default().to_string();
@@ -98,6 +115,44 @@ impl ReceivedRequest {
         Self {
             request_line,
             headers,
+            body: String::new(),
+        }
+    }
+
+    /// The length of the body this request states, in bytes.
+    ///
+    /// A request with no `Content-Length` header has no body. The server does
+    /// not read a body that arrives in chunks: reqwest states the length of a
+    /// JSON body, and no client in this crate sends one in chunks.
+    ///
+    /// # Returns
+    ///
+    /// The stated length, zero when the request states none, or `None` when
+    /// the value is not a count or is more than [`MAX_BODY_BYTES`].
+    fn body_length(&self) -> Option<usize> {
+        match self.header("content-length") {
+            None => Some(0),
+            Some(value) => value
+                .parse::<usize>()
+                .ok()
+                .filter(|length| *length <= MAX_BODY_BYTES),
+        }
+    }
+
+    /// This request with `body` as its body.
+    ///
+    /// # Arguments
+    ///
+    /// * `body` - The bytes that came after the head. The text is decoded as
+    ///   a whole, so a multi-byte character that two reads split stays whole.
+    ///
+    /// # Returns
+    ///
+    /// The request, with the body kept as text.
+    fn with_body(self, body: &[u8]) -> Self {
+        Self {
+            body: String::from_utf8_lossy(body).into_owned(),
+            ..self
         }
     }
 
@@ -134,18 +189,22 @@ impl ReceivedRequest {
 
     /// The body of this request, as text.
     ///
+    /// A command that changes the state of a controller says what to do in
+    /// the body, such as `{"action":"RESTART"}`. A test reads it here to see
+    /// the action the controller got.
+    ///
     /// # Returns
     ///
     /// The body, or an empty string when the request carried none.
     pub fn body(&self) -> &str {
-        ""
+        &self.body
     }
 }
 
 /// An HTTP server for one test.
 ///
-/// The server accepts every connection, records the request head, and writes
-/// back the one canned response it was built with. It stops when the test
+/// The server accepts every connection, records the request head and body,
+/// and writes back the one canned response it was built with. It stops when the test
 /// drops it.
 pub struct TestServer {
     /// The origin a client reaches this server at.
@@ -322,7 +381,12 @@ impl TestServer {
     }
 }
 
-/// Read the head of one request off `socket`.
+/// Read one request off `socket`: the head, then the body that the head
+/// states the length of.
+///
+/// The server must read the whole body before it answers. A test reads the
+/// body, and a socket that closes with bytes it did not read can reset the
+/// connection before the client reads the answer.
 ///
 /// # Arguments
 ///
@@ -330,31 +394,57 @@ impl TestServer {
 ///
 /// # Returns
 ///
-/// The request, or `None` when the client sent no complete head.
+/// The request, or `None` when the client sent no complete head, stated a
+/// body length the server does not accept, or closed before the whole body
+/// arrived.
 async fn read_request(socket: &mut TcpStream) -> Option<ReceivedRequest> {
-    let mut head = Vec::new();
-    let mut chunk = [0_u8; READ_CHUNK_BYTES];
+    let mut received = Vec::new();
 
-    loop {
-        let read = socket.read(&mut chunk).await.ok()?;
-        if read == 0 {
-            return None;
-        }
-        head.extend_from_slice(&chunk[..read]);
-
-        if let Some(end) = head
+    let head_end = loop {
+        if let Some(end) = received
             .windows(HEAD_END.len())
             .position(|window| window == HEAD_END)
         {
-            return Some(ReceivedRequest::parse(&String::from_utf8_lossy(
-                &head[..end],
-            )));
+            break end;
         }
-
-        if head.len() > MAX_HEAD_BYTES {
+        if received.len() > MAX_HEAD_BYTES {
             return None;
         }
+        read_chunk(socket, &mut received).await?;
+    };
+
+    let request = ReceivedRequest::parse(&String::from_utf8_lossy(&received[..head_end]));
+
+    // The first reads can hold part of the body, or all of it, after the
+    // end of the head.
+    let body_start = head_end + HEAD_END.len();
+    let body_end = body_start + request.body_length()?;
+    while received.len() < body_end {
+        read_chunk(socket, &mut received).await?;
     }
+
+    Some(request.with_body(&received[body_start..body_end]))
+}
+
+/// Read the next bytes off `socket` onto the end of `received`.
+///
+/// # Arguments
+///
+/// * `socket` - The accepted connection.
+/// * `received` - The bytes read so far.
+///
+/// # Returns
+///
+/// `Some` when bytes arrived, or `None` when the client closed the connection
+/// or the read failed.
+async fn read_chunk(socket: &mut TcpStream, received: &mut Vec<u8>) -> Option<()> {
+    let mut chunk = [0_u8; READ_CHUNK_BYTES];
+    let read = socket.read(&mut chunk).await.ok()?;
+    if read == 0 {
+        return None;
+    }
+    received.extend_from_slice(&chunk[..read]);
+    Some(())
 }
 
 /// The response that sends a client to `location`.
