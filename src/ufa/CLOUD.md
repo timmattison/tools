@@ -21,8 +21,10 @@ ufa config cloud
 
 Both prompts accept either the key itself or a 1Password secret reference
 (anything starting with `op://`). A reference is recommended: the key stays in
-1Password and is read on demand through `op-cache`, so it never lands in a file
-on disk.
+1Password and out of the config file, and `ufa` reads it on demand through
+`op-cache`. `op-cache` keeps a plaintext copy of the key in `.op-cache.json`
+beside the config file, at mode `0600` on Unix — see
+[README.md](./README.md#1password-storage-recommended).
 
 ### Option 2: Environment Variables
 ```bash

@@ -12,7 +12,7 @@ and with cloud-hosted consoles via the UniFi Site Manager API.
 - **Cloud Consoles**: List the consoles on your Ubiquiti account and look one up by ID
 - **Application Info**: Get UniFi application version and details
 - **Interactive Setup**: Find your controller on the network or in 1Password and write a config file
-- **1Password-backed Secrets**: Keep API keys in 1Password instead of on disk
+- **1Password-backed Secrets**: Keep API keys in 1Password instead of in the config file
 
 ## Installation
 
@@ -173,8 +173,13 @@ current setting alone.
 
 The key fields `op_path` (controller) and `sm_op_path` (cloud) hold a 1Password secret reference
 rather than a secret. `ufa` reads them on demand through
-[`op-cache`](../op-cache), so the key stays in your vault and never lands in a file, a shell
-history, or a backup.
+[`op-cache`](../op-cache), so the key stays out of the config file and out of your shell history.
+
+`op-cache` keeps a copy of each key it reads, in plaintext, in `.op-cache.json` beside the config
+file (`ufa config path` prints the config file). On Unix it writes that file at mode `0600`. A
+later run reads the key from that file and does not ask 1Password. To remove the copy, delete the
+file. Delete it also after you rotate a key in 1Password, or `ufa` keeps sending the old key. The
+next run reads the key from 1Password again.
 
 ```toml
 op_path    = "op://Private/ufa/key - 192.168.1.1 port 443"
@@ -419,9 +424,12 @@ Two commands answer with a bare array instead, because neither is paginated: `uf
 
 In descending order of preference:
 
-1. **1Password reference in the config file** (`op_path` / `sm_op_path`) — recommended. The key
-   stays in your vault, is fetched on demand, and never appears in a file on disk, in a backup, or
-   in a process listing. Set it up with `ufa config setup` or `ufa config cloud`.
+1. **1Password reference in the config file** (`op_path` / `sm_op_path`) — recommended. The config
+   file holds only the reference, and the key stays out of your shell history and out of process
+   listings. The key still reaches the disk: `op-cache` keeps a plaintext copy in `.op-cache.json`
+   beside the config file, at mode `0600` on Unix (see
+   [1Password storage](#1password-storage-recommended)). Set it up with `ufa config setup` or
+   `ufa config cloud`.
 2. **Environment variable** (`UNIFI_API_KEY`, `UNIFI_SITE_MANAGER_API_KEY`) — reasonable for CI/CD,
    where the secret comes from the runner's secret store. Note that a process's environment is
    readable by other processes running as the same user.
