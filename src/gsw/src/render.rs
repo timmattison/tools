@@ -2877,6 +2877,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_long_subject_on_a_log_row_with_the_mark_fits_the_terminal_width() {
+        // Issue #541: the gutter takes its column from the subject. So a row
+        // with the mark and a long subject is never wider than the terminal,
+        // and its subject ends with `…`. The subject holds characters of two
+        // columns and of more than one byte. An odd width puts the cut next
+        // to a character of two columns.
+        let subject = "a long subject 日本語テスト 🎉 café ".repeat(10);
+        for width in [40, 41, 80] {
+            let mut o = opts();
+            o.log_lines = 5;
+            o.terminal_width = width;
+
+            let glyphs = painted_glyphs(&snap_with_a_branch_row(&subject), &o);
+
+            let marked = row_with(&glyphs, BRANCH_HASH);
+            assert!(
+                marked.starts_with(BRANCH_MARK),
+                "width={width}: the row shows the mark: {marked:?}",
+            );
+            assert!(
+                UnicodeWidthStr::width(marked) <= width,
+                "width={width}: the row is {} columns wide: {marked:?}",
+                UnicodeWidthStr::width(marked),
+            );
+            let before_age = marked
+                .trim_end()
+                .rsplit_once(' ')
+                .map(|(head, _)| head.trim_end());
+            assert!(
+                before_age.is_some_and(|head| head.ends_with('…')),
+                "width={width}: the subject ends with an ellipsis: {marked:?}",
+            );
+        }
+    }
+
     // --- truecolor commit-log fade ---------------------------------------
     //
     // These tests inspect the `ColoredString::fgcolor` field directly rather
