@@ -3,8 +3,10 @@ use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use std::collections::HashSet;
+use std::future::Future;
 use std::time::Duration;
 use tokio::time::timeout;
+use url::Url;
 
 /// The integration API endpoint every controller answers, relative to
 /// [`INTEGRATION_API_PATH`].
@@ -22,9 +24,36 @@ pub struct DiscoveredController {
 }
 
 impl DiscoveredController {
-    pub fn url(&self) -> String {
-        format!("https://{}:{}", self.ip, self.port)
+    /// The URL of this controller.
+    ///
+    /// # Returns
+    ///
+    /// The origin URL, as [`origin_url`] builds it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no URL can hold the address.
+    pub fn url(&self) -> Result<String> {
+        origin_url(&self.ip, self.port)
     }
+}
+
+/// The origin URL of a controller at `host` and `port`.
+///
+/// # Arguments
+///
+/// * `host` - An IP address or a domain name.
+/// * `port` - The HTTPS port.
+///
+/// # Returns
+///
+/// The URL `https://<host>:<port>`.
+///
+/// # Errors
+///
+/// Returns an error if no URL can hold `host`.
+pub fn origin_url(host: &str, port: u16) -> Result<String> {
+    Ok(format!("https://{host}:{port}"))
 }
 
 /// Discover UniFi controllers on the local network
@@ -151,8 +180,37 @@ async fn discover_via_mdns() -> Result<Vec<DiscoveredController>> {
 /// Returns an error if the host cannot be reached or does not answer the
 /// integration API.
 pub async fn validate_controller(host: &str, port: u16) -> Result<DiscoveredController> {
-    let url = format!("https://{host}:{port}{INTEGRATION_API_PATH}{INFO_ENDPOINT}");
+    let url = Url::parse(&format!(
+        "https://{host}:{port}{INTEGRATION_API_PATH}{INFO_ENDPOINT}"
+    ))?;
 
+    match probe(url).await? {
+        ProbeVerdict::NotController => {
+            anyhow::bail!("{host}:{port} does not answer the UniFi integration API")
+        }
+        ProbeVerdict::Controller => Ok(DiscoveredController {
+            ip: resolve_address(host, port).await,
+            port,
+            name: None,
+            is_verified: true,
+        }),
+    }
+}
+
+/// Ask `url` for the integration API's `info` endpoint, and judge the answer.
+///
+/// # Arguments
+///
+/// * `url` - The URL of the `info` endpoint to ask.
+///
+/// # Returns
+///
+/// What the answer says about the host.
+///
+/// # Errors
+///
+/// Returns an error if the host cannot be reached.
+async fn probe(url: Url) -> Result<ProbeVerdict> {
     // Controllers ship a self-signed certificate out of the box, so discovery
     // -- which runs before any trust decision has been made -- cannot insist
     // on a valid one.
@@ -165,21 +223,11 @@ pub async fn validate_controller(host: &str, port: u16) -> Result<DiscoveredCont
         .timeout(PROBE_TIMEOUT)
         .build()?;
 
-    let response = client.get(&url).send().await?;
+    let response = client.get(url).send().await?;
     let status = response.status().as_u16();
     let body = response.text().await.unwrap_or_default();
 
-    match judge_probe(status, &body) {
-        ProbeVerdict::NotController => {
-            anyhow::bail!("{host}:{port} does not answer the UniFi integration API")
-        }
-        ProbeVerdict::Controller => Ok(DiscoveredController {
-            ip: resolve_address(host, port).await,
-            port,
-            name: None,
-            is_verified: true,
-        }),
-    }
+    Ok(judge_probe(status, &body))
 }
 
 /// Resolve `host` to an address, falling back to the name itself.
@@ -291,9 +339,47 @@ fn judge_probe(status: u16, body: &str) -> ProbeVerdict {
     ProbeVerdict::NotController
 }
 
-/// Validate a controller URL provided by the user
-pub async fn validate_user_url(url: &str) -> Result<DiscoveredController> {
-    let parsed = url::Url::parse(url).context("Invalid URL format")?;
+/// Validate a controller URL the user typed.
+///
+/// # Arguments
+///
+/// * `url` - The URL the user typed.
+///
+/// # Returns
+///
+/// The URL to save.
+///
+/// # Errors
+///
+/// Returns an error if the URL does not parse, or if no controller answers
+/// the integration API there.
+pub async fn validate_user_url(url: &str) -> Result<String> {
+    validate_typed_url(url, probe).await
+}
+
+/// Validate a controller URL the user typed, with `probe` to ask the host.
+///
+/// # Arguments
+///
+/// * `url` - The URL the user typed.
+/// * `probe` - Asks the URL it gets for the `info` endpoint and judges the
+///   answer. [`validate_user_url`] gives [`probe`]. A test gives a stand-in,
+///   so it needs no network.
+///
+/// # Returns
+///
+/// The URL to save.
+///
+/// # Errors
+///
+/// Returns an error if the URL does not parse, if the probe fails, or if the
+/// probe finds no controller.
+async fn validate_typed_url<P, F>(url: &str, probe: P) -> Result<String>
+where
+    P: FnOnce(Url) -> F,
+    F: Future<Output = Result<ProbeVerdict>>,
+{
+    let parsed = Url::parse(url).context("Invalid URL format")?;
 
     let host = parsed.host_str().context("URL must have a host")?;
 
@@ -301,7 +387,22 @@ pub async fn validate_user_url(url: &str) -> Result<DiscoveredController> {
         .port()
         .unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
 
-    validate_controller(host, port).await
+    let probe_url = Url::parse(&format!(
+        "https://{host}:{port}{INTEGRATION_API_PATH}{INFO_ENDPOINT}"
+    ))?;
+
+    match probe(probe_url).await? {
+        ProbeVerdict::NotController => {
+            anyhow::bail!("{host}:{port} does not answer the UniFi integration API")
+        }
+        ProbeVerdict::Controller => DiscoveredController {
+            ip: resolve_address(host, port).await,
+            port,
+            name: None,
+            is_verified: true,
+        }
+        .url(),
+    }
 }
 
 #[cfg(test)]
@@ -372,6 +473,178 @@ mod probe_tests {
             judge_probe(200, r#"{"status":"ok","service":"printer"}"#),
             ProbeVerdict::NotController,
             "a 200 without the documented shape proves nothing"
+        );
+    }
+}
+
+#[cfg(test)]
+mod typed_url_tests {
+    use super::*;
+    use crate::test_server::{json_response, ReceivedRequest, TestServer};
+    use std::cell::RefCell;
+
+    /// What a controller's integration API answers an `info` request with.
+    const CONTROLLER_INFO: &str = r#"{"applicationVersion":"9.0.108"}"#;
+
+    /// Validate `url` with a stand-in probe that finds a controller.
+    ///
+    /// # Returns
+    ///
+    /// The outcome, and the URL the probe got.
+    async fn validate_at_a_controller(url: &str) -> (Result<String>, Option<Url>) {
+        let asked = RefCell::new(None);
+        let outcome = validate_typed_url(url, |probe_url| {
+            *asked.borrow_mut() = Some(probe_url);
+            async { Ok(ProbeVerdict::Controller) }
+        })
+        .await;
+        (outcome, asked.into_inner())
+    }
+
+    /// A controller with a valid certificate for its name passes
+    /// verification only at that name. An address in its place fails
+    /// verification on every run, and the error then tells the user to use
+    /// `--insecure`.
+    #[tokio::test]
+    async fn a_typed_hostname_that_validates_is_saved_as_typed() {
+        const TYPED: &str = "https://localhost";
+
+        let (outcome, _) = validate_at_a_controller(TYPED).await;
+
+        assert_eq!(
+            outcome.expect("a controller answered the probe").as_str(),
+            TYPED,
+            "the URL to save must be the URL the user typed"
+        );
+    }
+
+    /// A controller behind a reverse proxy answers under a path prefix. The
+    /// probe asks for the integration API under that prefix, as the client
+    /// does, and the saved URL keeps the prefix.
+    #[tokio::test]
+    async fn a_typed_path_prefix_is_probed_and_saved() {
+        const TYPED: &str = "https://localhost/unifi";
+
+        let (outcome, asked) = validate_at_a_controller(TYPED).await;
+
+        assert_eq!(
+            asked.expect("the probe must run").as_str(),
+            "https://localhost/unifi/proxy/network/integration/v1/info",
+            "the probe must ask for the integration API under the prefix"
+        );
+        assert_eq!(
+            outcome.expect("a controller answered the probe").as_str(),
+            TYPED,
+            "the URL to save must keep the prefix"
+        );
+    }
+
+    /// A URL that already names the integration API gets `info` and no
+    /// second copy of the integration path, as the client does.
+    #[tokio::test]
+    async fn a_typed_integration_url_is_probed_where_it_stands() {
+        let (_, asked) =
+            validate_at_a_controller("https://localhost/proxy/network/integration/v1").await;
+
+        assert_eq!(
+            asked.expect("the probe must run").as_str(),
+            "https://localhost/proxy/network/integration/v1/info"
+        );
+    }
+
+    /// The real probe goes to the URL the user typed: the same scheme, the
+    /// same port and the same path prefix.
+    #[tokio::test]
+    async fn the_probe_goes_to_the_url_the_user_typed() {
+        let controller = TestServer::replying(&json_response(CONTROLLER_INFO)).await;
+        let typed = format!("{}/unifi", controller.origin());
+
+        let outcome = validate_user_url(&typed).await;
+
+        let received = controller.requests();
+        assert_eq!(
+            received
+                .iter()
+                .map(ReceivedRequest::request_line)
+                .collect::<Vec<_>>(),
+            ["GET /unifi/proxy/network/integration/v1/info HTTP/1.1"],
+            "the probe must reach the integration API under the typed URL"
+        );
+        assert_eq!(
+            outcome.expect("the test server answers as a controller"),
+            typed,
+            "the URL to save must be the URL the user typed"
+        );
+    }
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+
+    /// A discovered controller at the given address, on port 443.
+    fn controller_at(address: &str) -> DiscoveredController {
+        DiscoveredController {
+            ip: address.to_string(),
+            port: 443,
+            name: None,
+            is_verified: true,
+        }
+    }
+
+    /// An IPv6 address in a URL needs brackets. Without them, the colons of
+    /// the address and the colon of the port run together, and no URL parser
+    /// accepts the result.
+    #[test]
+    fn an_ipv6_address_gets_the_brackets_a_url_needs() {
+        let url = controller_at("2001:db8::1")
+            .url()
+            .expect("an IPv6 address fits in a URL");
+
+        assert_eq!(url, "https://[2001:db8::1]:443");
+        let parsed = Url::parse(&url).expect("the URL must parse");
+        assert_eq!(
+            parsed.host(),
+            Some(url::Host::Ipv6(
+                "2001:db8::1".parse().expect("a valid address")
+            )),
+            "the host must be the IPv6 address"
+        );
+    }
+
+    /// An address that already has its brackets keeps one pair of them.
+    #[test]
+    fn a_bracketed_ipv6_address_keeps_one_pair_of_brackets() {
+        assert_eq!(
+            origin_url("[2001:db8::1]", 443).expect("a bracketed IPv6 address fits in a URL"),
+            "https://[2001:db8::1]:443"
+        );
+    }
+
+    /// An IPv4 address and a name keep the explicit port, as before.
+    #[test]
+    fn an_ipv4_address_and_a_name_keep_the_explicit_port() {
+        assert_eq!(
+            controller_at("192.168.1.1")
+                .url()
+                .expect("an IPv4 address fits in a URL"),
+            "https://192.168.1.1:443"
+        );
+        assert_eq!(
+            origin_url("unifi.local", 8443).expect("a name fits in a URL"),
+            "https://unifi.local:8443"
+        );
+    }
+
+    /// A host that no URL can hold gives an error, not a URL that every
+    /// later request fails to parse.
+    #[test]
+    fn a_host_no_url_can_hold_is_refused() {
+        let outcome = origin_url("port forward", 8443);
+
+        assert!(
+            outcome.is_err(),
+            "a host with a space in it fits in no URL, got {outcome:?}"
         );
     }
 }

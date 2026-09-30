@@ -1,5 +1,5 @@
 use crate::client::UnifiClient;
-use crate::discovery::{discover_controllers, validate_user_url};
+use crate::discovery::{discover_controllers, origin_url, validate_user_url};
 use crate::prompt::{self, Stdio};
 use crate::secret::Secret;
 use anyhow::{Context, Result};
@@ -121,8 +121,19 @@ pub struct OpController {
 }
 
 impl OpController {
-    pub fn url(&self) -> String {
-        format!("https://{}:{}", self.host, self.port)
+    /// The URL of this controller.
+    ///
+    /// # Returns
+    ///
+    /// The origin URL, as [`origin_url`] builds it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no URL can hold the host that the field label
+    /// names.
+    pub fn url(&self) -> Result<String> {
+        origin_url(&self.host, self.port)
+            .with_context(|| format!("The 1Password field {} names no usable host", self.op_path))
     }
 }
 
@@ -448,7 +459,10 @@ impl Config {
         let selection = if !op_controllers.is_empty() {
             println!("Found {} controller(s) in 1Password:", op_controllers.len());
             for (i, c) in op_controllers.iter().enumerate() {
-                println!("  {}. {}", i + 1, c.url());
+                match c.url() {
+                    Ok(url) => println!("  {}. {url}", i + 1),
+                    Err(e) => println!("  {}. {e:#}", i + 1),
+                }
             }
             let manual_idx = op_controllers.len() + 1;
             let network_idx = op_controllers.len() + 2;
@@ -473,6 +487,7 @@ impl Config {
 
         let (controller_url, credential) = match selection {
             Selection::Op(c) => {
+                let url = c.url()?;
                 // Read the key via op-cache to verify it works
                 let cache = op_cache()?;
                 let path = op_cache::OpPath::new(&c.op_path).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -482,7 +497,7 @@ impl Config {
                         .map_err(|e| anyhow::anyhow!("{e}"))?,
                 );
                 (
-                    c.url(),
+                    url,
                     ControllerCredential::OnePassword {
                         op_path: c.op_path,
                         key,
@@ -807,7 +822,7 @@ async fn network_discover_and_select() -> Result<String> {
         println!(
             "  {}. {} {}",
             i + 1,
-            c.url(),
+            c.url()?,
             if c.is_verified { "✓" } else { "" }
         );
     }
@@ -815,7 +830,7 @@ async fn network_discover_and_select() -> Result<String> {
     println!("  {manual_idx}. Enter URL manually\n");
 
     match prompt::select_one(&mut Stdio, "Select a controller", manual_idx)? {
-        Some(index) if index < controllers.len() => Ok(controllers[index].url()),
+        Some(index) if index < controllers.len() => controllers[index].url(),
         Some(_) => get_manual_controller_url().await,
         None => anyhow::bail!(NEEDS_A_TERMINAL),
     }
@@ -848,9 +863,9 @@ async fn get_manual_controller_url() -> Result<String> {
         std::io::stdout().flush()?;
 
         match validate_user_url(&url).await {
-            Ok(controller) => {
+            Ok(url_to_save) => {
                 println!(" ✓");
-                return Ok(controller.url());
+                return Ok(url_to_save);
             }
             Err(e) => {
                 println!(" ✗");
@@ -1576,7 +1591,10 @@ mod tests {
 
         assert_eq!(controllers[0].host, "192.168.1.1");
         assert_eq!(controllers[0].port, 443);
-        assert_eq!(controllers[0].url(), "https://192.168.1.1:443");
+        assert_eq!(
+            controllers[0].url().expect("an IPv4 address fits in a URL"),
+            "https://192.168.1.1:443"
+        );
         assert_eq!(
             controllers[0].op_path, "op://Private/ufa/key - 192.168.1.1 port 443",
             "the reference must name the field the label came from"
@@ -1629,6 +1647,37 @@ mod tests {
         );
         assert_eq!(controllers[0].host, "port forward");
         assert_eq!(controllers[0].port, 8443);
+    }
+
+    /// A field label that names an IPv6 address gives a URL with the
+    /// brackets the address needs.
+    #[test]
+    fn a_field_label_with_an_ipv6_address_gives_a_url_that_parses() {
+        let controllers = controllers_from_labels(&["key - 2001:db8::1 port 443".to_string()]);
+
+        let url = controllers[0].url().expect("an IPv6 address fits in a URL");
+
+        assert_eq!(url, "https://[2001:db8::1]:443");
+        assert!(
+            url::Url::parse(&url).is_ok(),
+            "the URL of the controller must parse, got {url}"
+        );
+    }
+
+    /// A field label whose host fits in no URL still names a controller,
+    /// but its URL is an error that names the field.
+    #[test]
+    fn a_field_label_whose_host_fits_in_no_url_has_no_url() {
+        let controllers = controllers_from_labels(&["key - port forward port 8443".to_string()]);
+
+        let error = controllers[0]
+            .url()
+            .expect_err("a host with a space in it fits in no URL");
+
+        assert!(
+            error.to_string().contains("key - port forward port 8443"),
+            "the error must name the field to correct, got: {error}"
+        );
     }
 
     /// Configs written before `sm_op_path` existed keep working.
