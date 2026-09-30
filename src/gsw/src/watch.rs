@@ -6283,6 +6283,12 @@ mod tests {
         }
     }
 
+    /// Whether `line`, one row of a frame, is the log row of `commit`: the
+    /// hash of the commit follows the gutter of the row.
+    fn starts_with_commit(line: &str, commit: &LogEntry) -> bool {
+        crate::render::after_log_gutter(line).is_some_and(|row| row.starts_with(&commit.hash))
+    }
+
     /// How many commit rows `glyphs`, the glyphs of one frame, shows.
     fn commit_rows(glyphs: &str) -> usize {
         glyphs
@@ -6554,7 +6560,7 @@ mod tests {
             let row = run
                 .glyphs
                 .lines()
-                .find(|line| line.starts_with(&commit.hash))
+                .find(|line| starts_with_commit(line, &commit))
                 .unwrap_or_else(|| panic!("no row for {}:\n{}", commit.hash, run.glyphs));
             let true_age = crate::age::format_age_detailed(
                 commit
@@ -6730,7 +6736,7 @@ mod tests {
 
     /// Whether `glyphs`, the glyphs of one frame, hold a row of `commit`.
     fn shows(glyphs: &str, commit: &LogEntry) -> bool {
-        glyphs.lines().any(|line| line.starts_with(&commit.hash))
+        glyphs.lines().any(|line| starts_with_commit(line, commit))
     }
 
     #[test]

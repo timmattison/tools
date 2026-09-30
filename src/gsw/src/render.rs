@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use colored::{ColoredString, Colorize};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use textfit::{
     center, pad_right, truncate_left, truncate_middle, truncate_right, truncate_to_budget,
@@ -137,13 +137,8 @@ pub struct LogEntry {
     ///
     /// It is `false` for every commit when HEAD is on the base, or when the
     /// base does not resolve. The header then counts zero too.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Issue #541: the log row does not paint the mark yet, so only the tests read it"
-        )
-    )]
+    ///
+    /// The log row of such a commit shows [`BRANCH_MARK`] in its gutter.
     pub on_branch: bool,
 }
 
@@ -349,7 +344,26 @@ const LOG_HASH_SUBJECT_SEP: &str = "  ";
 /// color: in 8-color mode and in piped output with no escape codes.
 pub(crate) const BRANCH_MARK: char = '▎';
 
+/// The gutter of a log row whose commit is not only on the current branch.
+/// It is as wide as [`BRANCH_MARK`], so every hash starts in one column.
+const LOG_GUTTER_BLANK: char = ' ';
+
+/// The glyphs of the log row `row` after its gutter, or `None` when `row`
+/// does not start with a gutter. The tests use it to find a log row by the
+/// hash at its start.
+#[cfg(test)]
+pub(crate) fn after_log_gutter(row: &str) -> Option<&str> {
+    row.strip_prefix(BRANCH_MARK)
+        .or_else(|| row.strip_prefix(LOG_GUTTER_BLANK))
+}
+
 /// Render one commit-log row.
+///
+/// The row starts with a gutter of one column: [`BRANCH_MARK`] when the
+/// commit is only on the current branch ([`LogEntry::on_branch`]), and a blank
+/// on every other row. The gutter takes its column from the subject, so the
+/// row is never wider than `width`, and the age column stays in line with the
+/// age column of the file rows.
 ///
 /// `age_offset` is added (saturating) to the commit's age before it is
 /// formatted and used to drive the hash/subject/age fades, so the whole row
@@ -358,16 +372,24 @@ pub(crate) const BRANCH_MARK: char = '▎';
 /// give us ([`LogEntry::age`] of `None`) stays unknown whatever the offset —
 /// advancing a duration gsw never had produces a number it still cannot back.
 fn render_log_row(entry: &LogEntry, width: usize, truecolor: bool, age_offset: Duration) -> String {
-    // Layout: `{hash}  {subject…}   {age}` — the rightmost AGE_FIELD cells
-    // hold the right-aligned age, matching the file-row age column exactly.
-    // The subject is padded to fill the gap so the age column lines up.
+    // Layout: `{mark}{hash}  {subject…}   {age}` — the first cell is the
+    // gutter, which holds BRANCH_MARK or a blank, so every hash starts in the
+    // same column. The rightmost AGE_FIELD cells hold the right-aligned age,
+    // matching the file-row age column exactly. The subject is padded to fill
+    // the gap so the age column lines up.
     let effective_age = entry.age.map(|age| age.saturating_add(age_offset));
+    let gutter = if entry.on_branch {
+        BRANCH_MARK
+    } else {
+        LOG_GUTTER_BLANK
+    };
+    let gutter_width = UnicodeWidthChar::width(gutter).unwrap_or(0);
     let hash_width = UnicodeWidthStr::width(entry.hash.as_str());
     let hash_sep_width = LOG_HASH_SUBJECT_SEP.chars().count();
     let sep_to_age = " ".repeat(SEP_DELS_AGE);
 
     let subject_budget = width
-        .saturating_sub(hash_width + hash_sep_width + SEP_DELS_AGE + AGE_FIELD)
+        .saturating_sub(gutter_width + hash_width + hash_sep_width + SEP_DELS_AGE + AGE_FIELD)
         .max(1);
     let subject_truncated = truncate_right(&entry.subject, subject_budget);
     let subject_padded = pad_right(&subject_truncated, subject_budget);
@@ -378,7 +400,7 @@ fn render_log_row(entry: &LogEntry, width: usize, truecolor: bool, age_offset: D
     let hash_str = colorize_log_hash(&entry.hash, effective_age, truecolor);
     let subject_str = colorize_log_subject(&subject_padded, effective_age, truecolor);
     let age_str = colorize_log_age(&age_field, effective_age, truecolor);
-    format!("{hash_str}{LOG_HASH_SUBJECT_SEP}{subject_str}{sep_to_age}{age_str}")
+    format!("{gutter}{hash_str}{LOG_HASH_SUBJECT_SEP}{subject_str}{sep_to_age}{age_str}")
 }
 
 /// Total width of everything to the right of the path column: the bar plus

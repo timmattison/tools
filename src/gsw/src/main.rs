@@ -1171,7 +1171,8 @@ mod tests {
     }
 
     /// The start of the hash of each log row that [`snapshot_of`] makes. The
-    /// header and the file rows never start with it.
+    /// hash follows the gutter of the row. The header and the file rows never
+    /// hold it there.
     const SWEEP_HASH_PREFIX: &str = "lg";
 
     /// A snapshot with `files` changed files and `commits` log rows, for the
@@ -1227,7 +1228,10 @@ mod tests {
                     if lines.len() < height {
                         let log_rows = lines
                             .iter()
-                            .filter(|line| line.starts_with(SWEEP_HASH_PREFIX))
+                            .filter(|line| {
+                                crate::render::after_log_gutter(line)
+                                    .is_some_and(|row| row.starts_with(SWEEP_HASH_PREFIX))
+                            })
                             .count();
                         let file_rows = lines.iter().filter(|line| line.contains(".rs")).count();
                         assert_eq!(
