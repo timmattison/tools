@@ -2848,6 +2848,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_log_row_with_the_mark_and_a_row_with_a_blank_have_one_width_and_one_hash_column() {
+        // Issue #541: the mark does not move a row. The row with the mark and
+        // the row with a blank have the same width, and their hashes start in
+        // the same column. So no column moves when a commit lands on the
+        // branch.
+        let mut o = opts();
+        o.log_lines = 5;
+
+        let glyphs = painted_glyphs(&snap_with_a_branch_row("a commit on the branch"), &o);
+
+        let marked = row_with(&glyphs, BRANCH_HASH);
+        let blank = row_with(&glyphs, BASE_HASH);
+        assert_eq!(
+            UnicodeWidthStr::width(marked),
+            UnicodeWidthStr::width(blank),
+            "the two log rows have the same width:\n  mark:  {marked:?}\n  blank: {blank:?}",
+        );
+        let hash_column = |row: &str, hash: &str| {
+            row.split_once(hash)
+                .map(|(before, _)| UnicodeWidthStr::width(before))
+        };
+        assert_eq!(
+            hash_column(marked, BRANCH_HASH),
+            hash_column(blank, BASE_HASH),
+            "the two hashes start in the same column:\n  mark:  {marked:?}\n  blank: {blank:?}",
+        );
+    }
+
     // --- truecolor commit-log fade ---------------------------------------
     //
     // These tests inspect the `ColoredString::fgcolor` field directly rather
