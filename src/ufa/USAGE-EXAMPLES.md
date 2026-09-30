@@ -63,7 +63,7 @@ ufa --output json cloud host "70A741667C3000000000066DC7C00000000006BABC5A000000
 
 The console ID format: `70A741667C3000000000066DC7C00000000006BABC5A000000006289D202:1320847833`
 
-- **First part**: 64-character hexadecimal string (256 bits) - unique console identifier
+- **First part**: 60-character hexadecimal string (240 bits) - unique console identifier
 - **Separator**: Colon (:)
 - **Second part**: Numeric value (possibly timestamp or sequence number)
 
