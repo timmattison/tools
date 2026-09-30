@@ -1053,14 +1053,16 @@ mod action_tests {
         )
     }
 
-    /// `devices stats <id> --output json` prints the statistics as the
-    /// controller gave them. `devices stats --all --output json` must give the
-    /// same figures in the same units, so one parser reads both. A figure such
-    /// as `"12.5%"` or `"3d 4h 5m"` is text for a person, and the placeholder
-    /// `"ERROR"` in every field hides the reason for the failure.
-    #[tokio::test]
-    async fn stats_for_every_device_answer_json_with_the_raw_statistics_or_the_error() {
-        let controller = TestServer::routing(
+    /// A controller whose site holds the two devices above. The statistics
+    /// request of the healthy device succeeds, and the statistics request of
+    /// the failing device fails.
+    ///
+    /// # Returns
+    ///
+    /// The running controller. It answers every connection, so one test can
+    /// run the command more than once against it.
+    async fn controller_with_a_failing_device() -> TestServer {
+        TestServer::routing(
             &[
                 (
                     format!("/devices/{HEALTHY_DEVICE_ID}/"),
@@ -1076,7 +1078,17 @@ mod action_tests {
             ],
             &json_response(&two_devices()),
         )
-        .await;
+        .await
+    }
+
+    /// `devices stats <id> --output json` prints the statistics as the
+    /// controller gave them. `devices stats --all --output json` must give the
+    /// same figures in the same units, so one parser reads both. A figure such
+    /// as `"12.5%"` or `"3d 4h 5m"` is text for a person, and the placeholder
+    /// `"ERROR"` in every field hides the reason for the failure.
+    #[tokio::test]
+    async fn stats_for_every_device_answer_json_with_the_raw_statistics_or_the_error() {
+        let controller = controller_with_a_failing_device().await;
 
         let report =
             get_all_device_stats(&client_for(&controller), Uuid::new_v4(), OutputFormat::Json)
@@ -1137,6 +1149,56 @@ mod action_tests {
         assert!(
             !document.contains(FETCH_FAILED),
             "the table placeholder must not reach the JSON document, got:\n{document}"
+        );
+    }
+
+    /// A failed statistics request is a note of the report, in both formats.
+    ///
+    /// `Report::print` prints each note after the document, so the user reads
+    /// the failure last. A note printed straight to standard error comes
+    /// before the table, and no test can read it. The device that answered
+    /// gets no note.
+    #[tokio::test]
+    async fn stats_for_every_device_note_each_failed_request_in_the_report() {
+        let controller = controller_with_a_failing_device().await;
+        let client = client_for(&controller);
+        let site_id = Uuid::new_v4();
+
+        let json = get_all_device_stats(&client, site_id, OutputFormat::Json)
+            .await
+            .expect("the controller answered the device list");
+
+        // The note and the JSON entry give the same reason.
+        let document = json
+            .document()
+            .unwrap_or_else(|| panic!("--output json must answer with a document, got none"));
+        let parsed: serde_json::Value = serde_json::from_str(document).unwrap_or_else(|error| {
+            panic!("--output json must produce JSON ({error}), got:\n{document}")
+        });
+        let reason = parsed[1]["error"].as_str().unwrap_or_else(|| {
+            panic!("the failed device must carry the reason for the failure, got:\n{document}")
+        });
+        let expected =
+            format!("Failed to fetch statistics for switch-8 ({FAILING_DEVICE_ID}): {reason}");
+        assert!(
+            expected.contains(FAILURE_MESSAGE),
+            "the note must give the reason the controller gave, got: {expected}"
+        );
+
+        assert_eq!(
+            json.notes(),
+            std::slice::from_ref(&expected),
+            "under --output json, the report must hold one note for the failed device"
+        );
+
+        let table = get_all_device_stats(&client, site_id, OutputFormat::Table)
+            .await
+            .expect("the controller answered the device list");
+
+        assert_eq!(
+            table.notes(),
+            std::slice::from_ref(&expected),
+            "under --output table, the report must hold one note for the failed device"
         );
     }
 
