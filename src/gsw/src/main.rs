@@ -52,7 +52,10 @@ mod worktrees;
     about = "Compact git status watch — event-driven, self-refreshing branch-state view",
     long_about = "Prints a compact, color-coded view of the current branch's state: \
                   commits ahead of (and behind) the base branch, a recent-commit log, and a \
-                  per-file list showing a magnitude bar, +/- counts, and recency. On a TTY it \
+                  per-file list showing a magnitude bar, +/- counts, and recency. In the log, \
+                  a ▎ in the left column marks each commit that is only on the current \
+                  branch: the commits that the ahead count counts. The mark is a glyph, so it \
+                  stays visible with no color. On a TTY it \
                   runs as a self-refreshing watch that repaints on filesystem changes and \
                   re-walks the repository every --refresh-interval seconds, with the \
                   separator under the header showing how stale the screen is and how long \
@@ -620,7 +623,7 @@ pub(crate) fn collect_snapshot(
         &ages,
     );
 
-    let fetched = fetch_head_log(repo, log_limit);
+    let fetched = fetch_head_log(repo, &snapshot.base, log_limit);
     snapshot.log = fetched.entries;
     snapshot.log_complete = fetched.complete;
     snapshot.log_start = fetched.start;
@@ -820,7 +823,9 @@ pub(crate) struct FetchedLog {
     /// The commit that the read started from ([`Snapshot::log_start`]).
     /// `None` when HEAD named no commit.
     pub(crate) start: Option<repo::LogStart>,
-    /// The commits, newest first.
+    /// The commits, newest first. Each entry tells whether its commit is only
+    /// on the branch ([`LogEntry::on_branch`]). The base commit of `start`
+    /// decides that mark.
     pub(crate) entries: Vec<LogEntry>,
     /// `entries` is complete: the walk of the history of `start` reached its
     /// end at or before the limit, so a read from `start` with a higher limit
@@ -829,10 +834,16 @@ pub(crate) struct FetchedLog {
 }
 
 /// Fetch the `n` most recent commits from HEAD as [`LogEntry`] records via
-/// gix, with the commit that HEAD names.
+/// gix, with the start of the walk: the commit that HEAD names and the commit
+/// that `base` names ([`repo::LogStart`]).
 ///
 /// Returns an empty list when `n == 0` or the repo has no commits. The start
 /// is known at `n == 0` too, as [`repo::recent_log`] resolves it.
+///
+/// An entry is marked when its commit is only on the branch: HEAD reaches it,
+/// and `base` does not ([`LogEntry::on_branch`]). These are the commits that
+/// the header counts as ahead of the base. No entry is marked when HEAD is on
+/// the base, or when `base` does not resolve.
 ///
 /// [`FetchedLog::complete`] tells whether the walk reached the end of the
 /// history, as [`repo::recent_log`] finds it. A history of exactly `n` commits
@@ -847,9 +858,9 @@ pub(crate) struct FetchedLog {
 ///
 /// Each age is measured at the instant of this call. [`collect_snapshot`]
 /// calls it for each walk, and nothing else reads the log from HEAD.
-fn fetch_head_log(repo: &gix::Repository, n: usize) -> FetchedLog {
+fn fetch_head_log(repo: &gix::Repository, base: &str, n: usize) -> FetchedLog {
     let now = SystemTime::now();
-    fetched_at(repo::recent_log(repo, n), now)
+    fetched_at(repo::recent_log(repo, base, n), now)
 }
 
 /// Fetch the `n` most recent commits of the history of `start` as
@@ -863,6 +874,11 @@ fn fetch_head_log(repo: &gix::Repository, n: usize) -> FetchedLog {
 /// and more commits of the same history after them
 /// ([`repo::recent_log_from`]). Each age is measured at the instant of this
 /// call.
+///
+/// The marks of the entries ([`LogEntry::on_branch`]) come from the base
+/// commit that `start` recorded, and not from the commit that the base names
+/// now. So the read gives the commits of the walk with the marks of the walk,
+/// also when the base moved after the walk.
 pub(crate) fn fetch_log_from(
     repo: &gix::Repository,
     start: repo::LogStart,
@@ -873,17 +889,23 @@ pub(crate) fn fetch_log_from(
 }
 
 /// The [`FetchedLog`] of `recent`, with the age of each commit measured at
-/// `now`.
+/// `now`. Each entry keeps the mark of its commit
+/// ([`repo::LogCommit::on_branch`]).
 fn fetched_at(recent: repo::RecentLog, now: SystemTime) -> FetchedLog {
     let entries = recent
         .commits
         .into_iter()
-        .map(|(hash, secs, subject)| {
-            let age = u64::try_from(secs)
+        .map(|commit| {
+            let age = u64::try_from(commit.secs)
                 .ok()
                 .map(|s| SystemTime::UNIX_EPOCH + Duration::from_secs(s))
                 .and_then(|when| now.duration_since(when).ok());
-            LogEntry { hash, subject, age }
+            LogEntry {
+                hash: commit.hash,
+                subject: commit.summary,
+                age,
+                on_branch: commit.on_branch,
+            }
         })
         .collect();
     FetchedLog {
@@ -1152,7 +1174,8 @@ mod tests {
     }
 
     /// The start of the hash of each log row that [`snapshot_of`] makes. The
-    /// header and the file rows never start with it.
+    /// hash follows the gutter of the row. The header and the file rows never
+    /// hold it there.
     const SWEEP_HASH_PREFIX: &str = "lg";
 
     /// A snapshot with `files` changed files and `commits` log rows, for the
@@ -1165,6 +1188,7 @@ mod tests {
                 hash: format!("{SWEEP_HASH_PREFIX}{n:05}"),
                 subject: format!("commit {n}"),
                 age: Some(Duration::from_secs(90)),
+                on_branch: false,
             })
             .collect();
         snap
@@ -1207,7 +1231,10 @@ mod tests {
                     if lines.len() < height {
                         let log_rows = lines
                             .iter()
-                            .filter(|line| line.starts_with(SWEEP_HASH_PREFIX))
+                            .filter(|line| {
+                                crate::render::after_log_gutter(line)
+                                    .is_some_and(|row| row.starts_with(SWEEP_HASH_PREFIX))
+                            })
                             .count();
                         let file_rows = lines.iter().filter(|line| line.contains(".rs")).count();
                         assert_eq!(
@@ -1772,6 +1799,7 @@ mod tests {
                     hash: "abc1234".into(),
                     subject: "the newest commit".into(),
                     age: Some(age),
+                    on_branch: false,
                 }]
             })
             .unwrap_or_default();
@@ -1871,11 +1899,13 @@ mod tests {
                 hash: "abc1234".into(),
                 subject: "the newest commit".into(),
                 age: Some(Duration::from_secs(10)),
+                on_branch: false,
             },
             LogEntry {
                 hash: "def5678".into(),
                 subject: "an older commit".into(),
                 age: Some(Duration::from_secs(900)),
+                on_branch: false,
             },
         ];
         assert_eq!(
@@ -1920,6 +1950,7 @@ mod tests {
                 hash: "abc1234".into(),
                 subject: "the newest commit".into(),
                 age: Some(Duration::from_secs(10)),
+                on_branch: false,
             }],
             log_complete: false,
             log_start: None,
