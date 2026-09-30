@@ -40,7 +40,7 @@ const OP_MAX_RETRIES: u32 = 3;
 /// Delay between retries in milliseconds.
 const RETRY_DELAY_MS: u64 = 1000;
 
-/// Cache file name (must be gitignored by consuming projects).
+/// Cache file name that [`OpCache::new`] uses (a project that calls it must gitignore the file).
 const CACHE_FILENAME: &str = ".op-cache.json";
 
 /// Errors that can occur during 1Password caching operations.
