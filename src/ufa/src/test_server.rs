@@ -42,6 +42,13 @@ const MAX_BODY_BYTES: usize = 1_048_576;
 /// How much a server reads off a socket at a time.
 const READ_CHUNK_BYTES: usize = 1_024;
 
+/// The line ending of an HTTP head.
+const LINE_END: &str = "\r\n";
+
+/// The header line that tells a client that the server closes the connection
+/// after this answer.
+const CONNECTION_CLOSE: &str = "Connection: close";
+
 /// Where a controller serves the integration API, as the UniFi documentation
 /// gives it.
 ///
@@ -113,7 +120,7 @@ impl ReceivedRequest {
     /// The request line and every header it carried, with no body. The body
     /// comes after the head on the socket, and [`Self::with_body`] adds it.
     fn parse(head: &str) -> Self {
-        let mut lines = head.split("\r\n");
+        let mut lines = head.split(LINE_END);
         let request_line = lines.next().unwrap_or_default().to_string();
         let headers = lines
             .filter_map(|line| line.split_once(':'))
@@ -214,6 +221,10 @@ impl ReceivedRequest {
 /// The server accepts every connection, records the request head and body,
 /// and writes back the one canned response it was built with. It stops when the test
 /// drops it.
+///
+/// The server closes each connection after one answer, and it adds
+/// `Connection: close` to each answer, so that a client does not send its
+/// next request on the closed socket.
 pub struct TestServer {
     /// The origin a client reaches this server at.
     origin: String,
@@ -348,7 +359,8 @@ impl TestServer {
 
                 match response {
                     Some(response) => {
-                        let _ = socket.write_all(response.as_bytes()).await;
+                        let answer = closing_the_connection(response);
+                        let _ = socket.write_all(answer.as_bytes()).await;
                         let _ = socket.flush().await;
                     }
                     // The socket goes out of scope here, which closes the
@@ -474,6 +486,35 @@ async fn read_request(socket: &mut TcpStream) -> Option<ReceivedRequest> {
     }
 
     Some(request.with_body(&received[body_start..body_end]))
+}
+
+/// `response` with a header that says the server closes the connection after
+/// it writes this answer.
+///
+/// The server closes each connection after one answer. A client that is not
+/// told keeps the connection in its pool, and sometimes sends the next request
+/// on the socket that the server already closed. The server then records one
+/// request too few, and a test that counts the requests fails at random.
+///
+/// The server adds the header where it writes each answer. Thus every answer
+/// gets it: the answer from each builder, each route, the fallback, and a
+/// response that a test writes by hand.
+///
+/// # Arguments
+///
+/// * `response` - The raw HTTP response, as the test gave it.
+///
+/// # Returns
+///
+/// The response with the header directly after the status line. A response
+/// with no line ending has no head for the header, and comes back unchanged.
+fn closing_the_connection(response: &str) -> String {
+    match response.split_once(LINE_END) {
+        Some((status_line, rest)) => {
+            format!("{status_line}{LINE_END}{CONNECTION_CLOSE}{LINE_END}{rest}")
+        }
+        None => response.to_string(),
+    }
 }
 
 /// Read the next bytes off `socket` onto the end of `received`.
@@ -645,7 +686,7 @@ mod tests {
         let (head, body) = raw
             .split_once(head_end.as_ref())
             .expect("an HTTP answer has an empty line after its head");
-        let mut lines = head.split("\r\n");
+        let mut lines = head.split(LINE_END);
 
         Framed {
             status_line: lines.next().unwrap_or_default(),
