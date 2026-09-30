@@ -379,11 +379,11 @@ impl OpCache {
 /// The label of every field of a 1Password item, with the values discarded.
 ///
 /// This is how a caller that must know *which* fields an item holds asks,
-/// without reading what they hold. `op item get --format json` prints every
-/// field of the item together with the value of each concealed one, so a
-/// caller that runs it pulls every secret in that item into its own process
-/// merely to read the names beside them. Only this crate runs it, and only the
-/// labels come back.
+/// and gets no value back. `op item get --format json` prints every field of
+/// the item together with the value of each concealed one. This function runs
+/// that command, so every value in the item still reaches the process. The
+/// values stop in a buffer inside this crate, and only the labels come back:
+/// no value reaches a type or a variable of the caller.
 ///
 /// The answer is **not cached**, and it is the one read in this crate that is
 /// not. Two reasons. A label is not a secret, so none of the reasons the cache

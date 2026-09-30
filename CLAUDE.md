@@ -628,14 +628,17 @@ binary.
 ### Why
 
 `op-cache` caches what it read, retries what failed, and writes the cache file
-at mode 600. A crate that runs `op` itself gets none of that, and the failure is quiet: the code works, the secret arrives, and only
-the properties nobody can see are gone.
+at mode 600. A crate that runs `op` itself gets none of that, and the failure
+is quiet: the code works, the secret arrives, and only the properties nobody
+can see are gone.
 
 `ufa` did exactly that. `discover_op_controllers` ran
 `op item get ufa --vault Private --format json` to learn which controllers the
 user keeps, and that command prints the value of every concealed field beside
-its label — so every controller key in the item was read into the process for a
-list of names.
+its label — so every controller key in the item reached a variable of `ufa`
+for a list of names. `op_cache::field_labels` now runs that command. The values
+still reach the process, in a buffer inside `op-cache`, and stop there: no
+value reaches a type or a variable of `ufa`.
 
 The reason it reached around the helper is the part worth remembering:
 `op-cache` had no way to list the fields of an item, so the helper could not do

@@ -130,13 +130,13 @@ impl OpController {
 ///
 /// Fields with labels matching `key - <host> port <port>` are parsed.
 ///
-/// Only the labels of that item reach this process. `ufa` used to run
-/// `op item get ufa --vault Private --format json` itself, and that command
-/// prints the value of every concealed field beside its label — so every
-/// controller key in the item was read here to learn the names beside them,
-/// outside the one crate this workspace keeps for 1Password access.
-/// [`op_cache::field_labels`] runs `op` instead and answers with the labels
-/// alone.
+/// `ufa` used to run `op item get ufa --vault Private --format json` itself,
+/// and that command prints the value of every concealed field beside its
+/// label — so every controller key in the item was read here to learn the
+/// names beside them, outside the one crate this workspace keeps for 1Password
+/// access. [`op_cache::field_labels`] runs that command instead. The values
+/// still reach this process, in a buffer inside `op-cache`, and stop there: no
+/// value reaches a type or a variable of `ufa`.
 ///
 /// # Returns
 ///

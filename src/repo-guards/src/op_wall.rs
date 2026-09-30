@@ -2,17 +2,19 @@
 //!
 //! Every secret this workspace reads lives in 1Password, and `op-cache` is the
 //! one crate that reads it. It caches what it read, retries what failed, and
-//! keeps the cache file at mode 600 beside the repository root. A crate that
-//! runs `op` itself gets none of that, and the failure is quiet: the code
-//! works, the secret arrives, and only the properties nobody can see are gone.
+//! writes the cache file at mode 600. A crate that runs `op` itself gets none
+//! of that, and the failure is quiet: the code works, the secret arrives, and
+//! only the properties nobody can see are gone.
 //!
 //! `ufa` did exactly that. It ran `op item get ufa --vault Private --format
 //! json` to learn which controllers the user keeps, and that command prints the
 //! value of every concealed field beside its label. Every controller key in
-//! that item was read into the process for a list of names. The reason the code
-//! reached around the helper is the one this file exists to make loud:
-//! `op-cache` had no way to list the fields of an item, so the helper was not
-//! usable for the job, and nothing said so.
+//! that item reached a variable of `ufa` for a list of names. `op-cache` now
+//! runs that command. The values still reach the process, in a buffer inside
+//! `op-cache`, and stop there: no value reaches a type or a variable of `ufa`.
+//! The reason the code reached around the helper is the one this file exists
+//! to make loud: `op-cache` had no way to list the fields of an item, so the
+//! helper was not usable for the job, and nothing said so.
 //!
 //! # The rule is one sentence
 //!
