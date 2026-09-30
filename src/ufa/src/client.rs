@@ -3,12 +3,49 @@ use anyhow::{Context, Result};
 use reqwest::{Client, Url};
 use serde::de::DeserializeOwned;
 
-/// Where the controller serves the integration API, relative to its origin.
+/// Where the controller serves the integration API, relative to the URL of
+/// the controller.
 ///
-/// Discovery probes this path directly to tell a controller from anything
-/// else that happens to answer on the same port, so it lives next to the
-/// client that talks to it rather than being spelled out twice.
-pub const INTEGRATION_API_PATH: &str = "/proxy/network/integration/v1/";
+/// Only [`integration_api_base`] reads it. The client and the discovery probe
+/// both get the integration API from that function, so the two cannot
+/// disagree about where it is.
+const INTEGRATION_API_PATH: &str = "/proxy/network/integration/v1/";
+
+/// The base URL of the integration API of the controller at `controller`.
+///
+/// A controller behind a reverse proxy answers at a path prefix, and the
+/// integration API hangs off that prefix rather than off the origin. An
+/// origin with no path of its own leaves the integration path standing on
+/// its own.
+///
+/// A URL that already names the integration API is used where it stands. The
+/// path is what the controller serves, so a user who pasted the whole thing
+/// has given the right answer, and appending to it would ask for
+/// `.../integration/v1/proxy/network/integration/v1/`.
+///
+/// The result always ends in a slash, whichever shape it was built from.
+/// Every request is a relative join onto this URL, and `Url::join` replaces
+/// the last segment of a path that does not end in one.
+///
+/// # Arguments
+///
+/// * `controller` - The URL of the controller, with or without a path
+///   prefix.
+///
+/// # Returns
+///
+/// The base URL of the integration API.
+pub fn integration_api_base(controller: &Url) -> Url {
+    let mut base_url = controller.clone();
+    let prefix = controller.path().trim_end_matches('/');
+    let suffix = if prefix.ends_with(INTEGRATION_API_PATH.trim_end_matches('/')) {
+        "/"
+    } else {
+        INTEGRATION_API_PATH
+    };
+    base_url.set_path(&format!("{prefix}{suffix}"));
+    base_url
+}
 
 pub struct UnifiClient {
     client: Client,
@@ -27,29 +64,8 @@ impl UnifiClient {
         }
         let client = build_client(Api::Controller, api_key, insecure, Timeouts::PRODUCTION)?;
 
-        let mut base_url = Url::parse(base_url).context("Invalid UniFi controller URL")?;
-
-        // A controller behind a reverse proxy answers at a path prefix, and
-        // the integration API hangs off that prefix rather than off the
-        // origin. An origin with no path of its own leaves the integration
-        // path standing on its own.
-        //
-        // A URL that already names the integration API is used where it
-        // stands. The path is what the controller serves, so a user who
-        // pasted the whole thing has given the right answer, and appending to
-        // it would ask for `.../integration/v1/proxy/network/integration/v1/`.
-        //
-        // The result always ends in a slash, whichever shape it was built
-        // from. Every request is a relative join onto this URL, and
-        // `Url::join` replaces the last segment of a path that does not end
-        // in one.
-        let prefix = base_url.path().trim_end_matches('/');
-        let suffix = if prefix.ends_with(INTEGRATION_API_PATH.trim_end_matches('/')) {
-            "/"
-        } else {
-            INTEGRATION_API_PATH
-        };
-        base_url.set_path(&format!("{prefix}{suffix}"));
+        let base_url =
+            integration_api_base(&Url::parse(base_url).context("Invalid UniFi controller URL")?);
 
         Ok(Self { client, base_url })
     }

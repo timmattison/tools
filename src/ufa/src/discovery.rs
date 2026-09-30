@@ -1,15 +1,16 @@
-use crate::{client::INTEGRATION_API_PATH, models::ApplicationInfo};
+use crate::{client::integration_api_base, models::ApplicationInfo};
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use std::collections::HashSet;
 use std::future::Future;
+use std::net::IpAddr;
 use std::time::Duration;
 use tokio::time::timeout;
 use url::Url;
 
-/// The integration API endpoint every controller answers, relative to
-/// [`INTEGRATION_API_PATH`].
+/// The integration API endpoint every controller answers, relative to the
+/// base URL that [`integration_api_base`] gives.
 const INFO_ENDPOINT: &str = "info";
 
 /// How long a single host gets to answer a probe.
@@ -40,9 +41,16 @@ impl DiscoveredController {
 
 /// The origin URL of a controller at `host` and `port`.
 ///
+/// Every URL that `ufa` builds from a host and a port comes from here. The
+/// host goes through [`url::Host`], which writes an IPv6 address in the
+/// brackets a URL needs. The port stays in the URL even when it is 443:
+/// `Url::set_port` removes the default port of the scheme, and a list of
+/// controllers shows 443 and 8443 side by side.
+///
 /// # Arguments
 ///
-/// * `host` - An IP address or a domain name.
+/// * `host` - An IPv4 address, an IPv6 address with or without brackets, or
+///   a domain name.
 /// * `port` - The HTTPS port.
 ///
 /// # Returns
@@ -53,6 +61,14 @@ impl DiscoveredController {
 ///
 /// Returns an error if no URL can hold `host`.
 pub fn origin_url(host: &str, port: u16) -> Result<String> {
+    let host = match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(address)) => url::Host::Ipv4(address),
+        Ok(IpAddr::V6(address)) => url::Host::Ipv6(address),
+        Err(_) => {
+            url::Host::parse(host).with_context(|| format!("No URL can hold the host {host:?}"))?
+        }
+    };
+
     Ok(format!("https://{host}:{port}"))
 }
 
@@ -166,6 +182,10 @@ async fn discover_via_mdns() -> Result<Vec<DiscoveredController>> {
 /// front page proves nothing: any host that merely *mentions* UniFi would
 /// otherwise be offered to the user as a controller to configure.
 ///
+/// Discovery calls this function, and it has no URL that a user typed. A URL
+/// that the user typed goes through [`validate_user_url`], which keeps the
+/// name.
+///
 /// # Arguments
 ///
 /// * `host` - Hostname or IP address to probe.
@@ -177,14 +197,12 @@ async fn discover_via_mdns() -> Result<Vec<DiscoveredController>> {
 ///
 /// # Errors
 ///
-/// Returns an error if the host cannot be reached or does not answer the
-/// integration API.
+/// Returns an error if no URL can hold `host`, if the host cannot be reached,
+/// or if it does not answer the integration API.
 pub async fn validate_controller(host: &str, port: u16) -> Result<DiscoveredController> {
-    let url = Url::parse(&format!(
-        "https://{host}:{port}{INTEGRATION_API_PATH}{INFO_ENDPOINT}"
-    ))?;
+    let origin = Url::parse(&origin_url(host, port)?).context("Invalid controller URL")?;
 
-    match probe(url).await? {
+    match probe(probe_url(&origin)?).await? {
         ProbeVerdict::NotController => {
             anyhow::bail!("{host}:{port} does not answer the UniFi integration API")
         }
@@ -195,6 +213,30 @@ pub async fn validate_controller(host: &str, port: u16) -> Result<DiscoveredCont
             is_verified: true,
         }),
     }
+}
+
+/// The URL of the integration API's `info` endpoint of the controller at
+/// `controller`.
+///
+/// The client finds the integration API with the same rule, so a controller
+/// behind a reverse proxy is probed under its path prefix.
+///
+/// # Arguments
+///
+/// * `controller` - The URL of the controller, with or without a path
+///   prefix.
+///
+/// # Returns
+///
+/// The URL to probe.
+///
+/// # Errors
+///
+/// Returns an error if the endpoint cannot be joined onto the base URL.
+fn probe_url(controller: &Url) -> Result<Url> {
+    integration_api_base(controller)
+        .join(INFO_ENDPOINT)
+        .context("Failed to construct the probe URL")
 }
 
 /// Ask `url` for the integration API's `info` endpoint, and judge the answer.
@@ -341,13 +383,18 @@ fn judge_probe(status: u16, body: &str) -> ProbeVerdict {
 
 /// Validate a controller URL the user typed.
 ///
+/// The probe goes to the URL the user typed, path prefix included. The URL to
+/// save is that URL, unchanged. A controller with a valid certificate for its
+/// name passes verification only at that name, so an address in its place
+/// fails on every run.
+///
 /// # Arguments
 ///
 /// * `url` - The URL the user typed.
 ///
 /// # Returns
 ///
-/// The URL to save.
+/// The URL to save, which is `url` unchanged.
 ///
 /// # Errors
 ///
@@ -368,7 +415,7 @@ pub async fn validate_user_url(url: &str) -> Result<String> {
 ///
 /// # Returns
 ///
-/// The URL to save.
+/// The URL to save, which is `url` unchanged.
 ///
 /// # Errors
 ///
@@ -379,29 +426,14 @@ where
     P: FnOnce(Url) -> F,
     F: Future<Output = Result<ProbeVerdict>>,
 {
-    let parsed = Url::parse(url).context("Invalid URL format")?;
+    let typed = Url::parse(url).context("Invalid URL format")?;
+    anyhow::ensure!(typed.has_host(), "URL must have a host");
 
-    let host = parsed.host_str().context("URL must have a host")?;
-
-    let port = parsed
-        .port()
-        .unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
-
-    let probe_url = Url::parse(&format!(
-        "https://{host}:{port}{INTEGRATION_API_PATH}{INFO_ENDPOINT}"
-    ))?;
-
-    match probe(probe_url).await? {
+    match probe(probe_url(&typed)?).await? {
         ProbeVerdict::NotController => {
-            anyhow::bail!("{host}:{port} does not answer the UniFi integration API")
+            anyhow::bail!("{url} does not answer the UniFi integration API")
         }
-        ProbeVerdict::Controller => DiscoveredController {
-            ip: resolve_address(host, port).await,
-            port,
-            name: None,
-            is_verified: true,
-        }
-        .url(),
+        ProbeVerdict::Controller => Ok(url.to_string()),
     }
 }
 

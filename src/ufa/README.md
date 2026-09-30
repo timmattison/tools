@@ -160,7 +160,9 @@ It looks for a controller in this order:
 2. **The local network.** mDNS discovery, then each candidate is probed for the Integration API's
    `info` endpoint. A host is only offered if it actually answers that endpoint, so a device that
    merely mentions UniFi on a web page is not mistaken for a controller.
-3. **A URL you type**, validated the same way.
+3. **A URL you type**, validated the same way. The probe goes to the `info` endpoint under any path
+   prefix in the URL, as for a controller behind a reverse proxy, and setup saves the URL exactly as
+   you typed it. A name stays a name, so a certificate that is valid for that name stays valid.
 
 It then asks whether to skip TLS verification, tests the connection, and finally offers to store a
 Site Manager key for the `cloud` commands. If the key ends up in the config file rather than in
