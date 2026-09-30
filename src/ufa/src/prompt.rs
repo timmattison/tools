@@ -272,11 +272,13 @@ pub fn confirm(console: &mut impl Console, question: &str) -> Result<bool> {
 
 /// A [`Console`] with its answers written in advance.
 ///
-/// Records every question so a test can assert that nothing was asked.
+/// Records every question so a test can assert that nothing was asked, and
+/// every message so a test can assert what the user was shown.
 #[cfg(test)]
 pub struct Scripted {
     answers: std::collections::VecDeque<String>,
     questions: Vec<String>,
+    told: Vec<String>,
     is_terminal: bool,
 }
 
@@ -287,6 +289,7 @@ impl Scripted {
         Self {
             answers: answers.iter().map(|a| (*a).to_string()).collect(),
             questions: Vec::new(),
+            told: Vec::new(),
             is_terminal: true,
         }
     }
@@ -296,6 +299,7 @@ impl Scripted {
         Self {
             answers: std::collections::VecDeque::new(),
             questions: Vec::new(),
+            told: Vec::new(),
             is_terminal: false,
         }
     }
@@ -303,6 +307,11 @@ impl Scripted {
     /// Whether anything was asked at all.
     pub fn was_asked(&self) -> bool {
         !self.questions.is_empty()
+    }
+
+    /// Everything shown through [`Console::tell`], one message per line.
+    pub fn told(&self) -> String {
+        self.told.join("\n")
     }
 }
 
@@ -320,7 +329,9 @@ impl Console for Scripted {
         }
     }
 
-    fn tell(&mut self, _message: &str) {}
+    fn tell(&mut self, message: &str) {
+        self.told.push(message.to_string());
+    }
 }
 
 #[cfg(test)]

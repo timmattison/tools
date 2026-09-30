@@ -190,6 +190,57 @@ mod tests {
         assert!(console.was_asked(), "the user must have been asked");
     }
 
+    /// The table of choices goes where the question goes. The real console
+    /// puts both on standard error, so standard output keeps only the
+    /// document, and `--output json` stays a document a program reads. A
+    /// pipe cannot answer, but it sees the choices too: they hold the ids it
+    /// can name on the command line.
+    #[test]
+    fn the_choices_are_shown_through_the_console() {
+        let items = things(3);
+
+        for (kind, mut console) in [
+            ("a terminal", Scripted::terminal(&["1"])),
+            ("a pipe", Scripted::not_a_terminal()),
+        ] {
+            // A pipe fails to choose. Only what it was shown counts here.
+            let _ = choose_from(&items, &mut console);
+
+            let shown = console.told();
+            assert!(
+                shown.contains("Name"),
+                "{kind} must see the table of choices through the console, got {shown:?}"
+            );
+            for thing in &items {
+                assert!(
+                    shown.contains(&thing.name),
+                    "{kind} must see {:?} through the console, got {shown:?}",
+                    thing.name
+                );
+            }
+            assert!(
+                shown.contains("Multiple things found:"),
+                "{kind} must see the heading of the choices through the console, got {shown:?}"
+            );
+        }
+    }
+
+    /// An automatic choice is a note, and a note goes where the question
+    /// goes.
+    #[test]
+    fn a_single_thing_is_announced_through_the_console() {
+        let items = things(1);
+        let mut console = Scripted::terminal(&[]);
+
+        choose_from(&items, &mut console).expect("a single thing needs no choosing");
+
+        let shown = console.told();
+        assert!(
+            shown.contains(&format!("Using thing: thing 0 ({})", items[0].id())),
+            "the automatic choice must be announced through the console, got {shown:?}"
+        );
+    }
+
     /// A pipe cannot answer, so it gets told how to name one instead.
     #[test]
     fn a_pipe_is_told_how_to_name_one() {
