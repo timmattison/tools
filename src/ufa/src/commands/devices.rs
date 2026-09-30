@@ -869,7 +869,7 @@ mod tests {
 #[cfg(test)]
 mod action_tests {
     use super::*;
-    use crate::test_server::{empty_json, json_response, TestServer};
+    use crate::test_server::{empty_json, json_response, json_response_with_status, TestServer};
 
     /// The API key a test hands the client. Nothing reads it back.
     const API_KEY: &str = "an-api-key";
@@ -913,6 +913,139 @@ mod action_tests {
                 .any(|note| note.contains("No devices")),
             "the note must say the site holds no devices, got {:?}",
             report.notes()
+        );
+    }
+
+    /// The device that answers its statistics request.
+    const HEALTHY_DEVICE_ID: &str = "00000000-0000-0000-0000-00000000000a";
+
+    /// The device whose statistics request fails.
+    const FAILING_DEVICE_ID: &str = "00000000-0000-0000-0000-00000000000b";
+
+    /// The reason the controller gives for the failed statistics request.
+    const FAILURE_MESSAGE: &str = "Device statistics are not available";
+
+    /// The statistics of the healthy device, in the controller's own shape.
+    const HEALTHY_STATISTICS: &str = r#"{
+        "uptimeSec": 273900,
+        "lastHeartbeatAt": "2026-09-29T12:00:00Z",
+        "nextHeartbeatAt": "2026-09-29T12:00:30Z",
+        "loadAverage1Min": 0.5,
+        "loadAverage5Min": 0.25,
+        "loadAverage15Min": 0.125,
+        "cpuUtilizationPct": 12.5,
+        "memoryUtilizationPct": 40.25,
+        "uplink": { "txRateBps": 1200000, "rxRateBps": 3400 },
+        "interfaces": { "radios": [ { "frequencyGHz": 5.0, "txRetriesPct": 1.5 } ] }
+    }"#;
+
+    /// The device collection of a site that holds the two devices above.
+    fn two_devices() -> String {
+        format!(
+            r#"{{
+                "offset": 0, "limit": 200, "count": 2, "totalCount": 2,
+                "data": [
+                    {{
+                        "id": "{HEALTHY_DEVICE_ID}",
+                        "name": "ap-lr", "model": "U6-LR",
+                        "macAddress": "00:11:22:33:44:55", "ipAddress": "192.168.1.2",
+                        "state": "ONLINE", "features": [], "interfaces": []
+                    }},
+                    {{
+                        "id": "{FAILING_DEVICE_ID}",
+                        "name": "switch-8", "model": "USW-Lite-8-PoE",
+                        "macAddress": "00:11:22:33:44:66", "ipAddress": "192.168.1.3",
+                        "state": "OFFLINE", "features": [], "interfaces": []
+                    }}
+                ]
+            }}"#
+        )
+    }
+
+    /// `devices stats <id> --output json` prints the statistics as the
+    /// controller gave them. `devices stats --all --output json` must give the
+    /// same figures in the same units, so one parser reads both. A figure such
+    /// as `"12.5%"` or `"3d 4h 5m"` is text for a person, and the placeholder
+    /// `"ERROR"` in every field hides the reason for the failure.
+    #[tokio::test]
+    async fn stats_for_every_device_answer_json_with_the_raw_statistics_or_the_error() {
+        let controller = TestServer::routing(
+            &[
+                (
+                    format!("/devices/{HEALTHY_DEVICE_ID}/"),
+                    json_response(HEALTHY_STATISTICS),
+                ),
+                (
+                    format!("/devices/{FAILING_DEVICE_ID}/"),
+                    json_response_with_status(
+                        "404 Not Found",
+                        &format!(r#"{{ "message": "{FAILURE_MESSAGE}" }}"#),
+                    ),
+                ),
+            ],
+            &json_response(&two_devices()),
+        )
+        .await;
+
+        let report =
+            get_all_device_stats(&client_for(&controller), Uuid::new_v4(), OutputFormat::Json)
+                .await
+                .expect("the controller answered the device list");
+
+        let document = report
+            .document()
+            .unwrap_or_else(|| panic!("--output json must answer with a document, got none"));
+        let parsed: serde_json::Value = serde_json::from_str(document).unwrap_or_else(|error| {
+            panic!("--output json must produce JSON ({error}), got:\n{document}")
+        });
+        let entries = parsed
+            .as_array()
+            .unwrap_or_else(|| panic!("--output json must produce an array, got:\n{document}"));
+        assert_eq!(entries.len(), 2, "every device must appear:\n{document}");
+
+        // The statistics of one device, exactly as `devices stats <id>
+        // --output json` prints them.
+        let single_device_document = serde_json::to_value(
+            serde_json::from_str::<DeviceStatistics>(HEALTHY_STATISTICS)
+                .expect("the healthy statistics are valid"),
+        )
+        .expect("statistics serialize");
+
+        let healthy = &entries[0];
+        assert_eq!(
+            healthy["statistics"]["cpuUtilizationPct"],
+            serde_json::json!(12.5),
+            "the CPU figure must be the number the controller gave, got:\n{document}"
+        );
+        assert_eq!(
+            healthy["statistics"], single_device_document,
+            "the statistics must be the document of `devices stats <id>`, got:\n{document}"
+        );
+        assert_eq!(healthy["id"], HEALTHY_DEVICE_ID, "got:\n{document}");
+        assert_eq!(healthy["name"], "ap-lr", "got:\n{document}");
+        assert_eq!(
+            healthy.get("error"),
+            None,
+            "a device that answered has no error, got:\n{document}"
+        );
+
+        let failing = &entries[1];
+        assert_eq!(failing["id"], FAILING_DEVICE_ID, "got:\n{document}");
+        assert_eq!(failing["name"], "switch-8", "got:\n{document}");
+        assert!(
+            failing["error"]
+                .as_str()
+                .is_some_and(|error| error.contains(FAILURE_MESSAGE)),
+            "a failed device must carry the reason for the failure, got:\n{document}"
+        );
+        assert_eq!(
+            failing.get("statistics"),
+            None,
+            "a failed device has no statistics, got:\n{document}"
+        );
+        assert!(
+            !document.contains(FETCH_FAILED),
+            "the table placeholder must not reach the JSON document, got:\n{document}"
         );
     }
 

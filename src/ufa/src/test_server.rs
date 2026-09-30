@@ -36,6 +36,14 @@ const READ_CHUNK_BYTES: usize = 1_024;
 enum Reply {
     /// These bytes, exactly as given.
     Bytes(String),
+    /// The response of the first route whose fragment is in the request
+    /// line, or the fallback when no route matches.
+    Routes {
+        /// Pairs of a request-line fragment and the raw response for it.
+        routes: Vec<(String, String)>,
+        /// The raw response for a request that no route matches.
+        fallback: String,
+    },
     /// Nothing at all. The server keeps the connection open, so a client
     /// waits for an answer rather than reads an end of file.
     Silence,
@@ -156,6 +164,30 @@ impl TestServer {
         Self::start(Reply::Bytes(response.to_string())).await
     }
 
+    /// Start a server that picks its answer by the request line.
+    ///
+    /// A command that sends more than one request, such as a listing and then
+    /// one request for each item of it, needs a different answer for each.
+    ///
+    /// # Arguments
+    ///
+    /// * `routes` - Pairs of a fragment of the request line, such as a part of
+    ///   the path, and the raw HTTP response for a request whose line holds
+    ///   it. The first pair that matches wins.
+    /// * `fallback` - The raw HTTP response for a request that no route
+    ///   matches.
+    ///
+    /// # Returns
+    ///
+    /// The running server.
+    pub async fn routing(routes: &[(String, String)], fallback: &str) -> Self {
+        Self::start(Reply::Routes {
+            routes: routes.to_vec(),
+            fallback: fallback.to_string(),
+        })
+        .await
+    }
+
     /// Start a server that accepts a connection and never answers it.
     ///
     /// The connection stays open, so a client reads no end of file and no
@@ -202,17 +234,29 @@ impl TestServer {
                 let Some(request) = read_request(&mut socket).await else {
                     continue;
                 };
+
+                let response = match &reply {
+                    Reply::Bytes(response) => Some(response),
+                    Reply::Routes { routes, fallback } => Some(
+                        routes
+                            .iter()
+                            .find(|(fragment, _)| request.request_line().contains(fragment))
+                            .map_or(fallback, |(_, response)| response),
+                    ),
+                    Reply::Silence => None,
+                };
+
                 recorded
                     .lock()
                     .expect("nothing panics while it holds this lock")
                     .push(request);
 
-                match &reply {
-                    Reply::Bytes(response) => {
+                match response {
+                    Some(response) => {
                         let _ = socket.write_all(response.as_bytes()).await;
                         let _ = socket.flush().await;
                     }
-                    Reply::Silence => held_open.push(socket),
+                    None => held_open.push(socket),
                 }
             }
         });
@@ -305,8 +349,22 @@ pub fn redirect_to(location: &str) -> String {
 ///
 /// A raw `200 OK` response that carries `body`.
 pub fn json_response(body: &str) -> String {
+    json_response_with_status("200 OK", body)
+}
+
+/// The response that carries `body` as its JSON document, with `status`.
+///
+/// # Arguments
+///
+/// * `status` - The status code and reason, such as `404 Not Found`.
+/// * `body` - The JSON document to answer with.
+///
+/// # Returns
+///
+/// A raw response with that status that carries `body`.
+pub fn json_response_with_status(status: &str, body: &str) -> String {
     format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     )
 }
