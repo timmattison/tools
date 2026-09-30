@@ -1730,6 +1730,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn recent_log_marks_no_commit_when_head_is_on_the_base() {
+        // Issue #541: HEAD is on `main`, and `main` is the base. No commit is
+        // only on the branch, so the header counts zero and the log marks no
+        // commit.
+        let dir = three_commit_repo();
+        let repo = open_at(dir.path()).expect("fixture is a worktree repo");
+
+        let log = super::recent_log(&repo, "main", 10);
+
+        assert_eq!(subjects(&log), ["third", "second", "initial"]);
+        assert!(
+            marked(&log).is_empty(),
+            "a branch that is its base has no commit of its own: {:?}",
+            marked(&log),
+        );
+        assert_eq!(super::base_status(&repo, "main").ahead, 0);
+    }
+
     fn statuses(repo: &gix::Repository) -> Vec<(String, FileStatus, bool)> {
         super::collect_changes(repo)
             .unwrap()
