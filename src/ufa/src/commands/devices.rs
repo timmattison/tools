@@ -475,13 +475,13 @@ fn all_device_stats_report(
     rows: &[DeviceStatsRowWithName],
     format: OutputFormat,
 ) -> Result<Report> {
+    let report = render_collection(rows, format)?;
+
     if rows.is_empty() {
-        return Ok(Report::of_document(
-            "No devices found on this site.".to_string(),
-        ));
+        return Ok(report.with_note("No devices found on this site."));
     }
 
-    render_collection(rows, format)
+    Ok(report)
 }
 
 /// Ask the controller to restart a device.
@@ -509,9 +509,7 @@ async fn restart_device(
     let action = DeviceAction::Restart;
 
     let _: serde_json::Value = client.post(&path, &action).await?;
-    Ok(Report::of_document(
-        "Device restart initiated successfully".to_string(),
-    ))
+    Ok(Report::of_note("Device restart initiated successfully"))
 }
 
 /// Ask the controller to power cycle one port of a device.
@@ -544,9 +542,7 @@ async fn power_cycle_port(
     let action = PortAction::PowerCycle;
 
     let _: serde_json::Value = client.post(&path, &action).await?;
-    Ok(Report::of_document(
-        "Port power cycle initiated successfully".to_string(),
-    ))
+    Ok(Report::of_note("Port power cycle initiated successfully"))
 }
 
 #[cfg(test)]

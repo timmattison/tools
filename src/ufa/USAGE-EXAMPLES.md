@@ -38,14 +38,16 @@ Example output:
 │ 70A741667C3000000000066D... │ Home-UDM   │ UDM-Pro      │ 3.2.9    │ 192.168.1.1 │ console │ true  │ 2024-01-15 10:30:00 │
 │ 900A6F00301100000000074A... │ Office-UDR │ Dream Router │ 3.2.9    │ 192.168.2.1 │ console │ true  │ 2024-01-15 10:45:00 │
 └─────────────────────────────┴────────────┴──────────────┴──────────┴─────────────┴─────────┴───────┴─────────────────────┘
-
 Total hosts: 2
-
 To get details for a specific host, use: ufa cloud host <id>
 ```
 
 The IDs are cut short for display; `--output json` answers with them in full, alongside every other
 field the API reported.
+
+The two lines under the table go to standard error, so `ufa cloud hosts > hosts.txt` writes only
+the table. `ufa cloud host <id>` does the same with the dashboard URL that it shows under its
+table.
 
 ### Get Specific Console Details
 
@@ -79,6 +81,9 @@ table. So the display name is `.reportedState.name`, and the address is `.ipAddr
 leaves `reportedState` out for a console that never reported one, and it leaves `ipAddress` out
 for a console it has no address for, so an example that reads either one supplies a fallback with
 `//`. The fallbacks below are the words the table itself prints, `Unknown` and `N/A`.
+
+An account with no consoles answers `[]`, and the note that says so goes to standard error. The
+recipes below then print nothing, and they do not fail.
 
 ```bash
 # Get all console IDs

@@ -15,6 +15,12 @@ const NO_DATA: &str = "N/A";
 /// How a host's last state change is spelled in the listing.
 const LAST_SEEN_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 
+/// The note for an account that holds no hosts.
+const NO_HOSTS: &str = "No cloud-managed hosts found.";
+
+/// The note under the host listing that names the command for one host.
+const HOST_DETAILS_HINT: &str = "To get details for a specific host, use: ufa cloud host <id>";
+
 /// One row of the cloud host listing.
 #[derive(tabled::Tabled, serde::Serialize)]
 pub struct HostRow {
@@ -145,20 +151,19 @@ pub async fn handle_cloud_command(
 /// Returns an error if the hosts cannot be serialized.
 fn hosts_report(hosts: &[Host], format: OutputFormat) -> Result<Report> {
     if hosts.is_empty() {
-        return Ok(Report::of_document(
-            "No cloud-managed hosts found.".to_string(),
-        ));
+        return Ok(Report::of_empty_collection(format).with_note(NO_HOSTS));
     }
 
-    let mut document = render_hosts(hosts, format)?;
-    if matches!(format, OutputFormat::Table) {
-        document.push_str(&format!(
-            "\n\nTotal hosts: {}\n\nTo get details for a specific host, use: ufa cloud host <id>",
-            hosts.len()
-        ));
-    }
+    let report = Report::of_document(render_hosts(hosts, format)?);
 
-    Ok(Report::of_document(document))
+    // The count and the hint are for a person who reads the table. A program
+    // that reads `--output json` has the array, and the array holds the count.
+    Ok(match format {
+        OutputFormat::Json => report,
+        OutputFormat::Table => report
+            .with_note(format!("Total hosts: {}", hosts.len()))
+            .with_note(HOST_DETAILS_HINT),
+    })
 }
 
 /// The report of `ufa cloud host <id>`.
@@ -176,15 +181,17 @@ fn hosts_report(hosts: &[Host], format: OutputFormat) -> Result<Report> {
 ///
 /// Returns an error if the host cannot be serialized.
 fn host_report(host: &Host, format: OutputFormat) -> Result<Report> {
-    let mut document = render_output(host, format)?;
-    if matches!(format, OutputFormat::Table) {
-        document.push_str(&format!(
-            "\n\nCloud Console URL:\nhttps://unifi.ui.com/consoles/{}/network/default/dashboard",
-            host.id
-        ));
-    }
+    let report = Report::of_document(render_output(host, format)?);
 
-    Ok(Report::of_document(document))
+    // The dashboard URL is for a person who reads the table. A program that
+    // reads `--output json` has the id, and the URL is built from it.
+    Ok(match format {
+        OutputFormat::Json => report,
+        OutputFormat::Table => report.with_note(format!(
+            "Cloud Console URL: https://unifi.ui.com/consoles/{}/network/default/dashboard",
+            host.id
+        )),
+    })
 }
 
 #[cfg(test)]

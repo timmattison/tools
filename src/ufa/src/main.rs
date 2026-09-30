@@ -302,6 +302,10 @@ enum ConfigCommand {
 
 /// The report of `ufa config path`.
 ///
+/// The path is the whole document, with no label, so `$(ufa config path)`
+/// gives a shell the path itself. The name of the command says what the
+/// line is.
+///
 /// # Arguments
 ///
 /// * `path` - Where the configuration file is, or goes when it is written.
@@ -310,7 +314,7 @@ enum ConfigCommand {
 ///
 /// The report that gives the path.
 fn config_path_report(path: &std::path::Path) -> output::Report {
-    output::Report::of_document(format!("Configuration file path: {}", path.display()))
+    output::Report::of_document(path.display().to_string())
 }
 
 #[tokio::main]

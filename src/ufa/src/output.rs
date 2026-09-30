@@ -8,6 +8,9 @@ use crate::models::Page;
 /// How a user reaches the part of a collection that one page left out.
 const PAGING_HINT: &str = "Use --limit and --offset to see the rest.";
 
+/// The JSON document of a collection that holds nothing.
+const EMPTY_JSON_ARRAY: &str = "[]";
+
 #[derive(ValueEnum, Debug, Clone, Copy)]
 pub enum OutputFormat {
     Json,
@@ -238,6 +241,64 @@ impl Report {
         }
     }
 
+    /// A report that holds a note and no document.
+    ///
+    /// An action such as a restart has no document to give. The sentence
+    /// that says the controller accepted it is for a person, so it is a note.
+    ///
+    /// # Arguments
+    ///
+    /// * `note` - The sentence to show on standard error.
+    ///
+    /// # Returns
+    ///
+    /// The report.
+    pub fn of_note(note: impl Into<String>) -> Self {
+        Self {
+            document: None,
+            notes: vec![note.into()],
+        }
+    }
+
+    /// The report of a whole collection that holds nothing.
+    ///
+    /// Under `--output json` the document is still the collection: `[]`. A
+    /// program that reads the answer gets an array every time, and
+    /// `jq '.[]'` reads no items rather than failing on a sentence. A table
+    /// of headings and no rows tells a person nothing, so a table has no
+    /// document, and the caller adds the note that says why.
+    ///
+    /// # Arguments
+    ///
+    /// * `format` - The output format the user asked for.
+    ///
+    /// # Returns
+    ///
+    /// The report, with no note.
+    pub fn of_empty_collection(format: OutputFormat) -> Self {
+        Self {
+            document: match format {
+                OutputFormat::Json => Some(EMPTY_JSON_ARRAY.to_string()),
+                OutputFormat::Table => None,
+            },
+            notes: Vec::new(),
+        }
+    }
+
+    /// This report, with one more note after the notes it holds.
+    ///
+    /// # Arguments
+    ///
+    /// * `note` - The sentence to show on standard error.
+    ///
+    /// # Returns
+    ///
+    /// The report.
+    pub fn with_note(mut self, note: impl Into<String>) -> Self {
+        self.notes.push(note.into());
+        self
+    }
+
     /// The document this report prints on standard output.
     ///
     /// # Returns
@@ -290,8 +351,8 @@ impl Report {
 ///
 /// # Returns
 ///
-/// The rendered collection. The report holds no document when the collection
-/// holds nothing.
+/// The rendered collection, with no note. A collection that holds nothing is
+/// rendered as [`Report::of_empty_collection`] says.
 ///
 /// # Errors
 ///
@@ -301,10 +362,7 @@ where
     T: Serialize + Tabled,
 {
     if rows.is_empty() {
-        return Ok(Report {
-            document: None,
-            notes: Vec::new(),
-        });
+        return Ok(Report::of_empty_collection(format));
     }
 
     Ok(Report::of_document(render_vec_table(rows, format)?))

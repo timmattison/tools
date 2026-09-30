@@ -290,9 +290,7 @@ async fn authorize_guest(
     };
 
     let _: serde_json::Value = client.post(&path, &action).await?;
-    Ok(Report::of_document(
-        "Guest access authorized successfully".to_string(),
-    ))
+    Ok(Report::of_note("Guest access authorized successfully"))
 }
 
 /// Ask the controller to end the guest access of a client.
@@ -320,9 +318,7 @@ async fn unauthorize_guest(
     let action = ClientAction::UnauthorizeGuestAccess;
 
     let _: serde_json::Value = client.post(&path, &action).await?;
-    Ok(Report::of_document(
-        "Guest access unauthorized successfully".to_string(),
-    ))
+    Ok(Report::of_note("Guest access unauthorized successfully"))
 }
 
 #[cfg(test)]

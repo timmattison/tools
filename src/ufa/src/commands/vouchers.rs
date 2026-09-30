@@ -297,7 +297,7 @@ async fn delete_voucher(
     let path = format!("sites/{}/hotspot/vouchers/{}", site_id, voucher_id);
     let result: VoucherDeletionResults = client.delete(&path).await?;
 
-    Ok(Report::of_document(format!(
+    Ok(Report::of_note(format!(
         "Deleted {} voucher(s)",
         result.vouchers_deleted
     )))
@@ -449,7 +449,7 @@ fn outcome_report(outcome: DeletionOutcome, match_count: usize) -> Report {
         DeletionOutcome::Deleted(deleted) => format!("Deleted {deleted} voucher(s)"),
     };
 
-    Report::of_document(sentence)
+    Report::of_note(sentence)
 }
 
 #[cfg(test)]

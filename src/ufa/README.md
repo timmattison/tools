@@ -111,6 +111,9 @@ ufa sites
 ```bash
 # Print the path without needing the file to exist
 ufa config path
+
+# The path is the whole output, so a shell can use it as it is
+"$EDITOR" "$(ufa config path)"
 ```
 
 | Platform | Path                                             |
@@ -335,6 +338,10 @@ Delete 37 voucher(s)? [y/N]:
 | `-y`, `--yes` | Deletes without asking. Intended for scripts.                                    |
 | `--dry-run` | Lists the matches and stops. Nothing is deleted and nothing is asked.              |
 
+The list of matches is the document, on standard output. Under `--output json` it is `[]` when the
+filter matches nothing. The sentence that says what the command did — deleted, dry run, aborted, or
+no matches — goes to standard error, so `--output json` stays one document that a program can read.
+
 A filter that matches nothing says so and asks nothing. With stdin not attached to a terminal and
 no `--yes`, `ufa` refuses rather than guessing. The matches are listed first, as above, and then
 the refusal reaches stderr as a single line that carries the `Error: ` prefix of every `ufa`
@@ -421,6 +428,16 @@ $ ufa devices list --output json | jq '.data[] | select(.state == "OFFLINE")'
 
 Two commands answer with a bare array instead, because neither is paginated: `ufa cloud hosts` and
 `ufa devices stats --all`.
+
+A command that finds nothing still answers `--output json` with a document: `[]`. That is the
+answer of `ufa cloud hosts` for an account with no consoles, of `ufa devices stats --all` for a site
+with no devices, and of `ufa vouchers delete-filtered` for a filter that matches no voucher. So
+`jq '.[]'` reads no items, and it does not fail. In a table, these commands draw no table of
+headings alone, and a note says that nothing was found.
+
+Standard output carries the document and nothing else, in both formats. Every note, status sentence
+and hint goes to standard error. That includes the sentence that says a restart started, the count
+and the hint under the cloud host listing, and the outcome of a filtered deletion.
 
 ## Security
 
