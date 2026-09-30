@@ -335,8 +335,22 @@ impl Config {
 
     /// Read the API key from 1Password via op-cache, falling back to the
     /// plaintext `api_key` field for backward compatibility.
-    pub fn resolve_api_key(&self) -> Result<Secret> {
-        resolve_secret(
+    ///
+    /// # Arguments
+    ///
+    /// * `keys` - The store that reads the 1Password reference in `op_path`.
+    ///
+    /// # Returns
+    ///
+    /// The key, and the reference it came from when it came from one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no key is configured, and if the configured
+    /// reference cannot be read or holds only blank space.
+    pub fn resolve_api_key(&self, keys: &impl KeyStore) -> Result<ResolvedKey> {
+        resolve_secret_from(
+            |reference| keys.read(reference),
             self.op_path.as_deref(),
             self.api_key.as_ref().map(Secret::expose),
             "No API key configured. Run 'ufa config setup'.",
@@ -346,8 +360,23 @@ impl Config {
     /// Read the Site Manager (cloud) API key from 1Password via op-cache,
     /// falling back to the plaintext `site_manager_api_key` field for
     /// backward compatibility.
-    pub fn resolve_site_manager_api_key(&self) -> Result<Secret> {
-        resolve_secret(
+    ///
+    /// # Arguments
+    ///
+    /// * `keys` - The store that reads the 1Password reference in
+    ///   `sm_op_path`.
+    ///
+    /// # Returns
+    ///
+    /// The key, and the reference it came from when it came from one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no key is configured, and if the configured
+    /// reference cannot be read or holds only blank space.
+    pub fn resolve_site_manager_api_key(&self, keys: &impl KeyStore) -> Result<ResolvedKey> {
+        resolve_secret_from(
+            |reference| keys.read(reference),
             self.sm_op_path.as_deref(),
             self.site_manager_api_key.as_ref().map(Secret::expose),
             "No Site Manager API key configured. Run 'ufa config cloud'.",
@@ -491,13 +520,8 @@ impl Config {
             Selection::Op(c) => {
                 let url = c.url()?;
                 // Read the key via op-cache to verify it works
-                let cache = op_cache()?;
-                let path = op_cache::OpPath::new(&c.op_path).map_err(|e| anyhow::anyhow!("{e}"))?;
-                let key = Secret::from(
-                    cache
-                        .read(&path, None)
-                        .map_err(|e| anyhow::anyhow!("{e}"))?,
-                );
+                let key =
+                    Secret::from(CachedOnePassword::beside_the_configuration()?.read(&c.op_path)?);
                 (
                     url,
                     ControllerCredential::OnePassword {
@@ -794,57 +818,128 @@ fn restrict_to_owner(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Resolve a secret that may live in 1Password.
+/// The store that reads the keys that 1Password holds.
 ///
-/// A configured `op_path` always wins: if it is present but cannot be read the
-/// error is reported rather than quietly downgrading to the plaintext copy,
-/// which would hide a broken 1Password reference. `plaintext` is the legacy
-/// in-config fallback, and `missing` is the message used when neither source is
-/// configured.
-fn resolve_secret(op_path: Option<&str>, plaintext: Option<&str>, missing: &str) -> Result<Secret> {
-    resolve_secret_from(read_from_1password, op_path, plaintext, missing)
+/// [`CachedOnePassword`] is the store that every command uses. A test gives a
+/// store of its own, so no test starts the real `op`.
+pub trait KeyStore {
+    /// Read the secret at a 1Password reference.
+    ///
+    /// # Arguments
+    ///
+    /// * `reference` - The 1Password reference to read.
+    ///
+    /// # Returns
+    ///
+    /// Whatever the store holds at that reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the reference is not valid, and if the store
+    /// cannot read it.
+    fn read(&self, reference: &str) -> Result<String>;
+
+    /// Forget the copy of the secret at a 1Password reference that the store
+    /// keeps. The next read of that reference then asks 1Password.
+    ///
+    /// # Arguments
+    ///
+    /// * `reference` - The 1Password reference to forget.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the reference is not valid, and if the store
+    /// cannot forget its copy.
+    fn forget(&self, reference: &str) -> Result<()>;
 }
 
-/// Read the secret the 1Password reference `op_path` names, through op-cache.
+/// The keys that 1Password holds, read through op-cache.
+///
+/// Every read of a 1Password reference in `ufa` starts here. op-cache keeps a
+/// copy of each key it reads, and answers the next read from that copy.
+pub struct CachedOnePassword {
+    /// The cache that holds a copy of each key it read.
+    cache: op_cache::OpCache,
+}
+
+impl CachedOnePassword {
+    /// The store that every command uses.
+    ///
+    /// The cache file sits in the configuration directory, beside the
+    /// configuration file. [`op_cache::OpCache::new`] puts it at the root of
+    /// the git repository that holds the working directory. `ufa` is an
+    /// installed tool that runs from any directory, so that choice fails
+    /// outside a git repository. Inside one, it writes the plaintext
+    /// controller key into a repository that does not ignore the file, and a
+    /// `git add -A` there stages the key.
+    ///
+    /// # Returns
+    ///
+    /// The store, with its cache at `.op-cache.json` in the configuration
+    /// directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operating system names no configuration
+    /// directory.
+    pub fn beside_the_configuration() -> Result<Self> {
+        Ok(Self::in_directory(&Config::config_dir()?))
+    }
+
+    /// [`CachedOnePassword::beside_the_configuration`] against an explicit
+    /// configuration directory.
+    ///
+    /// # Arguments
+    ///
+    /// * `directory` - The configuration directory.
+    ///
+    /// # Returns
+    ///
+    /// The store, with its cache at `.op-cache.json` in `directory`.
+    pub fn in_directory(directory: &Path) -> Self {
+        Self {
+            cache: op_cache_in(directory),
+        }
+    }
+}
+
+impl KeyStore for CachedOnePassword {
+    fn read(&self, reference: &str) -> Result<String> {
+        let path = op_path(reference)?;
+
+        self.cache
+            .read(&path, None)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    fn forget(&self, reference: &str) -> Result<()> {
+        let path = op_path(reference)?;
+
+        self.cache
+            .invalidate(&path)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+}
+
+/// The op-cache path of a 1Password reference.
 ///
 /// # Arguments
 ///
-/// * `op_path` - The 1Password reference to read.
+/// * `reference` - The 1Password reference.
 ///
 /// # Returns
 ///
-/// Whatever 1Password holds at that reference.
-fn read_from_1password(op_path: &str) -> Result<String> {
-    let path = op_cache::OpPath::new(op_path).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let cache = op_cache()?;
-
-    cache.read(&path, None).map_err(|e| anyhow::anyhow!("{e}"))
-}
-
-/// The op-cache that `ufa` reads 1Password through.
-///
-/// Every read of a 1Password reference in `ufa` starts here.
-///
-/// The cache file sits in the configuration directory, beside the
-/// configuration file. [`op_cache::OpCache::new`] puts it at the root of the
-/// git repository that holds the working directory. `ufa` is an installed
-/// tool that runs from any directory, so that choice fails outside a git
-/// repository. Inside one, it writes the plaintext controller key into a
-/// repository that does not ignore the file, and a `git add -A` there stages
-/// the key.
-///
-/// # Returns
-///
-/// The cache at `.op-cache.json` in the configuration directory.
+/// The validated path.
 ///
 /// # Errors
 ///
-/// Returns an error if the operating system names no configuration directory.
-fn op_cache() -> Result<op_cache::OpCache> {
-    Ok(op_cache_in(&Config::config_dir()?))
+/// Returns an error that names the reference if it does not start with
+/// `op://`, or if it holds a character op-cache refuses.
+fn op_path(reference: &str) -> Result<op_cache::OpPath> {
+    op_cache::OpPath::new(reference).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-/// [`op_cache()`] against an explicit configuration directory.
+/// The op-cache at `.op-cache.json` in a configuration directory.
 ///
 /// The directory is a parameter so a test can name its own. No git process
 /// starts. The directory does not have to exist yet: op-cache makes it on the
@@ -858,11 +953,85 @@ fn op_cache() -> Result<op_cache::OpCache> {
 /// # Returns
 ///
 /// The cache at `.op-cache.json` in `directory`.
-fn op_cache_in(directory: &Path) -> op_cache::OpCache {
+pub(crate) fn op_cache_in(directory: &Path) -> op_cache::OpCache {
     op_cache::OpCache::with_path(directory.join(OP_CACHE_FILE))
 }
 
-/// [`resolve_secret`] against an explicit reader.
+/// A key, and the 1Password reference it came from when it came from one.
+///
+/// The reference is what lets a command read the key again after the API
+/// refuses it. A key from the command line, from the environment, or from a
+/// plaintext field of the configuration file has no reference, and nothing
+/// can read such a key again.
+#[derive(Debug, Clone)]
+pub struct ResolvedKey {
+    /// The key.
+    key: Secret,
+    /// The 1Password reference that holds the key, when one does.
+    reference: Option<String>,
+}
+
+impl ResolvedKey {
+    /// A key that did not come from 1Password.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key.
+    ///
+    /// # Returns
+    ///
+    /// The key, with no reference.
+    pub fn without_reference(key: Secret) -> Self {
+        Self {
+            key,
+            reference: None,
+        }
+    }
+
+    /// A key that 1Password holds at `reference`.
+    ///
+    /// # Arguments
+    ///
+    /// * `reference` - The 1Password reference that holds the key.
+    /// * `key` - The key.
+    ///
+    /// # Returns
+    ///
+    /// The key, with its reference.
+    fn from_1password(reference: &str, key: Secret) -> Self {
+        Self {
+            key,
+            reference: Some(reference.to_string()),
+        }
+    }
+
+    /// The key.
+    ///
+    /// # Returns
+    ///
+    /// The key, still wrapped.
+    pub fn key(&self) -> &Secret {
+        &self.key
+    }
+
+    /// The 1Password reference that holds the key.
+    ///
+    /// # Returns
+    ///
+    /// The reference, or `None` when the key did not come from 1Password.
+    pub fn reference(&self) -> Option<&str> {
+        self.reference.as_deref()
+    }
+}
+
+/// Resolve a secret that may live in 1Password.
+///
+/// This is the one place that decides which source wins. A configured
+/// `op_path` always wins: if it is present but cannot be read, the error is
+/// reported rather than quietly downgrading to the plaintext copy, which would
+/// hide a broken 1Password reference. `plaintext` is the legacy in-config
+/// fallback, and `missing` is the message used when neither source is
+/// configured.
 ///
 /// The reader is a parameter so a test can say what 1Password answered without
 /// a vault, a biometric prompt, or a network.
@@ -884,29 +1053,73 @@ fn op_cache_in(directory: &Path) -> op_cache::OpCache {
 ///
 /// # Returns
 ///
-/// The secret, exactly as its source holds it.
+/// The secret, exactly as its source holds it, and the reference it came from
+/// when it came from one.
+///
+/// # Errors
+///
+/// Returns an error if neither source is configured, and if the reference
+/// cannot be read or holds only blank space.
 fn resolve_secret_from(
     read_reference: impl FnOnce(&str) -> Result<String>,
     op_path: Option<&str>,
     plaintext: Option<&str>,
     missing: &str,
-) -> Result<Secret> {
+) -> Result<ResolvedKey> {
     if let Some(op_path) = op_path.filter(|reference| !is_blank(reference)) {
-        let secret = read_reference(op_path)?;
+        let key = key_in_answer(op_path, read_reference(op_path)?)?;
 
-        if is_blank(&secret) {
-            anyhow::bail!(
-                "The 1Password reference {op_path} holds no key. Put the key in that field, \
-                 or run 'ufa config setup' to name another reference."
-            );
-        }
-
-        return Ok(Secret::from(secret));
+        return Ok(ResolvedKey::from_1password(op_path, key));
     }
     if let Some(secret) = plaintext.filter(|value| !is_blank(value)) {
-        return Ok(Secret::from(secret));
+        return Ok(ResolvedKey::without_reference(Secret::from(secret)));
     }
     anyhow::bail!("{missing}")
+}
+
+/// The key in what 1Password answered for a reference.
+///
+/// # Arguments
+///
+/// * `reference` - The 1Password reference that was read.
+/// * `answer` - What 1Password answered.
+///
+/// # Returns
+///
+/// The key, exactly as 1Password holds it.
+///
+/// # Errors
+///
+/// Returns an error that names the reference when the answer holds only blank
+/// space.
+fn key_in_answer(reference: &str, answer: String) -> Result<Secret> {
+    if is_blank(&answer) {
+        anyhow::bail!(
+            "The 1Password reference {reference} holds no key. Put the key in that field, \
+             or run 'ufa config setup' to name another reference."
+        );
+    }
+
+    Ok(Secret::from(answer))
+}
+
+/// Read the key that 1Password holds now at a reference.
+///
+/// # Arguments
+///
+/// * `keys` - The store that holds the key.
+/// * `reference` - The 1Password reference of the key.
+///
+/// # Returns
+///
+/// The key that 1Password holds now.
+///
+/// # Errors
+///
+/// Returns an error if the store cannot read the reference, and if the
+/// reference holds only blank space.
+pub fn read_again_from_1password(keys: &impl KeyStore, reference: &str) -> Result<Secret> {
+    key_in_answer(reference, keys.read(reference)?)
 }
 
 /// Run network discovery (mDNS + common IPs) and let the user pick.
@@ -1039,38 +1252,14 @@ fn read_pasted_api_key(console: &mut impl Console) -> Result<Secret> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::test_vault::{TempConfigDir, TestVault};
 
-    /// A throwaway config directory that never touches the developer's real
-    /// `~/.config/ufa`.
+    /// The store for a test whose key does not come from 1Password.
     ///
-    /// The directory name is keyed on the process id *and* a nanosecond
-    /// timestamp so two concurrent `cargo test` runs — or two tests inside one
-    /// run — can never collide on the same file.
-    struct TempConfigDir {
-        dir: PathBuf,
-    }
-
-    impl TempConfigDir {
-        fn new(label: &str) -> Self {
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system clock is after the Unix epoch")
-                .as_nanos();
-            let dir = std::env::temp_dir()
-                .join(format!("ufa-config-{label}-{}-{nanos}", std::process::id()));
-            Self { dir }
-        }
-
-        fn config_file(&self) -> PathBuf {
-            self.dir.join("config.toml")
-        }
-    }
-
-    impl Drop for TempConfigDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.dir);
-        }
+    /// The vault cannot be read and no cache file exists, so a test that
+    /// reaches the store by mistake gets an error, and no call to `op`.
+    fn no_1password() -> TestVault {
+        TestVault::new("no-1password", &[], None)
     }
 
     /// A user with no 1Password `Private/ufa` item goes through the network
@@ -1096,9 +1285,9 @@ mod tests {
             .expect("the config file must exist after saving");
 
         let resolved = loaded
-            .resolve_api_key()
+            .resolve_api_key(&no_1password())
             .expect("the key pasted during setup must still resolve after saving");
-        assert_eq!(resolved.expose(), "pasted-api-key");
+        assert_eq!(resolved.key().expose(), "pasted-api-key");
     }
 
     /// Every `ufa` user already has a `config.toml` on disk, written when the
@@ -1124,15 +1313,17 @@ mod tests {
 
         assert_eq!(
             loaded
-                .resolve_api_key()
+                .resolve_api_key(&no_1password())
                 .expect("the controller key must still resolve")
+                .key()
                 .expose(),
             "key-from-an-older-ufa"
         );
         assert_eq!(
             loaded
-                .resolve_site_manager_api_key()
+                .resolve_site_manager_api_key(&no_1password())
                 .expect("the cloud key must still resolve")
+                .key()
                 .expose(),
             "cloud-key-from-an-older-ufa"
         );
@@ -1333,16 +1524,20 @@ mod tests {
     #[test]
     fn site_manager_key_prefers_1password_over_the_plaintext_field() {
         // Deliberately not an `op://` reference: op-cache rejects it locally,
-        // so the test never shells out to the `op` CLI.
+        // so the test never shells out to the `op` CLI. The store is the one
+        // every command uses, over a directory of this test's own.
         let config = Config {
             sm_op_path: Some("not-an-op-path".to_string()),
             site_manager_api_key: Some("stale-plaintext-key".into()),
             ..Config::default()
         };
+        let temp = TempConfigDir::new("unreadable-cloud-reference");
 
-        let error = config.resolve_site_manager_api_key().expect_err(
-            "an unreadable 1Password reference must not fall back to the plaintext key",
-        );
+        let error = config
+            .resolve_site_manager_api_key(&CachedOnePassword::in_directory(&temp.dir))
+            .expect_err(
+                "an unreadable 1Password reference must not fall back to the plaintext key",
+            );
         assert!(
             error.to_string().contains("not-an-op-path"),
             "the failure must name the 1Password reference it could not read, got {error}"
@@ -1564,7 +1759,7 @@ mod tests {
             );
 
             let error = config
-                .resolve_api_key()
+                .resolve_api_key(&no_1password())
                 .expect_err("a blank field must not resolve as a key");
             assert!(
                 format!("{error:#}").contains("ufa config setup"),
@@ -1587,7 +1782,7 @@ mod tests {
         );
 
         let error = config
-            .resolve_site_manager_api_key()
+            .resolve_site_manager_api_key(&no_1password())
             .expect_err("a blank field must not resolve as a key");
         assert!(
             format!("{error:#}").contains("ufa config cloud"),
@@ -1612,7 +1807,7 @@ mod tests {
         );
 
         let error = config
-            .resolve_api_key()
+            .resolve_api_key(&no_1password())
             .expect_err("a blank reference must not resolve as a key");
         assert!(
             format!("{error:#}").contains("ufa config setup"),
@@ -1622,7 +1817,7 @@ mod tests {
 
     /// A blank answer from 1Password is a different fault from a blank field.
     /// The user named a specific item, so the reference is broken rather than
-    /// absent — and `resolve_secret` already refuses to downgrade a broken
+    /// absent — and `resolve_secret_from` already refuses to downgrade a broken
     /// reference to the plaintext copy. The answer is an error that names the
     /// reference, not the advice to run the wizard.
     #[test]
@@ -1666,8 +1861,9 @@ mod tests {
         assert!(config.has_api_key(), "the field names a key");
         assert_eq!(
             config
-                .resolve_api_key()
+                .resolve_api_key(&no_1password())
                 .expect("a key that is not blank must resolve")
+                .key()
                 .expose(),
             " padded-key\n",
             "the resolved key must be what its source holds, byte for byte"
@@ -1681,6 +1877,7 @@ mod tests {
                 "missing",
             )
             .expect("a 1Password answer that is not blank must resolve")
+            .key()
             .expose(),
             " padded-op-key\n",
             "what 1Password answered must reach the caller untouched"
@@ -1815,8 +2012,9 @@ mod tests {
 
         assert_eq!(
             config
-                .resolve_site_manager_api_key()
+                .resolve_site_manager_api_key(&no_1password())
                 .expect("a legacy plaintext key must still resolve")
+                .key()
                 .expose(),
             "legacy-plaintext-key"
         );
@@ -1886,6 +2084,109 @@ mod tests {
             .expect("a cached key must read without 1Password");
 
         assert_eq!(key, FAKE_CONTROLLER_KEY);
+    }
+
+    /// The key that 1Password held before a rotation. The cache file keeps it.
+    const KEY_BEFORE_THE_ROTATION: &str = "key-before-the-rotation-7Hc2Qx";
+
+    /// The key that 1Password holds after the rotation.
+    const KEY_AFTER_THE_ROTATION: &str = "key-after-the-rotation-3Lp9Vz";
+
+    /// The setup wizard tests the key that it reads. A user who rotated the key
+    /// in 1Password runs the wizard to use the new key, and a copy that
+    /// op-cache kept from before the rotation fails the test of the wizard. So
+    /// the read forgets the copy first, and 1Password answers.
+    #[test]
+    fn reading_a_key_again_forgets_the_cached_copy_first() {
+        let vault = TestVault::new(
+            "read-again",
+            &[(OP_REFERENCE, KEY_BEFORE_THE_ROTATION)],
+            Some(KEY_AFTER_THE_ROTATION),
+        );
+
+        let key = read_again_from_1password(&vault, OP_REFERENCE)
+            .expect("the vault holds a key at the reference");
+
+        assert_eq!(
+            key.expose(),
+            KEY_AFTER_THE_ROTATION,
+            "the key must be the one that 1Password holds now"
+        );
+        assert_eq!(
+            vault.forgets(),
+            1,
+            "the cached copy must be forgotten before the read"
+        );
+        assert!(
+            !vault.caches(OP_REFERENCE),
+            "the cache file must no longer hold the reference"
+        );
+        assert!(
+            !vault.cache_file().contains(KEY_BEFORE_THE_ROTATION),
+            "the cache file must no longer hold the key from before the rotation"
+        );
+    }
+
+    /// A blank answer is a broken reference on a second read too, and the
+    /// error names the reference. A command that reads the key again after a
+    /// refusal must not send a blank key.
+    #[test]
+    fn a_key_read_again_that_holds_only_blank_space_is_a_broken_reference() {
+        let vault = TestVault::new(
+            "read-again-blank",
+            &[(OP_REFERENCE, KEY_BEFORE_THE_ROTATION)],
+            Some("   "),
+        );
+
+        let error = read_again_from_1password(&vault, OP_REFERENCE)
+            .expect_err("a blank answer must not read as a key");
+
+        assert!(
+            format!("{error:#}").contains(OP_REFERENCE),
+            "the failure must name the reference that holds nothing, got {error:#}"
+        );
+    }
+
+    /// A key from a reference comes back with that reference, and a key from
+    /// a plaintext field comes back with none. The reference is what lets a
+    /// command read the key again after the API refuses it, so the one
+    /// function that decides which source wins also says which one it was.
+    #[test]
+    fn a_resolved_key_names_the_reference_that_holds_it() {
+        let vault = TestVault::new(
+            "resolved-reference",
+            &[(OP_REFERENCE, KEY_BEFORE_THE_ROTATION)],
+            None,
+        );
+
+        let from_the_reference = Config {
+            op_path: Some(OP_REFERENCE.to_string()),
+            api_key: Some("plaintext-key".into()),
+            ..Config::default()
+        }
+        .resolve_api_key(&vault)
+        .expect("the cached key must resolve");
+
+        assert_eq!(from_the_reference.key().expose(), KEY_BEFORE_THE_ROTATION);
+        assert_eq!(
+            from_the_reference.reference(),
+            Some(OP_REFERENCE),
+            "a key from a reference must name the reference"
+        );
+
+        let from_the_plaintext_field = Config {
+            api_key: Some("plaintext-key".into()),
+            ..Config::default()
+        }
+        .resolve_api_key(&vault)
+        .expect("the plaintext key must resolve");
+
+        assert_eq!(from_the_plaintext_field.key().expose(), "plaintext-key");
+        assert_eq!(
+            from_the_plaintext_field.reference(),
+            None,
+            "a key from a plaintext field names no reference"
+        );
     }
 }
 

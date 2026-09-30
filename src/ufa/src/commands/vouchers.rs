@@ -15,7 +15,7 @@ use crate::{
 };
 use std::future::Future;
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum VouchersCommand {
     /// List vouchers on a site
     List {

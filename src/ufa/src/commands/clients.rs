@@ -14,7 +14,7 @@ use crate::{
 /// the MAC address of a VPN client.
 const NOT_APPLICABLE: &str = "N/A";
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum ClientsCommand {
     /// List connected clients on a site
     List {

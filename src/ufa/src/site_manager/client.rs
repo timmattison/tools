@@ -139,6 +139,39 @@ impl SiteManagerClient {
         Ok(Self { client, base_url })
     }
 
+    /// A client that sends `api_key` to a Site Manager API at `origin`, in
+    /// place of `api.ui.com`.
+    ///
+    /// The base URL is the one thing a test has to replace, and
+    /// [`SiteManagerClient::new`] names `api.ui.com` and nothing else.
+    /// Everything else about the client -- the key header, the refused
+    /// redirect, the bounds on the request -- comes from the same
+    /// `build_client` a command uses.
+    ///
+    /// # Arguments
+    ///
+    /// * `origin` - The origin of the test server, such as
+    ///   `http://127.0.0.1:52341`.
+    /// * `api_key` - The key the client sends.
+    ///
+    /// # Returns
+    ///
+    /// The client.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the key cannot go in a header, and if the origin is not a
+    /// base URL.
+    #[cfg(test)]
+    pub(crate) fn talking_to(origin: &str, api_key: &str) -> Self {
+        let client = build_client(Api::SiteManager, api_key, false, Timeouts::PRODUCTION)
+            .expect("a plain key must build a Site Manager client");
+        let base_url =
+            Url::parse(&format!("{origin}/v1/")).expect("a loopback origin is a base URL");
+
+        Self { client, base_url }
+    }
+
     /// Fetch every cloud host on the account.
     ///
     /// # One request, checked against the total the server states
@@ -318,18 +351,9 @@ mod tests {
     /// A client that talks to `origin` rather than to the real Site Manager
     /// API.
     ///
-    /// The base URL is the one thing a test has to replace, and
-    /// [`SiteManagerClient::new`] names `api.ui.com` and nothing else, so the
-    /// client is built field by field here. Everything else about it -- the
-    /// key header, the refused redirect, the bounds on the request -- comes
-    /// from the same `build_client` a command uses.
+    /// See [`SiteManagerClient::talking_to`] for why a test builds its own.
     fn client_talking_to(origin: &str) -> SiteManagerClient {
-        let client = build_client(Api::SiteManager, "an-api-key", false, Timeouts::PRODUCTION)
-            .expect("a plain key must build a Site Manager client");
-        let base_url =
-            Url::parse(&format!("{origin}/v1/")).expect("a loopback origin is a base URL");
-
-        SiteManagerClient { client, base_url }
+        SiteManagerClient::talking_to(origin, "an-api-key")
     }
 
     /// The listing body that carries `hosts` hosts, and the `total` the server

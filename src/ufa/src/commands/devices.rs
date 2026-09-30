@@ -25,7 +25,7 @@ const NO_DATA: &str = "N/A";
 /// gives the reason for the failure instead.
 const FETCH_FAILED: &str = "ERROR";
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum DevicesCommand {
     /// List devices on a site
     List {

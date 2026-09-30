@@ -24,6 +24,8 @@ mod site_manager;
 mod test_server;
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+mod test_vault;
 mod text;
 
 use anyhow::{Context, Result};
@@ -31,8 +33,9 @@ use buildinfo::version_string;
 use clap::{Parser, Subcommand};
 use client::UnifiClient;
 use commands::*;
-use config::Config;
+use config::{CachedOnePassword, Config, KeyStore, ResolvedKey};
 use secret::Secret;
+use std::future::Future;
 use std::io::Write;
 use uuid::Uuid;
 
@@ -69,10 +72,24 @@ impl Credential {
 
     /// Read the credential from the configuration file, which may mean
     /// fetching it from 1Password.
-    fn resolve(self, config: &Config) -> Result<Secret> {
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - The configuration file.
+    /// * `keys` - The store that reads a 1Password reference.
+    ///
+    /// # Returns
+    ///
+    /// The key, and the reference it came from when it came from one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the configuration file names no key, and if the
+    /// reference it names cannot be read.
+    fn resolve(self, config: &Config, keys: &impl KeyStore) -> Result<ResolvedKey> {
         match self {
-            Self::Controller => config.resolve_api_key(),
-            Self::SiteManager => config.resolve_site_manager_api_key(),
+            Self::Controller => config.resolve_api_key(keys),
+            Self::SiteManager => config.resolve_site_manager_api_key(keys),
         }
     }
 
@@ -110,21 +127,73 @@ impl Credential {
 /// problems and get different answers: a configured credential that fails to
 /// resolve reports the underlying cause (1Password CLI missing, prompt denied,
 /// item renamed), because re-running the setup wizard cannot fix any of that.
+///
+/// # Arguments
+///
+/// * `credential` - The credential to resolve.
+/// * `supplied` - What the command line and the environment supplied.
+/// * `config` - The configuration file, when there is one.
+/// * `keys` - The store that reads a 1Password reference.
+///
+/// # Returns
+///
+/// The key, and the 1Password reference it came from when it came from one. A
+/// supplied key names no reference.
+///
+/// # Errors
+///
+/// Returns an error if no source names the credential, and if the source that
+/// names it cannot be read.
 fn resolve_credential(
     credential: Credential,
     supplied: Option<Secret>,
     config: Option<&Config>,
-) -> Result<Secret> {
+    keys: &impl KeyStore,
+) -> Result<ResolvedKey> {
     if let Some(key) = supplied.filter(|key| !config::is_blank(key.expose())) {
-        return Ok(key);
+        return Ok(ResolvedKey::without_reference(key));
     }
 
     match config {
         Some(config) if credential.is_configured(config) => credential
-            .resolve(config)
+            .resolve(config, keys)
             .with_context(|| format!("Failed to read the configured {}", credential.description())),
         _ => anyhow::bail!(credential.missing_message()),
     }
+}
+
+/// Run a command with a key.
+///
+/// # Arguments
+///
+/// * `credential` - The credential the command sends.
+/// * `resolved` - The key, and the 1Password reference it came from when it
+///   came from one.
+/// * `keys` - The store that reads a 1Password reference.
+/// * `notes` - Where the notes for the user go.
+/// * `run` - Runs the command with the key it gets.
+///
+/// # Returns
+///
+/// What the command returned.
+///
+/// # Errors
+///
+/// Returns the error of the command.
+async fn run_with_the_current_key<F, Fut>(
+    credential: Credential,
+    resolved: ResolvedKey,
+    keys: &impl KeyStore,
+    notes: &mut impl Write,
+    mut run: F,
+) -> Result<()>
+where
+    F: FnMut(Secret) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    let _ = (credential, keys, notes);
+
+    run(resolved.key().clone()).await
 }
 
 /// Said before the first request whenever certificate verification is off.
@@ -222,7 +291,7 @@ struct Args {
     command: Commands,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 enum Commands {
     /// List all sites
     Sites {
@@ -290,7 +359,7 @@ enum Commands {
     },
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 enum ConfigCommand {
     /// Interactive configuration setup
     Setup,
@@ -357,19 +426,35 @@ async fn main() -> Result<()> {
     } = &args.command
     {
         let file_config = Config::load()?;
+        let keys = CachedOnePassword::beside_the_configuration()?;
 
         let sm_api_key = resolve_credential(
             Credential::SiteManager,
             site_manager_api_key.clone(),
             file_config.as_ref(),
+            &keys,
         )?;
 
-        let sm_client = site_manager::SiteManagerClient::new(sm_api_key.expose())?;
-        return site_manager::handle_cloud_command(command.clone(), &sm_client, args.output).await;
+        let output = args.output;
+        return run_with_the_current_key(
+            Credential::SiteManager,
+            sm_api_key,
+            &keys,
+            &mut std::io::stderr(),
+            |key| {
+                let command = command.clone();
+                async move {
+                    let sm_client = site_manager::SiteManagerClient::new(key.expose())?;
+                    site_manager::handle_cloud_command(command, &sm_client, output).await
+                }
+            },
+        )
+        .await;
     }
 
     // Load configuration from file
     let file_config = Config::load()?;
+    let keys = CachedOnePassword::beside_the_configuration()?;
 
     // Determine final configuration values. Each `args` field already resolves
     // its flag against the matching UNIFI_* variable via clap's `env`
@@ -378,13 +463,60 @@ async fn main() -> Result<()> {
         .or_else(|| file_config.as_ref().and_then(|c| c.url.clone()))
         .context("UniFi URL not provided. Set it via --url, UNIFI_URL environment variable, or run 'ufa config setup' to create a configuration file.")?;
 
-    let api_key = resolve_credential(Credential::Controller, args.api_key, file_config.as_ref())?;
+    let api_key = resolve_credential(
+        Credential::Controller,
+        args.api_key,
+        file_config.as_ref(),
+        &keys,
+    )?;
 
     let insecure = resolve_insecure(args.insecure, file_config.as_ref(), &mut std::io::stderr())?;
 
-    let client = UnifiClient::new(&url, api_key.expose(), insecure)?;
+    let output = args.output;
+    let command = args.command;
+    let url = url.as_str();
+    run_with_the_current_key(
+        Credential::Controller,
+        api_key,
+        &keys,
+        &mut std::io::stderr(),
+        |key| {
+            let command = command.clone();
+            async move {
+                let client = UnifiClient::new(url, key.expose(), insecure)?;
+                run_controller_command(command, &client, output).await
+            }
+        },
+    )
+    .await
+}
 
-    match args.command {
+/// Run a controller command against a controller.
+///
+/// # Arguments
+///
+/// * `command` - The command the user gave.
+/// * `client` - The client of the controller.
+/// * `output` - The output format the user asked for.
+///
+/// # Returns
+///
+/// What the command returned.
+///
+/// # Errors
+///
+/// Returns the error of the command.
+///
+/// # Panics
+///
+/// Panics if `command` is a configuration command or a cloud command. `main`
+/// runs those before it builds a controller client.
+async fn run_controller_command(
+    command: Commands,
+    client: &UnifiClient,
+    output: output::OutputFormat,
+) -> Result<()> {
+    match command {
         Commands::Sites {
             limit,
             offset,
@@ -395,18 +527,18 @@ async fn main() -> Result<()> {
                 offset,
                 filter,
             };
-            sites::handle_sites_command(cmd, &client, args.output).await
+            sites::handle_sites_command(cmd, client, output).await
         }
         Commands::Devices { site_id, command } => {
-            devices::handle_devices_command(command, site_id, &client, args.output).await
+            devices::handle_devices_command(command, site_id, client, output).await
         }
         Commands::Clients { site_id, command } => {
-            clients::handle_clients_command(command, site_id, &client, args.output).await
+            clients::handle_clients_command(command, site_id, client, output).await
         }
         Commands::Vouchers { site_id, command } => {
-            vouchers::handle_vouchers_command(command, site_id, &client, args.output).await
+            vouchers::handle_vouchers_command(command, site_id, client, output).await
         }
-        Commands::Info => info::handle_info_command(&client, args.output).await,
+        Commands::Info => info::handle_info_command(client, output).await,
         Commands::Config { .. } => unreachable!("Config commands handled above"),
         Commands::Cloud { .. } => unreachable!("Cloud commands handled above"),
     }
@@ -827,8 +959,17 @@ mod tls_warning_tests {
 
 #[cfg(test)]
 mod credential_tests {
-    use super::{resolve_credential, Config, Credential};
+    use super::{resolve_credential, CachedOnePassword, Config, Credential};
     use crate::test_support::{parse_args_for_test, ScopedVar};
+    use crate::test_vault::{TempConfigDir, TestVault};
+
+    /// The store for a test whose key does not come from 1Password.
+    ///
+    /// The vault cannot be read and no cache file exists, so a test that
+    /// reaches the store by mistake gets an error, and no call to `op`.
+    fn no_1password() -> TestVault {
+        TestVault::new("no-1password", &[], None)
+    }
 
     /// A config whose 1Password reference cannot be read.
     ///
@@ -849,8 +990,10 @@ mod credential_tests {
     #[test]
     fn resolution_failure_reports_the_underlying_cause() {
         let config = config_with_unreadable_reference();
+        let temp = TempConfigDir::new("unreadable-reference");
+        let keys = CachedOnePassword::in_directory(&temp.dir);
 
-        let error = resolve_credential(Credential::Controller, None, Some(&config))
+        let error = resolve_credential(Credential::Controller, None, Some(&config), &keys)
             .expect_err("an unreadable 1Password reference must not resolve");
         let report = format!("{error:#}");
 
@@ -867,7 +1010,7 @@ mod credential_tests {
     /// The friendly advice still applies when nothing is configured anywhere.
     #[test]
     fn missing_credential_reports_the_configuration_advice() {
-        let error = resolve_credential(Credential::Controller, None, None)
+        let error = resolve_credential(Credential::Controller, None, None, &no_1password())
             .expect_err("no key anywhere must not resolve");
 
         assert!(
@@ -875,8 +1018,13 @@ mod credential_tests {
             "an unconfigured key must point at setup, got {error:#}"
         );
 
-        let error = resolve_credential(Credential::SiteManager, None, Some(&Config::default()))
-            .expect_err("an empty config must not resolve a cloud key");
+        let error = resolve_credential(
+            Credential::SiteManager,
+            None,
+            Some(&Config::default()),
+            &no_1password(),
+        )
+        .expect_err("an empty config must not resolve a cloud key");
         assert!(
             format!("{error:#}").contains("ufa config cloud"),
             "an unconfigured cloud key must point at cloud setup, got {error:#}"
@@ -902,8 +1050,10 @@ mod credential_tests {
                     Credential::Controller,
                     Some(blank.into()),
                     Some(&config_with_a_plaintext_key()),
+                    &no_1password(),
                 )
                 .expect("a blank command line value must fall through to the file")
+                .key()
                 .expose(),
                 "key-from-the-configuration-file",
                 "{blank:?} names no key, so the configured key must answer"
@@ -923,8 +1073,10 @@ mod credential_tests {
                     Credential::Controller,
                     args.api_key,
                     Some(&config_with_a_plaintext_key()),
+                    &no_1password(),
                 )
                 .expect("a blank UNIFI_API_KEY must fall through to the file")
+                .key()
                 .expose(),
                 "key-from-the-configuration-file",
                 "UNIFI_API_KEY={blank:?} names no key, so the configured key must answer"
@@ -936,8 +1088,13 @@ mod credential_tests {
     /// rather than a 401 from the controller.
     #[test]
     fn a_blank_supplied_key_with_nothing_configured_reports_the_advice() {
-        let error = resolve_credential(Credential::Controller, Some("  ".into()), None)
-            .expect_err("a blank key and no configuration must not resolve");
+        let error = resolve_credential(
+            Credential::Controller,
+            Some("  ".into()),
+            None,
+            &no_1password(),
+        )
+        .expect_err("a blank key and no configuration must not resolve");
 
         assert!(
             format!("{error:#}").contains("ufa config setup"),
@@ -955,8 +1112,10 @@ mod credential_tests {
                 Credential::Controller,
                 Some(" padded-key\n".into()),
                 Some(&config_with_a_plaintext_key()),
+                &no_1password(),
             )
             .expect("a key that is not blank must resolve")
+            .key()
             .expose(),
             " padded-key\n",
             "the supplied key must reach the controller byte for byte"
@@ -970,17 +1129,535 @@ mod credential_tests {
     #[test]
     fn a_supplied_key_wins_over_the_config_file() {
         let config = config_with_unreadable_reference();
+        let temp = TempConfigDir::new("supplied-wins");
+        let keys = CachedOnePassword::in_directory(&temp.dir);
 
         assert_eq!(
             resolve_credential(
                 Credential::Controller,
                 Some("from-the-command-line".into()),
                 Some(&config),
+                &keys,
             )
             .expect("a supplied key must resolve")
+            .key()
             .expose(),
             "from-the-command-line"
         );
+    }
+}
+
+/// Pins the claim that a key which 1Password rotated after op-cache kept a
+/// copy of it costs the user no manual step.
+///
+/// op-cache answers every read of a reference from its copy, and it asks
+/// 1Password only when it holds no copy. So after a rotation in 1Password,
+/// every command sent the old key and failed on a 401. The error said to check
+/// the key or to make a new one, which is what the user had just done.
+///
+/// Each case runs the real client against a local server, and the key reaches
+/// the server in the real header. The store is a test vault in front of a
+/// real cache file, so each forget runs the real `OpCache::invalidate` and no
+/// read starts the real `op`.
+#[cfg(test)]
+mod key_rotation_tests {
+    use super::{resolve_credential, run_with_the_current_key, Config, Credential, Secret};
+    use crate::client::UnifiClient;
+    use crate::config::ResolvedKey;
+    use crate::http::answered_status;
+    use crate::models::ApplicationInfo;
+    use crate::site_manager::SiteManagerClient;
+    use crate::test_server::{json_response, json_response_with_status, TestServer};
+    use crate::test_vault::TestVault;
+    use reqwest::StatusCode;
+    use std::cell::Cell;
+
+    /// The 1Password reference of the controller key.
+    const REFERENCE: &str = "op://Private/ufa/key - 192.168.1.1 port 443";
+
+    /// The 1Password reference of the Site Manager key.
+    const SITE_MANAGER_REFERENCE: &str = "op://Private/ufa/site manager key";
+
+    /// The key that 1Password held before the rotation. The cache file keeps
+    /// it, and the API refuses it.
+    const OLD_KEY: &str = "old-key-from-before-the-rotation-7Hc2Qx";
+
+    /// The key that 1Password holds after the rotation. The API takes it.
+    const NEW_KEY: &str = "new-key-from-after-the-rotation-3Lp9Vz";
+
+    /// The header that carries the key. Stated here rather than read from the
+    /// production constant, so a renamed header fails this test.
+    const API_KEY_HEADER: &str = "x-api-key";
+
+    /// An answer that refuses the key, with `status`.
+    fn refusal(status: &str) -> String {
+        json_response_with_status(status, r#"{"message":"refused"}"#)
+    }
+
+    /// The answer of a controller that takes the key.
+    fn application_info() -> String {
+        json_response(r#"{"applicationVersion":"9.3.45"}"#)
+    }
+
+    /// The answer of a Site Manager API that takes the key.
+    fn no_hosts() -> String {
+        json_response(r#"{"hosts":[]}"#)
+    }
+
+    /// The configuration of a user who keeps the controller key in 1Password.
+    fn config_with_the_reference() -> Config {
+        Config {
+            op_path: Some(REFERENCE.to_string()),
+            ..Config::default()
+        }
+    }
+
+    /// What one command gave.
+    struct Outcome {
+        /// What the command returned in the end.
+        result: anyhow::Result<()>,
+        /// How many times the command ran.
+        runs: usize,
+        /// Everything written for the user.
+        notes: String,
+    }
+
+    /// Which API a case sends its request to.
+    #[derive(Clone, Copy)]
+    enum Target {
+        /// The controller: one request for its application info.
+        Controller,
+        /// The Site Manager API: one request for the host listing.
+        SiteManager,
+    }
+
+    /// Run one command with `resolved`, the way `main` runs it.
+    ///
+    /// The command sends the new key to `accepting`, and any other key to
+    /// `refusing`. That is how a real API behaves after a rotation: it takes
+    /// the new key and refuses every other one.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - Which API the command talks to.
+    /// * `credential` - The credential the command sends.
+    /// * `resolved` - The key the command starts with.
+    /// * `vault` - The store that reads the key again.
+    /// * `refusing` - The server that gets every key but the new one.
+    /// * `accepting` - The server that gets the new key.
+    ///
+    /// # Returns
+    ///
+    /// What the command gave.
+    async fn run_command(
+        target: Target,
+        credential: Credential,
+        resolved: ResolvedKey,
+        vault: &TestVault,
+        refusing: &TestServer,
+        accepting: &TestServer,
+    ) -> Outcome {
+        let runs = Cell::new(0_usize);
+        let mut notes = Vec::new();
+
+        let result =
+            run_with_the_current_key(credential, resolved, vault, &mut notes, |key: Secret| {
+                runs.set(runs.get() + 1);
+                let origin = if key.expose() == NEW_KEY {
+                    accepting.origin()
+                } else {
+                    refusing.origin()
+                };
+
+                async move {
+                    match target {
+                        Target::Controller => {
+                            let client = UnifiClient::new(origin, key.expose(), false)?;
+                            client.get::<ApplicationInfo>("info").await.map(|_| ())
+                        }
+                        Target::SiteManager => SiteManagerClient::talking_to(origin, key.expose())
+                            .get_hosts()
+                            .await
+                            .map(|_| ()),
+                    }
+                }
+            })
+            .await;
+
+        Outcome {
+            result,
+            runs: runs.get(),
+            notes: String::from_utf8(notes).expect("the notes are text"),
+        }
+    }
+
+    /// Assert that one server got exactly one request, and that the request
+    /// carried `key`.
+    fn assert_one_request_with(server: &TestServer, key: &str, which: &str) {
+        let requests = server.requests();
+
+        assert_eq!(
+            requests.len(),
+            1,
+            "{which} must get exactly one request, got {requests:?}"
+        );
+        assert_eq!(
+            requests[0].header(API_KEY_HEADER),
+            Some(key),
+            "the request to {which} must carry {key:?}"
+        );
+    }
+
+    /// Assert that the user got exactly one note, that the note says what
+    /// happened, and that it carries no key.
+    fn assert_one_note_about_the_new_key(notes: &str) {
+        assert_eq!(
+            notes.lines().count(),
+            1,
+            "the user must get exactly one note, got {notes:?}"
+        );
+        assert!(
+            notes.contains("1Password"),
+            "the note must say that the key in 1Password changed, got {notes:?}"
+        );
+        assert!(
+            notes.contains("again"),
+            "the note must say that the command runs again, got {notes:?}"
+        );
+        assert!(
+            !notes.contains(OLD_KEY) && !notes.contains(NEW_KEY),
+            "the note must carry no key, got {notes:?}"
+        );
+    }
+
+    /// Resolve the controller key the way `main` does, with no key on the
+    /// command line.
+    fn resolve_from_the_reference(vault: &TestVault) -> ResolvedKey {
+        let resolved = resolve_credential(
+            Credential::Controller,
+            None,
+            Some(&config_with_the_reference()),
+            vault,
+        )
+        .expect("the cached key must resolve");
+
+        assert_eq!(
+            resolved.key().expose(),
+            OLD_KEY,
+            "the command must start with the copy in the cache file"
+        );
+        resolved
+    }
+
+    /// The whole case of a rotation that the controller refuses with
+    /// `status`.
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - A word in the name of the directory of the vault.
+    /// * `status` - The status line of the refusal.
+    async fn a_rotated_key_refused_with(label: &str, status: &str) {
+        let vault = TestVault::new(label, &[(REFERENCE, OLD_KEY)], Some(NEW_KEY));
+        let refusing = TestServer::replying(&refusal(status)).await;
+        let accepting = TestServer::replying(&application_info()).await;
+
+        let resolved = resolve_from_the_reference(&vault);
+        let outcome = run_command(
+            Target::Controller,
+            Credential::Controller,
+            resolved,
+            &vault,
+            &refusing,
+            &accepting,
+        )
+        .await;
+
+        if let Err(error) = &outcome.result {
+            panic!("after {status} the command must run again with the new key and pass, got {error:#}");
+        }
+        assert_eq!(
+            outcome.runs, 2,
+            "the command must run once more, and no more"
+        );
+        assert_one_request_with(&refusing, OLD_KEY, "the refusing controller");
+        assert_one_request_with(&accepting, NEW_KEY, "the accepting controller");
+        assert_eq!(vault.forgets(), 1, "the cached copy must be forgotten once");
+        assert!(
+            !vault.caches(REFERENCE),
+            "the cache file must no longer hold the reference"
+        );
+        assert!(
+            !vault.cache_file().contains(OLD_KEY),
+            "the cache file must no longer hold the refused key"
+        );
+        assert_one_note_about_the_new_key(&outcome.notes);
+    }
+
+    /// The case the user met: the key changed in 1Password, the copy did not,
+    /// and the controller refused the copy with a 401.
+    #[tokio::test]
+    async fn a_key_that_1password_rotated_is_read_again_after_a_401() {
+        a_rotated_key_refused_with("rotated-401", "401 Unauthorized").await;
+    }
+
+    /// A 403 refuses the key too. The controller answers 403 to a key it
+    /// does not accept for the request.
+    #[tokio::test]
+    async fn a_key_that_1password_rotated_is_read_again_after_a_403() {
+        a_rotated_key_refused_with("rotated-403", "403 Forbidden").await;
+    }
+
+    /// The Site Manager key comes from a reference of its own, and the Site
+    /// Manager API refuses it the same way.
+    #[tokio::test]
+    async fn a_site_manager_key_that_1password_rotated_is_read_again() {
+        let vault = TestVault::new(
+            "rotated-site-manager",
+            &[(SITE_MANAGER_REFERENCE, OLD_KEY)],
+            Some(NEW_KEY),
+        );
+        let refusing = TestServer::replying(&refusal("401 Unauthorized")).await;
+        let accepting = TestServer::replying(&no_hosts()).await;
+        let config = Config {
+            sm_op_path: Some(SITE_MANAGER_REFERENCE.to_string()),
+            ..Config::default()
+        };
+
+        let resolved = resolve_credential(Credential::SiteManager, None, Some(&config), &vault)
+            .expect("the cached Site Manager key must resolve");
+        let outcome = run_command(
+            Target::SiteManager,
+            Credential::SiteManager,
+            resolved,
+            &vault,
+            &refusing,
+            &accepting,
+        )
+        .await;
+
+        if let Err(error) = &outcome.result {
+            panic!("the cloud command must run again with the new key and pass, got {error:#}");
+        }
+        assert_eq!(outcome.runs, 2, "the cloud command must run once more");
+        assert_one_request_with(&refusing, OLD_KEY, "the refusing Site Manager API");
+        assert_one_request_with(&accepting, NEW_KEY, "the accepting Site Manager API");
+        assert!(
+            !vault.caches(SITE_MANAGER_REFERENCE),
+            "the cache file must no longer hold the Site Manager reference"
+        );
+        assert_one_note_about_the_new_key(&outcome.notes);
+    }
+
+    /// 1Password still holds the key that the API refused. The key is wrong,
+    /// not stale, and a second run gets the same answer, so the user gets the
+    /// first error. The cache file no longer holds a copy, so the next run
+    /// reads 1Password.
+    #[tokio::test]
+    async fn the_same_key_from_1password_gives_the_first_error_back() {
+        let vault = TestVault::new("same-key", &[(REFERENCE, OLD_KEY)], Some(OLD_KEY));
+        let refusing = TestServer::replying(&refusal("401 Unauthorized")).await;
+        let accepting = TestServer::replying(&application_info()).await;
+
+        let resolved = resolve_from_the_reference(&vault);
+        let outcome = run_command(
+            Target::Controller,
+            Credential::Controller,
+            resolved,
+            &vault,
+            &refusing,
+            &accepting,
+        )
+        .await;
+
+        let error = outcome
+            .result
+            .expect_err("a key that 1Password still holds is refused again");
+        assert_eq!(
+            answered_status(&error),
+            Some(StatusCode::UNAUTHORIZED),
+            "the user must get the first refusal, got {error:#}"
+        );
+        assert_eq!(outcome.runs, 1, "the same key must not be sent again");
+        assert_eq!(vault.forgets(), 1, "the cached copy must be forgotten");
+        assert_eq!(
+            vault.vault_reads(),
+            1,
+            "the key must be read from 1Password once"
+        );
+        assert!(
+            accepting.requests().is_empty(),
+            "no request may reach the accepting controller"
+        );
+        assert!(
+            outcome.notes.is_empty(),
+            "nothing changed, so there is nothing to note, got {:?}",
+            outcome.notes
+        );
+    }
+
+    /// 1Password cannot be read after the refusal. The user gets the first
+    /// error, and one note that says why the key was not read again.
+    #[tokio::test]
+    async fn a_second_read_that_fails_gives_the_first_error_back_with_a_note() {
+        let vault = TestVault::new("unreadable-again", &[(REFERENCE, OLD_KEY)], None);
+        let refusing = TestServer::replying(&refusal("401 Unauthorized")).await;
+        let accepting = TestServer::replying(&application_info()).await;
+
+        let resolved = resolve_from_the_reference(&vault);
+        let outcome = run_command(
+            Target::Controller,
+            Credential::Controller,
+            resolved,
+            &vault,
+            &refusing,
+            &accepting,
+        )
+        .await;
+
+        let error = outcome
+            .result
+            .expect_err("a key that cannot be read again gives no second run");
+        assert_eq!(
+            answered_status(&error),
+            Some(StatusCode::UNAUTHORIZED),
+            "the user must get the first refusal, got {error:#}"
+        );
+        assert_eq!(outcome.runs, 1, "the command must not run again");
+        assert_eq!(
+            vault.vault_reads(),
+            1,
+            "the key must be read from 1Password once"
+        );
+        assert_eq!(
+            outcome.notes.lines().count(),
+            1,
+            "the user must get exactly one note, got {:?}",
+            outcome.notes
+        );
+        assert!(
+            outcome.notes.contains("cannot be read"),
+            "the note must give the reason the second read failed, got {:?}",
+            outcome.notes
+        );
+    }
+
+    /// A key that came from no reference cannot be read again: nothing names
+    /// where it lives. The user gets the refusal, and 1Password is not asked,
+    /// even when the configuration file names a reference.
+    #[tokio::test]
+    async fn a_key_that_came_from_no_reference_is_not_read_again() {
+        let supplied = || -> ResolvedKey {
+            // A config file that names a reference: the supplied key wins.
+            let vault = TestVault::new("unused", &[], None);
+            resolve_credential(
+                Credential::Controller,
+                Some(OLD_KEY.into()),
+                Some(&config_with_the_reference()),
+                &vault,
+            )
+            .expect("a supplied key must resolve")
+        };
+        let from_the_plaintext_field = || -> ResolvedKey {
+            let vault = TestVault::new("unused", &[], None);
+            let config = Config {
+                api_key: Some(OLD_KEY.into()),
+                ..Config::default()
+            };
+            resolve_credential(Credential::Controller, None, Some(&config), &vault)
+                .expect("a plaintext key must resolve")
+        };
+
+        for (case, resolved) in [
+            ("a key from the command line", supplied()),
+            ("a key from the plaintext field", from_the_plaintext_field()),
+        ] {
+            let vault = TestVault::new("no-reference", &[(REFERENCE, OLD_KEY)], Some(NEW_KEY));
+            let refusing = TestServer::replying(&refusal("401 Unauthorized")).await;
+            let accepting = TestServer::replying(&application_info()).await;
+
+            let outcome = run_command(
+                Target::Controller,
+                Credential::Controller,
+                resolved,
+                &vault,
+                &refusing,
+                &accepting,
+            )
+            .await;
+
+            let error = outcome
+                .result
+                .expect_err("a refused key that no reference names stays refused");
+            assert_eq!(
+                answered_status(&error),
+                Some(StatusCode::UNAUTHORIZED),
+                "{case}: the user must get the refusal, got {error:#}"
+            );
+            assert_eq!(outcome.runs, 1, "{case}: the command must not run again");
+            assert_eq!(vault.forgets(), 0, "{case}: nothing may be forgotten");
+            assert_eq!(
+                vault.vault_reads(),
+                0,
+                "{case}: 1Password must not be asked"
+            );
+            assert!(
+                vault.caches(REFERENCE),
+                "{case}: the cache file must keep what it holds"
+            );
+            assert!(
+                outcome.notes.is_empty(),
+                "{case}: there is nothing to note, got {:?}",
+                outcome.notes
+            );
+        }
+    }
+
+    /// Only a refusal of the key says the key is stale. A server fault, and
+    /// a request that got no answer at all, say nothing about the key, so
+    /// 1Password is not asked and the cache file keeps its copy.
+    #[tokio::test]
+    async fn a_failure_that_is_not_a_refusal_does_not_touch_1password() {
+        let server_fault = TestServer::replying(&refusal("500 Internal Server Error")).await;
+        let not_found = TestServer::replying(&refusal("404 Not Found")).await;
+        let hanging_up = TestServer::hanging_up().await;
+
+        for (case, failing) in [
+            ("a 500", &server_fault),
+            ("a 404", &not_found),
+            ("no answer", &hanging_up),
+        ] {
+            let vault = TestVault::new("not-a-refusal", &[(REFERENCE, OLD_KEY)], Some(NEW_KEY));
+            let accepting = TestServer::replying(&application_info()).await;
+
+            let resolved = resolve_from_the_reference(&vault);
+            let outcome = run_command(
+                Target::Controller,
+                Credential::Controller,
+                resolved,
+                &vault,
+                failing,
+                &accepting,
+            )
+            .await;
+
+            assert!(outcome.result.is_err(), "{case}: the command must fail");
+            assert_eq!(outcome.runs, 1, "{case}: the command must not run again");
+            assert_eq!(vault.forgets(), 0, "{case}: nothing may be forgotten");
+            assert_eq!(
+                vault.vault_reads(),
+                0,
+                "{case}: 1Password must not be asked"
+            );
+            assert!(
+                vault.caches(REFERENCE),
+                "{case}: the cache file must keep its copy"
+            );
+            assert!(
+                outcome.notes.is_empty(),
+                "{case}: there is nothing to note, got {:?}",
+                outcome.notes
+            );
+        }
     }
 }
 
