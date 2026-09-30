@@ -217,7 +217,9 @@ pub struct LogCommit {
     /// The first line of the message of the commit.
     pub summary: String,
     /// The commit is only on the branch: the start reaches it, and the base
-    /// does not.
+    /// of the start does not. These are the commits that the header counts
+    /// ([`base_status`]). The flag comes from the set of those commits, and
+    /// not from the position of the commit in the log ([`recent_log_from`]).
     pub on_branch: bool,
 }
 
@@ -228,7 +230,8 @@ pub struct RecentLog {
     /// walk. `None` when HEAD named no commit: HEAD was unborn, or it did not
     /// resolve to a commit.
     pub start: Option<LogStart>,
-    /// The commits, newest first.
+    /// The commits, newest first. Each commit tells whether it is only on
+    /// the branch ([`LogCommit::on_branch`]).
     pub commits: Vec<LogCommit>,
     /// The walk reached the end of the history at or before the limit, so
     /// `commits` holds every commit that `start` reaches, or no commit for an
@@ -243,7 +246,9 @@ pub struct RecentLog {
 /// The start holds the commit that HEAD names and the commit that `base`
 /// names. `base` resolves by the rule of [`base_status`], so the marks of the
 /// log and the count of the header agree on the base. A `base` that does not
-/// resolve gives a start with no base.
+/// resolve gives a start with no base, and then no commit is marked. When HEAD
+/// is on the base, no commit is marked either. The header counts zero in both
+/// cases.
 ///
 /// HEAD is resolved first, whatever `n` is, so the start is known at a limit
 /// of zero too. A pane too short for a log can grow later, and the read of the
@@ -296,6 +301,14 @@ pub fn recent_log(repo: &gix::Repository, base: &str, n: usize) -> RecentLog {
 /// A commit that the walk passed, but whose object, time, or message does not
 /// read, leaves no row. It does not change the flag, because a read with a
 /// higher limit cannot read that commit either.
+///
+/// A commit is marked as only on the branch ([`LogCommit::on_branch`]) when
+/// it is in the set of [`branch_commits`]. The decision is by membership in
+/// that set, and never by the position of the commit. The walk of the log is
+/// breadth-first, so after a merge of the base into the branch, it puts
+/// commits of the base between the commits of the branch. The set comes from
+/// the start commit and the base commit that the start holds. So every read
+/// from one start gives the same marks, also when the base moved.
 pub fn recent_log_from(repo: &gix::Repository, start: LogStart, n: usize) -> RecentLog {
     let incomplete = || RecentLog {
         start: Some(start),
@@ -308,6 +321,7 @@ pub fn recent_log_from(repo: &gix::Repository, start: LogStart, n: usize) -> Rec
     let Ok(mut walk) = repo.rev_walk(std::iter::once(start.commit)).all() else {
         return incomplete();
     };
+    let branch = branch_commits(repo, start);
     let mut step_failed = false;
     let commits = walk
         .by_ref()
@@ -325,7 +339,7 @@ pub fn recent_log_from(repo: &gix::Repository, start: LogStart, n: usize) -> Rec
                 hash,
                 secs,
                 summary,
-                on_branch: false,
+                on_branch: branch.contains(&info.id),
             })
         })
         .collect();
@@ -381,6 +395,50 @@ fn base_commit(repo: &gix::Repository, base: &str) -> Option<gix::ObjectId> {
     repo.rev_parse_single(base).ok().map(gix::Id::detach)
 }
 
+/// The commits that the start commit reaches and its base commit does not:
+/// the commits that are only on the branch.
+///
+/// The set comes from [`walk_only_on`], the walk that [`ahead_behind`] counts
+/// for the header. So the log marks the commits that the header counts.
+///
+/// The set is empty when the start has no base, when the base is the start
+/// commit, or when the walk does not start. The header counts zero in those
+/// cases. A step of the walk that fails also gives an empty set. A doubt then
+/// costs the marks, and it never marks a commit that the base reaches.
+fn branch_commits(repo: &gix::Repository, start: LogStart) -> gix::hashtable::HashSet {
+    let Some(base) = start.base else {
+        return gix::hashtable::HashSet::default();
+    };
+    if base == start.commit {
+        return gix::hashtable::HashSet::default();
+    }
+    walk_only_on(repo, start.commit, base)
+        .and_then(|walk| {
+            walk.map(|info| info.map(|info| info.id))
+                .collect::<Result<_, _>>()
+                .ok()
+        })
+        .unwrap_or_default()
+}
+
+/// The walk of the commits that `ours` reaches and `theirs` does not
+/// (`git rev-list theirs..ours`). `None` when the walk does not start.
+///
+/// This is the one rule for the commits that are only on one side.
+/// [`ahead_behind`] counts this walk, and [`branch_commits`] collects the ids
+/// of its commits. So the count of the header and the marks of the log cannot
+/// disagree about which commits are only on the branch.
+fn walk_only_on(
+    repo: &gix::Repository,
+    ours: gix::ObjectId,
+    theirs: gix::ObjectId,
+) -> Option<gix::revision::Walk<'_>> {
+    repo.rev_walk(std::iter::once(ours))
+        .with_hidden(std::iter::once(theirs))
+        .all()
+        .ok()
+}
+
 /// Count how far `ours` is ahead of and behind `theirs` as `(ahead, behind)`.
 ///
 /// `ahead` is the number of commits reachable from `ours` but not from `theirs`
@@ -391,7 +449,8 @@ fn base_commit(repo: &gix::Repository, base: &str) -> Option<gix::ObjectId> {
 /// Returns `None` if either rev walk fails. When `ours == theirs` the walks are
 /// short-circuited to `Some((0, 0))` (the walks would return `(0, 0)` anyway).
 /// Both `base_status` and `upstream_status` delegate here so the mirrored
-/// hidden-walk pair lives in exactly one place.
+/// hidden-walk pair lives in exactly one place. Each walk is
+/// [`walk_only_on`], which also decides the marks of the log.
 fn ahead_behind(
     repo: &gix::Repository,
     ours: gix::ObjectId,
@@ -401,19 +460,9 @@ fn ahead_behind(
         return Some((0, 0));
     }
     // ahead: theirs..ours — commits on `ours` not on `theirs`.
-    let ahead = repo
-        .rev_walk(std::iter::once(ours))
-        .with_hidden(std::iter::once(theirs))
-        .all()
-        .ok()?
-        .count();
+    let ahead = walk_only_on(repo, ours, theirs)?.count();
     // behind: ours..theirs — the mirror walk, `theirs` with `ours` hidden.
-    let behind = repo
-        .rev_walk(std::iter::once(theirs))
-        .with_hidden(std::iter::once(ours))
-        .all()
-        .ok()?
-        .count();
+    let behind = walk_only_on(repo, theirs, ours)?.count();
     Some((
         u32::try_from(ahead).unwrap_or(u32::MAX),
         u32::try_from(behind).unwrap_or(u32::MAX),
