@@ -1749,6 +1749,29 @@ mod tests {
         assert_eq!(super::base_status(&repo, "main").ahead, 0);
     }
 
+    #[test]
+    fn recent_log_marks_no_commit_when_the_base_does_not_resolve() {
+        // Issue #541: the base names no ref, so the header counts zero. The
+        // log uses the same fallback and marks no commit, although the
+        // branch has three commits on top of `main`.
+        let dir = feature_branch_repo();
+        let repo = open_at(dir.path()).expect("fixture is a worktree repo");
+
+        let log = super::recent_log(&repo, "no-such-branch", 10);
+
+        assert_eq!(
+            subjects(&log),
+            ["feature 3", "feature 2", "feature 1", "initial"],
+            "a base that does not resolve does not change the log",
+        );
+        assert!(
+            marked(&log).is_empty(),
+            "a base that does not resolve marks no commit: {:?}",
+            marked(&log),
+        );
+        assert_eq!(super::base_status(&repo, "no-such-branch").ahead, 0);
+    }
+
     fn statuses(repo: &gix::Repository) -> Vec<(String, FileStatus, bool)> {
         super::collect_changes(repo)
             .unwrap()
