@@ -1,13 +1,16 @@
 //! 1Password credential caching with retry logic, atomic writes, and worktree support.
 //!
-//! Fetches secrets from 1Password once and caches them in `.op-cache.json`
-//! at the repo root. Subsequent calls reuse cached values. If a credential
+//! Fetches secrets from 1Password once and caches them in a JSON file.
+//! [`OpCache::new`] puts the file at the root of the current git repository,
+//! as `.op-cache.json`. [`OpCache::with_path`] puts it at the path the caller
+//! gives. Subsequent calls reuse cached values. If a credential
 //! fails at point of use (e.g., R2 returns 403), invalidate the cache entry
 //! and the next read re-fetches from 1Password.
 //!
 //! Environment variables always take priority over the cache and 1Password.
 //!
-//! **Important:** Add `.op-cache.json` to your project's `.gitignore`.
+//! **Important:** If you use [`OpCache::new`], add `.op-cache.json` to your
+//! project's `.gitignore`.
 //!
 //! # Usage
 //!
@@ -184,8 +187,10 @@ type CacheFile = HashMap<String, CacheEntry>;
 
 /// 1Password credential cache manager.
 ///
-/// Reads and writes a JSON cache file at the root of the current git repository.
-/// The cache file is created with mode 600 on Unix systems.
+/// Reads and writes a JSON cache file. [`OpCache::new`] puts the file at the
+/// root of the current git repository. [`OpCache::with_path`] puts it at the
+/// path the caller gives. The cache file is created with mode 600 on Unix
+/// systems.
 pub struct OpCache {
     cache_path: PathBuf,
 }

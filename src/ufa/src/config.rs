@@ -721,7 +721,7 @@ fn op_cache() -> Result<op_cache::OpCache> {
     Ok(op_cache_in(&Config::config_dir()?))
 }
 
-/// [`op_cache`] against an explicit configuration directory.
+/// [`op_cache()`] against an explicit configuration directory.
 ///
 /// The directory is a parameter so a test can name its own. No git process
 /// starts. The directory does not have to exist yet: op-cache makes it on the
