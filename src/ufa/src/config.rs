@@ -695,6 +695,7 @@ const API_KEY_QUESTION: &str = "\nPaste your API key here: ";
 /// Prompt for the Site Manager (cloud) credential.
 ///
 /// The answer is either an `op://` reference, the key itself, or empty to skip.
+/// The answer does not show on the screen, because it can be the key.
 ///
 /// # Arguments
 ///
@@ -713,7 +714,7 @@ fn prompt_for_site_manager_key(console: &mut impl Console) -> Result<String> {
         "Paste the key from the unifi.ui.com API section, or a 1Password reference \
          ({OP_REFERENCE_PREFIX}Private/ufa/site manager key) to keep it out of the config file."
     );
-    prompt::ask_line(console, SITE_MANAGER_KEY_QUESTION)
+    prompt::ask_hidden_line(console, SITE_MANAGER_KEY_QUESTION)
 }
 
 /// The mode of a file that only its owner can read and write.
@@ -1012,7 +1013,7 @@ fn prompt_for_api_key(controller_url: &str) -> Result<Secret> {
     read_pasted_api_key(&mut Stdio)
 }
 
-/// Read the controller key the user pastes.
+/// Read the controller key the user pastes, and do not show it on the screen.
 ///
 /// [`prompt_for_api_key`] opens a browser before it reads, so the read is a
 /// function of its own, and a test can drive it.
@@ -1026,7 +1027,7 @@ fn prompt_for_api_key(controller_url: &str) -> Result<Secret> {
 /// Returns an error when the answers do not come from a terminal, if the
 /// answer cannot be read, and when the answer is empty.
 fn read_pasted_api_key(console: &mut impl Console) -> Result<Secret> {
-    let api_key = prompt::ask_line(console, API_KEY_QUESTION)?;
+    let api_key = prompt::ask_hidden_line(console, API_KEY_QUESTION)?;
 
     if api_key.is_empty() {
         anyhow::bail!("API key cannot be empty");

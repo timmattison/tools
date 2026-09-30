@@ -164,8 +164,10 @@ It looks for a controller in this order:
    prefix in the URL, as for a controller behind a reverse proxy, and setup saves the URL exactly as
    you typed it. A name stays a name, so a certificate that is valid for that name stays valid.
 
-It then asks whether to skip TLS verification, tests the connection, and finally offers to store a
-Site Manager key for the `cloud` commands. If the key ends up in the config file rather than in
+For a controller from the network or a typed URL, setup asks you to paste its key. It then asks
+whether to skip TLS verification, tests the connection, and finally offers to store a Site Manager
+key for the `cloud` commands. Neither key shows on the screen while you paste it, so it stays out of
+the scrollback, a screen share and a recording. If the key ends up in the config file rather than in
 1Password, setup says so and tells you how to move it.
 
 The connection test asks the controller for its `info` endpoint with the key. Only an answer passes
@@ -178,7 +180,7 @@ permissions gets that answer.
 
 Sets up the Site Manager (cloud) credential on its own, for when the controller is already
 configured. The prompt accepts an `op://` reference, the key itself, or an empty line to leave the
-current setting alone.
+current setting alone. What you paste does not show on the screen.
 
 ## 1Password storage (recommended)
 
