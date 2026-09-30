@@ -530,7 +530,7 @@ impl Config {
 
         // Site Manager API Key (optional)
         println!("\n\nOptional: UniFi Site Manager (Cloud) Configuration");
-        let sm_answer = prompt_for_site_manager_key()?;
+        let sm_answer = prompt_for_site_manager_key(&mut Stdio)?;
 
         // Save configuration
         let config = Self::edit(|config| {
@@ -568,7 +568,7 @@ impl Config {
     pub fn setup_site_manager() -> Result<()> {
         println!("Setting up UniFi Site Manager (Cloud) API credentials...\n");
 
-        let answer = prompt_for_site_manager_key()?;
+        let answer = prompt_for_site_manager_key(&mut Stdio)?;
         let config = Self::edit(|config| config.set_site_manager(&answer))?;
 
         if config.has_site_manager_key() {
@@ -686,22 +686,34 @@ fn decide_after_connection_test(
     }
 }
 
+/// The question that reads the Site Manager (cloud) credential.
+const SITE_MANAGER_KEY_QUESTION: &str = "Site Manager API key or 1Password reference [skip]: ";
+
+/// The question that reads the controller key the user pastes.
+const API_KEY_QUESTION: &str = "\nPaste your API key here: ";
+
 /// Prompt for the Site Manager (cloud) credential.
 ///
 /// The answer is either an `op://` reference, the key itself, or empty to skip.
+///
+/// # Arguments
+///
+/// * `console` - Where the question is put.
+///
+/// # Errors
+///
+/// Returns an error when the answers do not come from a terminal, and if the
+/// answer cannot be read.
 #[allow(
     clippy::print_stdout,
     reason = "the setup wizard is a conversation at a terminal, and it has no --output format"
 )]
-fn prompt_for_site_manager_key() -> Result<String> {
+fn prompt_for_site_manager_key(console: &mut impl Console) -> Result<String> {
     println!(
         "Paste the key from the unifi.ui.com API section, or a 1Password reference \
          ({OP_REFERENCE_PREFIX}Private/ufa/site manager key) to keep it out of the config file."
     );
-    prompt::ask_line(
-        &mut Stdio,
-        "Site Manager API key or 1Password reference [skip]: ",
-    )
+    prompt::ask_line(console, SITE_MANAGER_KEY_QUESTION)
 }
 
 /// The mode of a file that only its owner can read and write.
@@ -997,7 +1009,24 @@ fn prompt_for_api_key(controller_url: &str) -> Result<Secret> {
         println!("Could not open browser automatically. Please visit the URL above.");
     }
 
-    let api_key = prompt::ask_line(&mut Stdio, "\nPaste your API key here: ")?;
+    read_pasted_api_key(&mut Stdio)
+}
+
+/// Read the controller key the user pastes.
+///
+/// [`prompt_for_api_key`] opens a browser before it reads, so the read is a
+/// function of its own, and a test can drive it.
+///
+/// # Arguments
+///
+/// * `console` - Where the question is put.
+///
+/// # Errors
+///
+/// Returns an error when the answers do not come from a terminal, if the
+/// answer cannot be read, and when the answer is empty.
+fn read_pasted_api_key(console: &mut impl Console) -> Result<Secret> {
+    let api_key = prompt::ask_line(console, API_KEY_QUESTION)?;
 
     if api_key.is_empty() {
         anyhow::bail!("API key cannot be empty");
@@ -2044,5 +2073,87 @@ mod connection_test_tests {
             shown.contains(CONTROLLER_VERSION),
             "a passed test must show the version of the controller, it showed {shown:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod key_prompt_tests {
+    use super::*;
+    use crate::prompt::Scripted;
+    use crate::test_support::FAKE_CONTROLLER_KEY;
+
+    /// The controller key the user pastes does not show on the screen. A key
+    /// that shows stays in the scrollback, in a screen share and in a
+    /// recording.
+    #[test]
+    fn the_controller_key_is_read_without_showing_it() {
+        let pasted = format!("  {FAKE_CONTROLLER_KEY}  \n");
+        let mut console = Scripted::terminal(&[pasted.as_str()]);
+
+        let key = read_pasted_api_key(&mut console).expect("a scripted answer must be readable");
+
+        assert_eq!(
+            key.expose(),
+            FAKE_CONTROLLER_KEY,
+            "the key must arrive without the space around it"
+        );
+        assert_eq!(
+            console.asked(),
+            "",
+            "the controller key must not be read with a question that shows the answer"
+        );
+        assert_eq!(
+            console.asked_hidden(),
+            API_KEY_QUESTION,
+            "the controller key must be read with a hidden question"
+        );
+    }
+
+    /// The hidden read gives an empty answer back, so the refusal of an empty
+    /// controller key stays with the caller.
+    #[test]
+    fn an_empty_controller_key_is_refused() {
+        let mut console = Scripted::terminal(&["\n"]);
+
+        let error = read_pasted_api_key(&mut console).expect_err("an empty key is not a key");
+
+        assert!(
+            format!("{error:#}").contains("cannot be empty"),
+            "the refusal must say the key is empty, got {error:#}"
+        );
+    }
+
+    /// The Site Manager answer does not show on the screen, whether it is the
+    /// key itself, a 1Password reference, or an empty line that skips.
+    #[test]
+    fn the_site_manager_answer_is_read_without_showing_it() {
+        for (typed, answer) in [
+            (
+                "  sm-key-from-the-clipboard  \n",
+                "sm-key-from-the-clipboard",
+            ),
+            (
+                "op://Private/ufa/site manager key\n",
+                "op://Private/ufa/site manager key",
+            ),
+            ("\n", ""),
+        ] {
+            let mut console = Scripted::terminal(&[typed]);
+
+            let read = prompt_for_site_manager_key(&mut console)
+                .expect("a scripted answer must be readable");
+
+            assert_eq!(read, answer, "{typed:?} must arrive as {answer:?}");
+            assert_eq!(
+                console.asked(),
+                "",
+                "the Site Manager answer must not be read with a question that shows it"
+            );
+            assert_eq!(
+                console.asked_hidden(),
+                SITE_MANAGER_KEY_QUESTION,
+                "the Site Manager answer must be read with a hidden question"
+            );
+        }
     }
 }

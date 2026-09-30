@@ -9012,6 +9012,7 @@ dependencies = [
  "buildinfo",
  "chrono",
  "clap",
+ "dialoguer",
  "dirs",
  "dotenvy",
  "futures",

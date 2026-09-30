@@ -16,7 +16,7 @@
 //! carries only the document the user asked for, and under `--output json` a
 //! program reads that stream.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::io::{self, BufRead, IsTerminal, Write};
 
 /// The verdict on an action that would destroy something.
@@ -48,6 +48,18 @@ pub trait Console {
     /// closed stdin ends the question instead of looping on empty answers.
     fn ask(&mut self, question: &str) -> Result<String>;
 
+    /// Show `question` and read one line of the answer, but do not show what
+    /// the user types.
+    ///
+    /// An answer read with [`Console::ask`] shows on the screen. A credential
+    /// read that way stays in the scrollback, in a screen share and in a
+    /// recording.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the answer cannot be read.
+    fn ask_hidden(&mut self, question: &str) -> Result<String>;
+
     /// Show `message` on a line of its own.
     fn tell(&mut self, message: &str);
 }
@@ -72,9 +84,38 @@ impl Console for Stdio {
         Ok(line)
     }
 
+    fn ask_hidden(&mut self, question: &str) -> Result<String> {
+        let (blank_lines, prompt) = hidden_prompt(question);
+        eprint!("{blank_lines}");
+
+        // An empty answer comes back empty. The caller decides what it means.
+        dialoguer::Password::new()
+            .with_prompt(prompt)
+            .allow_empty_password(true)
+            .interact()
+            .context("Could not read the hidden answer from the terminal")
+    }
+
     fn tell(&mut self, message: &str) {
         eprintln!("{message}");
     }
+}
+
+/// Split `question` into the blank lines in front of it and the prompt that
+/// [`dialoguer::Password`] shows.
+///
+/// The theme of dialoguer puts `": "` after the prompt, so the prompt goes
+/// without the colon of the question. The prompt holds one line, so the
+/// blank lines go out on their own first.
+///
+/// # Returns
+///
+/// The blank lines, and the prompt.
+fn hidden_prompt(question: &str) -> (&str, &str) {
+    let blank_lines = question
+        .strip_suffix(question.trim_start())
+        .unwrap_or_default();
+    (blank_lines, without_prompt_punctuation(question))
 }
 
 /// What a confirmation does *before* any answer is read.
@@ -230,6 +271,43 @@ fn without_prompt_punctuation(question: &str) -> &str {
 /// Returns an error when the answers do not come from a terminal, and if the
 /// answer stream ends before a line arrives.
 pub fn ask_line(console: &mut impl Console, question: &str) -> Result<String> {
+    refuse_without_a_terminal(console, question)?;
+    Ok(console.ask(question)?.trim().to_string())
+}
+
+/// Put `question` to the user, do not show what the user types, and return
+/// the trimmed answer.
+///
+/// This is [`ask_line`] for a credential. It refuses the same run that
+/// [`ask_line`] refuses, with the same words. An empty answer comes back
+/// empty, because a caller can give an empty answer a meaning, for example
+/// "skip".
+///
+/// # Arguments
+///
+/// * `console` - Where the question is put.
+/// * `question` - The question, with the punctuation and spacing it is shown
+///   with.
+///
+/// # Returns
+///
+/// The answer, without the space around it.
+///
+/// # Errors
+///
+/// Returns an error when the answers do not come from a terminal, and if the
+/// answer cannot be read.
+pub fn ask_hidden_line(console: &mut impl Console, question: &str) -> Result<String> {
+    refuse_without_a_terminal(console, question)?;
+    Ok(console.ask_hidden(question)?.trim().to_string())
+}
+
+/// Refuse a free-text question when the answers do not come from a terminal.
+///
+/// # Errors
+///
+/// Returns an error that names the question and says a terminal is missing.
+fn refuse_without_a_terminal(console: &impl Console, question: &str) -> Result<()> {
     if !console.is_terminal() {
         bail!(
             "{} needs an answer, but stdin is not a terminal. \
@@ -237,8 +315,7 @@ pub fn ask_line(console: &mut impl Console, question: &str) -> Result<String> {
             without_prompt_punctuation(question)
         );
     }
-
-    Ok(console.ask(question)?.trim().to_string())
+    Ok(())
 }
 
 /// Ask a yes/no question that defaults to no.
@@ -268,22 +345,27 @@ pub fn confirm(console: &mut impl Console, question: &str) -> Result<bool> {
 /// A [`Console`] with its answers written in advance.
 ///
 /// Records every question so a test can assert that nothing was asked, and
-/// every message so a test can assert what the user was shown.
+/// every message so a test can assert what the user was shown. A hidden
+/// question goes in a record of its own, so a test can tell a read that shows
+/// the answer from a read that does not.
 #[cfg(test)]
 pub struct Scripted {
     answers: std::collections::VecDeque<String>,
     questions: Vec<String>,
+    hidden_questions: Vec<String>,
     told: Vec<String>,
     is_terminal: bool,
 }
 
 #[cfg(test)]
 impl Scripted {
-    /// A terminal that will answer with `answers`, in order.
+    /// A terminal that will answer with `answers`, in order. Hidden and shown
+    /// questions take their answers from the same list.
     pub fn terminal(answers: &[&str]) -> Self {
         Self {
             answers: answers.iter().map(|a| (*a).to_string()).collect(),
             questions: Vec::new(),
+            hidden_questions: Vec::new(),
             told: Vec::new(),
             is_terminal: true,
         }
@@ -294,14 +376,29 @@ impl Scripted {
         Self {
             answers: std::collections::VecDeque::new(),
             questions: Vec::new(),
+            hidden_questions: Vec::new(),
             told: Vec::new(),
             is_terminal: false,
         }
     }
 
-    /// Whether anything was asked at all.
+    /// Whether anything was asked at all, hidden or shown.
     pub fn was_asked(&self) -> bool {
-        !self.questions.is_empty()
+        !self.questions.is_empty() || !self.hidden_questions.is_empty()
+    }
+
+    /// Every question put through [`Console::ask_hidden`], one question per
+    /// line.
+    pub fn asked_hidden(&self) -> String {
+        self.hidden_questions.join("\n")
+    }
+
+    /// The next scripted answer to `question`.
+    fn next_answer(&mut self, question: &str) -> Result<String> {
+        match self.answers.pop_front() {
+            Some(answer) => Ok(answer),
+            None => bail!("the test scripted no answer for {question:?}"),
+        }
     }
 
     /// Everything shown through [`Console::tell`], one message per line.
@@ -323,10 +420,12 @@ impl Console for Scripted {
 
     fn ask(&mut self, question: &str) -> Result<String> {
         self.questions.push(question.to_string());
-        match self.answers.pop_front() {
-            Some(answer) => Ok(answer),
-            None => bail!("the test scripted no answer for {question:?}"),
-        }
+        self.next_answer(question)
+    }
+
+    fn ask_hidden(&mut self, question: &str) -> Result<String> {
+        self.hidden_questions.push(question.to_string());
+        self.next_answer(question)
     }
 
     fn tell(&mut self, message: &str) {
@@ -472,6 +571,101 @@ mod tests {
             format!("{error:#}").contains("terminal"),
             "the refusal must say a terminal is what is missing, got {error:#}"
         );
+    }
+
+    /// A hidden question gets its answer without the space around it, and
+    /// the console records it as hidden, not as a question that shows the
+    /// answer.
+    #[test]
+    fn a_terminal_answers_a_hidden_question() {
+        let mut console = Scripted::terminal(&["  key-from-the-clipboard  \n"]);
+
+        let answer = ask_hidden_line(&mut console, "\nPaste your API key here: ")
+            .expect("a scripted answer must be readable");
+
+        assert_eq!(
+            answer, "key-from-the-clipboard",
+            "the answer must arrive without the space around it"
+        );
+        assert_eq!(
+            console.asked_hidden(),
+            "\nPaste your API key here: ",
+            "the question must be put as a hidden question"
+        );
+        assert_eq!(
+            console.asked(),
+            "",
+            "a hidden question must not also be put as a question that shows the answer"
+        );
+    }
+
+    /// An empty answer to a hidden question comes back empty. A caller can
+    /// give it a meaning, and the Site Manager prompt reads it as "skip".
+    #[test]
+    fn an_empty_hidden_answer_comes_back_empty() {
+        let mut console = Scripted::terminal(&["\n"]);
+
+        let answer = ask_hidden_line(&mut console, "Site Manager API key [skip]: ")
+            .expect("an empty answer is an answer");
+
+        assert_eq!(answer, "", "an empty line must come back empty");
+    }
+
+    /// A hidden question refuses a pipe for the same reason that a question
+    /// that shows the answer does, and with the same words.
+    #[test]
+    fn a_pipe_is_not_asked_a_hidden_question() {
+        let mut console = Scripted::not_a_terminal();
+
+        let error = ask_hidden_line(&mut console, "\nPaste your API key here: ")
+            .expect_err("a pipe cannot answer a hidden question");
+
+        assert!(
+            !console.was_asked(),
+            "nothing can be asked when there is no terminal"
+        );
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "{:#}",
+                ask_line(
+                    &mut Scripted::not_a_terminal(),
+                    "\nPaste your API key here: "
+                )
+                .expect_err("a pipe cannot answer a free-text question")
+            ),
+            "the hidden read must refuse with the words of the read that shows the answer"
+        );
+        assert!(
+            format!("{error:#}").contains("terminal"),
+            "the refusal must say a terminal is what is missing, got {error:#}"
+        );
+    }
+
+    /// The theme of dialoguer puts `": "` after the prompt, so the prompt
+    /// goes without the colon of the question, and the blank lines in front
+    /// of the question go out on their own.
+    #[test]
+    fn a_hidden_prompt_loses_its_colon_and_keeps_its_blank_lines() {
+        for (question, blank_lines, prompt) in [
+            (
+                "\nPaste your API key here: ",
+                "\n",
+                "Paste your API key here",
+            ),
+            (
+                "Site Manager API key or 1Password reference [skip]: ",
+                "",
+                "Site Manager API key or 1Password reference [skip]",
+            ),
+            ("\n\n🔑 Schlüssel 日本語: ", "\n\n", "🔑 Schlüssel 日本語"),
+        ] {
+            assert_eq!(
+                hidden_prompt(question),
+                (blank_lines, prompt),
+                "{question:?} must split into its blank lines and its prompt"
+            );
+        }
     }
 
     /// The same guard reaches the yes/no questions of the setup wizard, which
