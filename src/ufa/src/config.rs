@@ -1,9 +1,11 @@
 use crate::client::UnifiClient;
 use crate::discovery::{discover_controllers, origin_url, validate_user_url};
+use crate::http::answered_status;
 use crate::prompt::{self, Console, Stdio};
 use crate::secret::Secret;
 use anyhow::{Context, Result};
 use dirs::config_dir;
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
@@ -580,16 +582,19 @@ impl Config {
 }
 
 /// What the connection test of the setup wizard found.
+///
+/// The test is one request for the application info of the controller, with
+/// the key the user gave. Building the client opens no connection, so a client
+/// that builds proves nothing. Only the answer to the request passes the test.
 enum ConnectionTest {
-    /// No client could be built from the URL and the key.
-    NoClient(anyhow::Error),
-    /// The controller did not give its application info.
-    NoInfo(anyhow::Error),
     /// The controller gave its application info.
     Passed {
         /// The version of the network application on the controller.
         version: String,
     },
+    /// No client could be built from the URL and the key, or the controller
+    /// did not give its application info.
+    Failed(anyhow::Error),
 }
 
 /// Whether the setup wizard saves the configuration the user gave it.
@@ -619,18 +624,24 @@ async fn run_connection_test(
 ) -> ConnectionTest {
     let client = match UnifiClient::new(controller_url, api_key.expose(), insecure) {
         Ok(client) => client,
-        Err(error) => return ConnectionTest::NoClient(error),
+        Err(error) => return ConnectionTest::Failed(error),
     };
 
     match client.get::<crate::models::ApplicationInfo>("info").await {
         Ok(info) => ConnectionTest::Passed {
             version: info.application_version,
         },
-        Err(error) => ConnectionTest::NoInfo(error),
+        Err(error) => ConnectionTest::Failed(error),
     }
 }
 
 /// Show what the connection test found, and decide whether setup saves.
+///
+/// A test that passed saves without a question. Every failure shows its error
+/// and asks the user, because only the user knows if the controller is off
+/// today or if the URL or the key is wrong. A 403 also gets a hint: the
+/// controller took the key and refused the request, which a key with limited
+/// permissions can cause.
 ///
 /// # Arguments
 ///
@@ -651,28 +662,27 @@ fn decide_after_connection_test(
     out: &mut impl Write,
     console: &mut impl Console,
 ) -> Result<SaveDecision> {
-    match test {
+    let error = match test {
         ConnectionTest::Passed { version } => {
             writeln!(out, "✅ Successfully connected to UniFi controller!")?;
             writeln!(out, "   Version: {version}")?;
-            Ok(SaveDecision::Save)
+            return Ok(SaveDecision::Save);
         }
-        ConnectionTest::NoInfo(e) => {
-            writeln!(out, "⚠️  Connected but couldn't fetch info: {e}")?;
-            writeln!(
-                out,
-                "   This might be normal if the API key has limited permissions."
-            )?;
-            Ok(SaveDecision::Save)
-        }
-        ConnectionTest::NoClient(e) => {
-            writeln!(out, "❌ Failed to connect: {e}")?;
-            if prompt::confirm(console, "\nSave configuration anyway?")? {
-                Ok(SaveDecision::Save)
-            } else {
-                Ok(SaveDecision::DoNotSave)
-            }
-        }
+        ConnectionTest::Failed(error) => error,
+    };
+
+    writeln!(out, "❌ Connection test failed: {error:#}")?;
+    if answered_status(&error) == Some(StatusCode::FORBIDDEN) {
+        writeln!(
+            out,
+            "   This can be normal if the API key has limited permissions."
+        )?;
+    }
+
+    if prompt::confirm(console, "\nSave configuration anyway?")? {
+        Ok(SaveDecision::Save)
+    } else {
+        Ok(SaveDecision::DoNotSave)
     }
 }
 

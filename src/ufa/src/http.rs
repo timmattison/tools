@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use reqwest::{header, redirect, Client, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use std::fmt;
 use std::time::Duration;
 
 /// How long one request to a UniFi API has to finish.
@@ -91,6 +92,44 @@ const MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
 #[derive(Deserialize)]
 struct ApiErrorBody {
     message: String,
+}
+
+/// A UniFi API answered with a status that is not a success.
+///
+/// The error keeps the status beside the message. A caller reads the status
+/// back through [`answered_status`], and never from the text of the message.
+#[derive(Debug)]
+struct StatusError {
+    /// The status the API answered with.
+    status: StatusCode,
+    /// What the user reads.
+    message: String,
+}
+
+impl fmt::Display for StatusError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for StatusError {}
+
+/// The status of the answer that `error` reports, when a UniFi API answered
+/// a request with a status that is not a success.
+///
+/// # Arguments
+///
+/// * `error` - An error from a request to a UniFi API.
+///
+/// # Returns
+///
+/// The status. `None` when the request failed before an answer arrived, and
+/// when a successful answer could not be read.
+pub fn answered_status(error: &anyhow::Error) -> Option<StatusCode> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<StatusError>())
+        .map(|answer| answer.status)
 }
 
 /// Which UniFi API a response came from.
@@ -404,21 +443,22 @@ where
 ///
 /// # Returns
 ///
-/// The error to raise.
+/// The error to raise. It carries `status`, which [`answered_status`] reads
+/// back.
 fn response_error(api: Api, status: StatusCode, body: &str) -> anyhow::Error {
-    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-        return anyhow::anyhow!(api.authentication_failure(status));
-    }
+    let message = if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        api.authentication_failure(status)
+    } else if let Ok(error) = serde_json::from_str::<ApiErrorBody>(body) {
+        format!("{} error: {} (HTTP {status})", api.label(), error.message)
+    } else {
+        format!(
+            "{} HTTP error {status}: {}",
+            api.label(),
+            truncate_for_display(body, ERROR_BODY_DISPLAY_CHARS)
+        )
+    };
 
-    if let Ok(error) = serde_json::from_str::<ApiErrorBody>(body) {
-        return anyhow::anyhow!("{} error: {} (HTTP {status})", api.label(), error.message);
-    }
-
-    anyhow::anyhow!(
-        "{} HTTP error {status}: {}",
-        api.label(),
-        truncate_for_display(body, ERROR_BODY_DISPLAY_CHARS)
-    )
+    anyhow::Error::new(StatusError { status, message })
 }
 
 #[cfg(test)]

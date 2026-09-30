@@ -168,6 +168,12 @@ It then asks whether to skip TLS verification, tests the connection, and finally
 Site Manager key for the `cloud` commands. If the key ends up in the config file rather than in
 1Password, setup says so and tells you how to move it.
 
+The connection test asks the controller for its `info` endpoint with the key. Only an answer passes
+the test. When the test fails — the controller refuses the connection or does not answer, the TLS
+certificate does not verify, or the controller rejects the key — setup shows the error and asks
+`Save configuration anyway?`. A no saves nothing. A 403 also gets a hint, because a key with limited
+permissions gets that answer.
+
 ### `ufa config cloud`
 
 Sets up the Site Manager (cloud) credential on its own, for when the controller is already
