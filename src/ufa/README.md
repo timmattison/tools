@@ -345,6 +345,25 @@ $ ufa vouchers delete-filtered --filter "expired.eq(true)"
 Delete 37 voucher(s)? [y/N]:
 ```
 
+The vouchers you confirm are the vouchers `ufa` deletes. It deletes each listed voucher by its ID,
+one `DELETE` at a time, in list order. It does not send the filter again, because the controller
+evaluates a filter each time it gets one. A voucher that starts to match while you read the list,
+such as a voucher that expires in that time, is not deleted, because you did not see it.
+
+When a deletion fails, `ufa` continues with the other vouchers. A note on stderr names each voucher
+that it could not delete, with the error. The closing note then compares the deleted count with the
+listed count, and the command exits with an error:
+
+```
+Could not delete voucher 2222222222 (ID 00000000-0000-0000-0000-000000000002): API error: voucher not found (HTTP 404 Not Found)
+Deleted 36 of 37 voucher(s)
+Error: Could not delete 1 of 37 voucher(s). The notes above name each voucher.
+```
+
+The controller answers each deletion with a count. A count other than one gets a note that names the
+voucher, and the closing note shows the total as `Deleted K of 37 voucher(s)`. A count other than one
+is not an error, because the request succeeded.
+
 | Flag        | Effect                                                                            |
 | ----------- | --------------------------------------------------------------------------------- |
 | *(none)*    | Lists the matches and asks for confirmation. Anything but `y` aborts.              |

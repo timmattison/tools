@@ -159,36 +159,6 @@ impl UnifiClient {
         read_json_response(Api::Controller, response).await
     }
 
-    pub async fn delete_with_params<T>(
-        &self,
-        path: &str,
-        params: &[(&str, &dyn std::fmt::Display)],
-    ) -> Result<T>
-    where
-        T: DeserializeOwned,
-    {
-        let mut url = self
-            .base_url
-            .join(path)
-            .context("Failed to construct request URL")?;
-
-        {
-            let mut query_pairs = url.query_pairs_mut();
-            for (key, value) in params {
-                query_pairs.append_pair(key, &value.to_string());
-            }
-        }
-
-        let response = self
-            .client
-            .delete(url)
-            .send()
-            .await
-            .map_err(|e| self.handle_request_error(e, "DELETE"))?;
-
-        read_json_response(Api::Controller, response).await
-    }
-
     fn handle_request_error(&self, error: reqwest::Error, method: &str) -> anyhow::Error {
         if is_tls_failure(&error) {
             anyhow::anyhow!(

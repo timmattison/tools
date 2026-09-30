@@ -294,13 +294,35 @@ async fn delete_voucher(
     voucher_id: Uuid,
 ) -> Result<Report> {
     let site_id = get_site_id_or_prompt(client, site_id).await?;
-    let path = format!("sites/{}/hotspot/vouchers/{}", site_id, voucher_id);
+    let deleted = send_voucher_deletion(client, site_id, voucher_id).await?;
+
+    Ok(Report::of_note(format!("Deleted {deleted} voucher(s)")))
+}
+
+/// Send the `DELETE` of one voucher, on the path of that voucher.
+///
+/// # Arguments
+///
+/// * `client` - The controller client to send the request with.
+/// * `site_id` - The site that holds the voucher.
+/// * `voucher_id` - The voucher to delete.
+///
+/// # Returns
+///
+/// The count of deleted vouchers that the controller answered with.
+///
+/// # Errors
+///
+/// Returns an error if the request fails, or if the answer is not a count.
+async fn send_voucher_deletion(
+    client: &UnifiClient,
+    site_id: Uuid,
+    voucher_id: Uuid,
+) -> Result<u64> {
+    let path = format!("sites/{site_id}/hotspot/vouchers/{voucher_id}");
     let result: VoucherDeletionResults = client.delete(&path).await?;
 
-    Ok(Report::of_note(format!(
-        "Deleted {} voucher(s)",
-        result.vouchers_deleted
-    )))
+    Ok(result.vouchers_deleted)
 }
 
 /// How much a filtered deletion is allowed to do on its own.
@@ -313,17 +335,35 @@ struct DeleteOptions {
 }
 
 /// What a filtered deletion ended up doing.
+///
+/// `R` is what the deletion answered with. The decision to delete does not
+/// depend on it.
 #[derive(Debug, PartialEq, Eq)]
-enum DeletionOutcome {
+enum DeletionOutcome<R> {
     /// The filter matched no vouchers.
     NoMatches,
     /// `--dry-run`: the matches were listed and nothing was deleted.
     Listed,
-    /// The deletion was approved and this many vouchers were destroyed.
-    Deleted(u64),
+    /// The deletion was approved, and this is what it answered with.
+    Deleted(R),
     /// The user was asked and declined.
     Aborted,
 }
+
+/// What the deletion of the listed vouchers did, one voucher at a time.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DeletionTally {
+    /// The sum of the counts that the controller answered with.
+    deleted: u64,
+    /// How many deletions failed.
+    failures: usize,
+    /// One sentence for each voucher whose deletion failed, or whose count
+    /// was not one, in list order.
+    remarks: Vec<String>,
+}
+
+/// The count that the controller answers for the deletion of one voucher.
+const ONE_VOUCHER: u64 = 1;
 
 /// Run `delete` only once the user has agreed to lose `match_count` vouchers.
 ///
@@ -336,21 +376,21 @@ enum DeletionOutcome {
 /// * `match_count` - How many vouchers the filter matched.
 /// * `options` - The `--yes` / `--dry-run` flags.
 /// * `console` - Where the confirmation is put to the user.
-/// * `delete` - Performs the deletion, answering with the number destroyed.
+/// * `delete` - Performs the deletion, and answers with what it did.
 ///
 /// # Errors
 ///
 /// Returns an error if the confirmation cannot be obtained (a non-terminal
 /// stdin without `--yes`) or if the deletion itself fails.
-async fn confirm_then_delete<D, Fut>(
+async fn confirm_then_delete<D, Fut, R>(
     match_count: usize,
     options: DeleteOptions,
     console: &mut impl Console,
     delete: D,
-) -> Result<DeletionOutcome>
+) -> Result<DeletionOutcome<R>>
 where
     D: FnOnce() -> Fut,
-    Fut: Future<Output = Result<u64>>,
+    Fut: Future<Output = Result<R>>,
 {
     let question = format!("Delete {match_count} voucher(s)?");
 
@@ -374,10 +414,22 @@ where
 
 /// Delete every voucher a filter expression matches.
 ///
-/// The matches are listed first and then confirmed, because the filter is
-/// evaluated by the controller: the only way to know what a filter really
-/// selects is to look at what came back, and by the time the API has answered
-/// a `DELETE` it is too late.
+/// The controller evaluates the filter, so the only way to know what a filter
+/// selects is to look at what came back. The command therefore lists the
+/// matches first, and the user confirms that list. Then the command deletes
+/// the listed vouchers by id, one `DELETE` for each voucher. It does not send
+/// the filter again. A second evaluation can select a voucher that started to
+/// match while the user read the list, such as a voucher that expired in that
+/// time. The deleted vouchers are thus the vouchers the user confirmed.
+///
+/// The deletions go one at a time, in list order. The controller is often a
+/// small router, and one request at a time keeps its load low. A failed
+/// deletion does not stop the others. A note names each voucher that was not
+/// deleted, with the error. The controller answers each deletion with a
+/// count, and the total is the sum of those counts. A count other than one
+/// gets a note that names the voucher. The closing note is
+/// `Deleted N voucher(s)` when every deletion succeeded and the total is N.
+/// Otherwise it is `Deleted K of N voucher(s)`, where K is the total.
 ///
 /// The command shows two reports, and the question comes between them: the
 /// matches, and then what the deletion did. `show` receives each report when
@@ -396,8 +448,12 @@ where
 ///
 /// # Errors
 ///
-/// Returns an error if the site cannot be resolved, if a request fails, if
+/// Returns an error if the site cannot be resolved, if the listing fails, if
 /// the confirmation cannot be obtained, or if the matches cannot be rendered.
+/// Also returns an error if the deletion of one or more listed vouchers
+/// failed. The report of the outcome comes before that error, so the exit
+/// status is not zero and the notes still name each voucher. A count other
+/// than one is not an error, because the request succeeded.
 async fn delete_vouchers_filtered(
     client: &UnifiClient,
     site_id: Option<Uuid>,
@@ -417,16 +473,70 @@ async fn delete_vouchers_filtered(
     let rows: Vec<VoucherRow> = matches.iter().map(VoucherRow::from).collect();
     show(render_collection(&rows, output_format)?);
 
-    let params: Vec<(&str, &dyn std::fmt::Display)> = vec![("filter", &filter)];
     let outcome = confirm_then_delete(matches.len(), options, console, || async {
-        let result: VoucherDeletionResults = client.delete_with_params(&path, &params).await?;
-        Ok(result.vouchers_deleted)
+        Ok(delete_listed_vouchers(client, site_id, &matches).await)
     })
     .await?;
 
+    let failures = if let DeletionOutcome::Deleted(tally) = &outcome {
+        tally.failures
+    } else {
+        0
+    };
     show(outcome_report(outcome, matches.len()));
 
+    anyhow::ensure!(
+        failures == 0,
+        "Could not delete {failures} of {} voucher(s). The notes above name each voucher.",
+        matches.len()
+    );
+
     Ok(())
+}
+
+/// Delete each listed voucher by its id, one at a time, in list order.
+///
+/// A failed deletion does not stop the others. The tally counts it, and keeps
+/// a remark that names the voucher and the error.
+///
+/// # Arguments
+///
+/// * `client` - The controller client to send the requests with.
+/// * `site_id` - The site that holds the vouchers.
+/// * `vouchers` - The vouchers the user confirmed.
+///
+/// # Returns
+///
+/// What the deletions did.
+async fn delete_listed_vouchers(
+    client: &UnifiClient,
+    site_id: Uuid,
+    vouchers: &[Voucher],
+) -> DeletionTally {
+    let mut tally = DeletionTally::default();
+
+    for voucher in vouchers {
+        let name = format!("{} (ID {})", voucher.code, voucher.id);
+
+        match send_voucher_deletion(client, site_id, voucher.id).await {
+            Ok(count) => {
+                tally.deleted = tally.deleted.saturating_add(count);
+                if count != ONE_VOUCHER {
+                    tally.remarks.push(format!(
+                        "The controller reported {count} deleted voucher(s) for voucher {name}"
+                    ));
+                }
+            }
+            Err(error) => {
+                tally.failures += 1;
+                tally
+                    .remarks
+                    .push(format!("Could not delete voucher {name}: {error:#}"));
+            }
+        }
+    }
+
+    tally
 }
 
 /// The report that says what a filtered deletion did.
@@ -439,17 +549,45 @@ async fn delete_vouchers_filtered(
 /// # Returns
 ///
 /// The report of the outcome.
-fn outcome_report(outcome: DeletionOutcome, match_count: usize) -> Report {
+fn outcome_report(outcome: DeletionOutcome<DeletionTally>, match_count: usize) -> Report {
     let sentence = match outcome {
         DeletionOutcome::NoMatches => "No vouchers match that filter; nothing to delete.".to_string(),
         DeletionOutcome::Listed => format!(
             "Dry run: {match_count} voucher(s) would be deleted. Re-run without --dry-run to delete them."
         ),
         DeletionOutcome::Aborted => "Aborted; no vouchers were deleted.".to_string(),
-        DeletionOutcome::Deleted(deleted) => format!("Deleted {deleted} voucher(s)"),
+        DeletionOutcome::Deleted(tally) => return deletion_report(tally, match_count),
     };
 
     Report::of_note(sentence)
+}
+
+/// The report of a deletion that went ahead: one note for each remark, then
+/// the closing note.
+///
+/// # Arguments
+///
+/// * `tally` - What the deletions did.
+/// * `match_count` - How many vouchers the user confirmed.
+///
+/// # Returns
+///
+/// The report of the deletion.
+fn deletion_report(tally: DeletionTally, match_count: usize) -> Report {
+    let listed = u64::try_from(match_count).unwrap_or(u64::MAX);
+    let closing = if tally.failures == 0 && tally.deleted == listed {
+        format!("Deleted {} voucher(s)", tally.deleted)
+    } else {
+        format!("Deleted {} of {match_count} voucher(s)", tally.deleted)
+    };
+
+    let mut remarks = tally.remarks.into_iter();
+    match remarks.next() {
+        None => Report::of_note(closing),
+        Some(first) => remarks
+            .fold(Report::of_note(first), Report::with_note)
+            .with_note(closing),
+    }
 }
 
 #[cfg(test)]
@@ -693,7 +831,13 @@ mod deletion_tests {
                 DeletionOutcome::Aborted,
                 "Aborted; no vouchers were deleted",
             ),
-            (DeletionOutcome::Deleted(deleted), "Deleted 7 voucher(s)"),
+            (
+                DeletionOutcome::Deleted(DeletionTally {
+                    deleted,
+                    ..DeletionTally::default()
+                }),
+                "Deleted 7 voucher(s)",
+            ),
         ] {
             let label = format!("{outcome:?}");
             let report = outcome_report(outcome, MATCHES);
