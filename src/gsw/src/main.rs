@@ -620,7 +620,7 @@ pub(crate) fn collect_snapshot(
         &ages,
     );
 
-    let fetched = fetch_head_log(repo, log_limit);
+    let fetched = fetch_head_log(repo, &snapshot.base, log_limit);
     snapshot.log = fetched.entries;
     snapshot.log_complete = fetched.complete;
     snapshot.log_start = fetched.start;
@@ -829,7 +829,8 @@ pub(crate) struct FetchedLog {
 }
 
 /// Fetch the `n` most recent commits from HEAD as [`LogEntry`] records via
-/// gix, with the commit that HEAD names.
+/// gix, with the start of the walk: the commit that HEAD names and the commit
+/// that `base` names ([`repo::LogStart`]).
 ///
 /// Returns an empty list when `n == 0` or the repo has no commits. The start
 /// is known at `n == 0` too, as [`repo::recent_log`] resolves it.
@@ -847,9 +848,9 @@ pub(crate) struct FetchedLog {
 ///
 /// Each age is measured at the instant of this call. [`collect_snapshot`]
 /// calls it for each walk, and nothing else reads the log from HEAD.
-fn fetch_head_log(repo: &gix::Repository, n: usize) -> FetchedLog {
+fn fetch_head_log(repo: &gix::Repository, base: &str, n: usize) -> FetchedLog {
     let now = SystemTime::now();
-    fetched_at(repo::recent_log(repo, n), now)
+    fetched_at(repo::recent_log(repo, base, n), now)
 }
 
 /// Fetch the `n` most recent commits of the history of `start` as
@@ -878,12 +879,16 @@ fn fetched_at(recent: repo::RecentLog, now: SystemTime) -> FetchedLog {
     let entries = recent
         .commits
         .into_iter()
-        .map(|(hash, secs, subject)| {
-            let age = u64::try_from(secs)
+        .map(|commit| {
+            let age = u64::try_from(commit.secs)
                 .ok()
                 .map(|s| SystemTime::UNIX_EPOCH + Duration::from_secs(s))
                 .and_then(|when| now.duration_since(when).ok());
-            LogEntry { hash, subject, age }
+            LogEntry {
+                hash: commit.hash,
+                subject: commit.summary,
+                age,
+            }
         })
         .collect();
     FetchedLog {

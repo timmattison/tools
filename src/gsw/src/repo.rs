@@ -169,8 +169,8 @@ pub fn resolve_base(repo: &gix::Repository) -> String {
     "HEAD".to_string()
 }
 
-/// The commit that a walk of the log starts from: the commit that HEAD named
-/// when [`recent_log`] resolved it.
+/// The start of a walk of the log: the commit that HEAD named when
+/// [`recent_log`] resolved it, and the commit that the base named then.
 ///
 /// A commit names its parents by their ids, and an id names its content. So
 /// the history of one start is the same at every read, whatever HEAD names by
@@ -178,29 +178,58 @@ pub fn resolve_base(repo: &gix::Repository) -> String {
 /// resize ([`recent_log_from`]), and that read extends the log of the walk. It
 /// never gives the history of another branch.
 ///
-/// The field is private, and only [`recent_log`] makes a start. So a read of
+/// The base commit decides which commits are only on the branch
+/// ([`LogCommit::on_branch`]). The start keeps that commit and not the name of
+/// the base. So a read from one start gives the same marks at every read, also
+/// when the base moved after the walk.
+///
+/// The fields are private, and only [`recent_log`] makes a start. So a read of
 /// the log starts from a commit that a walk recorded, or from HEAD.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LogStart(gix::ObjectId);
+pub struct LogStart {
+    /// The commit that the walk starts from.
+    commit: gix::ObjectId,
+    /// The commit that the base named when the walk started. `None` when the
+    /// base did not resolve.
+    base: Option<gix::ObjectId>,
+}
 
 impl LogStart {
-    /// A start that names no commit, for the tests that fake the histories of
-    /// a repository. One seed gives the same start at every call, and two
-    /// seeds give two different starts.
+    /// A start that names no commit and no base, for the tests that fake the
+    /// histories of a repository. One seed gives the same start at every
+    /// call, and two seeds give two different starts.
     #[cfg(test)]
     pub(crate) fn fake(seed: u8) -> Self {
-        Self(gix::ObjectId::from_bytes_or_panic(&[seed; 20]))
+        Self {
+            commit: gix::ObjectId::from_bytes_or_panic(&[seed; 20]),
+            base: None,
+        }
     }
+}
+
+/// One commit of a [`RecentLog`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogCommit {
+    /// The short hash of the commit.
+    pub hash: String,
+    /// The time of the commit, in seconds since the Unix epoch.
+    pub secs: i64,
+    /// The first line of the message of the commit.
+    pub summary: String,
+    /// The commit is only on the branch: the start reaches it, and the base
+    /// does not.
+    pub on_branch: bool,
 }
 
 /// The newest commits of one history, as [`recent_log`] reads them from HEAD
 /// and [`recent_log_from`] reads them from a start.
 pub struct RecentLog {
-    /// The commit that the walk started from. `None` when HEAD named no
-    /// commit: HEAD was unborn, or it did not resolve to a commit.
+    /// The commit that the walk started from, with the base commit of the
+    /// walk. `None` when HEAD named no commit: HEAD was unborn, or it did not
+    /// resolve to a commit.
     pub start: Option<LogStart>,
-    /// The commits, newest first, as `(short_hash, unix_secs, summary)`.
-    pub commits: Vec<(String, i64, String)>,
+    /// The commits, newest first.
+    pub commits: Vec<LogCommit>,
     /// The walk reached the end of the history at or before the limit, so
     /// `commits` holds every commit that `start` reaches, or no commit for an
     /// unborn HEAD. A read from `start` with a higher limit then finds no more
@@ -208,9 +237,13 @@ pub struct RecentLog {
     pub complete: bool,
 }
 
-/// The `n` most recent commits from HEAD as `(short_hash, unix_secs, summary)`,
-/// the commit that HEAD names, and whether the walk reached the end of the
-/// history.
+/// The `n` most recent commits from HEAD, the start of the walk, and whether
+/// the walk reached the end of the history.
+///
+/// The start holds the commit that HEAD names and the commit that `base`
+/// names. `base` resolves by the rule of [`base_status`], so the marks of the
+/// log and the count of the header agree on the base. A `base` that does not
+/// resolve gives a start with no base.
 ///
 /// HEAD is resolved first, whatever `n` is, so the start is known at a limit
 /// of zero too. A pane too short for a log can grow later, and the read of the
@@ -220,9 +253,15 @@ pub struct RecentLog {
 /// has no start and no commit, and it is complete, except at a limit of zero,
 /// which sees no end. A HEAD that does not resolve to a commit is a failure,
 /// so its log has no start and no commit, and it is not complete.
-pub fn recent_log(repo: &gix::Repository, n: usize) -> RecentLog {
+pub fn recent_log(repo: &gix::Repository, base: &str, n: usize) -> RecentLog {
     match repo.head_commit() {
-        Ok(head) => recent_log_from(repo, LogStart(head.id), n),
+        Ok(head) => {
+            let start = LogStart {
+                commit: head.id,
+                base: base_commit(repo, base),
+            };
+            recent_log_from(repo, start, n)
+        }
         Err(_) => RecentLog {
             start: None,
             commits: Vec::new(),
@@ -231,9 +270,8 @@ pub fn recent_log(repo: &gix::Repository, n: usize) -> RecentLog {
     }
 }
 
-/// The `n` most recent commits of the history of `start` as
-/// `(short_hash, unix_secs, summary)`, and whether the walk reached the end of
-/// that history.
+/// The `n` most recent commits of the history of `start`, and whether the walk
+/// reached the end of that history.
 ///
 /// The history of a commit never changes. So a read from one start gives the
 /// same commits in the same order at every read, whatever HEAD names by then,
@@ -267,7 +305,7 @@ pub fn recent_log_from(repo: &gix::Repository, start: LogStart, n: usize) -> Rec
     if n == 0 {
         return incomplete();
     }
-    let Ok(mut walk) = repo.rev_walk(std::iter::once(start.0)).all() else {
+    let Ok(mut walk) = repo.rev_walk(std::iter::once(start.commit)).all() else {
         return incomplete();
     };
     let mut step_failed = false;
@@ -283,7 +321,12 @@ pub fn recent_log_from(repo: &gix::Repository, start: LogStart, n: usize) -> Rec
             let hash = info.id().shorten_or_id().to_string();
             let secs = commit.time().ok()?.seconds;
             let summary = commit.message().ok()?.summary().to_string();
-            Some((hash, secs, summary))
+            Some(LogCommit {
+                hash,
+                secs,
+                summary,
+                on_branch: false,
+            })
         })
         .collect();
     let complete = !step_failed && walk.next().is_none();
@@ -321,11 +364,21 @@ pub struct BaseStatus {
 pub fn base_status(repo: &gix::Repository, base: &str) -> BaseStatus {
     let resolve = || -> Option<(u32, u32)> {
         let head = repo.head_id().ok()?.detach();
-        let base_id = repo.rev_parse_single(base).ok()?.detach();
+        let base_id = base_commit(repo, base)?;
         ahead_behind(repo, head, base_id)
     };
     let (ahead, behind) = resolve().unwrap_or((0, 0));
     BaseStatus { ahead, behind }
+}
+
+/// The commit that the ref `base` names, or `None` when `base` does not
+/// resolve.
+///
+/// [`base_status`] counts against this commit, and [`recent_log`] keeps it in
+/// the start of the log. One rule, so the count of the header and the marks of
+/// the log cannot disagree about the base.
+fn base_commit(repo: &gix::Repository, base: &str) -> Option<gix::ObjectId> {
+    repo.rev_parse_single(base).ok().map(gix::Id::detach)
 }
 
 /// Count how far `ours` is ahead of and behind `theirs` as `(ahead, behind)`.
@@ -1235,18 +1288,18 @@ mod tests {
         git(p, &["add", "b.txt"]);
         git(p, &["commit", "-q", "-m", "second commit"]);
         let repo = open_at(p).unwrap();
-        let log = super::recent_log(&repo, 10).commits;
+        let log = super::recent_log(&repo, "main", 10).commits;
         assert_eq!(log.len(), 2);
-        assert_eq!(log[0].2, "second commit");
-        assert_eq!(log[1].2, "initial");
-        assert!(!log[0].0.is_empty(), "short hash present");
+        assert_eq!(log[0].summary, "second commit");
+        assert_eq!(log[1].summary, "initial");
+        assert!(!log[0].hash.is_empty(), "short hash present");
     }
 
     #[test]
     fn recent_log_zero_is_empty() {
         let dir = init_repo();
         let repo = open_at(dir.path()).unwrap();
-        assert!(super::recent_log(&repo, 0).commits.is_empty());
+        assert!(super::recent_log(&repo, "main", 0).commits.is_empty());
     }
 
     /// A repository of three commits: the commit of [`init_repo`], then
@@ -1266,7 +1319,7 @@ mod tests {
     fn subjects(log: &super::RecentLog) -> Vec<&str> {
         log.commits
             .iter()
-            .map(|(_, _, subject)| subject.as_str())
+            .map(|commit| commit.summary.as_str())
             .collect()
     }
 
@@ -1277,7 +1330,7 @@ mod tests {
         let dir = three_commit_repo();
         let repo = open_at(dir.path()).expect("fixture is a worktree repo");
 
-        let log = super::recent_log(&repo, 10);
+        let log = super::recent_log(&repo, "main", 10);
 
         assert_eq!(subjects(&log), ["third", "second", "initial"]);
         assert!(log.complete, "a limit past the history reaches its end");
@@ -1291,7 +1344,7 @@ mod tests {
         let dir = three_commit_repo();
         let repo = open_at(dir.path()).expect("fixture is a worktree repo");
 
-        let log = super::recent_log(&repo, 3);
+        let log = super::recent_log(&repo, "main", 3);
 
         assert_eq!(subjects(&log), ["third", "second", "initial"]);
         assert!(log.complete, "the third commit is the last commit");
@@ -1304,7 +1357,7 @@ mod tests {
         let dir = three_commit_repo();
         let repo = open_at(dir.path()).expect("fixture is a worktree repo");
 
-        let log = super::recent_log(&repo, 2);
+        let log = super::recent_log(&repo, "main", 2);
 
         assert_eq!(subjects(&log), ["third", "second"]);
         assert!(!log.complete, "the walk stopped before the last commit");
@@ -1319,7 +1372,7 @@ mod tests {
         git(dir.path(), &["init", "-q", "-b", "main"]);
         let repo = open_at(dir.path()).expect("an unborn repository has a work tree");
 
-        let log = super::recent_log(&repo, 10);
+        let log = super::recent_log(&repo, "main", 10);
 
         assert!(log.commits.is_empty(), "an unborn HEAD has no commit");
         assert!(log.complete, "an unborn HEAD has an empty history");
@@ -1336,7 +1389,7 @@ mod tests {
         let dir = three_commit_repo();
         let repo = open_at(dir.path()).expect("fixture is a worktree repo");
 
-        let log = super::recent_log(&repo, 0);
+        let log = super::recent_log(&repo, "main", 0);
 
         assert!(log.commits.is_empty(), "a limit of zero reads no commit");
         assert!(!log.complete, "a read of no commit finds no end");
@@ -1361,7 +1414,7 @@ mod tests {
         git(p, &["symbolic-ref", "HEAD", "refs/heads/broken"]);
         let repo = open_at(p).expect("fixture is a worktree repo");
 
-        let log = super::recent_log(&repo, 10);
+        let log = super::recent_log(&repo, "main", 10);
 
         assert!(log.commits.is_empty(), "a missing commit gives no row");
         assert!(!log.complete, "a HEAD that does not resolve finds no end");
@@ -1386,7 +1439,7 @@ mod tests {
             .expect("remove the object of the first commit");
         let repo = open_at(p).expect("fixture is a worktree repo");
 
-        let log = super::recent_log(&repo, 10);
+        let log = super::recent_log(&repo, "main", 10);
 
         assert_eq!(subjects(&log), ["third", "second"]);
         assert!(!log.complete, "a walk that fails finds no end");
@@ -1455,14 +1508,14 @@ mod tests {
         let dir = three_commit_repo();
         let p = dir.path();
         let repo = open_at(p).expect("fixture is a worktree repo");
-        let start = super::recent_log(&repo, 1)
+        let start = super::recent_log(&repo, "main", 1)
             .start
             .expect("HEAD names a commit");
 
         move_head_to_another_history(p);
 
         assert_eq!(
-            subjects(&super::recent_log(&repo, 10)),
+            subjects(&super::recent_log(&repo, "main", 10)),
             ["moved 4", "moved 3", "moved 2", "moved 1"],
             "HEAD names the other history, so a read from HEAD gives it",
         );
