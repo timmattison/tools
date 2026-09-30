@@ -310,6 +310,42 @@ mod tests {
         );
     }
 
+    /// A host id in the form the Site Manager API gives: a hexadecimal
+    /// console identifier, a colon, and a number. It is the sample id of
+    /// `USAGE-EXAMPLES.md`, and it has 71 characters.
+    const REALISTIC_HOST_ID: &str =
+        "70A741667C3000000000066DC7C00000000006BABC5A000000006289D202:1320847833";
+
+    /// The vertical line between two cells of a drawn table.
+    const CELL_SEPARATOR: char = '│';
+
+    /// The finding this answers: the table cut each id at 60 characters, and
+    /// the hint under the table tells the user to give the id to
+    /// `ufa cloud host <id>`. A cut id does not identify a host there. So the
+    /// ID cell of a row must hold the whole id, and nothing more.
+    #[test]
+    fn the_table_shows_the_whole_host_id_that_ufa_cloud_host_takes() {
+        let mut host = test_host("edge");
+        host.id = REALISTIC_HOST_ID.to_string();
+
+        let rendered = render_hosts(&[host], OutputFormat::Table)
+            .expect("rendering the host listing must succeed");
+
+        let row = rendered
+            .lines()
+            .find(|line| line.contains("edge"))
+            .unwrap_or_else(|| panic!("the listing must have a row for the host, got:\n{rendered}"));
+        let id_cell = row
+            .split(CELL_SEPARATOR)
+            .nth(1)
+            .map(str::trim)
+            .unwrap_or_else(|| panic!("the row must have an ID cell, got:\n{row}"));
+        assert_eq!(
+            id_cell, REALISTIC_HOST_ID,
+            "the ID cell must hold the whole id, got:\n{rendered}"
+        );
+    }
+
     /// `--output json` is how the listing gets piped into something else, so
     /// it must keep answering with the hosts as the API reported them rather
     /// than with the handful of fields the table happens to show.
