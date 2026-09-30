@@ -355,15 +355,31 @@ one `DELETE` at a time, in list order. It does not send the filter again, becaus
 evaluates a filter each time it gets one. A voucher that starts to match while you read the list,
 such as a voucher that expires in that time, is not deleted, because you did not see it.
 
-When a deletion fails, `ufa` continues with the other vouchers. A note on stderr names each voucher
-that it could not delete, with the error. The closing note then compares the deleted count with the
-listed count, and the command exits with an error:
+When the controller answers a deletion with a failure status, such as a 404, `ufa` continues with
+the other vouchers. A note on stderr names each voucher that it could not delete, with the error.
+The closing note then compares the deleted count with the listed count, and the command exits with
+an error:
 
 ```
 Could not delete voucher 2222222222 (ID 00000000-0000-0000-0000-000000000002): API error: voucher not found (HTTP 404 Not Found)
 Deleted 36 of 37 voucher(s)
 Error: Could not delete 1 of 37 voucher(s). The notes above name each voucher.
 ```
+
+When a deletion fails with no HTTP status — a timeout, a refused or reset connection, or an answer
+`ufa` cannot read — `ufa` stops. A controller that stops answering in the middle of a run (a reboot,
+a dropped VPN) would otherwise make each remaining voucher wait the full 30-second request timeout.
+`ufa` does not send the vouchers after that failure, and a note gives their count:
+
+```
+Could not delete voucher 2222222222 (ID 00000000-0000-0000-0000-000000000002): Failed to send DELETE request: ...
+The controller gave no usable answer, so the deletion stopped. 35 voucher(s) were not attempted.
+Deleted 1 of 37 voucher(s)
+Error: Could not delete 1 of 37 voucher(s), and 35 voucher(s) were not attempted. The notes above name each voucher that failed.
+```
+
+Run the same `delete-filtered` command again when the controller answers. It lists the vouchers that
+are still there, and asks again.
 
 The controller answers each deletion with a count. A count other than one gets a note that names the
 voucher, and the closing note shows the total as `Deleted K of 37 voucher(s)`. A count other than one

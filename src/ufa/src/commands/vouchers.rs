@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     client::UnifiClient,
+    http::answered_status,
     models::{Page, Voucher, VoucherCreateRequest, VoucherCreateResponse, VoucherDeletionResults},
     output::{
         print_output, print_vec_table, render_collection, render_page_listing, OutputFormat, Report,
@@ -351,15 +352,67 @@ enum DeletionOutcome<R> {
 }
 
 /// What the deletion of the listed vouchers did, one voucher at a time.
+///
+/// A failure that the controller answered with a status, such as a 404, does
+/// not stop the deletion. A failure with no HTTP status stops it, and the
+/// vouchers after that failure are not sent.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct DeletionTally {
     /// The sum of the counts that the controller answered with.
     deleted: u64,
-    /// How many deletions failed.
+    /// How many deletions failed. The failure that stopped the deletion is
+    /// one of them.
     failures: usize,
+    /// How many listed vouchers the deletion did not send, because a failure
+    /// with no HTTP status stopped it.
+    not_attempted: usize,
     /// One sentence for each voucher whose deletion failed, or whose count
     /// was not one, in list order.
     remarks: Vec<String>,
+}
+
+impl DeletionTally {
+    /// The error of a deletion that left one or more listed vouchers in
+    /// place.
+    ///
+    /// # Arguments
+    ///
+    /// * `match_count` - How many vouchers the user confirmed.
+    ///
+    /// # Returns
+    ///
+    /// The text of the error, or `None` when no deletion failed and the
+    /// deletion sent every listed voucher. A count other than one is not an
+    /// error, because the request succeeded.
+    fn shortfall(&self, match_count: usize) -> Option<String> {
+        let failures = self.failures;
+        match self.not_attempted {
+            0 if failures == 0 => None,
+            0 => Some(format!(
+                "Could not delete {failures} of {match_count} voucher(s). The notes above name each voucher."
+            )),
+            not_attempted => Some(format!(
+                "Could not delete {failures} of {match_count} voucher(s), and {}. The notes above name each voucher that failed.",
+                not_attempted_count(not_attempted)
+            )),
+        }
+    }
+}
+
+/// The words that say how many listed vouchers a stopped deletion did not
+/// send.
+///
+/// The note and the error both use them, so the two always agree.
+///
+/// # Arguments
+///
+/// * `count` - How many vouchers the deletion did not send.
+///
+/// # Returns
+///
+/// The words, such as `2 voucher(s) were not attempted`.
+fn not_attempted_count(count: usize) -> String {
+    format!("{count} voucher(s) were not attempted")
 }
 
 /// The count that the controller answers for the deletion of one voucher.
@@ -423,13 +476,21 @@ where
 /// time. The deleted vouchers are thus the vouchers the user confirmed.
 ///
 /// The deletions go one at a time, in list order. The controller is often a
-/// small router, and one request at a time keeps its load low. A failed
-/// deletion does not stop the others. A note names each voucher that was not
-/// deleted, with the error. The controller answers each deletion with a
-/// count, and the total is the sum of those counts. A count other than one
-/// gets a note that names the voucher. The closing note is
-/// `Deleted N voucher(s)` when every deletion succeeded and the total is N.
-/// Otherwise it is `Deleted K of N voucher(s)`, where K is the total.
+/// small router, and one request at a time keeps its load low. A deletion
+/// that the controller answered with a failure status, such as a 404, does
+/// not stop the others. A failure with no HTTP status stops the deletion: a
+/// timeout, a refused or reset connection, or an answer that `ufa` cannot
+/// read. Such a failure says that the controller gave no usable answer, and
+/// each voucher after it waits the full request timeout for an answer that
+/// does not come. The vouchers after that failure are not attempted, and a
+/// note before the closing note gives their count.
+///
+/// A note names each voucher that was not deleted, with the error. The
+/// controller answers each deletion with a count, and the total is the sum
+/// of those counts. A count other than one gets a note that names the
+/// voucher. The closing note is `Deleted N voucher(s)` when every deletion
+/// succeeded and the total is N. Otherwise it is `Deleted K of N voucher(s)`,
+/// where K is the total.
 ///
 /// The command shows two reports, and the question comes between them: the
 /// matches, and then what the deletion did. `show` receives each report when
@@ -451,9 +512,11 @@ where
 /// Returns an error if the site cannot be resolved, if the listing fails, if
 /// the confirmation cannot be obtained, or if the matches cannot be rendered.
 /// Also returns an error if the deletion of one or more listed vouchers
-/// failed. The report of the outcome comes before that error, so the exit
-/// status is not zero and the notes still name each voucher. A count other
-/// than one is not an error, because the request succeeded.
+/// failed, and gives the count of the vouchers that were not attempted when
+/// a failure stopped the deletion. The report of the outcome comes before
+/// that error, so the exit status is not zero and the notes still name each
+/// voucher that failed. A count other than one is not an error, because the
+/// request succeeded.
 async fn delete_vouchers_filtered(
     client: &UnifiClient,
     site_id: Option<Uuid>,
@@ -478,26 +541,28 @@ async fn delete_vouchers_filtered(
     })
     .await?;
 
-    let failures = if let DeletionOutcome::Deleted(tally) = &outcome {
-        tally.failures
+    let shortfall = if let DeletionOutcome::Deleted(tally) = &outcome {
+        tally.shortfall(matches.len())
     } else {
-        0
+        None
     };
     show(outcome_report(outcome, matches.len()));
 
-    anyhow::ensure!(
-        failures == 0,
-        "Could not delete {failures} of {} voucher(s). The notes above name each voucher.",
-        matches.len()
-    );
+    if let Some(message) = shortfall {
+        anyhow::bail!(message);
+    }
 
     Ok(())
 }
 
 /// Delete each listed voucher by its id, one at a time, in list order.
 ///
-/// A failed deletion does not stop the others. The tally counts it, and keeps
-/// a remark that names the voucher and the error.
+/// The tally counts each failed deletion, and keeps a remark that names the
+/// voucher and the error. A failure that the controller answered with a
+/// status, such as a 404, does not stop the others. A failure with no HTTP
+/// status stops the loop, because each voucher after it waits the full
+/// request timeout for an answer that does not come. The tally counts the
+/// vouchers after that failure as not attempted.
 ///
 /// # Arguments
 ///
@@ -515,7 +580,7 @@ async fn delete_listed_vouchers(
 ) -> DeletionTally {
     let mut tally = DeletionTally::default();
 
-    for voucher in vouchers {
+    for (index, voucher) in vouchers.iter().enumerate() {
         let name = format!("{} (ID {})", voucher.code, voucher.id);
 
         match send_voucher_deletion(client, site_id, voucher.id).await {
@@ -532,6 +597,11 @@ async fn delete_listed_vouchers(
                 tally
                     .remarks
                     .push(format!("Could not delete voucher {name}: {error:#}"));
+
+                if answered_status(&error).is_none() {
+                    tally.not_attempted = vouchers.len() - index - 1;
+                    break;
+                }
             }
         }
     }
@@ -563,7 +633,8 @@ fn outcome_report(outcome: DeletionOutcome<DeletionTally>, match_count: usize) -
 }
 
 /// The report of a deletion that went ahead: one note for each remark, then
-/// the closing note.
+/// a note with the count of the vouchers that were not attempted when a
+/// failure stopped the deletion, then the closing note.
 ///
 /// # Arguments
 ///
@@ -575,16 +646,23 @@ fn outcome_report(outcome: DeletionOutcome<DeletionTally>, match_count: usize) -
 /// The report of the deletion.
 fn deletion_report(tally: DeletionTally, match_count: usize) -> Report {
     let listed = u64::try_from(match_count).unwrap_or(u64::MAX);
-    let closing = if tally.failures == 0 && tally.deleted == listed {
+    let closing = if tally.failures == 0 && tally.not_attempted == 0 && tally.deleted == listed {
         format!("Deleted {} voucher(s)", tally.deleted)
     } else {
         format!("Deleted {} of {match_count} voucher(s)", tally.deleted)
     };
 
-    let mut remarks = tally.remarks.into_iter();
-    match remarks.next() {
+    let stopped = (tally.not_attempted > 0).then(|| {
+        format!(
+            "The controller gave no usable answer, so the deletion stopped. {}.",
+            not_attempted_count(tally.not_attempted)
+        )
+    });
+
+    let mut notes = tally.remarks.into_iter().chain(stopped);
+    match notes.next() {
         None => Report::of_note(closing),
-        Some(first) => remarks
+        Some(first) => notes
             .fold(Report::of_note(first), Report::with_note)
             .with_note(closing),
     }
