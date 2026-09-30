@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use colored::{ColoredString, Colorize};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 use textfit::{
     center, pad_right, truncate_left, truncate_middle, truncate_right, truncate_to_budget,
@@ -378,12 +378,8 @@ fn render_log_row(entry: &LogEntry, width: usize, truecolor: bool, age_offset: D
     // matching the file-row age column exactly. The subject is padded to fill
     // the gap so the age column lines up.
     let effective_age = entry.age.map(|age| age.saturating_add(age_offset));
-    let gutter = if entry.on_branch {
-        BRANCH_MARK
-    } else {
-        LOG_GUTTER_BLANK
-    };
-    let gutter_width = UnicodeWidthChar::width(gutter).unwrap_or(0);
+    let gutter = colorize_log_gutter(entry.on_branch);
+    let gutter_width = UnicodeWidthStr::width(gutter.input.as_str());
     let hash_width = UnicodeWidthStr::width(entry.hash.as_str());
     let hash_sep_width = LOG_HASH_SUBJECT_SEP.chars().count();
     let sep_to_age = " ".repeat(SEP_DELS_AGE);
@@ -1129,6 +1125,21 @@ fn colorize_log_subject(subject: &str, age: Option<Duration>, truecolor: bool) -
             Some(AgeDim::Fresh | AgeDim::Recent) => subject.normal(),
             Some(AgeDim::Aging | AgeDim::Stale) | None => subject.dimmed(),
         }
+    }
+}
+
+/// The gutter of a commit-log row, painted.
+///
+/// A commit that is only on the current branch gets [`BRANCH_MARK`], in the
+/// paint of the header: bold, on the default foreground. The header counts
+/// these commits, so the mark and the count look the same. The header is bold
+/// in 8-color mode and in truecolor mode, so the mark is too. Every other row
+/// gets [`LOG_GUTTER_BLANK`] with no paint.
+fn colorize_log_gutter(on_branch: bool) -> ColoredString {
+    if on_branch {
+        BRANCH_MARK.to_string().bold()
+    } else {
+        LOG_GUTTER_BLANK.to_string().normal()
     }
 }
 
