@@ -702,36 +702,41 @@ fn read_from_1password(op_path: &str) -> Result<String> {
 ///
 /// Every read of a 1Password reference in `ufa` starts here.
 ///
+/// The cache file sits in the configuration directory, beside the
+/// configuration file. [`op_cache::OpCache::new`] puts it at the root of the
+/// git repository that holds the working directory. `ufa` is an installed
+/// tool that runs from any directory, so that choice fails outside a git
+/// repository. Inside one, it writes the plaintext controller key into a
+/// repository that does not ignore the file, and a `git add -A` there stages
+/// the key.
+///
 /// # Returns
 ///
-/// The cache that [`op_cache_in`] gives for the configuration directory.
+/// The cache at `.op-cache.json` in the configuration directory.
 ///
 /// # Errors
 ///
-/// Returns an error if the operating system names no configuration directory,
-/// or if op-cache cannot find its cache file.
+/// Returns an error if the operating system names no configuration directory.
 fn op_cache() -> Result<op_cache::OpCache> {
-    op_cache_in(&Config::config_dir()?)
+    Ok(op_cache_in(&Config::config_dir()?))
 }
 
 /// [`op_cache`] against an explicit configuration directory.
 ///
-/// The cache file sits at the root of the git repository that holds the
-/// working directory.
+/// The directory is a parameter so a test can name its own. No git process
+/// starts. The directory does not have to exist yet: op-cache makes it on the
+/// first write, as [`Config::edit`] makes it for the configuration file, and
+/// it writes the cache file at mode 0600.
 ///
 /// # Arguments
 ///
-/// * `_directory` - The configuration directory.
+/// * `directory` - The configuration directory.
 ///
 /// # Returns
 ///
-/// The cache at the root of that git repository.
-///
-/// # Errors
-///
-/// Returns an error if the working directory is not inside a git repository.
-fn op_cache_in(_directory: &Path) -> Result<op_cache::OpCache> {
-    op_cache::OpCache::new().map_err(|e| anyhow::anyhow!("{e}"))
+/// The cache at `.op-cache.json` in `directory`.
+fn op_cache_in(directory: &Path) -> op_cache::OpCache {
+    op_cache::OpCache::with_path(directory.join(OP_CACHE_FILE))
 }
 
 /// [`resolve_secret`] against an explicit reader.
@@ -1654,7 +1659,7 @@ mod tests {
     fn the_op_cache_file_sits_beside_the_configuration_file() {
         let temp = TempConfigDir::new("op-cache-path");
 
-        let cache = op_cache_in(&temp.dir).expect("the op-cache must open");
+        let cache = op_cache_in(&temp.dir);
 
         assert_eq!(
             cache.cache_path(),
@@ -1685,7 +1690,7 @@ mod tests {
         });
         write_file(&temp.dir.join(OP_CACHE_FILE), &seeded.to_string());
 
-        let cache = op_cache_in(&temp.dir).expect("the op-cache must open");
+        let cache = op_cache_in(&temp.dir);
 
         assert_eq!(
             cache.cache_path(),
@@ -1694,7 +1699,9 @@ mod tests {
         );
         let entries = cache.entries().expect("the seeded cache file must list");
         assert!(
-            entries.iter().any(|(reference, _)| reference == OP_REFERENCE),
+            entries
+                .iter()
+                .any(|(reference, _)| reference == OP_REFERENCE),
             "op-cache must find the seeded reference, or the read below calls `op`, \
              got {entries:?}"
         );

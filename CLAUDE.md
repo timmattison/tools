@@ -628,8 +628,7 @@ binary.
 ### Why
 
 `op-cache` caches what it read, retries what failed, and writes the cache file
-at mode 600 beside the repository root. A crate that runs `op` itself gets none
-of that, and the failure is quiet: the code works, the secret arrives, and only
+at mode 600. A crate that runs `op` itself gets none of that, and the failure is quiet: the code works, the secret arrives, and only
 the properties nobody can see are gone.
 
 `ufa` did exactly that. `discover_op_controllers` ran
@@ -646,8 +645,8 @@ Add the narrow method the helper lacks, then call it.
 ### Usage
 
 ```rust
-// One field of an item.
-let cache = op_cache::OpCache::new()?;
+// One field of an item, cached in a file the tool names.
+let cache = op_cache::OpCache::with_path(config_dir.join(".op-cache.json"));
 let path = op_cache::OpPath::new("op://Private/ufa/key - 192.168.1.1 port 443")?;
 let key = cache.read(&path, None)?;
 
@@ -661,6 +660,13 @@ a secret, and a cached list of names goes stale silently: a stale value is
 found out at the point of use, when the service refuses it and the caller
 invalidates the entry, but a stale list of names simply hides the field the
 user just added.
+
+`OpCache::new` puts the cache file at the root of the git repository that
+holds the working directory, and it fails outside a git repository. That suits
+a tool that runs in its own checkout. An installed tool runs from any
+directory, so it names the file with `OpCache::with_path`: `ufa` keeps it
+beside its configuration file. At the root of another repository, the file
+puts a plaintext key where nothing ignores it, and a `git add -A` stages it.
 
 ### The Trap: A Text Search Finds One Spelling
 
