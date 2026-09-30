@@ -519,9 +519,13 @@ impl Config {
         let (controller_url, credential) = match selection {
             Selection::Op(c) => {
                 let url = c.url()?;
-                // Read the key via op-cache to verify it works
-                let key =
-                    Secret::from(CachedOnePassword::beside_the_configuration()?.read(&c.op_path)?);
+                // Read the key to test it below. A user who rotated the key in
+                // 1Password runs the wizard to use the new key, so the read
+                // forgets any copy that op-cache kept, and 1Password answers.
+                let key = read_again_from_1password(
+                    &CachedOnePassword::beside_the_configuration()?,
+                    &c.op_path,
+                )?;
                 (
                     url,
                     ControllerCredential::OnePassword {
@@ -856,7 +860,9 @@ pub trait KeyStore {
 /// The keys that 1Password holds, read through op-cache.
 ///
 /// Every read of a 1Password reference in `ufa` starts here. op-cache keeps a
-/// copy of each key it reads, and answers the next read from that copy.
+/// copy of each key it reads, and answers the next read from that copy. The
+/// copy stays until something forgets it: [`read_again_from_1password`]
+/// forgets it when the API refuses it, and when the setup wizard tests it.
 pub struct CachedOnePassword {
     /// The cache that holds a copy of each key it read.
     cache: op_cache::OpCache,
@@ -1105,6 +1111,14 @@ fn key_in_answer(reference: &str, answer: String) -> Result<Secret> {
 
 /// Read the key that 1Password holds now at a reference.
 ///
+/// The store forgets its copy of the key first, so 1Password answers and not
+/// the cache. A copy from before a rotation in 1Password is exactly what this
+/// removes. The store then keeps a copy of the new key.
+///
+/// This is the one place that forgets and then reads. The setup wizard reads
+/// through it, so it tests the key that 1Password holds now. A command reads
+/// through it after the API refuses the key it sent.
+///
 /// # Arguments
 ///
 /// * `keys` - The store that holds the key.
@@ -1116,9 +1130,12 @@ fn key_in_answer(reference: &str, answer: String) -> Result<Secret> {
 ///
 /// # Errors
 ///
-/// Returns an error if the store cannot read the reference, and if the
-/// reference holds only blank space.
+/// Returns an error if the store cannot forget its copy, if it cannot read
+/// the reference, and if the reference holds only blank space.
 pub fn read_again_from_1password(keys: &impl KeyStore, reference: &str) -> Result<Secret> {
+    keys.forget(reference)
+        .with_context(|| format!("Failed to forget the cached copy of {reference}"))?;
+
     key_in_answer(reference, keys.read(reference)?)
 }
 

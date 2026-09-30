@@ -34,6 +34,7 @@ use clap::{Parser, Subcommand};
 use client::UnifiClient;
 use commands::*;
 use config::{CachedOnePassword, Config, KeyStore, ResolvedKey};
+use reqwest::StatusCode;
 use secret::Secret;
 use std::future::Future;
 use std::io::Write;
@@ -162,24 +163,49 @@ fn resolve_credential(
     }
 }
 
-/// Run a command with a key.
+/// Run a command with a key, and run it once more when the API refused a copy
+/// of the key that 1Password no longer holds.
+///
+/// op-cache answers each read of a 1Password reference from the copy it kept,
+/// and it asks 1Password only when it holds no copy. So after the user rotates
+/// a key in 1Password, the copy is the old key, and the API refuses it. The
+/// error of that refusal tells the user to check the key or to make a new one,
+/// which is what the user just did.
+///
+/// A refusal is a 401 or a 403. After a refusal of a key that came from a
+/// 1Password reference, the store forgets its copy and reads the key from
+/// 1Password again:
+///
+/// - A different key: one note says so, and the command runs once more with
+///   the new key. The command runs two times at most.
+/// - The same key: the key is wrong, not stale, and the first error comes
+///   back. The cache now holds the copy that 1Password just gave.
+/// - A read that fails: the first error comes back, and one note gives the
+///   reason of the failed read.
+///
+/// Any other failure, and a failure with a key that came from no reference,
+/// comes back as it is, and 1Password gets no request.
+///
+/// The second run is safe. Every request carries the key, so a stale key
+/// fails the first request of a command, and the first run changed nothing.
 ///
 /// # Arguments
 ///
 /// * `credential` - The credential the command sends.
 /// * `resolved` - The key, and the 1Password reference it came from when it
 ///   came from one.
-/// * `keys` - The store that reads a 1Password reference.
+/// * `keys` - The store that reads the key again.
 /// * `notes` - Where the notes for the user go.
 /// * `run` - Runs the command with the key it gets.
 ///
 /// # Returns
 ///
-/// What the command returned.
+/// What the last run of the command returned.
 ///
 /// # Errors
 ///
-/// Returns the error of the command.
+/// Returns the error of the last run. When the command does not run again
+/// after a refusal, that is the error of the first run.
 async fn run_with_the_current_key<F, Fut>(
     credential: Credential,
     resolved: ResolvedKey,
@@ -191,9 +217,60 @@ where
     F: FnMut(Secret) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
-    let _ = (credential, keys, notes);
+    let error = match run(resolved.key().clone()).await {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
 
-    run(resolved.key().clone()).await
+    let Some(reference) = resolved.reference() else {
+        return Err(error);
+    };
+    if !matches!(
+        http::answered_status(&error),
+        Some(StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
+    ) {
+        return Err(error);
+    }
+
+    match config::read_again_from_1password(keys, reference) {
+        Ok(current) if current.expose() != resolved.key().expose() => {
+            write_note(
+                notes,
+                &format!(
+                    "note: The {} in 1Password changed since ufa cached it. \
+                     ufa runs the command again with the new key.",
+                    credential.description()
+                ),
+            );
+            run(current).await
+        }
+        Ok(_) => Err(error),
+        Err(reread) => {
+            write_note(
+                notes,
+                &format!(
+                    "note: The API refused the {}, and ufa could not read it again from \
+                     1Password: {reread:#}",
+                    credential.description()
+                ),
+            );
+            Err(error)
+        }
+    }
+}
+
+/// Write one note for the user.
+///
+/// A note that cannot be written does not change the result of the command.
+/// The result is the answer the user asked for, and a note that is lost costs
+/// less than an answer that is lost.
+///
+/// # Arguments
+///
+/// * `notes` - Where the note goes.
+/// * `note` - The note, on one line.
+fn write_note(notes: &mut impl Write, note: &str) {
+    let _ = writeln!(notes, "{note}");
 }
 
 /// Said before the first request whenever certificate verification is off.

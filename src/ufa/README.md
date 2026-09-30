@@ -191,8 +191,13 @@ rather than a secret. `ufa` reads them on demand through
 `op-cache` keeps a copy of each key it reads, in plaintext, in `.op-cache.json` beside the config
 file (`ufa config path` prints the config file). On Unix it writes that file at mode `0600`. A
 later run reads the key from that file and does not ask 1Password. To remove the copy, delete the
-file. Delete it also after you rotate a key in 1Password, or `ufa` keeps sending the old key. The
-next run reads the key from 1Password again.
+file.
+
+When the controller or the Site Manager API refuses a key from that file (HTTP 401 or 403), `ufa`
+forgets the copy and reads the key from 1Password again. If 1Password now holds a different key, as
+after a rotation, `ufa` writes one note and runs the command once more with the new key. If
+1Password holds the same key, you get the refusal. `ufa config setup` also reads the key from
+1Password again before it tests it.
 
 ```toml
 op_path    = "op://Private/ufa/key - 192.168.1.1 port 443"
