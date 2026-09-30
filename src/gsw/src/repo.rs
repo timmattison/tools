@@ -1168,7 +1168,7 @@ mod tests {
 
     use super::RepoHandle;
     use crate::git::FileStatus;
-    use crate::render::{Operation, StepProgress};
+    use crate::render::{LogEntry, Operation, StepProgress};
     use crate::testrepo::{
         git, git_allowing_failure, git_stdout, init_repo, init_repo_with_upstream,
         init_repo_with_worktree,
@@ -1799,6 +1799,44 @@ mod tests {
         assert!(
             marked(&super::recent_log(&repo, "main", 10)).is_empty(),
             "main now holds the branch, so a new read from HEAD marks no commit",
+        );
+    }
+
+    /// The subject and the mark of each row of `log`, newest first.
+    fn row_marks(log: &[LogEntry]) -> Vec<(&str, bool)> {
+        log.iter()
+            .map(|entry| (entry.subject.as_str(), entry.on_branch))
+            .collect()
+    }
+
+    #[test]
+    fn a_walk_marks_the_log_rows_of_a_branch_on_top_of_its_base() {
+        // Issue #541: the walk puts the log on the snapshot, and each row
+        // keeps the mark of its commit. The branch has three commits on top
+        // of `main`. So the walk marks the three rows of the branch and not
+        // the row of the commit that `main` names. The header counts the
+        // same commits.
+        let dir = feature_branch_repo();
+        let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
+
+        let snapshot =
+            crate::collect_snapshot(handle.repo(), &log_walk_config(), 10).expect("walk");
+
+        assert_eq!(
+            row_marks(&snapshot.log),
+            [
+                ("feature 3", true),
+                ("feature 2", true),
+                ("feature 1", true),
+                ("initial", false),
+            ],
+            "the walk marks the rows of the three commits that only the branch has",
+        );
+        let marked_rows = snapshot.log.iter().filter(|entry| entry.on_branch).count();
+        assert_eq!(
+            u32::try_from(marked_rows).expect("a small count"),
+            snapshot.commits_ahead,
+            "the log marks as many rows as the header counts",
         );
     }
 
