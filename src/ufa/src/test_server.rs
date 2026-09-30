@@ -596,9 +596,211 @@ pub fn chunked_response(body: &str) -> String {
 mod tests {
     use super::*;
     use crate::client::UnifiClient;
+    use std::time::Duration;
 
     /// The API key a test hands the client. Nothing reads it back.
     const API_KEY: &str = "an-api-key";
+
+    /// How long a test waits for the server to finish an answer.
+    ///
+    /// The server closes each connection after it writes the answer, so a
+    /// read to the end of the stream ends at once. The bound only stops a
+    /// server that keeps the connection open from holding the test forever.
+    const ANSWER_PATIENCE: Duration = Duration::from_secs(30);
+
+    /// The header name that tells a client what happens to the connection
+    /// after this answer.
+    const CONNECTION_HEADER: &str = "connection";
+
+    /// The value of the `Connection` header that says the server closes the
+    /// connection after this answer.
+    const CLOSE: &str = "close";
+
+    /// An HTTP answer, cut at its framing.
+    #[derive(Debug, PartialEq)]
+    struct Framed<'a> {
+        /// The first line, such as `HTTP/1.1 200 OK`.
+        status_line: &'a str,
+        /// Every header line, in the order the answer gives them.
+        headers: Vec<&'a str>,
+        /// Everything after the empty line that ends the head.
+        body: &'a str,
+    }
+
+    /// Cut `raw` at its framing.
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - A whole HTTP answer, head and body.
+    ///
+    /// # Returns
+    ///
+    /// The status line, the header lines and the body.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `raw` has no empty line after its head.
+    fn framed(raw: &str) -> Framed<'_> {
+        let head_end = String::from_utf8_lossy(HEAD_END);
+        let (head, body) = raw
+            .split_once(head_end.as_ref())
+            .expect("an HTTP answer has an empty line after its head");
+        let mut lines = head.split("\r\n");
+
+        Framed {
+            status_line: lines.next().unwrap_or_default(),
+            headers: lines.collect(),
+            body,
+        }
+    }
+
+    /// The value of the header `line`, when its name is `Connection`.
+    ///
+    /// # Arguments
+    ///
+    /// * `line` - One header line, such as `Connection: close`.
+    ///
+    /// # Returns
+    ///
+    /// The value in lower case, or `None` when the line is another header.
+    fn connection_value(line: &str) -> Option<String> {
+        line.split_once(':')
+            .filter(|(name, _)| name.trim().eq_ignore_ascii_case(CONNECTION_HEADER))
+            .map(|(_, value)| value.trim().to_ascii_lowercase())
+    }
+
+    /// Send `GET path` to `server` on a plain socket, and read the answer up
+    /// to the end of the stream.
+    ///
+    /// A plain socket shows the bytes exactly as the server wrote them.
+    ///
+    /// # Arguments
+    ///
+    /// * `server` - The server to ask.
+    /// * `path` - The path of the request.
+    ///
+    /// # Returns
+    ///
+    /// The whole answer, as text.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the server refuses the connection, keeps it open for longer
+    /// than [`ANSWER_PATIENCE`], or writes an answer that is not text.
+    async fn raw_answer(server: &TestServer, path: &str) -> String {
+        let address = server
+            .origin()
+            .strip_prefix("http://")
+            .expect("a test server origin starts with http://");
+        let mut socket = TcpStream::connect(address)
+            .await
+            .expect("a test server accepts a connection");
+        socket
+            .write_all(format!("GET {path} HTTP/1.1\r\nHost: {address}\r\n\r\n").as_bytes())
+            .await
+            .expect("a test server reads the request");
+
+        let mut answer = Vec::new();
+        tokio::time::timeout(ANSWER_PATIENCE, socket.read_to_end(&mut answer))
+            .await
+            .expect("the server must close the connection after it answers")
+            .expect("the answer must arrive");
+
+        String::from_utf8(answer).expect("every answer a test server writes is text")
+    }
+
+    /// Assert that `answer` is `sent` with one `Connection: close` header
+    /// added, and with no other change.
+    ///
+    /// # Arguments
+    ///
+    /// * `case` - The name of the case, for the message of a failure.
+    /// * `sent` - The response the test gave the server.
+    /// * `answer` - The bytes the server wrote.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the answer has no `Connection: close` header, has more than
+    /// one `Connection` header, or differs from `sent` in any other way.
+    #[track_caller]
+    fn assert_says_it_closes(case: &str, sent: &str, answer: &str) {
+        let written = framed(answer);
+        let (connection, others): (Vec<&str>, Vec<&str>) = written
+            .headers
+            .iter()
+            .partition(|line| connection_value(line).is_some());
+
+        assert_eq!(
+            connection
+                .iter()
+                .filter_map(|line| connection_value(line))
+                .collect::<Vec<_>>(),
+            vec![CLOSE.to_string()],
+            "{case}: the answer must say once that the server closes the connection, got {answer:?}"
+        );
+        assert_eq!(
+            Framed {
+                status_line: written.status_line,
+                headers: others,
+                body: written.body,
+            },
+            framed(sent),
+            "{case}: the server must write the rest of the answer as the test gave it"
+        );
+    }
+
+    /// The server closes each connection after it answers, and every answer
+    /// must say so. A client that is not told keeps the connection for its
+    /// next request, and sometimes sends that request on the socket the
+    /// server already closed. The server then records one request too few,
+    /// and a test that counts requests fails at random.
+    #[tokio::test]
+    async fn every_answer_says_that_the_server_closes_the_connection() {
+        let cases = [
+            ("json_response", json_response(r#"{"answer":1}"#)),
+            (
+                "json_response_with_status",
+                json_response_with_status("404 Not Found", r#"{"message":"Not Found"}"#),
+            ),
+            ("empty_json", empty_json()),
+            ("redirect_to", redirect_to("http://127.0.0.1:9/moved")),
+            (
+                "chunked_response",
+                chunked_response(r#"{"name":"日本語 🎉 café"}"#),
+            ),
+            (
+                "a response a test writes by hand",
+                "HTTP/1.1 204 No Content\r\n\r\n".to_string(),
+            ),
+        ];
+
+        for (case, response) in cases {
+            let server = TestServer::replying(&response).await;
+
+            let answer = raw_answer(&server, "/info").await;
+
+            assert_says_it_closes(case, &response, &answer);
+        }
+    }
+
+    /// A server that routes picks one of several responses. Each of them,
+    /// and the fallback, must say that the server closes the connection.
+    #[tokio::test]
+    async fn every_route_and_the_fallback_say_that_the_server_closes_the_connection() {
+        let routed = json_response(r#"{"route":"matched"}"#);
+        let fallback = json_response_with_status("404 Not Found", r#"{"route":"none"}"#);
+        let server =
+            TestServer::routing(&[("/routed".to_string(), routed.clone())], &fallback).await;
+
+        for (case, path, response) in [
+            ("a matched route", "/routed", &routed),
+            ("the fallback", "/elsewhere", &fallback),
+        ] {
+            let answer = raw_answer(&server, path).await;
+
+            assert_says_it_closes(case, response, &answer);
+        }
+    }
 
     /// Send `body` as the JSON body of a `POST` to a new server.
     ///
