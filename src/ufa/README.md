@@ -269,7 +269,7 @@ $ ufa devices stats --all 0f8b...
 error: the argument '--all' cannot be used with '[DEVICE_ID]'
 ```
 
-Two different blanks appear in an `--all` listing, and they mean different things:
+Two different blanks appear in an `--all` table, and they mean different things:
 
 | Cell    | Meaning                                                                         |
 | ------- | ------------------------------------------------------------------------------- |
@@ -277,7 +277,10 @@ Two different blanks appear in an `--all` listing, and they mean different thing
 | `ERROR` | Its statistics could not be fetched at all. The reason is printed to stderr.     |
 
 One unreachable device therefore never hides the rest of the site. `--output json` is honoured for
-`--all` as well as for a single device.
+`--all` as well as for a single device. Under `--all` it prints one object per device, in device
+order: `{"id", "name", "model", "statistics"}`, or `{"id", "name", "model", "error"}` when the fetch
+failed. `statistics` is the document that `ufa devices stats <DEVICE_ID> --output json` prints, with
+the same field names and units, so one parser reads both. `error` is the reason that stderr gives.
 
 ### Clients
 

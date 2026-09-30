@@ -9,7 +9,8 @@ use crate::{
     device_helper::get_device_id_or_prompt,
     models::{Device, DeviceAction, DeviceDetails, DeviceStatistics, Page, PortAction},
     output::{
-        print_output, print_vec_table, render_collection, render_page_listing, OutputFormat, Report,
+        print_output, print_vec_table, render_collection, render_output, render_page_listing,
+        OutputFormat, Report,
     },
     pagination::fetch_all,
     site_helper::get_site_id_or_prompt,
@@ -18,9 +19,10 @@ use crate::{
 /// Shown in place of a figure the controller did not report.
 const NO_DATA: &str = "N/A";
 
-/// Shown in place of every figure of a device whose statistics request
-/// failed, so an unreachable device or a permissions problem cannot be
-/// mistaken for a device that simply had nothing to report.
+/// Shown in the table in place of every figure of a device whose statistics
+/// request failed, so an unreachable device or a permissions problem cannot be
+/// mistaken for a device that simply had nothing to report. The JSON document
+/// gives the reason for the failure instead.
 const FETCH_FAILED: &str = "ERROR";
 
 #[derive(Subcommand, Debug)]
@@ -241,6 +243,71 @@ impl DeviceStatsRowWithName {
     }
 }
 
+/// One device of a site, together with the outcome of its statistics request.
+struct DeviceStatsOutcome {
+    /// The device, as the device list gave it.
+    device: Device,
+    /// `Err` means the request itself failed. That is a different thing from
+    /// a device that answered with no figures to report.
+    statistics: Result<DeviceStatistics>,
+}
+
+/// One device in the JSON document of `devices stats --all`.
+///
+/// The statistics keep the field names and the units of [`DeviceStatistics`],
+/// so a program that reads `devices stats <id> --output json` reads each entry
+/// too.
+#[derive(serde::Serialize)]
+struct DeviceStatsEntry<'a> {
+    id: Uuid,
+    name: &'a str,
+    model: &'a str,
+    #[serde(flatten)]
+    outcome: DeviceStatsEntryOutcome<'a>,
+}
+
+/// The statistics of a [`DeviceStatsEntry`], or the reason it has none.
+///
+/// Each variant becomes one key of the entry, `statistics` or `error`. A
+/// program tells a failed device from a healthy one by the key it finds.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+enum DeviceStatsEntryOutcome<'a> {
+    /// The statistics, as the controller gave them.
+    Statistics(&'a DeviceStatistics),
+    /// The reason the statistics request failed.
+    Error(String),
+}
+
+impl<'a> From<&'a DeviceStatsOutcome> for DeviceStatsEntry<'a> {
+    fn from(fetched: &'a DeviceStatsOutcome) -> Self {
+        Self {
+            id: fetched.device.id,
+            name: &fetched.device.name,
+            model: &fetched.device.model,
+            outcome: match &fetched.statistics {
+                Ok(statistics) => DeviceStatsEntryOutcome::Statistics(statistics),
+                Err(error) => DeviceStatsEntryOutcome::Error(failure_reason(error)),
+            },
+        }
+    }
+}
+
+/// The reason a statistics request failed, with the chain of causes.
+///
+/// The note on standard error and the JSON entry give the same text.
+///
+/// # Arguments
+///
+/// * `error` - The error of the failed request.
+///
+/// # Returns
+///
+/// The reason, with each cause after the error it explains.
+fn failure_reason(error: &anyhow::Error) -> String {
+    format!("{error:#}")
+}
+
 pub async fn handle_devices_command(
     command: DevicesCommand,
     site_id: Option<Uuid>,
@@ -387,7 +454,7 @@ async fn get_single_device_stats(
 ///
 /// Returns an error if the device list cannot be fetched, or if the answer
 /// cannot be rendered. A failed statistics request for one device is not an
-/// error: its row says so instead.
+/// error: its row or its JSON entry says so instead.
 async fn get_all_device_stats(
     client: &UnifiClient,
     site_id: Uuid,
@@ -402,21 +469,23 @@ async fn get_all_device_stats(
     })
     .await;
 
-    let stats_rows: Vec<DeviceStatsRowWithName> = devices
-        .iter()
-        .zip(&statistics)
-        .map(|(device, stats)| {
-            if let Err(error) = stats {
+    let fetched: Vec<DeviceStatsOutcome> = devices
+        .into_iter()
+        .zip(statistics)
+        .map(|(device, statistics)| {
+            if let Err(error) = &statistics {
                 eprintln!(
-                    "Failed to fetch statistics for {} ({}): {error:#}",
-                    device.name, device.id
+                    "Failed to fetch statistics for {} ({}): {}",
+                    device.name,
+                    device.id,
+                    failure_reason(error)
                 );
             }
-            DeviceStatsRowWithName::from_device_and_stats(device, stats.as_ref())
+            DeviceStatsOutcome { device, statistics }
         })
         .collect();
 
-    all_device_stats_report(&stats_rows, output_format)
+    all_device_stats_report(&fetched, output_format)
 }
 
 /// Upper bound on statistics requests in flight at once.
@@ -458,9 +527,13 @@ where
 
 /// Render the per-device statistics of `devices stats --all`.
 ///
+/// A table gives each figure as text for a person. JSON gives one
+/// [`DeviceStatsEntry`] per device: the statistics as the controller gave
+/// them, or the reason the request failed.
+///
 /// # Arguments
 ///
-/// * `rows` - One row per device, in device order.
+/// * `fetched` - One outcome per device, in device order.
 /// * `format` - The output format the user asked for.
 ///
 /// # Returns
@@ -470,14 +543,31 @@ where
 ///
 /// # Errors
 ///
-/// Returns an error if the rows cannot be serialized.
-fn all_device_stats_report(
-    rows: &[DeviceStatsRowWithName],
-    format: OutputFormat,
-) -> Result<Report> {
-    let report = render_collection(rows, format)?;
+/// Returns an error if the statistics cannot be serialized.
+fn all_device_stats_report(fetched: &[DeviceStatsOutcome], format: OutputFormat) -> Result<Report> {
+    let report = match format {
+        OutputFormat::Table => {
+            let rows: Vec<DeviceStatsRowWithName> = fetched
+                .iter()
+                .map(|outcome| {
+                    DeviceStatsRowWithName::from_device_and_stats(
+                        &outcome.device,
+                        outcome.statistics.as_ref(),
+                    )
+                })
+                .collect();
+            render_collection(&rows, format)?
+        }
+        // A site with no devices gives `[]`, the same document as every other
+        // collection that holds nothing.
+        OutputFormat::Json => {
+            let entries: Vec<DeviceStatsEntry<'_>> =
+                fetched.iter().map(DeviceStatsEntry::from).collect();
+            Report::of_document(render_output(&entries, format)?)
+        }
+    };
 
-    if rows.is_empty() {
+    if fetched.is_empty() {
         return Ok(report.with_note("No devices found on this site."));
     }
 
@@ -572,14 +662,13 @@ mod tests {
         }
     }
 
-    fn rows_for(names: &[&str]) -> Vec<DeviceStatsRowWithName> {
+    /// One device per name, each with statistics that its request fetched.
+    fn outcomes_for(names: &[&str]) -> Vec<DeviceStatsOutcome> {
         names
             .iter()
-            .map(|name| {
-                DeviceStatsRowWithName::from_device_and_stats(
-                    &test_device(name),
-                    Ok(&stats_with_uptime(0)),
-                )
+            .map(|name| DeviceStatsOutcome {
+                device: test_device(name),
+                statistics: Ok(stats_with_uptime(0)),
             })
             .collect()
     }
@@ -589,9 +678,9 @@ mod tests {
     /// silently breaks that pipeline.
     #[test]
     fn all_device_stats_honour_the_json_output_format() {
-        let rows = rows_for(&["ap-lr", "switch-8"]);
+        let fetched = outcomes_for(&["ap-lr", "switch-8"]);
 
-        let report = all_device_stats_report(&rows, OutputFormat::Json)
+        let report = all_device_stats_report(&fetched, OutputFormat::Json)
             .expect("rendering the all-devices stats must succeed");
         let rendered = document_of(&report);
         let parsed: serde_json::Value = serde_json::from_str(rendered).unwrap_or_else(|error| {
@@ -815,9 +904,9 @@ mod tests {
     /// The table stays the default rendering.
     #[test]
     fn all_device_stats_default_to_a_table() {
-        let rows = rows_for(&["ap-lr"]);
+        let fetched = outcomes_for(&["ap-lr"]);
 
-        let report = all_device_stats_report(&rows, OutputFormat::Table)
+        let report = all_device_stats_report(&fetched, OutputFormat::Table)
             .expect("rendering the all-devices stats must succeed");
         let rendered = document_of(&report);
 
