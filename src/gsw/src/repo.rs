@@ -1772,6 +1772,36 @@ mod tests {
         assert_eq!(super::base_status(&repo, "no-such-branch").ahead, 0);
     }
 
+    #[test]
+    fn recent_log_from_keeps_the_marks_of_its_start_after_the_base_moves() {
+        // Issue #541: watch mode reads the log again from the recorded start
+        // on a resize. The start keeps the base commit of the walk. So a
+        // resize after `main` moved gives the marks of the walk, and not the
+        // marks of the moved `main`.
+        let dir = feature_branch_repo();
+        let p = dir.path();
+        let repo = open_at(p).expect("fixture is a worktree repo");
+        let start = super::recent_log(&repo, "main", 1)
+            .start
+            .expect("HEAD names a commit");
+
+        // `main` takes the three commits of the branch, and HEAD stays on
+        // the branch.
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--ff-only", "feature"]);
+        git(p, &["checkout", "-q", "feature"]);
+
+        assert_eq!(
+            marked(&super::recent_log_from(&repo, start, 10)),
+            ["feature 3", "feature 2", "feature 1"],
+            "a read from the start of the walk keeps the marks of the walk",
+        );
+        assert!(
+            marked(&super::recent_log(&repo, "main", 10)).is_empty(),
+            "main now holds the branch, so a new read from HEAD marks no commit",
+        );
+    }
+
     fn statuses(repo: &gix::Repository) -> Vec<(String, FileStatus, bool)> {
         super::collect_changes(repo)
             .unwrap()
