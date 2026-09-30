@@ -24,6 +24,9 @@ const CONTROLLER_LABEL_PREFIX: &str = "key - ";
 /// What stands between the host and the port in a controller field label.
 const PORT_SEPARATOR: &str = " port ";
 
+/// The name of the file that holds what op-cache read from 1Password.
+const OP_CACHE_FILE: &str = ".op-cache.json";
+
 /// Said when setup has a choice to make and no terminal to make it at.
 ///
 /// This is the refusal for the numbered menus. The free-text questions of the
@@ -471,7 +474,7 @@ impl Config {
         let (controller_url, credential) = match selection {
             Selection::Op(c) => {
                 // Read the key via op-cache to verify it works
-                let cache = op_cache::OpCache::new().map_err(|e| anyhow::anyhow!("{e}"))?;
+                let cache = op_cache()?;
                 let path = op_cache::OpPath::new(&c.op_path).map_err(|e| anyhow::anyhow!("{e}"))?;
                 let key = Secret::from(
                     cache
@@ -690,9 +693,45 @@ fn resolve_secret(op_path: Option<&str>, plaintext: Option<&str>, missing: &str)
 /// Whatever 1Password holds at that reference.
 fn read_from_1password(op_path: &str) -> Result<String> {
     let path = op_cache::OpPath::new(op_path).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let cache = op_cache::OpCache::new().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let cache = op_cache()?;
 
     cache.read(&path, None).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// The op-cache that `ufa` reads 1Password through.
+///
+/// Every read of a 1Password reference in `ufa` starts here.
+///
+/// # Returns
+///
+/// The cache that [`op_cache_in`] gives for the configuration directory.
+///
+/// # Errors
+///
+/// Returns an error if the operating system names no configuration directory,
+/// or if op-cache cannot find its cache file.
+fn op_cache() -> Result<op_cache::OpCache> {
+    op_cache_in(&Config::config_dir()?)
+}
+
+/// [`op_cache`] against an explicit configuration directory.
+///
+/// The cache file sits at the root of the git repository that holds the
+/// working directory.
+///
+/// # Arguments
+///
+/// * `_directory` - The configuration directory.
+///
+/// # Returns
+///
+/// The cache at the root of that git repository.
+///
+/// # Errors
+///
+/// Returns an error if the working directory is not inside a git repository.
+fn op_cache_in(_directory: &Path) -> Result<op_cache::OpCache> {
+    op_cache::OpCache::new().map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// [`resolve_secret`] against an explicit reader.
@@ -1602,5 +1641,69 @@ mod tests {
                 .expose(),
             "legacy-plaintext-key"
         );
+    }
+
+    /// `ufa` is an installed tool, and it runs from any directory. A cache
+    /// file at the root of the git repository around the working directory
+    /// fails outside a repository, and inside one it puts a plaintext
+    /// controller key into a repository that does not ignore the file. The
+    /// cache file sits beside the configuration file instead.
+    ///
+    /// The directory does not exist yet, as on the first `ufa config setup`.
+    #[test]
+    fn the_op_cache_file_sits_beside_the_configuration_file() {
+        let temp = TempConfigDir::new("op-cache-path");
+
+        let cache = op_cache_in(&temp.dir).expect("the op-cache must open");
+
+        assert_eq!(
+            cache.cache_path(),
+            temp.dir.join(OP_CACHE_FILE),
+            "the op-cache file must sit in the configuration directory"
+        );
+    }
+
+    /// A key that op-cache read before is read again from the cache file
+    /// beside the configuration file, with no git repository around the
+    /// working directory and no call to 1Password.
+    ///
+    /// Two assertions come before the read, and each one stops the test
+    /// before the read can reach the real `op`: the first proves the cache
+    /// reads the seeded file, the second proves op-cache parses that file
+    /// and finds the reference in it.
+    #[test]
+    fn a_key_cached_beside_the_configuration_file_is_read_without_1password() {
+        use crate::test_support::FAKE_CONTROLLER_KEY;
+
+        let temp = TempConfigDir::new("op-cache-read");
+        create_directory(&temp.dir);
+        let seeded = serde_json::json!({
+            OP_REFERENCE: {
+                "value": FAKE_CONTROLLER_KEY,
+                "fetchedAt": "2026-01-01T00:00:00Z",
+            }
+        });
+        write_file(&temp.dir.join(OP_CACHE_FILE), &seeded.to_string());
+
+        let cache = op_cache_in(&temp.dir).expect("the op-cache must open");
+
+        assert_eq!(
+            cache.cache_path(),
+            temp.dir.join(OP_CACHE_FILE),
+            "the op-cache must read the file beside the configuration file"
+        );
+        let entries = cache.entries().expect("the seeded cache file must list");
+        assert!(
+            entries.iter().any(|(reference, _)| reference == OP_REFERENCE),
+            "op-cache must find the seeded reference, or the read below calls `op`, \
+             got {entries:?}"
+        );
+
+        let reference = op_cache::OpPath::new(OP_REFERENCE).expect("the reference is valid");
+        let key = cache
+            .read(&reference, None)
+            .expect("a cached key must read without 1Password");
+
+        assert_eq!(key, FAKE_CONTROLLER_KEY);
     }
 }

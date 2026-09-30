@@ -668,6 +668,29 @@ mod tests {
         assert_eq!(perms.mode() & 0o777, 0o600);
     }
 
+    /// A caller can name a cache file in a directory that does not exist yet.
+    /// `ufa` does this on its first setup, when its configuration directory
+    /// is not there. The first write makes the directory.
+    #[test]
+    fn the_first_write_makes_a_missing_cache_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("not-made-yet").join(CACHE_FILENAME);
+        let cache = OpCache::with_path(cache_path.clone());
+
+        let mut file: CacheFile = HashMap::new();
+        file.insert(
+            "op://Private/Test/field".to_string(),
+            CacheEntry {
+                value: "secret".to_string(),
+                fetched_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+        );
+        cache.write_cache(&file).unwrap();
+
+        assert!(cache_path.exists(), "the first write must make the file");
+        assert_eq!(cache.entries().unwrap().len(), 1);
+    }
+
     #[test]
     fn env_var_override() {
         let dir = tempfile::tempdir().unwrap();
