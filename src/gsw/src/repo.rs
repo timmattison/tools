@@ -1661,6 +1661,75 @@ mod tests {
         );
     }
 
+    /// A repository with HEAD on the branch `feature`, which merged `main`
+    /// after the fork. The branch has `feature 1` and `feature 2`. Then `main`
+    /// gets `main 1` and `main 2`. Then the branch merges `main` with the
+    /// merge commit `merge main`, and gets `feature 3` after it.
+    fn merged_base_repo() -> TempDir {
+        let dir = init_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "feature"]);
+        commit_empty(p, "feature 1");
+        commit_empty(p, "feature 2");
+        git(p, &["checkout", "-q", "main"]);
+        commit_empty(p, "main 1");
+        commit_empty(p, "main 2");
+        git(p, &["checkout", "-q", "feature"]);
+        git(p, &["merge", "-q", "--no-ff", "main", "-m", "merge main"]);
+        commit_empty(p, "feature 3");
+        dir
+    }
+
+    #[test]
+    fn recent_log_marks_the_commits_of_a_branch_that_merged_its_base_by_membership() {
+        // Issue #541: the walk of the log is breadth-first. After a merge of
+        // `main` into the branch, the walk puts commits of `main` between the
+        // commits of the branch. So the first `ahead` rows are not the
+        // commits of the branch. The log marks the commits of
+        // `main..feature`, whatever their position in the walk.
+        let dir = merged_base_repo();
+        let repo = open_at(dir.path()).expect("fixture is a worktree repo");
+
+        let log = super::recent_log(&repo, "main", 10);
+
+        let position = |subject: &str| {
+            log.commits
+                .iter()
+                .position(|commit| commit.summary == subject)
+                .expect("the log holds every commit of the fixture")
+        };
+        assert!(
+            position("main 2") < position("feature 1"),
+            "the walk puts a commit of main before a commit of the branch, \
+             so a mark by position is wrong here: {:?}",
+            subjects(&log),
+        );
+        let flags: std::collections::BTreeMap<&str, bool> = log
+            .commits
+            .iter()
+            .map(|commit| (commit.summary.as_str(), commit.on_branch))
+            .collect();
+        assert_eq!(
+            flags,
+            std::collections::BTreeMap::from([
+                ("feature 3", true),
+                ("merge main", true),
+                ("feature 2", true),
+                ("feature 1", true),
+                ("main 2", false),
+                ("main 1", false),
+                ("initial", false),
+            ]),
+            "the log marks the commits of the branch and the merge, and no commit of main",
+        );
+        let ahead = super::base_status(&repo, "main").ahead;
+        assert_eq!(
+            u32::try_from(marked(&log).len()).expect("a small count"),
+            ahead,
+            "the log marks as many commits as the header counts",
+        );
+    }
+
     fn statuses(repo: &gix::Repository) -> Vec<(String, FileStatus, bool)> {
         super::collect_changes(repo)
             .unwrap()
