@@ -2009,6 +2009,26 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     compressor, and the swap in use over the same sample. `faulte kill` stops the old idle Claude
     Code sessions after a question. It supports macOS only. See below for the full entry.
   - To install: `cargo install --git https://github.com/timmattison/tools faulte`
+- ufa (UniFi API)
+  - Drives a UniFi Network application through its Integration API, and the cloud consoles of an
+    Ubiquiti account through the Site Manager API. It lists the sites, the devices, the clients,
+    and the hotspot vouchers. It reports the statistics of one device or of every device at once,
+    it restarts a device, and it power cycles a port. It authorizes and unauthorizes a guest, and
+    it creates, shows, and deletes a voucher. `--output json` gives every command a
+    machine-readable answer, and a table is the default.
+  - The two APIs take two different keys. The controller key comes from **Settings -> Control
+    Plane -> Integrations** on the controller itself. The Site Manager key comes from the API
+    section of [unifi.ui.com](https://unifi.ui.com). `ufa config setup` finds a controller in
+    1Password or on the local network, then writes the config file for you. A key can stay in
+    1Password, because the config file holds an `op://` reference that `ufa` resolves through
+    `op-cache`.
+  - `--site-id` belongs to the command group and stands before the leaf subcommand:
+    `ufa devices --site-id <SITE_ID> list`. Leave it out and `ufa` finds the site for you.
+  - Usage: `ufa sites`, `ufa devices list`, `ufa devices stats --all`,
+    `ufa clients list --output json`,
+    `ufa vouchers create --name "Guest pass" --time-limit-minutes 1440 --count 5`,
+    `ufa cloud hosts`, `ufa config setup`
+  - To install: `cargo install --git https://github.com/timmattison/tools ufa`
 
 ## dirhash
 

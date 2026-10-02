@@ -1,13 +1,16 @@
 //! 1Password credential caching with retry logic, atomic writes, and worktree support.
 //!
-//! Fetches secrets from 1Password once and caches them in `.op-cache.json`
-//! at the repo root. Subsequent calls reuse cached values. If a credential
+//! Fetches secrets from 1Password once and caches them in a JSON file.
+//! [`OpCache::new`] puts the file at the root of the current git repository,
+//! as `.op-cache.json`. [`OpCache::with_path`] puts it at the path the caller
+//! gives. Subsequent calls reuse cached values. If a credential
 //! fails at point of use (e.g., R2 returns 403), invalidate the cache entry
 //! and the next read re-fetches from 1Password.
 //!
 //! Environment variables always take priority over the cache and 1Password.
 //!
-//! **Important:** Add `.op-cache.json` to your project's `.gitignore`.
+//! **Important:** If you use [`OpCache::new`], add `.op-cache.json` to your
+//! project's `.gitignore`.
 //!
 //! # Usage
 //!
@@ -28,6 +31,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 use tempfile::NamedTempFile;
 
 /// Maximum number of retries for 1Password CLI operations.
@@ -36,7 +40,7 @@ const OP_MAX_RETRIES: u32 = 3;
 /// Delay between retries in milliseconds.
 const RETRY_DELAY_MS: u64 = 1000;
 
-/// Cache file name (must be gitignored by consuming projects).
+/// Cache file name that [`OpCache::new`] uses (a project that calls it must gitignore the file).
 const CACHE_FILENAME: &str = ".op-cache.json";
 
 /// Errors that can occur during 1Password caching operations.
@@ -45,6 +49,10 @@ pub enum Error {
     /// The provided path is not a valid 1Password reference.
     #[error("invalid 1Password path: \"{0}\" (must start with \"op://\" and contain no shell metacharacters)")]
     InvalidOpPath(String),
+
+    /// The provided vault and item do not name a 1Password item.
+    #[error("invalid 1Password item: \"{0}\" (the vault and the item must each hold more than blank space, must not start with \"-\", and must contain no shell metacharacters)")]
+    InvalidOpItem(String),
 
     /// The `op` CLI binary was not found in PATH.
     #[error("1Password CLI (op) not found in PATH — install with: brew install 1password-cli")]
@@ -110,6 +118,64 @@ impl fmt::Display for OpPath {
     }
 }
 
+/// A validated 1Password item reference: a vault, and an item inside it.
+///
+/// [`OpPath`] names one field of an item. This names the item itself, which is
+/// what a caller holds when it wants to know *which* fields the item has.
+///
+/// The two names are handed to `op` as separate arguments, so neither can be
+/// read as part of another. The validation still refuses a name that starts
+/// with `-`, because `op` reads such an argument as an option rather than as a
+/// name, and it refuses the shell metacharacters [`OpPath::new`] refuses, for
+/// the same defence-in-depth reason.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OpItem {
+    vault: String,
+    name: String,
+}
+
+impl OpItem {
+    /// Creates an `OpItem` from a vault name and an item name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidOpItem`] if either name holds nothing but blank
+    /// space, starts with `-`, or carries a control character or a shell
+    /// metacharacter.
+    pub fn new(vault: &str, name: &str) -> Result<Self> {
+        let item = Self {
+            vault: vault.to_string(),
+            name: name.to_string(),
+        };
+
+        if names_something(vault) && names_something(name) {
+            Ok(item)
+        } else {
+            Err(Error::InvalidOpItem(item.to_string()))
+        }
+    }
+}
+
+/// Whether `name` can go to `op` as a vault name or as an item name.
+///
+/// A name of nothing but blank space names nothing. A name that starts with
+/// `-` is read by `op` as an option rather than as a name, which turns the
+/// name of an item into a flag of the command that reads it. The
+/// metacharacters go for the reason [`OpPath::new`] refuses them.
+fn names_something(name: &str) -> bool {
+    !name.trim().is_empty()
+        && !name.starts_with('-')
+        && !name
+            .chars()
+            .any(|c| c.is_control() || ";|&$`\\".contains(c))
+}
+
+impl fmt::Display for OpItem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.vault, self.name)
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct CacheEntry {
     value: String,
@@ -121,8 +187,10 @@ type CacheFile = HashMap<String, CacheEntry>;
 
 /// 1Password credential cache manager.
 ///
-/// Reads and writes a JSON cache file at the root of the current git repository.
-/// The cache file is created with mode 600 on Unix systems.
+/// Reads and writes a JSON cache file. [`OpCache::new`] puts the file at the
+/// root of the current git repository. [`OpCache::with_path`] puts it at the
+/// path the caller gives. The cache file is created with mode 600 on Unix
+/// systems.
 pub struct OpCache {
     cache_path: PathBuf,
 }
@@ -313,6 +381,143 @@ impl OpCache {
     }
 }
 
+/// The label of every field of a 1Password item, with the values discarded.
+///
+/// This is how a caller that must know *which* fields an item holds asks,
+/// and gets no value back. `op item get --format json` prints every field of
+/// the item together with the value of each concealed one. This function runs
+/// that command, so every value in the item still reaches the process. The
+/// values stop in a buffer inside this crate, and only the labels come back:
+/// no value reaches a type or a variable of the caller.
+///
+/// The answer is **not cached**, and it is the one read in this crate that is
+/// not. Two reasons. A label is not a secret, so none of the reasons the cache
+/// exists apply to it. And a cached list of names would be wrong from the
+/// moment the user adds a field to the item, with nothing to say so: a stale
+/// value is found out at the point of use, when the service it authenticates
+/// refuses it and the caller invalidates it, whereas a stale list of names
+/// simply hides the field the user just added.
+///
+/// # Errors
+///
+/// Returns [`Error::OpCliNotFound`] if `op` is not in `PATH`,
+/// [`Error::OpReadFailed`] if `op` refuses the item on every attempt, and
+/// [`Error::Json`] if what `op` printed is not a 1Password item — which covers
+/// output that is not JSON at all, and JSON that carries no `fields` array.
+pub fn field_labels(item: &OpItem) -> Result<Vec<String>> {
+    field_labels_from(
+        || fetch_item_json(item),
+        item,
+        Duration::from_millis(RETRY_DELAY_MS),
+    )
+}
+
+/// [`field_labels`] against an explicit reader of the item.
+///
+/// The reader is a parameter so a test can state what `op` printed without a
+/// vault, a biometric prompt, or a network, and the delay is a parameter so
+/// such a test does not sleep through the retries.
+///
+/// A missing `op` ends the run at once. It is the one failure a second attempt
+/// cannot change, and retrying it would make a user who never installed the
+/// CLI wait three seconds to be told so.
+fn field_labels_from(
+    mut read_item: impl FnMut() -> Result<Vec<u8>>,
+    item: &OpItem,
+    retry_delay: Duration,
+) -> Result<Vec<String>> {
+    for attempt in 1..=OP_MAX_RETRIES {
+        match read_item() {
+            Ok(printed) => return labels_of(&printed),
+            Err(Error::OpCliNotFound) => return Err(Error::OpCliNotFound),
+            Err(_) => {}
+        }
+
+        if attempt < OP_MAX_RETRIES {
+            eprintln!(
+                "Failed to list the fields of {item} in 1Password (attempt {attempt}/{OP_MAX_RETRIES}), retrying..."
+            );
+            std::thread::sleep(retry_delay * attempt);
+        }
+    }
+
+    Err(Error::OpReadFailed(item.to_string()))
+}
+
+/// The label of every field of the item `printed` holds.
+///
+/// # Errors
+///
+/// Returns [`Error::Json`] if `printed` is not JSON, and if it is JSON that
+/// carries no `fields` array.
+fn labels_of(printed: &[u8]) -> Result<Vec<String>> {
+    let item: PrintedItem = serde_json::from_slice(printed)?;
+
+    Ok(item
+        .fields
+        .into_iter()
+        .filter_map(|field| field.label)
+        .collect())
+}
+
+/// The one part of a printed 1Password item this crate reads.
+///
+/// Nothing here names `value`, so `serde_json` skips every value of every
+/// field along with every other key it was never asked for. A field value has
+/// nowhere to land, which is what keeps it out of the answer rather than a
+/// filter somebody must remember to write.
+#[derive(Deserialize)]
+struct PrintedItem {
+    fields: Vec<PrintedField>,
+}
+
+/// One field of a printed 1Password item, reduced to its label.
+///
+/// A field with no label — a section that `op` prints with none — arrives as
+/// `None` and is dropped.
+#[derive(Deserialize)]
+struct PrintedField {
+    label: Option<String>,
+}
+
+/// Ask `op` to print the item, and hand back what it printed.
+///
+/// What `op` says when it refuses goes to standard error, because "you are not
+/// currently signed in" is the whole diagnosis and no error variant carries it.
+///
+/// # Errors
+///
+/// Returns [`Error::OpCliNotFound`] if `op` is not in `PATH`, and
+/// [`Error::OpReadFailed`] if `op` could not be started or refused the item.
+fn fetch_item_json(item: &OpItem) -> Result<Vec<u8>> {
+    ensure_op_available()?;
+
+    let printed = Command::new("op")
+        .args([
+            "item",
+            "get",
+            &item.name,
+            "--vault",
+            &item.vault,
+            "--format",
+            "json",
+        ])
+        .output()
+        .map_err(|_| Error::OpReadFailed(item.to_string()))?;
+
+    if printed.status.success() {
+        return Ok(printed.stdout);
+    }
+
+    let complaint = String::from_utf8_lossy(&printed.stderr);
+    let complaint = complaint.trim();
+    if !complaint.is_empty() {
+        eprintln!("op could not print {item}: {complaint}");
+    }
+
+    Err(Error::OpReadFailed(item.to_string()))
+}
+
 fn find_repo_root() -> Result<PathBuf> {
     let output = Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
@@ -468,6 +673,29 @@ mod tests {
         assert_eq!(perms.mode() & 0o777, 0o600);
     }
 
+    /// A caller can name a cache file in a directory that does not exist yet.
+    /// `ufa` does this on its first setup, when its configuration directory
+    /// is not there. The first write makes the directory.
+    #[test]
+    fn the_first_write_makes_a_missing_cache_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("not-made-yet").join(CACHE_FILENAME);
+        let cache = OpCache::with_path(cache_path.clone());
+
+        let mut file: CacheFile = HashMap::new();
+        file.insert(
+            "op://Private/Test/field".to_string(),
+            CacheEntry {
+                value: "secret".to_string(),
+                fetched_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+        );
+        cache.write_cache(&file).unwrap();
+
+        assert!(cache_path.exists(), "the first write must make the file");
+        assert_eq!(cache.entries().unwrap().len(), 1);
+    }
+
     #[test]
     fn env_var_override() {
         let dir = tempfile::tempdir().unwrap();
@@ -528,5 +756,217 @@ mod tests {
 
         cache.clear().unwrap();
         assert!(!cache_path.exists());
+    }
+
+    // -----------------------------------------------------------------------
+    // Listing the fields of an item.
+    //
+    // Nothing below runs the real `op`. Every test states what `op` printed,
+    // so no test reaches a vault, a biometric prompt, or a network.
+    // -----------------------------------------------------------------------
+
+    /// A controller key that exists nowhere but this file.
+    ///
+    /// The assertion that no value escapes looks for exactly this string, so
+    /// that assertion can actually fail: an implementation that hands back
+    /// what a field holds hands back this.
+    const FAKE_CONTROLLER_KEY: &str = "not-a-real-key-4f3a2b1c";
+
+    /// A second one, in another field of the same item.
+    const FAKE_CLOUD_KEY: &str = "not-a-real-key-9d8e7f60";
+
+    /// The label of the concealed field that holds the controller key.
+    const CONTROLLER_LABEL: &str = "key - 192.168.1.1 port 443";
+
+    /// The label of the concealed field that holds the cloud key.
+    const CLOUD_LABEL: &str = "site manager key";
+
+    /// The label of the field that carries no value, which is how `op` prints
+    /// an empty note.
+    const NOTES_LABEL: &str = "notesPlain";
+
+    /// What `op item get ufa --vault Private --format json` prints: an item
+    /// carrying a `fields` array, each entry with an `id`, a `type`, a
+    /// `label`, and — for a concealed field — a `value`.
+    fn printed_item() -> String {
+        format!(
+            r#"{{
+  "id": "hcxxfyzabc123",
+  "title": "ufa",
+  "version": 4,
+  "vault": {{ "id": "vaultid", "name": "Private" }},
+  "category": "SECURE_NOTE",
+  "fields": [
+    {{ "id": "notesPlain", "type": "STRING", "purpose": "NOTES", "label": "{NOTES_LABEL}" }},
+    {{ "id": "kzq6", "section": {{ "id": "sect1" }}, "type": "CONCEALED", "label": "{CONTROLLER_LABEL}", "value": "{FAKE_CONTROLLER_KEY}", "reference": "op://Private/ufa/{CONTROLLER_LABEL}" }},
+    {{ "id": "pw27", "section": {{ "id": "sect1" }}, "type": "CONCEALED", "label": "{CLOUD_LABEL}", "value": "{FAKE_CLOUD_KEY}", "reference": "op://Private/ufa/{CLOUD_LABEL}" }}
+  ],
+  "createdAt": "2026-01-01T00:00:00Z",
+  "updatedAt": "2026-01-02T00:00:00Z"
+}}"#
+        )
+    }
+
+    /// The item every test below reads.
+    fn ufa_item() -> OpItem {
+        OpItem::new("Private", "ufa").expect("Private/ufa names an item")
+    }
+
+    /// The labels of the item `printed` holds, with no delay between retries.
+    fn labels_of_printed(printed: &str) -> Result<Vec<String>> {
+        let item = ufa_item();
+        field_labels_from(|| Ok(printed.as_bytes().to_vec()), &item, Duration::ZERO)
+    }
+
+    /// The caller asked which fields the item holds, so it gets all of them.
+    #[test]
+    fn every_field_label_of_the_item_is_answered() {
+        let labels = labels_of_printed(&printed_item()).expect("op printed an item");
+
+        assert_eq!(
+            labels,
+            vec![
+                NOTES_LABEL.to_string(),
+                CONTROLLER_LABEL.to_string(),
+                CLOUD_LABEL.to_string(),
+            ],
+            "every field of the item must be named, in the order op printed them"
+        );
+    }
+
+    /// `op item get --format json` prints the value of every concealed field
+    /// beside its label. The caller asked which fields the item holds, not
+    /// what they hold, so the values stop here.
+    #[test]
+    fn no_field_value_reaches_the_caller() {
+        let labels = labels_of_printed(&printed_item()).expect("op printed an item");
+
+        assert!(
+            labels.iter().any(|label| label == CONTROLLER_LABEL),
+            "the concealed field must be named, or this test proves nothing, got {labels:?}"
+        );
+        for key in [FAKE_CONTROLLER_KEY, FAKE_CLOUD_KEY] {
+            assert!(
+                !labels.iter().any(|label| label.contains(key)),
+                "a field value must not leave this crate, got {labels:?}"
+            );
+        }
+    }
+
+    /// `op` writes its complaints to standard output under some subcommands,
+    /// so a successful exit is not a promise of JSON.
+    #[test]
+    fn output_that_is_not_json_is_refused() {
+        let error = labels_of_printed("[ERROR] 2026/01/01 you are not currently signed in")
+            .expect_err("output that is not JSON names no fields");
+
+        assert!(
+            matches!(error, Error::Json(_)),
+            "output that is not a 1Password item is a JSON fault, got {error:?}"
+        );
+    }
+
+    /// An item of a category that carries no fields at all parses as JSON and
+    /// still names no field. Answering with an empty list would report "this
+    /// item holds no controllers" for an item the guard never read.
+    #[test]
+    fn an_item_with_no_fields_array_is_refused() {
+        let error = labels_of_printed(r#"{"id": "hcxxfyzabc123", "title": "ufa"}"#)
+            .expect_err("an item with no fields array names no fields");
+
+        assert!(
+            matches!(error, Error::Json(_)),
+            "an item with no fields array is a JSON fault, got {error:?}"
+        );
+    }
+
+    /// A CLI that is not installed is not installed on the second attempt
+    /// either, so retrying only makes the user wait to be told so.
+    #[test]
+    fn a_missing_op_cli_is_reported_at_once() {
+        let item = ufa_item();
+        let mut attempts: u32 = 0;
+
+        let error = field_labels_from(
+            || {
+                attempts += 1;
+                Err(Error::OpCliNotFound)
+            },
+            &item,
+            Duration::ZERO,
+        )
+        .expect_err("a 1Password CLI that is not there answers nothing");
+
+        assert!(
+            matches!(error, Error::OpCliNotFound),
+            "the failure must say the CLI is missing, got {error:?}"
+        );
+        assert_eq!(attempts, 1, "a missing CLI must not be asked twice");
+    }
+
+    /// Every other refusal gets the retries the rest of this crate gives a
+    /// read, and the failure names the item it could not list.
+    #[test]
+    fn a_refusal_is_retried_and_then_reported() {
+        let item = ufa_item();
+        let mut attempts: u32 = 0;
+
+        let error = field_labels_from(
+            || {
+                attempts += 1;
+                Err(Error::OpReadFailed(item.to_string()))
+            },
+            &item,
+            Duration::ZERO,
+        )
+        .expect_err("an op that refuses every attempt answers nothing");
+
+        assert!(
+            matches!(&error, Error::OpReadFailed(named) if named == &item.to_string()),
+            "the failure must name the item it could not list, got {error:?}"
+        );
+        assert_eq!(
+            attempts, OP_MAX_RETRIES,
+            "every attempt allowed must be spent before the run is given up"
+        );
+    }
+
+    /// The two names go to `op` as arguments. A name that starts with `-` is
+    /// read as an option rather than as a name, and a name of nothing but
+    /// blank space names nothing at all.
+    #[test]
+    fn a_vault_or_an_item_that_names_nothing_is_refused() {
+        for (vault, name) in [
+            ("Private", "--vault"),
+            ("Private", "-ufa"),
+            ("-Private", "ufa"),
+            ("Private", ""),
+            ("Private", "   "),
+            ("", "ufa"),
+            ("Private", "ufa; rm -rf /"),
+            ("Private", "ufa`whoami`"),
+            ("Private", "ufa$HOME"),
+            ("Private", "ufa|cat"),
+            ("Private", "ufa&"),
+            ("Private", "ufa\\"),
+            ("Private", "ufa\n"),
+        ] {
+            assert!(
+                OpItem::new(vault, name).is_err(),
+                "{vault:?}/{name:?} does not name a 1Password item"
+            );
+        }
+    }
+
+    /// The ordinary case, and the shapes a real vault and a real item use.
+    #[test]
+    fn an_ordinary_vault_and_item_name_an_item() {
+        let item = OpItem::new("Private", "ufa").expect("Private/ufa names an item");
+        assert_eq!(item.to_string(), "Private/ufa");
+
+        assert!(
+            OpItem::new("Shared Vault", "ufa - staging").is_ok(),
+            "a space and a hyphen inside a name are ordinary"
+        );
     }
 }
