@@ -279,6 +279,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     - A fast terminal image and video display utility, designed as a high-performance alternative to `imgcat`. Supports
       multiple image and video formats, resizing with aspect ratio preservation, and reading from files or stdin. Video support requires ffmpeg.
     - To install: `cargo install --git https://github.com/timmattison/tools ic`
+    - `ic --emit-rgba 640x480 photo.jpg` prints the decoded pixels as JSON for a program that draws the picture itself.
+      The [`ic-inline`](plugins/ic-inline/README.md) Claude Code plugin uses it to show pictures inline in the transcript:
+      `/plugin install ic-inline --marketplace timmattison/tools`
 - inscribe
     - Automatically generates clear and consistent git commit messages using Claude AI. Analyzes staged changes and creates
       conventional commit messages. Supports credential storage in system credential managers (Keychain on macOS, Credential

@@ -113,6 +113,29 @@ The flag asks the same question the display path asks — the terminal, the mult
 
 `--will-display` is an input mode of its own. Do not combine it with a file, `--stdin`, or `--monitor`.
 
+### Give the pixels to a program that draws the picture itself:
+
+```bash
+ic --emit-rgba 640x480 photo.jpg
+cat photo.jpg | ic --emit-rgba 640x480 --stdin
+```
+
+Some programs own every cell of the screen, and they draw each cell again when something changes. Claude Code is one. An image that `ic` writes into such a program lands at a position that the next frame paints over. `--emit-rgba` gives the program the pixels instead, and the program draws the picture with its own elements. The [`ic-inline` Claude Code plugin](../../plugins/ic-inline/README.md) uses it.
+
+The flag decodes the picture, fits it inside the box of `WIDTHxHEIGHT` pixels, and prints one line of JSON:
+
+```json
+{"width":640,"height":427,"source_width":4032,"source_height":2688,"rgba":"..."}
+```
+
+- `width` and `height` are the size of the printed picture. It keeps the shape of the source.
+- `source_width` and `source_height` are the size of the picture in the file.
+- `rgba` holds 4 bytes for each pixel (red, green, blue, alpha), row by row from the top left, in standard base64.
+
+Each side of the box takes 1 to 4096 pixels. A picture that fits the box keeps its size, because a larger copy holds no detail that the file did not hold.
+
+`--emit-rgba` reads no terminal and writes nothing to the terminal, thus a terminal that draws no image, tmux, and mosh do not change the result. Do not combine it with a display option (`--width`, `--height`, `--scale`, `--no-newline`, or a video option), with `--monitor`, or with `--will-display`. It takes one file or `--stdin`. A video gives an error, because the flag prints one picture.
+
 ## Command Line Options
 
 - `FILE` - Image file to display (optional if using --stdin)
@@ -123,6 +146,7 @@ The flag asks the same question the display path asks — the terminal, the mult
 - `--monitor <DIR>` - Watch a directory and show each new image and text file (see [Show new images and text files in a directory](#show-new-images-and-text-files-in-a-directory)). Give it more than one time to watch more than one directory
 - `-n, --no-newline` - Leave the cursor to the caller and write only the image (see [Where the Cursor Ends](#where-the-cursor-ends))
 - `--will-display` - Report whether this session can display an image, then exit (0 = yes, 1 = no with the reason on stderr)
+- `--emit-rgba <WIDTHxHEIGHT>` - Print the picture, fitted inside the box, as one line of JSON with base64 RGBA pixels, then exit. It writes nothing to the terminal (see [Give the pixels to a program that draws the picture itself](#give-the-pixels-to-a-program-that-draws-the-picture-itself))
 - `-h, --help` - Print help information
 - `-V, --version` - Print version information
 

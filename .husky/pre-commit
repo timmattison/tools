@@ -122,3 +122,35 @@ if [ "${rust_gate_ran:-}" != yes ] &&
     env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_PREFIX \
         cargo test -p repo-guards --test tool_index_coverage
 fi
+
+# The Claude Code plugins under plugins/ are TypeScript, and the Rust gate above
+# reads none of them. A commit that stages a file of a plugin, or the
+# marketplace file that lists them, therefore runs the checks of the claude
+# CLI: `claude plugin validate` reads each manifest and hooks module the way
+# the engine loads them, and `claude plugin test` runs each plugin's tests in
+# the engine's own sandbox, which has no file system, network or process. The
+# repository root holds the marketplace file, so it is validated too.
+#
+# A machine without the claude CLI cannot run these tests, and a gate that
+# skips them reports a plugin it never read as clean. So that case fails the
+# commit and names the fix.
+#
+# --diff-filter carries D, as the index gate above does: deleting a file of a
+# plugin can break it as surely as an edit can. The same git-env scrub keeps
+# the CLI out of this repository's index.
+if git diff --cached --name-only --diff-filter=ACMRD | grep -qE '^(plugins/|\.claude-plugin/)'; then
+    if ! command -v claude >/dev/null 2>&1; then
+        echo "pre-commit: the claude CLI is not on PATH, and it runs the checks of plugins/. Install Claude Code, then commit again." >&2
+        exit 1
+    fi
+    echo "pre-commit: running claude plugin validate on the marketplace"
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_PREFIX \
+        claude plugin validate .
+    for plugin in plugins/*/; do
+        echo "pre-commit: running claude plugin validate and claude plugin test on ${plugin}"
+        env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_PREFIX \
+            claude plugin validate "${plugin}"
+        env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_PREFIX \
+            claude plugin test "${plugin}"
+    done
+fi
