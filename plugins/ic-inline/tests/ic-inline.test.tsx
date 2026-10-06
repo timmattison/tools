@@ -128,7 +128,12 @@ function band() {
 
 /** Run `/ic <args>` and give the text of its output row. */
 async function runIc($: Engine, args: string): Promise<string> {
-  const { text } = await $.command.run({ command: COMMAND, args })
+  const { text } = await $.command.run({
+    command: COMMAND,
+    args,
+    origin: { kind: 'composer' },
+    presentation: { isFullscreen: true, columns: WIDE.columns },
+  })
   return text ?? ''
 }
 
@@ -456,7 +461,7 @@ describe('the session', () => {
     const tools: string[] = []
     on('command.register', ($, e) => {
       commands.push(e.name)
-      return { value: {} }
+      return { value: { command: e.name } }
     })
     on('tool.register', ($, e) => {
       tools.push(e.name)
