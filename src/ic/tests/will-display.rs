@@ -44,14 +44,11 @@
 //! holds it to that: a run under a named terminal whose window reports no pixel
 //! size must write nothing at all to the terminal.
 
-use std::io::Read;
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::process::Command;
 
 mod common;
 
-use common::pty::{take_the_terminal_away, Pty, Window};
+use common::pty::{run_with_terminal, take_the_terminal_away, Window};
 use common::{unreachable_path_dir, MoshProcessTable};
 
 /// The name that this target puts in the unreachable `PATH` of its children.
@@ -69,37 +66,6 @@ const WINDOW: Window = Window {
     height_px: 0,
 };
 
-/// The request of the primary device attributes.
-///
-/// Every terminal answers it, so its answer is what ends a read of the
-/// terminal, and it stands last in the query that `ic` writes. A read that
-/// waits for it therefore waits for the whole of a query.
-const ATTRIBUTES_REQUEST: &[u8] = b"\x1b[c";
-
-/// How long one turn of the runner waits for a byte of the terminal.
-///
-/// The runner reads the terminal and asks after the child in turn, and this is
-/// the length of one turn. A run that asks writes its query inside the first
-/// one, and [`Pty::read_until`] gives that query back the moment the request of
-/// the attributes ends it.
-///
-/// **It is the floor of a turn as well as the ceiling.** [`Pty::read_until`]
-/// gives the rest of the slice back the moment the needle arrives, and it gives
-/// the whole of it back when the read of the terminal fails. The runner sleeps
-/// out what such a read left, so a wait for the child costs no core of the
-/// machine.
-const READ_SLICE: Duration = Duration::from_millis(100);
-
-/// How long the runner waits for `ic` to exit.
-///
-/// Ten seconds, which is generous because a loaded machine starts a process
-/// late. **The wall clock is the bound, and a count of turns is not**: a count
-/// is a deadline only while each turn costs what the count assumes, and a turn
-/// that ends early then shortens the whole wait without saying so. A change
-/// that stopped `ic` from exiting must fail a test instead of holding it, and
-/// it must take the stated ten seconds to say so.
-const EXIT_BUDGET: Duration = Duration::from_secs(10);
-
 /// Invoke the freshly-built `ic` binary in a known-empty environment.
 fn ic(term: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ic"));
@@ -107,115 +73,6 @@ fn ic(term: &str) -> Command {
     command.env("PATH", unreachable_path_dir(TARGET_NAME));
     command.env("TERM", term);
     command
-}
-
-/// What one run of `ic` did.
-struct Run {
-    /// The exit status of the run, as a number.
-    code: Option<i32>,
-    /// Every byte that the run wrote to standard output.
-    stdout: String,
-    /// Every byte that the run wrote to standard error.
-    stderr: String,
-    /// Every byte that the run wrote to its terminal.
-    wrote: Vec<u8>,
-}
-
-/// Run `command` with a pseudo-terminal of `window` as its controlling
-/// terminal.
-///
-/// [`Pty::hand_to`] puts the child in a session of its own, which drops the
-/// terminal the child inherited from the test runner and claims this one
-/// instead. So the run asks this terminal, which answers nothing, and it
-/// reaches no terminal of a person.
-///
-/// **The read of the terminal runs beside the wait for the child, and not
-/// behind it.** A process that closes its controlling terminal waits for the
-/// output queue of that terminal to drain, and the master end is where it
-/// drains to. So a run that wrote a query the runner had not read yet would
-/// hang on the way out, and a wait in front of the read would hold the two of
-/// them there for good.
-///
-/// # Arguments
-/// * `command` - The command to run. The caller states the environment and the
-///   arguments, and this call states the terminal and the three standard
-///   streams.
-/// * `window` - The size that the pseudo-terminal reports.
-///
-/// # Returns
-/// The exit status, the two captured streams, and every byte that the run wrote
-/// to the terminal.
-///
-/// # Panics
-/// Panics when `ic` does not start, and when it does not exit inside the
-/// deadline that [`EXIT_BUDGET`] states.
-fn run_with_terminal(command: &mut Command, window: Window) -> Run {
-    let pty = Pty::open(window);
-
-    // `spawn` inherits the streams of the test runner, where `output` gives a
-    // pipe for each of them. So this states all three.
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    pty.hand_to(command);
-
-    let mut child = command.spawn().expect("ic must run");
-
-    let deadline = Instant::now() + EXIT_BUDGET;
-    let mut wrote = Vec::new();
-    let mut exited = None;
-    while Instant::now() < deadline {
-        let slice = deadline
-            .saturating_duration_since(Instant::now())
-            .min(READ_SLICE);
-        let turn = Instant::now();
-        wrote.extend(pty.read_until(ATTRIBUTES_REQUEST, slice));
-        if let Some(status) = child.try_wait().expect("failed to ask after ic") {
-            exited = Some(status);
-            break;
-        }
-        let spent = turn.elapsed();
-        if spent < slice {
-            thread::sleep(slice - spent);
-        }
-    }
-    let Some(status) = exited else {
-        // The child outlived the deadline, which is the failure this wait is
-        // here to report. It ends first: a child that nobody kills and nobody
-        // waits for holds a slot of the process table of the machine for as
-        // long as the test runner lives.
-        let _ = child.kill();
-        let _ = child.wait();
-        panic!("ic must exit inside the deadline of this file");
-    };
-    // The child has exited, so every byte it ever wrote to the terminal is
-    // waiting there already. One last turn takes the bytes it wrote on its way
-    // out.
-    wrote.extend(pty.read_until(ATTRIBUTES_REQUEST, READ_SLICE));
-
-    Run {
-        code: status.code(),
-        stdout: drain(child.stdout.take(), "stdout"),
-        stderr: drain(child.stderr.take(), "stderr"),
-        wrote,
-    }
-}
-
-/// Take every byte that one pipe of the child holds.
-///
-/// The child has exited by the time this runs, so the whole of what it wrote is
-/// waiting in the pipe and the read ends at once.
-///
-/// # Arguments
-/// * `pipe` - The end of the pipe that the child wrote to.
-/// * `name` - The name of that stream, for the message of a failure.
-fn drain(pipe: Option<impl Read>, name: &str) -> String {
-    let mut bytes = Vec::new();
-    pipe.unwrap_or_else(|| panic!("the run must hold a pipe for {name}"))
-        .read_to_end(&mut bytes)
-        .unwrap_or_else(|error| panic!("failed to read the {name} of ic: {error}"));
-    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// Run `command` with no terminal at all, and report the three answers that a
