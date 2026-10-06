@@ -89,10 +89,8 @@ impl Scratch {
             .duration_since(UNIX_EPOCH)
             .expect("the clock must be after the epoch")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "ic-{TARGET_NAME}-{test}-{}-{nanos}",
-            process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("ic-{TARGET_NAME}-{test}-{}-{nanos}", process::id()));
         fs::create_dir_all(&dir).expect("the scratch directory must make");
         Scratch { dir }
     }
@@ -138,7 +136,12 @@ impl Drop for Scratch {
 fn pattern(width: u32, height: u32) -> RgbaImage {
     let channel = |value: u32| u8::try_from(value % 256).expect("a value modulo 256 fits a byte");
     RgbaImage::from_fn(width, height, |x, y| {
-        Rgba([channel(x * 37 + 11), channel(y * 53 + 7), channel(x * y + 101), 255])
+        Rgba([
+            channel(x * 37 + 11),
+            channel(y * 53 + 7),
+            channel(x * y + 101),
+            255,
+        ])
     })
 }
 
@@ -195,10 +198,7 @@ fn run(command: &mut Command) -> Run {
 
 /// Run the flag over the picture at `path`, inside `pixel_box`.
 fn emit(path: &Path, pixel_box: &str) -> Run {
-    run(ic(TERM_XTERM_256COLOR)
-        .arg(FLAG)
-        .arg(pixel_box)
-        .arg(path))
+    run(ic(TERM_XTERM_256COLOR).arg(FLAG).arg(pixel_box).arg(path))
 }
 
 /// The picture that one run printed.

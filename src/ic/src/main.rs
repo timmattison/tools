@@ -22,6 +22,10 @@ use termion::input::TermRead;
 use termion::raw::IntoRawMode;
 use unicode_width::UnicodeWidthStr;
 
+mod emit;
+
+use emit::PixelBox;
+
 /// The row that the shell prompt returns to below an image.
 const PROMPT_ROWS: u32 = 1;
 
@@ -197,6 +201,37 @@ struct Args {
     /// means yes. Exit code 1 means no, and the reason goes to stderr
     #[clap(long)]
     will_display: bool,
+
+    /// Print the picture as one line of JSON for a program that draws it
+    /// itself, then exit. The picture fits inside WIDTHxHEIGHT pixels (1 to
+    /// 4096 on each side) and never grows. The JSON holds width, height,
+    /// source_width, source_height and rgba: 4 bytes for each pixel, row by
+    /// row, in standard base64. Nothing goes to the terminal, thus a program
+    /// that owns the screen (such as Claude Code) can run it
+    //
+    // `allow_hyphen_values` hands a box such as `-5x5` to the parser of the box,
+    // which refuses it with the shape the flag takes. Without it, clap reads the
+    // box as a short flag and refuses an argument that the user never meant.
+    #[clap(
+        long,
+        value_name = "WIDTHxHEIGHT",
+        allow_hyphen_values = true,
+        conflicts_with_all = [
+            "width",
+            "height",
+            "scale",
+            "no_newline",
+            "monitor",
+            "will_display",
+            "loop_video",
+            "fps",
+            "do_not_drop_frames",
+            "memory_cleanup_frequency",
+            "max_fps",
+            "adaptive_fps",
+        ]
+    )]
+    emit_rgba: Option<PixelBox>,
 }
 
 fn main() -> Result<()> {
@@ -204,7 +239,9 @@ fn main() -> Result<()> {
 
     validate_arguments(&args)?;
 
-    if args.will_display {
+    if let Some(pixel_box) = args.emit_rgba {
+        emit_picture(&args, pixel_box)?;
+    } else if args.will_display {
         report_display_readiness()?;
     } else if args.stdin {
         display_image_from_stdin(&args)?;
@@ -232,6 +269,7 @@ fn main() -> Result<()> {
 
 fn validate_arguments(args: &Args) -> Result<()> {
     validate_input_modes(args)?;
+    validate_emit(args)?;
     validate_dimensions(args)?;
     validate_scale(args)?;
     validate_frame_options(args)?;
@@ -259,6 +297,63 @@ fn validate_input_modes(args: &Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Refuse a run of `--emit-rgba` over more than one file.
+///
+/// The flag prints one JSON document, and a reader of it parses one picture.
+/// Clap refuses the flag beside every option of a display, and this check
+/// holds the one rule that clap cannot state: the count of files.
+///
+/// # Errors
+/// An error that says the flag takes one picture, when it has more than one.
+fn validate_emit(args: &Args) -> Result<()> {
+    if args.emit_rgba.is_some() && args.files.len() > 1 {
+        anyhow::bail!(
+            "--emit-rgba prints one picture, thus it takes one picture: give one file or --stdin"
+        );
+    }
+
+    Ok(())
+}
+
+/// Print the picture of the one file or of standard input as the JSON of
+/// `--emit-rgba`.
+///
+/// **This path detects no terminal.** It reads no environment variable of a
+/// terminal, it opens no `/dev/tty`, and it validates no graphics protocol,
+/// because the program that runs it owns the terminal and puts the picture
+/// there itself. The `emit` module states the document.
+///
+/// # Arguments
+/// * `args` - The command line arguments. [`validate_arguments`] already
+///   holds them to one file or to `--stdin`.
+/// * `pixel_box` - The box that the printed picture fits inside.
+///
+/// # Errors
+/// An error when the file is absent or is a video, when the bytes hold no
+/// picture, or when the write to standard output fails.
+fn emit_picture(args: &Args, pixel_box: PixelBox) -> Result<()> {
+    let picture = if args.stdin {
+        let stdin = io::stdin();
+        let (_bytes, picture) = read_stdin_picture(BufReader::new(stdin.lock()))?;
+        picture
+    } else {
+        let file_path = args
+            .files
+            .first()
+            .context("--emit-rgba needs one file or --stdin")?;
+        ensure_file_exists(file_path)?;
+        if is_video_file(file_path) {
+            anyhow::bail!(
+                "--emit-rgba prints one picture, and {} is a video",
+                file_path.display()
+            );
+        }
+        with_image_file(file_path, |source| decode_picture(&source, file_path))?
+    };
+
+    emit::write_rgba_json(&picture, pixel_box, &mut io::stdout().lock())
 }
 
 fn validate_dimensions(args: &Args) -> Result<()> {
@@ -1982,6 +2077,30 @@ fn read_image_file(
     file_path: &Path,
     capabilities: &Capabilities,
 ) -> Result<(DynamicImage, Option<Vec<u8>>)> {
+    with_image_file(file_path, |source| {
+        decode_image(source, file_path, capabilities)
+    })
+}
+
+/// Read the bytes of the image file at `file_path`, and give them to `decode`.
+///
+/// Both reads of a file argument go through here: the display, which keeps the
+/// bytes that the terminal sends as they stand, and `--emit-rgba`, which keeps
+/// the picture alone. Each failure names the path in its context, because the
+/// error of `ic file.png` is the whole output of the run, and nothing else
+/// names the path to the user.
+///
+/// # Arguments
+/// * `file_path` - The path of the image file.
+/// * `decode` - Makes the result out of the bytes of the file.
+///
+/// # Returns
+/// What `decode` gave.
+///
+/// # Errors
+/// An error when the file does not open, or when `decode` fails. The outermost
+/// context of each error is `Failed to open image file: <path>`.
+fn with_image_file<T>(file_path: &Path, decode: impl FnOnce(Vec<u8>) -> Result<T>) -> Result<T> {
     // One closure gives the context of both failures, so the two texts cannot
     // drift apart. The closure holds only a reference, so it is `Copy`, and
     // each `with_context` takes its own copy.
@@ -1989,7 +2108,30 @@ fn read_image_file(
 
     let source = fs::read(file_path).with_context(failure)?;
 
-    decode_image(source, file_path, capabilities).with_context(failure)
+    decode(source).with_context(failure)
+}
+
+/// Make a picture out of the bytes of an image file.
+///
+/// The decoder reads the format out of the first bytes of the file, and it
+/// takes the extension of the name where those bytes name nothing. That is
+/// what `image::open` does with a path, and this reads the same file the same
+/// way out of the memory that already holds it.
+///
+/// # Arguments
+/// * `source` - The bytes of the image file.
+/// * `name` - The path of the image file. This function does not open it.
+///
+/// # Errors
+/// An error when the bytes hold no image. The chain of the error starts at the
+/// error of the decoder, and no link names the path.
+fn decode_picture(source: &[u8], name: &Path) -> Result<DynamicImage> {
+    let mut reader = image::ImageReader::new(io::Cursor::new(source));
+    if let Ok(format) = image::ImageFormat::from_path(name) {
+        reader.set_format(format);
+    }
+
+    Ok(reader.with_guessed_format()?.decode()?)
 }
 
 /// Make a picture out of the bytes of an image file, and keep the bytes when
@@ -2045,16 +2187,7 @@ fn decode_image(
     name: &Path,
     capabilities: &Capabilities,
 ) -> Result<(DynamicImage, Option<Vec<u8>>)> {
-    // The decoder reads the format out of the first bytes of the file, and it
-    // takes the extension of the name where those bytes name nothing. That is
-    // what `image::open` does with a path, and this reads the same file the
-    // same way out of the memory that already holds it.
-    let mut reader = image::ImageReader::new(io::Cursor::new(&source));
-    if let Ok(format) = image::ImageFormat::from_path(name) {
-        reader.set_format(format);
-    }
-
-    let img = reader.with_guessed_format()?.decode()?;
+    let img = decode_picture(&source, name)?;
 
     // A file that the writer cannot send drops here, at the end of the decode,
     // and the caller holds the picture alone.
@@ -2404,9 +2537,33 @@ fn display_text_file(file_path: &Path) -> Result<()> {
 /// # Errors
 /// An error when the stream does not read, or when it holds no image.
 fn picture_from_stdin(
-    mut reader: impl Read,
+    reader: impl Read,
     capabilities: &Capabilities,
 ) -> Result<(DynamicImage, Option<Vec<u8>>)> {
+    let (buffer, img) = read_stdin_picture(reader)?;
+
+    // A file that this terminal never sends drops here, at the end of the read,
+    // and the caller holds the picture alone.
+    let source = capabilities.travels_as_it_stands(&buffer).then_some(buffer);
+
+    Ok((img, source))
+}
+
+/// Read every byte of `reader`, and make a picture out of them.
+///
+/// Both readers of `--stdin` go through here: the display, which keeps the
+/// bytes that the terminal sends as they stand, and `--emit-rgba`, which reads
+/// no terminal and keeps the picture alone.
+///
+/// # Arguments
+/// * `reader` - The stream that carries the bytes of one image file.
+///
+/// # Returns
+/// The bytes that the stream carried, and the picture out of them.
+///
+/// # Errors
+/// An error when the stream does not read, or when it holds no image.
+fn read_stdin_picture(mut reader: impl Read) -> Result<(Vec<u8>, DynamicImage)> {
     let mut buffer = Vec::new();
     reader
         .read_to_end(&mut buffer)
@@ -2414,11 +2571,7 @@ fn picture_from_stdin(
 
     let img = image::load_from_memory(&buffer).context("Failed to decode image from stdin")?;
 
-    // A file that this terminal never sends drops here, at the end of the read,
-    // and the caller holds the picture alone.
-    let source = capabilities.travels_as_it_stands(&buffer).then_some(buffer);
-
-    Ok((img, source))
+    Ok((buffer, img))
 }
 
 fn display_image_from_stdin(args: &Args) -> Result<()> {
