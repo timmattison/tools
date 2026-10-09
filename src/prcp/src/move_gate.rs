@@ -309,8 +309,9 @@ impl<'a> MoveLedger<'a> {
             removal_errors: Vec::new(),
             operands_with_removal_errors: 0,
         };
+        let last_writers = self.last_writers();
         for (index, operand) in self.plan.operands().iter().enumerate() {
-            let problems = self.find_problems(index);
+            let problems = self.find_problems(index, &last_writers);
             if !problems.is_empty() {
                 report.kept.push(KeptOperand {
                     source: operand.source.clone(),
@@ -332,11 +333,50 @@ impl<'a> MoveLedger<'a> {
         report
     }
 
+    /// Map each destination path that a file or link entry wrote to the last entry that wrote it.
+    ///
+    /// Two sources of one run can have the same destination. The later copy
+    /// then replaces the earlier one, and only the last writer still matches
+    /// what is at the path.
+    fn last_writers(&self) -> BTreeMap<&Path, usize> {
+        let mut last = BTreeMap::new();
+        for (index, entry) in self.plan.entries().iter().enumerate() {
+            if matches!(
+                self.records[index],
+                Some(Record::File { .. } | Record::Symlink { .. })
+            ) {
+                last.insert(entry.destination.as_path(), index);
+            }
+        }
+        last
+    }
+
     /// Collect every problem of one operand. See [`Findings`] for how the list is made.
-    fn find_problems(&self, operand: usize) -> BTreeMap<PathBuf, Problem> {
+    ///
+    /// `last_writers` comes from [`Self::last_writers`]. A file or link entry
+    /// whose destination a later entry wrote is not compared with the
+    /// destination. A move keeps its source, because the destination no
+    /// longer holds that source. A copy reports nothing, because the person
+    /// let the later copy overwrite it.
+    fn find_problems(
+        &self,
+        operand: usize,
+        last_writers: &BTreeMap<&Path, usize>,
+    ) -> BTreeMap<PathBuf, Problem> {
         let mut findings = Findings::default();
         for (index, entry) in self.plan.entries().iter().enumerate() {
             if entry.operand.index() != operand {
+                continue;
+            }
+            let replaced_by = last_writers
+                .get(entry.destination.as_path())
+                .filter(|last| **last != index && self.records[index].is_some())
+                .and_then(|last| self.plan.entries().get(*last));
+            if let Some(later) = replaced_by {
+                if self.action == Action::Move {
+                    let by = later.source.clone();
+                    findings.note(&entry.source, Problem::ReplacedInRun { by });
+                }
                 continue;
             }
             match self.records[index] {
