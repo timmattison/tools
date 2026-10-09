@@ -832,6 +832,11 @@ pub(crate) enum Problem {
     },
     /// A Finder file (`.DS_Store`) appeared or changed, in the source or at the destination.
     FinderMetadata,
+    /// A later source of the same run wrote the same destination path.
+    ReplacedInRun {
+        /// The later source.
+        by: PathBuf,
+    },
 }
 
 impl Problem {
@@ -842,7 +847,10 @@ impl Problem {
     /// cannot be read are not, because prcp reports those as they occur.
     fn is_outside_change(&self) -> bool {
         match self {
-            Self::NotCopied | Self::Skipped(_) | Self::Unreadable(_) => false,
+            Self::NotCopied
+            | Self::Skipped(_)
+            | Self::Unreadable(_)
+            | Self::ReplacedInRun { .. } => false,
             Self::NewSinceCopy
             | Self::MissingAtSource
             | Self::MissingAtDestination
@@ -877,6 +885,11 @@ impl fmt::Display for Problem {
             Self::MovedAtDestination { to } => {
                 write!(f, "was renamed or moved to '{}' during the run", to.display())
             }
+            Self::ReplacedInRun { by } => write!(
+                f,
+                "was replaced at the destination by '{}', another source of this run",
+                by.display()
+            ),
             Self::FinderMetadata => f.write_str(
                 "was made or changed during the run. Finder writes this file when a person \
                  opens the folder in Finder",
@@ -2001,6 +2014,53 @@ mod tests {
         );
     }
 
+    /// Make two file sources with the same name in two directories, and a plan that copies
+    /// both into one destination directory. Return the sources and the plan.
+    fn two_sources_for_one_destination(temp: &TempDir) -> (PathBuf, PathBuf, CopyPlan) {
+        let a = temp.path().join("a").join("same.txt");
+        let b = temp.path().join("b").join("same.txt");
+        let dest = temp.path().join("dest");
+        write_file(&a, "from a");
+        write_file(&b, "from b, which is longer");
+        fs::create_dir(&dest).unwrap();
+        let plan = CopyPlan::build(&[a.clone(), b.clone()], &dest, false).unwrap();
+        (a, b, plan)
+    }
+
+    #[test]
+    fn a_move_of_two_sources_for_one_destination_keeps_the_first_and_blames_no_outsider() {
+        let temp = TempDir::new().unwrap();
+        let (a, b, plan) = two_sources_for_one_destination(&temp);
+        let ledger = copy_all(&plan, &[]);
+
+        let report = ledger.finish();
+
+        assert_eq!(report.removed, vec![b.clone()], "report: {report:?}");
+        assert_eq!(
+            problem_list(&report),
+            vec![(a.clone(), Problem::ReplacedInRun { by: b })]
+        );
+        assert!(a.exists(), "the replaced source must stay");
+        assert!(
+            !report
+                .error_lines()
+                .iter()
+                .any(|line| line.starts_with("Something outside prcp")),
+            "report: {report:?}"
+        );
+    }
+
+    #[test]
+    fn a_copy_of_two_sources_for_one_destination_reports_nothing() {
+        let temp = TempDir::new().unwrap();
+        let (_a, _b, plan) = two_sources_for_one_destination(&temp);
+        let ledger = run_all(&plan, &[], Action::Copy, Verification::Passed);
+
+        let report = ledger.finish();
+
+        assert!(report.is_complete(), "report: {report:?}");
+    }
+
     #[test]
     fn the_report_lists_each_kept_operand_with_its_problems_and_each_failed_removal() {
         let mut problems = BTreeMap::new();
@@ -2102,6 +2162,13 @@ mod tests {
             }
             .to_string(),
             "was renamed or moved to '/d/b.txt' during the run"
+        );
+        assert_eq!(
+            Problem::ReplacedInRun {
+                by: PathBuf::from("/b/same.txt")
+            }
+            .to_string(),
+            "was replaced at the destination by '/b/same.txt', another source of this run"
         );
         assert_eq!(
             Problem::FinderMetadata.to_string(),
