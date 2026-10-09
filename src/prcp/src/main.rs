@@ -1290,6 +1290,14 @@ async fn main() -> Result<()> {
         anyhow::bail!("{} file(s) failed to copy", failures.len());
     }
 
+    // A move that kept originals never ends in success.
+    if let Some(report) = move_report.filter(|report| !report.is_complete()) {
+        anyhow::bail!(
+            "The move did not finish: the originals of {} source(s) stay.",
+            report.unfinished_count()
+        );
+    }
+
     Ok(())
 }
 
