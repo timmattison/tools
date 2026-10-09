@@ -151,6 +151,14 @@ impl<'a> MoveLedger<'a> {
             operands_with_removal_errors: 0,
         };
         for (index, operand) in self.plan.operands().iter().enumerate() {
+            let problems = self.find_problems(index);
+            if !problems.is_empty() {
+                report.kept.push(KeptOperand {
+                    source: operand.source.clone(),
+                    problems,
+                });
+                continue;
+            }
             let errors = self.remove_originals(index);
             if errors.is_empty() {
                 report.removed.push(operand.source.clone());
@@ -160,6 +168,20 @@ impl<'a> MoveLedger<'a> {
             }
         }
         report
+    }
+
+    /// Collect every problem of one operand. The first problem of a path wins.
+    fn find_problems(&self, operand: usize) -> BTreeMap<PathBuf, Problem> {
+        let mut problems = BTreeMap::new();
+        for (index, entry) in self.plan.entries().iter().enumerate() {
+            if entry.operand.index() != operand {
+                continue;
+            }
+            if self.records[index].is_none() {
+                note(&mut problems, &entry.source, Problem::NotCopied);
+            }
+        }
+        problems
     }
 
     /// Remove the originals of one operand. Return each removal that failed.
@@ -190,6 +212,11 @@ impl<'a> MoveLedger<'a> {
         }
         errors
     }
+}
+
+/// Note a problem for a path. A path that already has a problem keeps the first one.
+fn note(problems: &mut BTreeMap<PathBuf, Problem>, path: &Path, problem: Problem) {
+    problems.entry(path.to_path_buf()).or_insert(problem);
 }
 
 /// The result of the gate and of the removal.
