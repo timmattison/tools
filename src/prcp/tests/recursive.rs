@@ -86,3 +86,32 @@ fn non_recursive_glob_skips_directory_matches_and_warns() {
     );
     assert!(stderr.contains("--recursive"), "stderr: {stderr}");
 }
+
+#[test]
+fn two_files_into_a_missing_destination_make_it_a_directory() {
+    let temp = TempDir::new().unwrap();
+    let a = temp.path().join("a.txt");
+    let b = temp.path().join("b.txt");
+    let newdir = temp.path().join("newdir");
+    write_file(&a, "content of a");
+    write_file(&b, "content of b");
+
+    let output = run_prcp([
+        OsString::from("-y"),
+        OsString::from("-q"),
+        a.into_os_string(),
+        b.into_os_string(),
+        newdir.clone().into_os_string(),
+    ]);
+
+    let stderr = visible_stderr(&output);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert_eq!(
+        fs::read_to_string(newdir.join("a.txt")).unwrap(),
+        "content of a"
+    );
+    assert_eq!(
+        fs::read_to_string(newdir.join("b.txt")).unwrap(),
+        "content of b"
+    );
+}
