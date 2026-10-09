@@ -177,8 +177,14 @@ impl<'a> MoveLedger<'a> {
             if entry.operand.index() != operand {
                 continue;
             }
-            if self.records[index].is_none() {
-                note(&mut problems, &entry.source, Problem::NotCopied);
+            match self.records[index] {
+                None => note(&mut problems, &entry.source, Problem::NotCopied),
+                Some(Record::File { .. }) => {
+                    if FileStamp::of(&entry.destination).is_err() {
+                        note(&mut problems, &entry.source, Problem::MissingAtDestination);
+                    }
+                }
+                Some(_) => {}
             }
         }
         self.compare_tree(operand, &mut problems);
