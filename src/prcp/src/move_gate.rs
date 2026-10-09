@@ -179,7 +179,10 @@ impl<'a> MoveLedger<'a> {
             }
             match self.records[index] {
                 None => note(&mut problems, &entry.source, Problem::NotCopied),
-                Some(Record::File { source, .. }) => {
+                Some(Record::File {
+                    source,
+                    destination,
+                }) => {
                     if let Some(problem) = stamp_problem(
                         &entry.source,
                         source,
@@ -188,8 +191,13 @@ impl<'a> MoveLedger<'a> {
                     ) {
                         note(&mut problems, &entry.source, problem);
                     }
-                    if FileStamp::of(&entry.destination).is_err() {
-                        note(&mut problems, &entry.source, Problem::MissingAtDestination);
+                    if let Some(problem) = stamp_problem(
+                        &entry.destination,
+                        destination,
+                        Problem::MissingAtDestination,
+                        Problem::DestinationChanged,
+                    ) {
+                        note(&mut problems, &entry.source, problem);
                     }
                 }
                 Some(_) => {}
