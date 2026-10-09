@@ -2410,6 +2410,27 @@ mod tests {
         }
     }
 
+    mod args_tests {
+        use super::*;
+        use clap::CommandFactory;
+
+        #[test]
+        fn recursive_flag_has_short_capital_r_and_small_r_stays_rm() {
+            let command = Args::command();
+            let recursive = command
+                .get_arguments()
+                .find(|arg| arg.get_long() == Some("recursive"))
+                .expect("the recursive argument must exist");
+            assert_eq!(recursive.get_short(), Some('R'));
+
+            let small_r = command
+                .get_arguments()
+                .find(|arg| arg.get_short() == Some('r'))
+                .expect("an argument with the short form -r must exist");
+            assert_eq!(small_r.get_long(), Some("rm"));
+        }
+    }
+
     mod resolve_sources_tests {
         use super::*;
         use std::fs;
