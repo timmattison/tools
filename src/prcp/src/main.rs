@@ -16,6 +16,7 @@ use clap::Parser;
 use colored::Colorize;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use indicatif::{HumanBytes, MultiProgress, ProgressBar};
+use move_gate::{FileStamp, MoveLedger};
 use plan::{CopyPlan, EntryKind};
 use termbar::{ProgressStyleBuilder, TerminalWidthWatcher};
 // Blake3 imported via blake3 crate (no Digest trait needed)
@@ -430,6 +431,10 @@ const SKIP_WARNING_TAIL: &str = "prcp copies only files, directories, and symlin
 const WALK_ERROR_HEADLINE: &str =
     "Cannot read part of the source tree (use --continue-on-error to copy the rest):";
 
+/// The message for a `--rm` run that stopped before the end of the plan.
+const NO_SOURCE_REMOVED_AFTER_STOP: &str =
+    "No source was removed, because the run stopped before the end.";
+
 /// The failure text for a destination that exists and that prcp did not overwrite.
 const SKIPPED_DESTINATION_EXISTS: &str = "Skipped (destination exists)";
 
@@ -772,8 +777,11 @@ async fn main() -> Result<()> {
     // Track completed files for batch progress display
     let mut completed_files = 0_usize;
 
+    // With --rm, the ledger holds what the loop proved. No source goes before the gate runs.
+    let mut ledger = MoveLedger::new(&plan);
+
     // Run each plan entry. The plan lists every directory before its contents.
-    for entry in plan.entries() {
+    for (index, entry) in plan.entries().iter().enumerate() {
         // Check for shutdown
         if shutdown.load(Ordering::SeqCst) {
             eprintln!("\nCopy cancelled by user");
@@ -799,6 +807,7 @@ async fn main() -> Result<()> {
                 stopped_early = true;
                 break;
             }
+            ledger.record_directory(index);
             continue;
         }
         // Recreate the symlink. prcp never follows it, so a link that points nowhere copies too.
@@ -828,6 +837,7 @@ async fn main() -> Result<()> {
             }
             match copy_symlink(target, dest) {
                 Ok(()) => {
+                    ledger.record_symlink(index);
                     if !args.quiet {
                         let _ = multi.println(format!(
                             "{} link '{}' -> '{}'",
@@ -873,6 +883,7 @@ async fn main() -> Result<()> {
             }
         };
         let file_size = metadata.len();
+        let source_stamp = FileStamp::from_metadata(&metadata);
 
         // Calculate bytes this file contributes to batch work (copy + optional verify)
         let file_batch_bytes = if verify_enabled {
@@ -1086,42 +1097,18 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                // Remove source if --rm and verification passed (or was skipped, which is blocked by flag validation)
-                let should_allow_removal = matches!(
-                    verify_outcome,
-                    VerifyOutcome::Passed { .. } | VerifyOutcome::Skipped
-                );
-                let removed = if args.rm && should_allow_removal {
-                    match fs::remove_file(source) {
-                        Ok(()) => true,
-                        Err(e) => {
-                            let error_msg =
-                                format!("Failed to remove source '{}': {}", source.display(), e);
-                            eprintln!("\n{}", error_msg);
-                            if args.continue_on_error {
-                                failures.push((source.clone(), error_msg));
-                            } else {
-                                anyhow::bail!("{}", error_msg);
-                            }
-                            false
-                        }
-                    }
-                } else {
-                    false
-                };
+                // Record the passed Blake3 check. The move gate removes a source only
+                // after the loop, and only when every record of its operand holds.
+                if matches!(verify_outcome, VerifyOutcome::Passed { .. }) {
+                    ledger.record_file(index, source_stamp);
+                }
 
                 // Print per-file stats (unless quiet mode, but always show problems)
-                let is_problem =
-                    matches!(verify_outcome, VerifyOutcome::Failed) || (args.rm && !removed);
+                let is_problem = matches!(verify_outcome, VerifyOutcome::Failed);
 
                 if !args.quiet || is_problem {
                     let status = match &verify_outcome {
                         VerifyOutcome::Failed => "fail".red(),
-                        VerifyOutcome::Passed { .. } | VerifyOutcome::Skipped
-                            if args.rm && !removed =>
-                        {
-                            "partial".yellow()
-                        }
                         _ => "ok".green(),
                     };
 
@@ -1211,6 +1198,24 @@ async fn main() -> Result<()> {
     let _ = signal_task.await;
     let _ = resize_task.await;
 
+    // Move gate: with --rm, remove the originals only after the loop, and only
+    // when the run reached its end.
+    let mut move_report = None;
+    if args.rm {
+        if stopped_early {
+            eprintln!("{NO_SOURCE_REMOVED_AFTER_STOP}");
+        } else {
+            let report = ledger.finish();
+            if !args.quiet && !report.removed.is_empty() {
+                println!(
+                    "Moved {} source(s): removed the originals after verification.",
+                    report.removed.len()
+                );
+            }
+            move_report = Some(report);
+        }
+    }
+
     // Check for early exit error (set during verification cancellation)
     if let Some(error_msg) = early_exit_error {
         anyhow::bail!("{}", error_msg);
@@ -1240,9 +1245,6 @@ async fn main() -> Result<()> {
                     verify_time,
                     verify_speed
                 );
-                if args.rm {
-                    println!("Source files removed after verification.");
-                }
             } else {
                 // Either --no-verify was used, or all verifications failed
                 println!(
