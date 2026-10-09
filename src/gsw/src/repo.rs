@@ -440,10 +440,13 @@ pub struct BaseStatus {
 /// call walks it, with [`count_only_on`]. Each count is clamped to `u32::MAX`.
 ///
 /// Both counts are zero when `start` is `None` (HEAD named no commit), when
-/// the start has no base, when the walk of the set failed, or when the walk
-/// of the behind count does not start or a step of it fails. A missing or
+/// the start has no base, or when the walk of the set failed. A missing or
 /// unresolvable base then produces no behind segment. When the base is the
 /// start commit, both counts are zero and no walk runs.
+///
+/// The behind count alone is zero when the walk of the behind count does not
+/// start or a step of it fails. The ahead count stays the size of the set.
+/// So the header and the marks of the log agree.
 pub fn base_status(repo: &gix::Repository, start: Option<&LogStart>) -> BaseStatus {
     let resolve = || -> Option<(u32, u32)> {
         let start = start?;
@@ -452,7 +455,7 @@ pub fn base_status(repo: &gix::Repository, start: Option<&LogStart>) -> BaseStat
         if base == start.commit {
             return Some((0, 0));
         }
-        let behind = count_only_on(repo, base, start.commit)?;
+        let behind = count_only_on(repo, base, start.commit).unwrap_or(0);
         Some((clamp_count(branch.len()), clamp_count(behind)))
     };
     let (ahead, behind) = resolve().unwrap_or((0, 0));
@@ -1994,8 +1997,7 @@ mod tests {
     /// more, `main 1` to `main 3`. `feature` holds three commits, `feature 1`
     /// to `feature 3`, on top of the commit of [`init_repo`]. So the branch is
     /// three commits ahead of the fork point, and the base is three commits
-    /// past it. The set of the branch has four ids when the object of `main 2`
-    /// is gone, because the hidden side of the walk does not fail on it.
+    /// past it.
     fn base_moved_repo() -> TempDir {
         let dir = init_repo();
         let p = dir.path();
@@ -2047,12 +2049,11 @@ mod tests {
             let dir = base_moved_repo();
             remove_commit_object(dir.path(), rev);
             let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
+            visited += 1;
             let Ok(snapshot) = crate::collect_snapshot(handle.repo(), &log_walk_config(), 10)
             else {
-                visited += 1;
                 continue;
             };
-            visited += 1;
             let marked_rows = snapshot.log.iter().filter(|entry| entry.on_branch).count();
             assert_eq!(
                 u32::try_from(marked_rows).expect("a small count"),
