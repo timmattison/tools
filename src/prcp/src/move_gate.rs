@@ -81,7 +81,7 @@
 mod destination;
 
 use crate::landing::Action;
-use crate::plan::{CopyPlan, EntryKind, OperandKind, TreeSnapshot};
+use crate::plan::{CopyPlan, EntryKind, OperandKind, PlanEntry, TreeSnapshot};
 use destination::{DestinationNode, DestinationTree, TreeChange};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -192,6 +192,10 @@ pub(crate) struct RunLedger<'a> {
     plan: &'a CopyPlan,
     action: Action,
     records: Vec<Option<Record>>,
+    /// The indexes of the plan entries of each operand, in plan order. The
+    /// check and the removal work one operand at a time, and this list keeps
+    /// each of them from a scan of the whole plan.
+    entries_by_operand: Vec<Vec<usize>>,
     /// The snapshot of the destination of each operand, taken before the first copy. A
     /// Directory operand has the walk of its root, and another operand has its one path.
     destination_before: BTreeMap<PathBuf, DestinationTree>,
@@ -221,15 +225,20 @@ impl<'a> RunLedger<'a> {
             })
             .collect();
         let mut first_entry = BTreeMap::new();
+        let mut entries_by_operand = vec![Vec::new(); plan.operands().len()];
         for (index, entry) in plan.entries().iter().enumerate() {
             first_entry
                 .entry(entry.destination.clone())
                 .or_insert(index);
+            if let Some(entries) = entries_by_operand.get_mut(entry.operand.index()) {
+                entries.push(index);
+            }
         }
         Self {
             plan,
             action,
             records: vec![None; plan.entries().len()],
+            entries_by_operand,
             destination_before,
             first_entry,
         }
@@ -287,11 +296,18 @@ impl<'a> RunLedger<'a> {
 
     /// Return the snapshot that holds `path`: the one with the deepest root above or at it.
     fn snapshot_of(&self, path: &Path) -> Option<&DestinationTree> {
-        self.destination_before
-            .iter()
-            .filter(|(root, _)| path.starts_with(root))
-            .max_by_key(|(root, _)| root.components().count())
-            .map(|(_, tree)| tree)
+        path.ancestors()
+            .find_map(|ancestor| self.destination_before.get(ancestor))
+    }
+
+    /// Return each plan entry of one operand with its index, in plan order.
+    fn entries_of(&self, operand: usize) -> impl Iterator<Item = (usize, &'a PlanEntry)> + '_ {
+        let plan = self.plan;
+        self.entries_by_operand
+            .get(operand)
+            .into_iter()
+            .flatten()
+            .filter_map(move |&index| plan.entries().get(index).map(|entry| (index, entry)))
     }
 
     /// Record that the loop kept the destination of entry `entry` as it was (`--skip-existing`).
@@ -328,11 +344,12 @@ impl<'a> RunLedger<'a> {
         NodeIdentity::of_node(&plan_entry.destination).ok()
     }
 
-    /// Record that the file of entry `entry` passed its Blake3 check.
+    /// Record that the loop wrote the file of entry `entry`, and how it proved the data.
     ///
-    /// Call this right after the check. The call stamps the destination now.
-    /// When that stamp fails, the entry stays without a record, so the gate
-    /// keeps its originals.
+    /// Call this right after the Blake3 check, or right after the copy when the
+    /// run skips the check. The call stamps the destination now. When that
+    /// stamp fails, the entry stays without a record, so the gate keeps its
+    /// originals.
     pub(crate) fn record_file(
         &mut self,
         entry: usize,
@@ -426,10 +443,7 @@ impl<'a> RunLedger<'a> {
         last_writers: &BTreeMap<&Path, usize>,
     ) -> BTreeMap<PathBuf, Problem> {
         let mut findings = Findings::default();
-        for (index, entry) in self.plan.entries().iter().enumerate() {
-            if entry.operand.index() != operand {
-                continue;
-            }
+        for (index, entry) in self.entries_of(operand) {
             let replaced_by = last_writers
                 .get(entry.destination.as_path())
                 .filter(|last| **last != index && self.records[index].is_some())
@@ -570,11 +584,9 @@ impl<'a> RunLedger<'a> {
     /// Directory has no snapshot, and the call does nothing.
     fn compare_tree(&self, operand: usize, findings: &mut Findings) {
         let Some(before) = self
-            .plan
-            .entries()
-            .iter()
-            .find(|entry| entry.operand.index() == operand)
-            .and_then(|entry| self.plan.tree(entry.operand))
+            .entries_of(operand)
+            .next()
+            .and_then(|(_, entry)| self.plan.tree(entry.operand))
         else {
             return;
         };
@@ -608,12 +620,7 @@ impl<'a> RunLedger<'a> {
     /// removes directories in reverse plan order with `remove_dir`, which
     /// refuses a directory that is not empty.
     fn remove_originals(&self, operand: usize) -> Vec<(PathBuf, String)> {
-        let entries = || {
-            self.plan
-                .entries()
-                .iter()
-                .filter(move |entry| entry.operand.index() == operand)
-        };
+        let entries = || self.entries_of(operand).map(|(_, entry)| entry);
         let mut errors = Vec::new();
         for entry in entries().filter(|entry| entry.kind != EntryKind::Directory) {
             if let Err(error) = fs::remove_file(&entry.source) {
@@ -1022,7 +1029,6 @@ impl fmt::Display for Problem {
 )]
 mod tests {
     use super::*;
-    use crate::plan::PlanEntry;
     use tempfile::TempDir;
 
     /// A source tree, a destination path, and the plan between them.
