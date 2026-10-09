@@ -219,8 +219,20 @@ pub(crate) enum Problem {
 impl fmt::Display for Problem {
     /// Write the problem as a phrase that follows a quoted path.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        Ok(())
+        match self {
+            Self::NotCopied => f.write_str("was not copied and verified"),
+            Self::Skipped(kind) => write!(f, "is a {kind}, and prcp does not copy it"),
+            Self::Unreadable(message) => write!(f, "cannot be read: {message}"),
+            Self::NewSinceCopy => {
+                f.write_str("appeared in the source after the copy started, and was not copied")
+            }
+            Self::MissingAtSource => f.write_str("is no longer in the source"),
+            Self::MissingAtDestination => f.write_str("is missing at the destination"),
+            Self::SourceChanged => f.write_str("changed in the source after its copy"),
+            Self::DestinationChanged => {
+                f.write_str("changed at the destination after its hash check")
+            }
+        }
     }
 }
 
