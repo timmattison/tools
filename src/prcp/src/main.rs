@@ -2555,6 +2555,16 @@ mod tests {
         }
 
         #[test]
+        fn recursive_accepts_a_literal_directory() {
+            let temp_dir = TempDir::new().unwrap();
+            let dir = temp_dir.path().join("subdir");
+            fs::create_dir(&dir).unwrap();
+
+            let result = resolve_sources(std::slice::from_ref(&dir), false, true).unwrap();
+            assert_eq!(result, vec![dir]);
+        }
+
+        #[test]
         fn glob_pattern_with_no_matches_returns_error() {
             let temp_dir = TempDir::new().unwrap();
             // Create a .txt file but search for .xyz
