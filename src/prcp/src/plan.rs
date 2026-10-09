@@ -1046,4 +1046,36 @@ mod tests {
         assert!(!old.nodes().contains_key(&added));
         assert!(old.nodes().contains_key(&src.join("a.txt")));
     }
+
+    /// Return the permission bits of a path.
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).unwrap().permissions().mode() & 0o7777
+    }
+
+    /// Set the permission bits of a path.
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_directory_permissions_gives_the_destination_the_mode_of_its_source() {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        write_file(&src.join("a.txt"), "a");
+        set_mode(&src, 0o750);
+        let dest = temp.path().join("dest");
+        let plan = CopyPlan::build(std::slice::from_ref(&src), &dest, true).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        set_mode(&dest, 0o755);
+
+        let errors = plan.apply_directory_permissions();
+
+        assert!(errors.is_empty(), "errors: {errors:?}");
+        assert_eq!(mode_of(&dest), 0o750);
+    }
 }
