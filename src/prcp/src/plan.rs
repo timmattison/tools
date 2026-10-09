@@ -566,4 +566,29 @@ mod tests {
             .iter()
             .all(|entry| !entry.source.ancestors().skip(1).any(|a| a.ends_with("loop"))));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn top_level_symlink_to_a_directory_is_one_symlink_entry() {
+        let temp = TempDir::new().unwrap();
+        let real = temp.path().join("real");
+        write_file(&real.join("a.txt"), "a");
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let dest = temp.path().join("dest");
+
+        let plan = CopyPlan::build(std::slice::from_ref(&link), &dest, true).unwrap();
+
+        assert_eq!(
+            plan.entries(),
+            [PlanEntry {
+                operand: OperandId(0),
+                source: link.clone(),
+                destination: dest.clone(),
+                kind: EntryKind::Symlink { target: real },
+            }]
+        );
+        assert_eq!(plan.operands()[0].kind, OperandKind::Symlink);
+        assert!(plan.tree(OperandId(0)).is_none());
+    }
 }
