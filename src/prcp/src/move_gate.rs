@@ -179,7 +179,15 @@ impl<'a> MoveLedger<'a> {
             }
             match self.records[index] {
                 None => note(&mut problems, &entry.source, Problem::NotCopied),
-                Some(Record::File { .. }) => {
+                Some(Record::File { source, .. }) => {
+                    if let Some(problem) = stamp_problem(
+                        &entry.source,
+                        source,
+                        Problem::MissingAtSource,
+                        Problem::SourceChanged,
+                    ) {
+                        note(&mut problems, &entry.source, problem);
+                    }
                     if FileStamp::of(&entry.destination).is_err() {
                         note(&mut problems, &entry.source, Problem::MissingAtDestination);
                     }
@@ -260,6 +268,25 @@ impl<'a> MoveLedger<'a> {
 /// Note a problem for a path. A path that already has a problem keeps the first one.
 fn note(problems: &mut BTreeMap<PathBuf, Problem>, path: &Path, problem: Problem) {
     problems.entry(path.to_path_buf()).or_insert(problem);
+}
+
+/// Compare the file at `path` with the stamp taken earlier.
+///
+/// Return `missing` when the file is gone and `changed` when its size or
+/// modification time differs. Another read error is `Unreadable`. Return
+/// `None` when the stamp still matches.
+fn stamp_problem(
+    path: &Path,
+    expected: FileStamp,
+    missing: Problem,
+    changed: Problem,
+) -> Option<Problem> {
+    match FileStamp::of(path) {
+        Ok(now) if now == expected => None,
+        Ok(_) => Some(changed),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(missing),
+        Err(error) => Some(Problem::Unreadable(error.to_string())),
+    }
 }
 
 /// The result of the gate and of the removal.
