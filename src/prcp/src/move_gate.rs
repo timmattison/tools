@@ -220,7 +220,11 @@ impl<'a> MoveLedger<'a> {
                         }
                     }
                 }
-                Some(Record::Directory) => {}
+                Some(Record::Directory) => {
+                    if !fs::metadata(&entry.destination).is_ok_and(|found| found.is_dir()) {
+                        note(&mut problems, &entry.source, Problem::MissingAtDestination);
+                    }
+                }
             }
         }
         for skipped in self.plan.skipped() {
