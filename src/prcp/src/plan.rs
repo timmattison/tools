@@ -330,4 +330,22 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn two_files_to_an_existing_file_is_an_error() {
+        let temp = TempDir::new().unwrap();
+        let first = temp.path().join("a");
+        let second = temp.path().join("b");
+        let destination = temp.path().join("target.txt");
+        write_file(&first, "a");
+        write_file(&second, "b");
+        write_file(&destination, "old");
+
+        let error = CopyPlan::build(&[first, second], &destination, false).unwrap_err();
+
+        assert!(
+            error.to_string().contains("is not a directory"),
+            "unexpected error: {error}"
+        );
+    }
 }
