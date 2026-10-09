@@ -425,6 +425,10 @@ fn resolve_sources(patterns: &[PathBuf], literal: bool, recursive: bool) -> Resu
 /// The end of the warning for a node that prcp does not copy.
 const SKIP_WARNING_TAIL: &str = "prcp copies only files, directories, and symlinks";
 
+/// The headline of the error for a part of the source tree that prcp cannot read.
+const WALK_ERROR_HEADLINE: &str =
+    "Cannot read part of the source tree (use --continue-on-error to copy the rest):";
+
 /// The failure text for a destination that exists and that prcp did not overwrite.
 const SKIPPED_DESTINATION_EXISTS: &str = "Skipped (destination exists)";
 
@@ -559,6 +563,17 @@ async fn main() -> Result<()> {
             skipped.path.display(),
             skipped.reason
         );
+    }
+
+    // A part of the tree that prcp cannot read stops the run before any copy,
+    // unless the user asks to copy the rest
+    if !plan.walk_errors().is_empty() && !args.continue_on_error {
+        let lines: String = plan
+            .walk_errors()
+            .iter()
+            .map(|error| format!("\n  {}: {}", error.path.display(), error.message))
+            .collect();
+        anyhow::bail!("{WALK_ERROR_HEADLINE}{lines}");
     }
 
     // Warn about potentially dangerous combination
