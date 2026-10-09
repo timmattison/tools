@@ -420,7 +420,7 @@ mod tests {
         make_tree(&src);
         let dest = temp.path().join("dest");
         fs::create_dir(&dest).unwrap();
-        let mut dotted = src.clone().into_os_string();
+        let mut dotted = src.into_os_string();
         dotted.push("/.");
         let dotted = PathBuf::from(dotted);
 

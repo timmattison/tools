@@ -22,7 +22,7 @@ use plan::{CopyPlan, EntryKind};
 use termbar::{ProgressStyleBuilder, TerminalWidthWatcher};
 // Blake3 imported via blake3 crate (no Digest trait needed)
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -533,10 +533,27 @@ fn confirm_overwrite(
     Ok(input.trim().eq_ignore_ascii_case("y"))
 }
 
+/// The question that lets a person stop the run before the first copy.
+const CONTINUE_QUESTION: &str = "Continue? (y/N): ";
+
+/// The message for a run that a person stopped at a question before the first copy.
+const OPERATION_CANCELLED: &str = "Operation cancelled";
+
 /// Ask the question that lets a person stop the run before the first copy.
+///
+/// Writes [`CONTINUE_QUESTION`] to `output`, then reads one line from `input`.
+/// Only `y` or `Y` continues. Any other line, an empty line, and the end of the
+/// input all stop the run, so the safe answer is the default.
+///
+/// # Errors
+///
+/// Returns an error when the question cannot be written or the answer cannot be read.
 fn ask_to_continue(input: &mut impl io::BufRead, output: &mut impl Write) -> io::Result<bool> {
-    let _ = (input, output);
-    Ok(true)
+    write!(output, "{CONTINUE_QUESTION}")?;
+    output.flush()?;
+    let mut answer = String::new();
+    input.read_line(&mut answer)?;
+    Ok(answer.trim().eq_ignore_ascii_case("y"))
 }
 
 #[tokio::main]
@@ -589,17 +606,30 @@ async fn main() -> Result<()> {
         anyhow::bail!("{WALK_ERROR_HEADLINE}{lines}");
     }
 
+    // Show where each source of a recursive run lands, before the first copy. A
+    // person at a terminal can then stop a run that would land in the wrong place.
+    let action = if args.rm {
+        landing::Action::Move
+    } else {
+        landing::Action::Copy
+    };
+    if let Some(preview) = landing::describe(&plan, action) {
+        eprint!("{preview}");
+        if !args.yes
+            && io::stdin().is_terminal()
+            && !ask_to_continue(&mut io::stdin().lock(), &mut io::stderr())?
+        {
+            println!("{OPERATION_CANCELLED}");
+            return Ok(());
+        }
+    }
+
     // Warn about potentially dangerous combination
     if args.rm && args.continue_on_error && total_files > 1 && !args.yes {
         eprintln!("Warning: Using --rm with --continue-on-error may result in partial moves.");
         eprintln!("Some source files may be deleted while others remain if errors occur.");
-        eprint!("Continue? (y/N): ");
-        io::stderr().flush()?;
-
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        if !input.trim().eq_ignore_ascii_case("y") {
-            println!("Operation cancelled");
+        if !ask_to_continue(&mut io::stdin().lock(), &mut io::stderr())? {
+            println!("{OPERATION_CANCELLED}");
             return Ok(());
         }
     }
