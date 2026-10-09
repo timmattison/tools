@@ -51,11 +51,48 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-/// The size and modification time of a file at one moment.
+/// The device and the inode number of a node. Two paths with the same identity are one node.
+///
+/// A rename keeps the identity. A new node that replaces an old one gets
+/// another identity, also when its size, time, and data are equal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct NodeIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl NodeIdentity {
+    /// Return the identity in `metadata`.
+    ///
+    /// Return `None` when the file system gives no inode number. Such a file
+    /// system reports 0, and 0 names no node.
+    #[cfg(unix)]
+    pub(crate) fn of(metadata: &fs::Metadata) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.ino() != 0).then(|| Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    /// Return `None`. This platform gives no stable inode number through the standard library.
+    #[cfg(not(unix))]
+    pub(crate) fn of(_metadata: &fs::Metadata) -> Option<Self> {
+        None
+    }
+
+    /// Return the identity of the node at `path`. The call does not follow a symlink.
+    fn of_node(path: &Path) -> io::Result<Option<Self>> {
+        fs::symlink_metadata(path).map(|metadata| Self::of(&metadata))
+    }
+}
+
+/// The size, the modification time, and the identity of a file at one moment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FileStamp {
     len: u64,
     modified: Option<SystemTime>,
+    identity: Option<NodeIdentity>,
 }
 
 impl FileStamp {
@@ -64,6 +101,7 @@ impl FileStamp {
         Self {
             len: metadata.len(),
             modified: metadata.modified().ok(),
+            identity: NodeIdentity::of(metadata),
         }
     }
 
@@ -77,9 +115,15 @@ impl FileStamp {
 #[derive(Debug, Clone, Copy)]
 enum Record {
     /// The destination directory exists.
-    Directory,
+    Directory {
+        /// The identity of the destination directory right after the loop made it.
+        identity: Option<NodeIdentity>,
+    },
     /// The destination link exists and reads back with the target.
-    Symlink,
+    Symlink {
+        /// The identity of the destination link right after the loop made it.
+        identity: Option<NodeIdentity>,
+    },
     /// The destination passed its Blake3 check against the source.
     File {
         /// The stamp of the source before the copy.
@@ -106,13 +150,29 @@ impl<'a> MoveLedger<'a> {
     }
 
     /// Record that the directory of entry `entry` exists at the destination.
+    ///
+    /// The call reads the identity of the directory now. When that read fails,
+    /// the entry stays without a record, so the gate keeps its originals.
     pub(crate) fn record_directory(&mut self, entry: usize) {
-        self.set(entry, Record::Directory);
+        if let Some(identity) = self.destination_identity(entry) {
+            self.set(entry, Record::Directory { identity });
+        }
     }
 
     /// Record that the symlink of entry `entry` was made and read back.
+    ///
+    /// The call reads the identity of the link now. When that read fails, the
+    /// entry stays without a record, so the gate keeps its originals.
     pub(crate) fn record_symlink(&mut self, entry: usize) {
-        self.set(entry, Record::Symlink);
+        if let Some(identity) = self.destination_identity(entry) {
+            self.set(entry, Record::Symlink { identity });
+        }
+    }
+
+    /// Read the identity of the destination of entry `entry` now. `None` when the read fails.
+    fn destination_identity(&self, entry: usize) -> Option<Option<NodeIdentity>> {
+        let plan_entry = self.plan.entries().get(entry)?;
+        NodeIdentity::of_node(&plan_entry.destination).ok()
     }
 
     /// Record that the file of entry `entry` passed its Blake3 check.
@@ -200,7 +260,7 @@ impl<'a> MoveLedger<'a> {
                         note(&mut problems, &entry.destination, problem);
                     }
                 }
-                Some(Record::Symlink) => {
+                Some(Record::Symlink { identity }) => {
                     if let EntryKind::Symlink { target } = &entry.kind {
                         if let Some(problem) = link_problem(
                             &entry.source,
@@ -210,23 +270,21 @@ impl<'a> MoveLedger<'a> {
                         ) {
                             note(&mut problems, &entry.source, problem);
                         }
-                        if let Some(problem) = link_problem(
+                        let destination = link_problem(
                             &entry.destination,
                             target,
                             Problem::MissingAtDestination,
                             Problem::DestinationChanged,
-                        ) {
+                        )
+                        .or_else(|| identity_problem(&entry.destination, identity));
+                        if let Some(problem) = destination {
                             note(&mut problems, &entry.destination, problem);
                         }
                     }
                 }
-                Some(Record::Directory) => {
-                    if !fs::metadata(&entry.destination).is_ok_and(|found| found.is_dir()) {
-                        note(
-                            &mut problems,
-                            &entry.destination,
-                            Problem::MissingAtDestination,
-                        );
+                Some(Record::Directory { identity }) => {
+                    if let Some(problem) = directory_problem(&entry.destination, identity) {
+                        note(&mut problems, &entry.destination, problem);
                     }
                 }
             }
@@ -354,6 +412,35 @@ fn link_problem(path: &Path, target: &Path, missing: Problem, changed: Problem) 
         Ok(_) => Some(changed),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Some(missing),
         Err(error) if error.kind() == io::ErrorKind::InvalidInput => Some(changed),
+        Err(error) => Some(Problem::Unreadable(error.to_string())),
+    }
+}
+
+/// Compare the directory at `path` with the identity that its record holds.
+///
+/// Return `MissingAtDestination` when nothing is at the path, and
+/// `DestinationChanged` when the path is no longer a directory or is another
+/// directory. Another read error is `Unreadable`. Return `None` when the
+/// directory is still the one that the loop made.
+fn directory_problem(path: &Path, identity: Option<NodeIdentity>) -> Option<Problem> {
+    match fs::metadata(path) {
+        Ok(found) if found.is_dir() => identity_problem(path, identity),
+        Ok(_) => Some(Problem::DestinationChanged),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Some(Problem::MissingAtDestination)
+        }
+        Err(error) => Some(Problem::Unreadable(error.to_string())),
+    }
+}
+
+/// Compare the identity of the node at `path` with the identity that a record holds.
+///
+/// Return `DestinationChanged` when another node is at the path, and
+/// `Unreadable` when the read fails. Return `None` when the node is the same.
+fn identity_problem(path: &Path, identity: Option<NodeIdentity>) -> Option<Problem> {
+    match NodeIdentity::of_node(path) {
+        Ok(now) if now == identity => None,
+        Ok(_) => Some(Problem::DestinationChanged),
         Err(error) => Some(Problem::Unreadable(error.to_string())),
     }
 }
