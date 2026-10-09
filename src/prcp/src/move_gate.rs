@@ -492,6 +492,30 @@ mod tests {
     }
 
     #[test]
+    fn a_source_file_that_is_deleted_keeps_all_originals() {
+        let fixture = sample();
+        let ledger = copy_all(&fixture.plan, &[]);
+        let gone = fixture.src.join("sub").join("inner.txt");
+        fs::remove_file(&gone).unwrap();
+
+        let report = ledger.finish();
+
+        assert!(report.removed.is_empty(), "report: {report:?}");
+        assert_eq!(
+            only_problems(&report).get(&gone),
+            Some(&Problem::MissingAtSource)
+        );
+        assert!(fixture.src.join("top.txt").exists());
+        assert!(fixture
+            .src
+            .join("sub")
+            .join("deeper")
+            .join("deep.txt")
+            .exists());
+        assert!(fixture.src.join("empty").is_dir());
+    }
+
+    #[test]
     fn problem_display_texts_state_each_problem() {
         assert_eq!(
             Problem::NotCopied.to_string(),
