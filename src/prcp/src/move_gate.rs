@@ -258,15 +258,15 @@ impl<'a> MoveLedger<'a> {
         report
     }
 
-    /// Collect every problem of one operand. The first problem of a path wins.
+    /// Collect every problem of one operand. See [`Findings`] for how the list is made.
     fn find_problems(&self, operand: usize) -> BTreeMap<PathBuf, Problem> {
-        let mut problems = BTreeMap::new();
+        let mut findings = Findings::default();
         for (index, entry) in self.plan.entries().iter().enumerate() {
             if entry.operand.index() != operand {
                 continue;
             }
             match self.records[index] {
-                None => note(&mut problems, &entry.source, Problem::NotCopied),
+                None => findings.note(&entry.source, Problem::NotCopied),
                 Some(Record::File {
                     source,
                     destination,
@@ -277,16 +277,15 @@ impl<'a> MoveLedger<'a> {
                         Problem::MissingAtSource,
                         Problem::SourceChanged,
                     ) {
-                        note(&mut problems, &entry.source, problem);
+                        findings.note(&entry.source, problem);
                     }
-                    if let Some(problem) = stamp_problem(
+                    let problem = stamp_problem(
                         &entry.destination,
                         destination,
                         Problem::MissingAtDestination,
                         Problem::DestinationChanged,
-                    ) {
-                        note(&mut problems, &entry.destination, problem);
-                    }
+                    );
+                    findings.note_destination(&entry.destination, problem, destination.identity);
                 }
                 Some(Record::Symlink { identity }) => {
                     if let EntryKind::Symlink { target } = &entry.kind {
@@ -296,48 +295,37 @@ impl<'a> MoveLedger<'a> {
                             Problem::MissingAtSource,
                             Problem::SourceChanged,
                         ) {
-                            note(&mut problems, &entry.source, problem);
+                            findings.note(&entry.source, problem);
                         }
-                        let destination = link_problem(
+                        let problem = link_problem(
                             &entry.destination,
                             target,
                             Problem::MissingAtDestination,
                             Problem::DestinationChanged,
                         )
                         .or_else(|| identity_problem(&entry.destination, identity));
-                        if let Some(problem) = destination {
-                            note(&mut problems, &entry.destination, problem);
-                        }
+                        findings.note_destination(&entry.destination, problem, identity);
                     }
                 }
                 Some(Record::Directory { identity }) => {
-                    if let Some(problem) = directory_problem(&entry.destination, identity) {
-                        note(&mut problems, &entry.destination, problem);
-                    }
+                    let problem = directory_problem(&entry.destination, identity);
+                    findings.note_destination(&entry.destination, problem, identity);
                 }
             }
         }
         for skipped in self.plan.skipped() {
             if skipped.operand.index() == operand {
-                note(
-                    &mut problems,
-                    &skipped.path,
-                    Problem::Skipped(skipped.reason),
-                );
+                findings.note(&skipped.path, Problem::Skipped(skipped.reason));
             }
         }
         for error in self.plan.walk_errors() {
             if error.operand.index() == operand {
-                note(
-                    &mut problems,
-                    &error.path,
-                    Problem::Unreadable(error.message.clone()),
-                );
+                findings.note(&error.path, Problem::Unreadable(error.message.clone()));
             }
         }
-        self.compare_tree(operand, &mut problems);
-        self.compare_destination(operand, &mut problems);
-        problems
+        self.compare_tree(operand, &mut findings);
+        self.compare_destination(operand, &mut findings);
+        findings.finish()
     }
 
     /// Walk the destination root of a Directory operand again, and compare it with the snapshot.
@@ -347,7 +335,7 @@ impl<'a> MoveLedger<'a> {
     /// `DestinationChanged`, and one that left is `MissingAtDestination`. An
     /// operand that is not a Directory has no tree to walk, and the call does
     /// nothing.
-    fn compare_destination(&self, operand: usize, problems: &mut BTreeMap<PathBuf, Problem>) {
+    fn compare_destination(&self, operand: usize, findings: &mut Findings) {
         let Some(root) = self.plan.operands().get(operand) else {
             return;
         };
@@ -356,13 +344,21 @@ impl<'a> MoveLedger<'a> {
         };
         let now = DestinationTree::take(&root.destination);
         for change in now.changes_since(before, &self.written) {
-            let problem = match &change {
-                TreeChange::New { .. } => Problem::NewAtDestination,
-                TreeChange::Changed { .. } => Problem::DestinationChanged,
-                TreeChange::Missing { .. } => Problem::MissingAtDestination,
-                TreeChange::Unreadable { message, .. } => Problem::Unreadable(message.clone()),
-            };
-            note(problems, change.path(), problem);
+            match change {
+                TreeChange::New { path, identity } => {
+                    findings.note(&path, Problem::NewAtDestination);
+                    if let Some(identity) = identity {
+                        findings.appeared.entry(identity).or_insert(path);
+                    }
+                }
+                TreeChange::Changed { path } => findings.note(&path, Problem::DestinationChanged),
+                TreeChange::Missing { path, identity } => {
+                    findings.note_destination(&path, Some(Problem::MissingAtDestination), identity);
+                }
+                TreeChange::Unreadable { path, message } => {
+                    findings.note(&path, Problem::Unreadable(message));
+                }
+            }
         }
     }
 
@@ -371,7 +367,7 @@ impl<'a> MoveLedger<'a> {
     /// A new path is `NewSinceCopy`. A path that left is `MissingAtSource`. A
     /// path with another kind is `SourceChanged`. An operand that is not a
     /// Directory has no snapshot, and the call does nothing.
-    fn compare_tree(&self, operand: usize, problems: &mut BTreeMap<PathBuf, Problem>) {
+    fn compare_tree(&self, operand: usize, findings: &mut Findings) {
         let Some(before) = self
             .plan
             .entries()
@@ -386,18 +382,18 @@ impl<'a> MoveLedger<'a> {
         };
         let now = TreeSnapshot::take(&root.source);
         for (path, message) in now.errors() {
-            note(problems, path, Problem::Unreadable(message.clone()));
+            findings.note(path, Problem::Unreadable(message.clone()));
         }
         for (path, kind) in now.nodes() {
             match before.nodes().get(path) {
-                None => note(problems, path, Problem::NewSinceCopy),
-                Some(old) if old != kind => note(problems, path, Problem::SourceChanged),
+                None => findings.note(path, Problem::NewSinceCopy),
+                Some(old) if old != kind => findings.note(path, Problem::SourceChanged),
                 Some(_) => {}
             }
         }
         for path in before.nodes().keys() {
             if !now.nodes().contains_key(path) {
-                note(problems, path, Problem::MissingAtSource);
+                findings.note(path, Problem::MissingAtSource);
             }
         }
     }
@@ -432,9 +428,75 @@ impl<'a> MoveLedger<'a> {
     }
 }
 
-/// Note a problem for a path. A path that already has a problem keeps the first one.
-fn note(problems: &mut BTreeMap<PathBuf, Problem>, path: &Path, problem: Problem) {
-    problems.entry(path.to_path_buf()).or_insert(problem);
+/// The problems of one operand while the gate collects them.
+///
+/// A path keeps the first problem noted for it. Two rules then shape the list
+/// for a person:
+///
+/// 1. A destination node that left one path and appeared at another, with
+///    the same identity, is one `MovedAtDestination` at the old path. The new
+///    path then has no line of its own.
+/// 2. A problem at a path stands for everything below that path. The list
+///    keeps the topmost path of each tree of problems, so a tree that was
+///    removed, moved, or added is one line, not one line for each node.
+#[derive(Debug, Default)]
+struct Findings {
+    problems: BTreeMap<PathBuf, Problem>,
+    /// Each destination path that left, with the identity that its node had.
+    gone: Vec<(PathBuf, NodeIdentity)>,
+    /// Each new destination path, by the identity of its node. The first path wins.
+    appeared: BTreeMap<NodeIdentity, PathBuf>,
+}
+
+impl Findings {
+    /// Note a problem for a path. A path that already has a problem keeps the first one.
+    fn note(&mut self, path: &Path, problem: Problem) {
+        self.problems.entry(path.to_path_buf()).or_insert(problem);
+    }
+
+    /// Note the result of a check of a destination path, and the identity that its node had.
+    ///
+    /// A path that left is kept with its identity, so [`Self::finish`] can find
+    /// where the node went.
+    fn note_destination(
+        &mut self,
+        path: &Path,
+        problem: Option<Problem>,
+        identity: Option<NodeIdentity>,
+    ) {
+        let Some(problem) = problem else {
+            return;
+        };
+        if let (Problem::MissingAtDestination, Some(identity)) = (&problem, identity) {
+            self.gone.push((path.to_path_buf(), identity));
+        }
+        self.note(path, problem);
+    }
+
+    /// Apply the two rules of [`Findings`] and return the list.
+    fn finish(mut self) -> BTreeMap<PathBuf, Problem> {
+        for (old, identity) in std::mem::take(&mut self.gone) {
+            let Some(new) = self.appeared.remove(&identity) else {
+                continue;
+            };
+            if self.problems.get(&new) == Some(&Problem::NewAtDestination) {
+                self.problems.remove(&new);
+            }
+            self.problems
+                .insert(old, Problem::MovedAtDestination { to: new });
+        }
+        // The map is in path order, and every path below a path comes right after it.
+        let mut list = BTreeMap::new();
+        let mut top: Option<PathBuf> = None;
+        for (path, problem) in self.problems {
+            if top.as_ref().is_some_and(|top| path.starts_with(top)) {
+                continue;
+            }
+            top = Some(path.clone());
+            list.insert(path, problem);
+        }
+        list
+    }
 }
 
 /// Compare the file at `path` with the stamp taken earlier.
