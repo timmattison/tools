@@ -289,6 +289,16 @@ mod tests {
         }
     }
 
+    /// Make a directory entry with the operand set to the given index.
+    fn dir_entry(operand: usize, source: &Path, destination: &Path) -> PlanEntry {
+        PlanEntry {
+            operand: OperandId(operand),
+            source: source.to_path_buf(),
+            destination: destination.to_path_buf(),
+            kind: EntryKind::Directory,
+        }
+    }
+
     #[test]
     fn one_file_into_existing_directory_lands_under_its_name() {
         let temp = TempDir::new().unwrap();
@@ -352,6 +362,32 @@ mod tests {
         assert!(
             error.to_string().contains("is not a directory"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn directory_to_missing_destination_walks_in_sorted_order_parents_first() {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        write_file(&src.join("z.txt"), "z");
+        write_file(&src.join("b").join("d").join("e.txt"), "e");
+        write_file(&src.join("b").join("c.txt"), "c");
+        write_file(&src.join("a.txt"), "a");
+        let dest = temp.path().join("dest");
+
+        let plan = CopyPlan::build(std::slice::from_ref(&src), &dest, true).unwrap();
+
+        assert_eq!(
+            plan.entries(),
+            [
+                dir_entry(0, &src, &dest),
+                file_entry(0, &src.join("a.txt"), &dest.join("a.txt")),
+                dir_entry(0, &src.join("b"), &dest.join("b")),
+                file_entry(0, &src.join("b/c.txt"), &dest.join("b/c.txt")),
+                dir_entry(0, &src.join("b/d"), &dest.join("b/d")),
+                file_entry(0, &src.join("b/d/e.txt"), &dest.join("b/d/e.txt")),
+                file_entry(0, &src.join("z.txt"), &dest.join("z.txt")),
+            ]
         );
     }
 }
