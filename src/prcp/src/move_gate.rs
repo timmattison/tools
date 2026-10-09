@@ -391,6 +391,23 @@ mod tests {
     }
 
     #[test]
+    fn an_entry_without_a_record_keeps_all_originals() {
+        let fixture = sample();
+        let unverified = fixture.src.join("sub").join("inner.txt");
+        let ledger = copy_all(&fixture.plan, &[unverified.as_path()]);
+
+        let report = ledger.finish();
+
+        assert!(!report.is_complete());
+        assert!(report.removed.is_empty(), "report: {report:?}");
+        assert_eq!(
+            only_problems(&report).get(&unverified),
+            Some(&Problem::NotCopied)
+        );
+        assert_originals_exist(&fixture.plan);
+    }
+
+    #[test]
     fn problem_display_texts_state_each_problem() {
         assert_eq!(
             Problem::NotCopied.to_string(),
