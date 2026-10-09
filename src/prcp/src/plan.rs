@@ -537,4 +537,33 @@ mod tests {
         );
         assert_eq!(link.destination, dest.join("link"));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn cyclic_symlink_ends_the_walk_and_is_not_followed() {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        write_file(&src.join("sub").join("a.txt"), "a");
+        std::os::unix::fs::symlink("..", src.join("sub").join("loop")).unwrap();
+        let dest = temp.path().join("dest");
+
+        let plan = CopyPlan::build(std::slice::from_ref(&src), &dest, true).unwrap();
+
+        let loops: Vec<&PlanEntry> = plan
+            .entries()
+            .iter()
+            .filter(|entry| entry.source.ends_with("loop"))
+            .collect();
+        assert_eq!(loops.len(), 1);
+        assert_eq!(
+            loops[0].kind,
+            EntryKind::Symlink {
+                target: PathBuf::from("..")
+            }
+        );
+        assert!(plan
+            .entries()
+            .iter()
+            .all(|entry| !entry.source.ancestors().skip(1).any(|a| a.ends_with("loop"))));
+    }
 }
