@@ -591,6 +591,11 @@ pub(crate) enum Problem {
     DestinationChanged,
     /// The path appeared at the destination, and prcp did not make it.
     NewAtDestination,
+    /// The node left this path at the destination, and is now at another path.
+    MovedAtDestination {
+        /// The path where the node is now.
+        to: PathBuf,
+    },
 }
 
 impl Problem {
@@ -607,7 +612,8 @@ impl Problem {
             | Self::MissingAtDestination
             | Self::SourceChanged
             | Self::DestinationChanged
-            | Self::NewAtDestination => true,
+            | Self::NewAtDestination
+            | Self::MovedAtDestination { .. } => true,
         }
     }
 }
@@ -630,6 +636,9 @@ impl fmt::Display for Problem {
             Self::DestinationChanged => f.write_str("changed at the destination during the run"),
             Self::NewAtDestination => {
                 f.write_str("appeared at the destination during the run, and prcp did not make it")
+            }
+            Self::MovedAtDestination { to } => {
+                write!(f, "was renamed or moved to '{}' during the run", to.display())
             }
         }
     }
@@ -1097,6 +1106,87 @@ mod tests {
         assert!(!fixture.src.exists(), "the source tree must be gone");
     }
 
+    /// Return the problems of the one kept operand as a list in path order.
+    fn problem_list(report: &MoveReport) -> Vec<(PathBuf, Problem)> {
+        only_problems(report)
+            .iter()
+            .map(|(path, problem)| (path.clone(), problem.clone()))
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_destination_file_that_is_renamed_is_reported_once_with_its_new_name() {
+        let fixture = sample();
+        let ledger = copy_all(&fixture.plan, &[]);
+        let copy = fixture.dest.join("top.txt");
+        let renamed = fixture.dest.join("top-renamed.txt");
+        fs::rename(&copy, &renamed).unwrap();
+
+        let report = ledger.finish();
+
+        assert!(report.removed.is_empty(), "report: {report:?}");
+        assert_eq!(
+            problem_list(&report),
+            vec![(copy, Problem::MovedAtDestination { to: renamed })]
+        );
+        assert_originals_exist(&fixture.plan);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_destination_directory_that_is_renamed_is_reported_once_with_its_new_name() {
+        let fixture = sample();
+        let ledger = copy_all(&fixture.plan, &[]);
+        let copy = fixture.dest.join("sub");
+        let renamed = fixture.dest.join("sub-renamed");
+        fs::rename(&copy, &renamed).unwrap();
+
+        let report = ledger.finish();
+
+        assert!(report.removed.is_empty(), "report: {report:?}");
+        assert_eq!(
+            problem_list(&report),
+            vec![(copy, Problem::MovedAtDestination { to: renamed })]
+        );
+        assert_originals_exist(&fixture.plan);
+    }
+
+    #[test]
+    fn a_new_destination_directory_is_reported_once() {
+        let fixture = sample();
+        let ledger = copy_all(&fixture.plan, &[]);
+        let intruder = fixture.dest.join("new-dir");
+        write_file(&intruder.join("a.txt"), "a");
+        write_file(&intruder.join("deeper").join("b.txt"), "b");
+
+        let report = ledger.finish();
+
+        assert!(report.removed.is_empty(), "report: {report:?}");
+        assert_eq!(
+            problem_list(&report),
+            vec![(intruder, Problem::NewAtDestination)]
+        );
+        assert_originals_exist(&fixture.plan);
+    }
+
+    #[test]
+    fn a_destination_directory_that_is_removed_is_reported_once() {
+        let fixture = sample();
+        let ledger = copy_all(&fixture.plan, &[]);
+        let copy = fixture.dest.join("sub");
+        fs::remove_dir_all(&copy).unwrap();
+
+        let report = ledger.finish();
+
+        assert!(report.removed.is_empty(), "report: {report:?}");
+        assert_eq!(
+            problem_list(&report),
+            vec![(copy, Problem::MissingAtDestination)]
+        );
+        assert_originals_exist(&fixture.plan);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_fifo_in_the_tree_keeps_all_originals() {
@@ -1393,6 +1483,13 @@ mod tests {
         assert_eq!(
             Problem::NewAtDestination.to_string(),
             "appeared at the destination during the run, and prcp did not make it"
+        );
+        assert_eq!(
+            Problem::MovedAtDestination {
+                to: PathBuf::from("/d/b.txt")
+            }
+            .to_string(),
+            "was renamed or moved to '/d/b.txt' during the run"
         );
     }
 }
