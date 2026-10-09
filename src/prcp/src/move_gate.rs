@@ -43,7 +43,7 @@
 //! directory that is not empty, so a file that appears after the gate also
 //! keeps its directory. The gate collects each removal error and goes on.
 
-use crate::plan::{CopyPlan, EntryKind, NodeKind, Operand, OperandId, TreeSnapshot};
+use crate::plan::{CopyPlan, EntryKind};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
@@ -144,21 +144,51 @@ impl<'a> MoveLedger<'a> {
 
     /// Run the gate for every operand, then remove the originals of each operand that passed.
     pub(crate) fn finish(self) -> MoveReport {
-        let kept = self
-            .plan
-            .operands()
-            .iter()
-            .map(|operand| KeptOperand {
-                source: operand.source.clone(),
-                problems: BTreeMap::new(),
-            })
-            .collect();
-        MoveReport {
+        let mut report = MoveReport {
             removed: Vec::new(),
-            kept,
+            kept: Vec::new(),
             removal_errors: Vec::new(),
             operands_with_removal_errors: 0,
+        };
+        for (index, operand) in self.plan.operands().iter().enumerate() {
+            let errors = self.remove_originals(index);
+            if errors.is_empty() {
+                report.removed.push(operand.source.clone());
+            } else {
+                report.operands_with_removal_errors += 1;
+                report.removal_errors.extend(errors);
+            }
         }
+        report
+    }
+
+    /// Remove the originals of one operand. Return each removal that failed.
+    ///
+    /// The call removes files and symlinks first, in plan order. It then
+    /// removes directories in reverse plan order with `remove_dir`, which
+    /// refuses a directory that is not empty.
+    fn remove_originals(&self, operand: usize) -> Vec<(PathBuf, String)> {
+        let entries = || {
+            self.plan
+                .entries()
+                .iter()
+                .filter(move |entry| entry.operand.index() == operand)
+        };
+        let mut errors = Vec::new();
+        for entry in entries().filter(|entry| entry.kind != EntryKind::Directory) {
+            if let Err(error) = fs::remove_file(&entry.source) {
+                errors.push((entry.source.clone(), error.to_string()));
+            }
+        }
+        let directories: Vec<_> = entries()
+            .filter(|entry| entry.kind == EntryKind::Directory)
+            .collect();
+        for entry in directories.into_iter().rev() {
+            if let Err(error) = fs::remove_dir(&entry.source) {
+                errors.push((entry.source.clone(), error.to_string()));
+            }
+        }
+        errors
     }
 }
 

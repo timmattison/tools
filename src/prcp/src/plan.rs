@@ -42,10 +42,6 @@ pub(crate) struct OperandId(usize);
 
 impl OperandId {
     /// Return the position of the operand in the list of sources.
-    #[allow(
-        dead_code,
-        reason = "slice D of issue #295 uses this for the move gate"
-    )]
     pub(crate) fn index(self) -> usize {
         self.0
     }
