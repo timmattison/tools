@@ -45,6 +45,7 @@
 
 mod destination;
 
+use crate::landing::Action;
 use crate::plan::{CopyPlan, EntryKind, OperandKind, TreeSnapshot};
 use destination::{DestinationTree, TreeChange};
 use std::collections::{BTreeMap, BTreeSet};
@@ -115,6 +116,15 @@ impl FileStamp {
     }
 }
 
+/// How the copy loop proved the data of one file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Verification {
+    /// The destination passed its Blake3 check against the source.
+    Passed,
+    /// The run skipped the Blake3 check (`--no-verify`). A move never skips it.
+    Skipped,
+}
+
 /// What the copy loop proved for one plan entry.
 #[derive(Debug, Clone, Copy)]
 enum Record {
@@ -141,6 +151,7 @@ enum Record {
 #[derive(Debug)]
 pub(crate) struct MoveLedger<'a> {
     plan: &'a CopyPlan,
+    action: Action,
     records: Vec<Option<Record>>,
     /// The snapshot of each destination root of a Directory operand, taken before the first copy.
     destination_before: BTreeMap<PathBuf, DestinationTree>,
@@ -154,7 +165,7 @@ impl<'a> MoveLedger<'a> {
     /// The call also takes the snapshot of each destination tree. Make the
     /// ledger right before the first copy, so that the snapshot shows the
     /// destination as the copy found it.
-    pub(crate) fn new(plan: &'a CopyPlan) -> Self {
+    pub(crate) fn new(plan: &'a CopyPlan, action: Action) -> Self {
         let destination_before = plan
             .operands()
             .iter()
@@ -172,6 +183,7 @@ impl<'a> MoveLedger<'a> {
             .collect();
         Self {
             plan,
+            action,
             records: vec![None; plan.entries().len()],
             destination_before,
             written,
@@ -209,7 +221,13 @@ impl<'a> MoveLedger<'a> {
     /// Call this right after the check. The call stamps the destination now.
     /// When that stamp fails, the entry stays without a record, so the gate
     /// keeps its originals.
-    pub(crate) fn record_file(&mut self, entry: usize, source_before_copy: FileStamp) {
+    pub(crate) fn record_file(
+        &mut self,
+        entry: usize,
+        source_before_copy: FileStamp,
+        verification: Verification,
+    ) {
+        let _ = verification;
         let Some(plan_entry) = self.plan.entries().get(entry) else {
             return;
         };
@@ -234,6 +252,7 @@ impl<'a> MoveLedger<'a> {
     /// Run the gate for every operand, then remove the originals of each operand that passed.
     pub(crate) fn finish(self) -> MoveReport {
         let mut report = MoveReport {
+            action: self.action,
             removed: Vec::new(),
             kept: Vec::new(),
             removal_errors: Vec::new(),
@@ -584,6 +603,8 @@ fn identity_problem(path: &Path, identity: Option<NodeIdentity>) -> Option<Probl
 /// The result of the gate and of the removal.
 #[derive(Debug)]
 pub(crate) struct MoveReport {
+    /// What the run did to its sources.
+    action: Action,
     /// The operand sources whose originals are all removed.
     pub(crate) removed: Vec<PathBuf>,
     /// The operands that kept their originals, with the reasons.
@@ -632,6 +653,14 @@ impl MoveReport {
     /// Count the operands whose originals stay: kept by the gate, or left by a failed removal.
     pub(crate) fn unfinished_count(&self) -> usize {
         self.kept.len() + self.operands_with_removal_errors
+    }
+
+    /// Return the one-line error for a run that is not complete.
+    pub(crate) fn summary(&self) -> String {
+        format!(
+            "The move did not finish: the originals of {} source(s) stay.",
+            self.unfinished_count()
+        )
     }
 }
 
@@ -811,10 +840,21 @@ mod tests {
         }
     }
 
-    /// Copy every entry of the plan as the copy loop does, except the sources in `skip`.
+    /// Copy every entry of the plan for a move, as the copy loop does, except the sources in `skip`.
     /// A skipped entry gets no record, as after a failed Blake3 check.
     fn copy_all<'a>(plan: &'a CopyPlan, skip: &[&Path]) -> MoveLedger<'a> {
-        let mut ledger = MoveLedger::new(plan);
+        run_all(plan, skip, Action::Move, Verification::Passed)
+    }
+
+    /// Copy every entry of the plan as the copy loop does for `action`, except the sources in
+    /// `skip`. Each copied file is recorded with `verification`.
+    fn run_all<'a>(
+        plan: &'a CopyPlan,
+        skip: &[&Path],
+        action: Action,
+        verification: Verification,
+    ) -> MoveLedger<'a> {
+        let mut ledger = MoveLedger::new(plan, action);
         for (index, entry) in plan.entries().iter().enumerate() {
             match &entry.kind {
                 EntryKind::Directory => {
@@ -825,7 +865,7 @@ mod tests {
                     let stamp = FileStamp::of(&entry.source).unwrap();
                     fs::copy(&entry.source, &entry.destination).unwrap();
                     if !skip.contains(&entry.source.as_path()) {
-                        ledger.record_file(index, stamp);
+                        ledger.record_file(index, stamp, verification);
                     }
                 }
                 EntryKind::Symlink { target } => {
@@ -1534,11 +1574,181 @@ mod tests {
     }
 
     #[test]
+    fn a_clean_copy_removes_nothing() {
+        let fixture = sample();
+        let ledger = run_all(&fixture.plan, &[], Action::Copy, Verification::Passed);
+
+        let report = ledger.finish();
+
+        assert!(report.is_complete(), "report: {report:?}");
+        assert!(report.removed.is_empty(), "report: {report:?}");
+        assert_originals_exist(&fixture.plan);
+    }
+
+    #[test]
+    fn a_copy_reports_a_file_that_appears_at_the_destination() {
+        let fixture = sample();
+        let ledger = run_all(&fixture.plan, &[], Action::Copy, Verification::Passed);
+        let intruder = fixture.dest.join("sub").join("new.txt");
+        write_file(&intruder, "new");
+
+        let report = ledger.finish();
+
+        assert!(!report.is_complete(), "report: {report:?}");
+        assert_eq!(
+            problem_list(&report),
+            vec![(intruder, Problem::NewAtDestination)]
+        );
+        assert_originals_exist(&fixture.plan);
+    }
+
+    #[test]
+    fn a_copy_leaves_out_an_entry_that_the_loop_did_not_copy() {
+        let fixture = sample();
+        let failed = fixture.src.join("sub").join("inner.txt");
+        let ledger = run_all(
+            &fixture.plan,
+            &[failed.as_path()],
+            Action::Copy,
+            Verification::Passed,
+        );
+
+        let report = ledger.finish();
+
+        assert!(report.is_complete(), "report: {report:?}");
+        assert_originals_exist(&fixture.plan);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_leaves_out_a_skipped_special_file() {
+        let fixture = sample_with(|src| {
+            let status = std::process::Command::new("mkfifo")
+                .arg(src.join("pipe"))
+                .status()
+                .unwrap();
+            assert!(status.success(), "mkfifo must work");
+        });
+        let ledger = run_all(&fixture.plan, &[], Action::Copy, Verification::Passed);
+
+        let report = ledger.finish();
+
+        assert!(report.is_complete(), "report: {report:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_leaves_out_a_part_that_the_plan_could_not_read() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = sample_with(|src| {
+            write_file(&src.join("locked").join("x.txt"), "x");
+            fs::set_permissions(src.join("locked"), fs::Permissions::from_mode(0o000)).unwrap();
+        });
+        let locked = fixture.src.join("locked");
+        if fs::read_dir(&locked).is_ok() {
+            // The lock does not work for root.
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+        let ledger = run_all(&fixture.plan, &[], Action::Copy, Verification::Passed);
+
+        let report = ledger.finish();
+
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(report.is_complete(), "report: {report:?}");
+    }
+
+    #[test]
+    fn a_move_without_a_hash_check_keeps_all_originals() {
+        let fixture = sample();
+        let ledger = run_all(&fixture.plan, &[], Action::Move, Verification::Skipped);
+
+        let report = ledger.finish();
+
+        assert!(report.removed.is_empty(), "report: {report:?}");
+        assert_eq!(
+            only_problems(&report).get(&fixture.src.join("top.txt")),
+            Some(&Problem::NotCopied)
+        );
+        assert_originals_exist(&fixture.plan);
+    }
+
+    #[test]
+    fn a_copy_without_a_hash_check_still_finds_a_changed_destination_file() {
+        let fixture = sample();
+        let ledger = run_all(&fixture.plan, &[], Action::Copy, Verification::Skipped);
+        let copy = fixture.dest.join("top.txt");
+        fs::write(&copy, "a longer text than before").unwrap();
+
+        let report = ledger.finish();
+
+        assert_eq!(
+            problem_list(&report),
+            vec![(copy, Problem::DestinationChanged)]
+        );
+    }
+
+    #[test]
+    fn the_report_of_a_copy_names_the_copy_and_keeps_no_originals() {
+        let mut problems = BTreeMap::new();
+        problems.insert(PathBuf::from("/d/s/new.txt"), Problem::NewAtDestination);
+        let report = MoveReport {
+            action: Action::Copy,
+            removed: Vec::new(),
+            kept: vec![KeptOperand {
+                source: PathBuf::from("/s"),
+                problems,
+            }],
+            removal_errors: Vec::new(),
+            operands_with_removal_errors: 0,
+        };
+
+        assert_eq!(
+            report.error_lines(),
+            vec![
+                "prcp found problems with the copy of '/s':",
+                "  '/d/s/new.txt' appeared at the destination during the run, and prcp did not \
+                 make it",
+                "Something outside prcp changed the source or the destination while prcp ran.",
+                "Another program or a person made those changes, not prcp. Make sure that \
+                 nothing else uses these paths, then run prcp again.",
+            ]
+        );
+        assert_eq!(
+            report.summary(),
+            "The copy did not pass its final check: 1 source(s) have problems."
+        );
+    }
+
+    #[test]
+    fn the_summary_of_a_move_names_the_originals_that_stay() {
+        let mut problems = BTreeMap::new();
+        problems.insert(PathBuf::from("/s/old.txt"), Problem::NotCopied);
+        let report = MoveReport {
+            action: Action::Move,
+            removed: Vec::new(),
+            kept: vec![KeptOperand {
+                source: PathBuf::from("/s"),
+                problems,
+            }],
+            removal_errors: Vec::new(),
+            operands_with_removal_errors: 0,
+        };
+
+        assert_eq!(
+            report.summary(),
+            "The move did not finish: the originals of 1 source(s) stay."
+        );
+    }
+
+    #[test]
     fn the_report_lists_each_kept_operand_with_its_problems_and_each_failed_removal() {
         let mut problems = BTreeMap::new();
         problems.insert(PathBuf::from("/s/late.txt"), Problem::NewSinceCopy);
         problems.insert(PathBuf::from("/s/old.txt"), Problem::NotCopied);
         let report = MoveReport {
+            action: Action::Move,
             removed: Vec::new(),
             kept: vec![KeptOperand {
                 source: PathBuf::from("/s"),
@@ -1569,6 +1779,7 @@ mod tests {
         problems.insert(PathBuf::from("/s/old.txt"), Problem::NotCopied);
         problems.insert(PathBuf::from("/s/pipe"), Problem::Skipped("fifo"));
         let report = MoveReport {
+            action: Action::Move,
             removed: Vec::new(),
             kept: vec![KeptOperand {
                 source: PathBuf::from("/s"),

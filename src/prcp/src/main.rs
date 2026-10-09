@@ -17,7 +17,7 @@ use clap::Parser;
 use colored::Colorize;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use indicatif::{HumanBytes, MultiProgress, ProgressBar};
-use move_gate::{FileStamp, MoveLedger};
+use move_gate::{FileStamp, MoveLedger, Verification};
 use plan::{CopyPlan, EntryKind};
 use termbar::{ProgressStyleBuilder, TerminalWidthWatcher};
 // Blake3 imported via blake3 crate (no Digest trait needed)
@@ -815,7 +815,7 @@ async fn main() -> Result<()> {
     let mut completed_files = 0_usize;
 
     // With --rm, the ledger holds what the loop proved. No source goes before the gate runs.
-    let mut ledger = MoveLedger::new(&plan);
+    let mut ledger = MoveLedger::new(&plan, action);
 
     // Run each plan entry. The plan lists every directory before its contents.
     for (index, entry) in plan.entries().iter().enumerate() {
@@ -1137,7 +1137,7 @@ async fn main() -> Result<()> {
                 // Record the passed Blake3 check. The move gate removes a source only
                 // after the loop, and only when every record of its operand holds.
                 if matches!(verify_outcome, VerifyOutcome::Passed { .. }) {
-                    ledger.record_file(index, source_stamp);
+                    ledger.record_file(index, source_stamp, Verification::Passed);
                 }
 
                 // Print per-file stats (unless quiet mode, but always show problems)
@@ -1329,10 +1329,7 @@ async fn main() -> Result<()> {
 
     // A move that kept originals never ends in success.
     if let Some(report) = move_report.filter(|report| !report.is_complete()) {
-        anyhow::bail!(
-            "The move did not finish: the originals of {} source(s) stay.",
-            report.unfinished_count()
-        );
+        anyhow::bail!("{}", report.summary());
     }
 
     Ok(())
