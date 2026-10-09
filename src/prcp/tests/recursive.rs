@@ -659,3 +659,33 @@ fn move_with_an_unreadable_file_keeps_every_original_and_fails() {
         "stderr: {stderr}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn move_of_a_tree_with_a_fifo_keeps_every_original_and_fails() {
+    let temp = TempDir::new().unwrap();
+    let src = temp.path().join("src");
+    let dest = temp.path().join("dest");
+    make_sample_tree(&src);
+    let fifo = src.join("pipe");
+    let status = Command::new("mkfifo").arg(&fifo).status().unwrap();
+    assert!(status.success(), "mkfifo must work");
+
+    let output = run_prcp([
+        OsString::from("--rm"),
+        OsString::from("-R"),
+        OsString::from("-y"),
+        src.clone().into_os_string(),
+        dest.clone().into_os_string(),
+    ]);
+
+    let stderr = visible_stderr(&output);
+    assert!(!output.status.success(), "stderr: {stderr}");
+    assert!(fifo.exists(), "stderr: {stderr}");
+    for (relative, _) in SAMPLE_FILES {
+        assert!(src.join(relative).exists(), "{relative} must stay");
+    }
+    assert!(src.join(SAMPLE_EMPTY_DIR).is_dir());
+    assert!(stderr.contains("fifo"), "stderr: {stderr}");
+    assert!(stderr.contains("Kept the originals of"), "stderr: {stderr}");
+}
