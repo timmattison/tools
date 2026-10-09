@@ -48,6 +48,7 @@ mod destination;
 use crate::plan::{CopyPlan, EntryKind, OperandKind, TreeSnapshot};
 use destination::{DestinationTree, TreeChange};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -450,7 +451,22 @@ struct Findings {
 
 impl Findings {
     /// Note a problem for a path. A path that already has a problem keeps the first one.
+    ///
+    /// A Finder file that appeared or changed becomes `FinderMetadata`, so its
+    /// line says why it is there.
     fn note(&mut self, path: &Path, problem: Problem) {
+        let problem = if path.file_name() == Some(OsStr::new(FINDER_FILE_NAME))
+            && matches!(
+                problem,
+                Problem::NewSinceCopy
+                    | Problem::SourceChanged
+                    | Problem::NewAtDestination
+                    | Problem::DestinationChanged
+            ) {
+            Problem::FinderMetadata
+        } else {
+            problem
+        };
         self.problems.entry(path.to_path_buf()).or_insert(problem);
     }
 
@@ -479,7 +495,10 @@ impl Findings {
             let Some(new) = self.appeared.remove(&identity) else {
                 continue;
             };
-            if self.problems.get(&new) == Some(&Problem::NewAtDestination) {
+            if matches!(
+                self.problems.get(&new),
+                Some(Problem::NewAtDestination | Problem::FinderMetadata)
+            ) {
                 self.problems.remove(&new);
             }
             self.problems
@@ -624,6 +643,9 @@ pub(crate) struct KeptOperand {
     /// The first problem of each path, in path order.
     pub(crate) problems: BTreeMap<PathBuf, Problem>,
 }
+
+/// The name of the file that Finder writes into a folder that a person opens.
+const FINDER_FILE_NAME: &str = ".DS_Store";
 
 /// The note at the end of a report that holds a change from outside prcp.
 const OUTSIDE_CHANGE_NOTE: [&str; 2] = [
