@@ -731,6 +731,9 @@ async fn main() -> Result<()> {
     // Track early exit errors (for proper cleanup before returning)
     let mut early_exit_error: Option<String> = None;
 
+    // Track a stop before the end of the plan (cancel, declined prompt, or fatal error)
+    let mut stopped_early = false;
+
     // Track completed files for batch progress display
     let mut completed_files = 0_usize;
 
@@ -739,6 +742,7 @@ async fn main() -> Result<()> {
         // Check for shutdown
         if shutdown.load(Ordering::SeqCst) {
             eprintln!("\nCopy cancelled by user");
+            stopped_early = true;
             break;
         }
 
@@ -757,6 +761,7 @@ async fn main() -> Result<()> {
                     entry.destination.display(),
                     e
                 ));
+                stopped_early = true;
                 break;
             }
             continue;
@@ -782,6 +787,7 @@ async fn main() -> Result<()> {
                         continue;
                     }
                     early_exit_error = Some(format!("{error_msg} ('{}')", dest.display()));
+                    stopped_early = true;
                     break;
                 }
             }
@@ -803,6 +809,7 @@ async fn main() -> Result<()> {
                         continue;
                     }
                     early_exit_error = Some(format!("{error_msg} ('{}')", dest.display()));
+                    stopped_early = true;
                     break;
                 }
             }
@@ -868,6 +875,7 @@ async fn main() -> Result<()> {
                     continue;
                 } else {
                     println!("Copy cancelled");
+                    stopped_early = true;
                     break;
                 }
             }
@@ -1028,6 +1036,7 @@ async fn main() -> Result<()> {
 
                 // Exit early if verification was cancelled (cleanup will happen at end of main)
                 if early_exit_error.is_some() {
+                    stopped_early = true;
                     break;
                 }
 
@@ -1135,6 +1144,18 @@ async fn main() -> Result<()> {
                     anyhow::bail!("Failed to copy '{}': {}", source.display(), e);
                 }
             }
+        }
+    }
+
+    // Set the directory permissions last, so a read-only source directory does not
+    // stop the copy of its contents. A run that stopped early leaves them as they are.
+    if !stopped_early {
+        for (path, error) in plan.apply_directory_permissions() {
+            eprintln!(
+                "Warning: Cannot set the permissions of '{}': {}",
+                path.display(),
+                error
+            );
         }
     }
 
