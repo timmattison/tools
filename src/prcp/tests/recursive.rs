@@ -524,3 +524,35 @@ fn unreadable_subdirectory_stops_the_copy_before_it_starts() {
     assert!(stderr.contains("--continue-on-error"), "stderr: {stderr}");
     assert!(!dest.exists(), "nothing may be copied");
 }
+
+#[cfg(unix)]
+#[test]
+fn unreadable_subdirectory_with_continue_on_error_copies_the_rest_and_fails() {
+    let temp = TempDir::new().unwrap();
+    let src = temp.path().join("src");
+    let dest = temp.path().join("dest");
+    let Some(_restore) = make_tree_with_locked_directory(&src) else {
+        return;
+    };
+    // The copy of the locked directory gets the same mode, so restore it as well.
+    let _restore_copy = ModeRestore(vec![dest.join("locked")]);
+
+    let output = run_prcp([
+        OsString::from("-R"),
+        OsString::from("-y"),
+        OsString::from("-q"),
+        OsString::from("--continue-on-error"),
+        src.clone().into_os_string(),
+        dest.clone().into_os_string(),
+    ]);
+
+    let stderr = visible_stderr(&output);
+    assert!(!output.status.success(), "stderr: {stderr}");
+    assert_eq!(fs::read_to_string(dest.join("a.txt")).unwrap(), "a");
+    assert_eq!(fs::read_to_string(dest.join("b.txt")).unwrap(), "b");
+    assert!(
+        stderr.contains(&src.join("locked").display().to_string()),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("Cannot read"), "stderr: {stderr}");
+}
