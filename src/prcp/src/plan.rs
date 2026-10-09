@@ -175,6 +175,7 @@ impl CopyPlan {
         recursive: bool,
     ) -> Result<Self> {
         let _ = recursive;
+        let container = destination.is_dir();
         let mut plan = Self {
             operands: Vec::new(),
             entries: Vec::new(),
@@ -194,7 +195,11 @@ impl CopyPlan {
             plan.entries.push(PlanEntry {
                 operand,
                 source: source.clone(),
-                destination: destination.join(name),
+                destination: if container {
+                    destination.join(name)
+                } else {
+                    destination.to_path_buf()
+                },
                 kind: EntryKind::File,
             });
         }
