@@ -819,4 +819,25 @@ mod tests {
             "unexpected error: {error}"
         );
     }
+
+    #[test]
+    fn multibyte_names_map_to_the_matching_destination_paths() {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("日本語");
+        write_file(&src.join("café.txt"), "c");
+        write_file(&src.join("🎉.txt"), "p");
+        let dest = temp.path().join("dest");
+        fs::create_dir(&dest).unwrap();
+
+        let plan = CopyPlan::build(std::slice::from_ref(&src), &dest, true).unwrap();
+
+        assert_eq!(
+            plan.entries(),
+            [
+                dir_entry(0, &src, &dest.join("日本語")),
+                file_entry(0, &src.join("café.txt"), &dest.join("日本語/café.txt")),
+                file_entry(0, &src.join("🎉.txt"), &dest.join("日本語/🎉.txt")),
+            ]
+        );
+    }
 }
