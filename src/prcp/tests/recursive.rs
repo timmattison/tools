@@ -604,3 +604,58 @@ fn move_of_a_tree_removes_the_source_tree_after_every_hash_check() {
     }
     assert!(dest.join(SAMPLE_EMPTY_DIR).is_dir());
 }
+
+/// Make a tree with two readable files, a locked file, and a readable file next to it.
+/// Return `None` when the lock does not work, which is the case for root.
+#[cfg(unix)]
+fn make_tree_with_locked_file(src: &Path) -> Option<ModeRestore> {
+    use std::os::unix::fs::PermissionsExt;
+
+    write_file(&src.join("a.txt"), "a");
+    write_file(&src.join("sub").join("b.txt"), "b");
+    write_file(&src.join("sub").join("locked.txt"), "locked");
+    let locked = src.join("sub").join("locked.txt");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let restore = ModeRestore(vec![locked.clone()]);
+    if fs::File::open(&locked).is_ok() {
+        return None;
+    }
+    Some(restore)
+}
+
+#[cfg(unix)]
+#[test]
+fn move_with_an_unreadable_file_keeps_every_original_and_fails() {
+    let temp = TempDir::new().unwrap();
+    let src = temp.path().join("src");
+    let dest = temp.path().join("dest");
+    let Some(_restore) = make_tree_with_locked_file(&src) else {
+        return;
+    };
+
+    let output = run_prcp([
+        OsString::from("--rm"),
+        OsString::from("-R"),
+        OsString::from("--continue-on-error"),
+        OsString::from("-y"),
+        OsString::from("-q"),
+        src.clone().into_os_string(),
+        dest.clone().into_os_string(),
+    ]);
+
+    let stderr = visible_stderr(&output);
+    assert!(!output.status.success(), "stderr: {stderr}");
+    assert!(src.join("a.txt").exists(), "stderr: {stderr}");
+    assert!(src.join("sub").join("b.txt").exists(), "stderr: {stderr}");
+    assert!(src.join("sub").join("locked.txt").exists());
+    assert_eq!(fs::read_to_string(dest.join("a.txt")).unwrap(), "a");
+    assert_eq!(
+        fs::read_to_string(dest.join("sub").join("b.txt")).unwrap(),
+        "b"
+    );
+    assert!(stderr.contains("Kept the originals of"), "stderr: {stderr}");
+    assert!(
+        stderr.contains(&src.display().to_string()),
+        "stderr: {stderr}"
+    );
+}
