@@ -422,6 +422,50 @@ fn resolve_sources(patterns: &[PathBuf], literal: bool, recursive: bool) -> Resu
     Ok(files)
 }
 
+/// Decide if prcp may overwrite an existing destination.
+///
+/// `--yes` allows it and `--skip-existing` refuses it. Without either flag, this
+/// function pauses the key listener, leaves raw mode, and asks the user. Returns
+/// true when the destination may be overwritten.
+///
+/// # Errors
+///
+/// Returns an error when prcp cannot write the prompt or read the answer.
+fn confirm_overwrite(
+    dest: &Path,
+    args: &Args,
+    raw_mode_guard: &mut RawModeGuard,
+    input_active: &AtomicBool,
+) -> Result<bool> {
+    if args.yes {
+        return Ok(true);
+    }
+    if args.skip_existing {
+        return Ok(false);
+    }
+
+    // Pause key listener while prompting
+    input_active.store(true, Ordering::SeqCst);
+
+    eprint!(
+        "\nDestination '{}' already exists. Overwrite? (y/N): ",
+        dest.display()
+    );
+    io::stderr().flush()?;
+
+    // Temporarily disable raw mode for input (guard ensures restoration)
+    raw_mode_guard.disable_temporarily();
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+
+    // Re-enable raw mode and resume key listener
+    raw_mode_guard.restore();
+    input_active.store(false, Ordering::SeqCst);
+
+    Ok(input.trim().eq_ignore_ascii_case("y"))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -698,32 +742,8 @@ async fn main() -> Result<()> {
 
         // Check if destination exists
         if dest_path.exists() {
-            let should_overwrite = if args.yes {
-                true
-            } else if args.skip_existing {
-                false
-            } else {
-                // Pause key listener while prompting
-                input_active.store(true, Ordering::SeqCst);
-
-                eprint!(
-                    "\nDestination '{}' already exists. Overwrite? (y/N): ",
-                    dest_path.display()
-                );
-                io::stderr().flush()?;
-
-                // Temporarily disable raw mode for input (guard ensures restoration)
-                raw_mode_guard.disable_temporarily();
-
-                let mut input = String::new();
-                io::stdin().read_line(&mut input)?;
-
-                // Re-enable raw mode and resume key listener
-                raw_mode_guard.restore();
-                input_active.store(false, Ordering::SeqCst);
-
-                input.trim().eq_ignore_ascii_case("y")
-            };
+            let should_overwrite =
+                confirm_overwrite(&dest_path, &args, &mut raw_mode_guard, &input_active)?;
 
             if !should_overwrite {
                 // When --skip-existing is used, track as skipped (not a failure)
