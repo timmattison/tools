@@ -1051,6 +1051,16 @@ const LOG_HASH_BASE_RGB: (u8, u8, u8) = (255, 215, 0);
 const LOG_SUBJECT_BASE_RGB: (u8, u8, u8) = (220, 220, 220);
 /// Base RGB for the commit-log age column.
 const LOG_AGE_BASE_RGB: (u8, u8, u8) = (190, 190, 190);
+/// RGB of [`BRANCH_MARK`] in truecolor mode: a medium blue.
+///
+/// No other part of gsw paints blue. Red tells of a conflict or a deletion,
+/// green of a staged or added file, yellow of a hash or an unstaged file,
+/// cyan of an untracked file or a bar, and magenta of a rename. So the mark
+/// tells of no problem and of no file status. The contrast of this blue is
+/// about 6.5:1 on black and 3.2:1 on white, so the mark is visible on a dark
+/// theme and on a light theme. The mark does not fade with age, because it
+/// tells which set a commit is in, and not how old the commit is.
+const BRANCH_MARK_RGB: (u8, u8, u8) = (70, 140, 255);
 
 // --- File-row truecolor base palette ---------------------------------------
 //
@@ -2942,13 +2952,19 @@ mod tests {
     }
 
     #[test]
-    fn the_mark_takes_the_paint_of_the_header_and_the_blank_takes_none() {
-        // Issue #541: the header counts the commits that the mark shows. So
-        // the mark takes the paint of the header: bold, on the default
-        // foreground, in 8-color mode and in truecolor mode. The blank of a
-        // row of a base commit takes no paint. The codes are forced on, so
-        // the test reads the paint whether it writes to a terminal or not.
-        for truecolor in [false, true] {
+    fn the_mark_is_painted_blue_and_the_blank_takes_none() {
+        // Issue #541: the mark is blue, a color that no other part of gsw
+        // paints, so it tells of no problem and of no file status. Truecolor
+        // mode paints `BRANCH_MARK_RGB`. 8-color mode paints bright blue,
+        // because plain blue is too dark to read on many dark themes. The
+        // blank of a row of a base commit takes no paint. The codes are
+        // forced on, so the test reads the paint whether it writes to a
+        // terminal or not.
+        let (r, g, b) = BRANCH_MARK_RGB;
+        for (truecolor, mark_codes) in [
+            (false, "\x1b[94m".to_string()),
+            (true, format!("{}{r};{g};{b}m", testcolor::TRUECOLOR_FG)),
+        ] {
             let mut o = opts();
             o.log_lines = 5;
             o.truecolor = truecolor;
@@ -2957,17 +2973,15 @@ mod tests {
                 render(&snap_with_a_branch_row("a commit on the branch"), &o)
             });
 
-            let header = painted.lines().next().unwrap_or_default();
-            let header_codes = leading_codes(header);
-            assert!(
-                !header_codes.is_empty(),
-                "truecolor={truecolor}: the header is painted: {header:?}",
-            );
             let marked = row_with(&painted, BRANCH_HASH);
+            assert_eq!(
+                leading_codes(marked),
+                mark_codes,
+                "truecolor={truecolor}: the mark is blue: {marked:?}",
+            );
             assert!(
-                marked.starts_with(&format!("{header_codes}{BRANCH_MARK}")),
-                "truecolor={truecolor}: the mark takes the codes {header_codes:?} of the \
-                 header: {marked:?}",
+                marked.starts_with(&format!("{mark_codes}{BRANCH_MARK}")),
+                "truecolor={truecolor}: the codes paint the mark: {marked:?}",
             );
             let blank = row_with(&painted, BASE_HASH);
             assert!(
