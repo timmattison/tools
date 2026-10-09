@@ -968,4 +968,20 @@ mod tests {
             "unexpected error: {error}"
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_source_is_not_a_file() {
+        let temp = TempDir::new().unwrap();
+        let link = temp.path().join("dangling");
+        std::os::unix::fs::symlink(temp.path().join("missing"), &link).unwrap();
+        let dest = temp.path().join("dest");
+
+        let error = CopyPlan::build(std::slice::from_ref(&link), &dest, true).unwrap_err();
+
+        assert!(
+            error.to_string().contains("is not a file"),
+            "unexpected error: {error}"
+        );
+    }
 }
