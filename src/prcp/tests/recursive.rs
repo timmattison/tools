@@ -466,7 +466,10 @@ fn recursive_copy_skips_a_fifo_and_warns() {
 
     let stderr = visible_stderr(&output);
     assert!(output.status.success(), "stderr: {stderr}");
-    assert!(stderr.contains(&fifo.display().to_string()), "stderr: {stderr}");
+    assert!(
+        stderr.contains(&fifo.display().to_string()),
+        "stderr: {stderr}"
+    );
     assert!(stderr.contains("fifo"), "stderr: {stderr}");
     assert_eq!(fs::read_to_string(dest.join("a.txt")).unwrap(), "a");
     assert_eq!(fs::read_to_string(dest.join("b.txt")).unwrap(), "b");
@@ -474,4 +477,50 @@ fn recursive_copy_skips_a_fifo_and_warns() {
         fs::symlink_metadata(dest.join("pipe")).is_err(),
         "the fifo must not exist at the destination"
     );
+}
+
+/// Make a source tree with two readable files and one directory that nobody can read.
+/// Return `None` when the lock does not work, which is the case for root.
+#[cfg(unix)]
+fn make_tree_with_locked_directory(src: &Path) -> Option<ModeRestore> {
+    use std::os::unix::fs::PermissionsExt;
+
+    write_file(&src.join("a.txt"), "a");
+    write_file(&src.join("b.txt"), "b");
+    write_file(&src.join("locked").join("c.txt"), "c");
+    let locked = src.join("locked");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let restore = ModeRestore(vec![locked.clone()]);
+    if fs::read_dir(&locked).is_ok() {
+        return None;
+    }
+    Some(restore)
+}
+
+#[cfg(unix)]
+#[test]
+fn unreadable_subdirectory_stops_the_copy_before_it_starts() {
+    let temp = TempDir::new().unwrap();
+    let src = temp.path().join("src");
+    let dest = temp.path().join("dest");
+    let Some(_restore) = make_tree_with_locked_directory(&src) else {
+        return;
+    };
+
+    let output = run_prcp([
+        OsString::from("-R"),
+        OsString::from("-y"),
+        OsString::from("-q"),
+        src.clone().into_os_string(),
+        dest.clone().into_os_string(),
+    ]);
+
+    let stderr = visible_stderr(&output);
+    assert!(!output.status.success(), "stderr: {stderr}");
+    assert!(
+        stderr.contains(&src.join("locked").display().to_string()),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("--continue-on-error"), "stderr: {stderr}");
+    assert!(!dest.exists(), "nothing may be copied");
 }
