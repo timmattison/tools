@@ -17,7 +17,7 @@ use clap::Parser;
 use colored::Colorize;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use indicatif::{HumanBytes, MultiProgress, ProgressBar};
-use move_gate::{FileStamp, MoveLedger, Verification};
+use move_gate::{FileStamp, RunLedger, Verification};
 use plan::{CopyPlan, EntryKind};
 use termbar::{ProgressStyleBuilder, TerminalWidthWatcher};
 // Blake3 imported via blake3 crate (no Digest trait needed)
@@ -816,7 +816,7 @@ async fn main() -> Result<()> {
 
     // The ledger holds what the loop proved, and a snapshot of the destination as the
     // copy finds it. The final check after the loop compares both with the tree.
-    let mut ledger = MoveLedger::new(&plan, action);
+    let mut ledger = RunLedger::new(&plan, action);
 
     // Run each plan entry. The plan lists every directory before its contents.
     for (index, entry) in plan.entries().iter().enumerate() {

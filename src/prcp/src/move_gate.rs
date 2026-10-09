@@ -153,7 +153,7 @@ enum Record {
 
 /// The positive results of one run, one slot for each plan entry, and the destination before the run.
 #[derive(Debug)]
-pub(crate) struct MoveLedger<'a> {
+pub(crate) struct RunLedger<'a> {
     plan: &'a CopyPlan,
     action: Action,
     records: Vec<Option<Record>>,
@@ -165,7 +165,7 @@ pub(crate) struct MoveLedger<'a> {
     first_entry: BTreeMap<PathBuf, usize>,
 }
 
-impl<'a> MoveLedger<'a> {
+impl<'a> RunLedger<'a> {
     /// Make an empty ledger for `plan`. Every entry starts without a record.
     ///
     /// The call also takes the snapshot of each destination tree. Make the
@@ -187,7 +187,9 @@ impl<'a> MoveLedger<'a> {
             .collect();
         let mut first_entry = BTreeMap::new();
         for (index, entry) in plan.entries().iter().enumerate() {
-            first_entry.entry(entry.destination.clone()).or_insert(index);
+            first_entry
+                .entry(entry.destination.clone())
+                .or_insert(index);
         }
         Self {
             plan,
@@ -326,11 +328,11 @@ impl<'a> MoveLedger<'a> {
 
     /// Run the final check for every operand. For a move, then remove the originals of each
     /// operand that passed. A copy removes nothing.
-    pub(crate) fn finish(self) -> MoveReport {
-        let mut report = MoveReport {
+    pub(crate) fn finish(self) -> RunReport {
+        let mut report = RunReport {
             action: self.action,
             removed: Vec::new(),
-            kept: Vec::new(),
+            with_problems: Vec::new(),
             removal_errors: Vec::new(),
             operands_with_removal_errors: 0,
         };
@@ -338,7 +340,7 @@ impl<'a> MoveLedger<'a> {
         for (index, operand) in self.plan.operands().iter().enumerate() {
             let problems = self.find_problems(index, &last_writers);
             if !problems.is_empty() {
-                report.kept.push(KeptOperand {
+                report.with_problems.push(OperandProblems {
                     source: operand.source.clone(),
                     problems,
                 });
@@ -788,32 +790,33 @@ impl fmt::Display for ChangeBeforeCopy {
 
 /// The result of the gate and of the removal.
 #[derive(Debug)]
-pub(crate) struct MoveReport {
+pub(crate) struct RunReport {
     /// What the run did to its sources.
     action: Action,
     /// The operand sources whose originals are all removed.
     pub(crate) removed: Vec<PathBuf>,
-    /// The operands that kept their originals, with the reasons.
-    pub(crate) kept: Vec<KeptOperand>,
+    /// The operands whose final check found a problem, with the problems. A move keeps their
+    /// originals.
+    pub(crate) with_problems: Vec<OperandProblems>,
     /// Each removal that failed, with the text of the error.
     pub(crate) removal_errors: Vec<(PathBuf, String)>,
     operands_with_removal_errors: usize,
 }
 
-impl MoveReport {
-    /// Return true when no operand kept its originals and no removal failed.
+impl RunReport {
+    /// Return true when no operand has a problem and no removal failed.
     pub(crate) fn is_complete(&self) -> bool {
-        self.kept.is_empty() && self.removal_errors.is_empty()
+        self.with_problems.is_empty() && self.removal_errors.is_empty()
     }
 
-    /// Write the report for a person: one block for each kept operand, then one line
+    /// Write the report for a person: one block for each operand with a problem, then one line
     /// for each failed removal.
     ///
     /// When a problem comes from outside prcp, the report ends with
     /// [`OUTSIDE_CHANGE_NOTE`], so a person does not think that prcp is broken.
     pub(crate) fn error_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
-        for operand in &self.kept {
+        for operand in &self.with_problems {
             let source = operand.source.display();
             lines.push(match self.action {
                 Action::Move => {
@@ -829,7 +832,7 @@ impl MoveReport {
             lines.push(format!("Cannot remove '{}': {error}", path.display()));
         }
         let outside = self
-            .kept
+            .with_problems
             .iter()
             .flat_map(|operand| operand.problems.values())
             .any(Problem::is_outside_change);
@@ -839,9 +842,9 @@ impl MoveReport {
         lines
     }
 
-    /// Count the operands whose originals stay: kept by the gate, or left by a failed removal.
+    /// Count the operands that did not finish: with a problem, or with a failed removal.
     pub(crate) fn unfinished_count(&self) -> usize {
-        self.kept.len() + self.operands_with_removal_errors
+        self.with_problems.len() + self.operands_with_removal_errors
     }
 
     /// Return the one-line error for a run that is not complete.
@@ -859,9 +862,9 @@ impl MoveReport {
     }
 }
 
-/// One operand that kept its originals.
+/// One operand whose final check found a problem.
 #[derive(Debug)]
-pub(crate) struct KeptOperand {
+pub(crate) struct OperandProblems {
     /// The source path of the operand.
     pub(crate) source: PathBuf,
     /// The first problem of each path, in path order.
@@ -957,7 +960,11 @@ impl fmt::Display for Problem {
                 f.write_str("appeared at the destination during the run, and prcp did not make it")
             }
             Self::MovedAtDestination { to } => {
-                write!(f, "was renamed or moved to '{}' during the run", to.display())
+                write!(
+                    f,
+                    "was renamed or moved to '{}' during the run",
+                    to.display()
+                )
             }
             Self::ReplacedInRun { by } => write!(
                 f,
@@ -1051,7 +1058,7 @@ mod tests {
 
     /// Copy every entry of the plan for a move, as the copy loop does, except the sources in `skip`.
     /// A skipped entry gets no record, as after a failed Blake3 check.
-    fn copy_all<'a>(plan: &'a CopyPlan, skip: &[&Path]) -> MoveLedger<'a> {
+    fn copy_all<'a>(plan: &'a CopyPlan, skip: &[&Path]) -> RunLedger<'a> {
         run_all(plan, skip, Action::Move, Verification::Passed)
     }
 
@@ -1062,8 +1069,8 @@ mod tests {
         skip: &[&Path],
         action: Action,
         verification: Verification,
-    ) -> MoveLedger<'a> {
-        let mut ledger = MoveLedger::new(plan, action);
+    ) -> RunLedger<'a> {
+        let mut ledger = RunLedger::new(plan, action);
         for (index, entry) in plan.entries().iter().enumerate() {
             let record = !skip.contains(&entry.source.as_path());
             make_entry(&mut ledger, index, entry, record, verification);
@@ -1074,7 +1081,7 @@ mod tests {
     /// Make one entry as the copy loop does, and record it. A file is recorded only when
     /// `record` is true, with `verification`.
     fn make_entry(
-        ledger: &mut MoveLedger<'_>,
+        ledger: &mut RunLedger<'_>,
         index: usize,
         entry: &PlanEntry,
         record: bool,
@@ -1121,10 +1128,10 @@ mod tests {
         }
     }
 
-    /// Return the problems that the report holds for the one kept operand.
-    fn only_problems(report: &MoveReport) -> &BTreeMap<PathBuf, Problem> {
-        assert_eq!(report.kept.len(), 1, "report: {report:?}");
-        &report.kept[0].problems
+    /// Return the problems that the report holds for the one operand with problems.
+    fn only_problems(report: &RunReport) -> &BTreeMap<PathBuf, Problem> {
+        assert_eq!(report.with_problems.len(), 1, "report: {report:?}");
+        &report.with_problems[0].problems
     }
 
     #[test]
@@ -1459,8 +1466,8 @@ mod tests {
         assert!(!fixture.src.exists(), "the source tree must be gone");
     }
 
-    /// Return the problems of the one kept operand as a list in path order.
-    fn problem_list(report: &MoveReport) -> Vec<(PathBuf, Problem)> {
+    /// Return the problems of the one operand with problems as a list in path order.
+    fn problem_list(report: &RunReport) -> Vec<(PathBuf, Problem)> {
         only_problems(report)
             .iter()
             .map(|(path, problem)| (path.clone(), problem.clone()))
@@ -1698,10 +1705,10 @@ mod tests {
         let report = ledger.finish();
 
         assert_eq!(report.removed, vec![good.clone()], "report: {report:?}");
-        assert_eq!(report.kept.len(), 1);
-        assert_eq!(report.kept[0].source, bad);
+        assert_eq!(report.with_problems.len(), 1);
+        assert_eq!(report.with_problems[0].source, bad);
         assert_eq!(
-            report.kept[0].problems.get(&late),
+            report.with_problems[0].problems.get(&late),
             Some(&Problem::NewSinceCopy)
         );
         assert!(!good.exists(), "the good operand must be gone");
@@ -1755,7 +1762,7 @@ mod tests {
         assert!(!report.is_complete());
         assert_eq!(report.removed, vec![first.clone()]);
         assert_eq!(
-            report.kept[0].problems.get(&second),
+            report.with_problems[0].problems.get(&second),
             Some(&Problem::NotCopied)
         );
         assert!(!first.exists());
@@ -1915,10 +1922,10 @@ mod tests {
     fn the_report_of_a_copy_names_the_copy_and_keeps_no_originals() {
         let mut problems = BTreeMap::new();
         problems.insert(PathBuf::from("/d/s/new.txt"), Problem::NewAtDestination);
-        let report = MoveReport {
+        let report = RunReport {
             action: Action::Copy,
             removed: Vec::new(),
-            kept: vec![KeptOperand {
+            with_problems: vec![OperandProblems {
                 source: PathBuf::from("/s"),
                 problems,
             }],
@@ -1947,10 +1954,10 @@ mod tests {
     fn the_summary_of_a_move_names_the_originals_that_stay() {
         let mut problems = BTreeMap::new();
         problems.insert(PathBuf::from("/s/old.txt"), Problem::NotCopied);
-        let report = MoveReport {
+        let report = RunReport {
             action: Action::Move,
             removed: Vec::new(),
-            kept: vec![KeptOperand {
+            with_problems: vec![OperandProblems {
                 source: PathBuf::from("/s"),
                 problems,
             }],
@@ -1975,7 +1982,7 @@ mod tests {
     #[test]
     fn a_planned_path_that_appears_before_its_copy_is_a_change_before_copy() {
         let fixture = sample();
-        let ledger = MoveLedger::new(&fixture.plan, Action::Move);
+        let ledger = RunLedger::new(&fixture.plan, Action::Move);
         let source = fixture.src.join("top.txt");
         let intruder = fixture.dest.join("top.txt");
         write_file(&intruder, "not from prcp");
@@ -1995,7 +2002,7 @@ mod tests {
     #[test]
     fn a_planned_file_from_before_the_copy_that_changes_is_a_change_before_copy() {
         let fixture = sample_into_existing(|root| write_file(&root.join("top.txt"), "old"));
-        let ledger = MoveLedger::new(&fixture.plan, Action::Copy);
+        let ledger = RunLedger::new(&fixture.plan, Action::Copy);
         fs::write(fixture.dest.join("top.txt"), "a longer text than before").unwrap();
 
         let source = fixture.src.join("top.txt");
@@ -2010,7 +2017,7 @@ mod tests {
     #[test]
     fn a_planned_file_from_before_the_copy_that_is_removed_is_a_change_before_copy() {
         let fixture = sample_into_existing(|root| write_file(&root.join("top.txt"), "old"));
-        let ledger = MoveLedger::new(&fixture.plan, Action::Copy);
+        let ledger = RunLedger::new(&fixture.plan, Action::Copy);
         fs::remove_file(fixture.dest.join("top.txt")).unwrap();
 
         let source = fixture.src.join("top.txt");
@@ -2025,7 +2032,7 @@ mod tests {
     #[test]
     fn a_planned_finder_file_that_appears_before_its_copy_names_finder() {
         let fixture = sample_with(|src| write_file(&src.join(".DS_Store"), "source"));
-        let ledger = MoveLedger::new(&fixture.plan, Action::Copy);
+        let ledger = RunLedger::new(&fixture.plan, Action::Copy);
         write_file(&fixture.dest.join(".DS_Store"), "made by Finder");
 
         let source = fixture.src.join(".DS_Store");
@@ -2047,7 +2054,7 @@ mod tests {
         write_file(&second, "second");
         fs::create_dir(&dest).unwrap();
         let plan = CopyPlan::build(&[first.clone(), second], &dest, false).unwrap();
-        let ledger = MoveLedger::new(&plan, Action::Copy);
+        let ledger = RunLedger::new(&plan, Action::Copy);
         write_file(&dest.join("first.txt"), "not from prcp");
 
         let change = ledger.change_before_copy(entry_index(&plan, &first));
@@ -2061,7 +2068,7 @@ mod tests {
     #[test]
     fn a_planned_path_that_nobody_touches_is_no_change() {
         let fixture = sample_into_existing(|root| write_file(&root.join("top.txt"), "old"));
-        let ledger = MoveLedger::new(&fixture.plan, Action::Copy);
+        let ledger = RunLedger::new(&fixture.plan, Action::Copy);
 
         for index in 0..fixture.plan.entries().len() {
             assert_eq!(ledger.change_before_copy(index), None, "entry {index}");
@@ -2078,7 +2085,7 @@ mod tests {
         write_file(&b, "from b");
         fs::create_dir(&dest).unwrap();
         let plan = CopyPlan::build(&[a, b.clone()], &dest, false).unwrap();
-        let ledger = MoveLedger::new(&plan, Action::Copy);
+        let ledger = RunLedger::new(&plan, Action::Copy);
         write_file(&dest.join("same.txt"), "from a");
 
         assert_eq!(ledger.change_before_copy(entry_index(&plan, &b)), None);
@@ -2151,8 +2158,8 @@ mod tests {
 
     /// Run the plan as `run_all` does, but leave the destination of the source `kept` as it
     /// was, as `--skip-existing` does.
-    fn run_all_keeping<'a>(plan: &'a CopyPlan, kept: &Path, action: Action) -> MoveLedger<'a> {
-        let mut ledger = MoveLedger::new(plan, action);
+    fn run_all_keeping<'a>(plan: &'a CopyPlan, kept: &Path, action: Action) -> RunLedger<'a> {
+        let mut ledger = RunLedger::new(plan, action);
         for (index, entry) in plan.entries().iter().enumerate() {
             if entry.source == kept {
                 ledger.record_existing_kept(index);
@@ -2222,10 +2229,10 @@ mod tests {
         let mut problems = BTreeMap::new();
         problems.insert(PathBuf::from("/s/late.txt"), Problem::NewSinceCopy);
         problems.insert(PathBuf::from("/s/old.txt"), Problem::NotCopied);
-        let report = MoveReport {
+        let report = RunReport {
             action: Action::Move,
             removed: Vec::new(),
-            kept: vec![KeptOperand {
+            with_problems: vec![OperandProblems {
                 source: PathBuf::from("/s"),
                 problems,
             }],
@@ -2253,10 +2260,10 @@ mod tests {
         let mut problems = BTreeMap::new();
         problems.insert(PathBuf::from("/s/old.txt"), Problem::NotCopied);
         problems.insert(PathBuf::from("/s/pipe"), Problem::Skipped("fifo"));
-        let report = MoveReport {
+        let report = RunReport {
             action: Action::Move,
             removed: Vec::new(),
-            kept: vec![KeptOperand {
+            with_problems: vec![OperandProblems {
                 source: PathBuf::from("/s"),
                 problems,
             }],
