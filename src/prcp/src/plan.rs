@@ -463,4 +463,24 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn trailing_slash_on_the_source_gives_the_same_plan() {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        write_file(&src.join("a.txt"), "a");
+        let dest = temp.path().join("dest");
+        fs::create_dir(&dest).unwrap();
+        let slashed = src.join("");
+        assert!(slashed.to_string_lossy().ends_with('/'));
+
+        let plan = CopyPlan::build(std::slice::from_ref(&slashed), &dest, true).unwrap();
+
+        let destinations: Vec<PathBuf> = plan
+            .entries()
+            .iter()
+            .map(|entry| entry.destination.clone())
+            .collect();
+        assert_eq!(destinations, [dest.join("src"), dest.join("src/a.txt")]);
+    }
 }
