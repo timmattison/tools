@@ -645,7 +645,26 @@ async fn main() -> Result<()> {
             break;
         }
 
-        // Only file entries are handled so far
+        // Make the directory. A file entry makes its own parent, so this keeps empty ones.
+        if entry.kind == EntryKind::Directory {
+            if let Err(e) = fs::create_dir_all(&entry.destination) {
+                if args.continue_on_error {
+                    failures.push((
+                        entry.source.clone(),
+                        format!("Failed to create directory: {}", e),
+                    ));
+                    continue;
+                }
+                early_exit_error = Some(format!(
+                    "Failed to create directory '{}': {}",
+                    entry.destination.display(),
+                    e
+                ));
+                break;
+            }
+            continue;
+        }
+        // Symlink entries are handled later
         if entry.kind != EntryKind::File {
             continue;
         }
