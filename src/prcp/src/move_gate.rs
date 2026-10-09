@@ -372,6 +372,25 @@ impl MoveReport {
         self.kept.is_empty() && self.removal_errors.is_empty()
     }
 
+    /// Write the report for a person: one block for each kept operand, then one line
+    /// for each failed removal.
+    pub(crate) fn error_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        for operand in &self.kept {
+            lines.push(format!(
+                "Kept the originals of '{}'. prcp removed nothing from it:",
+                operand.source.display()
+            ));
+            for (path, problem) in &operand.problems {
+                lines.push(format!("  '{}' {problem}", path.display()));
+            }
+        }
+        for (path, error) in &self.removal_errors {
+            lines.push(format!("Cannot remove '{}': {error}", path.display()));
+        }
+        lines
+    }
+
     /// Count the operands whose originals stay: kept by the gate, or left by a failed removal.
     pub(crate) fn unfinished_count(&self) -> usize {
         self.kept.len() + self.operands_with_removal_errors

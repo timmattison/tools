@@ -1206,6 +1206,9 @@ async fn main() -> Result<()> {
             eprintln!("{NO_SOURCE_REMOVED_AFTER_STOP}");
         } else {
             let report = ledger.finish();
+            for line in report.error_lines() {
+                eprintln!("{line}");
+            }
             if !args.quiet && !report.removed.is_empty() {
                 println!(
                     "Moved {} source(s): removed the originals after verification.",
