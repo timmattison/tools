@@ -271,27 +271,7 @@ impl<'a> MoveLedger<'a> {
             match before.nodes().get(path) {
                 None => note(problems, path, Problem::NewSinceCopy),
                 Some(old) if old != kind => note(problems, path, Problem::SourceChanged),
-                Some(Record::Symlink) => {
-                    if let EntryKind::Symlink { target } = &entry.kind {
-                        if let Some(problem) = link_problem(
-                            &entry.source,
-                            target,
-                            Problem::MissingAtSource,
-                            Problem::SourceChanged,
-                        ) {
-                            note(&mut problems, &entry.source, problem);
-                        }
-                        if let Some(problem) = link_problem(
-                            &entry.destination,
-                            target,
-                            Problem::MissingAtDestination,
-                            Problem::DestinationChanged,
-                        ) {
-                            note(&mut problems, &entry.source, problem);
-                        }
-                    }
-                }
-                Some(Record::Directory) => {}
+                Some(_) => {}
             }
         }
         for path in before.nodes().keys() {
