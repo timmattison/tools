@@ -64,14 +64,14 @@ clipboard-random text [OPTIONS] <CHARS>
 ```
 
 **Arguments:**
-- `<CHARS>` - Number of characters of text to generate (must be greater than 0)
+- `<CHARS>` - Number of letters and spaces of text to generate. Combining marks are not counted (must be greater than 0)
 
 **Options:**
 - `-p, --probability <PROBABILITY>` - Probability (0.0-1.0) that each character will have diacritics (default: 0.5)
 - `--min-diacritics <MIN_DIACRITICS>` - Minimum number of diacritics per character (default: 1)
 - `--max-diacritics <MAX_DIACRITICS>` - Maximum number of diacritics per character (default: 3)
-- `--min-word-length <MIN_WORD_LENGTH>` - Minimum number of characters between spaces (default: 3)
-- `--max-word-length <MAX_WORD_LENGTH>` - Maximum number of characters between spaces (default: 8)
+- `--min-word-length <MIN_WORD_LENGTH>` - Minimum number of letters between spaces (default: 3)
+- `--max-word-length <MAX_WORD_LENGTH>` - Maximum number of letters between spaces (default: 8)
 - `--preset <PRESET>` - Use a preset configuration:
   - `mild` - Mild diacritics effect (30% probability, 1-2 diacritics)
   - `scary` - Moderate diacritics effect (60% probability, 1-4 diacritics)

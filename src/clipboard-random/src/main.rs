@@ -31,7 +31,7 @@ enum Mode {
     },
     /// Generate random text with diacritics (Zalgo text)
     Text {
-        /// Number of characters of text to generate
+        /// Number of letters and spaces of text to generate. Combining marks are not counted
         #[clap(value_name = "CHARS")]
         chars: usize,
 
@@ -47,11 +47,11 @@ enum Mode {
         #[clap(long, default_value_t = 3)]
         max_diacritics: usize,
 
-        /// Minimum number of characters between spaces
+        /// Minimum number of letters between spaces
         #[clap(long, default_value_t = 3)]
         min_word_length: usize,
 
-        /// Maximum number of characters between spaces
+        /// Maximum number of letters between spaces
         #[clap(long, default_value_t = 8)]
         max_word_length: usize,
 
@@ -239,7 +239,7 @@ fn generate_binary_data(bytes: usize, format: OutputFormat, dry_run: bool) -> Re
 fn generate_text_data(chars: usize, config: TextConfig, dry_run: bool) -> Result<()> {
     // Validate input
     if chars == 0 {
-        anyhow::bail!("Number of characters must be greater than 0");
+        anyhow::bail!("Number of letters and spaces must be greater than 0");
     }
 
     if config.probability < 0.0 || config.probability > 1.0 {
@@ -593,7 +593,10 @@ mod tests {
     fn word_length_help_says_letters() {
         for id in ["min_word_length", "max_word_length"] {
             let help = text_argument_help(id);
-            assert!(help.contains("letters between spaces"), "{id} help was: {help}");
+            assert!(
+                help.contains("letters between spaces"),
+                "{id} help was: {help}"
+            );
             assert!(!help.contains("characters"), "{id} help was: {help}");
         }
     }
