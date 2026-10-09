@@ -107,7 +107,8 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     - To install: `cargo install --git https://github.com/timmattison/tools dirhash`
 - prcp
     - Copies files with a beautiful progress bar using Unicode block characters. Supports wildcards, multi-file copy,
-      and move mode (`--rm`) that verifies SHA256 before removing source. Press space to pause/resume, Ctrl+C to cancel.
+      directory trees (`-R`), and move mode (`--rm`) that removes the sources only after every copy passed its Blake3
+      check. Press space to pause/resume, Ctrl+C to cancel.
     - To install: `cargo install --git https://github.com/timmattison/tools prcp`
 - prgz
     - Similar to `prcp` but instead of copying a file it gzip compresses it. It draws the same one-line progress bar
@@ -2119,6 +2120,46 @@ Copy files with a beautiful progress bar: `prcp <source>... <destination>`
   started, or a file changed on either side after its check
 - `--continue-on-error` to keep going if some files fail
 - `-y` to skip confirmation prompts
+- Directory trees with `-R`/`--recursive` (see below)
+
+**Directories (`-R`, `--recursive`)**
+
+`prcp -R src dest` copies a directory and everything in it. Each file goes through the same copy, progress bar, and
+Blake3 check as a single file. The short form is `-R` only. In `prcp`, `-r` is `--rm`, so `cp -r` habits make a move,
+not a copy.
+
+- **Destination.** `prcp` decides every destination before the first copy, the same way as `cp -r`:
+  - If `dest` is a directory, the tree goes to `dest/src/...`.
+  - If `dest` does not exist, `dest` becomes the copy of `src`.
+  - A slash at the end of `src` changes nothing.
+  - With more than one source, `dest` is always a directory. If it does not exist, `prcp` makes it.
+- **Empty directories** are made at the destination.
+- **Symlinks** in the tree are copied as symlinks with the same target, and `prcp` never follows them. Thus a link
+  that points back up the tree cannot make the copy loop. A source that you name on the command line and that is a
+  symlink to a directory is also copied as a symlink. A symlink to a file that you name is copied as a file, as before.
+- **Special files** (FIFOs, sockets, devices) are not copied. `prcp` prints a warning for each one.
+- **Metadata.** Files and directories keep their mode bits. Modification times and owners are not kept, the same as
+  for a single file.
+- **Refusals.** `prcp` refuses to copy a directory into itself, and to replace a file with a directory. If it cannot
+  read a part of the tree, it stops before the first copy. With `--continue-on-error`, it copies the rest.
+- **Without `-R`**, a directory source is an error that names `--recursive`. A glob that matches a directory, for
+  example `prcp 'dir/*' dest/`, copies the files and prints a warning for each directory that it skips.
+
+**Moves (`--rm`)**
+
+A move is a copy first. `prcp --rm` removes nothing until the last copy of the run is done and verified. Then, for
+each source on the command line, it does a last check before it removes anything:
+
+- Each file of that source copied and passed its Blake3 check.
+- No file was skipped (`--skip-existing`, a declined prompt, or a special file).
+- No file appeared in the source directory after the copy started, and no file disappeared from it.
+- No file changed on either side after its check. `prcp` compares the size and the modification time, so it does not
+  read the data a third time.
+
+If a check fails, that source keeps **all** of its originals, also the files that copied correctly. `prcp` lists the
+files that caused the failure, and the run exits with an error. Other sources still move. If the run stops early
+(Ctrl+C, or an error without `--continue-on-error`), `prcp` removes no source at all. A directory is removed only when
+it is empty, so a file that appears at the last moment also keeps its directory.
 
 **Want a `prmv` shorthand?**
 
