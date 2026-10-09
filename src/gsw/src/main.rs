@@ -596,9 +596,11 @@ pub(crate) fn build_output(
 /// ([`Snapshot::log_start`]), at every limit.
 ///
 /// The log is read first. Its start holds the one walk of the commits that
-/// only the branch has, so HEAD is resolved one time. The counts of the header
-/// come from that start ([`repo::base_status`]). The ahead count is the size
-/// of the set that the log marks from, and the behind count is one more walk.
+/// only the branch has. The counts against the base come from that start
+/// ([`repo::base_status`]), so they and the log share one read of HEAD. The
+/// ahead count is the size of the set that the log marks from, and the behind
+/// count is one more walk. The branch name and the upstream counts read HEAD on
+/// their own.
 pub(crate) fn collect_snapshot(
     repo: &gix::Repository,
     cfg: &RenderConfig,
@@ -608,8 +610,8 @@ pub(crate) fn collect_snapshot(
 
     let base = cfg.base.clone().unwrap_or_else(|| repo::resolve_base(repo));
     // The log comes first. Its start holds the one walk of `base..HEAD`, and
-    // the counts of the header come from that start. So HEAD is resolved one
-    // time, and the header and the log agree.
+    // the counts against the base come from that start. So the base counts and
+    // the log read HEAD one time, and they agree.
     let fetched = fetch_head_log(repo, &base, log_limit);
     let base_status = repo::base_status(repo, fetched.start.as_ref());
 
