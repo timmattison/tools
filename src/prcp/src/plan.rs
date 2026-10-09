@@ -806,4 +806,17 @@ mod tests {
         assert_eq!(plan.entries()[0].destination, dest.join("src"));
         assert_eq!(plan.entries()[0].kind, EntryKind::Directory);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_source_has_no_name_and_is_an_error() {
+        let temp = TempDir::new().unwrap();
+
+        let error = CopyPlan::build(&[PathBuf::from("/")], temp.path(), true).unwrap_err();
+
+        assert!(
+            error.to_string().contains("has no name"),
+            "unexpected error: {error}"
+        );
+    }
 }
