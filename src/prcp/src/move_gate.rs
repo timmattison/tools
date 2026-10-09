@@ -604,6 +604,26 @@ mod tests {
     }
 
     #[test]
+    fn a_destination_file_that_changes_after_its_record_keeps_all_originals() {
+        let fixture = sample();
+        let ledger = copy_all(&fixture.plan, &[]);
+        fs::write(
+            fixture.dest.join("sub").join("deeper").join("deep.txt"),
+            "changed at the destination",
+        )
+        .unwrap();
+
+        let report = ledger.finish();
+
+        assert!(report.removed.is_empty(), "report: {report:?}");
+        assert_eq!(
+            only_problems(&report).get(&fixture.src.join("sub").join("deeper").join("deep.txt")),
+            Some(&Problem::DestinationChanged)
+        );
+        assert_originals_exist(&fixture.plan);
+    }
+
+    #[test]
     fn problem_display_texts_state_each_problem() {
         assert_eq!(
             Problem::NotCopied.to_string(),
