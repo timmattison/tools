@@ -31,7 +31,7 @@ enum Mode {
     },
     /// Generate random text with diacritics (Zalgo text)
     Text {
-        /// Number of characters of text to generate
+        /// Number of letters and spaces of text to generate. Combining marks are not counted
         #[clap(value_name = "CHARS")]
         chars: usize,
 
@@ -47,11 +47,11 @@ enum Mode {
         #[clap(long, default_value_t = 3)]
         max_diacritics: usize,
 
-        /// Minimum number of characters between spaces
+        /// Minimum number of letters between spaces
         #[clap(long, default_value_t = 3)]
         min_word_length: usize,
 
-        /// Maximum number of characters between spaces
+        /// Maximum number of letters between spaces
         #[clap(long, default_value_t = 8)]
         max_word_length: usize,
 
@@ -239,7 +239,7 @@ fn generate_binary_data(bytes: usize, format: OutputFormat, dry_run: bool) -> Re
 fn generate_text_data(chars: usize, config: TextConfig, dry_run: bool) -> Result<()> {
     // Validate input
     if chars == 0 {
-        anyhow::bail!("Number of characters must be greater than 0");
+        anyhow::bail!("Number of letters and spaces must be greater than 0");
     }
 
     if config.probability < 0.0 || config.probability > 1.0 {
@@ -276,7 +276,7 @@ fn generate_text_data(chars: usize, config: TextConfig, dry_run: bool) -> Result
         );
     }
 
-    println!("Text length: {} characters", text.len());
+    println!("{}", text_length_line(&text));
     println!(
         "Config: probability={:.2}, diacritics={}-{}, word_length={}-{}",
         config.probability,
@@ -295,6 +295,20 @@ fn generate_text_data(chars: usize, config: TextConfig, dry_run: bool) -> Result
     println!("Preview: {}", preview);
 
     Ok(())
+}
+
+/// Formats the `Text length` line that `generate_text_data` prints after it
+/// copies the text, for example `Text length: 84 characters (158 bytes)`.
+///
+/// The character count is the count of Unicode scalar values, thus each
+/// combining mark counts as one character. The byte count is the length of the
+/// UTF-8 encoding of the text that the tool gives to the clipboard.
+fn text_length_line(text: &str) -> String {
+    format!(
+        "Text length: {} characters ({} bytes)",
+        text.chars().count(),
+        text.len()
+    )
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -471,4 +485,130 @@ fn get_combining_marks() -> Vec<char> {
         '\u{0361}', // Combining double inverted breve
         '\u{0362}', // Combining double rightwards arrow below
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reads the character count and the byte count back out of a line from
+    /// `text_length_line`. Gives `None` when the line does not have the two counts.
+    fn counts_in(line: &str) -> Option<(usize, usize)> {
+        let rest = line.strip_prefix("Text length: ")?;
+        let (characters, rest) = rest.split_once(" characters (")?;
+        let bytes = rest.strip_suffix(" bytes)")?;
+        Some((characters.parse().ok()?, bytes.parse().ok()?))
+    }
+
+    #[test]
+    fn ascii_text_has_the_same_count_of_characters_and_bytes() {
+        assert_eq!(
+            text_length_line("abc def"),
+            "Text length: 7 characters (7 bytes)"
+        );
+    }
+
+    #[test]
+    fn each_combining_mark_counts_as_one_character_and_two_bytes() {
+        assert_eq!(
+            text_length_line("a\u{0301}\u{0302}"),
+            "Text length: 3 characters (5 bytes)"
+        );
+    }
+
+    #[test]
+    fn an_accented_letter_counts_as_one_character_and_two_bytes() {
+        // The precomposed é (U+00E9), not an e with a combining acute accent.
+        assert_eq!(
+            text_length_line("caf\u{e9}"),
+            "Text length: 4 characters (5 bytes)"
+        );
+    }
+
+    #[test]
+    fn each_japanese_character_counts_as_one_character_and_three_bytes() {
+        assert_eq!(
+            text_length_line("日本語"),
+            "Text length: 3 characters (9 bytes)"
+        );
+    }
+
+    #[test]
+    fn each_emoji_counts_as_one_character_and_four_bytes() {
+        assert_eq!(
+            text_length_line("🎉🎊"),
+            "Text length: 2 characters (8 bytes)"
+        );
+    }
+
+    #[test]
+    fn doom_text_has_fewer_characters_than_bytes() {
+        // The doom preset puts 5 or more combining marks on each base letter,
+        // and each mark is 2 bytes. Thus the two counts are always different.
+        let text = generate_zalgo_text(10, &TextPreset::Doom.get_config())
+            .expect("the doom preset is a valid configuration");
+
+        let line = text_length_line(&text);
+        let (characters, bytes) =
+            counts_in(&line).unwrap_or_else(|| panic!("no character and byte counts in {line:?}"));
+
+        assert_eq!(characters, text.chars().count());
+        assert_eq!(bytes, text.len());
+        assert!(
+            characters < bytes,
+            "{characters} characters is not less than {bytes} bytes"
+        );
+    }
+
+    /// Returns the plain-text help of one argument of the `text` subcommand.
+    fn text_argument_help(id: &str) -> String {
+        use clap::CommandFactory;
+        let command = Args::command();
+        let text = command
+            .find_subcommand("text")
+            .expect("the text subcommand exists");
+        let argument = text
+            .get_arguments()
+            .find(|a| a.get_id() == id)
+            .unwrap_or_else(|| panic!("the text subcommand has an argument {id}"));
+        argument
+            .get_help()
+            .unwrap_or_else(|| panic!("argument {id} has help"))
+            .to_string()
+    }
+
+    /// `<CHARS>` counts letters and spaces, not Unicode scalar values.
+    #[test]
+    fn chars_help_says_it_counts_letters_and_spaces() {
+        let help = text_argument_help("chars");
+        assert!(help.contains("letters and spaces"), "help was: {help}");
+        assert!(
+            help.contains("Combining marks are not counted"),
+            "help was: {help}"
+        );
+    }
+
+    /// The word lengths count letters between spaces, not characters.
+    #[test]
+    fn word_length_help_says_letters() {
+        for id in ["min_word_length", "max_word_length"] {
+            let help = text_argument_help(id);
+            assert!(
+                help.contains("letters between spaces"),
+                "{id} help was: {help}"
+            );
+            assert!(!help.contains("characters"), "{id} help was: {help}");
+        }
+    }
+
+    /// The error for a zero count names what `<CHARS>` counts.
+    #[test]
+    fn zero_chars_error_says_letters_and_spaces() {
+        let error = generate_text_data(0, TextPreset::Mild.get_config(), true)
+            .expect_err("zero chars is refused");
+        assert!(
+            error.to_string().contains("letters and spaces"),
+            "error was: {error}"
+        );
+    }
 }
