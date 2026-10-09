@@ -443,3 +443,35 @@ fn recursive_copy_merges_into_an_existing_tree_and_overwrites_files() {
         "extra"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn recursive_copy_skips_a_fifo_and_warns() {
+    let temp = TempDir::new().unwrap();
+    let src = temp.path().join("src");
+    let dest = temp.path().join("dest");
+    write_file(&src.join("a.txt"), "a");
+    write_file(&src.join("b.txt"), "b");
+    let fifo = src.join("pipe");
+    let status = Command::new("mkfifo").arg(&fifo).status().unwrap();
+    assert!(status.success(), "mkfifo must work");
+
+    let output = run_prcp([
+        OsString::from("-R"),
+        OsString::from("-y"),
+        OsString::from("-q"),
+        src.into_os_string(),
+        dest.clone().into_os_string(),
+    ]);
+
+    let stderr = visible_stderr(&output);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(stderr.contains(&fifo.display().to_string()), "stderr: {stderr}");
+    assert!(stderr.contains("fifo"), "stderr: {stderr}");
+    assert_eq!(fs::read_to_string(dest.join("a.txt")).unwrap(), "a");
+    assert_eq!(fs::read_to_string(dest.join("b.txt")).unwrap(), "b");
+    assert!(
+        fs::symlink_metadata(dest.join("pipe")).is_err(),
+        "the fifo must not exist at the destination"
+    );
+}
