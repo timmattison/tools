@@ -32,6 +32,7 @@
 use anyhow::{anyhow, bail, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
 
 /// Index of one source operand (one resolved source path), in the order given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -139,9 +140,21 @@ pub(crate) struct TreeSnapshot {
 impl TreeSnapshot {
     /// Walk `root` now. The snapshot includes `root` itself as a Directory node.
     pub(crate) fn take(root: &Path) -> Self {
-        let _ = root;
+        let mut nodes = BTreeMap::new();
+        let walk = WalkDir::new(root)
+            .follow_links(false)
+            .follow_root_links(false)
+            .sort_by_file_name();
+        for entry in walk.into_iter().flatten() {
+            let kind = if entry.file_type().is_dir() {
+                NodeKind::Directory
+            } else {
+                NodeKind::File
+            };
+            nodes.insert(entry.into_path(), kind);
+        }
         Self {
-            nodes: BTreeMap::new(),
+            nodes,
             errors: Vec::new(),
         }
     }
@@ -191,25 +204,66 @@ impl CopyPlan {
         };
         for (index, source) in sources.iter().enumerate() {
             let operand = OperandId(index);
-            let name = source
-                .file_name()
-                .ok_or_else(|| anyhow!("Source '{}' has no name to copy under the destination", source.display()))?;
-            plan.operands.push(Operand {
-                source: source.clone(),
-                kind: OperandKind::File,
-            });
-            plan.entries.push(PlanEntry {
-                operand,
-                source: source.clone(),
-                destination: if container {
-                    destination.join(name)
-                } else {
-                    destination.to_path_buf()
-                },
-                kind: EntryKind::File,
-            });
+            let name = source.file_name().ok_or_else(|| {
+                anyhow!(
+                    "Source '{}' has no name to copy under the destination",
+                    source.display()
+                )
+            })?;
+            let root = if container {
+                destination.join(name)
+            } else {
+                destination.to_path_buf()
+            };
+            if recursive && source.is_dir() {
+                plan.add_tree(operand, source, &root)?;
+            } else {
+                plan.operands.push(Operand {
+                    source: source.clone(),
+                    kind: OperandKind::File,
+                });
+                plan.entries.push(PlanEntry {
+                    operand,
+                    source: source.clone(),
+                    destination: root,
+                    kind: EntryKind::File,
+                });
+            }
         }
         Ok(plan)
+    }
+
+    /// Walk a Directory operand and add one entry for each node of the walk.
+    ///
+    /// `root` is the destination of the operand itself. The snapshot is the one
+    /// source of the entries, so the plan and the snapshot cannot disagree.
+    fn add_tree(&mut self, operand: OperandId, source: &Path, root: &Path) -> Result<()> {
+        self.operands.push(Operand {
+            source: source.to_path_buf(),
+            kind: OperandKind::Directory,
+        });
+        let snapshot = TreeSnapshot::take(source);
+        for (path, node) in snapshot.nodes() {
+            let relative = path.strip_prefix(source)?;
+            let destination = if relative.as_os_str().is_empty() {
+                root.to_path_buf()
+            } else {
+                root.join(relative)
+            };
+            let kind = match node {
+                NodeKind::Directory => EntryKind::Directory,
+                NodeKind::File => EntryKind::File,
+                NodeKind::Symlink { .. } | NodeKind::Special(_) => continue,
+            };
+            self.entries.push(PlanEntry {
+                operand,
+                source: path.clone(),
+                destination,
+                kind,
+            });
+        }
+        self.trees.insert(operand, snapshot);
+        Ok(())
     }
 
     /// Return the source operands, in the order given.
