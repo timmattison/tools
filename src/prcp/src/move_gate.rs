@@ -1,47 +1,82 @@
-//! The move gate: the rule that decides when `--rm` may remove a source.
+//! The final check of every run, and the move gate that decides when `--rm` may remove a source.
 //!
-//! # Rules
+//! # The final check
 //!
-//! With `--rm`, `prcp` removes no source while it copies. All removal happens
-//! after the copy loop, through this gate. A run that stops early removes
-//! nothing at all.
+//! The Blake3 check in the copy loop proves each copy at the moment that prcp
+//! makes it. It cannot see a person or a program that works in the source or
+//! the destination later in the run. [`RunLedger::new`] thus takes a snapshot
+//! of the destination right before the first copy, and [`RunLedger::finish`]
+//! checks the whole run again after the last copy. A copy reports what the
+//! check finds and fails. A move also keeps the originals of each operand with
+//! a problem. A run that stops early checks nothing and removes nothing.
 //!
-//! The gate works for each operand. One operand is one source path from the
-//! command line, after glob expansion. The gate first collects every problem
-//! of an operand. Only an operand with no problem has its originals removed.
-//! An operand with a problem keeps all of its originals, also the files that
-//! copied and verified. Other operands still move.
-//!
-//! The gate finds these problems:
+//! The check works for each operand. One operand is one source path from the
+//! command line, after glob expansion. The check finds these problems:
 //!
 //! 1. An entry of the operand has no positive record in the ledger. A failed
 //!    copy, a failed Blake3 check, a skipped file, and an entry that the loop
-//!    did not reach all leave no record.
-//! 2. The plan skipped a special file (FIFO, socket, device) under the operand.
-//!    The destination is not a full copy.
-//! 3. The plan or the gate could not read a part of the tree.
-//! 4. A Directory operand changed. The gate walks it again and compares the
-//!    walk with the snapshot of the plan. A new path means that a file
-//!    appeared after the copy started. A path that left, or a node that
-//!    changed kind, also stops the move.
-//! 5. A file changed on either side after its Blake3 check. The gate does not
-//!    read the data a third time. The Blake3 check in the copy loop is the
-//!    hash check. The gate compares the size and the modification time of both
-//!    sides with the stamps taken before the copy and right after the check.
-//! 6. A symlink no longer reads back with its target, on either side.
-//! 7. A destination directory is no longer a directory.
+//!    did not reach all leave no record. Only a move reports this, because a
+//!    copy reported each such failure as it occurred. A move also counts a
+//!    file that skipped its Blake3 check, and a destination that
+//!    `--skip-existing` kept, as not copied.
+//! 2. The plan skipped a special file (FIFO, socket, device) under the
+//!    operand. Only a move reports this, because a copy warned before the
+//!    first copy.
+//! 3. A part of the source tree cannot be read. A part that the plan could not
+//!    read counts only for a move. A part that only the check cannot read
+//!    counts for both.
+//! 4. A Directory operand changed in the source. The check walks it again and
+//!    compares the walk with the snapshot of the plan. A new path appeared
+//!    after the copy started. A path that left, or a node that changed kind,
+//!    is also a problem.
+//! 5. A file changed on either side after its Blake3 check. The check does not
+//!    read the data a third time. It compares the size, the modification time,
+//!    and the [`NodeIdentity`] of both sides with the stamps taken before the
+//!    copy and right after the check.
+//! 6. A symlink no longer reads back with its target, on either side, or a
+//!    destination link or directory is another node now.
+//! 7. The destination tree of a Directory operand changed. The check walks the
+//!    tree again and compares it with the snapshot (see the `destination`
+//!    submodule). A path that prcp did not write and that was not there
+//!    before appeared during the run. A path from before that changed or left
+//!    is also a problem.
+//! 8. A destination file that `--skip-existing` kept changed after the
+//!    snapshot. A move already counts that file as not copied.
+//! 9. A later entry of the same run wrote the destination of an entry. The
+//!    destination then no longer holds that source, so a move keeps it. A copy
+//!    reports nothing, because the person let the later copy overwrite it.
 //!
-//! The ledger holds positive records only. An entry without a record is a
-//! problem. That default is the safety rule: a new failure branch that forgets
-//! to record still keeps the originals.
+//! The ledger holds positive records only. In a move, an entry without a
+//! record is a problem. That default is the safety rule: a new failure branch
+//! that forgets to record still keeps the originals.
+//!
+//! # The report
+//!
+//! A destination problem names the destination path, and a source problem
+//! names the source path. A destination node that left one path and appeared
+//! at another, with the same identity, is one line that names both paths. A
+//! problem at a path stands for everything below that path, so a tree that
+//! appeared, left, or moved is one line. A `.DS_Store` that appeared or
+//! changed has its own text, because Finder writes that file when a person
+//! opens a folder. A report with a change from outside prcp ends with a note
+//! that says so, so a person does not think that prcp is broken.
+//!
+//! # Before each entry
+//!
+//! [`RunLedger::change_before_copy`] compares the destination path of an entry
+//! with the snapshot right before the loop makes the entry. A path that
+//! appeared, changed, or left since the snapshot belongs to somebody else
+//! now, and the loop does not write over it. A path that an earlier entry of
+//! the same run writes is the run's own, and keeps the overwrite question.
 //!
 //! # Removal
 //!
-//! For an operand with no problem, the gate removes each file and symlink
-//! source in plan order. It then removes each directory source in reverse plan
-//! order, children before parents, with `remove_dir`. That call refuses a
-//! directory that is not empty, so a file that appears after the gate also
-//! keeps its directory. The gate collects each removal error and goes on.
+//! Only a move removes. For an operand with no problem, the gate removes each
+//! file and symlink source in plan order. It then removes each directory
+//! source in reverse plan order, children before parents, with `remove_dir`.
+//! That call refuses a directory that is not empty, so a file that appears
+//! after the gate also keeps its directory. The gate collects each removal
+//! error and goes on.
 
 mod destination;
 
