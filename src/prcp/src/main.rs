@@ -361,6 +361,13 @@ fn resolve_sources(patterns: &[PathBuf], literal: bool, recursive: bool) -> Resu
                     Ok(path) => {
                         if path.is_file() || (recursive && path.is_dir()) {
                             matches.push(path);
+                        } else if path.is_dir() {
+                            // Without --recursive, a move would leave the directory behind
+                            // and say nothing. Warn so the user sees it.
+                            eprintln!(
+                                "Warning: Skipping directory '{}' ({RECURSIVE_HINT})",
+                                path.display()
+                            );
                         }
                     }
                     Err(e) => {
