@@ -513,7 +513,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     render when its output is piped or `--one-shot` is given — so it needs no `viddy`/`watch`
     wrapper, but still works under one. Shows branch, ahead/behind, working-tree changes, and
     a `git log --oneline` tail. The log fills the rows that the header and the file list leave,
-    so a tall window shows more history. A `▎` in the left column of a log row marks a commit
+    so a tall window shows more history. A blue `▎` in the left column of a log row marks a commit
     that is only on the current branch: the commits that the ahead count counts. The mark goes
     by which commits the base cannot reach, not by row position. So a branch that merged its
     base marks its own commits and the merge, and not the commits that came in from the base.

@@ -383,7 +383,7 @@ fn render_log_row(entry: &LogEntry, width: usize, truecolor: bool, age_offset: D
     // matching the file-row age column exactly. The subject is padded to fill
     // the gap so the age column lines up.
     let effective_age = entry.age.map(|age| age.saturating_add(age_offset));
-    let gutter = colorize_log_gutter(entry.on_branch);
+    let gutter = colorize_log_gutter(entry.on_branch, truecolor);
     let gutter_width = UnicodeWidthStr::width(gutter.input.as_str());
     let hash_width = UnicodeWidthStr::width(entry.hash.as_str());
     let hash_sep_width = LOG_HASH_SUBJECT_SEP.chars().count();
@@ -1145,16 +1145,19 @@ fn colorize_log_subject(subject: &str, age: Option<Duration>, truecolor: bool) -
 
 /// The gutter of a commit-log row, painted.
 ///
-/// A commit that is only on the current branch gets [`BRANCH_MARK`], in the
-/// paint of the header: bold, on the default foreground. The header counts
-/// these commits, so the mark and the count look the same. The header is bold
-/// in 8-color mode and in truecolor mode, so the mark is too. Every other row
-/// gets [`LOG_GUTTER_BLANK`] with no paint.
-fn colorize_log_gutter(on_branch: bool) -> ColoredString {
-    if on_branch {
-        BRANCH_MARK.to_string().bold()
-    } else {
-        LOG_GUTTER_BLANK.to_string().normal()
+/// A commit that is only on the current branch gets [`BRANCH_MARK`] in blue.
+/// With `truecolor`, the blue is [`BRANCH_MARK_RGB`]. Without, it is bright
+/// blue, because plain blue is too dark to read on many dark themes. See
+/// [`BRANCH_MARK_RGB`] for why the mark is blue. Every other row gets
+/// [`LOG_GUTTER_BLANK`] with no paint.
+fn colorize_log_gutter(on_branch: bool, truecolor: bool) -> ColoredString {
+    match (on_branch, truecolor) {
+        (false, _) => LOG_GUTTER_BLANK.to_string().normal(),
+        (true, true) => {
+            let (r, g, b) = BRANCH_MARK_RGB;
+            BRANCH_MARK.to_string().truecolor(r, g, b)
+        }
+        (true, false) => BRANCH_MARK.to_string().bright_blue(),
     }
 }
 
