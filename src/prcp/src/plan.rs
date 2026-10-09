@@ -231,3 +231,49 @@ impl CopyPlan {
             .collect()
     }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "tests use unwrap for brevity and clear failure messages"
+)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    /// Make a file with the given text. Make the parent directories first.
+    fn write_file(path: &Path, text: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, text).unwrap();
+    }
+
+    /// Make a file entry with the operand set to the given index.
+    fn file_entry(operand: usize, source: &Path, destination: &Path) -> PlanEntry {
+        PlanEntry {
+            operand: OperandId(operand),
+            source: source.to_path_buf(),
+            destination: destination.to_path_buf(),
+            kind: EntryKind::File,
+        }
+    }
+
+    #[test]
+    fn one_file_into_existing_directory_lands_under_its_name() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("a.txt");
+        write_file(&source, "a");
+        let destination = temp.path().join("dest");
+        fs::create_dir(&destination).unwrap();
+
+        let plan = CopyPlan::build(std::slice::from_ref(&source), &destination, false).unwrap();
+
+        assert_eq!(
+            plan.entries(),
+            [file_entry(0, &source, &destination.join("a.txt"))]
+        );
+    }
+}
