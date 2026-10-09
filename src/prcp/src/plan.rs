@@ -318,6 +318,13 @@ impl CopyPlan {
     /// `root` is the destination of the operand itself. The snapshot is the one
     /// source of the entries, so the plan and the snapshot cannot disagree.
     fn add_tree(&mut self, operand: OperandId, source: &Path, root: &Path) -> Result<()> {
+        if fs::symlink_metadata(root).is_ok_and(|existing| !existing.is_dir()) {
+            bail!(
+                "Cannot overwrite non-directory '{}' with directory '{}'",
+                root.display(),
+                source.display()
+            );
+        }
         let canonical_source = fs::canonicalize(source)?;
         if canonicalize_lenient(root)?.starts_with(&canonical_source) {
             bail!(
