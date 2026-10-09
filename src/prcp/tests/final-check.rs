@@ -180,6 +180,20 @@ fn run_and_meddle_at_the_question(args: Vec<OsString>, meddle: impl FnOnce()) ->
     }
 }
 
+/// Run `prcp` to its end with standard input on null, as a script runs it.
+fn run_without_questions(args: Vec<OsString>) -> Run {
+    let output = Command::new(env!("CARGO_BIN_EXE_prcp"))
+        .env("COLUMNS", TEST_COLUMNS)
+        .stdin(Stdio::null())
+        .args(args)
+        .output()
+        .expect("the prcp binary must start");
+    Run {
+        status: output.status,
+        stderr: testcolor::strip_ansi(&String::from_utf8_lossy(&output.stderr)),
+    }
+}
+
 /// Read a pipe to its end, so the child never blocks on a full pipe.
 fn drain(mut pipe: impl Read) -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -311,4 +325,19 @@ fn a_file_that_appears_at_a_planned_path_during_the_run_is_not_overwritten() {
     );
     assert_eq!(fs::read_to_string(&intruder).unwrap(), "not from prcp");
     fixture.assert_sources_stay(&run);
+}
+
+#[test]
+fn a_copy_that_skips_an_existing_file_passes_the_final_check() {
+    let fixture = Fixture::new();
+
+    let run = run_without_questions(fixture.args(&["--skip-existing"]));
+
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+    assert_eq!(
+        fs::read_to_string(fixture.root.join(ASKED_FILE)).unwrap(),
+        "old content of b"
+    );
+    assert_eq!(fs::read_to_string(fixture.root.join("a.txt")).unwrap(), "a");
+    assert_eq!(fs::read_to_string(fixture.root.join("c.txt")).unwrap(), "c");
 }
