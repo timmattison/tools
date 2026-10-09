@@ -276,7 +276,7 @@ fn generate_text_data(chars: usize, config: TextConfig, dry_run: bool) -> Result
         );
     }
 
-    println!("Text length: {} characters", text.len());
+    println!("{}", text_length_line(&text));
     println!(
         "Config: probability={:.2}, diacritics={}-{}, word_length={}-{}",
         config.probability,
@@ -295,6 +295,12 @@ fn generate_text_data(chars: usize, config: TextConfig, dry_run: bool) -> Result
     println!("Preview: {}", preview);
 
     Ok(())
+}
+
+/// Formats the `Text length` line that `generate_text_data` prints after it
+/// copies the text.
+fn text_length_line(text: &str) -> String {
+    format!("Text length: {} characters", text.len())
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -471,4 +477,78 @@ fn get_combining_marks() -> Vec<char> {
         '\u{0361}', // Combining double inverted breve
         '\u{0362}', // Combining double rightwards arrow below
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reads the character count and the byte count back out of a line from
+    /// `text_length_line`. Gives `None` when the line does not have the two counts.
+    fn counts_in(line: &str) -> Option<(usize, usize)> {
+        let rest = line.strip_prefix("Text length: ")?;
+        let (characters, rest) = rest.split_once(" characters (")?;
+        let bytes = rest.strip_suffix(" bytes)")?;
+        Some((characters.parse().ok()?, bytes.parse().ok()?))
+    }
+
+    #[test]
+    fn ascii_text_has_the_same_count_of_characters_and_bytes() {
+        assert_eq!(
+            text_length_line("abc def"),
+            "Text length: 7 characters (7 bytes)"
+        );
+    }
+
+    #[test]
+    fn each_combining_mark_counts_as_one_character_and_two_bytes() {
+        assert_eq!(
+            text_length_line("a\u{0301}\u{0302}"),
+            "Text length: 3 characters (5 bytes)"
+        );
+    }
+
+    #[test]
+    fn an_accented_letter_counts_as_one_character_and_two_bytes() {
+        // The precomposed é (U+00E9), not an e with a combining acute accent.
+        assert_eq!(
+            text_length_line("caf\u{e9}"),
+            "Text length: 4 characters (5 bytes)"
+        );
+    }
+
+    #[test]
+    fn each_japanese_character_counts_as_one_character_and_three_bytes() {
+        assert_eq!(
+            text_length_line("日本語"),
+            "Text length: 3 characters (9 bytes)"
+        );
+    }
+
+    #[test]
+    fn each_emoji_counts_as_one_character_and_four_bytes() {
+        assert_eq!(
+            text_length_line("🎉🎊"),
+            "Text length: 2 characters (8 bytes)"
+        );
+    }
+
+    #[test]
+    fn doom_text_has_fewer_characters_than_bytes() {
+        // The doom preset puts 5 or more combining marks on each base letter,
+        // and each mark is 2 bytes. Thus the two counts are always different.
+        let text = generate_zalgo_text(10, &TextPreset::Doom.get_config())
+            .expect("the doom preset is a valid configuration");
+
+        let line = text_length_line(&text);
+        let (characters, bytes) =
+            counts_in(&line).unwrap_or_else(|| panic!("no character and byte counts in {line:?}"));
+
+        assert_eq!(characters, text.chars().count());
+        assert_eq!(bytes, text.len());
+        assert!(
+            characters < bytes,
+            "{characters} characters is not less than {bytes} bytes"
+        );
+    }
 }
