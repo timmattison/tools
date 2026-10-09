@@ -200,7 +200,27 @@ impl<'a> MoveLedger<'a> {
                         note(&mut problems, &entry.source, problem);
                     }
                 }
-                Some(_) => {}
+                Some(Record::Symlink) => {
+                    if let EntryKind::Symlink { target } = &entry.kind {
+                        if let Some(problem) = link_problem(
+                            &entry.source,
+                            target,
+                            Problem::MissingAtSource,
+                            Problem::SourceChanged,
+                        ) {
+                            note(&mut problems, &entry.source, problem);
+                        }
+                        if let Some(problem) = link_problem(
+                            &entry.destination,
+                            target,
+                            Problem::MissingAtDestination,
+                            Problem::DestinationChanged,
+                        ) {
+                            note(&mut problems, &entry.source, problem);
+                        }
+                    }
+                }
+                Some(Record::Directory) => {}
             }
         }
         for skipped in self.plan.skipped() {
@@ -251,7 +271,27 @@ impl<'a> MoveLedger<'a> {
             match before.nodes().get(path) {
                 None => note(problems, path, Problem::NewSinceCopy),
                 Some(old) if old != kind => note(problems, path, Problem::SourceChanged),
-                Some(_) => {}
+                Some(Record::Symlink) => {
+                    if let EntryKind::Symlink { target } = &entry.kind {
+                        if let Some(problem) = link_problem(
+                            &entry.source,
+                            target,
+                            Problem::MissingAtSource,
+                            Problem::SourceChanged,
+                        ) {
+                            note(&mut problems, &entry.source, problem);
+                        }
+                        if let Some(problem) = link_problem(
+                            &entry.destination,
+                            target,
+                            Problem::MissingAtDestination,
+                            Problem::DestinationChanged,
+                        ) {
+                            note(&mut problems, &entry.source, problem);
+                        }
+                    }
+                }
+                Some(Record::Directory) => {}
             }
         }
         for path in before.nodes().keys() {
@@ -311,6 +351,21 @@ fn stamp_problem(
         Ok(now) if now == expected => None,
         Ok(_) => Some(changed),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Some(missing),
+        Err(error) => Some(Problem::Unreadable(error.to_string())),
+    }
+}
+
+/// Compare the symlink at `path` with the target text that the plan holds.
+///
+/// Return `missing` when nothing is at the path and `changed` when the link
+/// has another target, or when the path is not a link. Another read error is
+/// `Unreadable`. Return `None` when the link still reads back with `target`.
+fn link_problem(path: &Path, target: &Path, missing: Problem, changed: Problem) -> Option<Problem> {
+    match fs::read_link(path) {
+        Ok(now) if now == target => None,
+        Ok(_) => Some(changed),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(missing),
+        Err(error) if error.kind() == io::ErrorKind::InvalidInput => Some(changed),
         Err(error) => Some(Problem::Unreadable(error.to_string())),
     }
 }
