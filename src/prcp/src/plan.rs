@@ -1096,4 +1096,29 @@ mod tests {
         assert!(errors.is_empty(), "errors: {errors:?}");
         assert_eq!(mode_of(&dest), 0o750);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_directory_permissions_sets_a_nested_directory_under_a_read_only_parent() {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        write_file(&src.join("sub").join("a.txt"), "a");
+        set_mode(&src.join("sub"), 0o700);
+        set_mode(&src, 0o555);
+        let dest = temp.path().join("dest");
+        let plan = CopyPlan::build(std::slice::from_ref(&src), &dest, true).unwrap();
+        fs::create_dir_all(dest.join("sub")).unwrap();
+
+        let errors = plan.apply_directory_permissions();
+
+        let parent_mode = mode_of(&dest);
+        let child_mode = mode_of(&dest.join("sub"));
+        // Make every directory writable again so that TempDir can delete the tree.
+        for path in [&src, &dest, &dest.join("sub")] {
+            set_mode(path, 0o755);
+        }
+        assert!(errors.is_empty(), "errors: {errors:?}");
+        assert_eq!(parent_mode, 0o555);
+        assert_eq!(child_mode, 0o700);
+    }
 }
