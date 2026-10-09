@@ -60,6 +60,11 @@ pub struct Snapshot {
     /// never changes, so that read extends the log of the walk, and it never
     /// puts the commits of another branch under the header of this snapshot.
     /// A snapshot with no start gives a resize no log to read.
+    ///
+    /// The start also keeps the set of the commits that only the branch has,
+    /// from the one walk of the snapshot. The header counts the size of that
+    /// set, and the read on a resize marks its rows from it. The set lives as
+    /// long as the snapshot, and a clone of the snapshot shares it.
     pub log_start: Option<LogStart>,
     /// Upstream tracking branch status (ahead/behind). `None` when the
     /// current branch has no configured upstream.
@@ -131,6 +136,15 @@ pub struct LogEntry {
     /// [`UNKNOWN_AGE`] rather than a number, because every number available
     /// here is a lie — `0s` in particular claims the commit landed this second.
     pub age: Option<Duration>,
+    /// The commit is only on the current branch: the start of the log reaches
+    /// it, and the base does not. These are the commits that the ahead count
+    /// of the header counts ([`Snapshot::commits_ahead`]).
+    ///
+    /// It is `false` for every commit when HEAD is on the base, or when the
+    /// base does not resolve. The header then counts zero too.
+    ///
+    /// The log row of such a commit shows [`BRANCH_MARK`] in its gutter.
+    pub on_branch: bool,
 }
 
 /// One file row in the frame.
@@ -322,7 +336,39 @@ pub(crate) fn render_with_offset(
 /// Visible gap between the short hash and the subject in a log row.
 const LOG_HASH_SUBJECT_SEP: &str = "  ";
 
+/// The mark of a log row whose commit is only on the current branch
+/// ([`LogEntry::on_branch`]). The ahead count of the header counts these
+/// commits, so the mark shows which rows that count holds.
+///
+/// The mark sits in a gutter of one column at the left of the row, before the
+/// hash. Every other log row shows a blank in that gutter. The gutter is on
+/// every log row, also when no row has the mark. So the hash column does not
+/// move when the first commit lands on a new branch.
+///
+/// The mark is a glyph and not only a color. So it stays visible with no
+/// color: in 8-color mode and in piped output with no escape codes.
+pub(crate) const BRANCH_MARK: char = '▎';
+
+/// The gutter of a log row whose commit is not only on the current branch.
+/// It is as wide as [`BRANCH_MARK`], so every hash starts in one column.
+const LOG_GUTTER_BLANK: char = ' ';
+
+/// The glyphs of the log row `row` after its gutter, or `None` when `row`
+/// does not start with a gutter. The tests use it to find a log row by the
+/// hash at its start.
+#[cfg(test)]
+pub(crate) fn after_log_gutter(row: &str) -> Option<&str> {
+    row.strip_prefix(BRANCH_MARK)
+        .or_else(|| row.strip_prefix(LOG_GUTTER_BLANK))
+}
+
 /// Render one commit-log row.
+///
+/// The row starts with a gutter of one column: [`BRANCH_MARK`] when the
+/// commit is only on the current branch ([`LogEntry::on_branch`]), and a blank
+/// on every other row. The gutter takes its column from the subject, so the
+/// row is never wider than `width`, and the age column stays in line with the
+/// age column of the file rows.
 ///
 /// `age_offset` is added (saturating) to the commit's age before it is
 /// formatted and used to drive the hash/subject/age fades, so the whole row
@@ -331,16 +377,20 @@ const LOG_HASH_SUBJECT_SEP: &str = "  ";
 /// give us ([`LogEntry::age`] of `None`) stays unknown whatever the offset —
 /// advancing a duration gsw never had produces a number it still cannot back.
 fn render_log_row(entry: &LogEntry, width: usize, truecolor: bool, age_offset: Duration) -> String {
-    // Layout: `{hash}  {subject…}   {age}` — the rightmost AGE_FIELD cells
-    // hold the right-aligned age, matching the file-row age column exactly.
-    // The subject is padded to fill the gap so the age column lines up.
+    // Layout: `{mark}{hash}  {subject…}   {age}` — the first cell is the
+    // gutter, which holds BRANCH_MARK or a blank, so every hash starts in the
+    // same column. The rightmost AGE_FIELD cells hold the right-aligned age,
+    // matching the file-row age column exactly. The subject is padded to fill
+    // the gap so the age column lines up.
     let effective_age = entry.age.map(|age| age.saturating_add(age_offset));
+    let gutter = colorize_log_gutter(entry.on_branch, truecolor);
+    let gutter_width = UnicodeWidthStr::width(gutter.input.as_str());
     let hash_width = UnicodeWidthStr::width(entry.hash.as_str());
     let hash_sep_width = LOG_HASH_SUBJECT_SEP.chars().count();
     let sep_to_age = " ".repeat(SEP_DELS_AGE);
 
     let subject_budget = width
-        .saturating_sub(hash_width + hash_sep_width + SEP_DELS_AGE + AGE_FIELD)
+        .saturating_sub(gutter_width + hash_width + hash_sep_width + SEP_DELS_AGE + AGE_FIELD)
         .max(1);
     let subject_truncated = truncate_right(&entry.subject, subject_budget);
     let subject_padded = pad_right(&subject_truncated, subject_budget);
@@ -351,7 +401,7 @@ fn render_log_row(entry: &LogEntry, width: usize, truecolor: bool, age_offset: D
     let hash_str = colorize_log_hash(&entry.hash, effective_age, truecolor);
     let subject_str = colorize_log_subject(&subject_padded, effective_age, truecolor);
     let age_str = colorize_log_age(&age_field, effective_age, truecolor);
-    format!("{hash_str}{LOG_HASH_SUBJECT_SEP}{subject_str}{sep_to_age}{age_str}")
+    format!("{gutter}{hash_str}{LOG_HASH_SUBJECT_SEP}{subject_str}{sep_to_age}{age_str}")
 }
 
 /// Total width of everything to the right of the path column: the bar plus
@@ -1001,6 +1051,16 @@ const LOG_HASH_BASE_RGB: (u8, u8, u8) = (255, 215, 0);
 const LOG_SUBJECT_BASE_RGB: (u8, u8, u8) = (220, 220, 220);
 /// Base RGB for the commit-log age column.
 const LOG_AGE_BASE_RGB: (u8, u8, u8) = (190, 190, 190);
+/// RGB of [`BRANCH_MARK`] in truecolor mode: a medium blue.
+///
+/// No other part of gsw paints blue. Red tells of a conflict or a deletion,
+/// green of a staged or added file, yellow of a hash or an unstaged file,
+/// cyan of an untracked file or a bar, and magenta of a rename. So the mark
+/// tells of no problem and of no file status. The contrast of this blue is
+/// about 6.5:1 on black and 3.2:1 on white, so the mark is visible on a dark
+/// theme and on a light theme. The mark does not fade with age, because it
+/// tells which set a commit is in, and not how old the commit is.
+const BRANCH_MARK_RGB: (u8, u8, u8) = (70, 140, 255);
 
 // --- File-row truecolor base palette ---------------------------------------
 //
@@ -1080,6 +1140,24 @@ fn colorize_log_subject(subject: &str, age: Option<Duration>, truecolor: bool) -
             Some(AgeDim::Fresh | AgeDim::Recent) => subject.normal(),
             Some(AgeDim::Aging | AgeDim::Stale) | None => subject.dimmed(),
         }
+    }
+}
+
+/// The gutter of a commit-log row, painted.
+///
+/// A commit that is only on the current branch gets [`BRANCH_MARK`] in blue.
+/// With `truecolor`, the blue is [`BRANCH_MARK_RGB`]. Without, it is bright
+/// blue, because plain blue is too dark to read on many dark themes. See
+/// [`BRANCH_MARK_RGB`] for why the mark is blue. Every other row gets
+/// [`LOG_GUTTER_BLANK`] with no paint.
+fn colorize_log_gutter(on_branch: bool, truecolor: bool) -> ColoredString {
+    match (on_branch, truecolor) {
+        (false, _) => LOG_GUTTER_BLANK.to_string().normal(),
+        (true, true) => {
+            let (r, g, b) = BRANCH_MARK_RGB;
+            BRANCH_MARK.to_string().truecolor(r, g, b)
+        }
+        (true, false) => BRANCH_MARK.to_string().bright_blue(),
     }
 }
 
@@ -1464,6 +1542,7 @@ mod tests {
             hash: "52ef922".into(),
             subject: "an old commit that has been sitting here for a very long time".into(),
             age: Some(ancient()),
+            on_branch: false,
         }];
         let mut o = opts();
         o.log_lines = 5;
@@ -2352,6 +2431,7 @@ mod tests {
             hash: hash.into(),
             subject: subject.into(),
             age: Some(Duration::from_secs(age_secs)),
+            on_branch: false,
         }
     }
 
@@ -2361,6 +2441,7 @@ mod tests {
             hash: hash.into(),
             subject: subject.into(),
             age: None,
+            on_branch: false,
         }
     }
 
@@ -2472,6 +2553,7 @@ mod tests {
                 hash: format!("h{i:06}"),
                 subject: format!("subj {i}"),
                 age: Some(Duration::from_secs(i * 60)),
+                on_branch: false,
             })
             .collect();
         let mut o = opts();
@@ -2505,6 +2587,7 @@ mod tests {
             hash: "abc1234".into(),
             subject: "really long subject ".repeat(20),
             age: Some(Duration::from_secs(30)),
+            on_branch: false,
         }];
         let mut o = opts();
         o.log_lines = 1;
@@ -2721,6 +2804,194 @@ mod tests {
             preceding.chars().all(|c| c == '─' || c.is_whitespace()),
             "line before log section should be a ─ separator: {preceding:?}",
         );
+    }
+
+    // --- the mark of a branch commit -------------------------------------
+    //
+    // Issue #541: the header counts the commits that are only on the current
+    // branch. The log row of each such commit shows `BRANCH_MARK` in a gutter
+    // at its left. Every other log row shows a blank there.
+
+    /// The hash of the commit on the branch in the tests of the mark.
+    const BRANCH_HASH: &str = "abc1234";
+    /// The hash of the commit on the base in the tests of the mark.
+    const BASE_HASH: &str = "def5678";
+
+    /// A log row of a commit that is only on the current branch.
+    fn branch_log_entry(hash: &str, subject: &str, age_secs: u64) -> LogEntry {
+        LogEntry {
+            on_branch: true,
+            ..log_entry(hash, subject, age_secs)
+        }
+    }
+
+    /// A snapshot whose log holds one row of a branch commit with the subject
+    /// `subject`, and one row of a base commit.
+    fn snap_with_a_branch_row(subject: &str) -> Snapshot {
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![
+            branch_log_entry(BRANCH_HASH, subject, 30),
+            log_entry(BASE_HASH, "a commit on the base", 60),
+        ];
+        snap
+    }
+
+    /// The glyphs of the frame of `snap`. The frame is painted with the escape
+    /// codes forced on, and then the codes are taken out.
+    fn painted_glyphs(snap: &Snapshot, o: &RenderOptions) -> String {
+        strip_ansi(&testcolor::with_forced_ansi(|| render(snap, o)))
+    }
+
+    /// The row of `glyphs` that holds `hash`.
+    fn row_with<'a>(glyphs: &'a str, hash: &str) -> &'a str {
+        glyphs
+            .lines()
+            .find(|line| line.contains(hash))
+            .unwrap_or_else(|| panic!("no row holds {hash}:\n{glyphs}"))
+    }
+
+    #[test]
+    fn a_log_row_of_a_branch_commit_shows_the_mark_and_a_row_of_the_base_shows_a_blank() {
+        // Issue #541: the row of a commit that is only on the branch shows
+        // `BRANCH_MARK` in its first column. The row of a base commit shows a
+        // blank there. The glyphs hold no escape code, so the mark stays
+        // visible with no color: in 8-color mode and in piped output.
+        for truecolor in [false, true] {
+            let mut o = opts();
+            o.log_lines = 5;
+            o.truecolor = truecolor;
+
+            let glyphs = painted_glyphs(&snap_with_a_branch_row("a commit on the branch"), &o);
+
+            let marked = row_with(&glyphs, BRANCH_HASH);
+            assert!(
+                marked.starts_with(&format!("{BRANCH_MARK}{BRANCH_HASH}")),
+                "truecolor={truecolor}: the row of a branch commit starts with the mark: \
+                 {marked:?}",
+            );
+            let blank = row_with(&glyphs, BASE_HASH);
+            assert!(
+                blank.starts_with(&format!(" {BASE_HASH}")),
+                "truecolor={truecolor}: the row of a base commit starts with a blank: {blank:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_log_row_with_the_mark_and_a_row_with_a_blank_have_one_width_and_one_hash_column() {
+        // Issue #541: the mark does not move a row. The row with the mark and
+        // the row with a blank have the same width, and their hashes start in
+        // the same column. So no column moves when a commit lands on the
+        // branch.
+        let mut o = opts();
+        o.log_lines = 5;
+
+        let glyphs = painted_glyphs(&snap_with_a_branch_row("a commit on the branch"), &o);
+
+        let marked = row_with(&glyphs, BRANCH_HASH);
+        let blank = row_with(&glyphs, BASE_HASH);
+        assert_eq!(
+            UnicodeWidthStr::width(marked),
+            UnicodeWidthStr::width(blank),
+            "the two log rows have the same width:\n  mark:  {marked:?}\n  blank: {blank:?}",
+        );
+        let hash_column = |row: &str, hash: &str| {
+            row.split_once(hash)
+                .map(|(before, _)| UnicodeWidthStr::width(before))
+        };
+        assert_eq!(
+            hash_column(marked, BRANCH_HASH),
+            hash_column(blank, BASE_HASH),
+            "the two hashes start in the same column:\n  mark:  {marked:?}\n  blank: {blank:?}",
+        );
+    }
+
+    #[test]
+    fn a_long_subject_on_a_log_row_with_the_mark_fits_the_terminal_width() {
+        // Issue #541: the gutter takes its column from the subject. So a row
+        // with the mark and a long subject is never wider than the terminal,
+        // and its subject ends with `…`. The subject holds characters of two
+        // columns and of more than one byte. An odd width puts the cut next
+        // to a character of two columns.
+        let subject = "a long subject 日本語テスト 🎉 café ".repeat(10);
+        for width in [40, 41, 80] {
+            let mut o = opts();
+            o.log_lines = 5;
+            o.terminal_width = width;
+
+            let glyphs = painted_glyphs(&snap_with_a_branch_row(&subject), &o);
+
+            let marked = row_with(&glyphs, BRANCH_HASH);
+            assert!(
+                marked.starts_with(BRANCH_MARK),
+                "width={width}: the row shows the mark: {marked:?}",
+            );
+            assert!(
+                UnicodeWidthStr::width(marked) <= width,
+                "width={width}: the row is {} columns wide: {marked:?}",
+                UnicodeWidthStr::width(marked),
+            );
+            let before_age = marked
+                .trim_end()
+                .rsplit_once(' ')
+                .map(|(head, _)| head.trim_end());
+            assert!(
+                before_age.is_some_and(|head| head.ends_with('…')),
+                "width={width}: the subject ends with an ellipsis: {marked:?}",
+            );
+        }
+    }
+
+    /// The escape codes at the start of `line`, before its first glyph.
+    fn leading_codes(line: &str) -> &str {
+        let mut rest = line;
+        while let Some((_, tail)) = rest
+            .strip_prefix("\x1b[")
+            .and_then(|codes| codes.split_once('m'))
+        {
+            rest = tail;
+        }
+        line.strip_suffix(rest).unwrap_or_default()
+    }
+
+    #[test]
+    fn the_mark_is_painted_blue_and_the_blank_takes_none() {
+        // Issue #541: the mark is blue, a color that no other part of gsw
+        // paints, so it tells of no problem and of no file status. Truecolor
+        // mode paints `BRANCH_MARK_RGB`. 8-color mode paints bright blue,
+        // because plain blue is too dark to read on many dark themes. The
+        // blank of a row of a base commit takes no paint. The codes are
+        // forced on, so the test reads the paint whether it writes to a
+        // terminal or not.
+        let (r, g, b) = BRANCH_MARK_RGB;
+        for (truecolor, mark_codes) in [
+            (false, "\x1b[94m".to_string()),
+            (true, format!("{}{r};{g};{b}m", testcolor::TRUECOLOR_FG)),
+        ] {
+            let mut o = opts();
+            o.log_lines = 5;
+            o.truecolor = truecolor;
+
+            let painted = testcolor::with_forced_ansi(|| {
+                render(&snap_with_a_branch_row("a commit on the branch"), &o)
+            });
+
+            let marked = row_with(&painted, BRANCH_HASH);
+            assert_eq!(
+                leading_codes(marked),
+                mark_codes,
+                "truecolor={truecolor}: the mark is blue: {marked:?}",
+            );
+            assert!(
+                marked.starts_with(&format!("{mark_codes}{BRANCH_MARK}")),
+                "truecolor={truecolor}: the codes paint the mark: {marked:?}",
+            );
+            let blank = row_with(&painted, BASE_HASH);
+            assert!(
+                blank.starts_with(LOG_GUTTER_BLANK),
+                "truecolor={truecolor}: the blank gutter takes no paint: {blank:?}",
+            );
+        }
     }
 
     // --- truecolor commit-log fade ---------------------------------------
@@ -3522,6 +3793,7 @@ mod tests {
             hash: "abc1234".into(),
             subject: "test".into(),
             age: Some(Duration::from_secs(100)),
+            on_branch: false,
         }]; // log: "1m40s"
         let mut o = opts();
         o.log_lines = 5; // so the log section renders
@@ -3559,6 +3831,7 @@ mod tests {
                 hash: "abc1234".into(),
                 subject: "test".into(),
                 age: Some(Duration::from_secs(100)),
+                on_branch: false,
             }];
             let mut o = opts();
             o.log_lines = 5;

@@ -169,8 +169,9 @@ pub fn resolve_base(repo: &gix::Repository) -> String {
     "HEAD".to_string()
 }
 
-/// The commit that a walk of the log starts from: the commit that HEAD named
-/// when [`recent_log`] resolved it.
+/// The start of a walk of the log: the commit that HEAD named when
+/// [`recent_log`] resolved it, the commit that the base named then, and the
+/// set of the commits that only the branch has.
 ///
 /// A commit names its parents by their ids, and an id names its content. So
 /// the history of one start is the same at every read, whatever HEAD names by
@@ -178,29 +179,118 @@ pub fn resolve_base(repo: &gix::Repository) -> String {
 /// resize ([`recent_log_from`]), and that read extends the log of the walk. It
 /// never gives the history of another branch.
 ///
-/// The field is private, and only [`recent_log`] makes a start. So a read of
+/// The base commit decides which commits are only on the branch
+/// ([`LogCommit::on_branch`]). The start keeps that commit and not the name of
+/// the base. So a read from one start gives the same marks at every read, also
+/// when the base moved after the walk.
+///
+/// The start keeps the set of those commits from one walk of `base..commit`,
+/// made when [`recent_log`] made the start. The header counts the size of
+/// that set ([`base_status`]), and the log marks its rows from that set. So
+/// the count and the marks agree, and a read from the start walks no more
+/// than its rows. It never walks `base..commit` again.
+///
+/// The set is `None` when the walk did not start or when a step of it failed.
+/// That is a doubt: the header counts zero and the log marks no row. The set
+/// is empty when the start has no base or when the base is the start commit.
+///
+/// Memory: the set holds one id for each commit that only the branch has. The
+/// start keeps it for the life of the snapshot that holds the start. A clone
+/// of the start shares the set and does not copy it.
+///
+/// The fields are private, and only [`recent_log`] makes a start. So a read of
 /// the log starts from a commit that a walk recorded, or from HEAD.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LogStart(gix::ObjectId);
+#[derive(Clone)]
+pub struct LogStart {
+    /// The commit that the walk starts from.
+    commit: gix::ObjectId,
+    /// The commit that the base named when the walk started. `None` when the
+    /// base did not resolve.
+    base: Option<gix::ObjectId>,
+    /// The commits that `commit` reaches and `base` does not. `None` when the
+    /// walk did not start or a step of it failed.
+    branch: Option<std::sync::Arc<gix::hashtable::HashSet>>,
+}
+
+/// Two starts are equal when they name the same commit and the same base.
+///
+/// The set of the branch commits is a function of those two commits, because
+/// a history never changes. So the set is not compared. A walk that failed
+/// and a walk that did not fail, from the same two commits, are the same
+/// start.
+impl PartialEq for LogStart {
+    fn eq(&self, other: &Self) -> bool {
+        self.commit == other.commit && self.base == other.base
+    }
+}
+
+impl Eq for LogStart {}
+
+/// Shows the commit, the base, and the number of branch commits. It never
+/// shows the whole set, because a set of 50000 ids is not useful in the debug
+/// print of a snapshot.
+impl std::fmt::Debug for LogStart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LogStart")
+            .field("commit", &self.commit)
+            .field("base", &self.base)
+            .field("branch_commits", &self.branch.as_ref().map(|set| set.len()))
+            .finish()
+    }
+}
 
 impl LogStart {
-    /// A start that names no commit, for the tests that fake the histories of
-    /// a repository. One seed gives the same start at every call, and two
-    /// seeds give two different starts.
+    /// A start that names no commit and no base, for the tests that fake the
+    /// histories of a repository. One seed gives the same start at every
+    /// call, and two seeds give two different starts. The set of the branch
+    /// commits is empty.
     #[cfg(test)]
     pub(crate) fn fake(seed: u8) -> Self {
-        Self(gix::ObjectId::from_bytes_or_panic(&[seed; 20]))
+        Self {
+            commit: gix::ObjectId::from_bytes_or_panic(&[seed; 20]),
+            base: None,
+            branch: Some(std::sync::Arc::default()),
+        }
     }
+
+    /// Make the start of `commit` against `base`, with one walk of the
+    /// commits that only the branch has ([`branch_commits`]).
+    fn walked(repo: &gix::Repository, commit: gix::ObjectId, base: Option<gix::ObjectId>) -> Self {
+        Self {
+            commit,
+            base,
+            branch: branch_commits(repo, commit, base).map(std::sync::Arc::new),
+        }
+    }
+}
+
+/// One commit of a [`RecentLog`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogCommit {
+    /// The short hash of the commit.
+    pub hash: String,
+    /// The time of the commit, in seconds since the Unix epoch.
+    pub secs: i64,
+    /// The first line of the message of the commit.
+    pub summary: String,
+    /// The commit is only on the branch: the start reaches it, and the base
+    /// of the start does not. These are the commits that the header counts
+    /// ([`base_status`]). The flag comes from the set that the start keeps
+    /// ([`LogStart`]), and not from the position of the commit in the log
+    /// ([`recent_log_from`]).
+    pub on_branch: bool,
 }
 
 /// The newest commits of one history, as [`recent_log`] reads them from HEAD
 /// and [`recent_log_from`] reads them from a start.
 pub struct RecentLog {
-    /// The commit that the walk started from. `None` when HEAD named no
-    /// commit: HEAD was unborn, or it did not resolve to a commit.
+    /// The commit that the walk started from, with the base commit of the
+    /// walk. `None` when HEAD named no commit: HEAD was unborn, or it did not
+    /// resolve to a commit.
     pub start: Option<LogStart>,
-    /// The commits, newest first, as `(short_hash, unix_secs, summary)`.
-    pub commits: Vec<(String, i64, String)>,
+    /// The commits, newest first. Each commit tells whether it is only on
+    /// the branch ([`LogCommit::on_branch`]).
+    pub commits: Vec<LogCommit>,
     /// The walk reached the end of the history at or before the limit, so
     /// `commits` holds every commit that `start` reaches, or no commit for an
     /// unborn HEAD. A read from `start` with a higher limit then finds no more
@@ -208,21 +298,32 @@ pub struct RecentLog {
     pub complete: bool,
 }
 
-/// The `n` most recent commits from HEAD as `(short_hash, unix_secs, summary)`,
-/// the commit that HEAD names, and whether the walk reached the end of the
-/// history.
+/// The `n` most recent commits from HEAD, the start of the walk, and whether
+/// the walk reached the end of the history.
+///
+/// The start holds the commit that HEAD names, the commit that `base` names,
+/// and the set of the commits that only the branch has ([`LogStart`]). This
+/// call makes the one walk of `base..HEAD` for that set, whatever `n` is.
+/// [`base_status`] counts the header from the start, so the marks of the log
+/// and the count of the header agree. A `base` that does not resolve gives a
+/// start with no base, and then no commit is marked. When HEAD is on the base,
+/// no commit is marked either. The header counts zero in both cases.
 ///
 /// HEAD is resolved first, whatever `n` is, so the start is known at a limit
 /// of zero too. A pane too short for a log can grow later, and the read of the
-/// log for it starts there. [`recent_log_from`] then walks from that start.
+/// log for it starts there. [`recent_log_from`] then walks from that start
+/// and uses its set.
 ///
 /// An unborn HEAD is not a failure. It is a history of no commit, so its log
 /// has no start and no commit, and it is complete, except at a limit of zero,
 /// which sees no end. A HEAD that does not resolve to a commit is a failure,
 /// so its log has no start and no commit, and it is not complete.
-pub fn recent_log(repo: &gix::Repository, n: usize) -> RecentLog {
+pub fn recent_log(repo: &gix::Repository, base: &str, n: usize) -> RecentLog {
     match repo.head_commit() {
-        Ok(head) => recent_log_from(repo, LogStart(head.id), n),
+        Ok(head) => {
+            let start = LogStart::walked(repo, head.id, base_commit(repo, base));
+            recent_log_from(repo, start, n)
+        }
         Err(_) => RecentLog {
             start: None,
             commits: Vec::new(),
@@ -231,9 +332,8 @@ pub fn recent_log(repo: &gix::Repository, n: usize) -> RecentLog {
     }
 }
 
-/// The `n` most recent commits of the history of `start` as
-/// `(short_hash, unix_secs, summary)`, and whether the walk reached the end of
-/// that history.
+/// The `n` most recent commits of the history of `start`, and whether the walk
+/// reached the end of that history.
 ///
 /// The history of a commit never changes. So a read from one start gives the
 /// same commits in the same order at every read, whatever HEAD names by then,
@@ -258,16 +358,29 @@ pub fn recent_log(repo: &gix::Repository, n: usize) -> RecentLog {
 /// A commit that the walk passed, but whose object, time, or message does not
 /// read, leaves no row. It does not change the flag, because a read with a
 /// higher limit cannot read that commit either.
+///
+/// A commit is marked as only on the branch ([`LogCommit::on_branch`]) when
+/// it is in the set that `start` keeps ([`LogStart`]). The decision is by
+/// membership in that set, and never by the position of the commit. The walk
+/// of the log is breadth-first, so after a merge of the base into the branch,
+/// it puts commits of the base between the commits of the branch. The set
+/// comes from the one walk that made `start`. So every read from one start
+/// gives the same marks, also when the base moved.
+///
+/// This read never walks `base..start`. Its cost is the walk of `n + 1`
+/// commits of the log. A resize in watch mode reads only its rows, however
+/// many commits the branch has. When the set is `None` (the walk of the
+/// branch failed), no row is marked.
 pub fn recent_log_from(repo: &gix::Repository, start: LogStart, n: usize) -> RecentLog {
     let incomplete = || RecentLog {
-        start: Some(start),
+        start: Some(start.clone()),
         commits: Vec::new(),
         complete: false,
     };
     if n == 0 {
         return incomplete();
     }
-    let Ok(mut walk) = repo.rev_walk(std::iter::once(start.0)).all() else {
+    let Ok(mut walk) = repo.rev_walk(std::iter::once(start.commit)).all() else {
         return incomplete();
     };
     let mut step_failed = false;
@@ -283,7 +396,15 @@ pub fn recent_log_from(repo: &gix::Repository, start: LogStart, n: usize) -> Rec
             let hash = info.id().shorten_or_id().to_string();
             let secs = commit.time().ok()?.seconds;
             let summary = commit.message().ok()?.summary().to_string();
-            Some((hash, secs, summary))
+            Some(LogCommit {
+                hash,
+                secs,
+                summary,
+                on_branch: start
+                    .branch
+                    .as_ref()
+                    .is_some_and(|set| set.contains(&info.id)),
+            })
         })
         .collect();
     let complete = !step_failed && walk.next().is_none();
@@ -306,26 +427,119 @@ pub struct BaseStatus {
     pub behind: u32,
 }
 
-/// Count how far HEAD is ahead of and behind its `base` ref.
+/// Count how far the start of a log is ahead of and behind its base commit.
 ///
-/// `ahead` is the number of commits reachable from HEAD but not from `base`
-/// (`git rev-list --count base..HEAD`); `behind` is the mirror — commits
-/// reachable from `base` but not from HEAD (`git rev-list --count HEAD..base`),
-/// which is nonzero when the base has moved on past the fork point and HEAD
-/// needs a rebase.
+/// `start` is the start that [`recent_log`] made from HEAD. So the header
+/// counts the commits of the same walk that the log marks from.
 ///
-/// Any resolution or walk failure degrades to `BaseStatus { ahead: 0, behind:
-/// 0 }`, so a missing or unresolvable base produces no behind segment. When
-/// HEAD already points at the base commit the walks are short-circuited to
-/// `(0, 0)`. Each count is clamped to `u32::MAX`.
-pub fn base_status(repo: &gix::Repository, base: &str) -> BaseStatus {
+/// `ahead` is the size of the set that the start keeps
+/// (`git rev-list --count base..HEAD`). This call does not walk it again.
+/// `behind` is the mirror, the commits reachable from the base but not from
+/// the start commit (`git rev-list --count HEAD..base`). It is nonzero when
+/// the base has moved on past the fork point and HEAD needs a rebase. This
+/// call walks it, with [`count_only_on`]. Each count is clamped to `u32::MAX`.
+///
+/// Both counts are zero when `start` is `None` (HEAD named no commit), when
+/// the start has no base, or when the walk of the set failed. A missing or
+/// unresolvable base then produces no behind segment. When the base is the
+/// start commit, both counts are zero and no walk runs.
+///
+/// The behind count alone is zero when the walk of the behind count does not
+/// start or a step of it fails. The ahead count stays the size of the set.
+/// So the header and the marks of the log agree.
+pub fn base_status(repo: &gix::Repository, start: Option<&LogStart>) -> BaseStatus {
     let resolve = || -> Option<(u32, u32)> {
-        let head = repo.head_id().ok()?.detach();
-        let base_id = repo.rev_parse_single(base).ok()?.detach();
-        ahead_behind(repo, head, base_id)
+        let start = start?;
+        let base = start.base?;
+        let branch = start.branch.as_ref()?;
+        if base == start.commit {
+            return Some((0, 0));
+        }
+        let behind = count_only_on(repo, base, start.commit).unwrap_or(0);
+        Some((clamp_count(branch.len()), clamp_count(behind)))
     };
     let (ahead, behind) = resolve().unwrap_or((0, 0));
     BaseStatus { ahead, behind }
+}
+
+/// A count as a `u32`, clamped to `u32::MAX`.
+fn clamp_count(count: usize) -> u32 {
+    u32::try_from(count).unwrap_or(u32::MAX)
+}
+
+/// The commit that the ref `base` names, or `None` when `base` does not
+/// resolve.
+///
+/// [`recent_log`] keeps this commit in the start of the log, and
+/// [`base_status`] counts from that start. One rule, so the count of the
+/// header and the marks of the log cannot disagree about the base.
+fn base_commit(repo: &gix::Repository, base: &str) -> Option<gix::ObjectId> {
+    repo.rev_parse_single(base).ok().map(gix::Id::detach)
+}
+
+/// The commits that `commit` reaches and `base` does not: the commits that
+/// are only on the branch. [`LogStart::walked`] calls it one time for each
+/// start.
+///
+/// The set comes from [`walk_only_on`]. The header counts the size of the set
+/// ([`base_status`]), so the log marks the commits that the header counts.
+///
+/// The set is empty when there is no base or when the base is `commit`. The
+/// header counts zero in those cases. The result is `None` when the walk does
+/// not start or when a step of it fails. That is a doubt: the header counts
+/// zero and the log marks no row, so it never marks a commit that the base
+/// reaches.
+fn branch_commits(
+    repo: &gix::Repository,
+    commit: gix::ObjectId,
+    base: Option<gix::ObjectId>,
+) -> Option<gix::hashtable::HashSet> {
+    let Some(base) = base else {
+        return Some(gix::hashtable::HashSet::default());
+    };
+    if base == commit {
+        return Some(gix::hashtable::HashSet::default());
+    }
+    walk_only_on(repo, commit, base)?
+        .map(|info| info.map(|info| info.id))
+        .collect::<Result<_, _>>()
+        .ok()
+}
+
+/// The walk of the commits that `ours` reaches and `theirs` does not
+/// (`git rev-list theirs..ours`). `None` when the walk does not start.
+///
+/// This is the one rule for the commits that are only on one side.
+/// [`branch_commits`] collects the ids of its commits one time for each
+/// start, and the header counts the size of that set ([`base_status`]). So the
+/// header and the marks of the log are the same walk, and they agree about
+/// which commits are only on the branch. [`count_only_on`] counts the same
+/// walk without a set. Both give nothing when the walk does not start or when
+/// a step of it fails.
+fn walk_only_on(
+    repo: &gix::Repository,
+    ours: gix::ObjectId,
+    theirs: gix::ObjectId,
+) -> Option<gix::revision::Walk<'_>> {
+    repo.rev_walk(std::iter::once(ours))
+        .with_hidden(std::iter::once(theirs))
+        .all()
+        .ok()
+}
+
+/// The number of commits that `ours` reaches and `theirs` does not, or `None`
+/// when the walk does not start or when a step of it fails.
+///
+/// A step that fails is not a commit, and a count that includes it is a wrong
+/// number. So this count fails as [`branch_commits`] fails. It keeps no set.
+/// [`base_status`] uses it for the behind count, and [`ahead_behind`] uses it
+/// for both counts.
+fn count_only_on(
+    repo: &gix::Repository,
+    ours: gix::ObjectId,
+    theirs: gix::ObjectId,
+) -> Option<usize> {
+    walk_only_on(repo, ours, theirs)?.try_fold(0_usize, |count, info| info.ok().map(|_| count + 1))
 }
 
 /// Count how far `ours` is ahead of and behind `theirs` as `(ahead, behind)`.
@@ -335,10 +549,13 @@ pub fn base_status(repo: &gix::Repository, base: &str) -> BaseStatus {
 /// reachable from `theirs` but not from `ours` (`git rev-list --count
 /// ours..theirs`). Each count is clamped to `u32::MAX`.
 ///
-/// Returns `None` if either rev walk fails. When `ours == theirs` the walks are
+/// Returns `None` if either rev walk does not start or if a step of it fails.
+/// When `ours == theirs` the walks are
 /// short-circuited to `Some((0, 0))` (the walks would return `(0, 0)` anyway).
-/// Both `base_status` and `upstream_status` delegate here so the mirrored
-/// hidden-walk pair lives in exactly one place.
+/// `upstream_status` uses this and needs only the counts, so it keeps no set.
+/// [`base_status`] does not use it: the start of the log already holds the set
+/// for its ahead count. Each count is [`count_only_on`], which counts the same
+/// walk that [`branch_commits`] collects.
 fn ahead_behind(
     repo: &gix::Repository,
     ours: gix::ObjectId,
@@ -348,19 +565,9 @@ fn ahead_behind(
         return Some((0, 0));
     }
     // ahead: theirs..ours — commits on `ours` not on `theirs`.
-    let ahead = repo
-        .rev_walk(std::iter::once(ours))
-        .with_hidden(std::iter::once(theirs))
-        .all()
-        .ok()?
-        .count();
+    let ahead = count_only_on(repo, ours, theirs)?;
     // behind: ours..theirs — the mirror walk, `theirs` with `ours` hidden.
-    let behind = repo
-        .rev_walk(std::iter::once(theirs))
-        .with_hidden(std::iter::once(ours))
-        .all()
-        .ok()?
-        .count();
+    let behind = count_only_on(repo, theirs, ours)?;
     Some((
         u32::try_from(ahead).unwrap_or(u32::MAX),
         u32::try_from(behind).unwrap_or(u32::MAX),
@@ -375,6 +582,8 @@ fn ahead_behind(
 /// configured, or the upstream tracking ref hasn't been fetched yet (i.e.
 /// `origin/main` exists in config but not under `.git/refs/`) — the same cases
 /// where `git rev-parse @{upstream}` fails, so this matches the old CLI path.
+/// It also returns `None` when a walk does not start or when a step of it
+/// fails, because a count that includes a failed step is a wrong number.
 pub fn upstream_status(repo: &gix::Repository) -> Option<UpstreamStatus> {
     use gix::bstr::ByteSlice;
     use gix::remote::Direction;
@@ -1066,7 +1275,7 @@ mod tests {
 
     use super::RepoHandle;
     use crate::git::FileStatus;
-    use crate::render::{Operation, StepProgress};
+    use crate::render::{LogEntry, Operation, StepProgress};
     use crate::testrepo::{
         git, git_allowing_failure, git_stdout, init_repo, init_repo_with_upstream,
         init_repo_with_worktree,
@@ -1166,6 +1375,13 @@ mod tests {
         );
     }
 
+    /// The counts of the header for HEAD against `base`, as a walk reads
+    /// them: from the start of the log ([`super::recent_log`]), as
+    /// `collect_snapshot` does.
+    fn base_status(repo: &gix::Repository, base: &str) -> super::BaseStatus {
+        super::base_status(repo, super::recent_log(repo, base, 0).start.as_ref())
+    }
+
     #[test]
     fn base_status_reports_behind_when_base_advances_past_fork_point() {
         // Fork `feature` off main, advance both: feature gets one commit, then
@@ -1183,7 +1399,7 @@ mod tests {
         git(p, &["commit", "-q", "-m", "main moved on"]);
         git(p, &["checkout", "-q", "feature"]);
         let repo = open_at(p).unwrap();
-        let status = super::base_status(&repo, "main");
+        let status = base_status(&repo, "main");
         assert_eq!(
             status.ahead, 1,
             "feature has one commit past the fork point"
@@ -1206,7 +1422,7 @@ mod tests {
         git(p, &["add", "c.txt"]);
         git(p, &["commit", "-q", "-m", "third"]);
         let repo = open_at(p).unwrap();
-        let status = super::base_status(&repo, "main");
+        let status = base_status(&repo, "main");
         assert_eq!(status.ahead, 2);
         assert_eq!(status.behind, 0, "base has not moved");
     }
@@ -1215,7 +1431,7 @@ mod tests {
     fn base_status_is_zero_when_base_equals_head() {
         let dir = init_repo();
         let repo = open_at(dir.path()).unwrap();
-        let status = super::base_status(&repo, "main");
+        let status = base_status(&repo, "main");
         assert_eq!((status.ahead, status.behind), (0, 0));
     }
 
@@ -1223,7 +1439,7 @@ mod tests {
     fn base_status_is_zero_when_base_unresolvable() {
         let dir = init_repo();
         let repo = open_at(dir.path()).unwrap();
-        let status = super::base_status(&repo, "no-such-branch");
+        let status = base_status(&repo, "no-such-branch");
         assert_eq!((status.ahead, status.behind), (0, 0));
     }
 
@@ -1235,18 +1451,18 @@ mod tests {
         git(p, &["add", "b.txt"]);
         git(p, &["commit", "-q", "-m", "second commit"]);
         let repo = open_at(p).unwrap();
-        let log = super::recent_log(&repo, 10).commits;
+        let log = super::recent_log(&repo, "main", 10).commits;
         assert_eq!(log.len(), 2);
-        assert_eq!(log[0].2, "second commit");
-        assert_eq!(log[1].2, "initial");
-        assert!(!log[0].0.is_empty(), "short hash present");
+        assert_eq!(log[0].summary, "second commit");
+        assert_eq!(log[1].summary, "initial");
+        assert!(!log[0].hash.is_empty(), "short hash present");
     }
 
     #[test]
     fn recent_log_zero_is_empty() {
         let dir = init_repo();
         let repo = open_at(dir.path()).unwrap();
-        assert!(super::recent_log(&repo, 0).commits.is_empty());
+        assert!(super::recent_log(&repo, "main", 0).commits.is_empty());
     }
 
     /// A repository of three commits: the commit of [`init_repo`], then
@@ -1266,7 +1482,7 @@ mod tests {
     fn subjects(log: &super::RecentLog) -> Vec<&str> {
         log.commits
             .iter()
-            .map(|(_, _, subject)| subject.as_str())
+            .map(|commit| commit.summary.as_str())
             .collect()
     }
 
@@ -1277,7 +1493,7 @@ mod tests {
         let dir = three_commit_repo();
         let repo = open_at(dir.path()).expect("fixture is a worktree repo");
 
-        let log = super::recent_log(&repo, 10);
+        let log = super::recent_log(&repo, "main", 10);
 
         assert_eq!(subjects(&log), ["third", "second", "initial"]);
         assert!(log.complete, "a limit past the history reaches its end");
@@ -1291,7 +1507,7 @@ mod tests {
         let dir = three_commit_repo();
         let repo = open_at(dir.path()).expect("fixture is a worktree repo");
 
-        let log = super::recent_log(&repo, 3);
+        let log = super::recent_log(&repo, "main", 3);
 
         assert_eq!(subjects(&log), ["third", "second", "initial"]);
         assert!(log.complete, "the third commit is the last commit");
@@ -1304,7 +1520,7 @@ mod tests {
         let dir = three_commit_repo();
         let repo = open_at(dir.path()).expect("fixture is a worktree repo");
 
-        let log = super::recent_log(&repo, 2);
+        let log = super::recent_log(&repo, "main", 2);
 
         assert_eq!(subjects(&log), ["third", "second"]);
         assert!(!log.complete, "the walk stopped before the last commit");
@@ -1319,7 +1535,7 @@ mod tests {
         git(dir.path(), &["init", "-q", "-b", "main"]);
         let repo = open_at(dir.path()).expect("an unborn repository has a work tree");
 
-        let log = super::recent_log(&repo, 10);
+        let log = super::recent_log(&repo, "main", 10);
 
         assert!(log.commits.is_empty(), "an unborn HEAD has no commit");
         assert!(log.complete, "an unborn HEAD has an empty history");
@@ -1336,7 +1552,7 @@ mod tests {
         let dir = three_commit_repo();
         let repo = open_at(dir.path()).expect("fixture is a worktree repo");
 
-        let log = super::recent_log(&repo, 0);
+        let log = super::recent_log(&repo, "main", 0);
 
         assert!(log.commits.is_empty(), "a limit of zero reads no commit");
         assert!(!log.complete, "a read of no commit finds no end");
@@ -1361,7 +1577,7 @@ mod tests {
         git(p, &["symbolic-ref", "HEAD", "refs/heads/broken"]);
         let repo = open_at(p).expect("fixture is a worktree repo");
 
-        let log = super::recent_log(&repo, 10);
+        let log = super::recent_log(&repo, "main", 10);
 
         assert!(log.commits.is_empty(), "a missing commit gives no row");
         assert!(!log.complete, "a HEAD that does not resolve finds no end");
@@ -1369,6 +1585,16 @@ mod tests {
             log.start, None,
             "a HEAD that does not resolve names no start"
         );
+    }
+
+    /// Delete the loose object of the commit that `rev` names in the
+    /// repository at `dir`. A walk that comes to that commit then fails.
+    fn remove_commit_object(dir: &Path, rev: &str) {
+        let id = git_stdout(dir, &["rev-parse", rev]);
+        let fan_out: String = id.chars().take(2).collect();
+        let rest: String = id.chars().skip(2).collect();
+        std::fs::remove_file(dir.join(".git/objects").join(fan_out).join(rest))
+            .expect("remove the object of the commit");
     }
 
     #[test]
@@ -1379,14 +1605,10 @@ mod tests {
         // does not claim the end of the history.
         let dir = three_commit_repo();
         let p = dir.path();
-        let root = git_stdout(p, &["rev-parse", "HEAD~2"]);
-        let fan_out: String = root.chars().take(2).collect();
-        let rest: String = root.chars().skip(2).collect();
-        std::fs::remove_file(p.join(".git/objects").join(fan_out).join(rest))
-            .expect("remove the object of the first commit");
+        remove_commit_object(p, "HEAD~2");
         let repo = open_at(p).expect("fixture is a worktree repo");
 
-        let log = super::recent_log(&repo, 10);
+        let log = super::recent_log(&repo, "main", 10);
 
         assert_eq!(subjects(&log), ["third", "second"]);
         assert!(!log.complete, "a walk that fails finds no end");
@@ -1455,18 +1677,18 @@ mod tests {
         let dir = three_commit_repo();
         let p = dir.path();
         let repo = open_at(p).expect("fixture is a worktree repo");
-        let start = super::recent_log(&repo, 1)
+        let start = super::recent_log(&repo, "main", 1)
             .start
             .expect("HEAD names a commit");
 
         move_head_to_another_history(p);
 
         assert_eq!(
-            subjects(&super::recent_log(&repo, 10)),
+            subjects(&super::recent_log(&repo, "main", 10)),
             ["moved 4", "moved 3", "moved 2", "moved 1"],
             "HEAD names the other history, so a read from HEAD gives it",
         );
-        let log = super::recent_log_from(&repo, start, 10);
+        let log = super::recent_log_from(&repo, start.clone(), 10);
         assert_eq!(
             subjects(&log),
             ["third", "second", "initial"],
@@ -1505,6 +1727,448 @@ mod tests {
             subjects,
             ["third", "second", "initial"],
             "a read from the start of the walk gives the history of the walk",
+        );
+    }
+
+    /// Make one empty commit with the message `subject` on the branch that
+    /// HEAD of the repository at `dir` names.
+    fn commit_empty(dir: &Path, subject: &str) {
+        git(dir, &["commit", "-q", "--allow-empty", "-m", subject]);
+    }
+
+    /// A repository with HEAD on the branch `feature`. The branch has
+    /// `commits` commits, `feature 1` to `feature <commits>`, on top of the
+    /// commit of [`init_repo`], which `main` names.
+    fn feature_branch_repo(commits: usize) -> TempDir {
+        let dir = init_repo();
+        git(dir.path(), &["checkout", "-q", "-b", "feature"]);
+        for n in 1..=commits {
+            commit_empty(dir.path(), &format!("feature {n}"));
+        }
+        dir
+    }
+
+    /// Move `main` of the repository at `dir` to the commit that `feature`
+    /// names, by a fast-forward merge. HEAD stays on `feature`. After this,
+    /// `main` holds every commit of the branch, and the header counts zero.
+    fn fast_forward_main_to_feature(dir: &Path) {
+        git(dir, &["checkout", "-q", "main"]);
+        git(dir, &["merge", "-q", "--ff-only", "feature"]);
+        git(dir, &["checkout", "-q", "feature"]);
+    }
+
+    /// The subjects of the commits of `log` that are only on the branch,
+    /// newest first.
+    fn marked(log: &super::RecentLog) -> Vec<&str> {
+        log.commits
+            .iter()
+            .filter(|commit| commit.on_branch)
+            .map(|commit| commit.summary.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn recent_log_marks_the_commits_of_a_branch_on_top_of_its_base() {
+        // Issue #541: the header counts the commits that are only on the
+        // branch (`main..feature`). The log marks the same commits. Here the
+        // branch has three commits on top of `main`, so the log marks those
+        // three and not the commit that `main` names.
+        let dir = feature_branch_repo(3);
+        let repo = open_at(dir.path()).expect("fixture is a worktree repo");
+
+        let log = super::recent_log(&repo, "main", 10);
+
+        assert_eq!(
+            subjects(&log),
+            ["feature 3", "feature 2", "feature 1", "initial"],
+            "the log holds the branch and its base",
+        );
+        assert_eq!(
+            marked(&log),
+            ["feature 3", "feature 2", "feature 1"],
+            "the log marks the three commits that only the branch has",
+        );
+    }
+
+    /// A repository with HEAD on the branch `feature`, which merged `main`
+    /// after the fork. The branch has `feature 1` and `feature 2`. Then `main`
+    /// gets `main 1` and `main 2`. Then the branch merges `main` with the
+    /// merge commit `merge main`, and gets `feature 3` after it.
+    fn merged_base_repo() -> TempDir {
+        let dir = init_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "feature"]);
+        commit_empty(p, "feature 1");
+        commit_empty(p, "feature 2");
+        git(p, &["checkout", "-q", "main"]);
+        commit_empty(p, "main 1");
+        commit_empty(p, "main 2");
+        git(p, &["checkout", "-q", "feature"]);
+        git(p, &["merge", "-q", "--no-ff", "main", "-m", "merge main"]);
+        commit_empty(p, "feature 3");
+        dir
+    }
+
+    #[test]
+    fn recent_log_marks_the_commits_of_a_branch_that_merged_its_base_by_membership() {
+        // Issue #541: the walk of the log is breadth-first. After a merge of
+        // `main` into the branch, the walk puts commits of `main` between the
+        // commits of the branch. So the first `ahead` rows are not the
+        // commits of the branch. The log marks the commits of
+        // `main..feature`, whatever their position in the walk.
+        let dir = merged_base_repo();
+        let repo = open_at(dir.path()).expect("fixture is a worktree repo");
+
+        let log = super::recent_log(&repo, "main", 10);
+
+        let position = |subject: &str| {
+            log.commits
+                .iter()
+                .position(|commit| commit.summary == subject)
+                .expect("the log holds every commit of the fixture")
+        };
+        assert!(
+            position("main 2") < position("feature 1"),
+            "the walk puts a commit of main before a commit of the branch, \
+             so a mark by position is wrong here: {:?}",
+            subjects(&log),
+        );
+        let flags: std::collections::BTreeMap<&str, bool> = log
+            .commits
+            .iter()
+            .map(|commit| (commit.summary.as_str(), commit.on_branch))
+            .collect();
+        assert_eq!(
+            flags,
+            std::collections::BTreeMap::from([
+                ("feature 3", true),
+                ("merge main", true),
+                ("feature 2", true),
+                ("feature 1", true),
+                ("main 2", false),
+                ("main 1", false),
+                ("initial", false),
+            ]),
+            "the log marks the commits of the branch and the merge, and no commit of main",
+        );
+        let ahead = base_status(&repo, "main").ahead;
+        assert_eq!(
+            u32::try_from(marked(&log).len()).expect("a small count"),
+            ahead,
+            "the log marks as many commits as the header counts",
+        );
+    }
+
+    #[test]
+    fn recent_log_marks_no_commit_when_head_is_on_the_base() {
+        // Issue #541: HEAD is on `main`, and `main` is the base. No commit is
+        // only on the branch, so the header counts zero and the log marks no
+        // commit.
+        let dir = three_commit_repo();
+        let repo = open_at(dir.path()).expect("fixture is a worktree repo");
+
+        let log = super::recent_log(&repo, "main", 10);
+
+        assert_eq!(subjects(&log), ["third", "second", "initial"]);
+        assert!(
+            marked(&log).is_empty(),
+            "a branch that is its base has no commit of its own: {:?}",
+            marked(&log),
+        );
+        assert_eq!(base_status(&repo, "main").ahead, 0);
+    }
+
+    #[test]
+    fn recent_log_marks_no_commit_when_the_base_does_not_resolve() {
+        // Issue #541: the base names no ref, so the header counts zero. The
+        // log uses the same fallback and marks no commit, although the
+        // branch has three commits on top of `main`.
+        let dir = feature_branch_repo(3);
+        let repo = open_at(dir.path()).expect("fixture is a worktree repo");
+
+        let log = super::recent_log(&repo, "no-such-branch", 10);
+
+        assert_eq!(
+            subjects(&log),
+            ["feature 3", "feature 2", "feature 1", "initial"],
+            "a base that does not resolve does not change the log",
+        );
+        assert!(
+            marked(&log).is_empty(),
+            "a base that does not resolve marks no commit: {:?}",
+            marked(&log),
+        );
+        assert_eq!(base_status(&repo, "no-such-branch").ahead, 0);
+    }
+
+    #[test]
+    fn recent_log_from_keeps_the_marks_of_its_start_after_the_base_moves() {
+        // Issue #541: watch mode reads the log again from the recorded start
+        // on a resize. The start keeps the base commit of the walk. So a
+        // resize after `main` moved gives the marks of the walk, and not the
+        // marks of the moved `main`.
+        let dir = feature_branch_repo(3);
+        let p = dir.path();
+        let repo = open_at(p).expect("fixture is a worktree repo");
+        let start = super::recent_log(&repo, "main", 1)
+            .start
+            .expect("HEAD names a commit");
+
+        fast_forward_main_to_feature(p);
+
+        assert_eq!(
+            marked(&super::recent_log_from(&repo, start, 10)),
+            ["feature 3", "feature 2", "feature 1"],
+            "a read from the start of the walk keeps the marks of the walk",
+        );
+        assert!(
+            marked(&super::recent_log(&repo, "main", 10)).is_empty(),
+            "main now holds the branch, so a new read from HEAD marks no commit",
+        );
+    }
+
+    /// The subject and the mark of each row of `log`, newest first.
+    fn row_marks(log: &[LogEntry]) -> Vec<(&str, bool)> {
+        log.iter()
+            .map(|entry| (entry.subject.as_str(), entry.on_branch))
+            .collect()
+    }
+
+    #[test]
+    fn a_walk_marks_the_log_rows_of_a_branch_on_top_of_its_base() {
+        // Issue #541: the walk puts the log on the snapshot, and each row
+        // keeps the mark of its commit. The branch has three commits on top
+        // of `main`. So the walk marks the three rows of the branch and not
+        // the row of the commit that `main` names. The header counts the
+        // same commits.
+        let dir = feature_branch_repo(3);
+        let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
+
+        let snapshot =
+            crate::collect_snapshot(handle.repo(), &log_walk_config(), 10).expect("walk");
+
+        assert_eq!(
+            row_marks(&snapshot.log),
+            [
+                ("feature 3", true),
+                ("feature 2", true),
+                ("feature 1", true),
+                ("initial", false),
+            ],
+            "the walk marks the rows of the three commits that only the branch has",
+        );
+        let marked_rows = snapshot.log.iter().filter(|entry| entry.on_branch).count();
+        assert_eq!(
+            u32::try_from(marked_rows).expect("a small count"),
+            snapshot.commits_ahead,
+            "the log marks as many rows as the header counts",
+        );
+    }
+
+    #[test]
+    fn a_failed_step_of_the_walk_counts_no_commit_ahead_and_marks_no_row() {
+        // Review R-20261008T205212Z#N1. The object of `feature 1` is gone, so
+        // the walk of the branch fails when it comes to that commit. The set
+        // of the marks gives no commit when a step fails, so the count must
+        // give no number either. Else the header counts commits that the log
+        // does not mark.
+        let dir = feature_branch_repo(4);
+        remove_commit_object(dir.path(), "HEAD~3");
+        let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
+
+        let snapshot =
+            crate::collect_snapshot(handle.repo(), &log_walk_config(), 10).expect("walk");
+
+        let marked_rows = snapshot.log.iter().filter(|entry| entry.on_branch).count();
+        assert_eq!(
+            u32::try_from(marked_rows).expect("a small count"),
+            snapshot.commits_ahead,
+            "the log marks as many rows as the header counts",
+        );
+        assert_eq!(
+            (snapshot.commits_ahead, snapshot.commits_behind),
+            (0, 0),
+            "a failed step degrades the header to zero",
+        );
+    }
+
+    /// A repository with HEAD on the branch `feature`, where `main` moved
+    /// after the fork. `main` holds the commit of [`init_repo`] and three
+    /// more, `main 1` to `main 3`. `feature` holds three commits, `feature 1`
+    /// to `feature 3`, on top of the commit of [`init_repo`]. So the branch is
+    /// three commits ahead of the fork point, and the base is three commits
+    /// past it.
+    fn base_moved_repo() -> TempDir {
+        let dir = init_repo();
+        let p = dir.path();
+        for n in 1..=3 {
+            commit_empty(p, &format!("main {n}"));
+        }
+        git(p, &["checkout", "-q", "-b", "feature", "main~3"]);
+        for n in 1..=3 {
+            commit_empty(p, &format!("feature {n}"));
+        }
+        dir
+    }
+
+    #[test]
+    fn every_missing_commit_object_keeps_the_count_of_the_header_and_the_marks_of_the_log_in_agreement(
+    ) {
+        // Reviews R-20261008T205212Z#N1 and R-20261009T150046Z#I1. The count
+        // of the header and the marks of the log must agree. That broke
+        // once on each side of the walk. N1 was a failed step on the branch
+        // side. I1 was a failed step on the base side. So this test does not
+        // remove one chosen commit. It removes each commit of the fixture in
+        // turn, and a failure path that we did not think of cannot hide.
+        const REVS: [&str; 7] = [
+            "feature",
+            "feature~1",
+            "feature~2",
+            "feature~3",
+            "main",
+            "main~1",
+            "main~2",
+        ];
+        let intact = base_moved_repo();
+        let handle = RepoHandle::discover(intact.path()).expect("fixture is a worktree repo");
+        let snapshot =
+            crate::collect_snapshot(handle.repo(), &log_walk_config(), 10).expect("walk");
+        assert!(
+            snapshot.commits_ahead > 0 && snapshot.commits_behind > 0,
+            "the intact fixture is ahead and behind, so the sweep tests a moved base",
+        );
+        let commit_count = git_stdout(intact.path(), &["rev-list", "--all", "--count"]);
+        assert_eq!(
+            commit_count.trim().parse::<usize>().expect("a count"),
+            REVS.len(),
+            "the sweep names every commit of the fixture",
+        );
+
+        // The snapshot of these revs fails as a whole. HEAD names `feature`,
+        // so the read of the changes fails when its object is missing. The
+        // sweep names them, so a change that fails more revs cannot shrink
+        // the sweep without a failure.
+        const REVS_WHOSE_SNAPSHOT_FAILS: [&str; 1] = ["feature"];
+
+        let mut failed = Vec::new();
+        let mut checked = 0;
+        for rev in REVS {
+            let dir = base_moved_repo();
+            remove_commit_object(dir.path(), rev);
+            let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
+            let Ok(snapshot) = crate::collect_snapshot(handle.repo(), &log_walk_config(), 10)
+            else {
+                failed.push(rev);
+                continue;
+            };
+            checked += 1;
+            let marked_rows = snapshot.log.iter().filter(|entry| entry.on_branch).count();
+            assert_eq!(
+                u32::try_from(marked_rows).expect("a small count"),
+                snapshot.commits_ahead,
+                "the log marks as many rows as the header counts when the commit {rev} is missing: {:?}",
+                row_marks(&snapshot.log),
+            );
+        }
+        assert_eq!(
+            failed, REVS_WHOSE_SNAPSHOT_FAILS,
+            "the revs whose snapshot failed ({failed:?}) are not the revs that the test names ({REVS_WHOSE_SNAPSHOT_FAILS:?})",
+        );
+        assert_eq!(
+            checked,
+            REVS.len() - REVS_WHOSE_SNAPSHOT_FAILS.len(),
+            "the sweep checked the agreement for every rev whose snapshot succeeds",
+        );
+    }
+
+    #[test]
+    fn a_read_from_the_start_of_a_walk_keeps_the_marks_of_its_rows_after_the_base_moves() {
+        // Issue #541: watch mode caches the log rows of a walk. A resize that
+        // needs more rows reads the log again from the start of the walk,
+        // and the rows of that read replace the cached rows. Here the walk
+        // reads two rows of a branch with four commits on top of `main`.
+        // Then `main` takes the four commits. The read still gives the two
+        // cached rows first with the same marks. It also marks the two new
+        // rows of the branch, and not the commit before the branch.
+        let dir = feature_branch_repo(4);
+        let p = dir.path();
+        let handle = RepoHandle::discover(p).expect("fixture is a worktree repo");
+        let cfg = log_walk_config();
+        let snapshot = crate::collect_snapshot(handle.repo(), &cfg, 2).expect("walk");
+        assert_eq!(
+            row_marks(&snapshot.log),
+            [("feature 4", true), ("feature 3", true)],
+            "the walk marks its two rows",
+        );
+        let start = snapshot.log_start.expect("a walk records its start");
+
+        fast_forward_main_to_feature(p);
+
+        let after_the_move = crate::collect_snapshot(handle.repo(), &cfg, 10).expect("walk");
+        assert_eq!(
+            after_the_move.commits_ahead, 0,
+            "main now holds the branch, so the header of a new walk counts zero",
+        );
+        assert!(
+            after_the_move.log.iter().all(|entry| !entry.on_branch),
+            "a new walk marks no row: {:?}",
+            row_marks(&after_the_move.log),
+        );
+
+        let read = crate::fetch_log_from(handle.repo(), start, 10);
+        let hash_and_mark = |entry: &LogEntry| (entry.hash.clone(), entry.on_branch);
+        assert_eq!(
+            read.entries
+                .iter()
+                .take(snapshot.log.len())
+                .map(hash_and_mark)
+                .collect::<Vec<_>>(),
+            snapshot.log.iter().map(hash_and_mark).collect::<Vec<_>>(),
+            "the read gives the cached rows first, with the same hashes and marks",
+        );
+        assert_eq!(
+            row_marks(&read.entries),
+            [
+                ("feature 4", true),
+                ("feature 3", true),
+                ("feature 2", true),
+                ("feature 1", true),
+                ("initial", false),
+            ],
+            "the read marks the four commits of the branch against the base of the walk",
+        );
+    }
+
+    #[test]
+    fn a_read_from_the_start_of_a_walk_does_not_walk_the_branch_again() {
+        // Review R-20261008T205212Z#I1. A resize read uses the set of the
+        // walk again. The object of `feature 1` is gone after the walk, and
+        // a read of three rows never comes to it. A read that walks
+        // `main..start` again comes to the missing object and loses every
+        // mark.
+        let dir = feature_branch_repo(6);
+        let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
+        let snapshot = crate::collect_snapshot(handle.repo(), &log_walk_config(), 2).expect("walk");
+        assert_eq!(
+            row_marks(&snapshot.log),
+            [("feature 6", true), ("feature 5", true)],
+            "the walk marks its two rows",
+        );
+        let start = snapshot.log_start.expect("a walk records its start");
+
+        remove_commit_object(dir.path(), "HEAD~5");
+        let fresh = open_at(dir.path()).expect("fixture is a worktree repo");
+
+        let read = crate::fetch_log_from(&fresh, start, 3);
+
+        assert_eq!(
+            row_marks(&read.entries),
+            [
+                ("feature 6", true),
+                ("feature 5", true),
+                ("feature 4", true),
+            ],
+            "the read marks its rows from the set of the walk",
         );
     }
 
@@ -1703,6 +2367,26 @@ mod tests {
     fn upstream_none_for_branch_without_upstream() {
         let dir = init_repo(); // local-only main, never pushed
         let repo = open_at(dir.path()).unwrap();
+        assert!(super::upstream_status(&repo).is_none());
+    }
+
+    #[test]
+    fn upstream_gives_no_status_when_a_step_of_the_walk_fails() {
+        // Review R-20261008T205212Z#N1. The object of the first local commit
+        // is gone, so the walk fails when it comes to that commit. A count
+        // that includes a failed step is a wrong number, so the walk gives no
+        // status.
+        let (_origin, clone) = init_repo_with_upstream();
+        let p = clone.path();
+        for n in 1..=3 {
+            git(
+                p,
+                &["commit", "-q", "--allow-empty", "-m", &format!("local {n}")],
+            );
+        }
+        remove_commit_object(p, "HEAD~2");
+        let repo = open_at(p).unwrap();
+
         assert!(super::upstream_status(&repo).is_none());
     }
 

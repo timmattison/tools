@@ -3353,7 +3353,7 @@ where
         if saw_resize {
             let limit = state.log_limit();
             let cached = &state.cache.snapshot;
-            if let Some(start) = cached.log_start {
+            if let Some(start) = cached.log_start.clone() {
                 if cached.log.len() < limit && !cached.log_complete {
                     let fetched = (hooks.fetch_log)(&state.current, start, limit);
                     state.cache.take_fetched_log(fetched, now);
@@ -6146,6 +6146,20 @@ mod tests {
                         + Duration::from_secs(60)
                             * u32::try_from(n).expect("a test history is short"),
                 ),
+                on_branch: false,
+            })
+            .collect()
+    }
+
+    /// `history` with the mark of a branch commit ([`LogEntry::on_branch`]) on
+    /// each row whose index `marked` holds, and on no other row.
+    fn with_marks(history: Vec<LogEntry>, marked: &[usize]) -> Vec<LogEntry> {
+        history
+            .into_iter()
+            .enumerate()
+            .map(|(row, entry)| LogEntry {
+                on_branch: marked.contains(&row),
+                ..entry
             })
             .collect()
     }
@@ -6220,13 +6234,13 @@ mod tests {
 
         /// A read from `start` with the limit `limit` ([`read_of`]).
         fn read(&self, start: LogStart, limit: usize) -> FetchedLog {
-            read_of(start, self.history(start), limit)
+            read_of(start.clone(), self.history(start), limit)
         }
 
         /// The snapshot of a walk with the log limit `limit`. The walk reads
         /// from the start that HEAD names, and it records that start.
         fn walk(&self, limit: usize) -> Snapshot {
-            let read = self.read(self.head, limit);
+            let read = self.read(self.head.clone(), limit);
             Snapshot {
                 log: read.entries,
                 log_complete: read.complete,
@@ -6280,6 +6294,12 @@ mod tests {
         fn commit_rows(&self) -> usize {
             commit_rows(&self.glyphs)
         }
+    }
+
+    /// Whether `line`, one row of a frame, is the log row of `commit`: the
+    /// hash of the commit follows the gutter of the row.
+    fn starts_with_commit(line: &str, commit: &LogEntry) -> bool {
+        crate::render::after_log_gutter(line).is_some_and(|row| row.starts_with(&commit.hash))
     }
 
     /// How many commit rows `glyphs`, the glyphs of one frame, shows.
@@ -6553,7 +6573,7 @@ mod tests {
             let row = run
                 .glyphs
                 .lines()
-                .find(|line| line.starts_with(&commit.hash))
+                .find(|line| starts_with_commit(line, &commit))
                 .unwrap_or_else(|| panic!("no row for {}:\n{}", commit.hash, run.glyphs));
             let true_age = crate::age::format_age_detailed(
                 commit
@@ -6729,7 +6749,7 @@ mod tests {
 
     /// Whether `glyphs`, the glyphs of one frame, hold a row of `commit`.
     fn shows(glyphs: &str, commit: &LogEntry) -> bool {
-        glyphs.lines().any(|line| line.starts_with(&commit.hash))
+        glyphs.lines().any(|line| starts_with_commit(line, commit))
     }
 
     #[test]
@@ -6784,6 +6804,53 @@ mod tests {
                 !shows(&run.glyphs, commit),
                 "the frame shows {} of the history that HEAD moved to, under the header of \
                  the walk:\n{}",
+                commit.hash,
+                run.glyphs,
+            );
+        }
+    }
+
+    #[test]
+    fn a_resize_that_reads_more_commits_keeps_the_marks_of_the_cached_rows() {
+        // Issue #541: the log row of a commit that is only on the branch
+        // starts with the mark, and every other log row starts with a blank.
+        // Here the branch merged its base, so a commit of the base sits
+        // between commits of the branch: rows 0, 1 and 3 are on the branch,
+        // and rows 2, 4 and 5 are not.
+        //
+        // The walk filled a pane of 4 rows: 2 commits under the header and
+        // the separator. The pane then grows to 20 rows, and the resize reads
+        // the 6 commits of the history. The frame keeps the marks of the 2
+        // cached rows, and it marks row 3 of the read. No other row shows the
+        // mark.
+        const MARKED: [usize; 3] = [0, 1, 3];
+        let now = Instant::now();
+        let history = with_marks(fake_history(6, Duration::from_secs(100)), &MARKED);
+        let cache = SnapshotCache {
+            snapshot: walked(newest(&history, 2)),
+            collected_at: now,
+            dims: pane(4),
+        };
+
+        let run = run_resize(cache, 20, now, &FakeRepo::at(&history));
+
+        assert_eq!(run.fetches, 1, "the grown pane reads the log once");
+        assert_eq!(
+            run.commit_rows(),
+            6,
+            "the frame shows every commit of the history:\n{}",
+            run.glyphs,
+        );
+        for commit in &history {
+            let row = run
+                .glyphs
+                .lines()
+                .find(|line| starts_with_commit(line, commit))
+                .unwrap_or_else(|| panic!("no row for {}:\n{}", commit.hash, run.glyphs));
+            assert_eq!(
+                row.starts_with(crate::render::BRANCH_MARK),
+                commit.on_branch,
+                "the row of {} shows the mark only when the commit is on the branch:\n{}",
                 commit.hash,
                 run.glyphs,
             );
