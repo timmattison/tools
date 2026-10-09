@@ -264,3 +264,60 @@ fn symlink_replaces_an_existing_file_at_the_destination() {
     assert!(fs::symlink_metadata(&copy).unwrap().file_type().is_symlink());
     assert_eq!(fs::read_link(&copy).unwrap(), Path::new("a.txt"));
 }
+
+/// Set the mode of every path to `0o755` when dropped, so `TempDir` can delete the tree.
+#[cfg(unix)]
+struct ModeRestore(Vec<std::path::PathBuf>);
+
+#[cfg(unix)]
+impl Drop for ModeRestore {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        for path in &self.0 {
+            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o755));
+        }
+    }
+}
+
+/// Return the permission bits of a path.
+#[cfg(unix)]
+fn mode_of(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).unwrap().permissions().mode() & 0o7777
+}
+
+#[cfg(unix)]
+#[test]
+fn recursive_copy_keeps_the_modes_of_files_and_directories() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().unwrap();
+    let src = temp.path().join("src");
+    let dest = temp.path().join("dest");
+    write_file(&src.join("private.txt"), "p");
+    write_file(&src.join("other.txt"), "o");
+    write_file(&src.join("group").join("g.txt"), "g");
+    write_file(&src.join("locked").join("l.txt"), "l");
+    let _restore = ModeRestore(vec![src.join("locked"), dest.join("locked")]);
+    fs::set_permissions(src.join("private.txt"), fs::Permissions::from_mode(0o640)).unwrap();
+    fs::set_permissions(src.join("group"), fs::Permissions::from_mode(0o750)).unwrap();
+    fs::set_permissions(src.join("locked"), fs::Permissions::from_mode(0o555)).unwrap();
+
+    let output = run_prcp([
+        OsString::from("-R"),
+        OsString::from("-y"),
+        OsString::from("-q"),
+        src.clone().into_os_string(),
+        dest.clone().into_os_string(),
+    ]);
+
+    let stderr = visible_stderr(&output);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert_eq!(mode_of(&dest.join("private.txt")), 0o640);
+    assert_eq!(mode_of(&dest.join("group")), 0o750);
+    assert_eq!(mode_of(&dest.join("locked")), 0o555);
+    assert_eq!(
+        fs::read_to_string(dest.join("locked").join("l.txt")).unwrap(),
+        "l"
+    );
+}
