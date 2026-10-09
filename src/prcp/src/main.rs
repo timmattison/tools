@@ -359,7 +359,7 @@ fn resolve_sources(patterns: &[PathBuf], literal: bool, recursive: bool) -> Resu
             for entry in glob_iter {
                 match entry {
                     Ok(path) => {
-                        if path.is_file() {
+                        if path.is_file() || (recursive && path.is_dir()) {
                             matches.push(path);
                         }
                     }
