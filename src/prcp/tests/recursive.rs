@@ -371,3 +371,25 @@ fn directory_source_without_recursive_fails_and_copies_nothing() {
     assert!(stderr.contains("--recursive"), "stderr: {stderr}");
     assert!(!dest.exists());
 }
+
+#[test]
+fn directory_onto_an_existing_file_fails() {
+    let temp = TempDir::new().unwrap();
+    let src = temp.path().join("src");
+    let dest = temp.path().join("dest.txt");
+    make_sample_tree(&src);
+    write_file(&dest, "keep me");
+
+    let output = run_prcp([
+        OsString::from("-R"),
+        OsString::from("-y"),
+        OsString::from("-q"),
+        src.into_os_string(),
+        dest.clone().into_os_string(),
+    ]);
+
+    let stderr = visible_stderr(&output);
+    assert!(!output.status.success(), "stderr: {stderr}");
+    assert!(stderr.contains("non-directory"), "stderr: {stderr}");
+    assert_eq!(fs::read_to_string(&dest).unwrap(), "keep me");
+}
