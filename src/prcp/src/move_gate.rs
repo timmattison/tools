@@ -223,3 +223,49 @@ impl fmt::Display for Problem {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "tests use unwrap for brevity and clear failure messages"
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn problem_display_texts_state_each_problem() {
+        assert_eq!(
+            Problem::NotCopied.to_string(),
+            "was not copied and verified"
+        );
+        assert_eq!(
+            Problem::Skipped("fifo").to_string(),
+            "is a fifo, and prcp does not copy it"
+        );
+        assert_eq!(
+            Problem::Unreadable("denied".to_string()).to_string(),
+            "cannot be read: denied"
+        );
+        assert_eq!(
+            Problem::NewSinceCopy.to_string(),
+            "appeared in the source after the copy started, and was not copied"
+        );
+        assert_eq!(
+            Problem::MissingAtSource.to_string(),
+            "is no longer in the source"
+        );
+        assert_eq!(
+            Problem::MissingAtDestination.to_string(),
+            "is missing at the destination"
+        );
+        assert_eq!(
+            Problem::SourceChanged.to_string(),
+            "changed in the source after its copy"
+        );
+        assert_eq!(
+            Problem::DestinationChanged.to_string(),
+            "changed at the destination after its hash check"
+        );
+    }
+}
