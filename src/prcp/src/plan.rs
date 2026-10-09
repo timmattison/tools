@@ -310,4 +310,24 @@ mod tests {
 
         assert_eq!(plan.entries(), [file_entry(0, &source, &destination)]);
     }
+
+    #[test]
+    fn two_files_to_missing_destination_make_it_a_container() {
+        let temp = TempDir::new().unwrap();
+        let first = temp.path().join("a");
+        let second = temp.path().join("b");
+        write_file(&first, "a");
+        write_file(&second, "b");
+        let destination = temp.path().join("newdir");
+
+        let plan = CopyPlan::build(&[first.clone(), second.clone()], &destination, false).unwrap();
+
+        assert_eq!(
+            plan.entries(),
+            [
+                file_entry(0, &first, &destination.join("a")),
+                file_entry(1, &second, &destination.join("b")),
+            ]
+        );
+    }
 }
