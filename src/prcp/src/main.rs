@@ -7,6 +7,7 @@
 #![warn(clippy::cast_sign_loss)] // Warn when casting signed to unsigned
 #![warn(clippy::cast_precision_loss)] // Warn when casting to float loses precision
 
+mod landing;
 mod move_gate;
 mod plan;
 
