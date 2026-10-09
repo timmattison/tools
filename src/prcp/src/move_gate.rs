@@ -43,7 +43,7 @@
 //! directory that is not empty, so a file that appears after the gate also
 //! keeps its directory. The gate collects each removal error and goes on.
 
-use crate::plan::{CopyPlan, EntryKind};
+use crate::plan::{CopyPlan, EntryKind, TreeSnapshot};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
@@ -181,7 +181,44 @@ impl<'a> MoveLedger<'a> {
                 note(&mut problems, &entry.source, Problem::NotCopied);
             }
         }
+        self.compare_tree(operand, &mut problems);
         problems
+    }
+
+    /// Walk a Directory operand again and compare the walk with the snapshot of the plan.
+    ///
+    /// A new path is `NewSinceCopy`. A path that left is `MissingAtSource`. A
+    /// path with another kind is `SourceChanged`. An operand that is not a
+    /// Directory has no snapshot, and the call does nothing.
+    fn compare_tree(&self, operand: usize, problems: &mut BTreeMap<PathBuf, Problem>) {
+        let Some(before) = self
+            .plan
+            .entries()
+            .iter()
+            .find(|entry| entry.operand.index() == operand)
+            .and_then(|entry| self.plan.tree(entry.operand))
+        else {
+            return;
+        };
+        let Some(root) = self.plan.operands().get(operand) else {
+            return;
+        };
+        let now = TreeSnapshot::take(&root.source);
+        for (path, message) in now.errors() {
+            note(problems, path, Problem::Unreadable(message.clone()));
+        }
+        for (path, kind) in now.nodes() {
+            match before.nodes().get(path) {
+                None => note(problems, path, Problem::NewSinceCopy),
+                Some(old) if old != kind => note(problems, path, Problem::SourceChanged),
+                Some(_) => {}
+            }
+        }
+        for path in before.nodes().keys() {
+            if !now.nodes().contains_key(path) {
+                note(problems, path, Problem::MissingAtSource);
+            }
+        }
     }
 
     /// Remove the originals of one operand. Return each removal that failed.

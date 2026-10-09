@@ -461,10 +461,6 @@ impl CopyPlan {
     }
 
     /// Return the snapshot that `build` took of a Directory operand. None for other operands.
-    #[allow(
-        dead_code,
-        reason = "slice D of issue #295 uses this for the move gate"
-    )]
     pub(crate) fn tree(&self, operand: OperandId) -> Option<&TreeSnapshot> {
         self.trees.get(&operand)
     }
