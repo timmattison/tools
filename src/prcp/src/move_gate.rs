@@ -212,6 +212,15 @@ impl<'a> MoveLedger<'a> {
                 );
             }
         }
+        for error in self.plan.walk_errors() {
+            if error.operand.index() == operand {
+                note(
+                    &mut problems,
+                    &error.path,
+                    Problem::Unreadable(error.message.clone()),
+                );
+            }
+        }
         self.compare_tree(operand, &mut problems);
         problems
     }
