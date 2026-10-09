@@ -115,3 +115,67 @@ fn two_files_into_a_missing_destination_make_it_a_directory() {
         "content of b"
     );
 }
+
+/// The relative paths of the files in the sample tree, with their content.
+const SAMPLE_FILES: [(&str, &str); 3] = [
+    ("one.txt", "depth one"),
+    ("sub/two.txt", "depth two"),
+    ("sub/deeper/three.txt", "depth three"),
+];
+
+/// The relative path of the empty directory in the sample tree.
+const SAMPLE_EMPTY_DIR: &str = "empty";
+
+/// Make the sample tree under `root`: files at depth 1, 2, and 3, and one empty directory.
+fn make_sample_tree(root: &Path) {
+    for (relative, content) in SAMPLE_FILES {
+        write_file(&root.join(relative), content);
+    }
+    fs::create_dir_all(root.join(SAMPLE_EMPTY_DIR)).unwrap();
+}
+
+/// Return the Blake3 hash of a file.
+fn file_hash(path: &Path) -> blake3::Hash {
+    blake3::hash(&fs::read(path).unwrap())
+}
+
+/// Assert that `copy` holds the sample tree and that `original` is unchanged.
+fn assert_sample_copied(original: &Path, copy: &Path) {
+    for (relative, content) in SAMPLE_FILES {
+        assert_eq!(
+            file_hash(&copy.join(relative)),
+            file_hash(&original.join(relative)),
+            "hash of {relative}"
+        );
+        assert_eq!(
+            fs::read_to_string(original.join(relative)).unwrap(),
+            content,
+            "source {relative} changed"
+        );
+    }
+    assert!(
+        copy.join(SAMPLE_EMPTY_DIR).is_dir(),
+        "the empty directory must exist at the destination"
+    );
+    assert!(original.join(SAMPLE_EMPTY_DIR).is_dir());
+}
+
+#[test]
+fn recursive_copy_to_a_missing_destination_makes_the_tree() {
+    let temp = TempDir::new().unwrap();
+    let src = temp.path().join("src");
+    let dest = temp.path().join("dest");
+    make_sample_tree(&src);
+
+    let output = run_prcp([
+        OsString::from("-R"),
+        OsString::from("-y"),
+        OsString::from("-q"),
+        src.clone().into_os_string(),
+        dest.clone().into_os_string(),
+    ]);
+
+    let stderr = visible_stderr(&output);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert_sample_copied(&src, &dest);
+}
