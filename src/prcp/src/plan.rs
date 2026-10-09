@@ -148,7 +148,15 @@ impl TreeSnapshot {
             .follow_links(false)
             .follow_root_links(false)
             .sort_by_file_name();
-        for entry in walk.into_iter().flatten() {
+        for result in walk {
+            let entry = match result {
+                Ok(entry) => entry,
+                Err(error) => {
+                    let path = error.path().unwrap_or(root).to_path_buf();
+                    errors.push((path, error.to_string()));
+                    continue;
+                }
+            };
             let file_type = entry.file_type();
             let kind = if file_type.is_dir() {
                 NodeKind::Directory
@@ -380,6 +388,13 @@ impl CopyPlan {
                 source: path.clone(),
                 destination,
                 kind,
+            });
+        }
+        for (path, message) in snapshot.errors() {
+            self.walk_errors.push(WalkError {
+                operand,
+                path: path.clone(),
+                message: message.clone(),
             });
         }
         self.trees.insert(operand, snapshot);
