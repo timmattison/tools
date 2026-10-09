@@ -750,6 +750,85 @@ mod tests {
         assert_originals_exist(&fixture.plan);
     }
 
+    /// Put a new node at `path` with `make`, and keep the old node until the new one exists.
+    ///
+    /// The new node is made beside the old one, then renamed over it. The two
+    /// nodes thus exist at the same time, so the file system cannot give the new
+    /// node the inode number of the old one.
+    fn replace_node(path: &Path, make: impl FnOnce(&Path)) {
+        let mut name = path.file_name().unwrap().to_os_string();
+        name.push(".replacement");
+        let replacement = path.with_file_name(name);
+        make(&replacement);
+        if fs::symlink_metadata(path).unwrap().is_dir() {
+            fs::remove_dir(path).unwrap();
+        }
+        fs::rename(&replacement, path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_destination_file_replaced_with_the_same_size_and_mtime_keeps_all_originals() {
+        let fixture = sample();
+        let ledger = copy_all(&fixture.plan, &[]);
+        let copy = fixture.dest.join("top.txt");
+        let modified = fs::metadata(&copy).unwrap().modified().unwrap();
+        replace_node(&copy, |replacement| {
+            fs::write(replacement, "TOP").unwrap();
+            let file = fs::File::options().write(true).open(replacement).unwrap();
+            file.set_modified(modified).unwrap();
+        });
+        assert_eq!(fs::read_to_string(&copy).unwrap().len(), "top".len());
+        assert_eq!(fs::metadata(&copy).unwrap().modified().unwrap(), modified);
+
+        let report = ledger.finish();
+
+        assert!(report.removed.is_empty(), "report: {report:?}");
+        assert_eq!(
+            only_problems(&report).get(&copy),
+            Some(&Problem::DestinationChanged)
+        );
+        assert_originals_exist(&fixture.plan);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_destination_directory_replaced_by_a_new_one_keeps_all_originals() {
+        let fixture = sample();
+        let ledger = copy_all(&fixture.plan, &[]);
+        let copy = fixture.dest.join("empty");
+        replace_node(&copy, |replacement| fs::create_dir(replacement).unwrap());
+
+        let report = ledger.finish();
+
+        assert!(report.removed.is_empty(), "report: {report:?}");
+        assert_eq!(
+            only_problems(&report).get(&copy),
+            Some(&Problem::DestinationChanged)
+        );
+        assert_originals_exist(&fixture.plan);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_destination_symlink_replaced_by_an_equal_one_keeps_all_originals() {
+        let fixture = sample();
+        let ledger = copy_all(&fixture.plan, &[]);
+        let copy = fixture.dest.join("link");
+        replace_node(&copy, |replacement| {
+            std::os::unix::fs::symlink("top.txt", replacement).unwrap();
+        });
+
+        let report = ledger.finish();
+
+        assert!(report.removed.is_empty(), "report: {report:?}");
+        assert_eq!(
+            only_problems(&report).get(&copy),
+            Some(&Problem::DestinationChanged)
+        );
+        assert_originals_exist(&fixture.plan);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_fifo_in_the_tree_keeps_all_originals() {
