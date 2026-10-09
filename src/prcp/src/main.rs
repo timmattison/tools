@@ -750,6 +750,13 @@ async fn main() -> Result<()> {
     let mut failures: Vec<(PathBuf, String)> = Vec::new();
     // Track files skipped due to --skip-existing (not counted as failures)
     let mut skipped_existing: Vec<PathBuf> = Vec::new();
+    // With --continue-on-error, a part of the tree that prcp cannot read is a failure
+    for error in plan.walk_errors() {
+        failures.push((
+            error.path.clone(),
+            format!("Cannot read: {}", error.message),
+        ));
+    }
     let mut successful_copies = 0_u64;
     let mut total_bytes_copied = 0_u64;
     let mut total_copy_duration = Duration::ZERO;
