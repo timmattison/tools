@@ -79,6 +79,15 @@ clipboard-random text [OPTIONS] <CHARS>
   - `zalgo` - Extreme diacritics effect (90% probability, 3-8 diacritics)
   - `doom` - Apocalyptic diacritics effect (100% probability, 5-12 diacritics)
 
+**Output:** After the tool copies the text, it prints the length of the text in two units:
+
+```text
+Text length: 84 characters (158 bytes)
+```
+
+- `characters` is the count of Unicode scalar values, the same count as `pbpaste | wc -m`. Each combining mark counts as one character. Thus this count is larger than `<CHARS>` when the text has diacritics, because `<CHARS>` counts only the letters and the spaces.
+- `bytes` is the size of the UTF-8 text on the clipboard, the same count as `pbpaste | wc -c`. Each combining mark is 2 bytes.
+
 ### Global Options
 
 - `-d, --dry-run` - Generate and display data without copying to clipboard
