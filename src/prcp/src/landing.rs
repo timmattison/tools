@@ -1,6 +1,37 @@
 //! The landing preview: where each source of a recursive run lands, shown before the first copy.
+//!
+//! # Why
+//!
+//! With `-R`, the place where a tree lands depends on the destination. An
+//! existing directory takes the tree under the name of the source. A missing
+//! destination becomes the copy itself. A slash at the end of the source
+//! changes nothing, but `rsync` and BSD `cp` read that slash as "only the
+//! contents". A person with those habits can thus send a tree one level too
+//! deep. The preview shows the result of these rules before any byte moves.
+//!
+//! # Rules
+//!
+//! A plan gets a preview when it holds at least one directory source. The
+//! preview lists every source in the order given, also the files and symlinks
+//! beside the directory. Each line shows the source as the user typed it, and
+//! the absolute path that it becomes.
+//!
+//! The absolute path resolves every symlink in the directories above the
+//! landing place. It thus names the real directory that receives the files. A
+//! part of the path that does not exist yet stays as written. The preview
+//! reads the file system, but it makes and changes nothing.
+//!
+//! A directory source also shows if its landing directory is new or already
+//! exists, how many files it holds, and one example file. The example is the
+//! file nearest the top of the tree, and the first one in plan order when
+//! more than one is that near. More than [`MAX_LISTED_SOURCES`] sources show
+//! as one count after the first lines. They all land in the same directory,
+//! because more than one source makes the destination a container.
 
-use crate::plan::CopyPlan;
+use crate::plan::{canonicalize_lenient, CopyPlan, EntryKind, Operand, OperandKind, PlanEntry};
+use std::fmt::Write as _;
+use std::fs;
+use std::path::{is_separator, Path, PathBuf, MAIN_SEPARATOR};
 
 /// What the run does to its sources.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,10 +42,195 @@ pub(crate) enum Action {
     Move,
 }
 
-/// Describe where each source of `plan` lands.
+impl Action {
+    /// Return the verb of the action, as the headline of the preview uses it.
+    fn verb(self) -> &'static str {
+        match self {
+            Action::Copy => "copy",
+            Action::Move => "move",
+        }
+    }
+}
+
+/// The most sources that the preview lists one by one.
+const MAX_LISTED_SOURCES: usize = 20;
+
+/// The note for a directory source that ends with a slash or with `/.`.
+const SLASH_NOTE: &str = "Note: a '/' or a '/.' at the end of a source changes nothing.\n      \
+                          prcp copies the directory itself, not only its contents.\n";
+
+/// The files of one source: how many there are, and the one that the preview shows.
+#[derive(Debug, Clone, Default)]
+struct FileTally<'plan> {
+    count: usize,
+    example: Option<&'plan PlanEntry>,
+}
+
+impl<'plan> FileTally<'plan> {
+    /// Count one File entry, and keep it as the example when it is nearer the top.
+    fn add(&mut self, entry: &'plan PlanEntry) {
+        self.count += 1;
+        let nearer = self.example.is_none_or(|best| depth(entry) < depth(best));
+        if nearer {
+            self.example = Some(entry);
+        }
+    }
+}
+
+/// Return the number of components in the destination of an entry.
+fn depth(entry: &PlanEntry) -> usize {
+    entry.destination.components().count()
+}
+
+/// Describe where each source of `plan` lands. See the module docs for the rules.
+///
+/// # Returns
+/// The text of the preview, each line with a newline at its end. `None` when
+/// the plan holds no directory source.
 pub(crate) fn describe(plan: &CopyPlan, action: Action) -> Option<String> {
-    let _ = (plan, action);
-    None
+    let operands = plan.operands();
+    if !operands
+        .iter()
+        .any(|operand| operand.kind == OperandKind::Directory)
+    {
+        return None;
+    }
+
+    let mut tallies = vec![FileTally::default(); operands.len()];
+    for entry in plan.entries() {
+        if entry.kind != EntryKind::File {
+            continue;
+        }
+        if let Some(tally) = tallies.get_mut(entry.operand.index()) {
+            tally.add(entry);
+        }
+    }
+
+    let mut text = format!("prcp will {}:\n", action.verb());
+    for (operand, tally) in operands.iter().zip(&tallies).take(MAX_LISTED_SOURCES) {
+        push_operand(&mut text, operand, tally);
+    }
+    if let Some(first_unlisted) = operands.get(MAX_LISTED_SOURCES) {
+        let unlisted = operands.len() - MAX_LISTED_SOURCES;
+        let landing = shown(&first_unlisted.destination);
+        let container = landing.parent().unwrap_or(&landing);
+        let _ = writeln!(
+            text,
+            "  ... and {unlisted} more, each into {}",
+            as_directory(container)
+        );
+    }
+    if operands
+        .iter()
+        .any(|operand| operand.kind == OperandKind::Directory && ends_with_a_slash(&operand.source))
+    {
+        text.push_str(SLASH_NOTE);
+    }
+    Some(text)
+}
+
+/// Add the line of one source, and the line of its example file when it has one.
+fn push_operand(text: &mut String, operand: &Operand, tally: &FileTally<'_>) {
+    let exists = fs::symlink_metadata(&operand.destination).is_ok();
+    let landing = shown(&operand.destination);
+    let (landing, detail) = match operand.kind {
+        OperandKind::Directory => {
+            let detail = if exists {
+                format!("existing directory, {}", merging(tally.count))
+            } else {
+                format!("new directory, {}", files(tally.count))
+            };
+            (as_directory(&landing), detail)
+        }
+        OperandKind::File => (landing.display().to_string(), leaf_detail("file", exists)),
+        OperandKind::Symlink => (
+            landing.display().to_string(),
+            leaf_detail("symlink", exists),
+        ),
+    };
+    let _ = writeln!(
+        text,
+        "  {} -> {landing}  ({detail})",
+        operand.source.display()
+    );
+    // A file source is its own example, so only a directory source shows one.
+    let example = tally
+        .example
+        .filter(|_| operand.kind == OperandKind::Directory);
+    if let Some(example) = example {
+        let _ = writeln!(
+            text,
+            "    for example: {} -> {}",
+            example.source.display(),
+            shown(&example.destination).display()
+        );
+    }
+}
+
+/// Describe a file or symlink source: new, or onto a destination that exists.
+fn leaf_detail(kind: &str, exists: bool) -> String {
+    if exists {
+        format!("{kind}, the destination exists")
+    } else {
+        format!("new {kind}")
+    }
+}
+
+/// Count files: `1 file`, `2 files`.
+fn files(count: usize) -> String {
+    if count == 1 {
+        "1 file".to_string()
+    } else {
+        format!("{count} files")
+    }
+}
+
+/// Count the files that go into an existing directory: `1 file merges into it`.
+fn merging(count: usize) -> String {
+    if count == 1 {
+        "1 file merges into it".to_string()
+    } else {
+        format!("{count} files merge into it")
+    }
+}
+
+/// Return the absolute path that `path` names, with every symlink above it resolved.
+///
+/// The function resolves the parent directory, and keeps the last component as
+/// written. A destination that is itself a symlink thus shows as the link, and
+/// not as its target. When the path has no last component, or when the parent
+/// cannot be resolved, the function returns the absolute form of the path.
+fn shown(path: &Path) -> PathBuf {
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    match (path.file_name(), canonicalize_lenient(parent)) {
+        (Some(name), Ok(resolved)) => resolved.join(name),
+        _ => std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()),
+    }
+}
+
+/// Show `path` as a directory: its text with one separator at the end.
+fn as_directory(path: &Path) -> String {
+    let mut text = path.display().to_string();
+    if !text.ends_with(is_separator) {
+        text.push(MAIN_SEPARATOR);
+    }
+    text
+}
+
+/// Return true when `source` ends with a separator, or with a separator and a `.`.
+///
+/// `rsync` and BSD `cp` read either ending as "only the contents of the
+/// directory". `prcp` copies the directory itself.
+fn ends_with_a_slash(source: &Path) -> bool {
+    let text = source.to_string_lossy();
+    let text = text
+        .strip_suffix('.')
+        .filter(|rest| rest.ends_with(is_separator))
+        .unwrap_or(&text);
+    text.ends_with(is_separator)
 }
 
 #[cfg(test)]
@@ -172,7 +388,8 @@ mod tests {
     }
 
     /// The note that a preview adds for a directory source with a slash or a `/.` at its end.
-    const SLASH_NOTE: &str = "Note: a '/' or a '/.' at the end of a source changes nothing.\n      \
+    const SLASH_NOTE: &str =
+        "Note: a '/' or a '/.' at the end of a source changes nothing.\n      \
                               prcp copies the directory itself, not only its contents.\n";
 
     #[test]
@@ -464,7 +681,10 @@ mod tests {
                 landing.join(name).display()
             ));
         }
-        lines.push(format!("  ... and 5 more, each into {}/", landing.display()));
+        lines.push(format!(
+            "  ... and 5 more, each into {}/",
+            landing.display()
+        ));
         assert_eq!(preview, text(&lines));
     }
 

@@ -63,6 +63,8 @@ pub(crate) enum OperandKind {
 pub(crate) struct Operand {
     /// The source path as the user gave it.
     pub(crate) source: PathBuf,
+    /// The path that the source itself becomes. For a directory, this is the root of the copy.
+    pub(crate) destination: PathBuf,
     /// What the source is.
     pub(crate) kind: OperandKind,
 }
@@ -248,7 +250,7 @@ fn operand_name(source: &Path) -> Result<OsString> {
 ///
 /// The function resolves the deepest ancestor that exists. It then appends
 /// the components that do not exist.
-fn canonicalize_lenient(path: &Path) -> Result<PathBuf> {
+pub(crate) fn canonicalize_lenient(path: &Path) -> Result<PathBuf> {
     let mut missing: Vec<&OsStr> = Vec::new();
     let mut current = path;
     loop {
@@ -365,6 +367,7 @@ impl CopyPlan {
     ) {
         self.operands.push(Operand {
             source: source.to_path_buf(),
+            destination: destination.clone(),
             kind: operand_kind,
         });
         self.entries.push(PlanEntry {
@@ -397,6 +400,7 @@ impl CopyPlan {
         }
         self.operands.push(Operand {
             source: source.to_path_buf(),
+            destination: root.to_path_buf(),
             kind: OperandKind::Directory,
         });
         let snapshot = TreeSnapshot::take(source);
@@ -978,6 +982,12 @@ mod tests {
         );
         let kinds: Vec<OperandKind> = plan.operands().iter().map(|op| op.kind).collect();
         assert_eq!(kinds, [OperandKind::File, OperandKind::Directory]);
+        let landings: Vec<PathBuf> = plan
+            .operands()
+            .iter()
+            .map(|op| op.destination.clone())
+            .collect();
+        assert_eq!(landings, [dest.join("f.txt"), dest.join("src")]);
         assert!(plan.tree(OperandId(0)).is_none());
         assert!(plan.tree(OperandId(1)).is_some());
     }
