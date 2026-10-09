@@ -171,9 +171,17 @@ struct Args {
     #[arg(num_args = 0..)]
     paths: Vec<PathBuf>,
 
-    /// Remove source files after successful copy (verified by Blake3 hash)
+    /// Remove source files after a successful copy, verified by Blake3 hash. -r is --rm, not recursion (use -R)
+    // Maintainers: never give --recursive the short form -r. In cp, -r means recursive, but in
+    // prcp -r was --rm first, and a recursive -r turns a habit from cp into a move.
     #[arg(long, short = 'r')]
     rm: bool,
+
+    /// Copy directories and everything in them. The short form is -R only, because -r is --rm
+    // Maintainers: never give this flag the short form -r. In cp, -r means recursive, but in
+    // prcp -r was --rm first, and a recursive -r turns a habit from cp into a move.
+    #[arg(long, short = 'R')]
+    recursive: bool,
 
     /// Skip Blake3 verification after copy (not allowed with --rm)
     #[arg(long)]
