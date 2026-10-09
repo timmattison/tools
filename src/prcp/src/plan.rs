@@ -887,4 +887,30 @@ mod tests {
             .iter()
             .any(|entry| entry.source == src.join("a.txt")));
     }
+
+    #[test]
+    fn mixed_operands_keep_the_order_given() {
+        let temp = TempDir::new().unwrap();
+        let file = temp.path().join("f.txt");
+        write_file(&file, "f");
+        let src = temp.path().join("src");
+        write_file(&src.join("a.txt"), "a");
+        let dest = temp.path().join("dest");
+        fs::create_dir(&dest).unwrap();
+
+        let plan = CopyPlan::build(&[file.clone(), src.clone()], &dest, true).unwrap();
+
+        assert_eq!(
+            plan.entries(),
+            [
+                file_entry(0, &file, &dest.join("f.txt")),
+                dir_entry(1, &src, &dest.join("src")),
+                file_entry(1, &src.join("a.txt"), &dest.join("src/a.txt")),
+            ]
+        );
+        let kinds: Vec<OperandKind> = plan.operands().iter().map(|op| op.kind).collect();
+        assert_eq!(kinds, [OperandKind::File, OperandKind::Directory]);
+        assert!(plan.tree(OperandId(0)).is_none());
+        assert!(plan.tree(OperandId(1)).is_some());
+    }
 }
