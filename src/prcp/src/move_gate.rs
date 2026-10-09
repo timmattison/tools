@@ -534,6 +534,8 @@ pub(crate) enum Problem {
     SourceChanged,
     /// The destination changed after its hash check.
     DestinationChanged,
+    /// The path appeared at the destination, and prcp did not make it.
+    NewAtDestination,
 }
 
 impl Problem {
@@ -549,7 +551,8 @@ impl Problem {
             | Self::MissingAtSource
             | Self::MissingAtDestination
             | Self::SourceChanged
-            | Self::DestinationChanged => true,
+            | Self::DestinationChanged
+            | Self::NewAtDestination => true,
         }
     }
 }
@@ -570,6 +573,9 @@ impl fmt::Display for Problem {
             }
             Self::SourceChanged => f.write_str("changed in the source after its copy"),
             Self::DestinationChanged => f.write_str("changed at the destination during the run"),
+            Self::NewAtDestination => {
+                f.write_str("appeared at the destination during the run, and prcp did not make it")
+            }
         }
     }
 }
@@ -625,6 +631,27 @@ mod tests {
             _temp: temp,
             src,
             dest,
+            plan,
+        }
+    }
+
+    /// Make the fixture like `sample`, but into a destination directory that exists.
+    ///
+    /// The copy then lands in `dest/src`. `prepare` gets that root and fills it
+    /// before the plan. The fixture names that root as its `dest`.
+    fn sample_into_existing(prepare: impl FnOnce(&Path)) -> Fixture {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        let dest = temp.path().join("dest");
+        make_sample_tree(&src);
+        let root = dest.join("src");
+        fs::create_dir_all(&root).unwrap();
+        prepare(&root);
+        let plan = CopyPlan::build(std::slice::from_ref(&src), &dest, true).unwrap();
+        Fixture {
+            _temp: temp,
+            src,
+            dest: root,
             plan,
         }
     }
@@ -914,6 +941,105 @@ mod tests {
             Some(&Problem::DestinationChanged)
         );
         assert_originals_exist(&fixture.plan);
+    }
+
+    #[test]
+    fn a_file_that_appears_at_the_destination_keeps_all_originals() {
+        let fixture = sample();
+        let ledger = copy_all(&fixture.plan, &[]);
+        let intruder = fixture.dest.join("sub").join("new.txt");
+        write_file(&intruder, "new");
+
+        let report = ledger.finish();
+
+        assert!(report.removed.is_empty(), "report: {report:?}");
+        assert_eq!(
+            only_problems(&report).get(&intruder),
+            Some(&Problem::NewAtDestination)
+        );
+        assert_originals_exist(&fixture.plan);
+        assert!(intruder.exists());
+    }
+
+    #[test]
+    fn a_destination_that_held_files_before_the_copy_moves_cleanly() {
+        let fixture = sample_into_existing(|root| {
+            write_file(&root.join("extra.txt"), "extra");
+            write_file(&root.join("old").join("kept.txt"), "kept");
+        });
+        let ledger = copy_all(&fixture.plan, &[]);
+
+        let report = ledger.finish();
+
+        assert!(report.is_complete(), "report: {report:?}");
+        assert!(!fixture.src.exists(), "the source tree must be gone");
+        assert_eq!(
+            fs::read_to_string(fixture.dest.join("extra.txt")).unwrap(),
+            "extra"
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.dest.join("old").join("kept.txt")).unwrap(),
+            "kept"
+        );
+        assert!(fixture.dest.join("top.txt").exists());
+    }
+
+    #[test]
+    fn a_destination_file_from_before_the_copy_that_changes_keeps_all_originals() {
+        let fixture = sample_into_existing(|root| write_file(&root.join("extra.txt"), "extra"));
+        let ledger = copy_all(&fixture.plan, &[]);
+        let extra = fixture.dest.join("extra.txt");
+        fs::write(&extra, "a longer text than before").unwrap();
+
+        let report = ledger.finish();
+
+        assert!(report.removed.is_empty(), "report: {report:?}");
+        assert_eq!(
+            only_problems(&report).get(&extra),
+            Some(&Problem::DestinationChanged)
+        );
+        assert_originals_exist(&fixture.plan);
+    }
+
+    #[test]
+    fn a_destination_file_from_before_the_copy_that_is_removed_keeps_all_originals() {
+        let fixture = sample_into_existing(|root| write_file(&root.join("extra.txt"), "extra"));
+        let ledger = copy_all(&fixture.plan, &[]);
+        let extra = fixture.dest.join("extra.txt");
+        fs::remove_file(&extra).unwrap();
+
+        let report = ledger.finish();
+
+        assert!(report.removed.is_empty(), "report: {report:?}");
+        assert_eq!(
+            only_problems(&report).get(&extra),
+            Some(&Problem::MissingAtDestination)
+        );
+        assert_originals_exist(&fixture.plan);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_destination_part_that_was_unreadable_before_the_copy_does_not_stop_the_move() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = sample_into_existing(|root| {
+            write_file(&root.join("locked").join("x.txt"), "x");
+            fs::set_permissions(root.join("locked"), fs::Permissions::from_mode(0o000)).unwrap();
+        });
+        let locked = fixture.dest.join("locked");
+        if fs::read_dir(&locked).is_ok() {
+            // The lock does not work for root.
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+        let ledger = copy_all(&fixture.plan, &[]);
+
+        let report = ledger.finish();
+
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(report.is_complete(), "report: {report:?}");
+        assert!(!fixture.src.exists(), "the source tree must be gone");
     }
 
     #[cfg(unix)]
@@ -1208,6 +1334,10 @@ mod tests {
         assert_eq!(
             Problem::DestinationChanged.to_string(),
             "changed at the destination during the run"
+        );
+        assert_eq!(
+            Problem::NewAtDestination.to_string(),
+            "appeared at the destination during the run, and prcp did not make it"
         );
     }
 }
