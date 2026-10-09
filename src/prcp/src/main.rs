@@ -814,7 +814,8 @@ async fn main() -> Result<()> {
     // Track completed files for batch progress display
     let mut completed_files = 0_usize;
 
-    // With --rm, the ledger holds what the loop proved. No source goes before the gate runs.
+    // The ledger holds what the loop proved, and a snapshot of the destination as the
+    // copy finds it. The final check after the loop compares both with the tree.
     let mut ledger = MoveLedger::new(&plan, action);
 
     // Run each plan entry. The plan lists every directory before its contents.
@@ -1134,10 +1135,16 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                // Record the passed Blake3 check. The move gate removes a source only
-                // after the loop, and only when every record of its operand holds.
-                if matches!(verify_outcome, VerifyOutcome::Passed { .. }) {
-                    ledger.record_file(index, source_stamp, Verification::Passed);
+                // Record the copy and how the loop proved it. The final check compares the
+                // record with the tree, and a move removes a source only after a Blake3 check.
+                match verify_outcome {
+                    VerifyOutcome::Passed { .. } => {
+                        ledger.record_file(index, source_stamp, Verification::Passed);
+                    }
+                    VerifyOutcome::Skipped => {
+                        ledger.record_file(index, source_stamp, Verification::Skipped);
+                    }
+                    VerifyOutcome::Failed => {}
                 }
 
                 // Print per-file stats (unless quiet mode, but always show problems)
@@ -1235,25 +1242,26 @@ async fn main() -> Result<()> {
     let _ = signal_task.await;
     let _ = resize_task.await;
 
-    // Move gate: with --rm, remove the originals only after the loop, and only
-    // when the run reached its end.
-    let mut move_report = None;
-    if args.rm {
-        if stopped_early {
+    // Final check: walk the source and the destination again, and report each change
+    // that prcp did not make. With --rm, the gate then removes the originals of each
+    // source that passed. A run that stopped early checks nothing and removes nothing.
+    let mut run_report = None;
+    if stopped_early {
+        if args.rm {
             eprintln!("{NO_SOURCE_REMOVED_AFTER_STOP}");
-        } else {
-            let report = ledger.finish();
-            for line in report.error_lines() {
-                eprintln!("{line}");
-            }
-            if !args.quiet && !report.removed.is_empty() {
-                println!(
-                    "Moved {} source(s): removed the originals after verification.",
-                    report.removed.len()
-                );
-            }
-            move_report = Some(report);
         }
+    } else {
+        let report = ledger.finish();
+        for line in report.error_lines() {
+            eprintln!("{line}");
+        }
+        if !args.quiet && !report.removed.is_empty() {
+            println!(
+                "Moved {} source(s): removed the originals after verification.",
+                report.removed.len()
+            );
+        }
+        run_report = Some(report);
     }
 
     // Check for early exit error (set during verification cancellation)
@@ -1327,8 +1335,8 @@ async fn main() -> Result<()> {
         anyhow::bail!("{} file(s) failed to copy", failures.len());
     }
 
-    // A move that kept originals never ends in success.
-    if let Some(report) = move_report.filter(|report| !report.is_complete()) {
+    // A run whose final check found a problem never ends in success.
+    if let Some(report) = run_report.filter(|report| !report.is_complete()) {
         anyhow::bail!("{}", report.summary());
     }
 
