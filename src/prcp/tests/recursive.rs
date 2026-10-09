@@ -236,3 +236,31 @@ fn recursive_copy_recreates_symlinks_without_following_them() {
         assert_eq!(fs::read_link(&copy).unwrap(), Path::new(target));
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn symlink_replaces_an_existing_file_at_the_destination() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().unwrap();
+    let src = temp.path().join("src");
+    let dest = temp.path().join("dest");
+    write_file(&src.join("a.txt"), "a");
+    symlink("a.txt", src.join("link")).unwrap();
+    write_file(&dest.join("src").join("link"), "old file");
+    write_file(&dest.join("src").join("a.txt"), "old a");
+
+    let output = run_prcp([
+        OsString::from("-R"),
+        OsString::from("-y"),
+        OsString::from("-q"),
+        src.clone().into_os_string(),
+        dest.clone().into_os_string(),
+    ]);
+
+    let stderr = visible_stderr(&output);
+    assert!(output.status.success(), "stderr: {stderr}");
+    let copy = dest.join("src").join("link");
+    assert!(fs::symlink_metadata(&copy).unwrap().file_type().is_symlink());
+    assert_eq!(fs::read_link(&copy).unwrap(), Path::new("a.txt"));
+}
