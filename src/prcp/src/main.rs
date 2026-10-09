@@ -15,6 +15,7 @@ use clap::Parser;
 use colored::Colorize;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use indicatif::{HumanBytes, MultiProgress, ProgressBar};
+use plan::{CopyPlan, EntryKind};
 use termbar::{ProgressStyleBuilder, TerminalWidthWatcher};
 // Blake3 imported via blake3 crate (no Digest trait needed)
 use std::fs::{self, File};
@@ -447,21 +448,9 @@ async fn main() -> Result<()> {
 
     // Resolve all source files (handles glob patterns)
     let sources = resolve_sources(&source_paths, args.literal, args.recursive)?;
-    let total_files = sources.len();
-
-    // Validate destination for multi-file operations
-    if total_files > 1 {
-        // For multiple files, destination must be a directory
-        // Check if exists and is NOT a directory (error case)
-        if destination.exists() && !destination.is_dir() {
-            anyhow::bail!(
-                "Destination '{}' is not a directory (required for multiple source files)",
-                destination.display()
-            );
-        }
-        // Note: Directory creation is deferred until we're about to copy the first file
-        // This avoids creating empty directories if all operations fail
-    }
+    // Decide every destination before any copy starts
+    let plan = CopyPlan::build(&sources, &destination, args.recursive)?;
+    let total_files = plan.file_count();
 
     // Warn about potentially dangerous combination
     if args.rm && args.continue_on_error && total_files > 1 && !args.yes {
@@ -588,7 +577,7 @@ async fn main() -> Result<()> {
     // Only enable for single-file copies - raw mode breaks indicatif's MultiProgress
     // because \n doesn't include \r in raw mode, causing progress bars to scroll.
     // For multi-file copies, Ctrl+C still works via terminal SIGINT.
-    let mut raw_mode_guard = if total_files == 1 {
+    let mut raw_mode_guard = if plan.is_single_file() {
         RawModeGuard::new()
     } else {
         RawModeGuard::disabled()
@@ -604,7 +593,7 @@ async fn main() -> Result<()> {
     let verify_enabled = !args.no_verify;
     let total_batch_bytes = if total_files > 1 {
         // Calculate total batch work; if it fails, we'll continue without the batch progress bar
-        calculate_total_batch_bytes(&sources, verify_enabled).ok()
+        calculate_total_batch_bytes(&plan.file_sources(), verify_enabled).ok()
     } else {
         None
     };
@@ -648,23 +637,20 @@ async fn main() -> Result<()> {
     // Track completed files for batch progress display
     let mut completed_files = 0_usize;
 
-    // Copy each file
-    for source in &sources {
+    // Run each plan entry. The plan lists every directory before its contents.
+    for entry in plan.entries() {
         // Check for shutdown
         if shutdown.load(Ordering::SeqCst) {
             eprintln!("\nCopy cancelled by user");
             break;
         }
 
-        // Resolve destination path
-        let dest_path = if destination.is_dir() {
-            let filename = source
-                .file_name()
-                .ok_or_else(|| anyhow::anyhow!("Source '{}' has no filename", source.display()))?;
-            destination.join(filename)
-        } else {
-            destination.clone()
-        };
+        // Only file entries are handled so far
+        if entry.kind != EntryKind::File {
+            continue;
+        }
+        let source = &entry.source;
+        let dest_path = entry.destination.clone();
 
         // Get file metadata
         let metadata = match fs::metadata(source) {
