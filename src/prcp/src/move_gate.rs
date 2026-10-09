@@ -539,6 +539,23 @@ mod tests {
     }
 
     #[test]
+    fn a_source_file_with_a_new_length_keeps_all_originals() {
+        let fixture = sample();
+        let ledger = copy_all(&fixture.plan, &[]);
+        let changed = fixture.src.join("top.txt");
+        fs::write(&changed, "a much longer text than before").unwrap();
+
+        let report = ledger.finish();
+
+        assert!(report.removed.is_empty(), "report: {report:?}");
+        assert_eq!(
+            only_problems(&report).get(&changed),
+            Some(&Problem::SourceChanged)
+        );
+        assert_originals_exist(&fixture.plan);
+    }
+
+    #[test]
     fn problem_display_texts_state_each_problem() {
         assert_eq!(
             Problem::NotCopied.to_string(),
