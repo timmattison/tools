@@ -138,12 +138,14 @@ enum Record {
         /// The identity of the destination link right after the loop made it.
         identity: Option<NodeIdentity>,
     },
-    /// The destination passed its Blake3 check against the source.
+    /// The destination of a file was written, and checked as `verification` says.
     File {
         /// The stamp of the source before the copy.
         source: FileStamp,
         /// The stamp of the destination right after the Blake3 check.
         destination: FileStamp,
+        /// How the loop proved the data.
+        verification: Verification,
     },
 }
 
@@ -227,7 +229,6 @@ impl<'a> MoveLedger<'a> {
         source_before_copy: FileStamp,
         verification: Verification,
     ) {
-        let _ = verification;
         let Some(plan_entry) = self.plan.entries().get(entry) else {
             return;
         };
@@ -237,6 +238,7 @@ impl<'a> MoveLedger<'a> {
                 Record::File {
                     source: source_before_copy,
                     destination,
+                    verification,
                 },
             );
         }
@@ -249,7 +251,8 @@ impl<'a> MoveLedger<'a> {
         }
     }
 
-    /// Run the gate for every operand, then remove the originals of each operand that passed.
+    /// Run the final check for every operand. For a move, then remove the originals of each
+    /// operand that passed. A copy removes nothing.
     pub(crate) fn finish(self) -> MoveReport {
         let mut report = MoveReport {
             action: self.action,
@@ -265,6 +268,9 @@ impl<'a> MoveLedger<'a> {
                     source: operand.source.clone(),
                     problems,
                 });
+                continue;
+            }
+            if self.action == Action::Copy {
                 continue;
             }
             let errors = self.remove_originals(index);
@@ -286,10 +292,19 @@ impl<'a> MoveLedger<'a> {
                 continue;
             }
             match self.records[index] {
+                // A copy reported the failure when it occurred. A move keeps the originals.
+                None if self.action == Action::Copy => {}
                 None => findings.note(&entry.source, Problem::NotCopied),
+                Some(Record::File {
+                    verification: Verification::Skipped,
+                    ..
+                }) if self.action == Action::Move => {
+                    findings.note(&entry.source, Problem::NotCopied);
+                }
                 Some(Record::File {
                     source,
                     destination,
+                    ..
                 }) => {
                     if let Some(problem) = stamp_problem(
                         &entry.source,
@@ -333,14 +348,17 @@ impl<'a> MoveLedger<'a> {
                 }
             }
         }
-        for skipped in self.plan.skipped() {
-            if skipped.operand.index() == operand {
-                findings.note(&skipped.path, Problem::Skipped(skipped.reason));
+        // A copy warned about these before the first copy. A move keeps the originals.
+        if self.action == Action::Move {
+            for skipped in self.plan.skipped() {
+                if skipped.operand.index() == operand {
+                    findings.note(&skipped.path, Problem::Skipped(skipped.reason));
+                }
             }
-        }
-        for error in self.plan.walk_errors() {
-            if error.operand.index() == operand {
-                findings.note(&error.path, Problem::Unreadable(error.message.clone()));
+            for error in self.plan.walk_errors() {
+                if error.operand.index() == operand {
+                    findings.note(&error.path, Problem::Unreadable(error.message.clone()));
+                }
             }
         }
         self.compare_tree(operand, &mut findings);
@@ -402,7 +420,10 @@ impl<'a> MoveLedger<'a> {
         };
         let now = TreeSnapshot::take(&root.source);
         for (path, message) in now.errors() {
-            findings.note(path, Problem::Unreadable(message.clone()));
+            let known = before.errors().iter().any(|(old, _)| old == path);
+            if !known {
+                findings.note(path, Problem::Unreadable(message.clone()));
+            }
         }
         for (path, kind) in now.nodes() {
             match before.nodes().get(path) {
@@ -628,10 +649,13 @@ impl MoveReport {
     pub(crate) fn error_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
         for operand in &self.kept {
-            lines.push(format!(
-                "Kept the originals of '{}'. prcp removed nothing from it:",
-                operand.source.display()
-            ));
+            let source = operand.source.display();
+            lines.push(match self.action {
+                Action::Move => {
+                    format!("Kept the originals of '{source}'. prcp removed nothing from it:")
+                }
+                Action::Copy => format!("prcp found problems with the copy of '{source}':"),
+            });
             for (path, problem) in &operand.problems {
                 lines.push(format!("  '{}' {problem}", path.display()));
             }
@@ -657,10 +681,16 @@ impl MoveReport {
 
     /// Return the one-line error for a run that is not complete.
     pub(crate) fn summary(&self) -> String {
-        format!(
-            "The move did not finish: the originals of {} source(s) stay.",
-            self.unfinished_count()
-        )
+        match self.action {
+            Action::Move => format!(
+                "The move did not finish: the originals of {} source(s) stay.",
+                self.unfinished_count()
+            ),
+            Action::Copy => format!(
+                "The copy did not pass its final check: {} source(s) have problems.",
+                self.unfinished_count()
+            ),
+        }
     }
 }
 
