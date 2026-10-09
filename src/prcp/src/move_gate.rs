@@ -649,7 +649,7 @@ mod tests {
 
         assert!(report.removed.is_empty(), "report: {report:?}");
         assert_eq!(
-            only_problems(&report).get(&fixture.src.join("sub").join("inner.txt")),
+            only_problems(&report).get(&copy),
             Some(&Problem::MissingAtDestination)
         );
         assert_originals_exist(&fixture.plan);
@@ -697,17 +697,14 @@ mod tests {
     fn a_destination_file_that_changes_after_its_record_keeps_all_originals() {
         let fixture = sample();
         let ledger = copy_all(&fixture.plan, &[]);
-        fs::write(
-            fixture.dest.join("sub").join("deeper").join("deep.txt"),
-            "changed at the destination",
-        )
-        .unwrap();
+        let copy = fixture.dest.join("sub").join("deeper").join("deep.txt");
+        fs::write(&copy, "changed at the destination").unwrap();
 
         let report = ledger.finish();
 
         assert!(report.removed.is_empty(), "report: {report:?}");
         assert_eq!(
-            only_problems(&report).get(&fixture.src.join("sub").join("deeper").join("deep.txt")),
+            only_problems(&report).get(&copy),
             Some(&Problem::DestinationChanged)
         );
         assert_originals_exist(&fixture.plan);
@@ -781,7 +778,7 @@ mod tests {
 
         assert!(report.removed.is_empty(), "report: {report:?}");
         assert_eq!(
-            only_problems(&report).get(&fixture.src.join("link")),
+            only_problems(&report).get(&copy),
             Some(&Problem::DestinationChanged)
         );
         assert_originals_exist(&fixture.plan);
@@ -791,13 +788,14 @@ mod tests {
     fn a_destination_directory_that_is_gone_keeps_all_originals() {
         let fixture = sample();
         let ledger = copy_all(&fixture.plan, &[]);
-        fs::remove_dir(fixture.dest.join("empty")).unwrap();
+        let copy = fixture.dest.join("empty");
+        fs::remove_dir(&copy).unwrap();
 
         let report = ledger.finish();
 
         assert!(report.removed.is_empty(), "report: {report:?}");
         assert_eq!(
-            only_problems(&report).get(&fixture.src.join("empty")),
+            only_problems(&report).get(&copy),
             Some(&Problem::MissingAtDestination)
         );
         assert_originals_exist(&fixture.plan);
@@ -938,9 +936,37 @@ mod tests {
                 "  '/s/late.txt' appeared in the source after the copy started, and was not copied",
                 "  '/s/old.txt' was not copied and verified",
                 "Cannot remove '/t/x': denied",
+                "Something outside prcp changed the source or the destination while prcp ran.",
+                "Another program or a person made those changes, not prcp. Make sure that \
+                 nothing else uses these paths, then run prcp again.",
             ]
         );
         assert_eq!(report.unfinished_count(), 2);
+    }
+
+    #[test]
+    fn the_report_has_no_outside_note_when_every_problem_is_from_prcp_itself() {
+        let mut problems = BTreeMap::new();
+        problems.insert(PathBuf::from("/s/old.txt"), Problem::NotCopied);
+        problems.insert(PathBuf::from("/s/pipe"), Problem::Skipped("fifo"));
+        let report = MoveReport {
+            removed: Vec::new(),
+            kept: vec![KeptOperand {
+                source: PathBuf::from("/s"),
+                problems,
+            }],
+            removal_errors: Vec::new(),
+            operands_with_removal_errors: 0,
+        };
+
+        assert_eq!(
+            report.error_lines(),
+            vec![
+                "Kept the originals of '/s'. prcp removed nothing from it:",
+                "  '/s/old.txt' was not copied and verified",
+                "  '/s/pipe' is a fifo, and prcp does not copy it",
+            ]
+        );
     }
 
     #[test]
@@ -967,7 +993,7 @@ mod tests {
         );
         assert_eq!(
             Problem::MissingAtDestination.to_string(),
-            "is missing at the destination"
+            "was removed or moved away from the destination during the run"
         );
         assert_eq!(
             Problem::SourceChanged.to_string(),
@@ -975,7 +1001,7 @@ mod tests {
         );
         assert_eq!(
             Problem::DestinationChanged.to_string(),
-            "changed at the destination after its hash check"
+            "changed at the destination during the run"
         );
     }
 }
