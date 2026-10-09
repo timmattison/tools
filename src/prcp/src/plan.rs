@@ -984,4 +984,36 @@ mod tests {
             "unexpected error: {error}"
         );
     }
+
+    #[test]
+    fn queries_count_files_and_list_their_sources() {
+        let temp = TempDir::new().unwrap();
+        let single = temp.path().join("one.txt");
+        write_file(&single, "1");
+        let src = temp.path().join("src");
+        write_file(&src.join("a.txt"), "a");
+        write_file(&src.join("sub").join("b.txt"), "b");
+        let dest = temp.path().join("dest");
+
+        let file_plan = CopyPlan::build(std::slice::from_ref(&single), &dest, true).unwrap();
+        assert!(file_plan.is_single_file());
+        assert_eq!(file_plan.file_count(), 1);
+        assert_eq!(file_plan.file_sources(), [single.clone()]);
+
+        let tree_plan = CopyPlan::build(std::slice::from_ref(&src), &dest, true).unwrap();
+        assert!(!tree_plan.is_single_file());
+        assert_eq!(tree_plan.file_count(), 2);
+        assert_eq!(
+            tree_plan.file_sources(),
+            [src.join("a.txt"), src.join("sub").join("b.txt")]
+        );
+
+        let one_file_dir = temp.path().join("holder");
+        write_file(&one_file_dir.join("only.txt"), "o");
+        let holder_plan =
+            CopyPlan::build(std::slice::from_ref(&one_file_dir), &dest, true).unwrap();
+        assert_eq!(holder_plan.entries().len(), 2);
+        assert!(!holder_plan.is_single_file());
+        assert_eq!(holder_plan.file_count(), 1);
+    }
 }
