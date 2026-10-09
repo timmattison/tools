@@ -501,4 +501,28 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn symlink_in_the_tree_is_an_entry_that_keeps_its_target() {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        write_file(&src.join("a.txt"), "a");
+        std::os::unix::fs::symlink("a.txt", src.join("link")).unwrap();
+        let dest = temp.path().join("dest");
+
+        let plan = CopyPlan::build(std::slice::from_ref(&src), &dest, true).unwrap();
+
+        let link = plan
+            .entries()
+            .iter()
+            .find(|entry| entry.source == src.join("link"))
+            .expect("the plan has an entry for the link");
+        assert_eq!(
+            link.kind,
+            EntryKind::Symlink {
+                target: PathBuf::from("a.txt")
+            }
+        );
+        assert_eq!(link.destination, dest.join("link"));
+    }
 }
