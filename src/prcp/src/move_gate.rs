@@ -435,6 +435,26 @@ mod tests {
     }
 
     #[test]
+    fn a_file_that_appears_after_the_plan_keeps_all_originals() {
+        let fixture = sample();
+        let ledger = copy_all(&fixture.plan, &[]);
+        let late = fixture.src.join("sub").join("late.txt");
+        write_file(&late, "late");
+
+        let report = ledger.finish();
+
+        assert!(report.removed.is_empty(), "report: {report:?}");
+        assert_eq!(
+            only_problems(&report).get(&late),
+            Some(&Problem::NewSinceCopy)
+        );
+        assert_originals_exist(&fixture.plan);
+        assert!(late.exists());
+        assert!(!fixture.dest.join("sub").join("late.txt").exists());
+        assert!(fixture.dest.join("top.txt").exists());
+    }
+
+    #[test]
     fn problem_display_texts_state_each_problem() {
         assert_eq!(
             Problem::NotCopied.to_string(),
