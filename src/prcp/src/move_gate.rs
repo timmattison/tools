@@ -192,6 +192,14 @@ impl<'a> MoveLedger<'a> {
         }
     }
 
+    /// Find out if the destination of entry `entry` changed after the snapshot.
+    ///
+    /// Call this right before the loop makes the entry. The scaffold finds no change yet.
+    pub(crate) fn change_before_copy(&self, entry: usize) -> Option<ChangeBeforeCopy> {
+        let _ = entry;
+        None
+    }
+
     /// Record that the directory of entry `entry` exists at the destination.
     ///
     /// The call reads the identity of the directory now. When that read fails,
@@ -618,6 +626,39 @@ fn identity_problem(path: &Path, identity: Option<NodeIdentity>) -> Option<Probl
         Ok(now) if now == identity => None,
         Ok(_) => Some(Problem::DestinationChanged),
         Err(error) => Some(Problem::Unreadable(error.to_string())),
+    }
+}
+
+/// A destination path that changed after the snapshot, before the loop made its entry.
+///
+/// The loop does not write over such a path. Somebody else works there now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChangeBeforeCopy {
+    /// The source of the entry.
+    pub(crate) source: PathBuf,
+    /// The destination of the entry, which changed.
+    pub(crate) destination: PathBuf,
+    /// How the destination changed.
+    pub(crate) problem: Problem,
+}
+
+impl fmt::Display for ChangeBeforeCopy {
+    /// Write the error for a person. A change from outside prcp ends with
+    /// [`OUTSIDE_CHANGE_NOTE`].
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "prcp did not copy '{}': '{}' {}.",
+            self.source.display(),
+            self.destination.display(),
+            self.problem
+        )?;
+        if self.problem.is_outside_change() {
+            for line in OUTSIDE_CHANGE_NOTE {
+                write!(f, "\n{line}")?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1769,6 +1810,144 @@ mod tests {
         assert_eq!(
             report.summary(),
             "The move did not finish: the originals of 1 source(s) stay."
+        );
+    }
+
+    /// Return the index of the plan entry whose source is `source`.
+    fn entry_index(plan: &CopyPlan, source: &Path) -> usize {
+        plan.entries()
+            .iter()
+            .position(|entry| entry.source == source)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_planned_path_that_appears_before_its_copy_is_a_change_before_copy() {
+        let fixture = sample();
+        let ledger = MoveLedger::new(&fixture.plan, Action::Move);
+        let source = fixture.src.join("top.txt");
+        let intruder = fixture.dest.join("top.txt");
+        write_file(&intruder, "not from prcp");
+
+        let change = ledger.change_before_copy(entry_index(&fixture.plan, &source));
+
+        assert_eq!(
+            change,
+            Some(ChangeBeforeCopy {
+                source,
+                destination: intruder,
+                problem: Problem::NewAtDestination,
+            })
+        );
+    }
+
+    #[test]
+    fn a_planned_file_from_before_the_copy_that_changes_is_a_change_before_copy() {
+        let fixture = sample_into_existing(|root| write_file(&root.join("top.txt"), "old"));
+        let ledger = MoveLedger::new(&fixture.plan, Action::Copy);
+        fs::write(fixture.dest.join("top.txt"), "a longer text than before").unwrap();
+
+        let source = fixture.src.join("top.txt");
+        let change = ledger.change_before_copy(entry_index(&fixture.plan, &source));
+
+        assert_eq!(
+            change.map(|change| change.problem),
+            Some(Problem::DestinationChanged)
+        );
+    }
+
+    #[test]
+    fn a_planned_file_from_before_the_copy_that_is_removed_is_a_change_before_copy() {
+        let fixture = sample_into_existing(|root| write_file(&root.join("top.txt"), "old"));
+        let ledger = MoveLedger::new(&fixture.plan, Action::Copy);
+        fs::remove_file(fixture.dest.join("top.txt")).unwrap();
+
+        let source = fixture.src.join("top.txt");
+        let change = ledger.change_before_copy(entry_index(&fixture.plan, &source));
+
+        assert_eq!(
+            change.map(|change| change.problem),
+            Some(Problem::MissingAtDestination)
+        );
+    }
+
+    #[test]
+    fn a_planned_finder_file_that_appears_before_its_copy_names_finder() {
+        let fixture = sample_with(|src| write_file(&src.join(".DS_Store"), "source"));
+        let ledger = MoveLedger::new(&fixture.plan, Action::Copy);
+        write_file(&fixture.dest.join(".DS_Store"), "made by Finder");
+
+        let source = fixture.src.join(".DS_Store");
+        let change = ledger.change_before_copy(entry_index(&fixture.plan, &source));
+
+        assert_eq!(
+            change.map(|change| change.problem),
+            Some(Problem::FinderMetadata)
+        );
+    }
+
+    #[test]
+    fn a_file_operand_whose_destination_appears_before_its_copy_is_a_change_before_copy() {
+        let temp = TempDir::new().unwrap();
+        let first = temp.path().join("first.txt");
+        let second = temp.path().join("second.txt");
+        let dest = temp.path().join("dest");
+        write_file(&first, "first");
+        write_file(&second, "second");
+        fs::create_dir(&dest).unwrap();
+        let plan = CopyPlan::build(&[first.clone(), second], &dest, false).unwrap();
+        let ledger = MoveLedger::new(&plan, Action::Copy);
+        write_file(&dest.join("first.txt"), "not from prcp");
+
+        let change = ledger.change_before_copy(entry_index(&plan, &first));
+
+        assert_eq!(
+            change.map(|change| change.problem),
+            Some(Problem::NewAtDestination)
+        );
+    }
+
+    #[test]
+    fn a_planned_path_that_nobody_touches_is_no_change() {
+        let fixture = sample_into_existing(|root| write_file(&root.join("top.txt"), "old"));
+        let ledger = MoveLedger::new(&fixture.plan, Action::Copy);
+
+        for index in 0..fixture.plan.entries().len() {
+            assert_eq!(ledger.change_before_copy(index), None, "entry {index}");
+        }
+    }
+
+    #[test]
+    fn a_planned_path_that_an_earlier_entry_of_the_run_claims_is_no_change() {
+        let temp = TempDir::new().unwrap();
+        let a = temp.path().join("a").join("same.txt");
+        let b = temp.path().join("b").join("same.txt");
+        let dest = temp.path().join("dest");
+        write_file(&a, "from a");
+        write_file(&b, "from b");
+        fs::create_dir(&dest).unwrap();
+        let plan = CopyPlan::build(&[a, b.clone()], &dest, false).unwrap();
+        let ledger = MoveLedger::new(&plan, Action::Copy);
+        write_file(&dest.join("same.txt"), "from a");
+
+        assert_eq!(ledger.change_before_copy(entry_index(&plan, &b)), None);
+    }
+
+    #[test]
+    fn the_error_for_a_change_before_copy_names_both_paths_and_the_outside_cause() {
+        let change = ChangeBeforeCopy {
+            source: PathBuf::from("/s/c.txt"),
+            destination: PathBuf::from("/d/s/c.txt"),
+            problem: Problem::NewAtDestination,
+        };
+
+        assert_eq!(
+            change.to_string(),
+            "prcp did not copy '/s/c.txt': '/d/s/c.txt' appeared at the destination during the \
+             run, and prcp did not make it.\n\
+             Something outside prcp changed the source or the destination while prcp ran.\n\
+             Another program or a person made those changes, not prcp. Make sure that nothing \
+             else uses these paths, then run prcp again."
         );
     }
 

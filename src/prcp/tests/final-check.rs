@@ -283,3 +283,32 @@ fn a_move_reports_a_destination_file_that_is_renamed_during_the_run() {
     assert!(run.stderr.contains(OUTSIDE_NOTE), "stderr: {}", run.stderr);
     fixture.assert_sources_stay(&run);
 }
+
+#[test]
+fn a_file_that_appears_at_a_planned_path_during_the_run_is_not_overwritten() {
+    let fixture = Fixture::new();
+    let source = fixture.src.join("c.txt");
+    let intruder = fixture.root.join("c.txt");
+
+    let run = run_and_meddle_at_the_question(fixture.args(&[]), || {
+        write_file(&intruder, "not from prcp");
+    });
+
+    assert!(!run.status.success(), "stderr: {}", run.stderr);
+    let line = format!(
+        "prcp did not copy '{}': '{}' appeared at the destination during the run, and prcp did \
+         not make it.",
+        source.display(),
+        intruder.display()
+    );
+    assert!(run.stderr.contains(&line), "stderr: {}", run.stderr);
+    assert!(run.stderr.contains(OUTSIDE_NOTE), "stderr: {}", run.stderr);
+    assert_eq!(
+        run.stderr.matches(OVERWRITE_QUESTION).count(),
+        1,
+        "prcp must not ask about a path that somebody else made. stderr: {}",
+        run.stderr
+    );
+    assert_eq!(fs::read_to_string(&intruder).unwrap(), "not from prcp");
+    fixture.assert_sources_stay(&run);
+}
