@@ -293,4 +293,16 @@ mod tests {
             [file_entry(0, &source, &destination.join("a.txt"))]
         );
     }
+
+    #[test]
+    fn one_file_to_missing_destination_becomes_the_destination() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("a.txt");
+        write_file(&source, "a");
+        let destination = temp.path().join("copy.txt");
+
+        let plan = CopyPlan::build(std::slice::from_ref(&source), &destination, false).unwrap();
+
+        assert_eq!(plan.entries(), [file_entry(0, &source, &destination)]);
+    }
 }
