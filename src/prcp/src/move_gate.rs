@@ -133,6 +133,8 @@ enum Record {
         /// The identity of the destination directory right after the loop made it.
         identity: Option<NodeIdentity>,
     },
+    /// The loop left the destination as it was (`--skip-existing`). Nothing was copied.
+    KeptExisting,
     /// The destination link exists and reads back with the target.
     Symlink {
         /// The identity of the destination link right after the loop made it.
@@ -212,23 +214,38 @@ impl<'a> MoveLedger<'a> {
         if self.first_entry.get(destination) != Some(&entry) {
             return None;
         }
-        let before = self.snapshot_of(destination)?;
-        if !before.knows(destination) {
-            return None;
-        }
-        let now = DestinationNode::of(destination).ok()?;
-        let problem = match (before.node(destination), now) {
-            (None, None) => return None,
-            (None, Some(_)) => Problem::NewAtDestination,
-            (Some(_), None) => Problem::MissingAtDestination,
-            (Some(old), Some(now)) if !old.agrees_with(&now) => Problem::DestinationChanged,
-            (Some(_), Some(_)) => return None,
-        };
+        let problem = self.change_since_snapshot(destination)?;
         Some(ChangeBeforeCopy {
             source: plan_entry.source.clone(),
             destination: destination.clone(),
             problem: name_finder_file(destination, problem),
         })
+    }
+
+    /// Compare the destination path `path` with the snapshot. Return how it changed.
+    ///
+    /// A path that appeared is `NewAtDestination`, one that left is
+    /// `MissingAtDestination`, and one that changed is `DestinationChanged`.
+    /// Return `None` when the path is as the snapshot found it, when the
+    /// snapshot could not read it, and when it cannot be read now.
+    fn change_since_snapshot(&self, path: &Path) -> Option<Problem> {
+        let before = self.snapshot_of(path)?;
+        if !before.knows(path) {
+            return None;
+        }
+        let now = DestinationNode::of(path).ok()?;
+        match (before.node(path), now) {
+            (None, None) => None,
+            (None, Some(_)) => Some(Problem::NewAtDestination),
+            (Some(_), None) => Some(Problem::MissingAtDestination),
+            (Some(old), Some(now)) if !old.agrees_with(&now) => Some(Problem::DestinationChanged),
+            (Some(_), Some(_)) => None,
+        }
+    }
+
+    /// Return the identity that the snapshot holds for the destination path `path`.
+    fn identity_in_snapshot(&self, path: &Path) -> Option<NodeIdentity> {
+        self.snapshot_of(path)?.node(path)?.identity()
     }
 
     /// Return the snapshot that holds `path`: the one with the deepest root above or at it.
@@ -242,9 +259,10 @@ impl<'a> MoveLedger<'a> {
 
     /// Record that the loop kept the destination of entry `entry` as it was (`--skip-existing`).
     ///
-    /// The scaffold records nothing yet.
+    /// A copy then compares that path with the snapshot in the final check. A
+    /// move keeps the original, because nothing was copied.
     pub(crate) fn record_existing_kept(&mut self, entry: usize) {
-        let _ = entry;
+        self.set(entry, Record::KeptExisting);
     }
 
     /// Record that the directory of entry `entry` exists at the destination.
@@ -393,8 +411,17 @@ impl<'a> MoveLedger<'a> {
                 Some(Record::File {
                     verification: Verification::Skipped,
                     ..
-                }) if self.action == Action::Move => {
+                })
+                | Some(Record::KeptExisting)
+                    if self.action == Action::Move =>
+                {
                     findings.note(&entry.source, Problem::NotCopied);
+                }
+                Some(Record::KeptExisting) => {
+                    let destination = &entry.destination;
+                    let problem = self.change_since_snapshot(destination);
+                    let identity = self.identity_in_snapshot(destination);
+                    findings.note_destination(destination, problem, identity);
                 }
                 Some(Record::File {
                     source,

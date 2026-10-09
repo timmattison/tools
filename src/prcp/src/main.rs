@@ -874,6 +874,7 @@ async fn main() -> Result<()> {
                 if !confirm_overwrite(dest, &args, &mut raw_mode_guard, &input_active)? {
                     if args.skip_existing {
                         skipped_existing.push(entry.source.clone());
+                        ledger.record_existing_kept(index);
                     } else {
                         failures
                             .push((entry.source.clone(), SKIPPED_DESTINATION_EXISTS.to_string()));
@@ -955,6 +956,7 @@ async fn main() -> Result<()> {
                 // Otherwise, track as a failure or cancel the operation
                 if args.skip_existing {
                     skipped_existing.push(source.clone());
+                    ledger.record_existing_kept(index);
                     // Reduce batch total for skipped file
                     if let Some(ref pb) = batch_pb {
                         current_total_batch_bytes =
