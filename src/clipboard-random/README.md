@@ -86,7 +86,7 @@ Text length: 84 characters (158 bytes)
 ```
 
 - `characters` is the count of Unicode scalar values, the same count as `pbpaste | wc -m` in a UTF-8 locale (Terminal sets one by default). Each combining mark counts as one character. Thus this count is larger than `<CHARS>` when the text has diacritics, because `<CHARS>` counts only the letters and the spaces.
-- `bytes` is the size of the UTF-8 text on the clipboard, the same count as `pbpaste | wc -c` in a UTF-8 locale. Each combining mark is 2 bytes.
+- `bytes` is the length of the UTF-8 encoding of the text that the tool gives to the clipboard, the same count as `pbpaste | wc -c` in a UTF-8 locale. Each combining mark is 2 bytes.
 
 ### Global Options
 

@@ -302,7 +302,7 @@ fn generate_text_data(chars: usize, config: TextConfig, dry_run: bool) -> Result
 ///
 /// The character count is the count of Unicode scalar values, thus each
 /// combining mark counts as one character. The byte count is the length of the
-/// UTF-8 encoding, which is the quantity of data that goes to the clipboard.
+/// UTF-8 encoding of the text that the tool gives to the clipboard.
 fn text_length_line(text: &str) -> String {
     format!(
         "Text length: {} characters ({} bytes)",
