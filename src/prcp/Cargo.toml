@@ -18,6 +18,9 @@ tokio.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]
+# The pseudo-terminal of tests/landing.rs, which types an answer to the
+# question that prcp asks only on a terminal.
+gitscratch = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 testcolor.workspace = true
 

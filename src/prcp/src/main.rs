@@ -533,6 +533,12 @@ fn confirm_overwrite(
     Ok(input.trim().eq_ignore_ascii_case("y"))
 }
 
+/// Ask the question that lets a person stop the run before the first copy.
+fn ask_to_continue(input: &mut impl io::BufRead, output: &mut impl Write) -> io::Result<bool> {
+    let _ = (input, output);
+    Ok(true)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -2635,6 +2641,42 @@ mod tests {
 
             // When destination parent doesn't exist, returns true (safe default)
             assert!(same_device(&source, &dest_with_nonexistent_parent));
+        }
+    }
+
+    mod ask_to_continue_tests {
+        use super::*;
+
+        /// Type `typed` at the question. Return the answer and what the question wrote.
+        fn answer(typed: &str) -> (bool, String) {
+            let mut output = Vec::new();
+            let yes = ask_to_continue(&mut typed.as_bytes(), &mut output).unwrap();
+            (yes, String::from_utf8(output).unwrap())
+        }
+
+        #[test]
+        fn y_continues_after_the_question() {
+            assert_eq!(answer("y\n"), (true, "Continue? (y/N): ".to_string()));
+        }
+
+        #[test]
+        fn capital_y_continues() {
+            assert!(answer("Y\n").0);
+        }
+
+        #[test]
+        fn n_stops() {
+            assert!(!answer("n\n").0);
+        }
+
+        #[test]
+        fn enter_alone_stops() {
+            assert!(!answer("\n").0);
+        }
+
+        #[test]
+        fn end_of_input_stops() {
+            assert!(!answer("").0);
         }
     }
 

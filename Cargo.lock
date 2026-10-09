@@ -6257,6 +6257,7 @@ dependencies = [
  "clap",
  "colored",
  "crossterm",
+ "gitscratch",
  "glob",
  "indicatif",
  "libc",
