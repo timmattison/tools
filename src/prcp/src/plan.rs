@@ -840,4 +840,36 @@ mod tests {
             ]
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_subdirectory_is_a_walk_error_and_the_rest_is_planned() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        write_file(&src.join("a.txt"), "a");
+        let locked = src.join("locked");
+        write_file(&locked.join("hidden.txt"), "h");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::read_dir(&locked).is_ok();
+        let dest = temp.path().join("dest");
+
+        let result = CopyPlan::build(std::slice::from_ref(&src), &dest, true);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        if readable {
+            // The test runs as root, so the lock has no effect.
+            return;
+        }
+        let plan = result.unwrap();
+
+        assert_eq!(plan.walk_errors().len(), 1);
+        assert_eq!(plan.walk_errors()[0].operand, OperandId(0));
+        assert_eq!(plan.walk_errors()[0].path, locked);
+        assert!(!plan.walk_errors()[0].message.is_empty());
+        assert!(plan
+            .entries()
+            .iter()
+            .any(|entry| entry.source == src.join("a.txt")));
+    }
 }
