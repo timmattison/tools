@@ -605,4 +605,20 @@ mod tests {
         assert_eq!(plan.operands()[0].kind, OperandKind::Symlink);
         assert!(plan.tree(OperandId(0)).is_none());
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn top_level_symlink_to_a_file_is_a_file_entry() {
+        let temp = TempDir::new().unwrap();
+        let real = temp.path().join("real.txt");
+        write_file(&real, "a");
+        let link = temp.path().join("link.txt");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let dest = temp.path().join("dest");
+
+        let plan = CopyPlan::build(std::slice::from_ref(&link), &dest, true).unwrap();
+
+        assert_eq!(plan.entries(), [file_entry(0, &link, &dest)]);
+        assert_eq!(plan.operands()[0].kind, OperandKind::File);
+    }
 }
