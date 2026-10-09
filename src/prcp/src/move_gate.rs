@@ -785,6 +785,119 @@ mod tests {
     }
 
     #[test]
+    fn a_good_operand_moves_and_a_bad_operand_keeps_all_originals() {
+        let temp = TempDir::new().unwrap();
+        let good = temp.path().join("good");
+        let bad = temp.path().join("bad");
+        let dest = temp.path().join("dest");
+        make_sample_tree(&good);
+        make_sample_tree(&bad);
+        let plan = CopyPlan::build(&[good.clone(), bad.clone()], &dest, true).unwrap();
+        let ledger = copy_all(&plan, &[]);
+        let late = bad.join("late.txt");
+        write_file(&late, "late");
+
+        let report = ledger.finish();
+
+        assert_eq!(report.removed, vec![good.clone()], "report: {report:?}");
+        assert_eq!(report.kept.len(), 1);
+        assert_eq!(report.kept[0].source, bad);
+        assert_eq!(
+            report.kept[0].problems.get(&late),
+            Some(&Problem::NewSinceCopy)
+        );
+        assert!(!good.exists(), "the good operand must be gone");
+        assert!(bad.join("top.txt").exists());
+        assert!(bad.join("sub").join("deeper").join("deep.txt").exists());
+        assert!(bad.join("empty").is_dir());
+        assert!(dest.join("good").join("top.txt").exists());
+        assert!(dest.join("bad").join("top.txt").exists());
+        assert_eq!(report.unfinished_count(), 1);
+    }
+
+    #[test]
+    fn file_operands_that_all_verified_are_removed() {
+        let temp = TempDir::new().unwrap();
+        let first = temp.path().join("first.txt");
+        let second = temp.path().join("second.txt");
+        let dest = temp.path().join("dest");
+        write_file(&first, "first");
+        write_file(&second, "second");
+        fs::create_dir(&dest).unwrap();
+        let plan = CopyPlan::build(&[first.clone(), second.clone()], &dest, false).unwrap();
+        let ledger = copy_all(&plan, &[]);
+
+        let report = ledger.finish();
+
+        assert!(report.is_complete(), "report: {report:?}");
+        assert_eq!(report.removed, vec![first.clone(), second.clone()]);
+        assert!(!first.exists());
+        assert!(!second.exists());
+        assert_eq!(fs::read_to_string(dest.join("first.txt")).unwrap(), "first");
+        assert_eq!(
+            fs::read_to_string(dest.join("second.txt")).unwrap(),
+            "second"
+        );
+    }
+
+    #[test]
+    fn a_file_operand_without_a_record_stays_and_the_other_moves() {
+        let temp = TempDir::new().unwrap();
+        let first = temp.path().join("first.txt");
+        let second = temp.path().join("second.txt");
+        let dest = temp.path().join("dest");
+        write_file(&first, "first");
+        write_file(&second, "second");
+        fs::create_dir(&dest).unwrap();
+        let plan = CopyPlan::build(&[first.clone(), second.clone()], &dest, false).unwrap();
+        let ledger = copy_all(&plan, &[second.as_path()]);
+
+        let report = ledger.finish();
+
+        assert!(!report.is_complete());
+        assert_eq!(report.removed, vec![first.clone()]);
+        assert_eq!(
+            report.kept[0].problems.get(&second),
+            Some(&Problem::NotCopied)
+        );
+        assert!(!first.exists());
+        assert!(second.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_removal_that_fails_is_reported_and_the_operand_is_unfinished() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let locked_parent = temp.path().join("parent");
+        let file = locked_parent.join("file.txt");
+        let dest = temp.path().join("dest");
+        write_file(&file, "content");
+        let other = temp.path().join("other.txt");
+        write_file(&other, "other");
+        fs::create_dir(&dest).unwrap();
+        let plan = CopyPlan::build(&[file.clone(), other.clone()], &dest, false).unwrap();
+        let ledger = copy_all(&plan, &[]);
+        fs::set_permissions(&locked_parent, fs::Permissions::from_mode(0o555)).unwrap();
+        let writable_anyway = fs::File::create(locked_parent.join("probe")).is_ok();
+
+        let report = ledger.finish();
+
+        fs::set_permissions(&locked_parent, fs::Permissions::from_mode(0o755)).unwrap();
+        if writable_anyway {
+            // The lock does not work for root.
+            return;
+        }
+        assert!(!report.is_complete(), "report: {report:?}");
+        assert_eq!(report.removed, vec![other.clone()]);
+        assert_eq!(report.removal_errors.len(), 1);
+        assert_eq!(report.removal_errors[0].0, file);
+        assert_eq!(report.unfinished_count(), 1);
+        assert!(file.exists());
+    }
+
+    #[test]
     fn problem_display_texts_state_each_problem() {
         assert_eq!(
             Problem::NotCopied.to_string(),
