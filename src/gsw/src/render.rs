@@ -60,6 +60,11 @@ pub struct Snapshot {
     /// never changes, so that read extends the log of the walk, and it never
     /// puts the commits of another branch under the header of this snapshot.
     /// A snapshot with no start gives a resize no log to read.
+    ///
+    /// The start also keeps the set of the commits that only the branch has,
+    /// from the one walk of the snapshot. The header counts the size of that
+    /// set, and the read on a resize marks its rows from it. The set lives as
+    /// long as the snapshot, and a clone of the snapshot shares it.
     pub log_start: Option<LogStart>,
     /// Upstream tracking branch status (ahead/behind). `None` when the
     /// current branch has no configured upstream.

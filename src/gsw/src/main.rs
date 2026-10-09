@@ -594,6 +594,11 @@ pub(crate) fn build_output(
 /// reached the end of the history at or before that limit
 /// ([`Snapshot::log_complete`]), and the commit that its log started from
 /// ([`Snapshot::log_start`]), at every limit.
+///
+/// The log is read first. Its start holds the one walk of the commits that
+/// only the branch has, so HEAD is resolved one time. The counts of the header
+/// come from that start ([`repo::base_status`]). The ahead count is the size
+/// of the set that the log marks from, and the behind count is one more walk.
 pub(crate) fn collect_snapshot(
     repo: &gix::Repository,
     cfg: &RenderConfig,
@@ -602,7 +607,11 @@ pub(crate) fn collect_snapshot(
     let branch = repo::branch_name(repo);
 
     let base = cfg.base.clone().unwrap_or_else(|| repo::resolve_base(repo));
-    let base_status = repo::base_status(repo, &base);
+    // The log comes first. Its start holds the one walk of `base..HEAD`, and
+    // the counts of the header come from that start. So HEAD is resolved one
+    // time, and the header and the log agree.
+    let fetched = fetch_head_log(repo, &base, log_limit);
+    let base_status = repo::base_status(repo, fetched.start.as_ref());
 
     let repo::Changes {
         entries,
@@ -623,7 +632,6 @@ pub(crate) fn collect_snapshot(
         &ages,
     );
 
-    let fetched = fetch_head_log(repo, &snapshot.base, log_limit);
     snapshot.log = fetched.entries;
     snapshot.log_complete = fetched.complete;
     snapshot.log_start = fetched.start;
@@ -814,8 +822,9 @@ pub(crate) fn render_list_frame(
 /// commits of its history up to the limit of the read, and whether the history
 /// ended at or before that limit.
 ///
-/// [`fetch_head_log`] reads from the commit that HEAD names, and
-/// [`collect_snapshot`] puts all three on the [`Snapshot`]. Watch mode reads
+/// [`fetch_head_log`] reads from the commit that HEAD names, and makes the
+/// start with its one walk of the branch commits. [`collect_snapshot`] puts
+/// all three on the [`Snapshot`]. Watch mode reads
 /// from the start that the snapshot recorded, through [`fetch_log_from`], on a
 /// resize.
 #[derive(Debug, Clone)]
@@ -824,8 +833,8 @@ pub(crate) struct FetchedLog {
     /// `None` when HEAD named no commit.
     pub(crate) start: Option<repo::LogStart>,
     /// The commits, newest first. Each entry tells whether its commit is only
-    /// on the branch ([`LogEntry::on_branch`]). The base commit of `start`
-    /// decides that mark.
+    /// on the branch ([`LogEntry::on_branch`]). The set of branch commits that
+    /// `start` keeps decides that mark.
     pub(crate) entries: Vec<LogEntry>,
     /// `entries` is complete: the walk of the history of `start` reached its
     /// end at or before the limit, so a read from `start` with a higher limit
@@ -834,8 +843,9 @@ pub(crate) struct FetchedLog {
 }
 
 /// Fetch the `n` most recent commits from HEAD as [`LogEntry`] records via
-/// gix, with the start of the walk: the commit that HEAD names and the commit
-/// that `base` names ([`repo::LogStart`]).
+/// gix, with the start of the walk: the commit that HEAD names, the commit
+/// that `base` names, and the set of the commits that only the branch has
+/// ([`repo::LogStart`]). This call makes the one walk of that set.
 ///
 /// Returns an empty list when `n == 0` or the repo has no commits. The start
 /// is known at `n == 0` too, as [`repo::recent_log`] resolves it.
@@ -875,10 +885,11 @@ fn fetch_head_log(repo: &gix::Repository, base: &str, n: usize) -> FetchedLog {
 /// ([`repo::recent_log_from`]). Each age is measured at the instant of this
 /// call.
 ///
-/// The marks of the entries ([`LogEntry::on_branch`]) come from the base
-/// commit that `start` recorded, and not from the commit that the base names
-/// now. So the read gives the commits of the walk with the marks of the walk,
-/// also when the base moved after the walk.
+/// The marks of the entries ([`LogEntry::on_branch`]) come from the set of
+/// branch commits that `start` keeps, and not from the commit that the base
+/// names now. So the read gives the commits of the walk with the marks of the
+/// walk, also when the base moved after the walk. The read walks no more than
+/// its rows, and it never walks the commits of the branch again.
 pub(crate) fn fetch_log_from(
     repo: &gix::Repository,
     start: repo::LogStart,

@@ -170,7 +170,8 @@ pub fn resolve_base(repo: &gix::Repository) -> String {
 }
 
 /// The start of a walk of the log: the commit that HEAD named when
-/// [`recent_log`] resolved it, and the commit that the base named then.
+/// [`recent_log`] resolved it, the commit that the base named then, and the
+/// set of the commits that only the branch has.
 ///
 /// A commit names its parents by their ids, and an id names its content. So
 /// the history of one start is the same at every read, whatever HEAD names by
@@ -183,26 +184,82 @@ pub fn resolve_base(repo: &gix::Repository) -> String {
 /// the base. So a read from one start gives the same marks at every read, also
 /// when the base moved after the walk.
 ///
+/// The start keeps the set of those commits from one walk of `base..commit`,
+/// made when [`recent_log`] made the start. The header counts the size of
+/// that set ([`base_status`]), and the log marks its rows from that set. So
+/// the count and the marks agree, and a read from the start walks no more
+/// than its rows. It never walks `base..commit` again.
+///
+/// The set is `None` when the walk did not start or when a step of it failed.
+/// That is a doubt: the header counts zero and the log marks no row. The set
+/// is empty when the start has no base or when the base is the start commit.
+///
+/// Memory: the set holds one id for each commit that only the branch has. The
+/// start keeps it for the life of the snapshot that holds the start. A clone
+/// of the start shares the set and does not copy it.
+///
 /// The fields are private, and only [`recent_log`] makes a start. So a read of
 /// the log starts from a commit that a walk recorded, or from HEAD.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct LogStart {
     /// The commit that the walk starts from.
     commit: gix::ObjectId,
     /// The commit that the base named when the walk started. `None` when the
     /// base did not resolve.
     base: Option<gix::ObjectId>,
+    /// The commits that `commit` reaches and `base` does not. `None` when the
+    /// walk did not start or a step of it failed.
+    branch: Option<std::sync::Arc<gix::hashtable::HashSet>>,
+}
+
+/// Two starts are equal when they name the same commit and the same base.
+///
+/// The set of the branch commits is a function of those two commits, because
+/// a history never changes. So the set is not compared. A walk that failed
+/// and a walk that did not fail, from the same two commits, are the same
+/// start.
+impl PartialEq for LogStart {
+    fn eq(&self, other: &Self) -> bool {
+        self.commit == other.commit && self.base == other.base
+    }
+}
+
+impl Eq for LogStart {}
+
+/// Shows the commit, the base, and the number of branch commits. It never
+/// shows the whole set, because a set of 50000 ids is not useful in the debug
+/// print of a snapshot.
+impl std::fmt::Debug for LogStart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LogStart")
+            .field("commit", &self.commit)
+            .field("base", &self.base)
+            .field("branch_commits", &self.branch.as_ref().map(|set| set.len()))
+            .finish()
+    }
 }
 
 impl LogStart {
     /// A start that names no commit and no base, for the tests that fake the
     /// histories of a repository. One seed gives the same start at every
-    /// call, and two seeds give two different starts.
+    /// call, and two seeds give two different starts. The set of the branch
+    /// commits is empty.
     #[cfg(test)]
     pub(crate) fn fake(seed: u8) -> Self {
         Self {
             commit: gix::ObjectId::from_bytes_or_panic(&[seed; 20]),
             base: None,
+            branch: Some(std::sync::Arc::default()),
+        }
+    }
+
+    /// Make the start of `commit` against `base`, with one walk of the
+    /// commits that only the branch has ([`branch_commits`]).
+    fn walked(repo: &gix::Repository, commit: gix::ObjectId, base: Option<gix::ObjectId>) -> Self {
+        Self {
+            commit,
+            base,
+            branch: branch_commits(repo, commit, base).map(std::sync::Arc::new),
         }
     }
 }
@@ -218,8 +275,9 @@ pub struct LogCommit {
     pub summary: String,
     /// The commit is only on the branch: the start reaches it, and the base
     /// of the start does not. These are the commits that the header counts
-    /// ([`base_status`]). The flag comes from the set of those commits, and
-    /// not from the position of the commit in the log ([`recent_log_from`]).
+    /// ([`base_status`]). The flag comes from the set that the start keeps
+    /// ([`LogStart`]), and not from the position of the commit in the log
+    /// ([`recent_log_from`]).
     pub on_branch: bool,
 }
 
@@ -243,16 +301,18 @@ pub struct RecentLog {
 /// The `n` most recent commits from HEAD, the start of the walk, and whether
 /// the walk reached the end of the history.
 ///
-/// The start holds the commit that HEAD names and the commit that `base`
-/// names. `base` resolves by the rule of [`base_status`], so the marks of the
-/// log and the count of the header agree on the base. A `base` that does not
-/// resolve gives a start with no base, and then no commit is marked. When HEAD
-/// is on the base, no commit is marked either. The header counts zero in both
-/// cases.
+/// The start holds the commit that HEAD names, the commit that `base` names,
+/// and the set of the commits that only the branch has ([`LogStart`]). This
+/// call makes the one walk of `base..HEAD` for that set, whatever `n` is.
+/// [`base_status`] counts the header from the start, so the marks of the log
+/// and the count of the header agree. A `base` that does not resolve gives a
+/// start with no base, and then no commit is marked. When HEAD is on the base,
+/// no commit is marked either. The header counts zero in both cases.
 ///
 /// HEAD is resolved first, whatever `n` is, so the start is known at a limit
 /// of zero too. A pane too short for a log can grow later, and the read of the
-/// log for it starts there. [`recent_log_from`] then walks from that start.
+/// log for it starts there. [`recent_log_from`] then walks from that start
+/// and uses its set.
 ///
 /// An unborn HEAD is not a failure. It is a history of no commit, so its log
 /// has no start and no commit, and it is complete, except at a limit of zero,
@@ -261,10 +321,7 @@ pub struct RecentLog {
 pub fn recent_log(repo: &gix::Repository, base: &str, n: usize) -> RecentLog {
     match repo.head_commit() {
         Ok(head) => {
-            let start = LogStart {
-                commit: head.id,
-                base: base_commit(repo, base),
-            };
+            let start = LogStart::walked(repo, head.id, base_commit(repo, base));
             recent_log_from(repo, start, n)
         }
         Err(_) => RecentLog {
@@ -303,15 +360,20 @@ pub fn recent_log(repo: &gix::Repository, base: &str, n: usize) -> RecentLog {
 /// higher limit cannot read that commit either.
 ///
 /// A commit is marked as only on the branch ([`LogCommit::on_branch`]) when
-/// it is in the set of [`branch_commits`]. The decision is by membership in
-/// that set, and never by the position of the commit. The walk of the log is
-/// breadth-first, so after a merge of the base into the branch, it puts
-/// commits of the base between the commits of the branch. The set comes from
-/// the start commit and the base commit that the start holds. So every read
-/// from one start gives the same marks, also when the base moved.
+/// it is in the set that `start` keeps ([`LogStart`]). The decision is by
+/// membership in that set, and never by the position of the commit. The walk
+/// of the log is breadth-first, so after a merge of the base into the branch,
+/// it puts commits of the base between the commits of the branch. The set
+/// comes from the one walk that made `start`. So every read from one start
+/// gives the same marks, also when the base moved.
+///
+/// This read never walks `base..start`. Its cost is the walk of `n + 1`
+/// commits of the log. A resize in watch mode reads only its rows, however
+/// many commits the branch has. When the set is `None` (the walk of the
+/// branch failed), no row is marked.
 pub fn recent_log_from(repo: &gix::Repository, start: LogStart, n: usize) -> RecentLog {
     let incomplete = || RecentLog {
-        start: Some(start),
+        start: Some(start.clone()),
         commits: Vec::new(),
         complete: false,
     };
@@ -321,7 +383,6 @@ pub fn recent_log_from(repo: &gix::Repository, start: LogStart, n: usize) -> Rec
     let Ok(mut walk) = repo.rev_walk(std::iter::once(start.commit)).all() else {
         return incomplete();
     };
-    let branch = branch_commits(repo, start);
     let mut step_failed = false;
     let commits = walk
         .by_ref()
@@ -339,7 +400,10 @@ pub fn recent_log_from(repo: &gix::Repository, start: LogStart, n: usize) -> Rec
                 hash,
                 secs,
                 summary,
-                on_branch: branch.contains(&info.id),
+                on_branch: start
+                    .branch
+                    .as_ref()
+                    .is_some_and(|set| set.contains(&info.id)),
             })
         })
         .collect();
@@ -363,74 +427,92 @@ pub struct BaseStatus {
     pub behind: u32,
 }
 
-/// Count how far HEAD is ahead of and behind its `base` ref.
+/// Count how far the start of a log is ahead of and behind its base commit.
 ///
-/// `ahead` is the number of commits reachable from HEAD but not from `base`
-/// (`git rev-list --count base..HEAD`); `behind` is the mirror — commits
-/// reachable from `base` but not from HEAD (`git rev-list --count HEAD..base`),
-/// which is nonzero when the base has moved on past the fork point and HEAD
-/// needs a rebase.
+/// `start` is the start that [`recent_log`] made from HEAD. So the header
+/// counts the commits of the same walk that the log marks from.
 ///
-/// Any resolution or walk failure degrades to `BaseStatus { ahead: 0, behind:
-/// 0 }`, so a missing or unresolvable base produces no behind segment. A step
-/// of a walk that fails is one of those failures. When
-/// HEAD already points at the base commit the walks are short-circuited to
-/// `(0, 0)`. Each count is clamped to `u32::MAX`.
-pub fn base_status(repo: &gix::Repository, base: &str) -> BaseStatus {
+/// `ahead` is the size of the set that the start keeps
+/// (`git rev-list --count base..HEAD`). This call does not walk it again.
+/// `behind` is the mirror, the commits reachable from the base but not from
+/// the start commit (`git rev-list --count HEAD..base`). It is nonzero when
+/// the base has moved on past the fork point and HEAD needs a rebase. This
+/// call walks it, with [`count_only_on`]. Each count is clamped to `u32::MAX`.
+///
+/// Both counts are zero when `start` is `None` (HEAD named no commit), when
+/// the start has no base, when the walk of the set failed, or when the walk
+/// of the behind count does not start or a step of it fails. A missing or
+/// unresolvable base then produces no behind segment. When the base is the
+/// start commit, both counts are zero and no walk runs.
+pub fn base_status(repo: &gix::Repository, start: Option<&LogStart>) -> BaseStatus {
     let resolve = || -> Option<(u32, u32)> {
-        let head = repo.head_id().ok()?.detach();
-        let base_id = base_commit(repo, base)?;
-        ahead_behind(repo, head, base_id)
+        let start = start?;
+        let base = start.base?;
+        let branch = start.branch.as_ref()?;
+        if base == start.commit {
+            return Some((0, 0));
+        }
+        let behind = count_only_on(repo, base, start.commit)?;
+        Some((clamp_count(branch.len()), clamp_count(behind)))
     };
     let (ahead, behind) = resolve().unwrap_or((0, 0));
     BaseStatus { ahead, behind }
 }
 
+/// A count as a `u32`, clamped to `u32::MAX`.
+fn clamp_count(count: usize) -> u32 {
+    u32::try_from(count).unwrap_or(u32::MAX)
+}
+
 /// The commit that the ref `base` names, or `None` when `base` does not
 /// resolve.
 ///
-/// [`base_status`] counts against this commit, and [`recent_log`] keeps it in
-/// the start of the log. One rule, so the count of the header and the marks of
-/// the log cannot disagree about the base.
+/// [`recent_log`] keeps this commit in the start of the log, and
+/// [`base_status`] counts from that start. One rule, so the count of the
+/// header and the marks of the log cannot disagree about the base.
 fn base_commit(repo: &gix::Repository, base: &str) -> Option<gix::ObjectId> {
     repo.rev_parse_single(base).ok().map(gix::Id::detach)
 }
 
-/// The commits that the start commit reaches and its base commit does not:
-/// the commits that are only on the branch.
+/// The commits that `commit` reaches and `base` does not: the commits that
+/// are only on the branch. [`LogStart::walked`] calls it one time for each
+/// start.
 ///
-/// The set comes from [`walk_only_on`], the walk that [`ahead_behind`] counts
-/// for the header. So the log marks the commits that the header counts.
+/// The set comes from [`walk_only_on`]. The header counts the size of the set
+/// ([`base_status`]), so the log marks the commits that the header counts.
 ///
-/// The set is empty when the start has no base, when the base is the start
-/// commit, or when the walk does not start. The header counts zero in those
-/// cases. A step of the walk that fails also gives an empty set, and
-/// [`count_only_on`] also gives no count for it. A doubt then costs the marks
-/// and the count, and it never marks a commit that the base reaches.
-fn branch_commits(repo: &gix::Repository, start: LogStart) -> gix::hashtable::HashSet {
-    let Some(base) = start.base else {
-        return gix::hashtable::HashSet::default();
+/// The set is empty when there is no base or when the base is `commit`. The
+/// header counts zero in those cases. The result is `None` when the walk does
+/// not start or when a step of it fails. That is a doubt: the header counts
+/// zero and the log marks no row, so it never marks a commit that the base
+/// reaches.
+fn branch_commits(
+    repo: &gix::Repository,
+    commit: gix::ObjectId,
+    base: Option<gix::ObjectId>,
+) -> Option<gix::hashtable::HashSet> {
+    let Some(base) = base else {
+        return Some(gix::hashtable::HashSet::default());
     };
-    if base == start.commit {
-        return gix::hashtable::HashSet::default();
+    if base == commit {
+        return Some(gix::hashtable::HashSet::default());
     }
-    walk_only_on(repo, start.commit, base)
-        .and_then(|walk| {
-            walk.map(|info| info.map(|info| info.id))
-                .collect::<Result<_, _>>()
-                .ok()
-        })
-        .unwrap_or_default()
+    walk_only_on(repo, commit, base)?
+        .map(|info| info.map(|info| info.id))
+        .collect::<Result<_, _>>()
+        .ok()
 }
 
 /// The walk of the commits that `ours` reaches and `theirs` does not
 /// (`git rev-list theirs..ours`). `None` when the walk does not start.
 ///
 /// This is the one rule for the commits that are only on one side.
-/// [`ahead_behind`] counts this walk through [`count_only_on`], and
-/// [`branch_commits`] collects the ids of its commits. Both give nothing when
-/// a step of the walk fails. So the header counts zero and the log marks no
-/// commit, and the two agree about which commits are only on the branch.
+/// [`branch_commits`] collects the ids of its commits one time for each
+/// start, and the header counts the size of that set ([`base_status`]). So the
+/// header and the marks of the log are the same walk, and they agree about
+/// which commits are only on the branch. [`count_only_on`] counts the same
+/// walk without a set. Both give nothing when the walk does not start or when
+/// a step of it fails.
 fn walk_only_on(
     repo: &gix::Repository,
     ours: gix::ObjectId,
@@ -447,6 +529,8 @@ fn walk_only_on(
 ///
 /// A step that fails is not a commit, and a count that includes it is a wrong
 /// number. So this count fails as [`branch_commits`] fails. It keeps no set.
+/// [`base_status`] uses it for the behind count, and [`ahead_behind`] uses it
+/// for both counts.
 fn count_only_on(
     repo: &gix::Repository,
     ours: gix::ObjectId,
@@ -465,9 +549,10 @@ fn count_only_on(
 /// Returns `None` if either rev walk does not start or if a step of it fails.
 /// When `ours == theirs` the walks are
 /// short-circuited to `Some((0, 0))` (the walks would return `(0, 0)` anyway).
-/// Both `base_status` and `upstream_status` delegate here so the mirrored
-/// hidden-walk pair lives in exactly one place. Each count is
-/// [`count_only_on`], which counts the walk that decides the marks of the log.
+/// `upstream_status` uses this and needs only the counts, so it keeps no set.
+/// [`base_status`] does not use it: the start of the log already holds the set
+/// for its ahead count. Each count is [`count_only_on`], which counts the same
+/// walk that [`branch_commits`] collects.
 fn ahead_behind(
     repo: &gix::Repository,
     ours: gix::ObjectId,
@@ -1287,6 +1372,13 @@ mod tests {
         );
     }
 
+    /// The counts of the header for HEAD against `base`, as a walk reads
+    /// them: from the start of the log ([`super::recent_log`]), as
+    /// `collect_snapshot` does.
+    fn base_status(repo: &gix::Repository, base: &str) -> super::BaseStatus {
+        super::base_status(repo, super::recent_log(repo, base, 0).start.as_ref())
+    }
+
     #[test]
     fn base_status_reports_behind_when_base_advances_past_fork_point() {
         // Fork `feature` off main, advance both: feature gets one commit, then
@@ -1304,7 +1396,7 @@ mod tests {
         git(p, &["commit", "-q", "-m", "main moved on"]);
         git(p, &["checkout", "-q", "feature"]);
         let repo = open_at(p).unwrap();
-        let status = super::base_status(&repo, "main");
+        let status = base_status(&repo, "main");
         assert_eq!(
             status.ahead, 1,
             "feature has one commit past the fork point"
@@ -1327,7 +1419,7 @@ mod tests {
         git(p, &["add", "c.txt"]);
         git(p, &["commit", "-q", "-m", "third"]);
         let repo = open_at(p).unwrap();
-        let status = super::base_status(&repo, "main");
+        let status = base_status(&repo, "main");
         assert_eq!(status.ahead, 2);
         assert_eq!(status.behind, 0, "base has not moved");
     }
@@ -1336,7 +1428,7 @@ mod tests {
     fn base_status_is_zero_when_base_equals_head() {
         let dir = init_repo();
         let repo = open_at(dir.path()).unwrap();
-        let status = super::base_status(&repo, "main");
+        let status = base_status(&repo, "main");
         assert_eq!((status.ahead, status.behind), (0, 0));
     }
 
@@ -1344,7 +1436,7 @@ mod tests {
     fn base_status_is_zero_when_base_unresolvable() {
         let dir = init_repo();
         let repo = open_at(dir.path()).unwrap();
-        let status = super::base_status(&repo, "no-such-branch");
+        let status = base_status(&repo, "no-such-branch");
         assert_eq!((status.ahead, status.behind), (0, 0));
     }
 
@@ -1593,7 +1685,7 @@ mod tests {
             ["moved 4", "moved 3", "moved 2", "moved 1"],
             "HEAD names the other history, so a read from HEAD gives it",
         );
-        let log = super::recent_log_from(&repo, start, 10);
+        let log = super::recent_log_from(&repo, start.clone(), 10);
         assert_eq!(
             subjects(&log),
             ["third", "second", "initial"],
@@ -1756,7 +1848,7 @@ mod tests {
             ]),
             "the log marks the commits of the branch and the merge, and no commit of main",
         );
-        let ahead = super::base_status(&repo, "main").ahead;
+        let ahead = base_status(&repo, "main").ahead;
         assert_eq!(
             u32::try_from(marked(&log).len()).expect("a small count"),
             ahead,
@@ -1780,7 +1872,7 @@ mod tests {
             "a branch that is its base has no commit of its own: {:?}",
             marked(&log),
         );
-        assert_eq!(super::base_status(&repo, "main").ahead, 0);
+        assert_eq!(base_status(&repo, "main").ahead, 0);
     }
 
     #[test]
@@ -1803,7 +1895,7 @@ mod tests {
             "a base that does not resolve marks no commit: {:?}",
             marked(&log),
         );
-        assert_eq!(super::base_status(&repo, "no-such-branch").ahead, 0);
+        assert_eq!(base_status(&repo, "no-such-branch").ahead, 0);
     }
 
     #[test]

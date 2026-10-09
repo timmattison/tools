@@ -3353,7 +3353,7 @@ where
         if saw_resize {
             let limit = state.log_limit();
             let cached = &state.cache.snapshot;
-            if let Some(start) = cached.log_start {
+            if let Some(start) = cached.log_start.clone() {
                 if cached.log.len() < limit && !cached.log_complete {
                     let fetched = (hooks.fetch_log)(&state.current, start, limit);
                     state.cache.take_fetched_log(fetched, now);
@@ -6234,13 +6234,13 @@ mod tests {
 
         /// A read from `start` with the limit `limit` ([`read_of`]).
         fn read(&self, start: LogStart, limit: usize) -> FetchedLog {
-            read_of(start, self.history(start), limit)
+            read_of(start.clone(), self.history(start), limit)
         }
 
         /// The snapshot of a walk with the log limit `limit`. The walk reads
         /// from the start that HEAD names, and it records that start.
         fn walk(&self, limit: usize) -> Snapshot {
-            let read = self.read(self.head, limit);
+            let read = self.read(self.head.clone(), limit);
             Snapshot {
                 log: read.entries,
                 log_complete: read.complete,
