@@ -913,4 +913,19 @@ mod tests {
         assert!(plan.tree(OperandId(0)).is_none());
         assert!(plan.tree(OperandId(1)).is_some());
     }
+
+    #[test]
+    fn directory_without_recursive_is_an_error_that_names_the_flag() {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        write_file(&src.join("a.txt"), "a");
+        let dest = temp.path().join("dest");
+
+        let error = CopyPlan::build(std::slice::from_ref(&src), &dest, false).unwrap_err();
+
+        assert!(
+            error.to_string().contains("--recursive"),
+            "unexpected error: {error}"
+        );
+    }
 }
