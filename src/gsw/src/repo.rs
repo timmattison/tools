@@ -1955,6 +1955,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_read_from_the_start_of_a_walk_does_not_walk_the_branch_again() {
+        // Review R-20261008T205212Z#I1. A resize read uses the set of the
+        // walk again. The object of `feature 1` is gone after the walk, and
+        // a read of three rows never comes to it. A read that walks
+        // `main..start` again comes to the missing object and loses every
+        // mark.
+        let dir = feature_branch_repo(6);
+        let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
+        let snapshot = crate::collect_snapshot(handle.repo(), &log_walk_config(), 2).expect("walk");
+        assert_eq!(
+            row_marks(&snapshot.log),
+            [("feature 6", true), ("feature 5", true)],
+            "the walk marks its two rows",
+        );
+        let start = snapshot.log_start.expect("a walk records its start");
+
+        remove_commit_object(dir.path(), "HEAD~5");
+        let fresh = open_at(dir.path()).expect("fixture is a worktree repo");
+
+        let read = crate::fetch_log_from(&fresh, start, 3);
+
+        assert_eq!(
+            row_marks(&read.entries),
+            [
+                ("feature 6", true),
+                ("feature 5", true),
+                ("feature 4", true),
+            ],
+            "the read marks its rows from the set of the walk",
+        );
+    }
+
     fn statuses(repo: &gix::Repository) -> Vec<(String, FileStatus, bool)> {
         super::collect_changes(repo)
             .unwrap()
