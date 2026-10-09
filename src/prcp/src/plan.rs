@@ -445,10 +445,6 @@ impl CopyPlan {
     }
 
     /// Return the source operands, in the order given.
-    #[allow(
-        dead_code,
-        reason = "slice D of issue #295 uses this for the move gate"
-    )]
     pub(crate) fn operands(&self) -> &[Operand] {
         &self.operands
     }
