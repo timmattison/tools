@@ -689,3 +689,181 @@ fn move_of_a_tree_with_a_fifo_keeps_every_original_and_fails() {
     assert!(stderr.contains("fifo"), "stderr: {stderr}");
     assert!(stderr.contains("Kept the originals of"), "stderr: {stderr}");
 }
+
+#[cfg(unix)]
+#[test]
+fn move_of_two_trees_moves_the_good_one_and_keeps_the_bad_one() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().unwrap();
+    let a = temp.path().join("a");
+    let b = temp.path().join("b");
+    let dest = temp.path().join("dest");
+    write_file(&a.join("one.txt"), "one");
+    write_file(&a.join("sub").join("two.txt"), "two");
+    write_file(&b.join("three.txt"), "three");
+    write_file(&b.join("locked.txt"), "locked");
+    let locked = b.join("locked.txt");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let _restore = ModeRestore(vec![locked.clone()]);
+    if fs::File::open(&locked).is_ok() {
+        return;
+    }
+
+    let output = run_prcp([
+        OsString::from("--rm"),
+        OsString::from("-R"),
+        OsString::from("--continue-on-error"),
+        OsString::from("-y"),
+        OsString::from("-q"),
+        a.clone().into_os_string(),
+        b.clone().into_os_string(),
+        dest.clone().into_os_string(),
+    ]);
+
+    let stderr = visible_stderr(&output);
+    assert!(!output.status.success(), "stderr: {stderr}");
+    assert!(!a.exists(), "the good tree must be gone. stderr: {stderr}");
+    assert!(b.join("three.txt").exists(), "stderr: {stderr}");
+    assert!(locked.exists());
+    assert_eq!(
+        fs::read_to_string(dest.join("a/sub/two.txt")).unwrap(),
+        "two"
+    );
+    assert_eq!(
+        fs::read_to_string(dest.join("b/three.txt")).unwrap(),
+        "three"
+    );
+}
+
+#[test]
+fn move_of_files_without_recursion_removes_both_sources() {
+    let temp = TempDir::new().unwrap();
+    let a = temp.path().join("a.txt");
+    let b = temp.path().join("b.txt");
+    let dest = temp.path().join("dest");
+    write_file(&a, "content of a");
+    write_file(&b, "content of b");
+    fs::create_dir(&dest).unwrap();
+
+    let output = run_prcp([
+        OsString::from("--rm"),
+        OsString::from("-y"),
+        OsString::from("-q"),
+        a.clone().into_os_string(),
+        b.clone().into_os_string(),
+        dest.clone().into_os_string(),
+    ]);
+
+    let stderr = visible_stderr(&output);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(!a.exists());
+    assert!(!b.exists());
+    assert_eq!(
+        fs::read_to_string(dest.join("a.txt")).unwrap(),
+        "content of a"
+    );
+    assert_eq!(
+        fs::read_to_string(dest.join("b.txt")).unwrap(),
+        "content of b"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn move_of_files_with_one_unreadable_file_keeps_only_that_source() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().unwrap();
+    let good = temp.path().join("good.txt");
+    let bad = temp.path().join("bad.txt");
+    let dest = temp.path().join("dest");
+    write_file(&good, "good");
+    write_file(&bad, "bad");
+    fs::create_dir(&dest).unwrap();
+    fs::set_permissions(&bad, fs::Permissions::from_mode(0o000)).unwrap();
+    let _restore = ModeRestore(vec![bad.clone()]);
+    if fs::File::open(&bad).is_ok() {
+        return;
+    }
+
+    let output = run_prcp([
+        OsString::from("--rm"),
+        OsString::from("--continue-on-error"),
+        OsString::from("-y"),
+        OsString::from("-q"),
+        good.clone().into_os_string(),
+        bad.clone().into_os_string(),
+        dest.clone().into_os_string(),
+    ]);
+
+    let stderr = visible_stderr(&output);
+    assert!(!output.status.success(), "stderr: {stderr}");
+    assert!(!good.exists(), "stderr: {stderr}");
+    assert!(bad.exists());
+    assert_eq!(fs::read_to_string(dest.join("good.txt")).unwrap(), "good");
+}
+
+#[cfg(unix)]
+#[test]
+fn move_of_a_tree_with_a_symlink_recreates_the_link_and_removes_the_tree() {
+    let temp = TempDir::new().unwrap();
+    let src = temp.path().join("src");
+    let dest = temp.path().join("dest");
+    write_file(&src.join("a.txt"), "a");
+    write_file(&src.join("b.txt"), "b");
+    std::os::unix::fs::symlink("a.txt", src.join("link")).unwrap();
+
+    let output = run_prcp([
+        OsString::from("--rm"),
+        OsString::from("-R"),
+        OsString::from("-y"),
+        OsString::from("-q"),
+        src.clone().into_os_string(),
+        dest.clone().into_os_string(),
+    ]);
+
+    let stderr = visible_stderr(&output);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert_eq!(
+        fs::read_link(dest.join("link")).unwrap(),
+        Path::new("a.txt")
+    );
+    assert!(!src.exists(), "the source tree must be gone");
+}
+
+#[cfg(unix)]
+#[test]
+fn move_that_stops_on_the_first_error_removes_no_source() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().unwrap();
+    let good = temp.path().join("a-good.txt");
+    let bad = temp.path().join("b-bad.txt");
+    let dest = temp.path().join("dest");
+    write_file(&good, "good");
+    write_file(&bad, "bad");
+    fs::create_dir(&dest).unwrap();
+    fs::set_permissions(&bad, fs::Permissions::from_mode(0o000)).unwrap();
+    let _restore = ModeRestore(vec![bad.clone()]);
+    if fs::File::open(&bad).is_ok() {
+        return;
+    }
+
+    let output = run_prcp([
+        OsString::from("--rm"),
+        OsString::from("-y"),
+        OsString::from("-q"),
+        good.clone().into_os_string(),
+        bad.clone().into_os_string(),
+        dest.clone().into_os_string(),
+    ]);
+
+    let stderr = visible_stderr(&output);
+    assert!(!output.status.success(), "stderr: {stderr}");
+    assert!(
+        good.exists(),
+        "a run that stops early removes nothing. stderr: {stderr}"
+    );
+    assert!(bad.exists());
+}
