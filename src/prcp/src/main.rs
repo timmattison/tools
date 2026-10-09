@@ -2452,13 +2452,13 @@ mod tests {
             let recursive = command
                 .get_arguments()
                 .find(|arg| arg.get_long() == Some("recursive"))
-                .expect("the recursive argument must exist");
+                .unwrap();
             assert_eq!(recursive.get_short(), Some('R'));
 
             let small_r = command
                 .get_arguments()
                 .find(|arg| arg.get_short() == Some('r'))
-                .expect("an argument with the short form -r must exist");
+                .unwrap();
             assert_eq!(small_r.get_long(), Some("rm"));
         }
 
