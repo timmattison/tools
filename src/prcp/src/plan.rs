@@ -752,4 +752,20 @@ mod tests {
             "unexpected error: {error}"
         );
     }
+
+    #[test]
+    fn directory_onto_an_existing_file_is_an_error() {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        write_file(&src.join("a.txt"), "a");
+        let dest = temp.path().join("dest.txt");
+        write_file(&dest, "old");
+
+        let error = CopyPlan::build(std::slice::from_ref(&src), &dest, true).unwrap_err();
+
+        assert!(
+            error.to_string().contains("non-directory"),
+            "unexpected error: {error}"
+        );
+    }
 }
