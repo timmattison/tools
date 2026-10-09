@@ -1016,4 +1016,24 @@ mod tests {
         assert!(!holder_plan.is_single_file());
         assert_eq!(holder_plan.file_count(), 1);
     }
+
+    #[test]
+    fn new_snapshot_sees_a_file_that_the_plan_snapshot_does_not() {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        write_file(&src.join("a.txt"), "a");
+        let dest = temp.path().join("dest");
+        let plan = CopyPlan::build(std::slice::from_ref(&src), &dest, true).unwrap();
+        let added = src.join("late.txt");
+        write_file(&added, "late");
+
+        let fresh = TreeSnapshot::take(&src);
+
+        assert_eq!(fresh.nodes().get(&added), Some(&NodeKind::File));
+        assert_eq!(fresh.nodes().get(&src), Some(&NodeKind::Directory));
+        assert!(fresh.errors().is_empty());
+        let old = plan.tree(OperandId(0)).unwrap();
+        assert!(!old.nodes().contains_key(&added));
+        assert!(old.nodes().contains_key(&src.join("a.txt")));
+    }
 }
