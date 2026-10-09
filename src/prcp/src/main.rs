@@ -318,6 +318,7 @@ const RECURSIVE_HINT: &str = "use --recursive/-R to copy directories";
 ///
 /// * `patterns` - Paths that may be literal files or glob patterns
 /// * `literal` - If true, disable glob expansion entirely (all paths treated as literals)
+/// * `recursive` - If true, accept directories as sources. The caller copies their contents
 ///
 /// # Errors
 ///
@@ -325,7 +326,7 @@ const RECURSIVE_HINT: &str = "use --recursive/-R to copy directories";
 /// - A glob pattern matches no files
 /// - A literal path doesn't exist or is not a file
 /// - Glob iteration encounters errors (collected and reported)
-fn resolve_sources(patterns: &[PathBuf], literal: bool) -> Result<Vec<PathBuf>> {
+fn resolve_sources(patterns: &[PathBuf], literal: bool, recursive: bool) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     let mut glob_errors: Vec<String> = Vec::new();
 
@@ -429,7 +430,7 @@ async fn main() -> Result<()> {
     let source_paths: Vec<PathBuf> = source_paths.to_vec();
 
     // Resolve all source files (handles glob patterns)
-    let sources = resolve_sources(&source_paths, args.literal)?;
+    let sources = resolve_sources(&source_paths, args.literal, args.recursive)?;
     let total_files = sources.len();
 
     // Validate destination for multi-file operations
@@ -2470,7 +2471,7 @@ mod tests {
             let file = temp_dir.path().join("test.txt");
             fs::write(&file, "content").unwrap();
 
-            let result = resolve_sources(std::slice::from_ref(&file), false).unwrap();
+            let result = resolve_sources(std::slice::from_ref(&file), false, false).unwrap();
             assert_eq!(result, vec![file]);
         }
 
@@ -2482,7 +2483,7 @@ mod tests {
             fs::write(&file, "content").unwrap();
 
             // Without --literal flag, but file exists literally
-            let result = resolve_sources(std::slice::from_ref(&file), false).unwrap();
+            let result = resolve_sources(std::slice::from_ref(&file), false, false).unwrap();
             assert_eq!(result, vec![file]);
         }
 
@@ -2495,7 +2496,7 @@ mod tests {
             fs::write(&file2, "content2").unwrap();
 
             let pattern = temp_dir.path().join("*.txt");
-            let result = resolve_sources(&[pattern], false).unwrap();
+            let result = resolve_sources(&[pattern], false, false).unwrap();
 
             assert_eq!(result.len(), 2);
             assert!(result.contains(&file1));
@@ -2510,7 +2511,7 @@ mod tests {
 
             // Pattern that would match, but --literal is set
             let pattern = temp_dir.path().join("*.txt");
-            let result = resolve_sources(&[pattern], true);
+            let result = resolve_sources(&[pattern], true, false);
 
             // Should fail because "*.txt" doesn't exist as a literal file
             assert!(result.is_err());
@@ -2523,7 +2524,7 @@ mod tests {
             let temp_dir = TempDir::new().unwrap();
             let nonexistent = temp_dir.path().join("does_not_exist.txt");
 
-            let result = resolve_sources(&[nonexistent], false);
+            let result = resolve_sources(&[nonexistent], false, false);
             assert!(result.is_err());
             let err = result.unwrap_err().to_string();
             assert!(err.contains("does not exist"));
@@ -2535,7 +2536,7 @@ mod tests {
             let dir = temp_dir.path().join("subdir");
             fs::create_dir(&dir).unwrap();
 
-            let result = resolve_sources(&[dir], false);
+            let result = resolve_sources(&[dir], false, false);
             assert!(result.is_err());
             let err = result.unwrap_err().to_string();
             assert!(err.contains("is a directory"));
@@ -2547,7 +2548,9 @@ mod tests {
             let dir = temp_dir.path().join("subdir");
             fs::create_dir(&dir).unwrap();
 
-            let err = resolve_sources(&[dir], false).unwrap_err().to_string();
+            let err = resolve_sources(&[dir], false, false)
+                .unwrap_err()
+                .to_string();
             assert!(err.contains("--recursive"), "got: {err}");
         }
 
@@ -2559,7 +2562,7 @@ mod tests {
             fs::write(&file, "content").unwrap();
 
             let pattern = temp_dir.path().join("*.xyz");
-            let result = resolve_sources(&[pattern], false);
+            let result = resolve_sources(&[pattern], false, false);
 
             assert!(result.is_err());
             let err = result.unwrap_err().to_string();
@@ -2574,7 +2577,7 @@ mod tests {
             fs::write(&file1, "content1").unwrap();
             fs::write(&file2, "content2").unwrap();
 
-            let result = resolve_sources(&[file1.clone(), file2.clone()], false).unwrap();
+            let result = resolve_sources(&[file1.clone(), file2.clone()], false, false).unwrap();
             assert_eq!(result, vec![file1, file2]);
         }
 
@@ -2592,7 +2595,8 @@ mod tests {
             fs::write(&bracket_file, "brackets").unwrap();
 
             // When [abc].txt exists, it should be used literally, NOT expanded to a.txt, b.txt
-            let result = resolve_sources(std::slice::from_ref(&bracket_file), false).unwrap();
+            let result =
+                resolve_sources(std::slice::from_ref(&bracket_file), false, false).unwrap();
             assert_eq!(result, vec![bracket_file]);
         }
     }
