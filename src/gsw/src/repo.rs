@@ -1989,6 +1989,81 @@ mod tests {
         );
     }
 
+    /// A repository with HEAD on the branch `feature`, where `main` moved
+    /// after the fork. `main` holds the commit of [`init_repo`] and three
+    /// more, `main 1` to `main 3`. `feature` holds three commits, `feature 1`
+    /// to `feature 3`, on top of the commit of [`init_repo`]. So the branch is
+    /// three commits ahead of the fork point, and the base is three commits
+    /// past it. The set of the branch has four ids when the object of `main 2`
+    /// is gone, because the hidden side of the walk does not fail on it.
+    fn base_moved_repo() -> TempDir {
+        let dir = init_repo();
+        let p = dir.path();
+        for n in 1..=3 {
+            commit_empty(p, &format!("main {n}"));
+        }
+        git(p, &["checkout", "-q", "-b", "feature", "main~3"]);
+        for n in 1..=3 {
+            commit_empty(p, &format!("feature {n}"));
+        }
+        dir
+    }
+
+    #[test]
+    fn every_missing_commit_object_keeps_the_count_of_the_header_and_the_marks_of_the_log_in_agreement(
+    ) {
+        // Reviews R-20261008T205212Z#N1 and R-20261009T150046Z#I1. The count
+        // of the header and the marks of the log must agree. That broke
+        // once on each side of the walk. N1 was a failed step on the branch
+        // side. I1 was a failed step on the base side. So this test does not
+        // remove one chosen commit. It removes each commit of the fixture in
+        // turn, and a failure path that we did not think of cannot hide.
+        const REVS: [&str; 7] = [
+            "feature",
+            "feature~1",
+            "feature~2",
+            "feature~3",
+            "main",
+            "main~1",
+            "main~2",
+        ];
+        let intact = base_moved_repo();
+        let handle = RepoHandle::discover(intact.path()).expect("fixture is a worktree repo");
+        let snapshot =
+            crate::collect_snapshot(handle.repo(), &log_walk_config(), 10).expect("walk");
+        assert!(
+            snapshot.commits_ahead > 0 && snapshot.commits_behind > 0,
+            "the intact fixture is ahead and behind, so the sweep tests a moved base",
+        );
+        let commit_count = git_stdout(intact.path(), &["rev-list", "--all", "--count"]);
+        assert_eq!(
+            commit_count.trim().parse::<usize>().expect("a count"),
+            REVS.len(),
+            "the sweep names every commit of the fixture",
+        );
+
+        let mut visited = 0;
+        for rev in REVS {
+            let dir = base_moved_repo();
+            remove_commit_object(dir.path(), rev);
+            let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
+            let Ok(snapshot) = crate::collect_snapshot(handle.repo(), &log_walk_config(), 10)
+            else {
+                visited += 1;
+                continue;
+            };
+            visited += 1;
+            let marked_rows = snapshot.log.iter().filter(|entry| entry.on_branch).count();
+            assert_eq!(
+                u32::try_from(marked_rows).expect("a small count"),
+                snapshot.commits_ahead,
+                "the log marks as many rows as the header counts when the commit {rev} is missing: {:?}",
+                row_marks(&snapshot.log),
+            );
+        }
+        assert_eq!(visited, REVS.len(), "the sweep visited every commit");
+    }
+
     #[test]
     fn a_read_from_the_start_of_a_walk_keeps_the_marks_of_its_rows_after_the_base_moves() {
         // Issue #541: watch mode caches the log rows of a walk. A resize that
