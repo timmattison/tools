@@ -372,7 +372,8 @@ pub struct BaseStatus {
 /// needs a rebase.
 ///
 /// Any resolution or walk failure degrades to `BaseStatus { ahead: 0, behind:
-/// 0 }`, so a missing or unresolvable base produces no behind segment. When
+/// 0 }`, so a missing or unresolvable base produces no behind segment. A step
+/// of a walk that fails is one of those failures. When
 /// HEAD already points at the base commit the walks are short-circuited to
 /// `(0, 0)`. Each count is clamped to `u32::MAX`.
 pub fn base_status(repo: &gix::Repository, base: &str) -> BaseStatus {
@@ -403,8 +404,9 @@ fn base_commit(repo: &gix::Repository, base: &str) -> Option<gix::ObjectId> {
 ///
 /// The set is empty when the start has no base, when the base is the start
 /// commit, or when the walk does not start. The header counts zero in those
-/// cases. A step of the walk that fails also gives an empty set. A doubt then
-/// costs the marks, and it never marks a commit that the base reaches.
+/// cases. A step of the walk that fails also gives an empty set, and
+/// [`count_only_on`] also gives no count for it. A doubt then costs the marks
+/// and the count, and it never marks a commit that the base reaches.
 fn branch_commits(repo: &gix::Repository, start: LogStart) -> gix::hashtable::HashSet {
     let Some(base) = start.base else {
         return gix::hashtable::HashSet::default();
@@ -425,9 +427,10 @@ fn branch_commits(repo: &gix::Repository, start: LogStart) -> gix::hashtable::Ha
 /// (`git rev-list theirs..ours`). `None` when the walk does not start.
 ///
 /// This is the one rule for the commits that are only on one side.
-/// [`ahead_behind`] counts this walk, and [`branch_commits`] collects the ids
-/// of its commits. So the count of the header and the marks of the log cannot
-/// disagree about which commits are only on the branch.
+/// [`ahead_behind`] counts this walk through [`count_only_on`], and
+/// [`branch_commits`] collects the ids of its commits. Both give nothing when
+/// a step of the walk fails. So the header counts zero and the log marks no
+/// commit, and the two agree about which commits are only on the branch.
 fn walk_only_on(
     repo: &gix::Repository,
     ours: gix::ObjectId,
@@ -439,6 +442,19 @@ fn walk_only_on(
         .ok()
 }
 
+/// The number of commits that `ours` reaches and `theirs` does not, or `None`
+/// when the walk does not start or when a step of it fails.
+///
+/// A step that fails is not a commit, and a count that includes it is a wrong
+/// number. So this count fails as [`branch_commits`] fails. It keeps no set.
+fn count_only_on(
+    repo: &gix::Repository,
+    ours: gix::ObjectId,
+    theirs: gix::ObjectId,
+) -> Option<usize> {
+    walk_only_on(repo, ours, theirs)?.try_fold(0_usize, |count, info| info.ok().map(|_| count + 1))
+}
+
 /// Count how far `ours` is ahead of and behind `theirs` as `(ahead, behind)`.
 ///
 /// `ahead` is the number of commits reachable from `ours` but not from `theirs`
@@ -446,11 +462,12 @@ fn walk_only_on(
 /// reachable from `theirs` but not from `ours` (`git rev-list --count
 /// ours..theirs`). Each count is clamped to `u32::MAX`.
 ///
-/// Returns `None` if either rev walk fails. When `ours == theirs` the walks are
+/// Returns `None` if either rev walk does not start or if a step of it fails.
+/// When `ours == theirs` the walks are
 /// short-circuited to `Some((0, 0))` (the walks would return `(0, 0)` anyway).
 /// Both `base_status` and `upstream_status` delegate here so the mirrored
-/// hidden-walk pair lives in exactly one place. Each walk is
-/// [`walk_only_on`], which also decides the marks of the log.
+/// hidden-walk pair lives in exactly one place. Each count is
+/// [`count_only_on`], which counts the walk that decides the marks of the log.
 fn ahead_behind(
     repo: &gix::Repository,
     ours: gix::ObjectId,
@@ -460,9 +477,9 @@ fn ahead_behind(
         return Some((0, 0));
     }
     // ahead: theirs..ours — commits on `ours` not on `theirs`.
-    let ahead = walk_only_on(repo, ours, theirs)?.count();
+    let ahead = count_only_on(repo, ours, theirs)?;
     // behind: ours..theirs — the mirror walk, `theirs` with `ours` hidden.
-    let behind = walk_only_on(repo, theirs, ours)?.count();
+    let behind = count_only_on(repo, theirs, ours)?;
     Some((
         u32::try_from(ahead).unwrap_or(u32::MAX),
         u32::try_from(behind).unwrap_or(u32::MAX),
@@ -477,6 +494,8 @@ fn ahead_behind(
 /// configured, or the upstream tracking ref hasn't been fetched yet (i.e.
 /// `origin/main` exists in config but not under `.git/refs/`) — the same cases
 /// where `git rev-parse @{upstream}` fails, so this matches the old CLI path.
+/// It also returns `None` when a walk does not start or when a step of it
+/// fails, because a count that includes a failed step is a wrong number.
 pub fn upstream_status(repo: &gix::Repository) -> Option<UpstreamStatus> {
     use gix::bstr::ByteSlice;
     use gix::remote::Direction;
