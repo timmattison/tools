@@ -189,6 +189,41 @@ impl TreeSnapshot {
     }
 }
 
+/// Decide what a top-level source operand is. The call does not follow a
+/// symlink to find out if the operand is one.
+///
+/// A directory needs `recursive`. A symlink to a directory is a `Symlink`
+/// operand, and the plan does not walk it. A symlink to a file counts as a
+/// file, because the copy reads through the link. Anything else is an error.
+fn classify_operand(source: &Path, recursive: bool) -> Result<OperandKind> {
+    let file_type = fs::symlink_metadata(source)
+        .with_context(|| format!("Cannot read source '{}'", source.display()))?
+        .file_type();
+    let kind = if file_type.is_symlink() {
+        if source.is_dir() {
+            OperandKind::Symlink
+        } else if source.is_file() {
+            OperandKind::File
+        } else {
+            bail!("Source '{}' is not a file", source.display());
+        }
+    } else if file_type.is_dir() {
+        OperandKind::Directory
+    } else if file_type.is_file() {
+        OperandKind::File
+    } else {
+        bail!("Source '{}' is not a file", source.display());
+    };
+    if !recursive && kind != OperandKind::File {
+        bail!(
+            "Source '{}' is a directory ({})",
+            source.display(),
+            super::RECURSIVE_HINT
+        );
+    }
+    Ok(kind)
+}
+
 /// Return the name that `source` takes under a container destination.
 ///
 /// The name is the last component of the path. A path such as `.` or `dir/..`
@@ -276,12 +311,7 @@ pub(crate) struct CopyPlan {
 
 impl CopyPlan {
     /// Build the plan for `sources` and `destination`. See the module docs for the rules.
-    pub(crate) fn build(
-        sources: &[PathBuf],
-        destination: &Path,
-        recursive: bool,
-    ) -> Result<Self> {
-        let _ = recursive;
+    pub(crate) fn build(sources: &[PathBuf], destination: &Path, recursive: bool) -> Result<Self> {
         let container = destination.is_dir() || sources.len() > 1;
         if sources.len() > 1 && destination.exists() && !destination.is_dir() {
             bail!(
@@ -304,36 +334,45 @@ impl CopyPlan {
             } else {
                 destination.to_path_buf()
             };
-            let is_link = fs::symlink_metadata(source)?.file_type().is_symlink();
-            if recursive && is_link && source.is_dir() {
-                plan.operands.push(Operand {
-                    source: source.clone(),
-                    kind: OperandKind::Symlink,
-                });
-                plan.entries.push(PlanEntry {
-                    operand,
-                    source: source.clone(),
-                    destination: root,
-                    kind: EntryKind::Symlink {
-                        target: fs::read_link(source)?,
-                    },
-                });
-            } else if recursive && source.is_dir() {
-                plan.add_tree(operand, source, &root)?;
-            } else {
-                plan.operands.push(Operand {
-                    source: source.clone(),
-                    kind: OperandKind::File,
-                });
-                plan.entries.push(PlanEntry {
-                    operand,
-                    source: source.clone(),
-                    destination: root,
-                    kind: EntryKind::File,
-                });
+            match classify_operand(source, recursive)? {
+                OperandKind::Directory => plan.add_tree(operand, source, &root)?,
+                OperandKind::Symlink => {
+                    let target = fs::read_link(source)?;
+                    plan.add_leaf(
+                        operand,
+                        source,
+                        root,
+                        OperandKind::Symlink,
+                        EntryKind::Symlink { target },
+                    );
+                }
+                OperandKind::File => {
+                    plan.add_leaf(operand, source, root, OperandKind::File, EntryKind::File);
+                }
             }
         }
         Ok(plan)
+    }
+
+    /// Add an operand that has exactly one entry.
+    fn add_leaf(
+        &mut self,
+        operand: OperandId,
+        source: &Path,
+        destination: PathBuf,
+        operand_kind: OperandKind,
+        kind: EntryKind,
+    ) {
+        self.operands.push(Operand {
+            source: source.to_path_buf(),
+            kind: operand_kind,
+        });
+        self.entries.push(PlanEntry {
+            operand,
+            source: source.to_path_buf(),
+            destination,
+            kind,
+        });
     }
 
     /// Walk a Directory operand and add one entry for each node of the walk.
@@ -685,10 +724,11 @@ mod tests {
                 target: PathBuf::from("..")
             }
         );
-        assert!(plan
-            .entries()
-            .iter()
-            .all(|entry| !entry.source.ancestors().skip(1).any(|a| a.ends_with("loop"))));
+        assert!(plan.entries().iter().all(|entry| !entry
+            .source
+            .ancestors()
+            .skip(1)
+            .any(|a| a.ends_with("loop"))));
     }
 
     #[cfg(unix)]
@@ -767,8 +807,8 @@ mod tests {
         let src = temp.path().join("src");
         fs::create_dir_all(src.join("sub")).unwrap();
 
-        let error = CopyPlan::build(std::slice::from_ref(&src), &src.join("sub"), true)
-            .unwrap_err();
+        let error =
+            CopyPlan::build(std::slice::from_ref(&src), &src.join("sub"), true).unwrap_err();
 
         assert!(
             error.to_string().contains("into itself"),
