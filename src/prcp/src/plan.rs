@@ -175,7 +175,7 @@ impl CopyPlan {
         recursive: bool,
     ) -> Result<Self> {
         let _ = recursive;
-        let container = destination.is_dir();
+        let container = destination.is_dir() || sources.len() > 1;
         let mut plan = Self {
             operands: Vec::new(),
             entries: Vec::new(),
