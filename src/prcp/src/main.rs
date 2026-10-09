@@ -298,6 +298,9 @@ fn format_buffer_size(size: usize) -> String {
     }
 }
 
+/// Hint that tells the user how to copy a directory. Error and warning messages share it.
+const RECURSIVE_HINT: &str = "use --recursive/-R to copy directories";
+
 /// Resolve source patterns into a list of files.
 ///
 /// # Behavior
@@ -376,7 +379,13 @@ fn resolve_sources(patterns: &[PathBuf], literal: bool) -> Result<Vec<PathBuf>> 
             if !pattern.exists() {
                 anyhow::bail!("Source '{}' does not exist", pattern.display());
             }
-            // Path exists but is not a file (e.g., directory)
+            // A directory needs --recursive. Any other kind of path is not a file.
+            if pattern.is_dir() {
+                anyhow::bail!(
+                    "Source '{}' is a directory ({RECURSIVE_HINT})",
+                    pattern.display()
+                );
+            }
             anyhow::bail!("Source '{}' is not a file", pattern.display());
         }
     }
@@ -2529,7 +2538,7 @@ mod tests {
             let result = resolve_sources(&[dir], false);
             assert!(result.is_err());
             let err = result.unwrap_err().to_string();
-            assert!(err.contains("not a file"));
+            assert!(err.contains("is a directory"));
         }
 
         #[test]
