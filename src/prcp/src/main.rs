@@ -176,7 +176,7 @@ struct Args {
     #[arg(num_args = 0..)]
     paths: Vec<PathBuf>,
 
-    /// Remove source files after a successful copy, verified by Blake3 hash. -r is --rm, not recursion (use -R)
+    /// Move: remove the sources only after every copy of the run passed its Blake3 check. A source with a problem stays whole, and the run fails. -r is --rm, not recursion (use -R)
     // Maintainers: never give --recursive the short form -r. In cp, -r means recursive, but in
     // prcp -r was --rm first, and a recursive -r turns a habit from cp into a move.
     #[arg(long, short = 'r')]

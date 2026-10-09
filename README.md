@@ -2113,7 +2113,10 @@ Copy files with a beautiful progress bar: `prcp <source>... <destination>`
 - Preserves file permissions
 - Wildcard/glob support (e.g., `prcp *.txt backup/`)
 - Multi-file copy with overall progress tracking
-- Move mode with `--rm` flag (verifies SHA256 hash before removing source)
+- Move mode with the `--rm` flag. `prcp` removes no source while it copies. After the last copy, it removes the
+  originals of each source that passed every Blake3 check. A source stays whole, and the run exits with an error,
+  when a file did not copy, a hash did not match, a file is missing, a file appeared in the source after the copy
+  started, or a file changed on either side after its check
 - `--continue-on-error` to keep going if some files fail
 - `-y` to skip confirmation prompts
 

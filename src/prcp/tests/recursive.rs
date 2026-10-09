@@ -676,7 +676,7 @@ fn move_of_a_tree_with_a_fifo_keeps_every_original_and_fails() {
         OsString::from("-R"),
         OsString::from("-y"),
         src.clone().into_os_string(),
-        dest.clone().into_os_string(),
+        dest.into_os_string(),
     ]);
 
     let stderr = visible_stderr(&output);
@@ -856,7 +856,7 @@ fn move_that_stops_on_the_first_error_removes_no_source() {
         OsString::from("-q"),
         good.clone().into_os_string(),
         bad.clone().into_os_string(),
-        dest.clone().into_os_string(),
+        dest.into_os_string(),
     ]);
 
     let stderr = visible_stderr(&output);
