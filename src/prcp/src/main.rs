@@ -2437,6 +2437,17 @@ mod tests {
                 .expect("an argument with the short form -r must exist");
             assert_eq!(small_r.get_long(), Some("rm"));
         }
+
+        #[test]
+        fn small_r_parses_as_rm_and_capital_r_as_recursive() {
+            let small = Args::try_parse_from(["prcp", "-r", "a", "b"]).unwrap();
+            assert!(small.rm);
+            assert!(!small.recursive);
+
+            let capital = Args::try_parse_from(["prcp", "-R", "a", "b"]).unwrap();
+            assert!(capital.recursive);
+            assert!(!capital.rm);
+        }
     }
 
     mod resolve_sources_tests {
