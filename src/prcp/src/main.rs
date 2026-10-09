@@ -339,6 +339,13 @@ fn resolve_sources(patterns: &[PathBuf], literal: bool, recursive: bool) -> Resu
             continue;
         }
 
+        // With --recursive, a literal directory is a source. Keep the path as given.
+        // is_dir() follows a symlink on purpose. A later step decides what to do with it.
+        if recursive && pattern.is_dir() {
+            files.push(pattern.clone());
+            continue;
+        }
+
         let pattern_str = pattern.to_string_lossy();
 
         // Check if pattern contains glob characters (skip glob expansion if --literal is set)
