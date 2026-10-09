@@ -444,4 +444,23 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn directory_into_existing_directory_lands_under_its_name() {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        write_file(&src.join("a.txt"), "a");
+        let dest = temp.path().join("dest");
+        fs::create_dir(&dest).unwrap();
+
+        let plan = CopyPlan::build(std::slice::from_ref(&src), &dest, true).unwrap();
+
+        assert_eq!(
+            plan.entries(),
+            [
+                dir_entry(0, &src, &dest.join("src")),
+                file_entry(0, &src.join("a.txt"), &dest.join("src/a.txt")),
+            ]
+        );
+    }
 }
