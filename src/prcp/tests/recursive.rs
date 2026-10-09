@@ -44,7 +44,6 @@ fn visible_stderr(output: &Output) -> String {
 }
 
 /// Return standard output as text without ANSI codes.
-#[allow(dead_code, reason = "later tests in this file read standard output")]
 fn visible_stdout(output: &Output) -> String {
     testcolor::strip_ansi(&String::from_utf8_lossy(&output.stdout))
 }
@@ -555,4 +554,27 @@ fn unreadable_subdirectory_with_continue_on_error_copies_the_rest_and_fails() {
         "stderr: {stderr}"
     );
     assert!(stderr.contains("Cannot read"), "stderr: {stderr}");
+}
+
+#[test]
+fn summary_counts_files_and_not_directories() {
+    let temp = TempDir::new().unwrap();
+    let src = temp.path().join("src");
+    let dest = temp.path().join("dest");
+    make_sample_tree(&src);
+
+    let output = run_prcp([
+        OsString::from("-R"),
+        OsString::from("-y"),
+        src.into_os_string(),
+        dest.into_os_string(),
+    ]);
+
+    let stderr = visible_stderr(&output);
+    let stdout = visible_stdout(&output);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        stdout.contains("Copied 3 of 3 files"),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
 }
