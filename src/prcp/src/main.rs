@@ -7,6 +7,8 @@
 #![warn(clippy::cast_sign_loss)] // Warn when casting signed to unsigned
 #![warn(clippy::cast_precision_loss)] // Warn when casting to float loses precision
 
+mod plan;
+
 use anyhow::{Context, Result};
 use buildinfo::version_string;
 use clap::Parser;

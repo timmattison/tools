@@ -6264,6 +6264,7 @@ dependencies = [
  "termbar",
  "testcolor",
  "tokio",
+ "walkdir",
 ]
 
 [[package]]
