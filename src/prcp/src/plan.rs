@@ -31,6 +31,7 @@
 
 use anyhow::{anyhow, bail, Result};
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -141,22 +142,29 @@ impl TreeSnapshot {
     /// Walk `root` now. The snapshot includes `root` itself as a Directory node.
     pub(crate) fn take(root: &Path) -> Self {
         let mut nodes = BTreeMap::new();
+        let mut errors = Vec::new();
         let walk = WalkDir::new(root)
             .follow_links(false)
             .follow_root_links(false)
             .sort_by_file_name();
         for entry in walk.into_iter().flatten() {
-            let kind = if entry.file_type().is_dir() {
+            let file_type = entry.file_type();
+            let kind = if file_type.is_dir() {
                 NodeKind::Directory
+            } else if file_type.is_symlink() {
+                match fs::read_link(entry.path()) {
+                    Ok(target) => NodeKind::Symlink { target },
+                    Err(error) => {
+                        errors.push((entry.into_path(), error.to_string()));
+                        continue;
+                    }
+                }
             } else {
                 NodeKind::File
             };
             nodes.insert(entry.into_path(), kind);
         }
-        Self {
-            nodes,
-            errors: Vec::new(),
-        }
+        Self { nodes, errors }
     }
 
     /// Return every node of the walk, keyed by its full source path.
@@ -253,7 +261,10 @@ impl CopyPlan {
             let kind = match node {
                 NodeKind::Directory => EntryKind::Directory,
                 NodeKind::File => EntryKind::File,
-                NodeKind::Symlink { .. } | NodeKind::Special(_) => continue,
+                NodeKind::Symlink { target } => EntryKind::Symlink {
+                    target: target.clone(),
+                },
+                NodeKind::Special(_) => continue,
             };
             self.entries.push(PlanEntry {
                 operand,
@@ -502,6 +513,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlink_in_the_tree_is_an_entry_that_keeps_its_target() {
         let temp = TempDir::new().unwrap();
