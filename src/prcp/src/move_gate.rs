@@ -909,11 +909,38 @@ mod tests {
             return;
         }
         assert!(!report.is_complete(), "report: {report:?}");
-        assert_eq!(report.removed, vec![other.clone()]);
+        assert_eq!(report.removed, vec![other]);
         assert_eq!(report.removal_errors.len(), 1);
         assert_eq!(report.removal_errors[0].0, file);
         assert_eq!(report.unfinished_count(), 1);
         assert!(file.exists());
+    }
+
+    #[test]
+    fn the_report_lists_each_kept_operand_with_its_problems_and_each_failed_removal() {
+        let mut problems = BTreeMap::new();
+        problems.insert(PathBuf::from("/s/late.txt"), Problem::NewSinceCopy);
+        problems.insert(PathBuf::from("/s/old.txt"), Problem::NotCopied);
+        let report = MoveReport {
+            removed: Vec::new(),
+            kept: vec![KeptOperand {
+                source: PathBuf::from("/s"),
+                problems,
+            }],
+            removal_errors: vec![(PathBuf::from("/t/x"), "denied".to_string())],
+            operands_with_removal_errors: 1,
+        };
+
+        assert_eq!(
+            report.error_lines(),
+            vec![
+                "Kept the originals of '/s'. prcp removed nothing from it:",
+                "  '/s/late.txt' appeared in the source after the copy started, and was not copied",
+                "  '/s/old.txt' was not copied and verified",
+                "Cannot remove '/t/x': denied",
+            ]
+        );
+        assert_eq!(report.unfinished_count(), 2);
     }
 
     #[test]
