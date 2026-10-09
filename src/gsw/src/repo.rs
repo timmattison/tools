@@ -1473,6 +1473,16 @@ mod tests {
         );
     }
 
+    /// Delete the loose object of the commit that `rev` names in the
+    /// repository at `dir`. A walk that comes to that commit then fails.
+    fn remove_commit_object(dir: &Path, rev: &str) {
+        let id = git_stdout(dir, &["rev-parse", rev]);
+        let fan_out: String = id.chars().take(2).collect();
+        let rest: String = id.chars().skip(2).collect();
+        std::fs::remove_file(dir.join(".git/objects").join(fan_out).join(rest))
+            .expect("remove the object of the commit");
+    }
+
     #[test]
     fn recent_log_of_a_walk_that_meets_a_missing_commit_reports_no_end() {
         // The object of the first commit is gone, so the walk fails when it
@@ -1481,11 +1491,7 @@ mod tests {
         // does not claim the end of the history.
         let dir = three_commit_repo();
         let p = dir.path();
-        let root = git_stdout(p, &["rev-parse", "HEAD~2"]);
-        let fan_out: String = root.chars().take(2).collect();
-        let rest: String = root.chars().skip(2).collect();
-        std::fs::remove_file(p.join(".git/objects").join(fan_out).join(rest))
-            .expect("remove the object of the first commit");
+        remove_commit_object(p, "HEAD~2");
         let repo = open_at(p).expect("fixture is a worktree repo");
 
         let log = super::recent_log(&repo, "main", 10);
@@ -1846,6 +1852,33 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_step_of_the_walk_counts_no_commit_ahead_and_marks_no_row() {
+        // Review R-20261008T205212Z#N1. The object of `feature 1` is gone, so
+        // the walk of the branch fails when it comes to that commit. The set
+        // of the marks gives no commit when a step fails, so the count must
+        // give no number either. Else the header counts commits that the log
+        // does not mark.
+        let dir = feature_branch_repo(4);
+        remove_commit_object(dir.path(), "HEAD~3");
+        let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
+
+        let snapshot =
+            crate::collect_snapshot(handle.repo(), &log_walk_config(), 10).expect("walk");
+
+        let marked_rows = snapshot.log.iter().filter(|entry| entry.on_branch).count();
+        assert_eq!(
+            u32::try_from(marked_rows).expect("a small count"),
+            snapshot.commits_ahead,
+            "the log marks as many rows as the header counts",
+        );
+        assert_eq!(
+            (snapshot.commits_ahead, snapshot.commits_behind),
+            (0, 0),
+            "a failed step degrades the header to zero",
+        );
+    }
+
+    #[test]
     fn a_read_from_the_start_of_a_walk_keeps_the_marks_of_its_rows_after_the_base_moves() {
         // Issue #541: watch mode caches the log rows of a walk. A resize that
         // needs more rows reads the log again from the start of the walk,
@@ -2098,6 +2131,26 @@ mod tests {
     fn upstream_none_for_branch_without_upstream() {
         let dir = init_repo(); // local-only main, never pushed
         let repo = open_at(dir.path()).unwrap();
+        assert!(super::upstream_status(&repo).is_none());
+    }
+
+    #[test]
+    fn upstream_gives_no_status_when_a_step_of_the_walk_fails() {
+        // Review R-20261008T205212Z#N1. The object of the first local commit
+        // is gone, so the walk fails when it comes to that commit. A count
+        // that includes a failed step is a wrong number, so the walk gives no
+        // status.
+        let (_origin, clone) = init_repo_with_upstream();
+        let p = clone.path();
+        for n in 1..=3 {
+            git(
+                p,
+                &["commit", "-q", "--allow-empty", "-m", &format!("local {n}")],
+            );
+        }
+        remove_commit_object(p, "HEAD~2");
+        let repo = open_at(p).unwrap();
+
         assert!(super::upstream_status(&repo).is_none());
     }
 
