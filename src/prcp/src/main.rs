@@ -422,6 +422,9 @@ fn resolve_sources(patterns: &[PathBuf], literal: bool, recursive: bool) -> Resu
     Ok(files)
 }
 
+/// The end of the warning for a node that prcp does not copy.
+const SKIP_WARNING_TAIL: &str = "prcp copies only files, directories, and symlinks";
+
 /// The failure text for a destination that exists and that prcp did not overwrite.
 const SKIPPED_DESTINATION_EXISTS: &str = "Skipped (destination exists)";
 
@@ -548,6 +551,15 @@ async fn main() -> Result<()> {
     // Decide every destination before any copy starts
     let plan = CopyPlan::build(&sources, &destination, args.recursive)?;
     let total_files = plan.file_count();
+
+    // Tell the user about each node that the plan skips, before any copy starts
+    for skipped in plan.skipped() {
+        eprintln!(
+            "Warning: Skipping '{}' ({}): {SKIP_WARNING_TAIL}",
+            skipped.path.display(),
+            skipped.reason
+        );
+    }
 
     // Warn about potentially dangerous combination
     if args.rm && args.continue_on_error && total_files > 1 && !args.yes {
