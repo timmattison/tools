@@ -183,7 +183,7 @@ struct Args {
     #[arg(long, short = 'r')]
     rm: bool,
 
-    /// Copy directories and everything in them. The short form is -R only, because -r is --rm
+    /// Copy directories and everything in them. Before the first copy, prcp shows where each source lands, and on a terminal it asks first (-y skips the question). The short form is -R only, because -r is --rm
     // Maintainers: never give this flag the short form -r. In cp, -r means recursive, but in
     // prcp -r was --rm first, and a recursive -r turns a habit from cp into a move.
     #[arg(long, short = 'R')]

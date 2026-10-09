@@ -2119,7 +2119,7 @@ Copy files with a beautiful progress bar: `prcp <source>... <destination>`
   when a file did not copy, a hash did not match, a file is missing, a file appeared in the source after the copy
   started, or a file changed on either side after its check
 - `--continue-on-error` to keep going if some files fail
-- `-y` to skip confirmation prompts
+- `-y` to skip confirmation prompts, also the question after the preview of a recursive run
 - Directory trees with `-R`/`--recursive` (see below)
 
 **Directories (`-R`, `--recursive`)**
@@ -2131,8 +2131,26 @@ not a copy.
 - **Destination.** `prcp` decides every destination before the first copy, the same way as `cp -r`:
   - If `dest` is a directory, the tree goes to `dest/src/...`.
   - If `dest` does not exist, `dest` becomes the copy of `src`.
-  - A slash at the end of `src` changes nothing.
+  - A slash at the end of `src` changes nothing. `rsync` and BSD `cp` read `src/` and `src/.` as "only the contents
+    of `src`", but `prcp` copies the directory itself.
   - With more than one source, `dest` is always a directory. If it does not exist, `prcp` makes it.
+- **Preview.** Before the first copy, `prcp` shows where each source lands, as an absolute path with the symlinks
+  above it resolved. A directory source also shows if its landing directory is new or already exists, how many files
+  it holds, and one example file. A source with a slash or a `/.` at its end gets a note. Then, when standard input is
+  a terminal, `prcp` asks `Continue? (y/N)`. Only `y` starts the run. Any other answer stops it before any byte is
+  written, and a move keeps every original. `-y` skips the question. A run with no terminal on standard input (a
+  script, a pipe) shows the preview and starts. `-q` does not hide the preview. More than 20 sources show as one
+  count after the first 20.
+
+  ```text
+  $ prcp -R photos/ /Volumes/Backup
+  prcp will copy:
+    photos/ -> /Volumes/Backup/photos/  (new directory, 1204 files)
+      for example: photos/cover.jpg -> /Volumes/Backup/photos/cover.jpg
+  Note: a '/' or a '/.' at the end of a source changes nothing.
+        prcp copies the directory itself, not only its contents.
+  Continue? (y/N):
+  ```
 - **Empty directories** are made at the destination.
 - **Symlinks** in the tree are copied as symlinks with the same target, and `prcp` never follows them. Thus a link
   that points back up the tree cannot make the copy loop. A source that you name on the command line and that is a
