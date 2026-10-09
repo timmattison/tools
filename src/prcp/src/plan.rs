@@ -483,4 +483,22 @@ mod tests {
             .collect();
         assert_eq!(destinations, [dest.join("src"), dest.join("src/a.txt")]);
     }
+
+    #[test]
+    fn empty_subdirectory_is_a_directory_entry() {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        fs::create_dir_all(src.join("empty")).unwrap();
+        let dest = temp.path().join("dest");
+
+        let plan = CopyPlan::build(std::slice::from_ref(&src), &dest, true).unwrap();
+
+        assert_eq!(
+            plan.entries(),
+            [
+                dir_entry(0, &src, &dest),
+                dir_entry(0, &src.join("empty"), &dest.join("empty")),
+            ]
+        );
+    }
 }
