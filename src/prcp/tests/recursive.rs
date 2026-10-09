@@ -393,3 +393,24 @@ fn directory_onto_an_existing_file_fails() {
     assert!(stderr.contains("non-directory"), "stderr: {stderr}");
     assert_eq!(fs::read_to_string(&dest).unwrap(), "keep me");
 }
+
+#[test]
+fn directory_into_its_own_subdirectory_fails() {
+    let temp = TempDir::new().unwrap();
+    let src = temp.path().join("src");
+    make_sample_tree(&src);
+    let dest = src.join("sub");
+
+    let output = run_prcp([
+        OsString::from("-R"),
+        OsString::from("-y"),
+        OsString::from("-q"),
+        src.clone().into_os_string(),
+        dest.into_os_string(),
+    ]);
+
+    let stderr = visible_stderr(&output);
+    assert!(!output.status.success(), "stderr: {stderr}");
+    assert!(stderr.contains("into itself"), "stderr: {stderr}");
+    assert!(!src.join("sub").join("src").exists());
+}
