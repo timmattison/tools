@@ -2044,16 +2044,24 @@ mod tests {
             "the sweep names every commit of the fixture",
         );
 
-        let mut visited = 0;
+        // The snapshot of these revs fails as a whole. HEAD names `feature`,
+        // so the read of the changes fails when its object is missing. The
+        // sweep names them, so a change that fails more revs cannot shrink
+        // the sweep without a failure.
+        const REVS_WHOSE_SNAPSHOT_FAILS: [&str; 1] = ["feature"];
+
+        let mut failed = Vec::new();
+        let mut checked = 0;
         for rev in REVS {
             let dir = base_moved_repo();
             remove_commit_object(dir.path(), rev);
             let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
-            visited += 1;
             let Ok(snapshot) = crate::collect_snapshot(handle.repo(), &log_walk_config(), 10)
             else {
+                failed.push(rev);
                 continue;
             };
+            checked += 1;
             let marked_rows = snapshot.log.iter().filter(|entry| entry.on_branch).count();
             assert_eq!(
                 u32::try_from(marked_rows).expect("a small count"),
@@ -2062,7 +2070,15 @@ mod tests {
                 row_marks(&snapshot.log),
             );
         }
-        assert_eq!(visited, REVS.len(), "the sweep visited every commit");
+        assert_eq!(
+            failed, REVS_WHOSE_SNAPSHOT_FAILS,
+            "the revs whose snapshot failed ({failed:?}) are not the revs that the test names ({REVS_WHOSE_SNAPSHOT_FAILS:?})",
+        );
+        assert_eq!(
+            checked,
+            REVS.len() - REVS_WHOSE_SNAPSHOT_FAILS.len(),
+            "the sweep checked the agreement for every rev whose snapshot succeeds",
+        );
     }
 
     #[test]
