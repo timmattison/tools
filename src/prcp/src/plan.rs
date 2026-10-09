@@ -29,7 +29,7 @@
 //! A FIFO, socket, or device in a tree is not copied. The plan records it as a
 //! skipped entry. A part of a tree that the walk cannot read is a walk error.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -174,14 +174,31 @@ impl CopyPlan {
         destination: &Path,
         recursive: bool,
     ) -> Result<Self> {
-        let _ = (sources, destination, recursive);
-        Ok(Self {
+        let _ = recursive;
+        let mut plan = Self {
             operands: Vec::new(),
             entries: Vec::new(),
             skipped: Vec::new(),
             walk_errors: Vec::new(),
             trees: BTreeMap::new(),
-        })
+        };
+        for (index, source) in sources.iter().enumerate() {
+            let operand = OperandId(index);
+            let name = source
+                .file_name()
+                .ok_or_else(|| anyhow!("Source '{}' has no name to copy under the destination", source.display()))?;
+            plan.operands.push(Operand {
+                source: source.clone(),
+                kind: OperandKind::File,
+            });
+            plan.entries.push(PlanEntry {
+                operand,
+                source: source.clone(),
+                destination: destination.join(name),
+                kind: EntryKind::File,
+            });
+        }
+        Ok(plan)
     }
 
     /// Return the source operands, in the order given.
