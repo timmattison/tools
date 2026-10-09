@@ -159,8 +159,10 @@ impl TreeSnapshot {
                         continue;
                     }
                 }
-            } else {
+            } else if file_type.is_file() {
                 NodeKind::File
+            } else {
+                NodeKind::Special(special_kind(file_type))
             };
             nodes.insert(entry.into_path(), kind);
         }
@@ -177,6 +179,32 @@ impl TreeSnapshot {
         &self.errors
     }
 }
+
+/// Name the kind of a node that is not a directory, a file, or a symlink.
+#[cfg(unix)]
+fn special_kind(file_type: fs::FileType) -> &'static str {
+    use std::os::unix::fs::FileTypeExt;
+    if file_type.is_fifo() {
+        "fifo"
+    } else if file_type.is_socket() {
+        "socket"
+    } else if file_type.is_block_device() {
+        "block device"
+    } else if file_type.is_char_device() {
+        "character device"
+    } else {
+        SPECIAL_FILE
+    }
+}
+
+/// Name the kind of a node that is not a directory, a file, or a symlink.
+#[cfg(not(unix))]
+fn special_kind(_file_type: fs::FileType) -> &'static str {
+    SPECIAL_FILE
+}
+
+/// The reason for a special node of an unknown kind.
+const SPECIAL_FILE: &str = "special file";
 
 /// The full list of work for one run, decided before any copy starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,7 +306,14 @@ impl CopyPlan {
                 NodeKind::Symlink { target } => EntryKind::Symlink {
                     target: target.clone(),
                 },
-                NodeKind::Special(_) => continue,
+                NodeKind::Special(reason) => {
+                    self.skipped.push(SkippedEntry {
+                        operand,
+                        path: path.clone(),
+                        reason,
+                    });
+                    continue;
+                }
             };
             self.entries.push(PlanEntry {
                 operand,
