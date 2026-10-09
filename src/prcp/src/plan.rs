@@ -775,4 +775,20 @@ mod tests {
             "unexpected error: {error}"
         );
     }
+
+    #[test]
+    fn source_ending_in_dot_dot_takes_its_name_from_the_canonical_path() {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        write_file(&src.join("a.txt"), "a");
+        let dotted = src.join("sub").join("..");
+        let dest = temp.path().join("dest");
+        fs::create_dir(&dest).unwrap();
+
+        let plan = CopyPlan::build(std::slice::from_ref(&dotted), &dest, true).unwrap();
+
+        assert_eq!(plan.entries()[0].destination, dest.join("src"));
+        assert_eq!(plan.entries()[0].kind, EntryKind::Directory);
+    }
 }
