@@ -422,6 +422,59 @@ fn resolve_sources(patterns: &[PathBuf], literal: bool, recursive: bool) -> Resu
     Ok(files)
 }
 
+/// The failure text for a destination that exists and that prcp did not overwrite.
+const SKIPPED_DESTINATION_EXISTS: &str = "Skipped (destination exists)";
+
+/// The start of the failure text for a symlink that prcp could not recreate.
+const SYMLINK_FAILURE: &str = "Failed to create symlink";
+
+/// Create a symlink at `link` that points to `target`.
+///
+/// On Unix this calls the `symlink` system call. On other platforms it returns
+/// an `Unsupported` error.
+#[cfg(unix)]
+fn recreate_symlink(target: &Path, link: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+/// Create a symlink at `link` that points to `target`.
+///
+/// On Unix this calls the `symlink` system call. On other platforms it returns
+/// an `Unsupported` error.
+#[cfg(not(unix))]
+fn recreate_symlink(_target: &Path, _link: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "symlinks are not supported on this platform",
+    ))
+}
+
+/// Recreate one symlink at `link` and check the result.
+///
+/// Makes the parent directory when it is missing, creates the link, then reads
+/// the link back. The function does not follow the link and does not replace an
+/// existing node. The caller removes an existing destination first.
+///
+/// # Errors
+///
+/// Returns an error when the parent directory or the link cannot be created, when
+/// the link cannot be read back, or when the link reads back with another target.
+fn copy_symlink(target: &Path, link: &Path) -> Result<()> {
+    if let Some(parent) = link.parent() {
+        fs::create_dir_all(parent).context("cannot create the parent directory")?;
+    }
+    recreate_symlink(target, link)?;
+    let written = fs::read_link(link).context("cannot read the new link back")?;
+    if written != target {
+        anyhow::bail!(
+            "the new link points to '{}' and not to '{}'",
+            written.display(),
+            target.display()
+        );
+    }
+    Ok(())
+}
+
 /// Decide if prcp may overwrite an existing destination.
 ///
 /// `--yes` allows it and `--skip-existing` refuses it. Without either flag, this
@@ -708,7 +761,53 @@ async fn main() -> Result<()> {
             }
             continue;
         }
-        // Symlink entries are handled later
+        // Recreate the symlink. prcp never follows it, so a link that points nowhere copies too.
+        if let EntryKind::Symlink { target } = &entry.kind {
+            let dest = &entry.destination;
+            if fs::symlink_metadata(dest).is_ok() {
+                if !confirm_overwrite(dest, &args, &mut raw_mode_guard, &input_active)? {
+                    if args.skip_existing {
+                        skipped_existing.push(entry.source.clone());
+                    } else {
+                        failures
+                            .push((entry.source.clone(), SKIPPED_DESTINATION_EXISTS.to_string()));
+                    }
+                    continue;
+                }
+                if let Err(e) = fs::remove_file(dest) {
+                    let error_msg =
+                        format!("{SYMLINK_FAILURE}: cannot replace the destination: {e}");
+                    if args.continue_on_error {
+                        failures.push((entry.source.clone(), error_msg));
+                        continue;
+                    }
+                    early_exit_error = Some(format!("{error_msg} ('{}')", dest.display()));
+                    break;
+                }
+            }
+            match copy_symlink(target, dest) {
+                Ok(()) => {
+                    if !args.quiet {
+                        let _ = multi.println(format!(
+                            "{} link '{}' -> '{}'",
+                            "ok".green(),
+                            dest.display(),
+                            target.display()
+                        ));
+                    }
+                }
+                Err(e) => {
+                    let error_msg = format!("{SYMLINK_FAILURE}: {e}");
+                    if args.continue_on_error {
+                        failures.push((entry.source.clone(), error_msg));
+                        continue;
+                    }
+                    early_exit_error = Some(format!("{error_msg} ('{}')", dest.display()));
+                    break;
+                }
+            }
+            continue;
+        }
         if entry.kind != EntryKind::File {
             continue;
         }
@@ -758,7 +857,7 @@ async fn main() -> Result<()> {
                     }
                     continue;
                 } else if args.continue_on_error || total_files > 1 {
-                    let error_msg = "Skipped (destination exists)".to_string();
+                    let error_msg = SKIPPED_DESTINATION_EXISTS.to_string();
                     failures.push((source.clone(), error_msg));
                     // Reduce batch total for skipped file
                     if let Some(ref pb) = batch_pb {
