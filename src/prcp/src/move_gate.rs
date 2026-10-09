@@ -240,6 +240,13 @@ impl<'a> MoveLedger<'a> {
             .map(|(_, tree)| tree)
     }
 
+    /// Record that the loop kept the destination of entry `entry` as it was (`--skip-existing`).
+    ///
+    /// The scaffold records nothing yet.
+    pub(crate) fn record_existing_kept(&mut self, entry: usize) {
+        let _ = entry;
+    }
+
     /// Record that the directory of entry `entry` exists at the destination.
     ///
     /// The call reads the identity of the directory now. When that read fails,
@@ -946,6 +953,7 @@ impl fmt::Display for Problem {
 )]
 mod tests {
     use super::*;
+    use crate::plan::PlanEntry;
     use tempfile::TempDir;
 
     /// A source tree, a destination path, and the plan between them.
@@ -1030,28 +1038,41 @@ mod tests {
     ) -> MoveLedger<'a> {
         let mut ledger = MoveLedger::new(plan, action);
         for (index, entry) in plan.entries().iter().enumerate() {
-            match &entry.kind {
-                EntryKind::Directory => {
-                    fs::create_dir_all(&entry.destination).unwrap();
-                    ledger.record_directory(index);
-                }
-                EntryKind::File => {
-                    let stamp = FileStamp::of(&entry.source).unwrap();
-                    fs::copy(&entry.source, &entry.destination).unwrap();
-                    if !skip.contains(&entry.source.as_path()) {
-                        ledger.record_file(index, stamp, verification);
-                    }
-                }
-                EntryKind::Symlink { target } => {
-                    #[cfg(unix)]
-                    std::os::unix::fs::symlink(target, &entry.destination).unwrap();
-                    #[cfg(not(unix))]
-                    let _ = target;
-                    ledger.record_symlink(index);
-                }
-            }
+            let record = !skip.contains(&entry.source.as_path());
+            make_entry(&mut ledger, index, entry, record, verification);
         }
         ledger
+    }
+
+    /// Make one entry as the copy loop does, and record it. A file is recorded only when
+    /// `record` is true, with `verification`.
+    fn make_entry(
+        ledger: &mut MoveLedger<'_>,
+        index: usize,
+        entry: &PlanEntry,
+        record: bool,
+        verification: Verification,
+    ) {
+        match &entry.kind {
+            EntryKind::Directory => {
+                fs::create_dir_all(&entry.destination).unwrap();
+                ledger.record_directory(index);
+            }
+            EntryKind::File => {
+                let stamp = FileStamp::of(&entry.source).unwrap();
+                fs::copy(&entry.source, &entry.destination).unwrap();
+                if record {
+                    ledger.record_file(index, stamp, verification);
+                }
+            }
+            EntryKind::Symlink { target } => {
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(target, &entry.destination).unwrap();
+                #[cfg(not(unix))]
+                let _ = target;
+                ledger.record_symlink(index);
+            }
+        }
     }
 
     /// Return every source path of the plan that is a file or a symlink or a directory.
@@ -2099,6 +2120,74 @@ mod tests {
         let report = ledger.finish();
 
         assert!(report.is_complete(), "report: {report:?}");
+    }
+
+    /// Run the plan as `run_all` does, but leave the destination of the source `kept` as it
+    /// was, as `--skip-existing` does.
+    fn run_all_keeping<'a>(plan: &'a CopyPlan, kept: &Path, action: Action) -> MoveLedger<'a> {
+        let mut ledger = MoveLedger::new(plan, action);
+        for (index, entry) in plan.entries().iter().enumerate() {
+            if entry.source == kept {
+                ledger.record_existing_kept(index);
+            } else {
+                make_entry(&mut ledger, index, entry, true, Verification::Passed);
+            }
+        }
+        ledger
+    }
+
+    #[test]
+    fn a_copy_finds_a_change_to_a_destination_file_that_it_kept() {
+        let fixture = sample_into_existing(|root| write_file(&root.join("top.txt"), "old"));
+        let kept = fixture.src.join("top.txt");
+        let copy = fixture.dest.join("top.txt");
+        let ledger = run_all_keeping(&fixture.plan, &kept, Action::Copy);
+        fs::write(&copy, "a longer text than before").unwrap();
+
+        let report = ledger.finish();
+
+        assert_eq!(
+            problem_list(&report),
+            vec![(copy, Problem::DestinationChanged)]
+        );
+    }
+
+    #[test]
+    fn a_copy_that_kept_a_destination_file_that_nobody_touches_passes() {
+        let fixture = sample_into_existing(|root| write_file(&root.join("top.txt"), "old"));
+        let kept = fixture.src.join("top.txt");
+        let ledger = run_all_keeping(&fixture.plan, &kept, Action::Copy);
+
+        let report = ledger.finish();
+
+        assert!(report.is_complete(), "report: {report:?}");
+        assert_eq!(
+            fs::read_to_string(fixture.dest.join("top.txt")).unwrap(),
+            "old"
+        );
+    }
+
+    #[test]
+    fn a_move_that_kept_a_destination_file_keeps_that_original() {
+        let fixture = sample_into_existing(|root| write_file(&root.join("top.txt"), "old"));
+        let kept = fixture.src.join("top.txt");
+        let ledger = run_all_keeping(&fixture.plan, &kept, Action::Move);
+
+        let report = ledger.finish();
+
+        assert_eq!(problem_list(&report), vec![(kept, Problem::NotCopied)]);
+    }
+
+    #[test]
+    fn a_move_source_that_was_not_copied_is_not_called_replaced() {
+        let temp = TempDir::new().unwrap();
+        let (a, b, plan) = two_sources_for_one_destination(&temp);
+        let ledger = copy_all(&plan, &[a.as_path()]);
+
+        let report = ledger.finish();
+
+        assert_eq!(report.removed, vec![b], "report: {report:?}");
+        assert_eq!(problem_list(&report), vec![(a, Problem::NotCopied)]);
     }
 
     #[test]
