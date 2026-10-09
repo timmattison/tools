@@ -203,6 +203,15 @@ impl<'a> MoveLedger<'a> {
                 Some(_) => {}
             }
         }
+        for skipped in self.plan.skipped() {
+            if skipped.operand.index() == operand {
+                note(
+                    &mut problems,
+                    &skipped.path,
+                    Problem::Skipped(skipped.reason),
+                );
+            }
+        }
         self.compare_tree(operand, &mut problems);
         problems
     }
