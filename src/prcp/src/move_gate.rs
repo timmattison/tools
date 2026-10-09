@@ -47,8 +47,8 @@ mod destination;
 
 use crate::landing::Action;
 use crate::plan::{CopyPlan, EntryKind, OperandKind, TreeSnapshot};
-use destination::{DestinationTree, TreeChange};
-use std::collections::{BTreeMap, BTreeSet};
+use destination::{DestinationNode, DestinationTree, TreeChange};
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
@@ -155,10 +155,12 @@ pub(crate) struct MoveLedger<'a> {
     plan: &'a CopyPlan,
     action: Action,
     records: Vec<Option<Record>>,
-    /// The snapshot of each destination root of a Directory operand, taken before the first copy.
+    /// The snapshot of the destination of each operand, taken before the first copy. A
+    /// Directory operand has the walk of its root, and another operand has its one path.
     destination_before: BTreeMap<PathBuf, DestinationTree>,
-    /// Every destination path of the plan. prcp writes these, and the records judge them.
-    written: BTreeSet<PathBuf>,
+    /// Every destination path of the plan, with the first entry that writes it. prcp writes
+    /// these paths, and the records judge them.
+    first_entry: BTreeMap<PathBuf, usize>,
 }
 
 impl<'a> MoveLedger<'a> {
@@ -171,33 +173,71 @@ impl<'a> MoveLedger<'a> {
         let destination_before = plan
             .operands()
             .iter()
-            .filter(|operand| operand.kind == OperandKind::Directory)
             .map(|operand| {
                 let root = operand.destination.clone();
-                let tree = DestinationTree::take(&root);
+                let tree = if operand.kind == OperandKind::Directory {
+                    DestinationTree::take(&root)
+                } else {
+                    DestinationTree::take_node(&root)
+                };
                 (root, tree)
             })
             .collect();
-        let written = plan
-            .entries()
-            .iter()
-            .map(|entry| entry.destination.clone())
-            .collect();
+        let mut first_entry = BTreeMap::new();
+        for (index, entry) in plan.entries().iter().enumerate() {
+            first_entry.entry(entry.destination.clone()).or_insert(index);
+        }
         Self {
             plan,
             action,
             records: vec![None; plan.entries().len()],
             destination_before,
-            written,
+            first_entry,
         }
     }
 
     /// Find out if the destination of entry `entry` changed after the snapshot.
     ///
-    /// Call this right before the loop makes the entry. The scaffold finds no change yet.
+    /// Call this right before the loop makes the entry. A path that appeared,
+    /// changed, or left since the snapshot is a change. Somebody else works
+    /// there now, so the loop must not write over it.
+    ///
+    /// Return `None` when the path is as the snapshot found it. Also return
+    /// `None` when an earlier entry of this run writes the same path, when the
+    /// snapshot could not read the path, and when the path cannot be read now.
+    /// In the last case the copy fails with its own error.
     pub(crate) fn change_before_copy(&self, entry: usize) -> Option<ChangeBeforeCopy> {
-        let _ = entry;
-        None
+        let plan_entry = self.plan.entries().get(entry)?;
+        let destination = &plan_entry.destination;
+        if self.first_entry.get(destination) != Some(&entry) {
+            return None;
+        }
+        let before = self.snapshot_of(destination)?;
+        if !before.knows(destination) {
+            return None;
+        }
+        let now = DestinationNode::of(destination).ok()?;
+        let problem = match (before.node(destination), now) {
+            (None, None) => return None,
+            (None, Some(_)) => Problem::NewAtDestination,
+            (Some(_), None) => Problem::MissingAtDestination,
+            (Some(old), Some(now)) if !old.agrees_with(&now) => Problem::DestinationChanged,
+            (Some(_), Some(_)) => return None,
+        };
+        Some(ChangeBeforeCopy {
+            source: plan_entry.source.clone(),
+            destination: destination.clone(),
+            problem: name_finder_file(destination, problem),
+        })
+    }
+
+    /// Return the snapshot that holds `path`: the one with the deepest root above or at it.
+    fn snapshot_of(&self, path: &Path) -> Option<&DestinationTree> {
+        self.destination_before
+            .iter()
+            .filter(|(root, _)| path.starts_with(root))
+            .max_by_key(|(root, _)| root.components().count())
+            .map(|(_, tree)| tree)
     }
 
     /// Record that the directory of entry `entry` exists at the destination.
@@ -385,11 +425,15 @@ impl<'a> MoveLedger<'a> {
         let Some(root) = self.plan.operands().get(operand) else {
             return;
         };
+        if root.kind != OperandKind::Directory {
+            return;
+        }
         let Some(before) = self.destination_before.get(&root.destination) else {
             return;
         };
         let now = DestinationTree::take(&root.destination);
-        for change in now.changes_since(before, &self.written) {
+        let written = |path: &Path| self.first_entry.contains_key(path);
+        for change in now.changes_since(before, written) {
             match change {
                 TreeChange::New { path, identity } => {
                     findings.note(&path, Problem::NewAtDestination);
@@ -503,18 +547,7 @@ impl Findings {
     /// A Finder file that appeared or changed becomes `FinderMetadata`, so its
     /// line says why it is there.
     fn note(&mut self, path: &Path, problem: Problem) {
-        let problem = if path.file_name() == Some(OsStr::new(FINDER_FILE_NAME))
-            && matches!(
-                problem,
-                Problem::NewSinceCopy
-                    | Problem::SourceChanged
-                    | Problem::NewAtDestination
-                    | Problem::DestinationChanged
-            ) {
-            Problem::FinderMetadata
-        } else {
-            problem
-        };
+        let problem = name_finder_file(path, problem);
         self.problems.entry(path.to_path_buf()).or_insert(problem);
     }
 
@@ -563,6 +596,23 @@ impl Findings {
             list.insert(path, problem);
         }
         list
+    }
+}
+
+/// Return `FinderMetadata` for a Finder file at `path` that appeared or changed, else `problem`.
+fn name_finder_file(path: &Path, problem: Problem) -> Problem {
+    let finder = path.file_name() == Some(OsStr::new(FINDER_FILE_NAME));
+    let appeared_or_changed = matches!(
+        problem,
+        Problem::NewSinceCopy
+            | Problem::SourceChanged
+            | Problem::NewAtDestination
+            | Problem::DestinationChanged
+    );
+    if finder && appeared_or_changed {
+        Problem::FinderMetadata
+    } else {
+        problem
     }
 }
 

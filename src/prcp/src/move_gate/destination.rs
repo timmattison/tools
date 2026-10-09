@@ -25,7 +25,7 @@
 
 use super::{FileStamp, NodeIdentity};
 use crate::plan::{node_kind, NodeKind};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -47,13 +47,22 @@ impl DestinationNode {
         })
     }
 
+    /// Read the node at `path` now, without a walk. `None` when nothing is at the path.
+    pub(super) fn of(path: &Path) -> io::Result<Option<Self>> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => Self::from_metadata(path, &metadata).map(Some),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Return the identity of the node.
     pub(super) fn identity(&self) -> Option<NodeIdentity> {
         self.stamp.identity
     }
 
     /// Return true when `other` is the same node in the same state. See the module docs.
-    fn agrees_with(&self, other: &Self) -> bool {
+    pub(super) fn agrees_with(&self, other: &Self) -> bool {
         if self.kind != other.kind || self.stamp.identity != other.stamp.identity {
             return false;
         }
@@ -141,14 +150,45 @@ impl DestinationTree {
         tree
     }
 
+    /// Read the one node at `path` now, without a walk.
+    ///
+    /// This is the snapshot of a destination that is one file or one link. A
+    /// path with nothing at it gives an empty tree.
+    pub(super) fn take_node(path: &Path) -> Self {
+        let mut tree = Self::default();
+        match DestinationNode::of(path) {
+            Ok(Some(node)) => {
+                tree.nodes.insert(path.to_path_buf(), node);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tree.errors.insert(path.to_path_buf(), error.to_string());
+            }
+        }
+        tree
+    }
+
+    /// Return the node that the snapshot holds at `path`.
+    pub(super) fn node(&self, path: &Path) -> Option<&DestinationNode> {
+        self.nodes.get(path)
+    }
+
+    /// Return true when the snapshot knows what was at `path`: a node, or nothing.
+    ///
+    /// A path that the walk could not read, or that is under such a part, is unknown.
+    pub(super) fn knows(&self, path: &Path) -> bool {
+        !self.hides(path) && (self.nodes.contains_key(path) || !self.errors.contains_key(path))
+    }
+
     /// Compare this later snapshot with `before`, and return each difference in path order.
     ///
-    /// The paths in `written` are left out, because prcp writes them. A node
-    /// under a part that the walk cannot read now is not reported as gone.
+    /// The paths for which `written` is true are left out, because prcp writes
+    /// them. A node under a part that the walk cannot read now is not reported
+    /// as gone.
     pub(super) fn changes_since(
         &self,
         before: &Self,
-        written: &BTreeSet<PathBuf>,
+        written: impl Fn(&Path) -> bool,
     ) -> Vec<TreeChange> {
         let mut changes = Vec::new();
         for (path, message) in &self.errors {
@@ -160,7 +200,7 @@ impl DestinationTree {
             }
         }
         for (path, node) in &self.nodes {
-            if written.contains(path) {
+            if written(path) {
                 continue;
             }
             match before.nodes.get(path) {
@@ -175,7 +215,7 @@ impl DestinationTree {
             }
         }
         for (path, old) in &before.nodes {
-            if written.contains(path) || self.nodes.contains_key(path) || self.hides(path) {
+            if written(path) || self.nodes.contains_key(path) || self.hides(path) {
                 continue;
             }
             changes.push(TreeChange::Missing {
@@ -214,7 +254,13 @@ impl TreeChange {
 )]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use tempfile::TempDir;
+
+    /// Return the rule that the paths in `set`, and no others, are written.
+    fn written_in(set: &BTreeSet<PathBuf>) -> impl Fn(&Path) -> bool + '_ {
+        |path| set.contains(path)
+    }
 
     /// Write a file and make its parent directories.
     fn write_file(path: &Path, text: &str) {
@@ -241,7 +287,7 @@ mod tests {
 
         let now = DestinationTree::take(temp.path());
 
-        assert_eq!(now.changes_since(&before, &BTreeSet::new()), vec![]);
+        assert_eq!(now.changes_since(&before, |_| false), vec![]);
     }
 
     #[test]
@@ -256,7 +302,7 @@ mod tests {
         let now = DestinationTree::take(temp.path());
 
         let paths = BTreeSet::from([written]);
-        assert_eq!(now.changes_since(&before, &paths), vec![]);
+        assert_eq!(now.changes_since(&before, written_in(&paths)), vec![]);
     }
 
     #[test]
@@ -272,7 +318,7 @@ mod tests {
         let now = DestinationTree::take(temp.path());
 
         let written = BTreeSet::from([old, new]);
-        assert_eq!(now.changes_since(&before, &written), vec![]);
+        assert_eq!(now.changes_since(&before, written_in(&written)), vec![]);
     }
 
     #[test]
@@ -291,10 +337,66 @@ mod tests {
         let now = DestinationTree::take(temp.path());
 
         let paths: Vec<PathBuf> = now
-            .changes_since(&before, &BTreeSet::new())
+            .changes_since(&before, |_| false)
             .iter()
             .map(|change| change.path().to_path_buf())
             .collect();
         assert_eq!(paths, vec![a, b, c]);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "tests use unwrap for brevity and clear failure messages"
+)]
+mod node_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn a_snapshot_of_one_missing_path_knows_that_nothing_is_there() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("missing.txt");
+
+        let tree = DestinationTree::take_node(&path);
+
+        assert!(tree.knows(&path));
+        assert!(tree.node(&path).is_none());
+    }
+
+    #[test]
+    fn a_snapshot_of_one_file_holds_that_file() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("file.txt");
+        fs::write(&path, "file").unwrap();
+
+        let tree = DestinationTree::take_node(&path);
+
+        assert!(tree.knows(&path));
+        let node = tree.node(&path).unwrap();
+        assert!(node.agrees_with(&DestinationNode::of(&path).unwrap().unwrap()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_under_a_part_that_the_walk_could_not_read_is_unknown() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let locked = temp.path().join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&locked).is_ok() {
+            // The lock does not work for root.
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+
+        let tree = DestinationTree::take(temp.path());
+
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(tree.knows(&locked));
+        assert!(!tree.knows(&locked.join("inside.txt")));
     }
 }

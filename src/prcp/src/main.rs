@@ -827,6 +827,25 @@ async fn main() -> Result<()> {
             break;
         }
 
+        // A destination path that somebody else made, changed, or removed after the
+        // snapshot is not prcp's to write over. Stop, or go on with the next entry.
+        if let Some(change) = ledger.change_before_copy(index) {
+            if entry.kind == EntryKind::File {
+                if let (Some(pb), Ok(metadata)) = (&batch_pb, fs::metadata(&entry.source)) {
+                    current_total_batch_bytes = current_total_batch_bytes
+                        .saturating_sub(batch_bytes_of(metadata.len(), verify_enabled));
+                    pb.set_length(current_total_batch_bytes);
+                }
+            }
+            if args.continue_on_error {
+                failures.push((entry.source.clone(), change.to_string()));
+                continue;
+            }
+            early_exit_error = Some(change.to_string());
+            stopped_early = true;
+            break;
+        }
+
         // Make the directory. A file entry makes its own parent, so this keeps empty ones.
         if entry.kind == EntryKind::Directory {
             if let Err(e) = fs::create_dir_all(&entry.destination) {
@@ -924,11 +943,7 @@ async fn main() -> Result<()> {
         let source_stamp = FileStamp::from_metadata(&metadata);
 
         // Calculate bytes this file contributes to batch work (copy + optional verify)
-        let file_batch_bytes = if verify_enabled {
-            file_size.saturating_mul(2)
-        } else {
-            file_size
-        };
+        let file_batch_bytes = batch_bytes_of(file_size, verify_enabled);
 
         // Check if destination exists
         if dest_path.exists() {
@@ -1518,6 +1533,16 @@ fn calculate_file_hash(
     }
 
     Ok(Blake3Hash::from(hasher.finalize()))
+}
+
+/// Return the bytes that one file adds to the batch work: one read to copy it, and one
+/// more to verify it when verification is on.
+fn batch_bytes_of(file_size: u64, verify_enabled: bool) -> u64 {
+    if verify_enabled {
+        file_size.saturating_mul(2)
+    } else {
+        file_size
+    }
 }
 
 /// Calculate total bytes to process from all source files.
