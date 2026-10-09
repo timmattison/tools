@@ -658,6 +658,8 @@ pub(crate) enum Problem {
         /// The path where the node is now.
         to: PathBuf,
     },
+    /// A Finder file (`.DS_Store`) appeared or changed, in the source or at the destination.
+    FinderMetadata,
 }
 
 impl Problem {
@@ -675,7 +677,8 @@ impl Problem {
             | Self::SourceChanged
             | Self::DestinationChanged
             | Self::NewAtDestination
-            | Self::MovedAtDestination { .. } => true,
+            | Self::MovedAtDestination { .. }
+            | Self::FinderMetadata => true,
         }
     }
 }
@@ -702,6 +705,10 @@ impl fmt::Display for Problem {
             Self::MovedAtDestination { to } => {
                 write!(f, "was renamed or moved to '{}' during the run", to.display())
             }
+            Self::FinderMetadata => f.write_str(
+                "was made or changed during the run. Finder writes this file when a person \
+                 opens the folder in Finder",
+            ),
         }
     }
 }
@@ -1249,6 +1256,57 @@ mod tests {
         assert_originals_exist(&fixture.plan);
     }
 
+    #[test]
+    fn a_finder_file_that_appears_at_the_destination_names_finder() {
+        let fixture = sample();
+        let ledger = copy_all(&fixture.plan, &[]);
+        let finder = fixture.dest.join("sub").join(".DS_Store");
+        write_file(&finder, "finder");
+
+        let report = ledger.finish();
+
+        assert!(report.removed.is_empty(), "report: {report:?}");
+        assert_eq!(
+            problem_list(&report),
+            vec![(finder, Problem::FinderMetadata)]
+        );
+        assert_originals_exist(&fixture.plan);
+    }
+
+    #[test]
+    fn a_finder_file_that_appears_in_the_source_names_finder() {
+        let fixture = sample();
+        let ledger = copy_all(&fixture.plan, &[]);
+        let finder = fixture.src.join("sub").join(".DS_Store");
+        write_file(&finder, "finder");
+
+        let report = ledger.finish();
+
+        assert!(report.removed.is_empty(), "report: {report:?}");
+        assert_eq!(
+            problem_list(&report),
+            vec![(finder, Problem::FinderMetadata)]
+        );
+        assert_originals_exist(&fixture.plan);
+    }
+
+    #[test]
+    fn a_copied_finder_file_that_changes_at_the_destination_names_finder() {
+        let fixture = sample_with(|src| write_file(&src.join(".DS_Store"), "old"));
+        let ledger = copy_all(&fixture.plan, &[]);
+        let finder = fixture.dest.join(".DS_Store");
+        fs::write(&finder, "rewritten by Finder").unwrap();
+
+        let report = ledger.finish();
+
+        assert!(report.removed.is_empty(), "report: {report:?}");
+        assert_eq!(
+            problem_list(&report),
+            vec![(finder, Problem::FinderMetadata)]
+        );
+        assert_originals_exist(&fixture.plan);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_fifo_in_the_tree_keeps_all_originals() {
@@ -1552,6 +1610,11 @@ mod tests {
             }
             .to_string(),
             "was renamed or moved to '/d/b.txt' during the run"
+        );
+        assert_eq!(
+            Problem::FinderMetadata.to_string(),
+            "was made or changed during the run. Finder writes this file when a person opens \
+             the folder in Finder"
         );
     }
 }
