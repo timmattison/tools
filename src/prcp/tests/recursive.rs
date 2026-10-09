@@ -179,3 +179,24 @@ fn recursive_copy_to_a_missing_destination_makes_the_tree() {
     assert!(output.status.success(), "stderr: {stderr}");
     assert_sample_copied(&src, &dest);
 }
+
+#[test]
+fn recursive_copy_into_an_existing_directory_lands_under_the_source_name() {
+    let temp = TempDir::new().unwrap();
+    let src = temp.path().join("src");
+    let dest = temp.path().join("dest");
+    make_sample_tree(&src);
+    fs::create_dir(&dest).unwrap();
+
+    let output = run_prcp([
+        OsString::from("-R"),
+        OsString::from("-y"),
+        OsString::from("-q"),
+        src.clone().into_os_string(),
+        dest.clone().into_os_string(),
+    ]);
+
+    let stderr = visible_stderr(&output);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert_sample_copied(&src, &dest.join("src"));
+}
