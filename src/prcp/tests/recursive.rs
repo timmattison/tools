@@ -575,3 +575,32 @@ fn summary_counts_files_and_not_directories() {
         "stdout: {stdout}\nstderr: {stderr}"
     );
 }
+
+#[test]
+fn move_of_a_tree_removes_the_source_tree_after_every_hash_check() {
+    let temp = TempDir::new().unwrap();
+    let src = temp.path().join("src");
+    let dest = temp.path().join("dest");
+    make_sample_tree(&src);
+    let hashes: Vec<_> = SAMPLE_FILES
+        .iter()
+        .map(|(relative, _)| (*relative, file_hash(&src.join(relative))))
+        .collect();
+
+    let output = run_prcp([
+        OsString::from("--rm"),
+        OsString::from("-R"),
+        OsString::from("-y"),
+        OsString::from("-q"),
+        src.clone().into_os_string(),
+        dest.clone().into_os_string(),
+    ]);
+
+    let stderr = visible_stderr(&output);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(!src.exists(), "the source tree must be gone");
+    for (relative, hash) in hashes {
+        assert_eq!(file_hash(&dest.join(relative)), hash, "hash of {relative}");
+    }
+    assert!(dest.join(SAMPLE_EMPTY_DIR).is_dir());
+}
