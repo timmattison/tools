@@ -217,7 +217,7 @@ fn recursive_copy_recreates_symlinks_without_following_them() {
         OsString::from("-R"),
         OsString::from("-y"),
         OsString::from("-q"),
-        src.clone().into_os_string(),
+        src.into_os_string(),
         dest.clone().into_os_string(),
     ]);
 
@@ -226,10 +226,7 @@ fn recursive_copy_recreates_symlinks_without_following_them() {
     for (relative, target) in [("link", "a.txt"), ("sub/loop", "..")] {
         let copy = dest.join(relative);
         assert!(
-            fs::symlink_metadata(&copy)
-                .unwrap_or_else(|e| panic!("{relative} is missing: {e}"))
-                .file_type()
-                .is_symlink(),
+            fs::symlink_metadata(&copy).is_ok_and(|metadata| metadata.file_type().is_symlink()),
             "{relative} must be a symlink"
         );
         assert_eq!(fs::read_link(&copy).unwrap(), Path::new(target));
@@ -253,7 +250,7 @@ fn symlink_replaces_an_existing_file_at_the_destination() {
         OsString::from("-R"),
         OsString::from("-y"),
         OsString::from("-q"),
-        src.clone().into_os_string(),
+        src.into_os_string(),
         dest.clone().into_os_string(),
     ]);
 
@@ -309,7 +306,7 @@ fn recursive_copy_keeps_the_modes_of_files_and_directories() {
         OsString::from("-R"),
         OsString::from("-y"),
         OsString::from("-q"),
-        src.clone().into_os_string(),
+        src.into_os_string(),
         dest.clone().into_os_string(),
     ]);
 

@@ -42,6 +42,10 @@ pub(crate) struct OperandId(usize);
 
 impl OperandId {
     /// Return the position of the operand in the list of sources.
+    #[allow(
+        dead_code,
+        reason = "slice D of issue #295 uses this for the move gate"
+    )]
     pub(crate) fn index(self) -> usize {
         self.0
     }
@@ -441,6 +445,10 @@ impl CopyPlan {
     }
 
     /// Return the source operands, in the order given.
+    #[allow(
+        dead_code,
+        reason = "slice D of issue #295 uses this for the move gate"
+    )]
     pub(crate) fn operands(&self) -> &[Operand] {
         &self.operands
     }
@@ -461,6 +469,10 @@ impl CopyPlan {
     }
 
     /// Return the snapshot that `build` took of a Directory operand. None for other operands.
+    #[allow(
+        dead_code,
+        reason = "slice D of issue #295 uses this for the move gate"
+    )]
     pub(crate) fn tree(&self, operand: OperandId) -> Option<&TreeSnapshot> {
         self.trees.get(&operand)
     }
