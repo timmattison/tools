@@ -244,6 +244,121 @@ impl fmt::Display for Problem {
 )]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    /// A source tree, a destination path, and the plan between them.
+    struct Fixture {
+        _temp: TempDir,
+        src: PathBuf,
+        dest: PathBuf,
+        plan: CopyPlan,
+    }
+
+    /// Write a file and make its parent directories.
+    fn write_file(path: &Path, text: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+
+    /// Make the sample tree: files at three depths, an empty directory, and on Unix a symlink.
+    fn make_sample_tree(root: &Path) {
+        write_file(&root.join("top.txt"), "top");
+        write_file(&root.join("sub").join("inner.txt"), "inner");
+        write_file(&root.join("sub").join("deeper").join("deep.txt"), "deep");
+        fs::create_dir_all(root.join("empty")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("top.txt", root.join("link")).unwrap();
+    }
+
+    /// Make the fixture: the sample tree and a recursive plan over it.
+    fn sample() -> Fixture {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        let dest = temp.path().join("dest");
+        make_sample_tree(&src);
+        let plan = CopyPlan::build(std::slice::from_ref(&src), &dest, true).unwrap();
+        Fixture {
+            _temp: temp,
+            src,
+            dest,
+            plan,
+        }
+    }
+
+    /// Copy every entry of the plan as the copy loop does, except the sources in `skip`.
+    /// A skipped entry gets no record, as after a failed Blake3 check.
+    fn copy_all<'a>(plan: &'a CopyPlan, skip: &[&Path]) -> MoveLedger<'a> {
+        let mut ledger = MoveLedger::new(plan);
+        for (index, entry) in plan.entries().iter().enumerate() {
+            match &entry.kind {
+                EntryKind::Directory => {
+                    fs::create_dir_all(&entry.destination).unwrap();
+                    ledger.record_directory(index);
+                }
+                EntryKind::File => {
+                    let stamp = FileStamp::of(&entry.source).unwrap();
+                    fs::copy(&entry.source, &entry.destination).unwrap();
+                    if !skip.contains(&entry.source.as_path()) {
+                        ledger.record_file(index, stamp);
+                    }
+                }
+                EntryKind::Symlink { target } => {
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(target, &entry.destination).unwrap();
+                    #[cfg(not(unix))]
+                    let _ = target;
+                    ledger.record_symlink(index);
+                }
+            }
+        }
+        ledger
+    }
+
+    /// Return every source path of the plan that is a file or a symlink or a directory.
+    fn all_sources(plan: &CopyPlan) -> Vec<PathBuf> {
+        plan.entries()
+            .iter()
+            .map(|entry| entry.source.clone())
+            .collect()
+    }
+
+    /// Assert that every original of the plan still exists.
+    fn assert_originals_exist(plan: &CopyPlan) {
+        for source in all_sources(plan) {
+            assert!(
+                fs::symlink_metadata(&source).is_ok(),
+                "the original '{}' must stay",
+                source.display()
+            );
+        }
+    }
+
+    /// Return the problems that the report holds for the one kept operand.
+    fn only_problems(report: &MoveReport) -> &BTreeMap<PathBuf, Problem> {
+        assert_eq!(report.kept.len(), 1, "report: {report:?}");
+        &report.kept[0].problems
+    }
+
+    #[test]
+    fn a_clean_move_removes_the_whole_source_tree() {
+        let fixture = sample();
+        let ledger = copy_all(&fixture.plan, &[]);
+
+        let report = ledger.finish();
+
+        assert!(report.is_complete(), "report: {report:?}");
+        assert_eq!(report.removed, vec![fixture.src.clone()]);
+        assert!(!fixture.src.exists(), "the source root must be gone");
+        assert!(fixture.dest.join("top.txt").exists());
+        assert!(fixture.dest.join("sub").join("inner.txt").exists());
+        assert!(fixture
+            .dest
+            .join("sub")
+            .join("deeper")
+            .join("deep.txt")
+            .exists());
+        assert!(fixture.dest.join("empty").is_dir());
+    }
 
     #[test]
     fn problem_display_texts_state_each_problem() {
