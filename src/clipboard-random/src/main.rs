@@ -559,4 +559,53 @@ mod tests {
             "{characters} characters is not less than {bytes} bytes"
         );
     }
+
+    /// Returns the plain-text help of one argument of the `text` subcommand.
+    fn text_argument_help(id: &str) -> String {
+        use clap::CommandFactory;
+        let command = Args::command();
+        let text = command
+            .find_subcommand("text")
+            .expect("the text subcommand exists");
+        let argument = text
+            .get_arguments()
+            .find(|a| a.get_id() == id)
+            .unwrap_or_else(|| panic!("the text subcommand has an argument {id}"));
+        argument
+            .get_help()
+            .unwrap_or_else(|| panic!("argument {id} has help"))
+            .to_string()
+    }
+
+    /// `<CHARS>` counts letters and spaces, not Unicode scalar values.
+    #[test]
+    fn chars_help_says_it_counts_letters_and_spaces() {
+        let help = text_argument_help("chars");
+        assert!(help.contains("letters and spaces"), "help was: {help}");
+        assert!(
+            help.contains("Combining marks are not counted"),
+            "help was: {help}"
+        );
+    }
+
+    /// The word lengths count letters between spaces, not characters.
+    #[test]
+    fn word_length_help_says_letters() {
+        for id in ["min_word_length", "max_word_length"] {
+            let help = text_argument_help(id);
+            assert!(help.contains("letters between spaces"), "{id} help was: {help}");
+            assert!(!help.contains("characters"), "{id} help was: {help}");
+        }
+    }
+
+    /// The error for a zero count names what `<CHARS>` counts.
+    #[test]
+    fn zero_chars_error_says_letters_and_spaces() {
+        let error = generate_text_data(0, TextPreset::Mild.get_config(), true)
+            .expect_err("zero chars is refused");
+        assert!(
+            error.to_string().contains("letters and spaces"),
+            "error was: {error}"
+        );
+    }
 }
