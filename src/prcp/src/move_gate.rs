@@ -197,7 +197,7 @@ impl<'a> MoveLedger<'a> {
                         Problem::MissingAtDestination,
                         Problem::DestinationChanged,
                     ) {
-                        note(&mut problems, &entry.source, problem);
+                        note(&mut problems, &entry.destination, problem);
                     }
                 }
                 Some(Record::Symlink) => {
@@ -216,13 +216,17 @@ impl<'a> MoveLedger<'a> {
                             Problem::MissingAtDestination,
                             Problem::DestinationChanged,
                         ) {
-                            note(&mut problems, &entry.source, problem);
+                            note(&mut problems, &entry.destination, problem);
                         }
                     }
                 }
                 Some(Record::Directory) => {
                     if !fs::metadata(&entry.destination).is_ok_and(|found| found.is_dir()) {
-                        note(&mut problems, &entry.source, Problem::MissingAtDestination);
+                        note(
+                            &mut problems,
+                            &entry.destination,
+                            Problem::MissingAtDestination,
+                        );
                     }
                 }
             }
@@ -374,6 +378,9 @@ impl MoveReport {
 
     /// Write the report for a person: one block for each kept operand, then one line
     /// for each failed removal.
+    ///
+    /// When a problem comes from outside prcp, the report ends with
+    /// [`OUTSIDE_CHANGE_NOTE`], so a person does not think that prcp is broken.
     pub(crate) fn error_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
         for operand in &self.kept {
@@ -387,6 +394,14 @@ impl MoveReport {
         }
         for (path, error) in &self.removal_errors {
             lines.push(format!("Cannot remove '{}': {error}", path.display()));
+        }
+        let outside = self
+            .kept
+            .iter()
+            .flat_map(|operand| operand.problems.values())
+            .any(Problem::is_outside_change);
+        if outside {
+            lines.extend(OUTSIDE_CHANGE_NOTE.iter().map(|line| (*line).to_string()));
         }
         lines
     }
@@ -405,6 +420,13 @@ pub(crate) struct KeptOperand {
     /// The first problem of each path, in path order.
     pub(crate) problems: BTreeMap<PathBuf, Problem>,
 }
+
+/// The note at the end of a report that holds a change from outside prcp.
+const OUTSIDE_CHANGE_NOTE: [&str; 2] = [
+    "Something outside prcp changed the source or the destination while prcp ran.",
+    "Another program or a person made those changes, not prcp. Make sure that \
+     nothing else uses these paths, then run prcp again.",
+];
 
 /// One reason why the gate keeps the originals of an operand.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -427,6 +449,24 @@ pub(crate) enum Problem {
     DestinationChanged,
 }
 
+impl Problem {
+    /// Return true when something outside prcp caused the problem.
+    ///
+    /// A path that appeared, changed, or left after prcp read or wrote it is
+    /// such a change. A failed copy, a skipped special file, and a part that
+    /// cannot be read are not, because prcp reports those as they occur.
+    fn is_outside_change(&self) -> bool {
+        match self {
+            Self::NotCopied | Self::Skipped(_) | Self::Unreadable(_) => false,
+            Self::NewSinceCopy
+            | Self::MissingAtSource
+            | Self::MissingAtDestination
+            | Self::SourceChanged
+            | Self::DestinationChanged => true,
+        }
+    }
+}
+
 impl fmt::Display for Problem {
     /// Write the problem as a phrase that follows a quoted path.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -438,11 +478,11 @@ impl fmt::Display for Problem {
                 f.write_str("appeared in the source after the copy started, and was not copied")
             }
             Self::MissingAtSource => f.write_str("is no longer in the source"),
-            Self::MissingAtDestination => f.write_str("is missing at the destination"),
-            Self::SourceChanged => f.write_str("changed in the source after its copy"),
-            Self::DestinationChanged => {
-                f.write_str("changed at the destination after its hash check")
+            Self::MissingAtDestination => {
+                f.write_str("was removed or moved away from the destination during the run")
             }
+            Self::SourceChanged => f.write_str("changed in the source after its copy"),
+            Self::DestinationChanged => f.write_str("changed at the destination during the run"),
         }
     }
 }
