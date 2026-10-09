@@ -261,7 +261,10 @@ fn symlink_replaces_an_existing_file_at_the_destination() {
     let stderr = visible_stderr(&output);
     assert!(output.status.success(), "stderr: {stderr}");
     let copy = dest.join("src").join("link");
-    assert!(fs::symlink_metadata(&copy).unwrap().file_type().is_symlink());
+    assert!(fs::symlink_metadata(&copy)
+        .unwrap()
+        .file_type()
+        .is_symlink());
     assert_eq!(fs::read_link(&copy).unwrap(), Path::new("a.txt"));
 }
 
@@ -320,4 +323,31 @@ fn recursive_copy_keeps_the_modes_of_files_and_directories() {
         fs::read_to_string(dest.join("locked").join("l.txt")).unwrap(),
         "l"
     );
+}
+
+#[test]
+fn recursive_copy_handles_multibyte_names() {
+    let temp = TempDir::new().unwrap();
+    let src = temp.path().join("src");
+    let dest = temp.path().join("dest");
+    write_file(&src.join("日本語").join("café.txt"), "café");
+    write_file(&src.join("🎉.txt"), "party");
+
+    let output = run_prcp([
+        OsString::from("-R"),
+        OsString::from("-y"),
+        OsString::from("-q"),
+        src.clone().into_os_string(),
+        dest.clone().into_os_string(),
+    ]);
+
+    let stderr = visible_stderr(&output);
+    assert!(output.status.success(), "stderr: {stderr}");
+    for relative in ["日本語/café.txt", "🎉.txt"] {
+        assert_eq!(
+            file_hash(&dest.join(relative)),
+            file_hash(&src.join(relative)),
+            "hash of {relative}"
+        );
+    }
 }
