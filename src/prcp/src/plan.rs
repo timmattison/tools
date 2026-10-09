@@ -685,4 +685,19 @@ mod tests {
         let tree = plan.tree(OperandId(0)).unwrap();
         assert_eq!(tree.nodes().get(&fifo), Some(&NodeKind::Special("fifo")));
     }
+
+    #[test]
+    fn directory_into_its_own_subdirectory_is_an_error() {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        fs::create_dir_all(src.join("sub")).unwrap();
+
+        let error = CopyPlan::build(std::slice::from_ref(&src), &src.join("sub"), true)
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("into itself"),
+            "unexpected error: {error}"
+        );
+    }
 }
