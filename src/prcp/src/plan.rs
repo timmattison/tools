@@ -485,7 +485,25 @@ impl CopyPlan {
     /// reverse plan order, so children come before parents. It skips an entry
     /// whose destination is not a directory. It collects each error and goes on.
     pub(crate) fn apply_directory_permissions(&self) -> Vec<(PathBuf, std::io::Error)> {
-        Vec::new()
+        let mut errors = Vec::new();
+        for entry in self.entries.iter().rev() {
+            if entry.kind != EntryKind::Directory {
+                continue;
+            }
+            let is_directory = fs::symlink_metadata(&entry.destination)
+                .map(|metadata| metadata.is_dir())
+                .unwrap_or(false);
+            if !is_directory {
+                continue;
+            }
+            let result = fs::metadata(&entry.source).and_then(|metadata| {
+                fs::set_permissions(&entry.destination, metadata.permissions())
+            });
+            if let Err(error) = result {
+                errors.push((entry.destination.clone(), error));
+            }
+        }
+        errors
     }
 
     /// Return the sources of the File entries, in plan order.
