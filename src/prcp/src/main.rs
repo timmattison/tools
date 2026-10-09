@@ -2533,6 +2533,16 @@ mod tests {
         }
 
         #[test]
+        fn directory_path_error_names_the_recursive_flag() {
+            let temp_dir = TempDir::new().unwrap();
+            let dir = temp_dir.path().join("subdir");
+            fs::create_dir(&dir).unwrap();
+
+            let err = resolve_sources(&[dir], false).unwrap_err().to_string();
+            assert!(err.contains("--recursive"), "got: {err}");
+        }
+
+        #[test]
         fn glob_pattern_with_no_matches_returns_error() {
             let temp_dir = TempDir::new().unwrap();
             // Create a .txt file but search for .xyz
