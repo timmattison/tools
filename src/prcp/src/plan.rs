@@ -738,4 +738,18 @@ mod tests {
             "unexpected error: {error}"
         );
     }
+
+    #[test]
+    fn directory_into_its_own_parent_is_an_error() {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        write_file(&src.join("a.txt"), "a");
+
+        let error = CopyPlan::build(std::slice::from_ref(&src), temp.path(), true).unwrap_err();
+
+        assert!(
+            error.to_string().contains("into itself"),
+            "unexpected error: {error}"
+        );
+    }
 }
