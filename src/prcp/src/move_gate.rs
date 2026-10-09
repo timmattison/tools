@@ -43,8 +43,11 @@
 //! directory that is not empty, so a file that appears after the gate also
 //! keeps its directory. The gate collects each removal error and goes on.
 
-use crate::plan::{CopyPlan, EntryKind, TreeSnapshot};
-use std::collections::BTreeMap;
+mod destination;
+
+use crate::plan::{CopyPlan, EntryKind, OperandKind, TreeSnapshot};
+use destination::{DestinationTree, TreeChange};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -133,19 +136,44 @@ enum Record {
     },
 }
 
-/// The positive results of one run, one slot for each plan entry.
+/// The positive results of one run, one slot for each plan entry, and the destination before the run.
 #[derive(Debug)]
 pub(crate) struct MoveLedger<'a> {
     plan: &'a CopyPlan,
     records: Vec<Option<Record>>,
+    /// The snapshot of each destination root of a Directory operand, taken before the first copy.
+    destination_before: BTreeMap<PathBuf, DestinationTree>,
+    /// Every destination path of the plan. prcp writes these, and the records judge them.
+    written: BTreeSet<PathBuf>,
 }
 
 impl<'a> MoveLedger<'a> {
     /// Make an empty ledger for `plan`. Every entry starts without a record.
+    ///
+    /// The call also takes the snapshot of each destination tree. Make the
+    /// ledger right before the first copy, so that the snapshot shows the
+    /// destination as the copy found it.
     pub(crate) fn new(plan: &'a CopyPlan) -> Self {
+        let destination_before = plan
+            .operands()
+            .iter()
+            .filter(|operand| operand.kind == OperandKind::Directory)
+            .map(|operand| {
+                let root = operand.destination.clone();
+                let tree = DestinationTree::take(&root);
+                (root, tree)
+            })
+            .collect();
+        let written = plan
+            .entries()
+            .iter()
+            .map(|entry| entry.destination.clone())
+            .collect();
         Self {
             plan,
             records: vec![None; plan.entries().len()],
+            destination_before,
+            written,
         }
     }
 
@@ -308,7 +336,34 @@ impl<'a> MoveLedger<'a> {
             }
         }
         self.compare_tree(operand, &mut problems);
+        self.compare_destination(operand, &mut problems);
         problems
+    }
+
+    /// Walk the destination root of a Directory operand again, and compare it with the snapshot.
+    ///
+    /// A path that prcp did not write, and that was not there before, is
+    /// `NewAtDestination`. A path from before that changed is
+    /// `DestinationChanged`, and one that left is `MissingAtDestination`. An
+    /// operand that is not a Directory has no tree to walk, and the call does
+    /// nothing.
+    fn compare_destination(&self, operand: usize, problems: &mut BTreeMap<PathBuf, Problem>) {
+        let Some(root) = self.plan.operands().get(operand) else {
+            return;
+        };
+        let Some(before) = self.destination_before.get(&root.destination) else {
+            return;
+        };
+        let now = DestinationTree::take(&root.destination);
+        for change in now.changes_since(before, &self.written) {
+            let problem = match &change {
+                TreeChange::New { .. } => Problem::NewAtDestination,
+                TreeChange::Changed { .. } => Problem::DestinationChanged,
+                TreeChange::Missing { .. } => Problem::MissingAtDestination,
+                TreeChange::Unreadable { message, .. } => Problem::Unreadable(message.clone()),
+            };
+            note(problems, change.path(), problem);
+        }
     }
 
     /// Walk a Directory operand again and compare the walk with the snapshot of the plan.

@@ -159,23 +159,12 @@ impl TreeSnapshot {
                     continue;
                 }
             };
-            let file_type = entry.file_type();
-            let kind = if file_type.is_dir() {
-                NodeKind::Directory
-            } else if file_type.is_symlink() {
-                match fs::read_link(entry.path()) {
-                    Ok(target) => NodeKind::Symlink { target },
-                    Err(error) => {
-                        errors.push((entry.into_path(), error.to_string()));
-                        continue;
-                    }
+            match node_kind(entry.path(), entry.file_type()) {
+                Ok(kind) => {
+                    nodes.insert(entry.into_path(), kind);
                 }
-            } else if file_type.is_file() {
-                NodeKind::File
-            } else {
-                NodeKind::Special(special_kind(file_type))
-            };
-            nodes.insert(entry.into_path(), kind);
+                Err(error) => errors.push((entry.into_path(), error.to_string())),
+            }
         }
         Self { nodes, errors }
     }
@@ -189,6 +178,24 @@ impl TreeSnapshot {
     pub(crate) fn errors(&self) -> &[(PathBuf, String)] {
         &self.errors
     }
+}
+
+/// Return the kind of the node at `path`, from the file type that a walk read.
+///
+/// The call reads the target of a symlink, and it never follows the link. A
+/// link whose target cannot be read is an error.
+pub(crate) fn node_kind(path: &Path, file_type: fs::FileType) -> std::io::Result<NodeKind> {
+    Ok(if file_type.is_dir() {
+        NodeKind::Directory
+    } else if file_type.is_symlink() {
+        NodeKind::Symlink {
+            target: fs::read_link(path)?,
+        }
+    } else if file_type.is_file() {
+        NodeKind::File
+    } else {
+        NodeKind::Special(special_kind(file_type))
+    })
 }
 
 /// Decide what a top-level source operand is. The call does not follow a
