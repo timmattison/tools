@@ -298,9 +298,17 @@ fn generate_text_data(chars: usize, config: TextConfig, dry_run: bool) -> Result
 }
 
 /// Formats the `Text length` line that `generate_text_data` prints after it
-/// copies the text.
+/// copies the text, for example `Text length: 84 characters (158 bytes)`.
+///
+/// The character count is the count of Unicode scalar values, thus each
+/// combining mark counts as one character. The byte count is the length of the
+/// UTF-8 encoding, which is the quantity of data that goes to the clipboard.
 fn text_length_line(text: &str) -> String {
-    format!("Text length: {} characters", text.len())
+    format!(
+        "Text length: {} characters ({} bytes)",
+        text.chars().count(),
+        text.len()
+    )
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
