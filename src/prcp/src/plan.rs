@@ -223,7 +223,21 @@ impl CopyPlan {
             } else {
                 destination.to_path_buf()
             };
-            if recursive && source.is_dir() {
+            let is_link = fs::symlink_metadata(source)?.file_type().is_symlink();
+            if recursive && is_link && source.is_dir() {
+                plan.operands.push(Operand {
+                    source: source.clone(),
+                    kind: OperandKind::Symlink,
+                });
+                plan.entries.push(PlanEntry {
+                    operand,
+                    source: source.clone(),
+                    destination: root,
+                    kind: EntryKind::Symlink {
+                        target: fs::read_link(source)?,
+                    },
+                });
+            } else if recursive && source.is_dir() {
                 plan.add_tree(operand, source, &root)?;
             } else {
                 plan.operands.push(Operand {
