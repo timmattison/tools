@@ -621,4 +621,33 @@ mod tests {
         assert_eq!(plan.entries(), [file_entry(0, &link, &dest)]);
         assert_eq!(plan.operands()[0].kind, OperandKind::File);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_in_the_tree_is_skipped_and_kept_in_the_snapshot() {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        write_file(&src.join("a.txt"), "a");
+        let fifo = src.join("pipe");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let dest = temp.path().join("dest");
+
+        let plan = CopyPlan::build(std::slice::from_ref(&src), &dest, true).unwrap();
+
+        assert!(plan.entries().iter().all(|entry| entry.source != fifo));
+        assert_eq!(
+            plan.skipped(),
+            [SkippedEntry {
+                operand: OperandId(0),
+                path: fifo.clone(),
+                reason: "fifo",
+            }]
+        );
+        let tree = plan.tree(OperandId(0)).unwrap();
+        assert_eq!(tree.nodes().get(&fifo), Some(&NodeKind::Special("fifo")));
+    }
 }
