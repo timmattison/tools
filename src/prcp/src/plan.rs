@@ -29,8 +29,9 @@
 //! A FIFO, socket, or device in a tree is not copied. The plan records it as a
 //! skipped entry. A part of a tree that the walk cannot read is a walk error.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -180,6 +181,35 @@ impl TreeSnapshot {
     }
 }
 
+/// Resolve `path` to an absolute path with no symlinks, even when its tail does not exist yet.
+///
+/// The function resolves the deepest ancestor that exists. It then appends
+/// the components that do not exist.
+fn canonicalize_lenient(path: &Path) -> Result<PathBuf> {
+    let mut missing: Vec<&OsStr> = Vec::new();
+    let mut current = path;
+    loop {
+        match fs::canonicalize(current) {
+            Ok(mut resolved) => {
+                resolved.extend(missing.iter().rev());
+                return Ok(resolved);
+            }
+            Err(error) => {
+                let (Some(name), Some(parent)) = (current.file_name(), current.parent()) else {
+                    return Err(error)
+                        .with_context(|| format!("Cannot resolve '{}'", path.display()));
+                };
+                missing.push(name);
+                current = if parent.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    parent
+                };
+            }
+        }
+    }
+}
+
 /// Name the kind of a node that is not a directory, a file, or a symlink.
 #[cfg(unix)]
 fn special_kind(file_type: fs::FileType) -> &'static str {
@@ -288,6 +318,14 @@ impl CopyPlan {
     /// `root` is the destination of the operand itself. The snapshot is the one
     /// source of the entries, so the plan and the snapshot cannot disagree.
     fn add_tree(&mut self, operand: OperandId, source: &Path, root: &Path) -> Result<()> {
+        let canonical_source = fs::canonicalize(source)?;
+        if canonicalize_lenient(root)?.starts_with(&canonical_source) {
+            bail!(
+                "Cannot copy directory '{}' into itself ('{}')",
+                source.display(),
+                root.display()
+            );
+        }
         self.operands.push(Operand {
             source: source.to_path_buf(),
             kind: OperandKind::Directory,
