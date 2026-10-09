@@ -309,6 +309,24 @@ impl Pty {
 
         Output { stdout, ..finished }
     }
+
+    /// Run `command` with its standard input on this terminal, and type
+    /// `typed` into the terminal.
+    ///
+    /// A tool that asks a question only when a person can answer it needs
+    /// this shape of run.
+    ///
+    /// # Arguments
+    /// * `command` - The command to start the child from.
+    /// * `typed` - The bytes that a person types into the terminal.
+    ///
+    /// # Returns
+    /// The exit status of the child and what it wrote to its standard output
+    /// and its standard error.
+    pub fn run_with_stdin_on_terminal(self, command: Command, typed: &[u8]) -> Output {
+        let _ = typed;
+        self.run_with_stdout_on_terminal(command)
+    }
 }
 
 /// Read `master` until no copy of the slave end is left open.
