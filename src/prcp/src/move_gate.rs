@@ -407,10 +407,16 @@ mod tests {
 
     /// Make the fixture: the sample tree and a recursive plan over it.
     fn sample() -> Fixture {
+        sample_with(|_| {})
+    }
+
+    /// Make the fixture like `sample`, but let `prepare` change the source tree before the plan.
+    fn sample_with(prepare: impl FnOnce(&Path)) -> Fixture {
         let temp = TempDir::new().unwrap();
         let src = temp.path().join("src");
         let dest = temp.path().join("dest");
         make_sample_tree(&src);
+        prepare(&src);
         let plan = CopyPlan::build(std::slice::from_ref(&src), &dest, true).unwrap();
         Fixture {
             _temp: temp,
@@ -629,6 +635,29 @@ mod tests {
             Some(&Problem::DestinationChanged)
         );
         assert_originals_exist(&fixture.plan);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_in_the_tree_keeps_all_originals() {
+        let fixture = sample_with(|src| {
+            let status = std::process::Command::new("mkfifo")
+                .arg(src.join("pipe"))
+                .status()
+                .unwrap();
+            assert!(status.success(), "mkfifo must work");
+        });
+        let ledger = copy_all(&fixture.plan, &[]);
+
+        let report = ledger.finish();
+
+        assert!(report.removed.is_empty(), "report: {report:?}");
+        assert_eq!(
+            only_problems(&report).get(&fixture.src.join("pipe")),
+            Some(&Problem::Skipped("fifo"))
+        );
+        assert_originals_exist(&fixture.plan);
+        assert!(fixture.src.join("pipe").exists());
     }
 
     #[test]
