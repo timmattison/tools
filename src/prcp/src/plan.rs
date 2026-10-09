@@ -747,8 +747,8 @@ mod tests {
             plan.entries(),
             [PlanEntry {
                 operand: OperandId(0),
-                source: link.clone(),
-                destination: dest.clone(),
+                source: link,
+                destination: dest,
                 kind: EntryKind::Symlink { target: real },
             }]
         );
@@ -998,7 +998,7 @@ mod tests {
         let file_plan = CopyPlan::build(std::slice::from_ref(&single), &dest, true).unwrap();
         assert!(file_plan.is_single_file());
         assert_eq!(file_plan.file_count(), 1);
-        assert_eq!(file_plan.file_sources(), [single.clone()]);
+        assert_eq!(file_plan.file_sources(), std::slice::from_ref(&single));
 
         let tree_plan = CopyPlan::build(std::slice::from_ref(&src), &dest, true).unwrap();
         assert!(!tree_plan.is_single_file());
