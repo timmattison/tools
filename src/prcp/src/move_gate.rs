@@ -669,6 +669,38 @@ mod tests {
         assert!(fixture.src.join("pipe").exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_part_of_the_tree_that_the_plan_could_not_read_keeps_all_originals() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = sample_with(|src| {
+            write_file(&src.join("locked").join("x.txt"), "x");
+            fs::set_permissions(src.join("locked"), fs::Permissions::from_mode(0o000)).unwrap();
+        });
+        let locked = fixture.src.join("locked");
+        if fs::read_dir(&locked).is_ok() {
+            // The lock does not work for root.
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+        let ledger = copy_all(&fixture.plan, &[]);
+        // Open the directory again. The plan still holds the walk error.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let report = ledger.finish();
+
+        assert!(report.removed.is_empty(), "report: {report:?}");
+        assert!(
+            matches!(
+                only_problems(&report).get(&locked),
+                Some(Problem::Unreadable(_))
+            ),
+            "report: {report:?}"
+        );
+        assert_originals_exist(&fixture.plan);
+    }
+
     #[test]
     fn problem_display_texts_state_each_problem() {
         assert_eq!(
