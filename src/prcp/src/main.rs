@@ -2572,6 +2572,20 @@ mod tests {
         }
 
         #[test]
+        fn recursive_glob_keeps_directory_matches() {
+            let temp_dir = TempDir::new().unwrap();
+            let file = temp_dir.path().join("a.txt");
+            let dir = temp_dir.path().join("sub");
+            fs::write(&file, "content").unwrap();
+            fs::create_dir(&dir).unwrap();
+
+            let pattern = temp_dir.path().join("*");
+            let mut result = resolve_sources(&[pattern], false, true).unwrap();
+            result.sort();
+            assert_eq!(result, vec![file, dir]);
+        }
+
+        #[test]
         fn glob_pattern_with_no_matches_returns_error() {
             let temp_dir = TempDir::new().unwrap();
             // Create a .txt file but search for .xyz
