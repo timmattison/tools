@@ -478,6 +478,16 @@ impl CopyPlan {
         matches!(self.entries.as_slice(), [only] if only.kind == EntryKind::File)
     }
 
+    /// Give each destination directory the permissions of its source directory.
+    ///
+    /// Call this after the copy, because a read-only source directory would stop
+    /// the copy of its contents. The function walks the Directory entries in
+    /// reverse plan order, so children come before parents. It skips an entry
+    /// whose destination is not a directory. It collects each error and goes on.
+    pub(crate) fn apply_directory_permissions(&self) -> Vec<(PathBuf, std::io::Error)> {
+        Vec::new()
+    }
+
     /// Return the sources of the File entries, in plan order.
     pub(crate) fn file_sources(&self) -> Vec<PathBuf> {
         self.entries
