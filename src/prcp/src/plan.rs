@@ -31,7 +31,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -181,6 +181,26 @@ impl TreeSnapshot {
     }
 }
 
+/// Return the name that `source` takes under a container destination.
+///
+/// The name is the last component of the path. A path such as `.` or `dir/..`
+/// has none, so the name then comes from the canonical path. The root `/` has
+/// no name at all, and that is an error.
+fn operand_name(source: &Path) -> Result<OsString> {
+    if let Some(name) = source.file_name() {
+        return Ok(name.to_os_string());
+    }
+    fs::canonicalize(source)
+        .ok()
+        .and_then(|canonical| canonical.file_name().map(OsStr::to_os_string))
+        .ok_or_else(|| {
+            anyhow!(
+                "Source '{}' has no name to copy under the destination",
+                source.display()
+            )
+        })
+}
+
 /// Resolve `path` to an absolute path with no symlinks, even when its tail does not exist yet.
 ///
 /// The function resolves the deepest ancestor that exists. It then appends
@@ -270,12 +290,7 @@ impl CopyPlan {
         };
         for (index, source) in sources.iter().enumerate() {
             let operand = OperandId(index);
-            let name = source.file_name().ok_or_else(|| {
-                anyhow!(
-                    "Source '{}' has no name to copy under the destination",
-                    source.display()
-                )
-            })?;
+            let name = operand_name(source)?;
             let root = if container {
                 destination.join(name)
             } else {
