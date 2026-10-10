@@ -1138,4 +1138,105 @@ mod tests {
         assert_eq!(parent_mode, 0o555);
         assert_eq!(child_mode, 0o700);
     }
+
+    /// Assert that `result` is the same-file refusal.
+    fn assert_same_file(result: Result<CopyPlan>) {
+        let error = result.expect_err("the plan must refuse a destination that is its source");
+        assert!(
+            error.to_string().contains("are the same file"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn file_into_its_own_directory_is_refused() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("a.txt");
+        write_file(&source, "content");
+
+        assert_same_file(CopyPlan::build(
+            std::slice::from_ref(&source),
+            temp.path(),
+            false,
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_onto_a_symlink_to_its_source_file_is_refused() {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        write_file(&src.join("f.txt"), "content");
+        let dest = temp.path().join("dest");
+        fs::create_dir_all(dest.join("src")).unwrap();
+        std::os::unix::fs::symlink(src.join("f.txt"), dest.join("src").join("f.txt")).unwrap();
+
+        assert_same_file(CopyPlan::build(std::slice::from_ref(&src), &dest, true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_onto_a_hard_link_to_its_source_file_is_refused() {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        write_file(&src.join("f.txt"), "content");
+        let dest = temp.path().join("dest");
+        fs::create_dir_all(dest.join("src")).unwrap();
+        fs::hard_link(src.join("f.txt"), dest.join("src").join("f.txt")).unwrap();
+
+        assert_same_file(CopyPlan::build(std::slice::from_ref(&src), &dest, true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_entry_whose_destination_link_resolves_to_its_source_link_is_refused() {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        std::os::unix::fs::symlink("nowhere", src.join("sub").join("link")).unwrap();
+        let dest = temp.path().join("dest");
+        fs::create_dir_all(dest.join("src")).unwrap();
+        std::os::unix::fs::symlink(src.join("sub"), dest.join("src").join("sub")).unwrap();
+
+        assert_same_file(CopyPlan::build(std::slice::from_ref(&src), &dest, true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn top_level_symlink_copied_onto_itself_is_refused() {
+        let temp = TempDir::new().unwrap();
+        let target = temp.path().join("target.txt");
+        write_file(&target, "content");
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        // A top-level symlink to a file is a File entry. Name the link as the
+        // source and as the destination.
+        assert_same_file(CopyPlan::build(std::slice::from_ref(&link), &link, false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_entry_whose_destination_is_a_symlink_to_its_source_is_refused() {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        let dest = temp.path().join("dest");
+        fs::create_dir_all(dest.join("src")).unwrap();
+        std::os::unix::fs::symlink(src.join("sub"), dest.join("src").join("sub")).unwrap();
+
+        assert_same_file(CopyPlan::build(std::slice::from_ref(&src), &dest, true));
+    }
+
+    #[test]
+    fn merge_onto_a_different_existing_file_is_not_refused() {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        write_file(&src.join("f.txt"), "new");
+        let dest = temp.path().join("dest");
+        write_file(&dest.join("src").join("f.txt"), "old");
+
+        let plan = CopyPlan::build(std::slice::from_ref(&src), &dest, true).unwrap();
+
+        assert_eq!(plan.file_count(), 1);
+    }
 }
