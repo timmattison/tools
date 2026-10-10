@@ -69,6 +69,14 @@
 //! now, and the loop does not write over it. A path that an earlier entry of
 //! the same run writes is the run's own, and keeps the overwrite question.
 //!
+//! # Overlapping operands
+//!
+//! A move refuses overlapping operands before the first copy, see
+//! [`refuse_overlapping_operands`]. A source given twice, and a source inside
+//! another source directory, are such operands. The removal of one operand
+//! would otherwise touch what the check of another operand reads. A copy has
+//! no such rule.
+//!
 //! # Removal
 //!
 //! Only a move removes. For an operand with no problem, the gate removes each
@@ -83,6 +91,7 @@ mod destination;
 use crate::landing::Action;
 use crate::node_identity::NodeIdentity;
 use crate::plan::{CopyPlan, EntryKind, OperandKind, PlanEntry, TreeSnapshot};
+use anyhow::Context;
 use destination::{DestinationNode, DestinationTree, TreeChange};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -881,10 +890,101 @@ pub(crate) struct OperandProblems {
 /// Refuse a move whose operands overlap. Call this before the first copy.
 ///
 /// This is the precondition of the move gate: in a move, the removal of one
-/// operand must not touch what another operand checks or removes. See the
-/// module docs.
-pub(crate) fn refuse_overlapping_operands(_plan: &CopyPlan) -> anyhow::Result<()> {
+/// operand must not touch what another operand checks or removes. Without it,
+/// the removal of `src` would make the check of `src/a` fail, and the report
+/// would blame a person for a change that prcp made.
+///
+/// Two operands overlap in two cases:
+///
+/// 1. They have the same location. The same source given twice, or two
+///    spellings of one path (`./src` and `src`), are this case.
+/// 2. One location is inside the location of a Directory operand. Only a
+///    Directory operand contains anything.
+///
+/// The location of an operand is its parent, resolved with
+/// [`fs::canonicalize`], joined with its file name. The call does not follow
+/// the last component, so a top-level symlink stays the link itself, and a
+/// link to `src` does not overlap `src`. A source with no file name (`.`,
+/// `..`, `dir/..`) has no last component to keep, so the call resolves the
+/// whole path.
+///
+/// The call looks up each ancestor of a location in a map, not each pair of
+/// operands, because a glob can give thousands of operands. It compares path
+/// components, not text, so `src2` is not inside `src`.
+///
+/// # Errors
+///
+/// Return an error that names the first overlap in operand order, with the
+/// paths as the user gave them. Also return an error when a location cannot
+/// be resolved. A copy needs no call, because a copy of overlapping operands
+/// works.
+pub(crate) fn refuse_overlapping_operands(plan: &CopyPlan) -> anyhow::Result<()> {
+    let operands = plan.operands();
+    let locations = operands
+        .iter()
+        .map(|operand| operand_location(&operand.source))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let mut by_location: BTreeMap<&Path, usize> = BTreeMap::new();
+    for (index, location) in locations.iter().enumerate() {
+        by_location.entry(location.as_path()).or_insert(index);
+    }
+    for (index, location) in locations.iter().enumerate() {
+        let operand = &operands[index];
+        if let Some(&first) = by_location.get(location.as_path()) {
+            if first != index {
+                anyhow::bail!(
+                    "{}",
+                    same_source_message(&operands[first].source, &operand.source)
+                );
+            }
+        }
+        for ancestor in location.ancestors().skip(1) {
+            let Some(&outer) = by_location.get(ancestor) else {
+                continue;
+            };
+            if operands[outer].kind == OperandKind::Directory {
+                anyhow::bail!(
+                    "{}",
+                    inside_message(&operand.source, &operands[outer].source)
+                );
+            }
+        }
+    }
     Ok(())
+}
+
+/// Return the location of one operand, as [`refuse_overlapping_operands`] defines it.
+fn operand_location(source: &Path) -> anyhow::Result<PathBuf> {
+    let resolve = |path: &Path| {
+        fs::canonicalize(path)
+            .with_context(|| format!("Cannot resolve the source '{}'", source.display()))
+    };
+    let Some(name) = source.file_name() else {
+        return resolve(source);
+    };
+    let parent = match source.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    Ok(resolve(parent)?.join(name))
+}
+
+/// The refusal for two operands with one location.
+fn same_source_message(first: &Path, second: &Path) -> String {
+    format!(
+        "Cannot move '{}' and '{}' in one run: they are the same source. Give it once.",
+        first.display(),
+        second.display()
+    )
+}
+
+/// The refusal for an operand inside a Directory operand.
+fn inside_message(inner: &Path, outer: &Path) -> String {
+    format!(
+        "Cannot move '{inner}' and '{outer}' in one run: '{inner}' is inside '{outer}'. Give only '{outer}'.",
+        inner = inner.display(),
+        outer = outer.display()
+    )
 }
 
 /// The name of the file that Finder writes into a folder that a person opens.
@@ -1191,7 +1291,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let src = nested_tree(&temp);
         let inner = src.join("a");
-        let message = refusal_for(&[inner.clone(), src.clone()], &temp.path().join("dest"));
+        let message = refusal_for(&[inner, src.clone()], &temp.path().join("dest"));
         assert!(message.contains("is inside"), "message: {message}");
         assert!(message.contains(&format!("Give only '{}'", src.display())));
     }

@@ -2235,6 +2235,11 @@ files that caused the failure, and the run exits with an error. Other sources st
 (Ctrl+C, or an error without `--continue-on-error`), `prcp` removes no source at all. A directory is removed only when
 it is empty, so a file that appears at the last moment also keeps its directory.
 
+A move refuses, before the first copy, two sources that overlap. A source that is inside another source directory is
+one case, and a source given twice is the other. `prcp` names both paths and the fix: give only the outer directory,
+or give the source once. A `**` glob with `-R` can give such sources without you typing them. A copy (no `--rm`) does
+not refuse them.
+
 **Want a `prmv` shorthand?**
 
 `prcp` installs nothing into your shell config. `prcp --rm` is the whole move
