@@ -7,16 +7,23 @@
 #![warn(clippy::cast_sign_loss)] // Warn when casting signed to unsigned
 #![warn(clippy::cast_precision_loss)] // Warn when casting to float loses precision
 
+mod landing;
+mod move_gate;
+mod node_identity;
+mod plan;
+
 use anyhow::{Context, Result};
 use buildinfo::version_string;
 use clap::Parser;
 use colored::Colorize;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use indicatif::{HumanBytes, MultiProgress, ProgressBar};
+use move_gate::{FileStamp, RunLedger, Verification};
+use plan::{CopyPlan, EntryKind};
 use termbar::{ProgressStyleBuilder, TerminalWidthWatcher};
 // Blake3 imported via blake3 crate (no Digest trait needed)
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -171,9 +178,17 @@ struct Args {
     #[arg(num_args = 0..)]
     paths: Vec<PathBuf>,
 
-    /// Remove source files after successful copy (verified by Blake3 hash)
+    /// Move: remove each source only after every copy of that source passed its Blake3 check and the final check for changes from outside prcp. A source with a problem stays whole, and the run fails. -r is --rm, not recursion (use -R)
+    // Maintainers: never give --recursive the short form -r. In cp, -r means recursive, but in
+    // prcp -r was --rm first, and a recursive -r turns a habit from cp into a move.
     #[arg(long, short = 'r')]
     rm: bool,
+
+    /// Copy directories and everything in them. Before the first copy, prcp shows where each source lands, and on a terminal it asks first (-y skips the question). The short form is -R only, because -r is --rm
+    // Maintainers: never give this flag the short form -r. In cp, -r means recursive, but in
+    // prcp -r was --rm first, and a recursive -r turns a habit from cp into a move.
+    #[arg(long, short = 'R')]
+    recursive: bool,
 
     /// Skip Blake3 verification after copy (not allowed with --rm)
     #[arg(long)]
@@ -290,31 +305,48 @@ fn format_buffer_size(size: usize) -> String {
     }
 }
 
-/// Resolve source patterns into a list of files.
+/// Hint that tells the user how to copy a directory. Error and warning messages share it.
+const RECURSIVE_HINT: &str = "use --recursive/-R to copy directories";
+
+/// Resolve source patterns into a list of source paths.
+///
+/// The list holds files. It also holds directories when `recursive` is true.
 ///
 /// # Behavior
 ///
 /// For each pattern:
 /// 1. If the path exists as a literal file, use it directly (no glob expansion)
-/// 2. If `literal` is false and the path contains glob characters (*, ?, []),
-///    expand the glob and collect matching files
-/// 3. Otherwise, return an error (path doesn't exist or is not a file)
+/// 2. If `recursive` is true and the path is a literal directory, keep it as given.
+///    A symlink to a directory counts as a directory
+/// 3. If `literal` is false and the path contains glob characters (*, ?, []),
+///    expand the glob. Keep each matched file. Keep each matched directory when
+///    `recursive` is true. Without `recursive`, skip each matched directory and
+///    print a warning that names `--recursive`
+/// 4. Otherwise, return an error (path doesn't exist or is neither a file nor an
+///    allowed directory)
 ///
 /// This "literal-first" approach (like `mv` and `cp`) allows filenames containing
 /// glob characters (e.g., `[Artist Name] - Song.mp3`) to work without escaping.
 ///
 /// # Arguments
 ///
-/// * `patterns` - Paths that may be literal files or glob patterns
+/// * `patterns` - Paths that may be literal files, literal directories, or glob patterns
 /// * `literal` - If true, disable glob expansion entirely (all paths treated as literals)
+/// * `recursive` - If true, accept directories as sources. The caller copies each directory
+///   itself, with everything in it
 ///
 /// # Errors
 ///
 /// Returns an error if:
-/// - A glob pattern matches no files
-/// - A literal path doesn't exist or is not a file
-/// - Glob iteration encounters errors (collected and reported)
-fn resolve_sources(patterns: &[PathBuf], literal: bool) -> Result<Vec<PathBuf>> {
+/// - A glob pattern matches nothing that it can keep
+/// - A literal path doesn't exist
+/// - A literal path is a directory and `recursive` is false (the error names `--recursive`)
+/// - A literal path is neither a file nor a directory
+/// - Glob iteration encounters errors and nothing matched (the errors are collected into
+///   the message)
+///
+/// Glob iteration errors are only a warning when the pattern also matched something.
+fn resolve_sources(patterns: &[PathBuf], literal: bool, recursive: bool) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     let mut glob_errors: Vec<String> = Vec::new();
 
@@ -323,6 +355,13 @@ fn resolve_sources(patterns: &[PathBuf], literal: bool) -> Result<Vec<PathBuf>> 
         // with glob characters (e.g., [brackets]) to work when they're literal filenames.
         // This single is_file() check avoids redundant syscalls in the common case.
         if pattern.is_file() {
+            files.push(pattern.clone());
+            continue;
+        }
+
+        // With --recursive, a literal directory is a source. Keep the path as given.
+        // is_dir() follows a symlink on purpose. A later step decides what to do with it.
+        if recursive && pattern.is_dir() {
             files.push(pattern.clone());
             continue;
         }
@@ -340,8 +379,15 @@ fn resolve_sources(patterns: &[PathBuf], literal: bool) -> Result<Vec<PathBuf>> 
             for entry in glob_iter {
                 match entry {
                     Ok(path) => {
-                        if path.is_file() {
+                        if path.is_file() || (recursive && path.is_dir()) {
                             matches.push(path);
+                        } else if path.is_dir() {
+                            // Without --recursive, a move would leave the directory behind
+                            // and say nothing. Warn so the user sees it.
+                            eprintln!(
+                                "Warning: Skipping directory '{}' ({RECURSIVE_HINT})",
+                                path.display()
+                            );
                         }
                     }
                     Err(e) => {
@@ -368,7 +414,13 @@ fn resolve_sources(patterns: &[PathBuf], literal: bool) -> Result<Vec<PathBuf>> 
             if !pattern.exists() {
                 anyhow::bail!("Source '{}' does not exist", pattern.display());
             }
-            // Path exists but is not a file (e.g., directory)
+            // A directory needs --recursive. Any other kind of path is not a file.
+            if pattern.is_dir() {
+                anyhow::bail!(
+                    "Source '{}' is a directory ({RECURSIVE_HINT})",
+                    pattern.display()
+                );
+            }
             anyhow::bail!("Source '{}' is not a file", pattern.display());
         }
     }
@@ -385,6 +437,137 @@ fn resolve_sources(patterns: &[PathBuf], literal: bool) -> Result<Vec<PathBuf>> 
     // so resolve_sources is never called with an empty slice.
 
     Ok(files)
+}
+
+/// The end of the warning for a node that prcp does not copy.
+const SKIP_WARNING_TAIL: &str = "prcp copies only files, directories, and symlinks";
+
+/// The headline of the error for a part of the source tree that prcp cannot read.
+const WALK_ERROR_HEADLINE: &str =
+    "Cannot read part of the source tree (use --continue-on-error to copy the rest):";
+
+/// The message for a `--rm` run that stopped before the end of the plan.
+const NO_SOURCE_REMOVED_AFTER_STOP: &str =
+    "No source was removed, because the run stopped before the end.";
+
+/// The failure text for a destination that exists and that prcp did not overwrite.
+const SKIPPED_DESTINATION_EXISTS: &str = "Skipped (destination exists)";
+
+/// The start of the failure text for a symlink that prcp could not recreate.
+const SYMLINK_FAILURE: &str = "Failed to create symlink";
+
+/// Create a symlink at `link` that points to `target`.
+///
+/// On Unix this calls the `symlink` system call. On other platforms it returns
+/// an `Unsupported` error.
+#[cfg(unix)]
+fn recreate_symlink(target: &Path, link: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+/// Create a symlink at `link` that points to `target`.
+///
+/// On Unix this calls the `symlink` system call. On other platforms it returns
+/// an `Unsupported` error.
+#[cfg(not(unix))]
+fn recreate_symlink(_target: &Path, _link: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "symlinks are not supported on this platform",
+    ))
+}
+
+/// Recreate one symlink at `link` and check the result.
+///
+/// Makes the parent directory when it is missing, creates the link, then reads
+/// the link back. The function does not follow the link and does not replace an
+/// existing node. The caller removes an existing destination first.
+///
+/// # Errors
+///
+/// Returns an error when the parent directory or the link cannot be created, when
+/// the link cannot be read back, or when the link reads back with another target.
+fn copy_symlink(target: &Path, link: &Path) -> Result<()> {
+    if let Some(parent) = link.parent() {
+        fs::create_dir_all(parent).context("cannot create the parent directory")?;
+    }
+    recreate_symlink(target, link)?;
+    let written = fs::read_link(link).context("cannot read the new link back")?;
+    if written != target {
+        anyhow::bail!(
+            "the new link points to '{}' and not to '{}'",
+            written.display(),
+            target.display()
+        );
+    }
+    Ok(())
+}
+
+/// Decide if prcp may overwrite an existing destination.
+///
+/// `--yes` allows it and `--skip-existing` refuses it. Without either flag, this
+/// function pauses the key listener, leaves raw mode, and asks the user. Returns
+/// true when the destination may be overwritten.
+///
+/// # Errors
+///
+/// Returns an error when prcp cannot write the prompt or read the answer.
+fn confirm_overwrite(
+    dest: &Path,
+    args: &Args,
+    raw_mode_guard: &mut RawModeGuard,
+    input_active: &AtomicBool,
+) -> Result<bool> {
+    if args.yes {
+        return Ok(true);
+    }
+    if args.skip_existing {
+        return Ok(false);
+    }
+
+    // Pause key listener while prompting
+    input_active.store(true, Ordering::SeqCst);
+
+    eprint!(
+        "\nDestination '{}' already exists. Overwrite? (y/N): ",
+        dest.display()
+    );
+    io::stderr().flush()?;
+
+    // Temporarily disable raw mode for input (guard ensures restoration)
+    raw_mode_guard.disable_temporarily();
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+
+    // Re-enable raw mode and resume key listener
+    raw_mode_guard.restore();
+    input_active.store(false, Ordering::SeqCst);
+
+    Ok(input.trim().eq_ignore_ascii_case("y"))
+}
+
+/// The question that lets a person stop the run before the first copy.
+const CONTINUE_QUESTION: &str = "Continue? (y/N): ";
+
+/// The message for a run that a person stopped at a question before the first copy.
+const OPERATION_CANCELLED: &str = "Operation cancelled";
+
+/// Ask the question that lets a person stop the run before the first copy.
+///
+/// Writes [`CONTINUE_QUESTION`] to `output`, then reads one line from `input`.
+/// Only `y` or `Y` continues. Any other line, an empty line, and the end of the
+/// input all stop the run, so the safe answer is the default.
+///
+/// # Errors
+///
+/// Returns an error when the question cannot be written or the answer cannot be read.
+fn ask_to_continue(input: &mut impl io::BufRead, output: &mut impl Write) -> io::Result<bool> {
+    write!(output, "{CONTINUE_QUESTION}")?;
+    output.flush()?;
+    let mut answer = String::new();
+    input.read_line(&mut answer)?;
+    Ok(answer.trim().eq_ignore_ascii_case("y"))
 }
 
 #[tokio::main]
@@ -412,34 +595,59 @@ async fn main() -> Result<()> {
     let source_paths: Vec<PathBuf> = source_paths.to_vec();
 
     // Resolve all source files (handles glob patterns)
-    let sources = resolve_sources(&source_paths, args.literal)?;
-    let total_files = sources.len();
+    let sources = resolve_sources(&source_paths, args.literal, args.recursive)?;
+    // Decide every destination before any copy starts
+    let plan = CopyPlan::build(&sources, &destination, args.recursive)?;
+    // A move must not touch what another operand checks or removes
+    if args.rm {
+        move_gate::refuse_overlapping_operands(&plan)?;
+    }
+    let total_files = plan.file_count();
 
-    // Validate destination for multi-file operations
-    if total_files > 1 {
-        // For multiple files, destination must be a directory
-        // Check if exists and is NOT a directory (error case)
-        if destination.exists() && !destination.is_dir() {
-            anyhow::bail!(
-                "Destination '{}' is not a directory (required for multiple source files)",
-                destination.display()
-            );
+    // Tell the user about each node that the plan skips, before any copy starts
+    for skipped in plan.skipped() {
+        eprintln!(
+            "Warning: Skipping '{}' ({}): {SKIP_WARNING_TAIL}",
+            skipped.path.display(),
+            skipped.reason
+        );
+    }
+
+    // A part of the tree that prcp cannot read stops the run before any copy,
+    // unless the user asks to copy the rest
+    if !plan.walk_errors().is_empty() && !args.continue_on_error {
+        let lines: String = plan
+            .walk_errors()
+            .iter()
+            .map(|error| format!("\n  {}: {}", error.path.display(), error.message))
+            .collect();
+        anyhow::bail!("{WALK_ERROR_HEADLINE}{lines}");
+    }
+
+    // Show where each source of a recursive run lands, before the first copy. A
+    // person at a terminal can then stop a run that would land in the wrong place.
+    let action = if args.rm {
+        landing::Action::Move
+    } else {
+        landing::Action::Copy
+    };
+    if let Some(preview) = landing::describe(&plan, action) {
+        eprint!("{preview}");
+        if !args.yes
+            && io::stdin().is_terminal()
+            && !ask_to_continue(&mut io::stdin().lock(), &mut io::stderr())?
+        {
+            println!("{OPERATION_CANCELLED}");
+            return Ok(());
         }
-        // Note: Directory creation is deferred until we're about to copy the first file
-        // This avoids creating empty directories if all operations fail
     }
 
     // Warn about potentially dangerous combination
     if args.rm && args.continue_on_error && total_files > 1 && !args.yes {
         eprintln!("Warning: Using --rm with --continue-on-error may result in partial moves.");
         eprintln!("Some source files may be deleted while others remain if errors occur.");
-        eprint!("Continue? (y/N): ");
-        io::stderr().flush()?;
-
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        if !input.trim().eq_ignore_ascii_case("y") {
-            println!("Operation cancelled");
+        if !ask_to_continue(&mut io::stdin().lock(), &mut io::stderr())? {
+            println!("{OPERATION_CANCELLED}");
             return Ok(());
         }
     }
@@ -554,7 +762,7 @@ async fn main() -> Result<()> {
     // Only enable for single-file copies - raw mode breaks indicatif's MultiProgress
     // because \n doesn't include \r in raw mode, causing progress bars to scroll.
     // For multi-file copies, Ctrl+C still works via terminal SIGINT.
-    let mut raw_mode_guard = if total_files == 1 {
+    let mut raw_mode_guard = if plan.is_single_file() {
         RawModeGuard::new()
     } else {
         RawModeGuard::disabled()
@@ -570,7 +778,7 @@ async fn main() -> Result<()> {
     let verify_enabled = !args.no_verify;
     let total_batch_bytes = if total_files > 1 {
         // Calculate total batch work; if it fails, we'll continue without the batch progress bar
-        calculate_total_batch_bytes(&sources, verify_enabled).ok()
+        calculate_total_batch_bytes(&plan.file_sources(), verify_enabled).ok()
     } else {
         None
     };
@@ -603,6 +811,13 @@ async fn main() -> Result<()> {
     let mut failures: Vec<(PathBuf, String)> = Vec::new();
     // Track files skipped due to --skip-existing (not counted as failures)
     let mut skipped_existing: Vec<PathBuf> = Vec::new();
+    // With --continue-on-error, a part of the tree that prcp cannot read is a failure
+    for error in plan.walk_errors() {
+        failures.push((
+            error.path.clone(),
+            format!("Cannot read: {}", error.message),
+        ));
+    }
     let mut successful_copies = 0_u64;
     let mut total_bytes_copied = 0_u64;
     let mut total_copy_duration = Duration::ZERO;
@@ -611,26 +826,121 @@ async fn main() -> Result<()> {
     // Track early exit errors (for proper cleanup before returning)
     let mut early_exit_error: Option<String> = None;
 
+    // Track a stop before the end of the plan (cancel, declined prompt, or fatal error)
+    let mut stopped_early = false;
+
     // Track completed files for batch progress display
     let mut completed_files = 0_usize;
 
-    // Copy each file
-    for source in &sources {
+    // The ledger holds what the loop proved, and a snapshot of the destination as the
+    // copy finds it. The final check after the loop compares both with the tree.
+    let mut ledger = RunLedger::new(&plan, action);
+
+    // Run each plan entry. The plan lists every directory before its contents.
+    for (index, entry) in plan.entries().iter().enumerate() {
         // Check for shutdown
         if shutdown.load(Ordering::SeqCst) {
             eprintln!("\nCopy cancelled by user");
+            stopped_early = true;
             break;
         }
 
-        // Resolve destination path
-        let dest_path = if destination.is_dir() {
-            let filename = source
-                .file_name()
-                .ok_or_else(|| anyhow::anyhow!("Source '{}' has no filename", source.display()))?;
-            destination.join(filename)
-        } else {
-            destination.clone()
-        };
+        // A destination path that somebody else made, changed, or removed after the
+        // snapshot is not prcp's to write over. Stop, or go on with the next entry.
+        if let Some(change) = ledger.change_before_copy(index) {
+            if entry.kind == EntryKind::File {
+                if let (Some(pb), Ok(metadata)) = (&batch_pb, fs::metadata(&entry.source)) {
+                    current_total_batch_bytes = current_total_batch_bytes
+                        .saturating_sub(batch_bytes_of(metadata.len(), verify_enabled));
+                    pb.set_length(current_total_batch_bytes);
+                }
+            }
+            if args.continue_on_error {
+                failures.push((entry.source.clone(), change.to_string()));
+                continue;
+            }
+            early_exit_error = Some(change.to_string());
+            stopped_early = true;
+            break;
+        }
+
+        // Make the directory. A file entry makes its own parent, so this keeps empty ones.
+        if entry.kind == EntryKind::Directory {
+            if let Err(e) = fs::create_dir_all(&entry.destination) {
+                if args.continue_on_error {
+                    failures.push((
+                        entry.source.clone(),
+                        format!("Failed to create directory: {}", e),
+                    ));
+                    continue;
+                }
+                early_exit_error = Some(format!(
+                    "Failed to create directory '{}': {}",
+                    entry.destination.display(),
+                    e
+                ));
+                stopped_early = true;
+                break;
+            }
+            ledger.record_directory(index);
+            continue;
+        }
+        // Recreate the symlink. prcp never follows it, so a link that points nowhere copies too.
+        if let EntryKind::Symlink { target } = &entry.kind {
+            let dest = &entry.destination;
+            if fs::symlink_metadata(dest).is_ok() {
+                if !confirm_overwrite(dest, &args, &mut raw_mode_guard, &input_active)? {
+                    if args.skip_existing {
+                        skipped_existing.push(entry.source.clone());
+                        ledger.record_existing_kept(index);
+                    } else {
+                        failures
+                            .push((entry.source.clone(), SKIPPED_DESTINATION_EXISTS.to_string()));
+                    }
+                    continue;
+                }
+                if let Err(e) = fs::remove_file(dest) {
+                    let error_msg =
+                        format!("{SYMLINK_FAILURE}: cannot replace the destination: {e}");
+                    if args.continue_on_error {
+                        failures.push((entry.source.clone(), error_msg));
+                        continue;
+                    }
+                    early_exit_error = Some(format!("{error_msg} ('{}')", dest.display()));
+                    stopped_early = true;
+                    break;
+                }
+            }
+            match copy_symlink(target, dest) {
+                Ok(()) => {
+                    ledger.record_symlink(index);
+                    if !args.quiet {
+                        let _ = multi.println(format!(
+                            "{} link '{}' -> '{}'",
+                            "ok".green(),
+                            dest.display(),
+                            target.display()
+                        ));
+                    }
+                }
+                Err(e) => {
+                    let error_msg = format!("{SYMLINK_FAILURE}: {e}");
+                    if args.continue_on_error {
+                        failures.push((entry.source.clone(), error_msg));
+                        continue;
+                    }
+                    early_exit_error = Some(format!("{error_msg} ('{}')", dest.display()));
+                    stopped_early = true;
+                    break;
+                }
+            }
+            continue;
+        }
+        if entry.kind != EntryKind::File {
+            continue;
+        }
+        let source = &entry.source;
+        let dest_path = entry.destination.clone();
 
         // Get file metadata
         let metadata = match fs::metadata(source) {
@@ -649,48 +959,22 @@ async fn main() -> Result<()> {
             }
         };
         let file_size = metadata.len();
+        let source_stamp = FileStamp::from_metadata(&metadata);
 
         // Calculate bytes this file contributes to batch work (copy + optional verify)
-        let file_batch_bytes = if verify_enabled {
-            file_size.saturating_mul(2)
-        } else {
-            file_size
-        };
+        let file_batch_bytes = batch_bytes_of(file_size, verify_enabled);
 
         // Check if destination exists
         if dest_path.exists() {
-            let should_overwrite = if args.yes {
-                true
-            } else if args.skip_existing {
-                false
-            } else {
-                // Pause key listener while prompting
-                input_active.store(true, Ordering::SeqCst);
-
-                eprint!(
-                    "\nDestination '{}' already exists. Overwrite? (y/N): ",
-                    dest_path.display()
-                );
-                io::stderr().flush()?;
-
-                // Temporarily disable raw mode for input (guard ensures restoration)
-                raw_mode_guard.disable_temporarily();
-
-                let mut input = String::new();
-                io::stdin().read_line(&mut input)?;
-
-                // Re-enable raw mode and resume key listener
-                raw_mode_guard.restore();
-                input_active.store(false, Ordering::SeqCst);
-
-                input.trim().eq_ignore_ascii_case("y")
-            };
+            let should_overwrite =
+                confirm_overwrite(&dest_path, &args, &mut raw_mode_guard, &input_active)?;
 
             if !should_overwrite {
                 // When --skip-existing is used, track as skipped (not a failure)
                 // Otherwise, track as a failure or cancel the operation
                 if args.skip_existing {
                     skipped_existing.push(source.clone());
+                    ledger.record_existing_kept(index);
                     // Reduce batch total for skipped file
                     if let Some(ref pb) = batch_pb {
                         current_total_batch_bytes =
@@ -699,7 +983,7 @@ async fn main() -> Result<()> {
                     }
                     continue;
                 } else if args.continue_on_error || total_files > 1 {
-                    let error_msg = "Skipped (destination exists)".to_string();
+                    let error_msg = SKIPPED_DESTINATION_EXISTS.to_string();
                     failures.push((source.clone(), error_msg));
                     // Reduce batch total for skipped file
                     if let Some(ref pb) = batch_pb {
@@ -710,6 +994,7 @@ async fn main() -> Result<()> {
                     continue;
                 } else {
                     println!("Copy cancelled");
+                    stopped_early = true;
                     break;
                 }
             }
@@ -870,6 +1155,7 @@ async fn main() -> Result<()> {
 
                 // Exit early if verification was cancelled (cleanup will happen at end of main)
                 if early_exit_error.is_some() {
+                    stopped_early = true;
                     break;
                 }
 
@@ -884,42 +1170,24 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                // Remove source if --rm and verification passed (or was skipped, which is blocked by flag validation)
-                let should_allow_removal = matches!(
-                    verify_outcome,
-                    VerifyOutcome::Passed { .. } | VerifyOutcome::Skipped
-                );
-                let removed = if args.rm && should_allow_removal {
-                    match fs::remove_file(source) {
-                        Ok(()) => true,
-                        Err(e) => {
-                            let error_msg =
-                                format!("Failed to remove source '{}': {}", source.display(), e);
-                            eprintln!("\n{}", error_msg);
-                            if args.continue_on_error {
-                                failures.push((source.clone(), error_msg));
-                            } else {
-                                anyhow::bail!("{}", error_msg);
-                            }
-                            false
-                        }
+                // Record the copy and how the loop proved it. The final check compares the
+                // record with the tree, and a move removes a source only after a Blake3 check.
+                match verify_outcome {
+                    VerifyOutcome::Passed { .. } => {
+                        ledger.record_file(index, source_stamp, Verification::Passed);
                     }
-                } else {
-                    false
-                };
+                    VerifyOutcome::Skipped => {
+                        ledger.record_file(index, source_stamp, Verification::Skipped);
+                    }
+                    VerifyOutcome::Failed => {}
+                }
 
                 // Print per-file stats (unless quiet mode, but always show problems)
-                let is_problem =
-                    matches!(verify_outcome, VerifyOutcome::Failed) || (args.rm && !removed);
+                let is_problem = matches!(verify_outcome, VerifyOutcome::Failed);
 
                 if !args.quiet || is_problem {
                     let status = match &verify_outcome {
                         VerifyOutcome::Failed => "fail".red(),
-                        VerifyOutcome::Passed { .. } | VerifyOutcome::Skipped
-                            if args.rm && !removed =>
-                        {
-                            "partial".yellow()
-                        }
                         _ => "ok".green(),
                     };
 
@@ -980,6 +1248,18 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Set the directory permissions last, so a read-only source directory does not
+    // stop the copy of its contents. A run that stopped early leaves them as they are.
+    if !stopped_early {
+        for (path, error) in plan.apply_directory_permissions() {
+            eprintln!(
+                "Warning: Cannot set the permissions of '{}': {}",
+                path.display(),
+                error
+            );
+        }
+    }
+
     // Signal key listener and signal handler to exit (operation complete)
     key_listener_done.store(true, Ordering::SeqCst);
     drop(resize_shutdown_tx.take()); // Signal resize task to exit
@@ -996,6 +1276,28 @@ async fn main() -> Result<()> {
     let _ = key_task.await;
     let _ = signal_task.await;
     let _ = resize_task.await;
+
+    // Final check: walk the source and the destination again, and report each change
+    // that prcp did not make. With --rm, the gate then removes the originals of each
+    // source that passed. A run that stopped early checks nothing and removes nothing.
+    let mut run_report = None;
+    if stopped_early {
+        if args.rm {
+            eprintln!("{NO_SOURCE_REMOVED_AFTER_STOP}");
+        }
+    } else {
+        let report = ledger.finish();
+        for line in report.error_lines() {
+            eprintln!("{line}");
+        }
+        if !args.quiet && !report.removed.is_empty() {
+            println!(
+                "Moved {} source(s): removed the originals after verification.",
+                report.removed.len()
+            );
+        }
+        run_report = Some(report);
+    }
 
     // Check for early exit error (set during verification cancellation)
     if let Some(error_msg) = early_exit_error {
@@ -1026,9 +1328,6 @@ async fn main() -> Result<()> {
                     verify_time,
                     verify_speed
                 );
-                if args.rm {
-                    println!("Source files removed after verification.");
-                }
             } else {
                 // Either --no-verify was used, or all verifications failed
                 println!(
@@ -1069,6 +1368,11 @@ async fn main() -> Result<()> {
             eprintln!("  {}: {}", path.display(), error);
         }
         anyhow::bail!("{} file(s) failed to copy", failures.len());
+    }
+
+    // A run whose final check found a problem never ends in success.
+    if let Some(report) = run_report.filter(|report| !report.is_complete()) {
+        anyhow::bail!("{}", report.summary());
     }
 
     Ok(())
@@ -1249,6 +1553,16 @@ fn calculate_file_hash(
     }
 
     Ok(Blake3Hash::from(hasher.finalize()))
+}
+
+/// Return the bytes that one file adds to the batch work: one read to copy it, and one
+/// more to verify it when verification is on.
+fn batch_bytes_of(file_size: u64, verify_enabled: bool) -> u64 {
+    if verify_enabled {
+        file_size.saturating_mul(2)
+    } else {
+        file_size
+    }
 }
 
 /// Calculate total bytes to process from all source files.
@@ -2410,6 +2724,74 @@ mod tests {
         }
     }
 
+    mod ask_to_continue_tests {
+        use super::*;
+
+        /// Type `typed` at the question. Return the answer and what the question wrote.
+        fn answer(typed: &str) -> (bool, String) {
+            let mut output = Vec::new();
+            let yes = ask_to_continue(&mut typed.as_bytes(), &mut output).unwrap();
+            (yes, String::from_utf8(output).unwrap())
+        }
+
+        #[test]
+        fn y_continues_after_the_question() {
+            assert_eq!(answer("y\n"), (true, "Continue? (y/N): ".to_string()));
+        }
+
+        #[test]
+        fn capital_y_continues() {
+            assert!(answer("Y\n").0);
+        }
+
+        #[test]
+        fn n_stops() {
+            assert!(!answer("n\n").0);
+        }
+
+        #[test]
+        fn enter_alone_stops() {
+            assert!(!answer("\n").0);
+        }
+
+        #[test]
+        fn end_of_input_stops() {
+            assert!(!answer("").0);
+        }
+    }
+
+    mod args_tests {
+        use super::*;
+        use clap::CommandFactory;
+
+        #[test]
+        fn recursive_flag_has_short_capital_r_and_small_r_stays_rm() {
+            let command = Args::command();
+            let recursive = command
+                .get_arguments()
+                .find(|arg| arg.get_long() == Some("recursive"))
+                .unwrap();
+            assert_eq!(recursive.get_short(), Some('R'));
+
+            let small_r = command
+                .get_arguments()
+                .find(|arg| arg.get_short() == Some('r'))
+                .unwrap();
+            assert_eq!(small_r.get_long(), Some("rm"));
+        }
+
+        #[test]
+        fn small_r_parses_as_rm_and_capital_r_as_recursive() {
+            let small = Args::try_parse_from(["prcp", "-r", "a", "b"]).unwrap();
+            assert!(small.rm);
+            assert!(!small.recursive);
+
+            let capital = Args::try_parse_from(["prcp", "-R", "a", "b"]).unwrap();
+            assert!(capital.recursive);
+            assert!(!capital.rm);
+        }
+    }
+
     mod resolve_sources_tests {
         use super::*;
         use std::fs;
@@ -2421,7 +2803,7 @@ mod tests {
             let file = temp_dir.path().join("test.txt");
             fs::write(&file, "content").unwrap();
 
-            let result = resolve_sources(std::slice::from_ref(&file), false).unwrap();
+            let result = resolve_sources(std::slice::from_ref(&file), false, false).unwrap();
             assert_eq!(result, vec![file]);
         }
 
@@ -2433,7 +2815,7 @@ mod tests {
             fs::write(&file, "content").unwrap();
 
             // Without --literal flag, but file exists literally
-            let result = resolve_sources(std::slice::from_ref(&file), false).unwrap();
+            let result = resolve_sources(std::slice::from_ref(&file), false, false).unwrap();
             assert_eq!(result, vec![file]);
         }
 
@@ -2446,7 +2828,7 @@ mod tests {
             fs::write(&file2, "content2").unwrap();
 
             let pattern = temp_dir.path().join("*.txt");
-            let result = resolve_sources(&[pattern], false).unwrap();
+            let result = resolve_sources(&[pattern], false, false).unwrap();
 
             assert_eq!(result.len(), 2);
             assert!(result.contains(&file1));
@@ -2461,7 +2843,7 @@ mod tests {
 
             // Pattern that would match, but --literal is set
             let pattern = temp_dir.path().join("*.txt");
-            let result = resolve_sources(&[pattern], true);
+            let result = resolve_sources(&[pattern], true, false);
 
             // Should fail because "*.txt" doesn't exist as a literal file
             assert!(result.is_err());
@@ -2474,7 +2856,7 @@ mod tests {
             let temp_dir = TempDir::new().unwrap();
             let nonexistent = temp_dir.path().join("does_not_exist.txt");
 
-            let result = resolve_sources(&[nonexistent], false);
+            let result = resolve_sources(&[nonexistent], false, false);
             assert!(result.is_err());
             let err = result.unwrap_err().to_string();
             assert!(err.contains("does not exist"));
@@ -2486,10 +2868,46 @@ mod tests {
             let dir = temp_dir.path().join("subdir");
             fs::create_dir(&dir).unwrap();
 
-            let result = resolve_sources(&[dir], false);
+            let result = resolve_sources(&[dir], false, false);
             assert!(result.is_err());
             let err = result.unwrap_err().to_string();
-            assert!(err.contains("not a file"));
+            assert!(err.contains("is a directory"));
+        }
+
+        #[test]
+        fn directory_path_error_names_the_recursive_flag() {
+            let temp_dir = TempDir::new().unwrap();
+            let dir = temp_dir.path().join("subdir");
+            fs::create_dir(&dir).unwrap();
+
+            let err = resolve_sources(&[dir], false, false)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("--recursive"), "got: {err}");
+        }
+
+        #[test]
+        fn recursive_accepts_a_literal_directory() {
+            let temp_dir = TempDir::new().unwrap();
+            let dir = temp_dir.path().join("subdir");
+            fs::create_dir(&dir).unwrap();
+
+            let result = resolve_sources(std::slice::from_ref(&dir), false, true).unwrap();
+            assert_eq!(result, vec![dir]);
+        }
+
+        #[test]
+        fn recursive_glob_keeps_directory_matches() {
+            let temp_dir = TempDir::new().unwrap();
+            let file = temp_dir.path().join("a.txt");
+            let dir = temp_dir.path().join("sub");
+            fs::write(&file, "content").unwrap();
+            fs::create_dir(&dir).unwrap();
+
+            let pattern = temp_dir.path().join("*");
+            let mut result = resolve_sources(&[pattern], false, true).unwrap();
+            result.sort();
+            assert_eq!(result, vec![file, dir]);
         }
 
         #[test]
@@ -2500,7 +2918,7 @@ mod tests {
             fs::write(&file, "content").unwrap();
 
             let pattern = temp_dir.path().join("*.xyz");
-            let result = resolve_sources(&[pattern], false);
+            let result = resolve_sources(&[pattern], false, false);
 
             assert!(result.is_err());
             let err = result.unwrap_err().to_string();
@@ -2515,7 +2933,7 @@ mod tests {
             fs::write(&file1, "content1").unwrap();
             fs::write(&file2, "content2").unwrap();
 
-            let result = resolve_sources(&[file1.clone(), file2.clone()], false).unwrap();
+            let result = resolve_sources(&[file1.clone(), file2.clone()], false, false).unwrap();
             assert_eq!(result, vec![file1, file2]);
         }
 
@@ -2533,7 +2951,8 @@ mod tests {
             fs::write(&bracket_file, "brackets").unwrap();
 
             // When [abc].txt exists, it should be used literally, NOT expanded to a.txt, b.txt
-            let result = resolve_sources(std::slice::from_ref(&bracket_file), false).unwrap();
+            let result =
+                resolve_sources(std::slice::from_ref(&bracket_file), false, false).unwrap();
             assert_eq!(result, vec![bracket_file]);
         }
     }

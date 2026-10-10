@@ -51,7 +51,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `polish` | Updates Rust dependencies across all `Cargo.toml` files in a repo. |
 | `popstop` | Keeps the default audio output awake with an inaudible signal, so USB speakers do not pop or cut the start of a sound. |
 | `portplz` | Generates a consistent unprivileged port number from directory name, git branch, and an optional `--name`. |
-| `prcp` | Copies files with a Unicode progress bar; wildcards, multi-file, and verified move mode. |
+| `prcp` | Copies files and directory trees (`-R`) with a Unicode progress bar; wildcards, multi-file, verified move mode, and a final check for changes that others make during the run. |
 | `prgz` | Like `prcp` but gzip-compresses the file, with the same one-line progress bar and a closing report. |
 | `prhash` | Hashes files (MD5/SHA1/SHA256/SHA512/Blake3) with a progress bar, shasum-compatible output. |
 | `r2-bucket-cleaner` | Lists and optionally clears all objects from a Cloudflare R2 bucket via wrangler. |

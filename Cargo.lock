@@ -6257,6 +6257,7 @@ dependencies = [
  "clap",
  "colored",
  "crossterm",
+ "gitscratch",
  "glob",
  "indicatif",
  "libc",
@@ -6264,6 +6265,7 @@ dependencies = [
  "termbar",
  "testcolor",
  "tokio",
+ "walkdir",
 ]
 
 [[package]]

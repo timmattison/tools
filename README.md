@@ -107,7 +107,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     - To install: `cargo install --git https://github.com/timmattison/tools dirhash`
 - prcp
     - Copies files with a beautiful progress bar using Unicode block characters. Supports wildcards, multi-file copy,
-      and move mode (`--rm`) that verifies SHA256 before removing source. Press space to pause/resume, Ctrl+C to cancel.
+      directory trees (`-R`), and move mode (`--rm`) that removes each source only after every copy of that source
+      passed its Blake3 check. After the last copy, a final check reports each change that another program or person
+      made to the source or the destination during the run. Press space to pause/resume, Ctrl+C to cancel.
     - To install: `cargo install --git https://github.com/timmattison/tools prcp`
 - prgz
     - Similar to `prcp` but instead of copying a file it gzip compresses it. It draws the same one-line progress bar
@@ -2113,9 +2115,131 @@ Copy files with a beautiful progress bar: `prcp <source>... <destination>`
 - Preserves file permissions
 - Wildcard/glob support (e.g., `prcp *.txt backup/`)
 - Multi-file copy with overall progress tracking
-- Move mode with `--rm` flag (verifies SHA256 hash before removing source)
+- A final check after every copy and move. `prcp` walks the source and the destination again, and reports each
+  change that it did not make: a file that appeared, changed, was removed, or was renamed while it ran (see below)
+- Move mode with the `--rm` flag. `prcp` removes no source while it copies. After the last copy, it removes the
+  originals of each source that passed every Blake3 check and the final check. A source stays whole, and the run
+  exits with an error, when a file did not copy, a hash did not match, or the final check found a problem
 - `--continue-on-error` to keep going if some files fail
-- `-y` to skip confirmation prompts
+- `-y` to skip confirmation prompts, also the question after the preview of a recursive run
+- Directory trees with `-R`/`--recursive` (see below)
+
+**Directories (`-R`, `--recursive`)**
+
+`prcp -R src dest` copies a directory and everything in it. Each file goes through the same copy, progress bar, and
+Blake3 check as a single file. The short form is `-R` only. In `prcp`, `-r` is `--rm`, so `cp -r` habits make a move,
+not a copy.
+
+- **Destination.** `prcp` decides every destination before the first copy, the same way as `cp -r`:
+  - If `dest` is a directory, the tree goes to `dest/src/...`.
+  - If `dest` does not exist, `dest` becomes the copy of `src`.
+  - A slash at the end of `src` changes nothing. `rsync` and BSD `cp` read `src/` and `src/.` as "only the contents
+    of `src`", but `prcp` copies the directory itself.
+  - With more than one source, `dest` is always a directory. If it does not exist, `prcp` makes it.
+- **Preview.** Before the first copy, `prcp` shows where each source lands, as an absolute path with the symlinks
+  above it resolved. A directory source also shows if its landing directory is new or already exists, how many files
+  it holds, and one example file. A source with a slash or a `/.` at its end gets a note. Then, when standard input is
+  a terminal, `prcp` asks `Continue? (y/N)`. Only `y` starts the run. Any other answer stops it before any byte is
+  written, and a move keeps every original. `-y` skips the question. A run with no terminal on standard input (a
+  script, a pipe) shows the preview and starts. `-q` does not hide the preview. More than 20 sources show as one
+  count after the first 20.
+
+  ```text
+  $ prcp -R photos/ /Volumes/Backup
+  prcp will copy:
+    photos/ -> /Volumes/Backup/photos/  (new directory, 1204 files)
+      for example: photos/cover.jpg -> /Volumes/Backup/photos/cover.jpg
+  Note: a '/' or a '/.' at the end of a source changes nothing.
+        prcp copies the directory itself, not only its contents.
+  Continue? (y/N):
+  ```
+- **Empty directories** are made at the destination.
+- **Symlinks** in the tree are copied as symlinks with the same target, and `prcp` never follows them. Thus a link
+  that points back up the tree cannot make the copy loop. A source that you name on the command line and that is a
+  symlink to a directory is also copied as a symlink. A symlink to a file that you name is copied as a file, as before.
+- **Special files** (FIFOs, sockets, devices) are not copied. `prcp` prints a warning for each one.
+- **Metadata.** Files and directories keep their mode bits. Modification times and owners are not kept, the same as
+  for a single file.
+- **Refusals.** `prcp` refuses to copy a directory into itself, and to replace a file with a directory. It also refuses
+  to copy a file or a link onto itself. This includes a destination that reaches its source through a symlink or a
+  hard link. The error says `are the same file`, and the run stops before the first copy. If it cannot
+  read a part of the tree, it stops before the first copy. With `--continue-on-error`, it copies the rest.
+- **Without `-R`**, a directory source is an error that names `--recursive`. A glob that matches a directory, for
+  example `prcp 'dir/*' dest/`, copies the files and prints a warning for each directory that it skips.
+
+**The final check (every run)**
+
+The Blake3 check proves each copy at the moment that `prcp` makes it. It cannot see a person or a program that works
+in the source or the destination later in the run. Thus `prcp` takes a snapshot of the destination right before the
+first copy, and after the last copy it checks the whole run again:
+
+- It walks each source directory again. A file that appeared after the copy started was not copied. A file that left
+  the source, or that changed after its copy, no longer matches its copy.
+- It walks each destination directory again and compares it with the snapshot. A path that `prcp` did not write, and
+  that was not there before, appeared during the run. A path from before that changed or left is also a change.
+- It compares each file that it wrote with the stamp that it took right after the Blake3 check: the size, the
+  modification time, and the identity of the file (the device and the inode number). A file that replaced the copy
+  has another identity, also when its size and time are the same. Each link must keep its target, and each directory
+  must still be the directory that `prcp` made.
+- A file or a directory that left one path and appeared at another, with the same identity, was renamed or moved.
+  The report names both paths. A whole tree that appeared, left, or moved is one line, at its top.
+- A `.DS_Store` file has its own line. Finder writes that file into a folder when a person opens the folder.
+
+When the check finds a change, the run exits with an error, and the report ends with a note that something outside
+`prcp` made the change:
+
+```text
+$ prcp -R photos backup
+...
+prcp found problems with the copy of 'photos':
+  'backup/photos/a.jpg' was renamed or moved to 'backup/photos/a-renamed.jpg' during the run
+  'backup/photos/notes.txt' appeared at the destination during the run, and prcp did not make it
+Something outside prcp changed the source or the destination while prcp ran.
+Another program or a person made those changes, not prcp. Make sure that nothing else uses these paths, then run prcp again.
+Error: The copy did not pass its final check: 1 source(s) have problems.
+```
+
+`prcp` also looks before it writes. When the copy gets to a destination path that somebody made, changed, or removed
+after the snapshot, `prcp` does not ask to overwrite it and does not write over it. It stops with an error that names
+the source and the destination. With `--continue-on-error`, it goes on with the next file, and the run fails at the
+end.
+
+A copy does not report a problem again that it already reported when it occurred: a failed copy, a skipped special
+file, or a part of the source that it could not read. A file that `--skip-existing` kept is compared with the
+snapshot too. When two sources of one run land on the same path, the later copy replaces the earlier one. `prcp` made
+that change itself, so it is not a change from outside.
+
+The check has these limits:
+
+- A source that is a file or a link is checked at its own destination path only. `prcp a.txt ~/Downloads/` does not
+  walk all of `~/Downloads`.
+- An edit that keeps the size, the modification time, and the inode number of a file passes. Only a second Blake3
+  read of every file finds it, and that read doubles the read time.
+- A file system that gives no inode numbers (it reports 0), and every file system on Windows, is compared by size
+  and modification time only. A file system that changes the inode number of a file that nobody touched makes the
+  check report that file as changed. That false report costs a failed run, never a lost original.
+- A change after the final check cannot be found.
+
+**Moves (`--rm`)**
+
+A move is a copy first. `prcp --rm` removes nothing until the last copy of the run is done and verified. Then, for
+each source on the command line, it removes the originals only when all of these are true:
+
+- Each file of that source copied and passed its Blake3 check.
+- No file was skipped (`--skip-existing`, a declined prompt, or a special file).
+- The final check (above) found no change in that source or at its destination.
+- No later source of the same run replaced its copy at the destination.
+
+If a check fails, that source keeps **all** of its originals, also the files that copied correctly. `prcp` lists the
+files that caused the failure, and the run exits with an error. Other sources still move. `prcp` checks every source before it removes any, so the removal of one source never
+changes the check of another. If the run stops early
+(Ctrl+C, or an error without `--continue-on-error`), `prcp` removes no source at all. A directory is removed only when
+it is empty, so a file that appears at the last moment also keeps its directory.
+
+A move refuses, before the first copy, two sources that overlap. A source that is inside another source directory is
+one case, and a source given twice is the other. `prcp` names both paths and the fix: give only the outer directory,
+or give the source once. A `**` glob with `-R` can give such sources without you typing them. A copy (no `--rm`) does
+not refuse them.
 
 **Want a `prmv` shorthand?**
 
