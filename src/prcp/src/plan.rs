@@ -18,6 +18,15 @@
 //! non-directory at its root, or when the destination root is inside the
 //! source.
 //!
+//! A destination that is the same node as its source is an error, for every
+//! entry. A file, a directory, or a link is the same node when the device and
+//! the inode of both are equal. A file or a directory compares the nodes that
+//! the copy reaches through a link. A symlink entry compares the links
+//! themselves. A destination that does not exist is not a conflict. The check
+//! also catches a destination that reaches its source through a symlink or a
+//! hard link. It stops the run before the first copy, because the copy would
+//! truncate the shared file.
+//!
 //! # Symlink rules
 //!
 //! The walk never follows a symlink. A symlink inside a tree becomes a
@@ -29,6 +38,7 @@
 //! A FIFO, socket, or device in a tree is not copied. The plan records it as a
 //! skipped entry. A part of a tree that the walk cannot read is a walk error.
 
+use crate::node_identity::NodeIdentity;
 use anyhow::{anyhow, bail, Context, Result};
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -308,6 +318,36 @@ fn special_kind(_file_type: fs::FileType) -> &'static str {
 /// The reason for a special node of an unknown kind.
 const SPECIAL_FILE: &str = "special file";
 
+/// Return an error when the destination of `entry` is the same node as its source.
+///
+/// A file and a directory entry compare the nodes that the copy reaches:
+/// `File::create` writes through a destination link, and the copy reads through
+/// a source link. A symlink entry compares the links themselves, because the
+/// copy replaces the destination link and a move removes the source link. A
+/// destination that does not exist is not a conflict. When the file system
+/// gives no identity for either side, prcp cannot tell and does not refuse.
+fn refuse_same_node(entry: &PlanEntry) -> Result<()> {
+    let follow = !matches!(entry.kind, EntryKind::Symlink { .. });
+    let read = |path: &Path| {
+        if follow {
+            fs::metadata(path)
+        } else {
+            fs::symlink_metadata(path)
+        }
+    };
+    let (Ok(source), Ok(destination)) = (read(&entry.source), read(&entry.destination)) else {
+        return Ok(());
+    };
+    match (NodeIdentity::of(&source), NodeIdentity::of(&destination)) {
+        (Some(from), Some(to)) if from == to => bail!(
+            "'{}' and '{}' are the same file",
+            entry.source.display(),
+            entry.destination.display()
+        ),
+        _ => Ok(()),
+    }
+}
+
 /// The full list of work for one run, decided before any copy starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CopyPlan {
@@ -320,6 +360,10 @@ pub(crate) struct CopyPlan {
 
 impl CopyPlan {
     /// Build the plan for `sources` and `destination`. See the module docs for the rules.
+    ///
+    /// Return an error when an entry has a destination that is the same node
+    /// as its source (also through a symlink or a hard link). The error
+    /// comes before the first copy, also with `--skip-existing`.
     pub(crate) fn build(sources: &[PathBuf], destination: &Path, recursive: bool) -> Result<Self> {
         let container = destination.is_dir() || sources.len() > 1;
         if sources.len() > 1 && destination.exists() && !destination.is_dir() {
@@ -359,6 +403,9 @@ impl CopyPlan {
                     plan.add_leaf(operand, source, root, OperandKind::File, EntryKind::File);
                 }
             }
+        }
+        for entry in &plan.entries {
+            refuse_same_node(entry)?;
         }
         Ok(plan)
     }

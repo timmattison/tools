@@ -9,6 +9,7 @@
 
 mod landing;
 mod move_gate;
+mod node_identity;
 mod plan;
 
 use anyhow::{Context, Result};

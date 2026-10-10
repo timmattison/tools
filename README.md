@@ -2160,7 +2160,9 @@ not a copy.
 - **Special files** (FIFOs, sockets, devices) are not copied. `prcp` prints a warning for each one.
 - **Metadata.** Files and directories keep their mode bits. Modification times and owners are not kept, the same as
   for a single file.
-- **Refusals.** `prcp` refuses to copy a directory into itself, and to replace a file with a directory. If it cannot
+- **Refusals.** `prcp` refuses to copy a directory into itself, and to replace a file with a directory. It also refuses
+  to copy a file or a link onto itself. This includes a destination that reaches its source through a symlink or a
+  hard link. The error says `are the same file`, and the run stops before the first copy. If it cannot
   read a part of the tree, it stops before the first copy. With `--continue-on-error`, it copies the rest.
 - **Without `-R`**, a directory source is an error that names `--recursive`. A glob that matches a directory, for
   example `prcp 'dir/*' dest/`, copies the files and prints a warning for each directory that it skips.
