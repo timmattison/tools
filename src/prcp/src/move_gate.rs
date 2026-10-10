@@ -79,12 +79,13 @@
 //!
 //! # Removal
 //!
-//! Only a move removes. For an operand with no problem, the gate removes each
-//! file and symlink source in plan order. It then removes each directory
-//! source in reverse plan order, children before parents, with `remove_dir`.
-//! That call refuses a directory that is not empty, so a file that appears
-//! after the gate also keeps its directory. The gate collects each removal
-//! error and goes on.
+//! Only a move removes. The gate checks every operand before it removes any,
+//! so the removal of one operand cannot change the check of another. Then, for
+//! an operand with no problem, the gate removes each file and symlink source in
+//! plan order. It then removes each directory source in reverse plan order,
+//! children before parents, with `remove_dir`. That call refuses a directory
+//! that is not empty, so a file that appears after the gate also keeps its
+//! directory. The gate collects each removal error and goes on.
 
 mod destination;
 
@@ -354,6 +355,11 @@ impl<'a> RunLedger<'a> {
 
     /// Run the final check for every operand. For a move, then remove the originals of each
     /// operand that passed. A copy removes nothing.
+    ///
+    /// The call checks every operand before it removes any. The removal of
+    /// one operand then cannot change the check of another, for example when
+    /// a symlink source points at a file that another operand removes. The
+    /// lists of the report keep operand order.
     pub(crate) fn finish(self) -> RunReport {
         let mut report = RunReport {
             action: self.action,
@@ -363,8 +369,10 @@ impl<'a> RunLedger<'a> {
             operands_with_removal_errors: 0,
         };
         let last_writers = self.last_writers();
-        for (index, operand) in self.plan.operands().iter().enumerate() {
-            let problems = self.find_problems(index, &last_writers);
+        let checked: Vec<_> = (0..self.plan.operands().len())
+            .map(|index| self.find_problems(index, &last_writers))
+            .collect();
+        for ((index, operand), problems) in self.plan.operands().iter().enumerate().zip(checked) {
             if !problems.is_empty() {
                 report.with_problems.push(OperandProblems {
                     source: operand.source.clone(),

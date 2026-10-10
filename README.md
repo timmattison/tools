@@ -2231,7 +2231,8 @@ each source on the command line, it removes the originals only when all of these
 - No later source of the same run replaced its copy at the destination.
 
 If a check fails, that source keeps **all** of its originals, also the files that copied correctly. `prcp` lists the
-files that caused the failure, and the run exits with an error. Other sources still move. If the run stops early
+files that caused the failure, and the run exits with an error. Other sources still move. `prcp` checks every source before it removes any, so the removal of one source never
+changes the check of another. If the run stops early
 (Ctrl+C, or an error without `--continue-on-error`), `prcp` removes no source at all. A directory is removed only when
 it is empty, so a file that appears at the last moment also keeps its directory.
 
