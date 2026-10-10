@@ -107,9 +107,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     - To install: `cargo install --git https://github.com/timmattison/tools dirhash`
 - prcp
     - Copies files with a beautiful progress bar using Unicode block characters. Supports wildcards, multi-file copy,
-      directory trees (`-R`), and move mode (`--rm`) that removes the sources only after every copy passed its Blake3
-      check. After the last copy, a final check reports each change that another program or person made to the source
-      or the destination during the run. Press space to pause/resume, Ctrl+C to cancel.
+      directory trees (`-R`), and move mode (`--rm`) that removes each source only after every copy of that source
+      passed its Blake3 check. After the last copy, a final check reports each change that another program or person
+      made to the source or the destination during the run. Press space to pause/resume, Ctrl+C to cancel.
     - To install: `cargo install --git https://github.com/timmattison/tools prcp`
 - prgz
     - Similar to `prcp` but instead of copying a file it gzip compresses it. It draws the same one-line progress bar
