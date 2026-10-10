@@ -991,3 +991,33 @@ fn copy_of_a_directory_and_a_directory_inside_it_still_works() {
     );
     assert_nested_source_intact(&src);
 }
+
+#[cfg(unix)]
+#[test]
+fn move_of_a_file_and_a_symlink_to_it_moves_both_and_blames_nobody() {
+    let temp = TempDir::new().unwrap();
+    let real = temp.path().join("real.txt");
+    let link = temp.path().join("link.txt");
+    let dest = temp.path().join("dest");
+    write_file(&real, "real");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let output = run_prcp([
+        OsString::from("--rm"),
+        OsString::from("-y"),
+        real.clone().into_os_string(),
+        link.clone().into_os_string(),
+        dest.clone().into_os_string(),
+    ]);
+
+    let stderr = visible_stderr(&output);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("Something outside prcp"),
+        "stderr: {stderr}"
+    );
+    assert_eq!(fs::read_to_string(dest.join("real.txt")).unwrap(), "real");
+    assert_eq!(fs::read_to_string(dest.join("link.txt")).unwrap(), "real");
+    assert!(fs::symlink_metadata(&real).is_err());
+    assert!(fs::symlink_metadata(&link).is_err());
+}

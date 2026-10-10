@@ -1988,6 +1988,28 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_move_checks_a_symlink_source_before_the_file_it_points_to_is_removed() {
+        let temp = TempDir::new().unwrap();
+        let real = temp.path().join("real.txt");
+        let link = temp.path().join("link.txt");
+        let dest = temp.path().join("dest");
+        write_file(&real, "real");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        fs::create_dir(&dest).unwrap();
+        let plan = CopyPlan::build(&[real.clone(), link.clone()], &dest, false).unwrap();
+        let ledger = copy_all(&plan, &[]);
+
+        let report = ledger.finish();
+
+        assert!(report.is_complete(), "report: {report:?}");
+        assert_eq!(report.removed, vec![real.clone(), link.clone()]);
+        assert!(report.with_problems.is_empty(), "report: {report:?}");
+        assert!(fs::symlink_metadata(&real).is_err());
+        assert!(fs::symlink_metadata(&link).is_err());
+    }
+
     #[test]
     fn a_file_operand_without_a_record_stays_and_the_other_moves() {
         let temp = TempDir::new().unwrap();
