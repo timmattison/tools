@@ -308,31 +308,44 @@ fn format_buffer_size(size: usize) -> String {
 /// Hint that tells the user how to copy a directory. Error and warning messages share it.
 const RECURSIVE_HINT: &str = "use --recursive/-R to copy directories";
 
-/// Resolve source patterns into a list of files.
+/// Resolve source patterns into a list of source paths.
+///
+/// The list holds files. It also holds directories when `recursive` is true.
 ///
 /// # Behavior
 ///
 /// For each pattern:
 /// 1. If the path exists as a literal file, use it directly (no glob expansion)
-/// 2. If `literal` is false and the path contains glob characters (*, ?, []),
-///    expand the glob and collect matching files
-/// 3. Otherwise, return an error (path doesn't exist or is not a file)
+/// 2. If `recursive` is true and the path is a literal directory, keep it as given.
+///    A symlink to a directory counts as a directory
+/// 3. If `literal` is false and the path contains glob characters (*, ?, []),
+///    expand the glob. Keep each matched file. Keep each matched directory when
+///    `recursive` is true. Without `recursive`, skip each matched directory and
+///    print a warning that names `--recursive`
+/// 4. Otherwise, return an error (path doesn't exist or is neither a file nor an
+///    allowed directory)
 ///
 /// This "literal-first" approach (like `mv` and `cp`) allows filenames containing
 /// glob characters (e.g., `[Artist Name] - Song.mp3`) to work without escaping.
 ///
 /// # Arguments
 ///
-/// * `patterns` - Paths that may be literal files or glob patterns
+/// * `patterns` - Paths that may be literal files, literal directories, or glob patterns
 /// * `literal` - If true, disable glob expansion entirely (all paths treated as literals)
-/// * `recursive` - If true, accept directories as sources. The caller copies their contents
+/// * `recursive` - If true, accept directories as sources. The caller copies each directory
+///   itself, with everything in it
 ///
 /// # Errors
 ///
 /// Returns an error if:
-/// - A glob pattern matches no files
-/// - A literal path doesn't exist or is not a file
-/// - Glob iteration encounters errors (collected and reported)
+/// - A glob pattern matches nothing that it can keep
+/// - A literal path doesn't exist
+/// - A literal path is a directory and `recursive` is false (the error names `--recursive`)
+/// - A literal path is neither a file nor a directory
+/// - Glob iteration encounters errors and nothing matched (the errors are collected into
+///   the message)
+///
+/// Glob iteration errors are only a warning when the pattern also matched something.
 fn resolve_sources(patterns: &[PathBuf], literal: bool, recursive: bool) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     let mut glob_errors: Vec<String> = Vec::new();
