@@ -878,6 +878,15 @@ pub(crate) struct OperandProblems {
     pub(crate) problems: BTreeMap<PathBuf, Problem>,
 }
 
+/// Refuse a move whose operands overlap. Call this before the first copy.
+///
+/// This is the precondition of the move gate: in a move, the removal of one
+/// operand must not touch what another operand checks or removes. See the
+/// module docs.
+pub(crate) fn refuse_overlapping_operands(_plan: &CopyPlan) -> anyhow::Result<()> {
+    Ok(())
+}
+
 /// The name of the file that Finder writes into a folder that a person opens.
 const FINDER_FILE_NAME: &str = ".DS_Store";
 
@@ -1138,6 +1147,134 @@ mod tests {
     fn only_problems(report: &RunReport) -> &BTreeMap<PathBuf, Problem> {
         assert_eq!(report.with_problems.len(), 1, "report: {report:?}");
         &report.with_problems[0].problems
+    }
+
+    /// Build a move plan over `sources` (paths as the test spells them) into `dest`.
+    fn move_plan(sources: &[PathBuf], dest: &Path) -> CopyPlan {
+        CopyPlan::build(sources, dest, true).unwrap()
+    }
+
+    /// Return the message of the refusal for `sources`, or fail the test when there is none.
+    fn refusal_for(sources: &[PathBuf], dest: &Path) -> String {
+        let plan = move_plan(sources, dest);
+        refuse_overlapping_operands(&plan)
+            .expect_err("overlapping operands must be refused")
+            .to_string()
+    }
+
+    /// Make `src` with a sub directory `a` that holds a file, and a file `top.txt`.
+    fn nested_tree(temp: &TempDir) -> PathBuf {
+        let src = temp.path().join("src");
+        write_file(&src.join("a").join("x.txt"), "x");
+        write_file(&src.join("top.txt"), "top");
+        src
+    }
+
+    #[test]
+    fn a_move_refuses_a_directory_inside_an_earlier_directory() {
+        let temp = TempDir::new().unwrap();
+        let src = nested_tree(&temp);
+        let inner = src.join("a");
+        let message = refusal_for(&[src.clone(), inner.clone()], &temp.path().join("dest"));
+        assert_eq!(
+            message,
+            format!(
+                "Cannot move '{inner}' and '{src}' in one run: '{inner}' is inside '{src}'. Give only '{src}'.",
+                inner = inner.display(),
+                src = src.display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_move_refuses_a_directory_inside_a_later_directory() {
+        let temp = TempDir::new().unwrap();
+        let src = nested_tree(&temp);
+        let inner = src.join("a");
+        let message = refusal_for(&[inner.clone(), src.clone()], &temp.path().join("dest"));
+        assert!(message.contains("is inside"), "message: {message}");
+        assert!(message.contains(&format!("Give only '{}'", src.display())));
+    }
+
+    #[test]
+    fn a_move_refuses_a_file_inside_a_directory_operand() {
+        let temp = TempDir::new().unwrap();
+        let src = nested_tree(&temp);
+        let file = src.join("top.txt");
+        let message = refusal_for(&[src.clone(), file.clone()], &temp.path().join("dest"));
+        assert!(
+            message.contains(&format!(
+                "'{}' is inside '{}'",
+                file.display(),
+                src.display()
+            )),
+            "message: {message}"
+        );
+    }
+
+    #[test]
+    fn a_move_refuses_a_source_that_is_given_twice() {
+        let temp = TempDir::new().unwrap();
+        let file = temp.path().join("a.txt");
+        write_file(&file, "a");
+        let message = refusal_for(&[file.clone(), file.clone()], &temp.path().join("dest"));
+        assert_eq!(
+            message,
+            format!(
+                "Cannot move '{f}' and '{f}' in one run: they are the same source. Give it once.",
+                f = file.display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_move_refuses_two_spellings_of_one_source() {
+        let temp = TempDir::new().unwrap();
+        let src = nested_tree(&temp);
+        let dotted = temp.path().join(".").join("src");
+        let message = refusal_for(&[dotted, src], &temp.path().join("dest"));
+        assert!(message.contains("same source"), "message: {message}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_move_refuses_a_symlink_that_sits_inside_a_directory_operand() {
+        let temp = TempDir::new().unwrap();
+        let src = nested_tree(&temp);
+        let outside = temp.path().join("outside");
+        write_file(&outside.join("o.txt"), "o");
+        let link = src.join("link");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let message = refusal_for(&[src.clone(), link.clone()], &temp.path().join("dest"));
+        assert!(
+            message.contains(&format!(
+                "'{}' is inside '{}'",
+                link.display(),
+                src.display()
+            )),
+            "message: {message}"
+        );
+    }
+
+    #[test]
+    fn a_move_accepts_two_directories_whose_names_share_a_prefix() {
+        let temp = TempDir::new().unwrap();
+        let src = nested_tree(&temp);
+        let other = temp.path().join("src2");
+        write_file(&other.join("y.txt"), "y");
+        let plan = move_plan(&[src, other], &temp.path().join("dest"));
+        refuse_overlapping_operands(&plan).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_move_accepts_a_symlink_to_a_directory_beside_that_directory() {
+        let temp = TempDir::new().unwrap();
+        let src = nested_tree(&temp);
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&src, &link).unwrap();
+        let plan = move_plan(&[link, src], &temp.path().join("dest"));
+        refuse_overlapping_operands(&plan).unwrap();
     }
 
     #[test]

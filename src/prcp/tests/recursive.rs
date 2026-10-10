@@ -867,3 +867,127 @@ fn move_that_stops_on_the_first_error_removes_no_source() {
     );
     assert!(bad.exists());
 }
+
+/// Make `src` with `src/a/x.txt` and `src/top.txt`. Return `src`.
+fn make_nested_source(root: &Path) -> std::path::PathBuf {
+    let src = root.join("src");
+    write_file(&src.join("a").join("x.txt"), "x");
+    write_file(&src.join("a").join("y.txt"), "y");
+    write_file(&src.join("top.txt"), "top");
+    src
+}
+
+/// Assert that every file of `make_nested_source` is still in place with its content.
+fn assert_nested_source_intact(src: &Path) {
+    assert_eq!(
+        fs::read_to_string(src.join("a").join("x.txt")).unwrap(),
+        "x"
+    );
+    assert_eq!(
+        fs::read_to_string(src.join("a").join("y.txt")).unwrap(),
+        "y"
+    );
+    assert_eq!(fs::read_to_string(src.join("top.txt")).unwrap(), "top");
+}
+
+/// Assert that the run made nothing at `dest`: it does not exist, or it is empty.
+fn assert_nothing_made_at(dest: &Path) {
+    let empty = match fs::read_dir(dest) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(_) => !dest.exists(),
+    };
+    assert!(empty, "'{}' must hold nothing from the run", dest.display());
+}
+
+#[test]
+fn move_of_a_directory_and_a_directory_inside_it_is_refused_before_any_copy() {
+    let temp = TempDir::new().unwrap();
+    let src = make_nested_source(temp.path());
+    let dest = temp.path().join("dest");
+
+    let output = run_prcp([
+        OsString::from("-R"),
+        OsString::from("--rm"),
+        OsString::from("-y"),
+        src.clone().into_os_string(),
+        src.join("a").into_os_string(),
+        dest.clone().into_os_string(),
+    ]);
+
+    let stderr = visible_stderr(&output);
+    assert!(!output.status.success(), "stderr: {stderr}");
+    assert!(stderr.contains("is inside"), "stderr: {stderr}");
+    assert_nested_source_intact(&src);
+    assert_nothing_made_at(&dest);
+}
+
+#[test]
+fn move_of_a_directory_inside_a_later_directory_is_refused_before_any_copy() {
+    let temp = TempDir::new().unwrap();
+    let src = make_nested_source(temp.path());
+    let dest = temp.path().join("dest");
+
+    let output = run_prcp([
+        OsString::from("-R"),
+        OsString::from("--rm"),
+        OsString::from("-y"),
+        src.join("a").into_os_string(),
+        src.clone().into_os_string(),
+        dest.clone().into_os_string(),
+    ]);
+
+    let stderr = visible_stderr(&output);
+    assert!(!output.status.success(), "stderr: {stderr}");
+    assert!(stderr.contains("is inside"), "stderr: {stderr}");
+    assert_nested_source_intact(&src);
+    assert_nothing_made_at(&dest);
+}
+
+#[test]
+fn move_of_a_source_given_twice_is_refused_before_any_copy() {
+    let temp = TempDir::new().unwrap();
+    let file = temp.path().join("a.txt");
+    let dest = temp.path().join("dest");
+    write_file(&file, "a");
+
+    let output = run_prcp([
+        OsString::from("--rm"),
+        OsString::from("-y"),
+        file.clone().into_os_string(),
+        file.clone().into_os_string(),
+        dest.clone().into_os_string(),
+    ]);
+
+    let stderr = visible_stderr(&output);
+    assert!(!output.status.success(), "stderr: {stderr}");
+    assert!(stderr.contains("same source"), "stderr: {stderr}");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "a");
+    assert_nothing_made_at(&dest);
+}
+
+#[test]
+fn copy_of_a_directory_and_a_directory_inside_it_still_works() {
+    let temp = TempDir::new().unwrap();
+    let src = make_nested_source(temp.path());
+    let dest = temp.path().join("dest");
+
+    let output = run_prcp([
+        OsString::from("-R"),
+        OsString::from("-y"),
+        src.clone().into_os_string(),
+        src.join("a").into_os_string(),
+        dest.clone().into_os_string(),
+    ]);
+
+    let stderr = visible_stderr(&output);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert_eq!(
+        fs::read_to_string(dest.join("src").join("a").join("x.txt")).unwrap(),
+        "x"
+    );
+    assert_eq!(
+        fs::read_to_string(dest.join("a").join("y.txt")).unwrap(),
+        "y"
+    );
+    assert_nested_source_intact(&src);
+}

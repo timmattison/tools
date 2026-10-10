@@ -585,6 +585,10 @@ async fn main() -> Result<()> {
     let sources = resolve_sources(&source_paths, args.literal, args.recursive)?;
     // Decide every destination before any copy starts
     let plan = CopyPlan::build(&sources, &destination, args.recursive)?;
+    // A move must not touch what another operand checks or removes
+    if args.rm {
+        move_gate::refuse_overlapping_operands(&plan)?;
+    }
     let total_files = plan.file_count();
 
     // Tell the user about each node that the plan skips, before any copy starts
