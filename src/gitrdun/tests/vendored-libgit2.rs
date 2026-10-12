@@ -50,13 +50,15 @@ fn workspace_git2_builds_no_network_transport() {
     assert!(
         !version.ssh(),
         "git2 links a libgit2 with SSH, and no crate in the workspace uses it. \
-         Set `default-features = false` on the `git2` entry in \
-         [workspace.dependencies] of the root Cargo.toml."
+         Keep `default-features = false` on the `git2` entry in \
+         [workspace.dependencies] of the root Cargo.toml, and do not turn on \
+         its `ssh` feature."
     );
     assert!(
         !version.https(),
         "git2 links a libgit2 with HTTPS, and no crate in the workspace uses it. \
-         Set `default-features = false` on the `git2` entry in \
-         [workspace.dependencies] of the root Cargo.toml."
+         Keep `default-features = false` on the `git2` entry in \
+         [workspace.dependencies] of the root Cargo.toml, and do not turn on \
+         its `https` feature."
     );
 }
