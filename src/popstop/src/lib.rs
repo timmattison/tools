@@ -46,3 +46,9 @@ pub mod output;
 #[cfg(target_os = "macos")]
 pub mod process;
 pub mod signal;
+
+/// The turn at the audio device, which the unit tests share with the test
+/// targets in `tests/`, so one test at a time opens the device.
+#[cfg(all(test, target_os = "macos"))]
+#[path = "../tests/shared/device-turn.rs"]
+mod device_turn;

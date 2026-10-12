@@ -6,10 +6,17 @@
 //! kills what stays, so a test that fails leaves no copy that plays for ever.
 //!
 //! These tests open the real default output device and play the inaudible
-//! keepalive signal.
+//! keepalive signal. Each test that runs popstop with a state directory first
+//! takes the turn at the device (see `shared/device-turn.rs`), thus one test at
+//! a time opens it. Each helper that runs popstop with a state directory
+//! borrows that turn. Thus no test can skip the turn, and the turn of a test
+//! ends after each copy of that test stopped.
 
 // popstop plays audio on macOS only.
 #![cfg(target_os = "macos")]
+
+#[path = "shared/device-turn.rs"]
+mod device_turn;
 
 use std::ffi::{c_void, OsString};
 use std::fs::{self, File, OpenOptions};
@@ -23,6 +30,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use device_turn::DeviceTurn;
 use popstop::background::{CHILD_FLAG, HANDSHAKE_BOUND};
 use popstop::handshake::Handshake;
 use popstop::lock::{acquire, current_holder, HolderRecord, Mode, StartTime, StateDir};
@@ -115,8 +123,11 @@ const ROOT_DIRECTORY: &str = "/";
 /// A copy of popstop that a test started.
 ///
 /// A drop stops the copy and reaps it, so a test that fails early leaves no
-/// copy that plays.
-struct Copy {
+/// copy that plays. The copy borrows the turn of its test at the device, thus
+/// the turn ends after the drop.
+struct Copy<'turn> {
+    /// The turn of the test at the audio device.
+    _turn: &'turn DeviceTurn,
     /// The state directory of the copy, for the stop of the drop.
     dir: PathBuf,
     /// The child process.
@@ -128,7 +139,7 @@ struct Copy {
     stderr: Option<thread::JoinHandle<String>>,
 }
 
-impl Drop for Copy {
+impl Drop for Copy<'_> {
     /// Stops the copy the way that a user stops it, and then kills what
     /// stays.
     ///
@@ -150,10 +161,10 @@ impl Drop for Copy {
     }
 }
 
-impl Copy {
+impl<'turn> Copy<'turn> {
     /// Starts a copy of popstop with the state directory `dir`, and with the
-    /// arguments `arguments` after it.
-    fn start(dir: &Path, arguments: &[&str]) -> Self {
+    /// arguments `arguments` after it, in the turn `turn`.
+    fn start(turn: &'turn DeviceTurn, dir: &Path, arguments: &[&str]) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_popstop"))
             .arg("--state-dir")
             .arg(dir)
@@ -183,6 +194,7 @@ impl Copy {
         });
 
         Self {
+            _turn: turn,
             dir: dir.to_path_buf(),
             child,
             stdout: receiver,
@@ -191,9 +203,9 @@ impl Copy {
     }
 
     /// Starts a copy that runs until a signal ends it, or until
-    /// [`EXIT_AFTER_SECONDS`] pass.
-    fn start_in_the_foreground(dir: &Path) -> Self {
-        Self::start(dir, &["--exit-after", EXIT_AFTER_SECONDS])
+    /// [`EXIT_AFTER_SECONDS`] pass, in the turn `turn`.
+    fn start_in_the_foreground(turn: &'turn DeviceTurn, dir: &Path) -> Self {
+        Self::start(turn, dir, &["--exit-after", EXIT_AFTER_SECONDS])
     }
 
     /// Gives the process ID of the copy.
@@ -274,8 +286,11 @@ impl Copy {
 /// The command that started the copy ended already, and the copy runs on. A
 /// drop stops it the way that a user stops it. The copy is no child of this
 /// test, thus the stop is the only way to end it, and `--exit-after` is what
-/// bounds a copy that the stop did not reach.
-struct BackgroundStart {
+/// bounds a copy that the stop did not reach. The start borrows the turn of
+/// its test at the device, thus the turn ends after the stop.
+struct BackgroundStart<'turn> {
+    /// The turn of the test at the audio device.
+    _turn: &'turn DeviceTurn,
     /// The state directory of the copy, for the stop of the drop. The stop
     /// runs in the working directory of this test, thus this path does not
     /// depend on the working directory of the start.
@@ -291,7 +306,7 @@ struct BackgroundStart {
     errors: String,
 }
 
-impl Drop for BackgroundStart {
+impl Drop for BackgroundStart<'_> {
     fn drop(&mut self) {
         let _ = Command::new(env!("CARGO_BIN_EXE_popstop"))
             .arg("--stop")
@@ -304,37 +319,38 @@ impl Drop for BackgroundStart {
     }
 }
 
-impl BackgroundStart {
-    /// Runs `popstop --background` with the state directory `dir`, and waits
-    /// for that command to end.
+impl<'turn> BackgroundStart<'turn> {
+    /// Runs `popstop --background` with the state directory `dir`, in the
+    /// turn `turn`, and waits for that command to end.
     ///
     /// The copy that the command started holds no pipe of this test: its
     /// stdout goes to the command that started it, and its stderr goes to the
     /// log. Thus the wait for the output of the command ends when the command
     /// ends, and not when the copy ends.
-    fn make(dir: &Path) -> Self {
-        Self::make_from(None, dir)
+    fn make(turn: &'turn DeviceTurn, dir: &Path) -> Self {
+        Self::make_from(turn, None, dir)
     }
 
     /// Runs `popstop --background` in the working directory `working_dir`,
-    /// with `state_dir` as the value of `--state-dir`, and waits for that
-    /// command to end. A relative `state_dir` names a directory in
-    /// `working_dir`.
-    fn make_in(working_dir: &Path, state_dir: &Path) -> Self {
-        Self::make_from(Some(working_dir), state_dir)
+    /// with `state_dir` as the value of `--state-dir`, in the turn `turn`, and
+    /// waits for that command to end. A relative `state_dir` names a
+    /// directory in `working_dir`.
+    fn make_in(turn: &'turn DeviceTurn, working_dir: &Path, state_dir: &Path) -> Self {
+        Self::make_from(turn, Some(working_dir), state_dir)
     }
 
     /// Runs `popstop --background` with `state_dir` as the value of
-    /// `--state-dir`, and waits for that command to end. The command runs in
-    /// `working_dir` when it is given, and in the working directory of this
-    /// test when it is not.
-    fn make_from(working_dir: Option<&Path>, state_dir: &Path) -> Self {
+    /// `--state-dir`, in the turn `turn`, and waits for that command to end.
+    /// The command runs in `working_dir` when it is given, and in the working
+    /// directory of this test when it is not.
+    fn make_from(turn: &'turn DeviceTurn, working_dir: Option<&Path>, state_dir: &Path) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_popstop"));
         if let Some(working_dir) = working_dir {
             command.current_dir(working_dir);
         }
         let start = Self::spawn(&mut command, state_dir, None);
         Self::finish(
+            turn,
             start,
             working_dir.map_or_else(
                 || state_dir.to_path_buf(),
@@ -344,16 +360,21 @@ impl BackgroundStart {
     }
 
     /// Runs `popstop --background` from the program of `late`, with the state
-    /// directory of `late`, and waits for that command to end. The copy that
-    /// the command makes reports after the bound of a user passed.
+    /// directory of `late`, in the turn `turn`, and waits for that command to
+    /// end. The copy that the command makes reports after the bound of a user
+    /// passed.
     ///
     /// The command waits for the report for `handshake_bound` seconds when it
     /// is given. When it is not given, the command gets what each other
     /// background start of this file gets.
-    fn make_with_a_late_copy(late: &mut LateCopy, handshake_bound: Option<&str>) -> Self {
+    fn make_with_a_late_copy(
+        turn: &'turn DeviceTurn,
+        late: &mut LateCopy,
+        handshake_bound: Option<&str>,
+    ) -> Self {
         let start = Self::spawn(&mut Command::new(&late.program), &late.dir, handshake_bound);
         late.make_the_copy_late();
-        Self::finish(start, late.dir.clone())
+        Self::finish(turn, start, late.dir.clone())
     }
 
     /// Starts `popstop --background` from `command`, with `state_dir` as the
@@ -378,11 +399,12 @@ impl BackgroundStart {
 
     /// Waits for the background start `start` to end, and keeps what it
     /// wrote. `dir` is the state directory of its copy, for the stop of the
-    /// drop.
-    fn finish(start: Child, dir: PathBuf) -> Self {
+    /// drop, and `turn` is the turn of the test at the device.
+    fn finish(turn: &'turn DeviceTurn, start: Child, dir: PathBuf) -> Self {
         let command_pid = start.id();
         let output = start.wait_with_output().expect("wait for the start");
         Self {
+            _turn: turn,
             dir,
             command_pid,
             status: output.status,
@@ -646,8 +668,10 @@ fn ask(arguments: &[&str]) -> (ExitStatus, String) {
 /// and its stderr.
 ///
 /// The commands that take this way (`--stop` and `--status`) act on the copy
-/// that runs and end by themselves, thus they need no time limit.
-fn ask_in(dir: &Path, arguments: &[&str]) -> (ExitStatus, String, String) {
+/// that runs and end by themselves, thus they need no time limit. `--status`
+/// reads the name of the device, and a start opens it, thus the run takes the
+/// turn `_turn` of its test.
+fn ask_in(_turn: &DeviceTurn, dir: &Path, arguments: &[&str]) -> (ExitStatus, String, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_popstop"));
     command.arg("--state-dir").arg(dir).args(arguments);
     outcome_of(&mut command)
@@ -658,8 +682,13 @@ fn ask_in(dir: &Path, arguments: &[&str]) -> (ExitStatus, String, String) {
 /// and its stderr.
 ///
 /// The arguments name the state directory, thus a relative state directory
-/// names a directory in `working_dir`.
-fn ask_from(working_dir: &Path, arguments: &[&str]) -> (ExitStatus, String, String) {
+/// names a directory in `working_dir`. The run takes the turn `_turn` of its
+/// test, as [`ask_in`] does.
+fn ask_from(
+    _turn: &DeviceTurn,
+    working_dir: &Path,
+    arguments: &[&str],
+) -> (ExitStatus, String, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_popstop"));
     command.current_dir(working_dir).args(arguments);
     outcome_of(&mut command)
@@ -762,7 +791,7 @@ fn write_the_record(dir: &Path, record: &HolderRecord) {
 
 /// Reads the three lines of a foreground start, and gives the name of the
 /// device that the first line names.
-fn device_of_the_ready_lines(copy: &mut Copy) -> String {
+fn device_of_the_ready_lines(copy: &mut Copy<'_>) -> String {
     let first = copy.next_line();
     let opening = "popstop: \"";
     let pid = copy.pid();
@@ -786,9 +815,10 @@ fn device_of_the_ready_lines(copy: &mut Copy) -> String {
 /// The default action of each of these signals ends a process where it
 /// stands, thus a copy that ends with a signal status registered no handler.
 fn a_signal_stops_a_foreground_copy(signal: libc::c_int) {
+    let turn = DeviceTurn::take();
     let temp = tempfile::tempdir().expect("a temporary directory");
     let dir = temp.path().join("state");
-    let mut copy = Copy::start_in_the_foreground(&dir);
+    let mut copy = Copy::start_in_the_foreground(&turn, &dir);
     device_of_the_ready_lines(&mut copy);
 
     copy.send(signal);
@@ -805,10 +835,11 @@ fn a_signal_stops_a_foreground_copy(signal: libc::c_int) {
 
 #[test]
 fn a_background_start_returns_only_after_the_copy_holds_the_lock() {
+    let turn = DeviceTurn::take();
     let temp = tempfile::tempdir().expect("a temporary directory");
     let dir = temp.path().join("state");
 
-    let start = BackgroundStart::make(&dir);
+    let start = BackgroundStart::make(&turn, &dir);
 
     assert_eq!(
         start.status.code(),
@@ -849,11 +880,12 @@ fn a_background_start_returns_only_after_the_copy_holds_the_lock() {
 
 #[test]
 fn a_background_start_of_the_tests_waits_for_a_copy_that_passes_the_bound_of_a_user() {
+    let turn = DeviceTurn::take();
     let temp = tempfile::tempdir().expect("a temporary directory");
     let mut late = LateCopy::prepare(temp.path());
 
     // A machine that runs many tests together can start a copy this slowly.
-    let start = BackgroundStart::make_with_a_late_copy(&mut late, None);
+    let start = BackgroundStart::make_with_a_late_copy(&turn, &mut late, None);
 
     assert_eq!(
         start.status.code(),
@@ -869,11 +901,15 @@ fn a_background_start_of_the_tests_waits_for_a_copy_that_passes_the_bound_of_a_u
 
 #[test]
 fn a_background_start_gives_up_after_the_handshake_bound_that_it_got() {
+    let turn = DeviceTurn::take();
     let temp = tempfile::tempdir().expect("a temporary directory");
     let mut late = LateCopy::prepare(temp.path());
 
-    let start =
-        BackgroundStart::make_with_a_late_copy(&mut late, Some(SHORT_HANDSHAKE_BOUND_SECONDS));
+    let start = BackgroundStart::make_with_a_late_copy(
+        &turn,
+        &mut late,
+        Some(SHORT_HANDSHAKE_BOUND_SECONDS),
+    );
 
     assert_eq!(
         start.status.code(),
@@ -901,9 +937,10 @@ fn a_background_start_gives_up_after_the_handshake_bound_that_it_got() {
 
 #[test]
 fn a_status_names_the_background_copy_and_a_stop_ends_it() {
+    let turn = DeviceTurn::take();
     let temp = tempfile::tempdir().expect("a temporary directory");
     let dir = temp.path().join("state");
-    let start = BackgroundStart::make(&dir);
+    let start = BackgroundStart::make(&turn, &dir);
     assert_eq!(
         start.status.code(),
         Some(0),
@@ -914,7 +951,7 @@ fn a_status_names_the_background_copy_and_a_stop_ends_it() {
     let record = holder(&dir).expect("the copy holds the lock");
 
     // Story 13: a user who forgot a background copy finds it with a status.
-    let (status, report, errors) = ask_in(&dir, &["--status"]);
+    let (status, report, errors) = ask_in(&turn, &dir, &["--status"]);
     assert_eq!(
         status.code(),
         Some(0),
@@ -932,7 +969,7 @@ fn a_status_names_the_background_copy_and_a_stop_ends_it() {
     }
 
     // Story 11: a stop ends the copy, and the user looks for no PID.
-    let (status, report, errors) = ask_in(&dir, &["--stop"]);
+    let (status, report, errors) = ask_in(&turn, &dir, &["--stop"]);
     assert_eq!(
         status.code(),
         Some(0),
@@ -946,7 +983,7 @@ fn a_status_names_the_background_copy_and_a_stop_ends_it() {
     assert_eq!(errors, "", "a stop that worked says nothing on stderr");
     assert_eq!(holder(&dir), None, "the copy released the lock");
 
-    let (status, report, errors) = ask_in(&dir, &["--status"]);
+    let (status, report, errors) = ask_in(&turn, &dir, &["--status"]);
     assert_eq!(
         status.code(),
         Some(4),
@@ -957,9 +994,10 @@ fn a_status_names_the_background_copy_and_a_stop_ends_it() {
 
 #[test]
 fn a_background_copy_has_no_terminal_and_outlives_the_command_that_started_it() {
+    let turn = DeviceTurn::take();
     let temp = tempfile::tempdir().expect("a temporary directory");
     let dir = temp.path().join("state");
-    let start = BackgroundStart::make(&dir);
+    let start = BackgroundStart::make(&turn, &dir);
     assert_eq!(
         start.status.code(),
         Some(0),
@@ -1000,18 +1038,19 @@ fn a_background_copy_has_no_terminal_and_outlives_the_command_that_started_it() 
 
 #[test]
 fn a_background_start_refuses_with_the_words_of_a_foreground_start() {
+    let turn = DeviceTurn::take();
     let temp = tempfile::tempdir().expect("a temporary directory");
     let dir = temp.path().join("state");
-    let mut first = Copy::start_in_the_foreground(&dir);
+    let mut first = Copy::start_in_the_foreground(&turn, &dir);
     device_of_the_ready_lines(&mut first);
     let record = holder(&dir).expect("the first copy holds the lock");
 
     // Neither start takes the lock, thus neither one plays and neither one
     // stays. The time limit of each is the backstop of a start that works.
     let (foreground, foreground_report, foreground_refusal) =
-        ask_in(&dir, &["--exit-after", EXIT_AFTER_SECONDS]);
+        ask_in(&turn, &dir, &["--exit-after", EXIT_AFTER_SECONDS]);
     let (background, background_report, background_refusal) =
-        ask_in(&dir, &background_start(HANDSHAKE_BOUND_SECONDS));
+        ask_in(&turn, &dir, &background_start(HANDSHAKE_BOUND_SECONDS));
 
     assert_eq!(
         background.code(),
@@ -1062,6 +1101,7 @@ fn a_background_start_refuses_with_the_words_of_a_foreground_start() {
 
 #[test]
 fn a_background_copy_runs_in_the_root_directory_and_holds_no_directory_of_the_user() {
+    let turn = DeviceTurn::take();
     let temp = tempfile::tempdir().expect("a temporary directory");
     // The directory that the user starts the copy from. It can be on a volume
     // that the user unmounts later.
@@ -1069,7 +1109,7 @@ fn a_background_copy_runs_in_the_root_directory_and_holds_no_directory_of_the_us
     fs::create_dir(&working_dir).expect("make the directory of the start");
     let dir = temp.path().join("state");
 
-    let start = BackgroundStart::make_in(&working_dir, &dir);
+    let start = BackgroundStart::make_in(&turn, &working_dir, &dir);
 
     assert_eq!(
         start.status.code(),
@@ -1090,6 +1130,7 @@ fn a_background_copy_runs_in_the_root_directory_and_holds_no_directory_of_the_us
 
 #[test]
 fn a_relative_state_directory_names_one_directory_in_the_start_the_copy_and_each_message() {
+    let turn = DeviceTurn::take();
     let temp = tempfile::tempdir().expect("a temporary directory");
     // popstop makes a relative path full with the working directory that the
     // system gives, and that path has no symbolic link. On macOS `/var` is a
@@ -1099,7 +1140,7 @@ fn a_relative_state_directory_names_one_directory_in_the_start_the_copy_and_each
     let relative = "state";
     let dir = working_dir.join(relative);
 
-    let start = BackgroundStart::make_in(&working_dir, Path::new(relative));
+    let start = BackgroundStart::make_in(&turn, &working_dir, Path::new(relative));
 
     assert_eq!(
         start.status.code(),
@@ -1125,10 +1166,12 @@ fn a_relative_state_directory_names_one_directory_in_the_start_the_copy_and_each
     // thus neither one plays. The time limit of each is the backstop of a
     // start that works.
     let (foreground, _, foreground_refusal) = ask_from(
+        &turn,
         &working_dir,
         &["--state-dir", relative, "--exit-after", EXIT_AFTER_SECONDS],
     );
     let (background, _, background_refusal) = ask_from(
+        &turn,
         &working_dir,
         &[
             &["--state-dir", relative][..],
@@ -1154,7 +1197,7 @@ fn a_relative_state_directory_names_one_directory_in_the_start_the_copy_and_each
     );
 
     // The command of the hint, from the working directory of this test.
-    let (status, report, errors) = ask_in(&dir, &["--stop"]);
+    let (status, report, errors) = ask_in(&turn, &dir, &["--stop"]);
     assert_eq!(
         status.code(),
         Some(0),
@@ -1205,12 +1248,13 @@ fn a_relative_state_directory_in_a_working_directory_that_is_gone_is_an_error() 
 
 #[test]
 fn the_copy_that_takes_the_lock_empties_the_log_of_the_copy_before_it() {
+    let turn = DeviceTurn::take();
     let temp = tempfile::tempdir().expect("a temporary directory");
     let dir = temp.path().join("state");
     let log = StateDir::new(dir.clone()).log_path();
 
     {
-        let first = BackgroundStart::make(&dir);
+        let first = BackgroundStart::make(&turn, &dir);
         assert_eq!(
             first.status.code(),
             Some(0),
@@ -1229,7 +1273,7 @@ fn the_copy_that_takes_the_lock_empties_the_log_of_the_copy_before_it() {
     let old_line = "an old line of a copy that ran before";
     fs::write(&log, format!("{old_line}\n").repeat(500)).expect("write the old log");
 
-    let second = BackgroundStart::make(&dir);
+    let second = BackgroundStart::make(&turn, &dir);
 
     assert_eq!(
         second.status.code(),
@@ -1248,10 +1292,11 @@ fn the_copy_that_takes_the_lock_empties_the_log_of_the_copy_before_it() {
 
 #[test]
 fn a_refused_background_start_leaves_the_log_of_the_copy_that_runs_alone() {
+    let turn = DeviceTurn::take();
     let temp = tempfile::tempdir().expect("a temporary directory");
     let dir = temp.path().join("state");
     let log = StateDir::new(dir.clone()).log_path();
-    let first = BackgroundStart::make(&dir);
+    let first = BackgroundStart::make(&turn, &dir);
     assert_eq!(
         first.status.code(),
         Some(0),
@@ -1274,7 +1319,7 @@ fn a_refused_background_start_leaves_the_log_of_the_copy_that_runs_alone() {
 
     // The second start does not take the lock, thus it does not play and it
     // does not stay. Its time limit is the backstop of a start that works.
-    let (status, report, refusal) = ask_in(&dir, &background_start(HANDSHAKE_BOUND_SECONDS));
+    let (status, report, refusal) = ask_in(&turn, &dir, &background_start(HANDSHAKE_BOUND_SECONDS));
 
     assert_eq!(
         status.code(),
@@ -1315,11 +1360,16 @@ fn a_refused_background_start_leaves_the_log_of_the_copy_that_runs_alone() {
 
 #[test]
 fn a_background_copy_whose_stderr_is_no_log_plays_and_warns_about_nothing() {
+    let turn = DeviceTurn::take();
     let temp = tempfile::tempdir().expect("a temporary directory");
     let dir = temp.path().join("state");
     // A person who gives the hidden flag by hand gives the copy a terminal or
     // a pipe as its stderr, and not a log. Neither one can be emptied.
-    let mut copy = Copy::start(&dir, &[CHILD_FLAG, "--exit-after", EXIT_AFTER_SECONDS]);
+    let mut copy = Copy::start(
+        &turn,
+        &dir,
+        &[CHILD_FLAG, "--exit-after", EXIT_AFTER_SECONDS],
+    );
 
     let line = copy.next_line();
     let Some(Handshake::Ready { pid, .. }) = Handshake::parse(&line) else {
@@ -1343,6 +1393,7 @@ fn a_background_copy_whose_stderr_is_no_log_plays_and_warns_about_nothing() {
 
 #[test]
 fn a_copy_that_cannot_start_says_why_on_stderr_and_in_its_log() {
+    let turn = DeviceTurn::take();
     let temp = tempfile::tempdir().expect("a temporary directory");
     let dir = temp.path().join("state");
     let state = StateDir::new(dir.clone());
@@ -1350,7 +1401,7 @@ fn a_copy_that_cannot_start_says_why_on_stderr_and_in_its_log() {
     // lock file. The start makes its log, and the copy fails before it plays.
     fs::create_dir_all(state.lock_path()).expect("make a lock file that no copy can open");
 
-    let (status, report, problem) = ask_in(&dir, &background_start(HANDSHAKE_BOUND_SECONDS));
+    let (status, report, problem) = ask_in(&turn, &dir, &background_start(HANDSHAKE_BOUND_SECONDS));
 
     assert_eq!(
         status.code(),
@@ -1387,10 +1438,11 @@ fn a_termination_signal_stops_a_foreground_copy() {
 
 #[test]
 fn a_stop_with_no_copy_says_that_nothing_runs() {
+    let turn = DeviceTurn::take();
     let temp = tempfile::tempdir().expect("a temporary directory");
     let dir = temp.path().join("state");
 
-    let (status, report, errors) = ask_in(&dir, &["--stop"]);
+    let (status, report, errors) = ask_in(&turn, &dir, &["--stop"]);
 
     assert_eq!(
         status.code(),
@@ -1407,6 +1459,7 @@ fn a_stop_with_no_copy_says_that_nothing_runs() {
 
 #[test]
 fn a_record_in_a_lock_that_nobody_holds_makes_a_stop_send_no_signal() {
+    let turn = DeviceTurn::take();
     let temp = tempfile::tempdir().expect("a temporary directory");
     let dir = temp.path().join("state");
 
@@ -1421,7 +1474,7 @@ fn a_record_in_a_lock_that_nobody_holds_makes_a_stop_send_no_signal() {
         },
     );
 
-    let (status, report, errors) = ask_in(&dir, &["--stop"]);
+    let (status, report, errors) = ask_in(&turn, &dir, &["--stop"]);
 
     assert_eq!(
         status.code(),
@@ -1449,7 +1502,7 @@ fn a_record_in_a_lock_that_nobody_holds_makes_a_stop_send_no_signal() {
         },
     );
 
-    let (status, report, errors) = ask_in(&dir, &["--stop"]);
+    let (status, report, errors) = ask_in(&turn, &dir, &["--stop"]);
 
     assert_eq!(
         status.code(),
@@ -1470,6 +1523,7 @@ fn a_record_in_a_lock_that_nobody_holds_makes_a_stop_send_no_signal() {
 
 #[test]
 fn a_stop_sends_no_signal_to_a_pid_that_another_process_has_now() {
+    let turn = DeviceTurn::take();
     let temp = tempfile::tempdir().expect("a temporary directory");
     let dir = temp.path().join("state");
 
@@ -1488,7 +1542,7 @@ fn a_stop_sends_no_signal_to_a_pid_that_another_process_has_now() {
     };
     let guard = acquire(&StateDir::new(dir.clone()), &record).expect("take the lock");
 
-    let (status, report, errors) = ask_in(&dir, &["--stop"]);
+    let (status, report, errors) = ask_in(&turn, &dir, &["--stop"]);
 
     assert_eq!(
         status.code(),
@@ -1518,12 +1572,13 @@ fn a_stop_sends_no_signal_to_a_pid_that_another_process_has_now() {
 
 #[test]
 fn a_stop_ends_a_foreground_copy_and_frees_the_lock() {
+    let turn = DeviceTurn::take();
     let temp = tempfile::tempdir().expect("a temporary directory");
     let dir = temp.path().join("state");
-    let mut copy = Copy::start_in_the_foreground(&dir);
+    let mut copy = Copy::start_in_the_foreground(&turn, &dir);
     device_of_the_ready_lines(&mut copy);
 
-    let (status, report, errors) = ask_in(&dir, &["--stop"]);
+    let (status, report, errors) = ask_in(&turn, &dir, &["--stop"]);
 
     assert_eq!(
         status.code(),
@@ -1546,7 +1601,7 @@ fn a_stop_ends_a_foreground_copy_and_frees_the_lock() {
     assert_eq!(stderr, "", "a copy that stops says nothing on stderr");
     assert_eq!(holder(&dir), None, "the copy released the lock");
 
-    let (status, report, errors) = ask_in(&dir, &["--status"]);
+    let (status, report, errors) = ask_in(&turn, &dir, &["--status"]);
     assert_eq!(
         status.code(),
         Some(4),
@@ -1557,10 +1612,11 @@ fn a_stop_ends_a_foreground_copy_and_frees_the_lock() {
 
 #[test]
 fn a_status_with_no_copy_ends_with_the_status_of_no_copy() {
+    let turn = DeviceTurn::take();
     let temp = tempfile::tempdir().expect("a temporary directory");
     let dir = temp.path().join("state");
 
-    let (status, report, errors) = ask_in(&dir, &["--status"]);
+    let (status, report, errors) = ask_in(&turn, &dir, &["--status"]);
 
     assert_eq!(
         status.code(),
@@ -1577,13 +1633,14 @@ fn a_status_with_no_copy_ends_with_the_status_of_no_copy() {
 
 #[test]
 fn a_status_names_the_copy_that_runs_its_mode_and_its_device() {
+    let turn = DeviceTurn::take();
     let temp = tempfile::tempdir().expect("a temporary directory");
     let dir = temp.path().join("state");
-    let mut copy = Copy::start_in_the_foreground(&dir);
+    let mut copy = Copy::start_in_the_foreground(&turn, &dir);
     let device = device_of_the_ready_lines(&mut copy);
     let record = holder(&dir).expect("the copy holds the lock");
 
-    let (status, report, errors) = ask_in(&dir, &["--status"]);
+    let (status, report, errors) = ask_in(&turn, &dir, &["--status"]);
 
     assert_eq!(
         status.code(),
@@ -1681,9 +1738,10 @@ fn the_version_names_the_build_that_runs() {
 
 #[test]
 fn a_copy_with_a_time_limit_stops_by_itself() {
+    let turn = DeviceTurn::take();
     let temp = tempfile::tempdir().expect("a temporary directory");
     let dir = temp.path().join("state");
-    let mut copy = Copy::start(&dir, &["--exit-after", "1"]);
+    let mut copy = Copy::start(&turn, &dir, &["--exit-after", "1"]);
 
     device_of_the_ready_lines(&mut copy);
     let (status, stderr) = copy.finish();
@@ -1699,13 +1757,14 @@ fn a_copy_with_a_time_limit_stops_by_itself() {
 
 #[test]
 fn a_second_start_refuses_and_names_the_copy_that_runs() {
+    let turn = DeviceTurn::take();
     let temp = tempfile::tempdir().expect("a temporary directory");
     let dir = temp.path().join("state");
-    let mut first = Copy::start_in_the_foreground(&dir);
+    let mut first = Copy::start_in_the_foreground(&turn, &dir);
     device_of_the_ready_lines(&mut first);
     let record = holder(&dir).expect("the first copy holds the lock");
 
-    let mut second = Copy::start_in_the_foreground(&dir);
+    let mut second = Copy::start_in_the_foreground(&turn, &dir);
     let (status, refusal) = second.finish();
 
     assert_eq!(
@@ -1747,9 +1806,10 @@ fn a_second_start_refuses_and_names_the_copy_that_runs() {
 
 #[test]
 fn a_foreground_copy_names_its_device_holds_the_lock_and_stops_on_sigint() {
+    let turn = DeviceTurn::take();
     let temp = tempfile::tempdir().expect("a temporary directory");
     let dir = temp.path().join("state");
-    let mut copy = Copy::start_in_the_foreground(&dir);
+    let mut copy = Copy::start_in_the_foreground(&turn, &dir);
 
     device_of_the_ready_lines(&mut copy);
 
