@@ -12,25 +12,44 @@
 #![cfg(target_os = "macos")]
 
 use std::ffi::{c_void, OsString};
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::mem::{self, MaybeUninit};
 use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::{symlink, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use popstop::background::CHILD_FLAG;
+use popstop::background::{CHILD_FLAG, HANDSHAKE_BOUND};
 use popstop::handshake::Handshake;
 use popstop::lock::{acquire, current_holder, HolderRecord, Mode, StartTime, StateDir};
-use popstop::message::{stale_record, start_time_text};
+use popstop::message::{did_not_report_within, stale_record, start_time_text};
 use popstop::process::start_time;
 
 /// The time after which a copy stops by itself, as `--exit-after` takes it.
 /// A test ends long before, and this value is the backstop.
 const EXIT_AFTER_SECONDS: &str = "60";
+
+/// The flag that gives a background start the longest time that it waits for
+/// the report of its copy.
+const HANDSHAKE_BOUND_FLAG: &str = "--handshake-bound";
+
+/// A bound for the report of a copy that a late copy always passes, as
+/// `--handshake-bound` takes it.
+const SHORT_HANDSHAKE_BOUND_SECONDS: &str = "1";
+
+/// The time by which a late copy passes the bound of a user.
+const LATE_BY: Duration = Duration::from_secs(1);
+
+/// The name of the program that a late copy runs from.
+const PROGRAM_NAME: &str = "popstop";
+
+/// The mode of the script of a late copy. The owner can write it, and each
+/// user can read it and run it.
+const SCRIPT_MODE: u32 = 0o755;
 
 /// The longest time that a test waits for a line of a copy.
 ///
@@ -306,28 +325,144 @@ impl BackgroundStart {
         if let Some(working_dir) = working_dir {
             command.current_dir(working_dir);
         }
-        let child = command
+        let start = Self::spawn(&mut command, state_dir, None);
+        Self::finish(
+            start,
+            working_dir.map_or_else(
+                || state_dir.to_path_buf(),
+                |working_dir| working_dir.join(state_dir),
+            ),
+        )
+    }
+
+    /// Runs `popstop --background` from the program of `late`, with the state
+    /// directory of `late`, and waits for that command to end. The copy that
+    /// the command makes reports after the bound of a user passed.
+    ///
+    /// The command waits for the report for `handshake_bound` seconds when it
+    /// is given. When it is not given, the command gets what each other
+    /// background start of this file gets.
+    fn make_with_a_late_copy(late: &mut LateCopy, handshake_bound: Option<&str>) -> Self {
+        let start = Self::spawn(&mut Command::new(&late.program), &late.dir, handshake_bound);
+        late.make_the_copy_late();
+        Self::finish(start, late.dir.clone())
+    }
+
+    /// Starts `popstop --background` from `command`, with `state_dir` as the
+    /// value of `--state-dir`, and returns at once.
+    ///
+    /// The start waits for the report of its copy for `handshake_bound`
+    /// seconds when it is given.
+    fn spawn(command: &mut Command, state_dir: &Path, handshake_bound: Option<&str>) -> Child {
+        command
             .arg("--state-dir")
             .arg(state_dir)
             .arg("--background")
-            .args(["--exit-after", EXIT_AFTER_SECONDS])
+            .args(["--exit-after", EXIT_AFTER_SECONDS]);
+        if let Some(bound) = handshake_bound {
+            command.args([HANDSHAKE_BOUND_FLAG, bound]);
+        }
+        command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("start popstop");
-        let command_pid = child.id();
-        let output = child.wait_with_output().expect("wait for the start");
+            .expect("start popstop")
+    }
+
+    /// Waits for the background start `start` to end, and keeps what it
+    /// wrote. `dir` is the state directory of its copy, for the stop of the
+    /// drop.
+    fn finish(start: Child, dir: PathBuf) -> Self {
+        let command_pid = start.id();
+        let output = start.wait_with_output().expect("wait for the start");
         Self {
-            dir: working_dir.map_or_else(
-                || state_dir.to_path_buf(),
-                |working_dir| working_dir.join(state_dir),
-            ),
+            dir,
             command_pid,
             status: output.status,
             report: String::from_utf8(output.stdout).expect("the output of popstop is UTF-8"),
             errors: String::from_utf8(output.stderr).expect("the errors of popstop are UTF-8"),
         }
+    }
+}
+
+/// The program of a background start whose copy reports late.
+///
+/// A start makes its copy from the path that it ran from
+/// (`std::env::current_exe`), and macOS gives that path as the start got it,
+/// with no symbolic link resolved. So the start runs through a link to the
+/// built binary, and then the test puts a script at the path of the link. The
+/// copy runs the script, which waits until the bound of a user
+/// ([`HANDSHAKE_BOUND`]) passed, and then becomes the built binary.
+///
+/// The log in the state directory is a FIFO. A start opens its log before it
+/// makes its copy, and the open of a FIFO waits until a reader opens the other
+/// end. The test opens that end only after the script is in place. Thus the
+/// start cannot make its copy before the script is there, on a machine of any
+/// speed.
+struct LateCopy {
+    /// The path that the start runs from. It is a link to the built binary
+    /// until [`LateCopy::make_the_copy_late`] puts the script there.
+    program: PathBuf,
+    /// The state directory of the start.
+    dir: PathBuf,
+    /// The end of the FIFO that the test reads. It stays open until the drop,
+    /// thus a copy that writes to its log after its start ended writes into
+    /// an open pipe.
+    _reader: Option<File>,
+}
+
+impl LateCopy {
+    /// Makes the link and the state directory with its FIFO in `root`.
+    fn prepare(root: &Path) -> Self {
+        let bin = root.join("bin");
+        fs::create_dir(&bin).expect("make the directory of the program");
+        let program = bin.join(PROGRAM_NAME);
+        symlink(env!("CARGO_BIN_EXE_popstop"), &program).expect("link to the built binary");
+        let dir = root.join("state");
+        fs::create_dir(&dir).expect("make the state directory");
+        let log = StateDir::new(dir.clone()).log_path();
+        let made = Command::new("mkfifo")
+            .arg(&log)
+            .status()
+            .expect("start mkfifo");
+        assert!(made.success(), "mkfifo did not make the FIFO {log:?}: {made}");
+        Self {
+            program,
+            dir,
+            _reader: None,
+        }
+    }
+
+    /// Puts the script at the path of the program, and then lets the start
+    /// open its log.
+    ///
+    /// The start began before this call, thus it runs the built binary. Only
+    /// the copy that it makes runs the script.
+    fn make_the_copy_late(&mut self) {
+        let delay = HANDSHAKE_BOUND + LATE_BY;
+        let script = format!(
+            "#!/bin/sh\nsleep {}\nexec {} \"$@\"\n",
+            delay.as_secs(),
+            shellquote::shell_quote(env!("CARGO_BIN_EXE_popstop"))
+        );
+        let staged = self.program.with_extension("late");
+        fs::write(&staged, script).expect("write the script");
+        fs::set_permissions(&staged, fs::Permissions::from_mode(SCRIPT_MODE))
+            .expect("let the script run");
+        // A rename puts the script in place of the link in one step.
+        fs::rename(&staged, &self.program).expect("put the script at the path of the program");
+        // A read end that opens with O_NONBLOCK opens at once, also when no
+        // writer is there. The start then stops its wait in the open of its
+        // log.
+        let log = StateDir::new(self.dir.clone()).log_path();
+        self._reader = Some(
+            OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&log)
+                .expect("open the log to read"),
+        );
     }
 }
 
@@ -683,6 +818,58 @@ fn a_background_start_returns_only_after_the_copy_holds_the_lock() {
     assert!(
         !device.trim().is_empty(),
         "story 4: the start names the device that stays awake"
+    );
+}
+
+#[test]
+fn a_background_start_of_the_tests_waits_for_a_copy_that_passes_the_bound_of_a_user() {
+    let temp = tempfile::tempdir().expect("a temporary directory");
+    let mut late = LateCopy::prepare(temp.path());
+
+    // A machine that runs many tests together can start a copy this slowly.
+    let start = BackgroundStart::make_with_a_late_copy(&mut late, None);
+
+    assert_eq!(
+        start.status.code(),
+        Some(0),
+        "a background start of the tests waits for a copy that reports after {HANDSHAKE_BOUND:?}: \
+         {}. Its stderr:\n{}",
+        start.status,
+        start.errors
+    );
+    let record = holder(&late.dir).expect("the late copy holds the lock");
+    device_of_the_background_lines(&start.report, record.pid, &late.dir);
+}
+
+#[test]
+fn a_background_start_gives_up_after_the_handshake_bound_that_it_got() {
+    let temp = tempfile::tempdir().expect("a temporary directory");
+    let mut late = LateCopy::prepare(temp.path());
+
+    let start =
+        BackgroundStart::make_with_a_late_copy(&mut late, Some(SHORT_HANDSHAKE_BOUND_SECONDS));
+
+    assert_eq!(
+        start.status.code(),
+        Some(1),
+        "a start whose copy did not report within the bound fails: {}. Its stderr:\n{}",
+        start.status,
+        start.errors
+    );
+    let bound = Duration::from_secs(
+        SHORT_HANDSHAKE_BOUND_SECONDS
+            .parse()
+            .expect("the bound is a number of seconds"),
+    );
+    let log = StateDir::new(late.dir.clone()).log_path();
+    assert_eq!(
+        start.errors,
+        format!("{}\n", did_not_report_within(bound, &log)),
+        "the start names the bound that it got, and not the bound of a user"
+    );
+    assert_eq!(
+        start.report, "",
+        "a problem goes to stderr, thus a script that reads stdout sees nothing"
     );
 }
 
@@ -1424,7 +1611,12 @@ fn the_help_lists_the_five_exit_statuses_and_hides_the_flags_of_the_tests() {
         ["0", "1", "2", "3", "4"],
         "the help lists each exit status, in order:\n{help}"
     );
-    for hidden in ["--state-dir", "--exit-after", "--background-child"] {
+    for hidden in [
+        "--state-dir",
+        "--exit-after",
+        "--background-child",
+        HANDSHAKE_BOUND_FLAG,
+    ] {
         assert!(
             !help.contains(hidden),
             "the help shows {hidden}, which exists for the tests:\n{help}"

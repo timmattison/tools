@@ -65,7 +65,7 @@ const ROOT_DIRECTORY: &str = "/";
 /// bound. The cause is Core Audio and not popstop: a device that a copy
 /// released a moment before opens slowly. So a test file that starts many
 /// copies together can fail here, and a person who starts one copy cannot.
-const HANDSHAKE_BOUND: Duration = Duration::from_secs(10);
+pub const HANDSHAKE_BOUND: Duration = Duration::from_secs(10);
 
 /// The longest time that a start waits for a copy that reported nothing.
 const END_BOUND: Duration = Duration::from_secs(5);
