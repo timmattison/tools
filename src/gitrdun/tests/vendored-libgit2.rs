@@ -34,3 +34,29 @@ fn workspace_git2_links_the_bundled_libgit2_not_the_system_one() {
          LIBGIT2_NO_VENDOR is not set."
     );
 }
+
+/// No crate in the workspace clones, fetches, or pushes with `git2`. Each one
+/// reads a repository on the local disk. Thus `git2` builds neither network
+/// transport.
+///
+/// The `ssh` feature builds `libssh2-sys`, which links the Homebrew OpenSSL
+/// dylib on a Mac. A crate that does not use SSH thus loads a Homebrew dylib
+/// at run time for nothing. If a crate starts to clone or fetch, turn on only
+/// the transport it uses, and change this test in the same commit.
+#[test]
+fn workspace_git2_builds_no_network_transport() {
+    let version = git2::Version::get();
+
+    assert!(
+        !version.ssh(),
+        "git2 links a libgit2 with SSH, and no crate in the workspace uses it. \
+         Set `default-features = false` on the `git2` entry in \
+         [workspace.dependencies] of the root Cargo.toml."
+    );
+    assert!(
+        !version.https(),
+        "git2 links a libgit2 with HTTPS, and no crate in the workspace uses it. \
+         Set `default-features = false` on the `git2` entry in \
+         [workspace.dependencies] of the root Cargo.toml."
+    );
+}
