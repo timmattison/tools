@@ -46,9 +46,8 @@ notify = "8.2"
 # Git
 # vendored-libgit2 compiles the bundled libgit2 and links it statically. A
 # system libgit2 puts its version-pinned Homebrew Cellar path in the build
-# cache, and each Homebrew upgrade then stops the link. The default ssh and
-# https features stay on: org-borg clones over both. Held by
-# src/org-borg/tests/vendored-libgit2.rs.
+# cache, and each Homebrew upgrade then stops the link. Held by
+# src/gitrdun/tests/vendored-libgit2.rs.
 git2 = { version = "0.20", features = ["vendored-libgit2"] }
 gix = "0.83"
 

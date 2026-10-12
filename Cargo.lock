@@ -5852,22 +5852,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "org-borg"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "buildinfo",
- "clap",
- "colored",
- "git2",
- "indicatif",
- "reqwest",
- "serde",
- "termbar",
- "tokio",
-]
-
-[[package]]
 name = "outref"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
