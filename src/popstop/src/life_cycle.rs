@@ -53,6 +53,10 @@ pub struct Settings {
     state_dir: Option<PathBuf>,
     /// The time after which the copy stops by itself, from `--exit-after`.
     pub exit_after: Option<Duration>,
+    /// The longest time that a background start waits for the report of its
+    /// copy, from `--handshake-bound`. The bound of a user
+    /// ([`crate::background::HANDSHAKE_BOUND`]), when it is `None`.
+    pub handshake_bound: Option<Duration>,
 }
 
 impl Settings {
@@ -73,7 +77,11 @@ impl Settings {
     /// Returns a [`Failure`] with the status [`exit_status::ERROR`] when the
     /// full path cannot be found, for example because the working directory
     /// is gone.
-    pub fn new(state_dir: Option<&Path>, exit_after: Option<Duration>) -> Result<Self, Failure> {
+    pub fn new(
+        state_dir: Option<&Path>,
+        exit_after: Option<Duration>,
+        handshake_bound: Option<Duration>,
+    ) -> Result<Self, Failure> {
         let state_dir = state_dir
             .map(|path| {
                 std::path::absolute(path).map_err(|problem| {
@@ -87,6 +95,7 @@ impl Settings {
         Ok(Self {
             state_dir,
             exit_after,
+            handshake_bound,
         })
     }
 
@@ -413,7 +422,7 @@ mod tests {
         // tests of this binary run on many threads, and they share it.
         let working_dir = std::env::current_dir().expect("the working directory of this test");
 
-        let relative = Settings::new(Some(Path::new("state")), None)
+        let relative = Settings::new(Some(Path::new("state")), None, None)
             .expect("settings with a relative state directory");
         assert_eq!(
             relative.state_dir_argument(),
@@ -423,14 +432,14 @@ mod tests {
 
         let full = Path::new("/tmp/state dir");
         let settings =
-            Settings::new(Some(full), None).expect("settings with a full state directory");
+            Settings::new(Some(full), None, None).expect("settings with a full state directory");
         assert_eq!(
             settings.state_dir_argument(),
             Some(full),
             "a full path stays as it is"
         );
 
-        let none = Settings::new(None, None).expect("settings with no state directory");
+        let none = Settings::new(None, None, None).expect("settings with no state directory");
         assert_eq!(
             none.state_dir_argument(),
             None,

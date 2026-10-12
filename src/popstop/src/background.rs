@@ -52,7 +52,8 @@ const EXIT_AFTER_FLAG: &str = "--exit-after";
 /// that a user unmounts.
 const ROOT_DIRECTORY: &str = "/";
 
-/// The longest time that a start waits for the report of its copy.
+/// The longest time that a start waits for the report of its copy, when the
+/// start got no `--handshake-bound`. This is the bound of a user.
 ///
 /// The copy opens the default output device in that time, and a device that
 /// needs longer needs the user. The wait has a bound because a start that
@@ -63,8 +64,11 @@ const ROOT_DIRECTORY: &str = "/";
 /// the longest measured start of one copy. Twelve starts with no time
 /// between them took up to 6.8 s each, and one of the twelve passed the
 /// bound. The cause is Core Audio and not popstop: a device that a copy
-/// released a moment before opens slowly. So a test file that starts many
-/// copies together can fail here, and a person who starts one copy cannot.
+/// released a moment before opens slowly. A machine that runs many tests
+/// together also starts each process slowly. So a test file that starts many
+/// copies together passes this bound, and a person who starts one copy does
+/// not. Thus the tests give each start a longer bound with the hidden flag
+/// `--handshake-bound`.
 pub const HANDSHAKE_BOUND: Duration = Duration::from_secs(10);
 
 /// The longest time that a start waits for a copy that reported nothing.
@@ -81,6 +85,9 @@ const READ_THREAD_NAME: &str = "popstop-handshake";
 ///
 /// The report is the proof that the device is awake, thus the answer for the
 /// user comes after it and not after the start of the copy (story 9).
+///
+/// The wait lasts for the handshake bound of `settings` at most, and for
+/// [`HANDSHAKE_BOUND`] when `settings` has none.
 ///
 /// # Errors
 ///
@@ -99,8 +106,9 @@ pub fn start(settings: &Settings) -> Result<Report, Failure> {
         ))
     })?;
     let mut copy = make_the_copy(settings, log)?;
+    let bound = settings.handshake_bound.unwrap_or(HANDSHAKE_BOUND);
 
-    match read_the_report(&mut copy)? {
+    match read_the_report(&mut copy, bound)? {
         Answer::Reported(Handshake::Ready { device_name, pid }) => Ok(Report::new(
             exit_status::SUCCESS,
             message::background_ready_lines(
@@ -127,7 +135,7 @@ pub fn start(settings: &Settings) -> Result<Report, Failure> {
             end_the_copy(&mut copy);
             Err(Failure::new(
                 exit_status::ERROR,
-                message::did_not_report_within(HANDSHAKE_BOUND, &log_path),
+                message::did_not_report_within(bound, &log_path),
             ))
         }
     }
@@ -384,16 +392,16 @@ enum Answer {
     /// The copy wrote no report, and it writes none: it closed its stdout, or
     /// it wrote a line that is not a report.
     Nothing,
-    /// The copy wrote nothing within [`HANDSHAKE_BOUND`].
+    /// The copy wrote nothing within the bound of the start.
     Silence,
 }
 
-/// Reads the one line that the copy writes, for [`HANDSHAKE_BOUND`] at most.
+/// Reads the one line that the copy writes, for `bound` at most.
 ///
 /// A thread reads the line and sends it into a channel, and this call waits on
 /// that channel with a bound. Thus a copy that writes nothing ends the wait,
 /// and a read that never returns holds nothing.
-fn read_the_report(copy: &mut Child) -> Result<Answer, Failure> {
+fn read_the_report(copy: &mut Child, bound: Duration) -> Result<Answer, Failure> {
     let Some(stdout) = copy.stdout.take() else {
         return Ok(Answer::Nothing);
     };
@@ -412,7 +420,7 @@ fn read_the_report(copy: &mut Child) -> Result<Answer, Failure> {
             ))
         })?;
 
-    Ok(match receiver.recv_timeout(HANDSHAKE_BOUND) {
+    Ok(match receiver.recv_timeout(bound) {
         Ok(Ok(line)) => Handshake::parse(&line).map_or(Answer::Nothing, Answer::Reported),
         Ok(Err(_)) | Err(RecvTimeoutError::Disconnected) => Answer::Nothing,
         Err(RecvTimeoutError::Timeout) => Answer::Silence,
@@ -425,7 +433,7 @@ fn read_the_report(copy: &mut Child) -> Result<Answer, Failure> {
 /// never `SIGKILL`. A copy that already plays then ramps its signal down.
 ///
 /// Such a copy can still hold the lock, because it takes the lock before it
-/// opens the device. That open can last longer than [`HANDSHAKE_BOUND`]. The
+/// opens the device. That open can last longer than the bound of the start. The
 /// copy registered the stop signals before it took the lock, thus the
 /// `SIGTERM` waits in the copy, and the open continues. When the device opens
 /// while the start runs, the copy reports, stops on the `SIGTERM`, and

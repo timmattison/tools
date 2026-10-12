@@ -37,6 +37,14 @@ const EXIT_AFTER_SECONDS: &str = "60";
 /// the report of its copy.
 const HANDSHAKE_BOUND_FLAG: &str = "--handshake-bound";
 
+/// The longest time that a background start of this file waits for the
+/// report of its copy, as `--handshake-bound` takes it.
+///
+/// The bound of a user ([`HANDSHAKE_BOUND`]) is ten seconds, and a machine
+/// that runs many tests together passes it. Thus each background start of this
+/// file gets the bound of [`LINE_TIMEOUT`], for the reason that bound gives.
+const HANDSHAKE_BOUND_SECONDS: &str = "60";
+
 /// A bound for the report of a copy that a late copy always passes, as
 /// `--handshake-bound` takes it.
 const SHORT_HANDSHAKE_BOUND_SECONDS: &str = "1";
@@ -352,17 +360,15 @@ impl BackgroundStart {
     /// value of `--state-dir`, and returns at once.
     ///
     /// The start waits for the report of its copy for `handshake_bound`
-    /// seconds when it is given.
+    /// seconds when it is given, and for [`HANDSHAKE_BOUND_SECONDS`] when it
+    /// is not.
     fn spawn(command: &mut Command, state_dir: &Path, handshake_bound: Option<&str>) -> Child {
         command
             .arg("--state-dir")
             .arg(state_dir)
-            .arg("--background")
-            .args(["--exit-after", EXIT_AFTER_SECONDS]);
-        if let Some(bound) = handshake_bound {
-            command.args([HANDSHAKE_BOUND_FLAG, bound]);
-        }
-        command
+            .args(background_start(
+                handshake_bound.unwrap_or(HANDSHAKE_BOUND_SECONDS),
+            ))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -384,6 +390,23 @@ impl BackgroundStart {
             errors: String::from_utf8(output.stderr).expect("the errors of popstop are UTF-8"),
         }
     }
+}
+
+/// Gives the arguments of a background start of this file, after its state
+/// directory.
+///
+/// The copy stops by itself after [`EXIT_AFTER_SECONDS`], and the start waits
+/// for the report of the copy for `handshake_bound` seconds. Each background
+/// start of this file takes its arguments here, thus no start waits for the
+/// bound of a user by mistake.
+fn background_start(handshake_bound: &str) -> [&str; 5] {
+    [
+        "--background",
+        "--exit-after",
+        EXIT_AFTER_SECONDS,
+        HANDSHAKE_BOUND_FLAG,
+        handshake_bound,
+    ]
 }
 
 /// The program of a background start whose copy reports late.
@@ -426,7 +449,10 @@ impl LateCopy {
             .arg(&log)
             .status()
             .expect("start mkfifo");
-        assert!(made.success(), "mkfifo did not make the FIFO {log:?}: {made}");
+        assert!(
+            made.success(),
+            "mkfifo did not make the FIFO {log:?}: {made}"
+        );
         Self {
             program,
             dir,
@@ -985,7 +1011,7 @@ fn a_background_start_refuses_with_the_words_of_a_foreground_start() {
     let (foreground, foreground_report, foreground_refusal) =
         ask_in(&dir, &["--exit-after", EXIT_AFTER_SECONDS]);
     let (background, background_report, background_refusal) =
-        ask_in(&dir, &["--background", "--exit-after", EXIT_AFTER_SECONDS]);
+        ask_in(&dir, &background_start(HANDSHAKE_BOUND_SECONDS));
 
     assert_eq!(
         background.code(),
@@ -1105,12 +1131,10 @@ fn a_relative_state_directory_names_one_directory_in_the_start_the_copy_and_each
     let (background, _, background_refusal) = ask_from(
         &working_dir,
         &[
-            "--state-dir",
-            relative,
-            "--background",
-            "--exit-after",
-            EXIT_AFTER_SECONDS,
-        ],
+            &["--state-dir", relative][..],
+            &background_start(HANDSHAKE_BOUND_SECONDS),
+        ]
+        .concat(),
     );
     assert_eq!(
         (foreground.code(), background.code()),
@@ -1250,8 +1274,7 @@ fn a_refused_background_start_leaves_the_log_of_the_copy_that_runs_alone() {
 
     // The second start does not take the lock, thus it does not play and it
     // does not stay. Its time limit is the backstop of a start that works.
-    let (status, report, refusal) =
-        ask_in(&dir, &["--background", "--exit-after", EXIT_AFTER_SECONDS]);
+    let (status, report, refusal) = ask_in(&dir, &background_start(HANDSHAKE_BOUND_SECONDS));
 
     assert_eq!(
         status.code(),
@@ -1327,8 +1350,7 @@ fn a_copy_that_cannot_start_says_why_on_stderr_and_in_its_log() {
     // lock file. The start makes its log, and the copy fails before it plays.
     fs::create_dir_all(state.lock_path()).expect("make a lock file that no copy can open");
 
-    let (status, report, problem) =
-        ask_in(&dir, &["--background", "--exit-after", EXIT_AFTER_SECONDS]);
+    let (status, report, problem) = ask_in(&dir, &background_start(HANDSHAKE_BOUND_SECONDS));
 
     assert_eq!(
         status.code(),
