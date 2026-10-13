@@ -28,6 +28,56 @@ impl fmt::Display for PullNumber {
 /// The host that `gh` talks to when `GH_HOST` is not set.
 const GITHUB_HOST: &str = "github.com";
 
+/// The suffix that many remote URLs add to the name of a repository.
+const GIT_SUFFIX: &str = ".git";
+
+/// The URL schemes that name a remote on a network host.
+const NETWORK_SCHEMES: [&str; 4] = ["ssh", "https", "http", "git"];
+
+/// Splits the URL of a remote into its host and its path.
+///
+/// The URL form `scheme://[user@]host[:port]/path` and the scp-like form
+/// `[user@]host:path` both work. The host keeps its original case and loses
+/// the user and the port. Returns `None` for a scheme that is not a network
+/// scheme, for a local path, and for a port that is not a number.
+fn split_host_and_path(url: &str) -> Option<(&str, &str)> {
+    if let Some((scheme, rest)) = url.split_once("://") {
+        if !NETWORK_SCHEMES
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(scheme))
+        {
+            return None;
+        }
+        let (authority, path) = rest.split_once('/')?;
+        let host_and_port = authority
+            .rsplit_once('@')
+            .map_or(authority, |(_, after)| after);
+        return match host_and_port.split_once(':') {
+            Some((host, port)) => (!port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
+                .then_some((host, path)),
+            None => Some((host_and_port, path)),
+        };
+    }
+    let (before, path) = url.split_once(':')?;
+    if before.contains('/') {
+        return None;
+    }
+    let host = before.rsplit_once('@').map_or(before, |(_, after)| after);
+    Some((host, path))
+}
+
+/// Tells if `part` is a valid owner or repository name.
+///
+/// The part is not empty and holds only ASCII letters, digits, `-`, `_`, and
+/// `.`. A part of only `.git` is not a name, because the caller has already
+/// removed one `.git` suffix and an empty name is left.
+fn is_name_part(part: &str) -> bool {
+    !part.is_empty()
+        && part
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
 /// A repository on GitHub, named by host, owner, and name.
 ///
 /// `gh pr list` asks one repository for its pull requests. This type holds the
@@ -54,8 +104,25 @@ impl GithubRepo {
     /// `OWNER/NAME`. An SSH alias such as `github-work` is another host, so it
     /// returns `None` too.
     pub fn from_remote_url(url: &str, extra_host: Option<&str>) -> Option<Self> {
-        let _ = (url, extra_host);
-        None
+        let (host, path) = split_host_and_path(url)?;
+        let host = host.to_ascii_lowercase();
+        let wanted = host == GITHUB_HOST
+            || extra_host
+                .is_some_and(|extra| !extra.is_empty() && host == extra.to_ascii_lowercase());
+        if !wanted {
+            return None;
+        }
+        let path = path.strip_suffix('/').unwrap_or(path);
+        let path = path.strip_suffix(GIT_SUFFIX).unwrap_or(path);
+        let (owner, name) = path.split_once('/')?;
+        if !is_name_part(owner) || !is_name_part(name) {
+            return None;
+        }
+        Some(Self {
+            host,
+            owner: owner.to_owned(),
+            name: name.to_owned(),
+        })
     }
 
     /// The owner of the repository, as it appears in the remote URL.
@@ -67,8 +134,7 @@ impl GithubRepo {
 impl fmt::Display for GithubRepo {
     /// Writes `host/owner/name`, the form that `gh pr list --repo` takes.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        Ok(())
+        write!(f, "{}/{}/{}", self.host, self.owner, self.name)
     }
 }
 
