@@ -503,21 +503,19 @@ impl Family {
             .collect()
     }
 
-    /// The numbers of the open pull requests of the branch of `entry`, written
-    /// as one space and the numbers joined by single spaces.
+    /// The numbers of the open pull requests of the branch of `entry`, joined
+    /// by single spaces, or `None` when there is nothing to show.
     ///
-    /// The text is empty when the worktree has no branch or its branch has no
-    /// open pull request, so such a row does not change.
-    fn pull_numbers_of(&self, entry: &Entry, pulls: &PullRequests) -> String {
-        let Some(branch) = entry.worktree.branch.as_deref() else {
-            return String::new();
-        };
+    /// A worktree with no branch has no number, and a branch with no open pull
+    /// request has none either. Such a row does not change.
+    fn pull_numbers_of(&self, entry: &Entry, pulls: &PullRequests) -> Option<String> {
+        let branch = entry.worktree.branch.as_deref()?;
         let numbers = pulls.numbers(entry.group, branch);
         if numbers.is_empty() {
-            return String::new();
+            return None;
         }
         let joined: Vec<String> = numbers.iter().map(ToString::to_string).collect();
-        format!(" {}", joined.join(" "))
+        Some(joined.join(" "))
     }
 
     /// Renders the listing, with the current worktree highlighted.
@@ -546,14 +544,20 @@ impl Family {
             let path = entry.worktree.path.display().to_string();
             let branch = entry.worktree.display_branch();
             let numbers = self.pull_numbers_of(entry, pulls);
+            let numbers = |paint: fn(&str) -> String| {
+                numbers
+                    .as_deref()
+                    .map_or_else(String::new, |text| format!(" {}", paint(text)))
+            };
 
             let _ = if is_current {
                 writeln!(
                     out,
-                    "{} {indent}{} [{}]{numbers}",
+                    "{} {indent}{} [{}]{}",
                     marker.green().bold(),
                     path.green().bold(),
-                    branch.green()
+                    branch.green(),
+                    numbers(|text| text.green().to_string())
                 )
             } else {
                 writeln!(
