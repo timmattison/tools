@@ -231,9 +231,41 @@ const PR_TIMEOUT_ENV: &str = "CWT_PR_TIMEOUT";
 const DEFAULT_PR_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Reads a time limit in seconds. Decimals are allowed.
+///
+/// Returns `None` for text that is not a number, for a number that is not
+/// finite or not greater than 0, and for a number too large for a `Duration`.
 fn parse_pr_timeout(value: &str) -> Option<Duration> {
-    let _ = value;
-    None
+    let seconds: f64 = value.trim().parse().ok()?;
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return None;
+    }
+    Duration::try_from_secs_f64(seconds).ok()
+}
+
+/// Reads the time limit of the pull request queries from the environment.
+///
+/// Returns the limit and, when the variable holds a bad value, one warning line
+/// without the `Warning: ` prefix. An unset or empty variable is not a choice,
+/// so it gives the default and no warning.
+fn pr_time_limit() -> (Duration, Option<String>) {
+    pr_time_limit_from(std::env::var(PR_TIMEOUT_ENV).ok().as_deref())
+}
+
+/// The rules of [`pr_time_limit`], with the value as a parameter so a test does
+/// not touch the environment of the process.
+fn pr_time_limit_from(value: Option<&str>) -> (Duration, Option<String>) {
+    match value {
+        None | Some("") => (DEFAULT_PR_TIMEOUT, None),
+        Some(value) => match parse_pr_timeout(value) {
+            Some(limit) => (limit, None),
+            None => (
+                DEFAULT_PR_TIMEOUT,
+                Some(format!(
+                    "{PR_TIMEOUT_ENV}={value:?} is not a number of seconds greater than 0. The limit stays at {DEFAULT_PR_TIMEOUT:?}"
+                )),
+            ),
+        },
+    }
 }
 
 /// The shell code to add to shell config files.
@@ -477,6 +509,29 @@ mod tests {
         for value in ["0", "-1", "abc", "", "inf", "NaN", "1e30"] {
             assert_eq!(parse_pr_timeout(value), None, "{value:?} must be refused");
         }
+    }
+
+    #[test]
+    fn test_pr_time_limit_uses_the_default_for_an_unset_or_empty_variable() {
+        assert_eq!(pr_time_limit_from(None), (DEFAULT_PR_TIMEOUT, None));
+        assert_eq!(pr_time_limit_from(Some("")), (DEFAULT_PR_TIMEOUT, None));
+    }
+
+    #[test]
+    fn test_pr_time_limit_uses_a_valid_value_without_a_warning() {
+        assert_eq!(
+            pr_time_limit_from(Some("0.5")),
+            (Duration::from_millis(500), None)
+        );
+    }
+
+    #[test]
+    fn test_pr_time_limit_warns_in_one_line_for_a_bad_value() {
+        let (limit, warning) = pr_time_limit_from(Some("abc"));
+        assert_eq!(limit, DEFAULT_PR_TIMEOUT);
+        let warning = warning.expect("a bad value must give a warning");
+        assert!(warning.contains(PR_TIMEOUT_ENV) && warning.contains("\"abc\""));
+        assert_eq!(warning.lines().count(), 1);
     }
 
     #[test]
