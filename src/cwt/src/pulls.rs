@@ -1,10 +1,19 @@
-//! Open pull requests, read from the output of `gh pr list`.
+//! Open pull requests of a repository, asked of GitHub through `gh pr list`.
 //!
 //! `cwt` shows the numbers of the open pull requests after the branch of a
 //! worktree. One `gh pr list --json` call for each repository gives all the
-//! data. This module holds the pure part of that work: it reads the URL of a
-//! remote, and it reads the JSON that `gh` prints. It runs no command and it
-//! needs no network, so every rule in it has an offline test.
+//! data. The module has three parts:
+//!
+//! - The pure reads, which run no command and need no network.
+//!   `GithubRepo::from_remote_url` reads the URL of a remote, and
+//!   `parse_pull_list` reads the JSON that `gh` prints.
+//! - The bounded run of a child. `run_with_limit` starts a program and kills
+//!   it when the time limit ends.
+//! - The lookup. `lookup` starts `git` to read the URL of `origin`, and then
+//!   starts `gh`, which uses the network.
+//!
+//! The tests of the lookup give it a stub `gh` script and a temporary
+//! repository, so no test uses the network.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -107,8 +116,9 @@ impl GithubRepo {
     ///
     /// Returns `Some` only when the host is `github.com`, `ssh.github.com`, or
     /// equals `extra_host`. The host `ssh.github.com` is the SSH host of GitHub
-    /// on port 443, so it counts as `github.com` and is stored as such. The caller passes the value of the `GH_HOST` environment
-    /// variable as `extra_host`. An empty `extra_host` matches nothing.
+    /// on port 443, so it counts as `github.com` and is stored as such. The
+    /// caller passes the value of the `GH_HOST` environment variable as
+    /// `extra_host`. An empty `extra_host` matches nothing.
     ///
     /// The function accepts the scp-like form `[user@]HOST:OWNER/NAME` and the
     /// URL forms `ssh://`, `https://`, `http://`, and `git://`. A trailing `/`
