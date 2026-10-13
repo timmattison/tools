@@ -419,8 +419,17 @@ fn main() {
             }
         }
     } else {
-        // No args: display list
-        print!("{}", family.render(&family::PullRequests::default()));
+        // No args: display list. This is the only branch that asks GitHub, so
+        // every way of navigating stays offline and never starts `gh`.
+        let (limit, limit_warning) = pr_time_limit();
+        if let Some(warning) = limit_warning {
+            error!(cli.quiet, "Warning: {}", warning);
+        }
+        let pulls = family.open_pull_requests(limit);
+        for warning in pulls.warnings() {
+            error!(cli.quiet, "Warning: {}", warning);
+        }
+        print!("{}", family.render(&pulls));
     }
 }
 
