@@ -634,3 +634,14 @@ fn a_bad_time_limit_gives_one_warning_and_the_list_keeps_its_numbers() {
     assert_eq!(warnings.len(), 1, "stderr was: {warnings:?}");
     assert!(warnings[0].contains("CWT_PR_TIMEOUT"), "{}", warnings[0]);
 }
+
+#[test]
+fn the_help_describes_the_pull_request_numbers_and_their_time_limit() {
+    let (_tmp, root) = scratch();
+    let output = run_cwt(&root, &["--help"], &[], &prepend_to_path(&root));
+    assert!(output.status.success());
+
+    let help = stdout(&output);
+    assert!(help.contains("CWT_PR_TIMEOUT"), "the help was:\n{help}");
+    assert!(help.contains("`gh`"), "the help was:\n{help}");
+}
