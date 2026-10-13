@@ -547,6 +547,12 @@ impl Family {
     ///
     /// One repository prints as a plain list. More than one prints grouped, with
     /// each repository's name above its worktrees.
+    ///
+    /// A worktree whose branch has open pull requests in `pulls` shows their
+    /// numbers after the branch, for example `[main] #512 #519`. The numbers
+    /// have the paint of the branch: green on the current row, dimmed on the
+    /// others. A row with no number does not change. Pass
+    /// `&PullRequests::default()` to list with no lookup.
     pub fn render(&self, pulls: &PullRequests) -> String {
         let mut out = String::new();
         // The heading is remembered by which repository it was: two
