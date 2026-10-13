@@ -562,8 +562,9 @@ impl Family {
             } else {
                 writeln!(
                     out,
-                    "{marker} {indent}{path} [{}]{numbers}",
-                    branch.dimmed()
+                    "{marker} {indent}{path} [{}]{}",
+                    branch.dimmed(),
+                    numbers(|text| text.dimmed().to_string())
                 )
             };
         }
