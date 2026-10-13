@@ -13,11 +13,13 @@
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use colored::Colorize;
 use repowalker::{child_repositories, holds_git_entry};
 
 use crate::ascent::{climb, main_branch_rank};
+use crate::pulls::{self, Lookup, PullNumber};
 use crate::worktree::{canonical, list_worktrees, paths_equal, RepoWorktrees, Worktree};
 
 /// The indent that puts a worktree under its repository heading.
@@ -100,6 +102,35 @@ pub struct Family {
     current: Option<usize>,
     /// Repositories left out of the family, for the caller to report.
     warnings: Vec<String>,
+}
+
+/// The open pull requests of every repository of a family, in the order of the
+/// family's groups.
+///
+/// `Family::open_pull_requests` builds it. `Family::render` reads it. The
+/// default value holds no lookup, so it shows no number and it warns of
+/// nothing.
+#[derive(Debug, Default)]
+pub struct PullRequests {
+    by_group: Vec<Lookup>,
+}
+
+impl PullRequests {
+    /// The warnings of the lookups, one line each, in group order, without a
+    /// `Warning: ` prefix.
+    pub fn warnings(&self) -> impl Iterator<Item = &str> {
+        self.by_group.iter().filter_map(Lookup::warning)
+    }
+
+    /// The numbers for `branch` in group `group`.
+    ///
+    /// The slice is empty when the group has no lookup, which is the case for
+    /// the default value, and when the branch has no pull request.
+    fn numbers(&self, group: usize, branch: &str) -> &[PullNumber] {
+        self.by_group
+            .get(group)
+            .map_or(&[], |lookup| lookup.pulls().numbers(branch))
+    }
 }
 
 impl Family {
@@ -472,11 +503,65 @@ impl Family {
             .collect()
     }
 
+    /// Asks GitHub for the open pull requests of every repository of the family.
+    ///
+    /// This is the second wave of the listing. `discover` stays offline, so
+    /// every other command of `cwt` never calls `gh`. Only the listing calls
+    /// this method. Every repository is asked once, in the main worktree of the
+    /// repository, where `git remote get-url origin` works for a bare
+    /// repository and for a yadm git directory too. The repositories run at the
+    /// same time, `SCAN_WIDTH` at once, and each one has `limit` to answer.
+    ///
+    /// A lookup that panics gives a warning for its repository and no other
+    /// repository loses its numbers.
+    pub fn open_pull_requests(&self, limit: Duration) -> PullRequests {
+        self.open_pull_requests_with(|dir| pulls::lookup(dir, limit))
+    }
+
+    /// The same as `open_pull_requests`, with the lookup as a parameter.
+    ///
+    /// A test passes a lookup that panics, to reach the warning of a lookup
+    /// that died. `lookup` gets the main worktree of one repository.
+    fn open_pull_requests_with(&self, lookup: impl Fn(&Path) -> Lookup + Sync) -> PullRequests {
+        let by_group = in_waves(
+            &self.groups,
+            |group| lookup(&group.dir),
+            |group| {
+                Lookup::failed(format!(
+                    "{LOOKUP_DIED} {} {LOOKUP_DIED_END}",
+                    group.dir.display()
+                ))
+            },
+        );
+        PullRequests { by_group }
+    }
+
+    /// The numbers of the open pull requests of the branch of `entry`, joined
+    /// by single spaces, or `None` when there is nothing to show.
+    ///
+    /// A worktree with no branch has no number, and a branch with no open pull
+    /// request has none either. Such a row does not change.
+    fn pull_numbers_of(entry: &Entry, pulls: &PullRequests) -> Option<String> {
+        let branch = entry.worktree.branch.as_deref()?;
+        let numbers = pulls.numbers(entry.group, branch);
+        if numbers.is_empty() {
+            return None;
+        }
+        let joined: Vec<String> = numbers.iter().map(ToString::to_string).collect();
+        Some(joined.join(" "))
+    }
+
     /// Renders the listing, with the current worktree highlighted.
     ///
     /// One repository prints as a plain list. More than one prints grouped, with
     /// each repository's name above its worktrees.
-    pub fn render(&self) -> String {
+    ///
+    /// A worktree whose branch has open pull requests in `pulls` shows their
+    /// numbers after the branch, for example `[main] #512 #519`. The numbers
+    /// have the paint of the branch: green on the current row, dimmed on the
+    /// others. A row with no number does not change. Pass
+    /// `&PullRequests::default()` to list with no lookup.
+    pub fn render(&self, pulls: &PullRequests) -> String {
         let mut out = String::new();
         // The heading is remembered by which repository it was: two
         // repositories of one family can have the same directory name, and a
@@ -497,17 +582,29 @@ impl Family {
             let indent = if self.grouped { GROUP_INDENT } else { "" };
             let path = entry.worktree.path.display().to_string();
             let branch = entry.worktree.display_branch();
+            let numbers = Self::pull_numbers_of(entry, pulls);
+            let numbers = |paint: fn(&str) -> String| {
+                numbers
+                    .as_deref()
+                    .map_or_else(String::new, |text| format!(" {}", paint(text)))
+            };
 
             let _ = if is_current {
                 writeln!(
                     out,
-                    "{} {indent}{} [{}]",
+                    "{} {indent}{} [{}]{}",
                     marker.green().bold(),
                     path.green().bold(),
-                    branch.green()
+                    branch.green(),
+                    numbers(|text| text.green().to_string())
                 )
             } else {
-                writeln!(out, "{marker} {indent}{path} [{}]", branch.dimmed())
+                writeln!(
+                    out,
+                    "{marker} {indent}{path} [{}]{}",
+                    branch.dimmed(),
+                    numbers(|text| text.dimmed().to_string())
+                )
             };
         }
 
@@ -528,51 +625,74 @@ fn anchor_of(main_worktree: &Path) -> PathBuf {
     }
 }
 
-/// How many child repositories are read at once.
+/// How many items one wave of [`in_waves`] works on at once.
 ///
-/// Each of these threads spends its life waiting on a `git` subprocess, so the
-/// useful width is set by how many subprocesses the machine will carry at once
-/// rather than by how many cores it has: a cap at the core count puts a
-/// 50-child family through four waves and hands most of the saving back. Wider
-/// is not better without limit either — 64 at a time measured slower than 32 on
-/// a 14-core machine, and a directory of hundreds of repositories would ask the
+/// Each of these threads spends its life waiting on a subprocess, so the useful
+/// width is set by how many subprocesses the machine will carry at once rather
+/// than by how many cores it has: a cap at the core count puts a 50-child
+/// family through four waves and hands most of the saving back. Wider is not
+/// better without limit either. 64 at a time measured slower than 32 on a
+/// 14-core machine, and a directory of hundreds of repositories would ask the
 /// operating system for hundreds of processes at once. The families this
-/// feature is for sit well under this width and are read in a single wave.
+/// feature is for sit well under this width and run in a single wave.
 const SCAN_WIDTH: usize = 32;
 
 /// What a repository whose scan did not finish is told to the user as.
 const SCAN_DIED: &str = "the scan of this repository did not finish";
 
-/// Reads every child repository of `dir`, in the order [`child_repositories`]
-/// sorted them.
-///
-/// A repository is read by asking `git` for its worktrees, and the answer takes
-/// far longer to arrive than it takes to use. So `SCAN_WIDTH` of them are asked
-/// at once and the answers are collected back into directory order, which costs
-/// a family of children about what one child costs. The order the caller sees
-/// is the order it would see from reading them one at a time.
-fn read_children(dir: &Path) -> Vec<(PathBuf, Result<RepoWorktrees, String>)> {
-    let children = child_repositories(dir);
-    let mut listings = Vec::with_capacity(children.len());
+/// What a repository whose lookup of pull requests did not finish is told to
+/// the user as. The directory of the repository follows it.
+const LOOKUP_DIED: &str = "the lookup of the pull requests of";
 
-    for wave in children.chunks(SCAN_WIDTH) {
+/// The end of the sentence that [`LOOKUP_DIED`] starts.
+const LOOKUP_DIED_END: &str = "did not finish";
+
+/// Runs `work` on every item, `SCAN_WIDTH` at a time, and gives the answers
+/// back in item order.
+///
+/// A subprocess takes far longer to answer than the answer takes to use. So
+/// `SCAN_WIDTH` items run at once, and the answers come back in the order of
+/// the items. A family of children then costs about what one child costs, and
+/// the caller sees the order it would see from one item at a time.
+///
+/// A thread that panics gets `died(item)` in its slot and no other slot
+/// changes. One bad item must not cost the user the answers of the others.
+fn in_waves<T: Sync, R: Send>(
+    items: &[T],
+    work: impl Fn(&T) -> R + Sync,
+    died: impl Fn(&T) -> R,
+) -> Vec<R> {
+    let work = &work;
+    let mut answers = Vec::with_capacity(items.len());
+
+    for wave in items.chunks(SCAN_WIDTH) {
         std::thread::scope(|scope| {
-            let readers: Vec<_> = wave
+            let threads: Vec<_> = wave
                 .iter()
-                .map(|child| scope.spawn(move || list_worktrees(child)))
+                .map(|item| scope.spawn(move || work(item)))
                 .collect();
 
-            for (child, reader) in wave.iter().zip(readers) {
-                // A reader that died takes its own repository out of the family
-                // and no other: one unreadable directory must not cost the user
-                // the listing.
-                let listing = reader.join().unwrap_or_else(|_| Err(SCAN_DIED.to_string()));
-                listings.push((child.clone(), listing));
+            for (item, thread) in wave.iter().zip(threads) {
+                answers.push(thread.join().unwrap_or_else(|_| died(item)));
             }
         });
     }
 
-    listings
+    answers
+}
+
+/// Reads every child repository of `dir`, in the order [`child_repositories`]
+/// sorted them.
+///
+/// A child that cannot be read keeps its place in the answer as an error.
+fn read_children(dir: &Path) -> Vec<(PathBuf, Result<RepoWorktrees, String>)> {
+    let children = child_repositories(dir);
+    let listings = in_waves(
+        &children,
+        |child| list_worktrees(child),
+        |_| Err(SCAN_DIED.to_string()),
+    );
+    children.into_iter().zip(listings).collect()
 }
 
 /// Gives every repository of the family a name that reaches it alone.
@@ -731,7 +851,9 @@ mod tests {
     /// irrelevant. It also makes the assertion stronger than a plain `render`
     /// call, because the painted output is the one a user reads.
     fn glyphs_of(whole: &Family) -> String {
-        testcolor::strip_ansi(&testcolor::with_forced_ansi(|| whole.render()))
+        testcolor::strip_ansi(&testcolor::with_forced_ansi(|| {
+            whole.render(&PullRequests::default())
+        }))
     }
 
     /// Build a family by hand, without touching the filesystem.
@@ -814,6 +936,189 @@ mod tests {
             current,
             warnings: Vec::new(),
         }
+    }
+
+    /// The pull requests of a family, one list of `(branch, number)` pairs for
+    /// each group, in group order.
+    fn pull_requests(groups: &[&[(&str, u64)]]) -> PullRequests {
+        PullRequests {
+            by_group: groups
+                .iter()
+                .map(|pairs| Lookup::found(pulls::OpenPulls::from_pairs(pairs)))
+                .collect(),
+        }
+    }
+
+    /// The glyphs of a render that shows `pulls`.
+    fn glyphs_with(whole: &Family, pulls: &PullRequests) -> String {
+        testcolor::strip_ansi(&testcolor::with_forced_ansi(|| whole.render(pulls)))
+    }
+
+    #[test]
+    fn render_shows_the_pull_request_of_the_current_branch() {
+        let one = family(
+            vec![("solo", "/repo", "main"), ("solo", "/repo-wt/x", "feature")],
+            false,
+            Some(0),
+        );
+        let pulls = pull_requests(&[&[("main", 547)]]);
+        assert_eq!(
+            glyphs_with(&one, &pulls),
+            "> /repo [main] #547\n  /repo-wt/x [feature]\n",
+            "a row with no pull request keeps its exact text, with no trailing space"
+        );
+    }
+
+    #[test]
+    fn render_paints_the_numbers_of_the_current_row_green_and_the_others_dimmed() {
+        let one = family(
+            vec![("solo", "/repo", "main"), ("solo", "/repo-wt/x", "feature")],
+            false,
+            Some(0),
+        );
+        let pulls = pull_requests(&[&[("main", 547), ("feature", 512), ("feature", 519)]]);
+        let painted = testcolor::with_forced_ansi(|| {
+            let current = "#547".green().to_string();
+            let other = "#512 #519".dimmed().to_string();
+            (one.render(&pulls), current, other)
+        });
+        let (rendered, current, other) = painted;
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert!(lines[0].ends_with(&format!("] {current}")), "{rendered:?}");
+        assert!(lines[1].ends_with(&format!("] {other}")), "{rendered:?}");
+    }
+
+    #[test]
+    fn warnings_come_in_group_order_and_skip_lookups_without_one() {
+        let pulls = PullRequests {
+            by_group: vec![
+                Lookup::failed("first".to_string()),
+                Lookup::default(),
+                Lookup::found(pulls::OpenPulls::from_pairs(&[("main", 1)])),
+                Lookup::failed("last".to_string()),
+            ],
+        };
+        assert_eq!(pulls.warnings().collect::<Vec<_>>(), ["first", "last"]);
+        assert_eq!(PullRequests::default().warnings().count(), 0);
+    }
+
+    #[test]
+    fn render_shows_ascending_numbers_whatever_the_order_they_came_in() {
+        let one = family(vec![("solo", "/repo", "feature")], false, Some(0));
+        let pulls = pull_requests(&[&[("feature", 519), ("feature", 512)]]);
+        assert_eq!(glyphs_with(&one, &pulls), "> /repo [feature] #512 #519\n");
+    }
+
+    #[test]
+    fn a_detached_worktree_never_shows_numbers() {
+        let one = detachable_family(vec![("solo", "/repo", None)], false, Some(0));
+        let shown = one.entries[0].worktree.display_branch();
+        let pulls = pull_requests(&[&[(shown.as_str(), 9)]]);
+        let rendered = glyphs_with(&one, &pulls);
+        assert_eq!(rendered, glyphs_of(&one));
+        assert!(!rendered.contains("#9"), "{rendered}");
+    }
+
+    #[test]
+    fn each_row_shows_the_numbers_of_its_own_repository() {
+        let two = family(
+            vec![("parent", "/p", "shared"), ("child", "/p/c", "shared")],
+            true,
+            Some(1),
+        );
+        let pulls = pull_requests(&[&[], &[("shared", 77)]]);
+        assert_eq!(
+            glyphs_with(&two, &pulls),
+            "parent\n    /p [shared]\n\nchild\n>   /p/c [shared] #77\n"
+        );
+    }
+
+    #[test]
+    fn multibyte_branch_names_show_their_numbers() {
+        let one = family(
+            vec![
+                ("solo", "/a", "\u{65e5}\u{672c}\u{8a9e}"),
+                ("solo", "/b", "\u{1f389}"),
+                ("solo", "/c", "caf\u{e9}"),
+            ],
+            false,
+            None,
+        );
+        let pulls = pull_requests(&[&[
+            ("\u{65e5}\u{672c}\u{8a9e}", 1),
+            ("\u{1f389}", 2),
+            ("caf\u{e9}", 3),
+        ]]);
+        assert_eq!(
+            glyphs_with(&one, &pulls),
+            "  /a [\u{65e5}\u{672c}\u{8a9e}] #1\n  /b [\u{1f389}] #2\n  /c [caf\u{e9}] #3\n"
+        );
+    }
+
+    #[test]
+    fn no_pull_requests_render_a_family_as_before() {
+        let two = family(
+            vec![("parent", "/p", "main"), ("child", "/p/c", "trunk")],
+            true,
+            Some(1),
+        );
+        assert_eq!(
+            glyphs_with(&two, &PullRequests::default()),
+            "parent\n    /p [main]\n\nchild\n>   /p/c [trunk]\n"
+        );
+    }
+
+    #[test]
+    fn a_lookup_that_panics_warns_for_its_repository_and_the_others_keep_their_numbers() {
+        let whole = family(
+            vec![
+                ("parent", "/p", "main"),
+                ("child", "/p/c", "trunk"),
+                ("third", "/p/d", "dev"),
+            ],
+            true,
+            None,
+        );
+        let pulls = whole.open_pull_requests_with(|dir| {
+            assert_ne!(dir, Path::new("/p/c"), "this lookup panics on purpose");
+            Lookup::found(pulls::OpenPulls::from_pairs(&[
+                ("main", 1),
+                ("trunk", 2),
+                ("dev", 3),
+            ]))
+        });
+        assert_eq!(
+            pulls.warnings().collect::<Vec<_>>(),
+            ["the lookup of the pull requests of /p/c did not finish"]
+        );
+        assert_eq!(
+            glyphs_with(&whole, &pulls),
+            "parent\n    /p [main] #1\n\nchild\n    /p/c [trunk]\n\nthird\n    /p/d [dev] #3\n"
+        );
+    }
+
+    #[test]
+    fn in_waves_keeps_item_order_and_replaces_only_the_item_that_died() {
+        let items: Vec<usize> = (0..SCAN_WIDTH * 2 + 3).collect();
+        let answers = in_waves(
+            &items,
+            |&item| {
+                assert_ne!(item, 5, "this item panics on purpose");
+                item * 10
+            },
+            |&item| item + 1_000_000,
+        );
+        let expected: Vec<usize> = items
+            .iter()
+            .map(|&item| {
+                if item == 5 {
+                    item + 1_000_000
+                } else {
+                    item * 10
+                }
+            })
+            .collect();
+        assert_eq!(answers, expected);
     }
 
     #[test]

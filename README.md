@@ -453,10 +453,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - To install: `cargo install --git https://github.com/timmattison/tools nwt`
 - cwt
   - Change Worktree - Navigate between the git worktrees of a repository and of the
-    repositories inside it. Shows a list of all worktrees with the current one highlighted,
-    or cycle through them with `-f` (forward) and `-p` (previous). Can also jump directly to
-    a worktree by directory name or branch name. Use `--no-family` to stay inside one
-    repository, and `--shell-setup` to automatically add shell integration to your config.
+    repositories inside it. Shows a list of all worktrees with the current one highlighted
+    and the number of each open pull request after its branch, or cycle through them with
+    `-f` (forward) and `-p` (previous). Can also jump directly to a worktree by directory
+    name or branch name. Use `--no-family` to stay inside one repository, and
+    `--shell-setup` to automatically add shell integration to your config.
   - To install: `cargo install --git https://github.com/timmattison/tools cwt`
 - gitnuke
   - Removes a git worktree and deletes the branch it had checked out, resolved as one
@@ -3202,7 +3203,7 @@ Navigate between the git worktrees of a repository and of the repositories insid
 ### Basic Usage
 
 ```bash
-cwt                           # Show list of worktrees with current highlighted
+cwt                           # Show list of worktrees with current highlighted, and open PR numbers
 cwt -f                        # Go to next worktree (wraps around)
 cwt -p                        # Go to previous worktree (wraps around)
 cwt -m                        # Go to the main worktree, or up a level when you are at its root
@@ -3382,6 +3383,44 @@ cwt keyboards/keyboards:inner  # a worktree of that child
 `--no-family` confines the listing, the cycling, and the name search to the repository
 you are standing in. Set `CWT_NO_FAMILY` to any value other than `0` to make that the
 default.
+
+### Open pull requests
+
+The list shows the number of each open pull request after the branch that is its head.
+The numbers are in ascending order, and a row with no open pull request does not change:
+
+```text
+> /code/tools-worktrees/issue-546 [issue-546] #547
+  /code/tools-worktrees/170 [170]
+  /code/tools-worktrees/ic-xtermjs [ic-xtermjs] #512 #519
+```
+
+The current row paints the numbers green, as it paints its branch. Other rows paint them
+dimmed. A draft pull request is open, so it shows. Closed and merged pull requests do not
+show.
+
+`cwt` asks GitHub through [`gh`](https://cli.github.com/), about the repository that
+`origin` names. That is also true in a fork that has an `upstream` remote. A pull request
+shows only when its head is a branch of the repository that `origin` names, so the `main` or
+`patch-1` of a fork never attaches to your branch of the same name. `cwt` sends one query for
+each repository of the family, and up to 32 queries run at a time.
+
+- Only the list asks GitHub. `cwt NAME`, `-f`, `-p`, `-m`, and the error lists stay
+  offline, because the `wt` function waits for the path that they print.
+- A repository whose `origin` is not on `github.com`, or on the host that `GH_HOST` names,
+  shows no numbers, and `cwt` does not run `gh` for it. `ssh.github.com`, the SSH host of
+  GitHub on port 443, counts as `github.com`. An SSH host alias from `~/.ssh/config`, such
+  as `git@github-work:owner/name.git`, is a different host to `cwt`, so it shows no numbers.
+- A machine with no `gh` shows no numbers and prints nothing more.
+- If `gh` fails or does not answer in time, that repository shows no numbers, and `cwt`
+  prints one warning line that names the repository and the cause. `--quiet` removes the
+  line.
+- `CWT_PR_TIMEOUT` sets the time limit in seconds, for example `10` or `0.5`. The default
+  is 3. The queries run in groups of up to 32, and the limit applies to each group, not to
+  each repository. Thus a family of up to 32 repositories waits for the limit once at most.
+  A larger family can wait once for each group of 32.
+- `cwt` asks for up to 1000 open pull requests of each repository. A repository that has
+  1000 or more gets a warning that some numbers can be missing.
 
 ### Shell Integration
 
