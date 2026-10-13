@@ -515,9 +515,17 @@ impl Family {
     /// A lookup that panics gives a warning for its repository and no other
     /// repository loses its numbers.
     pub fn open_pull_requests(&self, limit: Duration) -> PullRequests {
+        self.open_pull_requests_with(|dir| pulls::lookup(dir, limit))
+    }
+
+    /// The same as `open_pull_requests`, with the lookup as a parameter.
+    ///
+    /// A test passes a lookup that panics, to reach the warning of a lookup
+    /// that died. `lookup` gets the main worktree of one repository.
+    fn open_pull_requests_with(&self, lookup: impl Fn(&Path) -> Lookup + Sync) -> PullRequests {
         let by_group = in_waves(
             &self.groups,
-            |group| pulls::lookup(&group.dir, limit),
+            |group| lookup(&group.dir),
             |group| {
                 Lookup::failed(format!(
                     "{LOOKUP_DIED} {} {LOOKUP_DIED_END}",
@@ -1057,6 +1065,35 @@ mod tests {
         assert_eq!(
             glyphs_with(&two, &PullRequests::default()),
             "parent\n    /p [main]\n\nchild\n>   /p/c [trunk]\n"
+        );
+    }
+
+    #[test]
+    fn a_lookup_that_panics_warns_for_its_repository_and_the_others_keep_their_numbers() {
+        let whole = family(
+            vec![
+                ("parent", "/p", "main"),
+                ("child", "/p/c", "trunk"),
+                ("third", "/p/d", "dev"),
+            ],
+            true,
+            None,
+        );
+        let pulls = whole.open_pull_requests_with(|dir| {
+            assert_ne!(dir, Path::new("/p/c"), "this lookup panics on purpose");
+            Lookup::found(pulls::OpenPulls::from_pairs(&[
+                ("main", 1),
+                ("trunk", 2),
+                ("dev", 3),
+            ]))
+        });
+        assert_eq!(
+            pulls.warnings().collect::<Vec<_>>(),
+            ["the lookup of the pull requests of /p/c did not finish"]
+        );
+        assert_eq!(
+            glyphs_with(&whole, &pulls),
+            "parent\n    /p [main] #1\n\nchild\n    /p/c [trunk]\n\nthird\n    /p/d [dev] #3\n"
         );
     }
 
