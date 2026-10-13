@@ -133,11 +133,6 @@ impl GithubRepo {
             name: name.to_owned(),
         })
     }
-
-    /// The owner of the repository, as it appears in the remote URL.
-    pub fn owner(&self) -> &str {
-        &self.owner
-    }
 }
 
 impl fmt::Display for GithubRepo {
@@ -194,28 +189,27 @@ impl OpenPulls {
 }
 
 /// One entry of the JSON array that `gh pr list` prints.
+///
+/// The field `isCrossRepository` is `true` when the head branch is in another
+/// repository. It is `false` when the head branch is in the repository that
+/// `gh` was asked about.
 #[derive(Debug, Deserialize)]
 struct RawPull {
     number: PullNumber,
     #[serde(rename = "headRefName")]
     head_ref_name: String,
-    #[serde(rename = "headRepositoryOwner", default)]
-    head_repository_owner: Option<RawOwner>,
+    #[serde(rename = "isCrossRepository", default)]
+    is_cross_repository: Option<bool>,
 }
 
-/// The owner of the repository that holds the head branch of a pull request.
-#[derive(Debug, Deserialize)]
-struct RawOwner {
-    login: String,
-}
-
-/// Reads the output of `gh pr list --json number,headRefName,headRepositoryOwner`.
+/// Reads the output of `gh pr list --json number,headRefName,isCrossRepository`.
 ///
-/// Keeps an entry only when the login of `headRepositoryOwner` equals `owner`,
-/// with ASCII case ignored, because GitHub logins ignore case. This drops the
+/// Keeps an entry only when `isCrossRepository` is `false`. This drops the
 /// pull requests from forks, whose branch names can equal a local branch name.
-/// An entry with a `null` or absent owner never matches. That is the case for
-/// a pull request whose fork was deleted.
+/// The rule does not compare owner names. A repository that moved gives the
+/// new login, and the old name in the URL of `origin` then no longer matches.
+/// An entry with a `null` or absent flag is dropped. A pull request whose fork
+/// was deleted has `isCrossRepository` set to `true`, so it is dropped too.
 ///
 /// Returns the kept pull requests and the count of all entries in the array,
 /// counted before the filter. The caller compares that count with the `--limit`
@@ -225,14 +219,11 @@ struct RawOwner {
 ///
 /// Returns the error of `serde_json` when `json` is not an array of objects of
 /// the expected shape.
-fn parse_pull_list(json: &str, owner: &str) -> Result<(OpenPulls, usize), serde_json::Error> {
+fn parse_pull_list(json: &str) -> Result<(OpenPulls, usize), serde_json::Error> {
     let raw: Vec<RawPull> = serde_json::from_str(json)?;
     let total = raw.len();
     let kept = raw.into_iter().filter_map(|pull| {
-        let from_owner = pull
-            .head_repository_owner
-            .is_some_and(|head| head.login.eq_ignore_ascii_case(owner));
-        from_owner.then_some((pull.head_ref_name, pull.number))
+        (pull.is_cross_repository == Some(false)).then_some((pull.head_ref_name, pull.number))
     });
     Ok((OpenPulls::from_branches(kept), total))
 }
@@ -247,7 +238,7 @@ const GH: &str = "gh";
 pub const PULL_LIMIT: usize = 1000;
 
 /// The JSON fields that cwt asks `gh pr list` for.
-const GH_JSON_FIELDS: &str = "number,headRefName,headRepositoryOwner";
+const GH_JSON_FIELDS: &str = "number,headRefName,isCrossRepository";
 
 /// Why `run_with_limit` gave no output.
 #[derive(Debug)]
@@ -412,7 +403,7 @@ fn lookup_with(gh: &OsStr, repo_dir: &Path, limit: Duration, extra_host: Option<
         };
         return Lookup::failed(could_not_list(&repo, &cause));
     }
-    match parse_pull_list(&String::from_utf8_lossy(&output.stdout), repo.owner()) {
+    match parse_pull_list(&String::from_utf8_lossy(&output.stdout)) {
         Ok((pulls, total)) => {
             let warning = (total >= PULL_LIMIT).then(|| {
                 format!(
@@ -631,12 +622,6 @@ mod tests {
     }
 
     #[test]
-    fn owner_is_the_owner_part() {
-        let repo = GithubRepo::from_remote_url("git@github.com:Owner/name.git", None).unwrap();
-        assert_eq!(repo.owner(), "Owner");
-    }
-
-    #[test]
     fn extra_host_is_matched_only_when_given_and_not_empty() {
         let url = "git@ghe.example.com:org/repo.git";
         let repo = GithubRepo::from_remote_url(url, Some("ghe.example.com")).unwrap();
@@ -671,10 +656,18 @@ mod tests {
         }
     }
 
-    /// One entry in the shape that `gh pr list --json` prints.
-    fn entry(number: u64, branch: &str, login: &str) -> String {
+    /// One entry of this repository, in the shape that `gh pr list --json`
+    /// prints. The owner is not the one in the URL, on purpose.
+    fn entry(number: u64, branch: &str) -> String {
         format!(
-            r#"{{"headRefName":"{branch}","headRepositoryOwner":{{"id":"MDQ6","name":"Some One","login":"{login}"}},"number":{number}}}"#
+            r#"{{"headRefName":"{branch}","headRepositoryOwner":{{"id":"MDQ6","name":"Some One","login":"moved-owner"}},"isCrossRepository":false,"number":{number}}}"#
+        )
+    }
+
+    /// One entry from a fork, in the shape that `gh pr list --json` prints.
+    fn fork_entry(number: u64, branch: &str) -> String {
+        format!(
+            r#"{{"headRefName":"{branch}","headRepositoryOwner":{{"id":"MDQ6","name":"Some One","login":"stranger"}},"isCrossRepository":true,"number":{number}}}"#
         )
     }
 
@@ -689,8 +682,8 @@ mod tests {
 
     #[test]
     fn one_pull_request_is_found_by_its_branch() {
-        let json = array(&[entry(548, "issue-546", "timmattison")]);
-        let (pulls, total) = parse_pull_list(&json, "timmattison").unwrap();
+        let json = array(&[entry(548, "issue-546")]);
+        let (pulls, total) = parse_pull_list(&json).unwrap();
         assert_eq!(numbers_of(&pulls, "issue-546"), vec![548]);
         assert_eq!(total, 1);
     }
@@ -698,50 +691,43 @@ mod tests {
     #[test]
     fn numbers_of_one_branch_are_sorted_and_unique() {
         let json = array(&[
-            entry(30, "feat", "me"),
-            entry(7, "feat", "me"),
-            entry(19, "feat", "me"),
-            entry(7, "feat", "me"),
+            entry(30, "feat"),
+            entry(7, "feat"),
+            entry(19, "feat"),
+            entry(7, "feat"),
         ]);
-        let (pulls, _) = parse_pull_list(&json, "me").unwrap();
+        let (pulls, _) = parse_pull_list(&json).unwrap();
         assert_eq!(numbers_of(&pulls, "feat"), vec![7, 19, 30]);
     }
 
     #[test]
     fn a_branch_without_a_pull_request_has_an_empty_slice() {
-        let json = array(&[entry(1, "feat", "me")]);
-        let (pulls, _) = parse_pull_list(&json, "me").unwrap();
+        let json = array(&[entry(1, "feat")]);
+        let (pulls, _) = parse_pull_list(&json).unwrap();
         assert!(pulls.numbers("other").is_empty());
         assert!(OpenPulls::default().numbers("feat").is_empty());
     }
 
     #[test]
-    fn pull_requests_from_other_owners_are_not_kept() {
+    fn pull_requests_from_forks_are_not_kept() {
         let json = array(&[
-            entry(1, "main", "stranger"),
-            entry(2, "patch-1", "stranger"),
-            entry(3, "main", "me"),
+            fork_entry(1, "main"),
+            fork_entry(2, "patch-1"),
+            entry(3, "main"),
         ]);
-        let (pulls, _) = parse_pull_list(&json, "me").unwrap();
+        let (pulls, _) = parse_pull_list(&json).unwrap();
         assert_eq!(numbers_of(&pulls, "main"), vec![3]);
         assert!(pulls.numbers("patch-1").is_empty());
     }
 
     #[test]
-    fn owner_comparison_ignores_ascii_case() {
-        let json = array(&[entry(5, "feat", "TimMattison")]);
-        let (pulls, _) = parse_pull_list(&json, "timmattison").unwrap();
-        assert_eq!(numbers_of(&pulls, "feat"), vec![5]);
-    }
-
-    #[test]
-    fn null_and_absent_owners_are_not_kept() {
+    fn null_and_absent_cross_repository_flags_are_not_kept() {
         let json = r#"[
-            {"headRefName":"a","headRepositoryOwner":null,"number":1},
+            {"headRefName":"a","isCrossRepository":null,"number":1},
             {"headRefName":"a","number":2},
-            {"headRefName":"a","headRepositoryOwner":{"login":"me"},"number":3}
+            {"headRefName":"a","isCrossRepository":false,"number":3}
         ]"#;
-        let (pulls, total) = parse_pull_list(json, "me").unwrap();
+        let (pulls, total) = parse_pull_list(json).unwrap();
         assert_eq!(numbers_of(&pulls, "a"), vec![3]);
         assert_eq!(total, 3);
     }
@@ -752,7 +738,7 @@ mod tests {
             {"headRefName":"feat","headRepositoryOwner":{"login":"new-owner"},"isCrossRepository":false,"number":7},
             {"headRefName":"main","headRepositoryOwner":{"login":"old-owner"},"isCrossRepository":true,"number":8}
         ]"#;
-        let (pulls, total) = parse_pull_list(json, "old-owner").unwrap();
+        let (pulls, total) = parse_pull_list(json).unwrap();
         assert_eq!(numbers_of(&pulls, "feat"), vec![7]);
         assert!(pulls.numbers("main").is_empty());
         assert_eq!(total, 2);
@@ -760,25 +746,21 @@ mod tests {
 
     #[test]
     fn the_total_counts_entries_the_filter_dropped() {
-        let json = array(&[
-            entry(1, "a", "me"),
-            entry(2, "b", "stranger"),
-            entry(3, "c", "other"),
-        ]);
-        let (_, total) = parse_pull_list(&json, "me").unwrap();
+        let json = array(&[entry(1, "a"), fork_entry(2, "b"), fork_entry(3, "c")]);
+        let (_, total) = parse_pull_list(&json).unwrap();
         assert_eq!(total, 3);
-        let (pulls, total) = parse_pull_list("[]", "me").unwrap();
+        let (pulls, total) = parse_pull_list("[]").unwrap();
         assert_eq!((pulls, total), (OpenPulls::default(), 0));
     }
 
     #[test]
     fn multibyte_branch_names_round_trip() {
         let json = array(&[
-            entry(1, "\u{65e5}\u{672c}\u{8a9e}", "me"),
-            entry(2, "\u{1f389}", "me"),
-            entry(3, "caf\u{e9}", "me"),
+            entry(1, "\u{65e5}\u{672c}\u{8a9e}"),
+            entry(2, "\u{1f389}"),
+            entry(3, "caf\u{e9}"),
         ]);
-        let (pulls, _) = parse_pull_list(&json, "me").unwrap();
+        let (pulls, _) = parse_pull_list(&json).unwrap();
         assert_eq!(numbers_of(&pulls, "\u{65e5}\u{672c}\u{8a9e}"), vec![1]);
         assert_eq!(numbers_of(&pulls, "\u{1f389}"), vec![2]);
         assert_eq!(numbers_of(&pulls, "caf\u{e9}"), vec![3]);
@@ -786,9 +768,9 @@ mod tests {
 
     #[test]
     fn invalid_json_is_an_error() {
-        assert!(parse_pull_list("not json", "me").is_err());
-        assert!(parse_pull_list(r#"{"number":1}"#, "me").is_err());
-        assert!(parse_pull_list(r#"[{"number":1}]"#, "me").is_err());
+        assert!(parse_pull_list("not json").is_err());
+        assert!(parse_pull_list(r#"{"number":1}"#).is_err());
+        assert!(parse_pull_list(r#"[{"number":1}]"#).is_err());
     }
 
     /// Runs a git command in `dir` with a hermetic environment and checks that
@@ -823,11 +805,17 @@ mod tests {
     }
 
     /// The JSON that `gh pr list` prints for `entries`, as `(number, branch,
-    /// owner)`.
-    fn gh_json(entries: &[(u64, &str, &str)]) -> String {
+    /// from_fork)`.
+    fn gh_json(entries: &[(u64, &str, bool)]) -> String {
         let items: Vec<String> = entries
             .iter()
-            .map(|(number, branch, owner)| entry(*number, branch, owner))
+            .map(|&(number, branch, from_fork)| {
+                if from_fork {
+                    fork_entry(number, branch)
+                } else {
+                    entry(number, branch)
+                }
+            })
             .collect();
         array(&items)
     }
@@ -858,10 +846,10 @@ mod tests {
         let work = TempDir::new().unwrap();
         let repo = repo_with_origin(Some("git@github.com:owner/one.git"));
         let json = gh_json(&[
-            (7, "feat", "owner"),
-            (9, "feat", "owner"),
-            (8, "feat", "forker"),
-            (3, "other", "forker"),
+            (7, "feat", false),
+            (9, "feat", false),
+            (8, "feat", true),
+            (3, "other", true),
         ]);
         let stub = answering_stub(&work, &json);
         let found = run_lookup(&stub, &repo, GENEROUS_LIMIT);
@@ -1029,12 +1017,12 @@ mod tests {
         assert_eq!(one_line(""), "");
     }
 
-    /// A lookup against a stub that prints `count` pull requests of `owner`.
+    /// A lookup against a stub that prints `count` pull requests of the repository.
     fn lookup_of_count(count: usize) -> Lookup {
         let work = TempDir::new().unwrap();
         let repo = repo_with_origin(Some("git@github.com:owner/one.git"));
         let entries: Vec<String> = (1..=count)
-            .map(|number| entry(number as u64, "feat", "owner"))
+            .map(|number| entry(number as u64, "feat"))
             .collect();
         let stub = answering_stub(&work, &array(&entries));
         run_lookup(&stub, &repo, GENEROUS_LIMIT)

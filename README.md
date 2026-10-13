@@ -3407,8 +3407,8 @@ show.
 
 `cwt` asks GitHub through [`gh`](https://cli.github.com/), about the repository that
 `origin` names. That is also true in a fork that has an `upstream` remote. A pull request
-shows only when its head is a branch of the owner of `origin`, so the `main` or `patch-1` of
-a different fork never attaches to your branch of the same name. `cwt` sends one query for
+shows only when its head is a branch of the repository that `origin` names, so the `main` or
+`patch-1` of a fork never attaches to your branch of the same name. `cwt` sends one query for
 each repository of the family, and all the queries run at the same time.
 
 - Only the list asks GitHub. `cwt NAME`, `-f`, `-p`, `-m`, and the error lists stay

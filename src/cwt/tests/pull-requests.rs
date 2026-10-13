@@ -69,11 +69,11 @@ if [ -f "$dir/$key.json" ]; then head -n "$limit" "$dir/$key.json"; echo ']'; ex
 echo "the stub has no answer for $repo" >&2; exit 1
 "#;
 
-/// A pull request that the stub reports: the branch, the owner of the
-/// repository that holds the branch, and the number.
+/// A pull request that the stub reports: the branch, if the head is in
+/// another repository, and the number.
 struct Pull {
     branch: String,
-    owner: String,
+    from_fork: bool,
     number: u64,
 }
 
@@ -82,16 +82,16 @@ impl Pull {
     fn own(branch: &str, number: u64) -> Self {
         Self {
             branch: branch.to_string(),
-            owner: OWNER.to_string(),
+            from_fork: false,
             number,
         }
     }
 
-    /// A pull request from a fork that `owner` holds.
-    fn fork(branch: &str, owner: &str, number: u64) -> Self {
+    /// A pull request from a branch of a fork.
+    fn fork(branch: &str, number: u64) -> Self {
         Self {
             branch: branch.to_string(),
-            owner: owner.to_string(),
+            from_fork: true,
             number,
         }
     }
@@ -100,9 +100,9 @@ impl Pull {
     /// escape in JSON text, and multibyte text needs none.
     fn json(&self) -> String {
         format!(
-            r#"{{"headRefName":"{}","headRepositoryOwner":{{"id":"X","login":"{}"}},"number":{}}}"#,
+            r#"{{"headRefName":"{}","isCrossRepository":{},"number":{}}}"#,
             escape_json(&self.branch),
-            escape_json(&self.owner),
+            self.from_fork,
             self.number
         )
     }
@@ -424,7 +424,7 @@ fn a_pull_request_from_a_fork_shows_no_number() {
     let repo = one_repo_with(&root, &[]);
 
     let stub = GhStub::new();
-    stub.answer(ONE, &[Pull::fork("main", "someone-else", 9)]);
+    stub.answer(ONE, &[Pull::fork("main", 9)]);
     let output = stub.run(&repo, &[], &[]);
 
     assert_eq!(
