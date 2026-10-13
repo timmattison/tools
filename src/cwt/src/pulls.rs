@@ -294,6 +294,62 @@ fn run_with_limit(command: &mut Command, limit: Duration) -> Result<Output, RunF
     })
 }
 
+/// What the lookup found for one repository.
+///
+/// `Lookup::default()` means there is nothing to show and nothing to say. That
+/// is the normal state for a repository with no GitHub remote, and for a
+/// machine with no `gh`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Lookup {
+    pulls: OpenPulls,
+    warning: Option<String>,
+}
+
+impl Lookup {
+    /// The open pull requests that the lookup found.
+    pub fn pulls(&self) -> &OpenPulls {
+        &self.pulls
+    }
+
+    /// One line that tells the user what went wrong, without a `Warning: `
+    /// prefix. The caller adds the prefix. `None` means nothing went wrong.
+    pub fn warning(&self) -> Option<&str> {
+        self.warning.as_deref()
+    }
+
+    /// A lookup that found no pull requests and carries `warning`.
+    pub fn failed(warning: String) -> Self {
+        Self {
+            pulls: OpenPulls::default(),
+            warning: Some(warning),
+        }
+    }
+}
+
+/// Lists the open pull requests of the repository in `repo_dir`.
+///
+/// Reads `GH_HOST` and calls `lookup_with` with the real `gh`. See
+/// `lookup_with` for the rules.
+pub fn lookup(repo_dir: &Path, limit: Duration) -> Lookup {
+    let gh_host = std::env::var("GH_HOST").ok();
+    lookup_with(OsStr::new(GH), repo_dir, limit, gh_host.as_deref())
+}
+
+/// Lists the open pull requests of the repository in `repo_dir` with the
+/// program `gh`.
+///
+/// The program is a parameter so a test can pass a stub script and never change
+/// the process-global `PATH`.
+fn lookup_with(
+    gh: &OsStr,
+    repo_dir: &Path,
+    limit: Duration,
+    extra_host: Option<&str>,
+) -> Lookup {
+    let _ = (gh, repo_dir, limit, extra_host);
+    Lookup::failed("not implemented".to_owned())
+}
+
 /// Starts a thread that reads `pipe` to the end and returns the bytes.
 ///
 /// A read error ends the read early and keeps the bytes that came before it.
@@ -598,5 +654,170 @@ mod tests {
         assert!(parse_pull_list("not json", "me").is_err());
         assert!(parse_pull_list(r#"{"number":1}"#, "me").is_err());
         assert!(parse_pull_list(r#"[{"number":1}]"#, "me").is_err());
+    }
+
+    /// Runs a git command in `dir` with a hermetic environment and checks that
+    /// it worked.
+    fn git(dir: &Path, args: &[&str]) {
+        let mut command = Command::new("git");
+        gitscratch::shed_inherited_git_environment(&mut command);
+        let output = command
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+    }
+
+    /// A repository in a fresh temporary directory. `origin` is its remote URL,
+    /// or `None` for a repository with no remote.
+    fn repo_with_origin(origin: Option<&str>) -> TempDir {
+        let dir = TempDir::new().unwrap();
+        git(dir.path(), &["init", "-q"]);
+        if let Some(url) = origin {
+            git(dir.path(), &["remote", "add", "origin", url]);
+        }
+        dir
+    }
+
+    /// The file in `dir` that a stub writes its record to.
+    fn record(dir: &TempDir, name: &str) -> std::path::PathBuf {
+        dir.path().join(name)
+    }
+
+    /// The JSON that `gh pr list` prints for `entries`, as `(number, branch,
+    /// owner)`.
+    fn gh_json(entries: &[(u64, &str, &str)]) -> String {
+        let items: Vec<String> = entries
+            .iter()
+            .map(|(number, branch, owner)| entry(*number, branch, owner))
+            .collect();
+        array(&items)
+    }
+
+    /// A stub `gh` that records its arguments and prints `json`.
+    fn answering_stub(dir: &TempDir, json: &str) -> std::path::PathBuf {
+        let answer = record(dir, "answer.json");
+        std::fs::write(&answer, json).unwrap();
+        write_stub(
+            dir,
+            "gh-stub",
+            &format!(
+                "printf '%s\\n' \"$@\" > \"{args}\"\n: > \"{ran}\"\nenv > \"{env}\"\ncat \"{answer}\"",
+                args = record(dir, "args").display(),
+                ran = record(dir, "ran").display(),
+                env = record(dir, "env").display(),
+                answer = answer.display(),
+            ),
+        )
+    }
+
+    fn run_lookup(stub: &Path, repo: &TempDir, limit: Duration) -> Lookup {
+        lookup_with(stub.as_os_str(), repo.path(), limit, None)
+    }
+
+    #[test]
+    fn lookup_finds_the_numbers_of_the_owner() {
+        let work = TempDir::new().unwrap();
+        let repo = repo_with_origin(Some("git@github.com:owner/one.git"));
+        let json = gh_json(&[
+            (7, "feat", "owner"),
+            (9, "feat", "owner"),
+            (8, "feat", "forker"),
+            (3, "other", "forker"),
+        ]);
+        let stub = answering_stub(&work, &json);
+        let found = run_lookup(&stub, &repo, GENEROUS_LIMIT);
+        assert_eq!(found.warning(), None);
+        let numbers: Vec<String> = found
+            .pulls()
+            .numbers("feat")
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(numbers, ["#7", "#9"]);
+        assert!(found.pulls().numbers("other").is_empty());
+    }
+
+    #[test]
+    fn lookup_gives_gh_the_repository_and_the_limit() {
+        let work = TempDir::new().unwrap();
+        let repo = repo_with_origin(Some("git@github.com:owner/one.git"));
+        let stub = answering_stub(&work, "[]");
+        run_lookup(&stub, &repo, GENEROUS_LIMIT);
+        let args = std::fs::read_to_string(record(&work, "args")).unwrap();
+        let args: Vec<&str> = args.lines().collect();
+        assert_eq!(
+            args,
+            [
+                "pr",
+                "list",
+                "--repo",
+                "github.com/owner/one",
+                "--state",
+                "open",
+                "--limit",
+                "1000",
+                "--json",
+                "number,headRefName,headRepositoryOwner",
+            ]
+        );
+    }
+
+    #[test]
+    fn lookup_asks_gh_for_plain_json() {
+        let work = TempDir::new().unwrap();
+        let repo = repo_with_origin(Some("git@github.com:owner/one.git"));
+        let stub = answering_stub(&work, "[]");
+        run_lookup(&stub, &repo, GENEROUS_LIMIT);
+        let env = std::fs::read_to_string(record(&work, "env")).unwrap();
+        assert!(env.lines().any(|line| line == "NO_COLOR=1"), "{env}");
+    }
+
+    #[test]
+    fn lookup_is_silent_for_a_repository_with_no_origin() {
+        let work = TempDir::new().unwrap();
+        let repo = repo_with_origin(None);
+        let stub = answering_stub(&work, "[]");
+        assert_eq!(run_lookup(&stub, &repo, GENEROUS_LIMIT), Lookup::default());
+        assert!(!record(&work, "ran").exists());
+    }
+
+    #[test]
+    fn lookup_is_silent_for_a_remote_that_is_not_github() {
+        let work = TempDir::new().unwrap();
+        let repo = repo_with_origin(Some("git@gitlab.com:owner/one.git"));
+        let stub = answering_stub(&work, "[]");
+        assert_eq!(run_lookup(&stub, &repo, GENEROUS_LIMIT), Lookup::default());
+        assert!(!record(&work, "ran").exists());
+    }
+
+    #[test]
+    fn lookup_is_silent_when_gh_is_not_installed() {
+        let work = TempDir::new().unwrap();
+        let repo = repo_with_origin(Some("git@github.com:owner/one.git"));
+        let missing = record(&work, "no-such-gh");
+        assert_eq!(
+            run_lookup(&missing, &repo, GENEROUS_LIMIT),
+            Lookup::default()
+        );
+    }
+
+    #[test]
+    fn lookup_uses_the_extra_host_for_a_github_enterprise_remote() {
+        let work = TempDir::new().unwrap();
+        let repo = repo_with_origin(Some("git@ghe.example.com:org/repo.git"));
+        let stub = answering_stub(&work, "[]");
+        let found = lookup_with(
+            stub.as_os_str(),
+            repo.path(),
+            GENEROUS_LIMIT,
+            Some("ghe.example.com"),
+        );
+        assert_eq!(found.warning(), None);
+        let args = std::fs::read_to_string(record(&work, "args")).unwrap();
+        assert!(args.lines().any(|line| line == "ghe.example.com/org/repo"));
     }
 }
