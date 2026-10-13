@@ -334,7 +334,8 @@ fn stderr_lines(output: &Output) -> Vec<String> {
 }
 
 /// A repository `one` on `main` with a GitHub origin, and a worktree on each of
-/// `branches`. The worktree of the branch `name` sits in `one-worktrees/NAME`.
+/// `branches`. The worktree of the branch at position `N` of `branches` sits in
+/// `one-worktrees/wN`.
 fn one_repo_with(root: &Path, branches: &[&str]) -> PathBuf {
     let repo = root.join("one");
     make_repo(&repo, "main");
@@ -628,21 +629,27 @@ fn branch_names_with_multibyte_characters_show_their_numbers() {
 }
 
 #[test]
-fn a_bad_time_limit_gives_one_warning_and_the_list_keeps_its_numbers() {
+fn a_bad_time_limit_gives_one_warning_and_the_list_still_prints() {
+    // The repository has no `origin`, so `gh` never runs. A bad value puts the
+    // 3 s default back, and a stub that had to answer inside it on a loaded
+    // machine would add a second warning that this test does not ask about.
+    // The unit tests of `pr_time_limit_from` show that the default comes back.
     let (_tmp, root) = scratch();
-    let repo = one_repo_with(&root, &[]);
+    let repo = root.join("one");
+    make_repo(&repo, "main");
 
     let stub = GhStub::new();
-    stub.answer(ONE, &[Pull::own("main", 547)]);
     let output = stub.run(&repo, &[], &[("CWT_PR_TIMEOUT", "abc")]);
 
+    assert!(output.status.success(), "cwt failed: {}", stderr(&output));
     assert_eq!(
         lines_of(&output),
-        vec![format!("> {} [main] #547", repo.display())]
+        vec![format!("> {} [main]", repo.display())]
     );
     let warnings = stderr_lines(&output);
     assert_eq!(warnings.len(), 1, "stderr was: {warnings:?}");
     assert!(warnings[0].contains("CWT_PR_TIMEOUT"), "{}", warnings[0]);
+    assert!(warnings[0].contains("\"abc\""), "{}", warnings[0]);
 }
 
 #[test]
