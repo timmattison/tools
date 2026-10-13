@@ -157,6 +157,33 @@ pub struct OpenPulls {
 }
 
 impl OpenPulls {
+    /// Groups `(branch, number)` pairs by branch.
+    ///
+    /// The numbers of one branch end up in ascending order with no duplicates.
+    /// This is the one place that states that rule.
+    fn from_branches(pairs: impl IntoIterator<Item = (String, PullNumber)>) -> Self {
+        let mut by_branch: HashMap<String, Vec<PullNumber>> = HashMap::new();
+        for (branch, number) in pairs {
+            by_branch.entry(branch).or_default().push(number);
+        }
+        for numbers in by_branch.values_mut() {
+            numbers.sort_unstable();
+            numbers.dedup();
+        }
+        Self { by_branch }
+    }
+
+    /// Builds the pull requests of a test from `(branch, number)` pairs, in
+    /// any order.
+    #[cfg(test)]
+    pub(crate) fn from_pairs(pairs: &[(&str, u64)]) -> Self {
+        Self::from_branches(
+            pairs
+                .iter()
+                .map(|&(branch, number)| (branch.to_owned(), PullNumber(number))),
+        )
+    }
+
     /// The numbers of the open pull requests whose head is `branch`.
     ///
     /// The numbers are in ascending order and hold no duplicates. The slice is
@@ -201,23 +228,13 @@ struct RawOwner {
 fn parse_pull_list(json: &str, owner: &str) -> Result<(OpenPulls, usize), serde_json::Error> {
     let raw: Vec<RawPull> = serde_json::from_str(json)?;
     let total = raw.len();
-    let mut by_branch: HashMap<String, Vec<PullNumber>> = HashMap::new();
-    for pull in raw {
+    let kept = raw.into_iter().filter_map(|pull| {
         let from_owner = pull
             .head_repository_owner
             .is_some_and(|head| head.login.eq_ignore_ascii_case(owner));
-        if from_owner {
-            by_branch
-                .entry(pull.head_ref_name)
-                .or_default()
-                .push(pull.number);
-        }
-    }
-    for numbers in by_branch.values_mut() {
-        numbers.sort_unstable();
-        numbers.dedup();
-    }
-    Ok((OpenPulls { by_branch }, total))
+        from_owner.then_some((pull.head_ref_name, pull.number))
+    });
+    Ok((OpenPulls::from_branches(kept), total))
 }
 
 /// The program that lists the pull requests.
@@ -315,6 +332,15 @@ impl Lookup {
     /// prefix. The caller adds the prefix. `None` means nothing went wrong.
     pub fn warning(&self) -> Option<&str> {
         self.warning.as_deref()
+    }
+
+    /// A lookup that found `pulls` and has nothing to warn about.
+    #[cfg(test)]
+    pub(crate) fn found(pulls: OpenPulls) -> Self {
+        Self {
+            pulls,
+            warning: None,
+        }
     }
 
     /// A lookup that found no pull requests and carries `warning`.

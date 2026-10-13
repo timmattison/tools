@@ -372,7 +372,7 @@ fn main() {
         }
     } else {
         // No args: display list
-        print!("{}", family.render());
+        print!("{}", family.render(&family::PullRequests::default()));
     }
 }
 

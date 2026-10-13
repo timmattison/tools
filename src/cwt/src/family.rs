@@ -13,11 +13,13 @@
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use colored::Colorize;
 use repowalker::{child_repositories, holds_git_entry};
 
 use crate::ascent::{climb, main_branch_rank};
+use crate::pulls::{self, Lookup, PullNumber};
 use crate::worktree::{canonical, list_worktrees, paths_equal, RepoWorktrees, Worktree};
 
 /// The indent that puts a worktree under its repository heading.
@@ -100,6 +102,33 @@ pub struct Family {
     current: Option<usize>,
     /// Repositories left out of the family, for the caller to report.
     warnings: Vec<String>,
+}
+
+/// The open pull requests of every repository of a family, in the order of the
+/// family's groups.
+///
+/// `Family::open_pull_requests` builds it. `Family::render` reads it. The
+/// default value holds no lookup, so it shows no number and it warns of
+/// nothing.
+#[derive(Debug, Default)]
+pub struct PullRequests {
+    by_group: Vec<Lookup>,
+}
+
+impl PullRequests {
+    /// The warnings of the lookups, one line each, in group order, without a
+    /// `Warning: ` prefix.
+    pub fn warnings(&self) -> impl Iterator<Item = &str> {
+        std::iter::empty()
+    }
+
+    /// The numbers for `branch` in group `group`.
+    ///
+    /// The slice is empty when the group has no lookup, which is the case for
+    /// the default value, and when the branch has no pull request.
+    fn numbers(&self, _group: usize, _branch: &str) -> &[PullNumber] {
+        &[]
+    }
 }
 
 impl Family {
@@ -476,7 +505,7 @@ impl Family {
     ///
     /// One repository prints as a plain list. More than one prints grouped, with
     /// each repository's name above its worktrees.
-    pub fn render(&self) -> String {
+    pub fn render(&self, _pulls: &PullRequests) -> String {
         let mut out = String::new();
         // The heading is remembered by which repository it was: two
         // repositories of one family can have the same directory name, and a
@@ -747,7 +776,9 @@ mod tests {
     /// irrelevant. It also makes the assertion stronger than a plain `render`
     /// call, because the painted output is the one a user reads.
     fn glyphs_of(whole: &Family) -> String {
-        testcolor::strip_ansi(&testcolor::with_forced_ansi(|| whole.render()))
+        testcolor::strip_ansi(&testcolor::with_forced_ansi(|| {
+            whole.render(&PullRequests::default())
+        }))
     }
 
     /// Build a family by hand, without touching the filesystem.
@@ -830,6 +861,37 @@ mod tests {
             current,
             warnings: Vec::new(),
         }
+    }
+
+    /// The pull requests of a family, one list of `(branch, number)` pairs for
+    /// each group, in group order.
+    fn pull_requests(groups: &[&[(&str, u64)]]) -> PullRequests {
+        PullRequests {
+            by_group: groups
+                .iter()
+                .map(|pairs| Lookup::found(pulls::OpenPulls::from_pairs(pairs)))
+                .collect(),
+        }
+    }
+
+    /// The glyphs of a render that shows `pulls`.
+    fn glyphs_with(whole: &Family, pulls: &PullRequests) -> String {
+        testcolor::strip_ansi(&testcolor::with_forced_ansi(|| whole.render(pulls)))
+    }
+
+    #[test]
+    fn render_shows_the_pull_request_of_the_current_branch() {
+        let one = family(
+            vec![("solo", "/repo", "main"), ("solo", "/repo-wt/x", "feature")],
+            false,
+            Some(0),
+        );
+        let pulls = pull_requests(&[&[("main", 547)]]);
+        assert_eq!(
+            glyphs_with(&one, &pulls),
+            "> /repo [main] #547\n  /repo-wt/x [feature]\n",
+            "a row with no pull request keeps its exact text, with no trailing space"
+        );
     }
 
     #[test]
