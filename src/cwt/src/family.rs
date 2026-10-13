@@ -119,7 +119,7 @@ impl PullRequests {
     /// The warnings of the lookups, one line each, in group order, without a
     /// `Warning: ` prefix.
     pub fn warnings(&self) -> impl Iterator<Item = &str> {
-        std::iter::empty()
+        self.by_group.iter().filter_map(Lookup::warning)
     }
 
     /// The numbers for `branch` in group `group`.
