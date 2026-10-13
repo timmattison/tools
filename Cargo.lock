@@ -1830,6 +1830,7 @@ dependencies = [
  "shellsetup",
  "tempfile",
  "testcolor",
+ "wait-timeout",
 ]
 
 [[package]]

@@ -7,7 +7,15 @@
 //! needs no network, so every rule in it has an offline test.
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fmt;
+use std::io::Read;
+use std::path::Path;
+use std::process::{Command, Output, Stdio};
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+use wait_timeout::ChildExt;
 
 use serde::Deserialize;
 
@@ -212,9 +220,114 @@ fn parse_pull_list(json: &str, owner: &str) -> Result<(OpenPulls, usize), serde_
     Ok((OpenPulls { by_branch }, total))
 }
 
+/// The program that lists the pull requests.
+const GH: &str = "gh";
+
+/// The `--limit` that cwt gives to `gh pr list`.
+///
+/// The default of `gh pr list` is 30. A repository with more than 30 open pull
+/// requests would lose numbers with no message.
+pub const PULL_LIMIT: usize = 1000;
+
+/// The JSON fields that cwt asks `gh pr list` for.
+const GH_JSON_FIELDS: &str = "number,headRefName,headRepositoryOwner";
+
+/// Why `run_with_limit` gave no output.
+#[derive(Debug)]
+enum RunFailure {
+    /// The program does not exist.
+    NotInstalled,
+    /// The program exists but the system could not start it.
+    Spawn(std::io::Error),
+    /// The program started but the wait for it failed.
+    Wait(std::io::Error),
+    /// The program did not finish in the time limit.
+    TimedOut(Duration),
+}
+
+/// Runs `command` and waits at most `limit` for it to finish.
+///
+/// stdin is closed. A reader thread drains each of stdout and stderr, so a
+/// chatty child cannot fill a pipe and block. The wait uses `wait_timeout`,
+/// because a read to the end of the pipes would never finish for a hung child.
+///
+/// On a timeout the function kills and reaps the child and returns at once. It
+/// does not join the reader threads. A hung child can leave a grandchild that
+/// holds the write end of a pipe, and a join would block on the same stall that
+/// the limit exists to escape. The threads end when the pipe closes.
+fn run_with_limit(command: &mut Command, limit: Duration) -> Result<Output, RunFailure> {
+    let _ = (command, limit);
+    Err(RunFailure::NotInstalled)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Instant;
+
+    use tempfile::TempDir;
+
     use super::*;
+
+    /// A time limit that no stub that finishes comes near.
+    const GENEROUS_LIMIT: Duration = Duration::from_secs(60);
+
+    /// Writes an executable `#!/bin/sh` script into `dir` and returns its path.
+    fn write_stub(dir: &TempDir, name: &str, body: &str) -> std::path::PathBuf {
+        let path = dir.path().join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[test]
+    fn run_with_limit_returns_the_output_of_a_fast_program() {
+        let dir = TempDir::new().unwrap();
+        let stub = write_stub(&dir, "fast", "echo out; echo err >&2; exit 0");
+        let output = run_with_limit(&mut Command::new(&stub), GENEROUS_LIMIT).unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "out\n");
+        assert_eq!(String::from_utf8_lossy(&output.stderr), "err\n");
+    }
+
+    #[test]
+    fn run_with_limit_reports_the_exit_status() {
+        let dir = TempDir::new().unwrap();
+        let stub = write_stub(&dir, "fails", "exit 3");
+        let output = run_with_limit(&mut Command::new(&stub), GENEROUS_LIMIT).unwrap();
+        assert_eq!(output.status.code(), Some(3));
+    }
+
+    #[test]
+    fn run_with_limit_reports_a_missing_program() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        let result = run_with_limit(&mut Command::new(&missing), GENEROUS_LIMIT);
+        assert!(matches!(result, Err(RunFailure::NotInstalled)), "{result:?}");
+    }
+
+    #[test]
+    fn run_with_limit_reports_a_program_that_cannot_start() {
+        let dir = TempDir::new().unwrap();
+        let not_executable = dir.path().join("plain");
+        std::fs::write(&not_executable, "text").unwrap();
+        let result = run_with_limit(&mut Command::new(&not_executable), GENEROUS_LIMIT);
+        assert!(matches!(result, Err(RunFailure::Spawn(_))), "{result:?}");
+    }
+
+    #[test]
+    fn run_with_limit_gives_up_on_a_program_that_hangs() {
+        let dir = TempDir::new().unwrap();
+        let stub = write_stub(&dir, "hangs", "exec sleep 120");
+        let limit = Duration::from_millis(500);
+        let started = Instant::now();
+        let result = run_with_limit(&mut Command::new(&stub), limit);
+        assert!(started.elapsed() < Duration::from_secs(60));
+        assert!(
+            matches!(result, Err(RunFailure::TimedOut(reported)) if reported == limit),
+            "{result:?}"
+        );
+    }
 
     #[test]
     fn pull_number_displays_with_a_hash() {
