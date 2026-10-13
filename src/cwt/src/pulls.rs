@@ -154,8 +154,7 @@ impl OpenPulls {
     /// The numbers are in ascending order and hold no duplicates. The slice is
     /// empty when the branch has no open pull request.
     pub fn numbers(&self, branch: &str) -> &[PullNumber] {
-        let _ = (&self.by_branch, branch);
-        &[]
+        self.by_branch.get(branch).map_or(&[], Vec::as_slice)
     }
 }
 
@@ -192,8 +191,25 @@ struct RawOwner {
 /// Returns the error of `serde_json` when `json` is not an array of objects of
 /// the expected shape.
 fn parse_pull_list(json: &str, owner: &str) -> Result<(OpenPulls, usize), serde_json::Error> {
-    let _ = (json, owner);
-    Ok((OpenPulls::default(), 0))
+    let raw: Vec<RawPull> = serde_json::from_str(json)?;
+    let total = raw.len();
+    let mut by_branch: HashMap<String, Vec<PullNumber>> = HashMap::new();
+    for pull in raw {
+        let from_owner = pull
+            .head_repository_owner
+            .is_some_and(|head| head.login.eq_ignore_ascii_case(owner));
+        if from_owner {
+            by_branch
+                .entry(pull.head_ref_name)
+                .or_default()
+                .push(pull.number);
+        }
+    }
+    for numbers in by_branch.values_mut() {
+        numbers.sort_unstable();
+        numbers.dedup();
+    }
+    Ok((OpenPulls { by_branch }, total))
 }
 
 #[cfg(test)]
