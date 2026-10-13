@@ -503,6 +503,31 @@ impl Family {
             .collect()
     }
 
+    /// Asks GitHub for the open pull requests of every repository of the family.
+    ///
+    /// This is the second wave of the listing. `discover` stays offline, so
+    /// every other command of `cwt` never calls `gh`. Only the listing calls
+    /// this method. Every repository is asked once, in the main worktree of the
+    /// repository, where `git remote get-url origin` works for a bare
+    /// repository and for a yadm git directory too. The repositories run at the
+    /// same time, `SCAN_WIDTH` at once, and each one has `limit` to answer.
+    ///
+    /// A lookup that panics gives a warning for its repository and no other
+    /// repository loses its numbers.
+    pub fn open_pull_requests(&self, limit: Duration) -> PullRequests {
+        let by_group = in_waves(
+            &self.groups,
+            |group| pulls::lookup(&group.dir, limit),
+            |group| {
+                Lookup::failed(format!(
+                    "{LOOKUP_DIED} {} {LOOKUP_DIED_END}",
+                    group.dir.display()
+                ))
+            },
+        );
+        PullRequests { by_group }
+    }
+
     /// The numbers of the open pull requests of the branch of `entry`, joined
     /// by single spaces, or `None` when there is nothing to show.
     ///
@@ -600,6 +625,13 @@ const SCAN_WIDTH: usize = 32;
 
 /// What a repository whose scan did not finish is told to the user as.
 const SCAN_DIED: &str = "the scan of this repository did not finish";
+
+/// What a repository whose lookup of pull requests did not finish is told to
+/// the user as. The directory of the repository follows it.
+const LOOKUP_DIED: &str = "the lookup of the pull requests of";
+
+/// The end of the sentence that [`LOOKUP_DIED`] starts.
+const LOOKUP_DIED_END: &str = "did not finish";
 
 /// Runs `work` on every item, `SCAN_WIDTH` at a time, and gives the answers
 /// back in item order.
