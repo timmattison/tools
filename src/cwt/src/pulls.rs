@@ -37,6 +37,9 @@ impl fmt::Display for PullNumber {
 /// The host that `gh` talks to when `GH_HOST` is not set.
 const GITHUB_HOST: &str = "github.com";
 
+/// The SSH host of GitHub on port 443. It names the same service as `github.com`.
+const GITHUB_SSH_HOST: &str = "ssh.github.com";
+
 /// The suffix that many remote URLs add to the name of a repository.
 const GIT_SUFFIX: &str = ".git";
 
@@ -102,8 +105,9 @@ pub struct GithubRepo {
 impl GithubRepo {
     /// Reads the URL of a git remote.
     ///
-    /// Returns `Some` only when the host is `github.com` or equals
-    /// `extra_host`. The caller passes the value of the `GH_HOST` environment
+    /// Returns `Some` only when the host is `github.com`, `ssh.github.com`, or
+    /// equals `extra_host`. The host `ssh.github.com` is the SSH host of GitHub
+    /// on port 443, so it counts as `github.com` and is stored as such. The caller passes the value of the `GH_HOST` environment
     /// variable as `extra_host`. An empty `extra_host` matches nothing.
     ///
     /// The function accepts the scp-like form `[user@]HOST:OWNER/NAME` and the
@@ -115,6 +119,11 @@ impl GithubRepo {
     pub fn from_remote_url(url: &str, extra_host: Option<&str>) -> Option<Self> {
         let (host, path) = split_host_and_path(url)?;
         let host = host.to_ascii_lowercase();
+        let host = if host == GITHUB_SSH_HOST {
+            GITHUB_HOST.to_owned()
+        } else {
+            host
+        };
         let wanted = host == GITHUB_HOST
             || extra_host
                 .is_some_and(|extra| !extra.is_empty() && host == extra.to_ascii_lowercase());

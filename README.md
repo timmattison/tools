@@ -3414,7 +3414,9 @@ each repository of the family, and all the queries run at the same time.
 - Only the list asks GitHub. `cwt NAME`, `-f`, `-p`, `-m`, and the error lists stay
   offline, because the `wt` function waits for the path that they print.
 - A repository whose `origin` is not on `github.com`, or on the host that `GH_HOST` names,
-  shows no numbers, and `cwt` does not run `gh` for it.
+  shows no numbers, and `cwt` does not run `gh` for it. `ssh.github.com`, the SSH host of
+  GitHub on port 443, counts as `github.com`. An SSH host alias from `~/.ssh/config`, such
+  as `git@github-work:owner/name.git`, is a different host to `cwt`, so it shows no numbers.
 - A machine with no `gh` shows no numbers and prints nothing more.
 - If `gh` fails or does not answer in time, that repository shows no numbers, and `cwt`
   prints one warning line that names the repository and the cause. `--quiet` removes the
