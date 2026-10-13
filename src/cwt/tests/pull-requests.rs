@@ -295,7 +295,7 @@ fn gh_gets_the_documented_arguments_and_the_gh_variables_of_the_user() {
             "--limit",
             "1000",
             "--json",
-            "number,headRefName,headRepositoryOwner"
+            "number,headRefName,isCrossRepository"
         ]
     );
     assert!(

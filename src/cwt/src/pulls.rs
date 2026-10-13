@@ -747,6 +747,18 @@ mod tests {
     }
 
     #[test]
+    fn a_pull_request_from_this_repository_is_kept_when_the_owner_moved() {
+        let json = r#"[
+            {"headRefName":"feat","headRepositoryOwner":{"login":"new-owner"},"isCrossRepository":false,"number":7},
+            {"headRefName":"main","headRepositoryOwner":{"login":"old-owner"},"isCrossRepository":true,"number":8}
+        ]"#;
+        let (pulls, total) = parse_pull_list(json, "old-owner").unwrap();
+        assert_eq!(numbers_of(&pulls, "feat"), vec![7]);
+        assert!(pulls.numbers("main").is_empty());
+        assert_eq!(total, 2);
+    }
+
+    #[test]
     fn the_total_counts_entries_the_filter_dropped() {
         let json = array(&[
             entry(1, "a", "me"),
@@ -884,7 +896,7 @@ mod tests {
                 "--limit",
                 "1000",
                 "--json",
-                "number,headRefName,headRepositoryOwner",
+                "number,headRefName,isCrossRepository",
             ]
         );
     }
