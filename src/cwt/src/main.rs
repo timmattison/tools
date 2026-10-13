@@ -19,6 +19,7 @@ use shellsetup::ShellIntegration;
 
 mod ascent;
 mod family;
+mod pulls;
 mod worktree;
 
 use ascent::MAIN_BRANCH_NAMES;

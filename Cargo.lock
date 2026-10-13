@@ -1825,6 +1825,8 @@ dependencies = [
  "colored",
  "gitscratch",
  "repowalker",
+ "serde",
+ "serde_json",
  "shellsetup",
  "tempfile",
  "testcolor",
