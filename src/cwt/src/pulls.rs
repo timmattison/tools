@@ -406,7 +406,7 @@ fn lookup_with(gh: &OsStr, repo_dir: &Path, limit: Duration, extra_host: Option<
     if !output.status.success() {
         let stderr = one_line(&String::from_utf8_lossy(&output.stderr));
         let cause = if stderr.is_empty() {
-            format!("gh exited with {}", output.status)
+            exit_cause(output.status)
         } else {
             stderr
         };
@@ -430,6 +430,24 @@ fn lookup_with(gh: &OsStr, repo_dir: &Path, limit: Duration, extra_host: Option<
 
 /// The start that every warning of a failed lookup shares.
 const COULD_NOT_LIST: &str = "could not list the open pull requests of";
+
+/// Says why `gh` failed when it wrote nothing to stderr.
+///
+/// The `Display` of `ExitStatus` already starts with "exit status", so this
+/// function reads the code, or the signal when there is no code.
+fn exit_cause(status: std::process::ExitStatus) -> String {
+    if let Some(code) = status.code() {
+        return format!("gh exited with code {code}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return format!("gh was stopped by signal {signal}");
+        }
+    }
+    format!("gh ended with {status}")
+}
 
 /// Writes the warning for a lookup of `repo` that failed for `cause`.
 fn could_not_list(repo: &GithubRepo, cause: &str) -> String {
