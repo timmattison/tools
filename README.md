@@ -3409,7 +3409,7 @@ show.
 `origin` names. That is also true in a fork that has an `upstream` remote. A pull request
 shows only when its head is a branch of the repository that `origin` names, so the `main` or
 `patch-1` of a fork never attaches to your branch of the same name. `cwt` sends one query for
-each repository of the family, and all the queries run at the same time.
+each repository of the family, and up to 32 queries run at a time.
 
 - Only the list asks GitHub. `cwt NAME`, `-f`, `-p`, `-m`, and the error lists stay
   offline, because the `wt` function waits for the path that they print.
@@ -3422,8 +3422,9 @@ each repository of the family, and all the queries run at the same time.
   prints one warning line that names the repository and the cause. `--quiet` removes the
   line.
 - `CWT_PR_TIMEOUT` sets the time limit in seconds, for example `10` or `0.5`. The default
-  is 3. The queries run at the same time, so the limit applies to the whole list, not to
-  each repository.
+  is 3. The queries run in groups of up to 32, and the limit applies to each group, not to
+  each repository. Thus a family of up to 32 repositories waits for the limit once at most.
+  A larger family can wait once for each group of 32.
 - `cwt` asks for up to 1000 open pull requests of each repository. A repository that has
   1000 or more gets a warning that some numbers can be missing.
 

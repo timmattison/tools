@@ -68,10 +68,10 @@ macro_rules! error {
 ///
 /// The list shows the number of each open pull request after its branch, for
 /// example `[feature] #512`. `cwt` asks GitHub through `gh`. It sends one query
-/// for each repository, all at the same time, about the repository that
-/// `origin` names. A repository with no GitHub `origin` shows no numbers. A
-/// machine with no `gh` shows no numbers either. A query that fails or is slow
-/// shows no numbers and gives one warning, and `--quiet` removes the warning.
+/// for each repository, up to 32 at a time, about the repository that `origin`
+/// names. A repository with no GitHub `origin` shows no numbers. A machine
+/// with no `gh` shows no numbers either. A query that fails or is slow shows
+/// no numbers and gives one warning, and `--quiet` removes the warning.
 /// `CWT_PR_TIMEOUT` sets the time limit in seconds, and the default is 3.
 /// Moving to a worktree never asks GitHub.
 ///
