@@ -943,6 +943,20 @@ mod tests {
     }
 
     #[test]
+    fn warnings_come_in_group_order_and_skip_lookups_without_one() {
+        let pulls = PullRequests {
+            by_group: vec![
+                Lookup::failed("first".to_string()),
+                Lookup::default(),
+                Lookup::found(pulls::OpenPulls::from_pairs(&[("main", 1)])),
+                Lookup::failed("last".to_string()),
+            ],
+        };
+        assert_eq!(pulls.warnings().collect::<Vec<_>>(), ["first", "last"]);
+        assert_eq!(PullRequests::default().warnings().count(), 0);
+    }
+
+    #[test]
     fn main_worktree_picks_main() {
         let one = family(
             vec![
