@@ -346,8 +346,64 @@ fn lookup_with(
     limit: Duration,
     extra_host: Option<&str>,
 ) -> Lookup {
-    let _ = (gh, repo_dir, limit, extra_host);
-    Lookup::failed("not implemented".to_owned())
+    let Some(url) = origin_url(repo_dir) else {
+        return Lookup::default();
+    };
+    let Some(repo) = GithubRepo::from_remote_url(url.trim(), extra_host) else {
+        return Lookup::default();
+    };
+
+    let mut command = Command::new(gh);
+    gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
+    // `gh` paints its JSON with escape codes when `CLICOLOR_FORCE` or
+    // `GH_FORCE_TTY` is set (seen on gh 2.102.0), and then the parse fails.
+    // `NO_COLOR=1` gives plain JSON in every combination tested. All `GH_*`
+    // variables stay, because the user sets `GH_TOKEN` and `GH_HOST` on
+    // purpose. The `--repo` with the host stops `gh` from choosing `upstream`
+    // or asking for a default.
+    command
+        .env("NO_COLOR", "1")
+        .args(["pr", "list", "--repo"])
+        .arg(repo.to_string())
+        .args(["--state", "open", "--limit"])
+        .arg(PULL_LIMIT.to_string())
+        .args(["--json", GH_JSON_FIELDS]);
+
+    let output = match run_with_limit(&mut command, limit) {
+        Ok(output) => output,
+        Err(RunFailure::NotInstalled) => return Lookup::default(),
+        Err(_) => return Lookup::failed("not implemented".to_owned()),
+    };
+    match parse_pull_list(&String::from_utf8_lossy(&output.stdout), repo.owner()) {
+        Ok((pulls, _total)) => Lookup {
+            pulls,
+            warning: None,
+        },
+        Err(_) => Lookup::failed("not implemented".to_owned()),
+    }
+}
+
+/// Asks git for the URL of `origin` in `repo_dir`.
+///
+/// Returns `None` when the repository has no `origin`, when `repo_dir` is not a
+/// repository, and when git is not there. That is a normal state, so the caller
+/// prints nothing. The command is `git remote get-url origin` and not a read of
+/// `remote.origin.url`, because `get-url` applies the `url.<base>.insteadOf`
+/// rewrites and so gives the URL that git really uses.
+fn origin_url(repo_dir: &Path) -> Option<String> {
+    let mut command = Command::new("git");
+    gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
+    let output = command
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_dir)
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!url.is_empty()).then_some(url)
 }
 
 /// Starts a thread that reads `pipe` to the end and returns the bytes.
