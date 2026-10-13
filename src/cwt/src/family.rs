@@ -528,51 +528,67 @@ fn anchor_of(main_worktree: &Path) -> PathBuf {
     }
 }
 
-/// How many child repositories are read at once.
+/// How many items one wave of [`in_waves`] works on at once.
 ///
-/// Each of these threads spends its life waiting on a `git` subprocess, so the
-/// useful width is set by how many subprocesses the machine will carry at once
-/// rather than by how many cores it has: a cap at the core count puts a
-/// 50-child family through four waves and hands most of the saving back. Wider
-/// is not better without limit either — 64 at a time measured slower than 32 on
-/// a 14-core machine, and a directory of hundreds of repositories would ask the
+/// Each of these threads spends its life waiting on a subprocess, so the useful
+/// width is set by how many subprocesses the machine will carry at once rather
+/// than by how many cores it has: a cap at the core count puts a 50-child
+/// family through four waves and hands most of the saving back. Wider is not
+/// better without limit either. 64 at a time measured slower than 32 on a
+/// 14-core machine, and a directory of hundreds of repositories would ask the
 /// operating system for hundreds of processes at once. The families this
-/// feature is for sit well under this width and are read in a single wave.
+/// feature is for sit well under this width and run in a single wave.
 const SCAN_WIDTH: usize = 32;
 
 /// What a repository whose scan did not finish is told to the user as.
 const SCAN_DIED: &str = "the scan of this repository did not finish";
 
-/// Reads every child repository of `dir`, in the order [`child_repositories`]
-/// sorted them.
+/// Runs `work` on every item, `SCAN_WIDTH` at a time, and gives the answers
+/// back in item order.
 ///
-/// A repository is read by asking `git` for its worktrees, and the answer takes
-/// far longer to arrive than it takes to use. So `SCAN_WIDTH` of them are asked
-/// at once and the answers are collected back into directory order, which costs
-/// a family of children about what one child costs. The order the caller sees
-/// is the order it would see from reading them one at a time.
-fn read_children(dir: &Path) -> Vec<(PathBuf, Result<RepoWorktrees, String>)> {
-    let children = child_repositories(dir);
-    let mut listings = Vec::with_capacity(children.len());
+/// A subprocess takes far longer to answer than the answer takes to use. So
+/// `SCAN_WIDTH` items run at once, and the answers come back in the order of
+/// the items. A family of children then costs about what one child costs, and
+/// the caller sees the order it would see from one item at a time.
+///
+/// A thread that panics gets `died(item)` in its slot and no other slot
+/// changes. One bad item must not cost the user the answers of the others.
+fn in_waves<T: Sync, R: Send>(
+    items: &[T],
+    work: impl Fn(&T) -> R + Sync,
+    died: impl Fn(&T) -> R,
+) -> Vec<R> {
+    let work = &work;
+    let mut answers = Vec::with_capacity(items.len());
 
-    for wave in children.chunks(SCAN_WIDTH) {
+    for wave in items.chunks(SCAN_WIDTH) {
         std::thread::scope(|scope| {
-            let readers: Vec<_> = wave
+            let threads: Vec<_> = wave
                 .iter()
-                .map(|child| scope.spawn(move || list_worktrees(child)))
+                .map(|item| scope.spawn(move || work(item)))
                 .collect();
 
-            for (child, reader) in wave.iter().zip(readers) {
-                // A reader that died takes its own repository out of the family
-                // and no other: one unreadable directory must not cost the user
-                // the listing.
-                let listing = reader.join().unwrap_or_else(|_| Err(SCAN_DIED.to_string()));
-                listings.push((child.clone(), listing));
+            for (item, thread) in wave.iter().zip(threads) {
+                answers.push(thread.join().unwrap_or_else(|_| died(item)));
             }
         });
     }
 
-    listings
+    answers
+}
+
+/// Reads every child repository of `dir`, in the order [`child_repositories`]
+/// sorted them.
+///
+/// A child that cannot be read keeps its place in the answer as an error.
+fn read_children(dir: &Path) -> Vec<(PathBuf, Result<RepoWorktrees, String>)> {
+    let children = child_repositories(dir);
+    let listings = in_waves(
+        &children,
+        |child| list_worktrees(child),
+        |_| Err(SCAN_DIED.to_string()),
+    );
+    children.into_iter().zip(listings).collect()
 }
 
 /// Gives every repository of the family a name that reaches it alone.
