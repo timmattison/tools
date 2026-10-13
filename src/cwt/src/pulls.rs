@@ -6,6 +6,7 @@
 //! remote, and it reads the JSON that `gh` prints. It runs no command and it
 //! needs no network, so every rule in it has an offline test.
 
+use std::collections::HashMap;
 use std::fmt;
 
 use serde::Deserialize;
@@ -138,6 +139,63 @@ impl fmt::Display for GithubRepo {
     }
 }
 
+/// The open pull requests of one repository, grouped by head branch.
+///
+/// Build it with `parse_pull_list`. Ask it for the numbers of one branch with
+/// `numbers`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct OpenPulls {
+    by_branch: HashMap<String, Vec<PullNumber>>,
+}
+
+impl OpenPulls {
+    /// The numbers of the open pull requests whose head is `branch`.
+    ///
+    /// The numbers are in ascending order and hold no duplicates. The slice is
+    /// empty when the branch has no open pull request.
+    pub fn numbers(&self, branch: &str) -> &[PullNumber] {
+        let _ = (&self.by_branch, branch);
+        &[]
+    }
+}
+
+/// One entry of the JSON array that `gh pr list` prints.
+#[derive(Debug, Deserialize)]
+struct RawPull {
+    number: PullNumber,
+    #[serde(rename = "headRefName")]
+    head_ref_name: String,
+    #[serde(rename = "headRepositoryOwner", default)]
+    head_repository_owner: Option<RawOwner>,
+}
+
+/// The owner of the repository that holds the head branch of a pull request.
+#[derive(Debug, Deserialize)]
+struct RawOwner {
+    login: String,
+}
+
+/// Reads the output of `gh pr list --json number,headRefName,headRepositoryOwner`.
+///
+/// Keeps an entry only when the login of `headRepositoryOwner` equals `owner`,
+/// with ASCII case ignored, because GitHub logins ignore case. This drops the
+/// pull requests from forks, whose branch names can equal a local branch name.
+/// An entry with a `null` or absent owner never matches. That is the case for
+/// a pull request whose fork was deleted.
+///
+/// Returns the kept pull requests and the count of all entries in the array,
+/// counted before the filter. The caller compares that count with the `--limit`
+/// it gave to `gh`, to find out if the list is cut short.
+///
+/// # Errors
+///
+/// Returns the error of `serde_json` when `json` is not an array of objects of
+/// the expected shape.
+fn parse_pull_list(json: &str, owner: &str) -> Result<(OpenPulls, usize), serde_json::Error> {
+    let _ = (json, owner);
+    Ok((OpenPulls::default(), 0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,5 +314,113 @@ mod tests {
         ] {
             assert_eq!(parsed(url), None, "{url}");
         }
+    }
+
+    /// One entry in the shape that `gh pr list --json` prints.
+    fn entry(number: u64, branch: &str, login: &str) -> String {
+        format!(
+            r#"{{"headRefName":"{branch}","headRepositoryOwner":{{"id":"MDQ6","name":"Some One","login":"{login}"}},"number":{number}}}"#
+        )
+    }
+
+    /// Joins entries into a JSON array.
+    fn array(entries: &[String]) -> String {
+        format!("[{}]", entries.join(","))
+    }
+
+    fn numbers_of(pulls: &OpenPulls, branch: &str) -> Vec<u64> {
+        pulls.numbers(branch).iter().map(|n| n.0).collect()
+    }
+
+    #[test]
+    fn one_pull_request_is_found_by_its_branch() {
+        let json = array(&[entry(548, "issue-546", "timmattison")]);
+        let (pulls, total) = parse_pull_list(&json, "timmattison").unwrap();
+        assert_eq!(numbers_of(&pulls, "issue-546"), vec![548]);
+        assert_eq!(total, 1);
+    }
+
+    #[test]
+    fn numbers_of_one_branch_are_sorted_and_unique() {
+        let json = array(&[
+            entry(30, "feat", "me"),
+            entry(7, "feat", "me"),
+            entry(19, "feat", "me"),
+            entry(7, "feat", "me"),
+        ]);
+        let (pulls, _) = parse_pull_list(&json, "me").unwrap();
+        assert_eq!(numbers_of(&pulls, "feat"), vec![7, 19, 30]);
+    }
+
+    #[test]
+    fn a_branch_without_a_pull_request_has_an_empty_slice() {
+        let json = array(&[entry(1, "feat", "me")]);
+        let (pulls, _) = parse_pull_list(&json, "me").unwrap();
+        assert!(pulls.numbers("other").is_empty());
+        assert!(OpenPulls::default().numbers("feat").is_empty());
+    }
+
+    #[test]
+    fn pull_requests_from_other_owners_are_not_kept() {
+        let json = array(&[
+            entry(1, "main", "stranger"),
+            entry(2, "patch-1", "stranger"),
+            entry(3, "main", "me"),
+        ]);
+        let (pulls, _) = parse_pull_list(&json, "me").unwrap();
+        assert_eq!(numbers_of(&pulls, "main"), vec![3]);
+        assert!(pulls.numbers("patch-1").is_empty());
+    }
+
+    #[test]
+    fn owner_comparison_ignores_ascii_case() {
+        let json = array(&[entry(5, "feat", "TimMattison")]);
+        let (pulls, _) = parse_pull_list(&json, "timmattison").unwrap();
+        assert_eq!(numbers_of(&pulls, "feat"), vec![5]);
+    }
+
+    #[test]
+    fn null_and_absent_owners_are_not_kept() {
+        let json = r#"[
+            {"headRefName":"a","headRepositoryOwner":null,"number":1},
+            {"headRefName":"a","number":2},
+            {"headRefName":"a","headRepositoryOwner":{"login":"me"},"number":3}
+        ]"#;
+        let (pulls, total) = parse_pull_list(json, "me").unwrap();
+        assert_eq!(numbers_of(&pulls, "a"), vec![3]);
+        assert_eq!(total, 3);
+    }
+
+    #[test]
+    fn the_total_counts_entries_the_filter_dropped() {
+        let json = array(&[
+            entry(1, "a", "me"),
+            entry(2, "b", "stranger"),
+            entry(3, "c", "other"),
+        ]);
+        let (_, total) = parse_pull_list(&json, "me").unwrap();
+        assert_eq!(total, 3);
+        let (pulls, total) = parse_pull_list("[]", "me").unwrap();
+        assert_eq!((pulls, total), (OpenPulls::default(), 0));
+    }
+
+    #[test]
+    fn multibyte_branch_names_round_trip() {
+        let json = array(&[
+            entry(1, "\u{65e5}\u{672c}\u{8a9e}", "me"),
+            entry(2, "\u{1f389}", "me"),
+            entry(3, "caf\u{e9}", "me"),
+        ]);
+        let (pulls, _) = parse_pull_list(&json, "me").unwrap();
+        assert_eq!(numbers_of(&pulls, "\u{65e5}\u{672c}\u{8a9e}"), vec![1]);
+        assert_eq!(numbers_of(&pulls, "\u{1f389}"), vec![2]);
+        assert_eq!(numbers_of(&pulls, "caf\u{e9}"), vec![3]);
+    }
+
+    #[test]
+    fn invalid_json_is_an_error() {
+        assert!(parse_pull_list("not json", "me").is_err());
+        assert!(parse_pull_list(r#"{"number":1}"#, "me").is_err());
+        assert!(parse_pull_list(r#"[{"number":1}]"#, "me").is_err());
     }
 }
