@@ -126,8 +126,10 @@ impl PullRequests {
     ///
     /// The slice is empty when the group has no lookup, which is the case for
     /// the default value, and when the branch has no pull request.
-    fn numbers(&self, _group: usize, _branch: &str) -> &[PullNumber] {
-        &[]
+    fn numbers(&self, group: usize, branch: &str) -> &[PullNumber] {
+        self.by_group
+            .get(group)
+            .map_or(&[], |lookup| lookup.pulls().numbers(branch))
     }
 }
 
@@ -501,11 +503,28 @@ impl Family {
             .collect()
     }
 
+    /// The numbers of the open pull requests of the branch of `entry`, written
+    /// as one space and the numbers joined by single spaces.
+    ///
+    /// The text is empty when the worktree has no branch or its branch has no
+    /// open pull request, so such a row does not change.
+    fn pull_numbers_of(&self, entry: &Entry, pulls: &PullRequests) -> String {
+        let Some(branch) = entry.worktree.branch.as_deref() else {
+            return String::new();
+        };
+        let numbers = pulls.numbers(entry.group, branch);
+        if numbers.is_empty() {
+            return String::new();
+        }
+        let joined: Vec<String> = numbers.iter().map(ToString::to_string).collect();
+        format!(" {}", joined.join(" "))
+    }
+
     /// Renders the listing, with the current worktree highlighted.
     ///
     /// One repository prints as a plain list. More than one prints grouped, with
     /// each repository's name above its worktrees.
-    pub fn render(&self, _pulls: &PullRequests) -> String {
+    pub fn render(&self, pulls: &PullRequests) -> String {
         let mut out = String::new();
         // The heading is remembered by which repository it was: two
         // repositories of one family can have the same directory name, and a
@@ -526,17 +545,22 @@ impl Family {
             let indent = if self.grouped { GROUP_INDENT } else { "" };
             let path = entry.worktree.path.display().to_string();
             let branch = entry.worktree.display_branch();
+            let numbers = self.pull_numbers_of(entry, pulls);
 
             let _ = if is_current {
                 writeln!(
                     out,
-                    "{} {indent}{} [{}]",
+                    "{} {indent}{} [{}]{numbers}",
                     marker.green().bold(),
                     path.green().bold(),
                     branch.green()
                 )
             } else {
-                writeln!(out, "{marker} {indent}{path} [{}]", branch.dimmed())
+                writeln!(
+                    out,
+                    "{marker} {indent}{path} [{}]{numbers}",
+                    branch.dimmed()
+                )
             };
         }
 
