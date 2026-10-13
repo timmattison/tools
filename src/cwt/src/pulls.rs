@@ -256,8 +256,55 @@ enum RunFailure {
 /// holds the write end of a pipe, and a join would block on the same stall that
 /// the limit exists to escape. The threads end when the pipe closes.
 fn run_with_limit(command: &mut Command, limit: Duration) -> Result<Output, RunFailure> {
-    let _ = (command, limit);
-    Err(RunFailure::NotInstalled)
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                RunFailure::NotInstalled
+            } else {
+                RunFailure::Spawn(error)
+            }
+        })?;
+    let stdout_reader = drain(child.stdout.take());
+    let stderr_reader = drain(child.stderr.take());
+
+    let status = match child.wait_timeout(limit) {
+        Ok(Some(status)) => status,
+        Ok(None) => {
+            // Kill and reap the child. Leave the readers alone, see above.
+            let _ = child.kill();
+            let _ = child.wait();
+            drop(stdout_reader);
+            drop(stderr_reader);
+            return Err(RunFailure::TimedOut(limit));
+        }
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(RunFailure::Wait(error));
+        }
+    };
+    Ok(Output {
+        status,
+        stdout: stdout_reader.join().unwrap_or_default(),
+        stderr: stderr_reader.join().unwrap_or_default(),
+    })
+}
+
+/// Starts a thread that reads `pipe` to the end and returns the bytes.
+///
+/// A read error ends the read early and keeps the bytes that came before it.
+fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut bytes);
+        }
+        bytes
+    })
 }
 
 #[cfg(test)]
