@@ -8,7 +8,7 @@
 
 mod support;
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -210,7 +210,7 @@ fn prepend_to_path(first: &Path) -> OsString {
 ///
 /// The environment of the child is built here. The test process never calls
 /// `set_var`, because the tests of one binary run on many threads.
-fn run_cwt(dir: &Path, args: &[&str], env: &[(&str, &str)], path: &OsString) -> Output {
+fn run_cwt(dir: &Path, args: &[&str], env: &[(&str, &str)], path: &OsStr) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cwt"));
     command
         .args(args)
@@ -300,4 +300,337 @@ fn gh_gets_the_documented_arguments_and_the_gh_variables_of_the_user() {
         "GH_TOKEN must reach gh, but gh saw:\n{}",
         stub.env()
     );
+}
+
+/// The lines of a listing, as visible glyphs.
+fn lines_of(output: &Output) -> Vec<String> {
+    stdout(output).lines().map(str::to_string).collect()
+}
+
+/// The one line of the listing that names `path`.
+fn row_of(output: &Output, path: &Path) -> String {
+    let shown = path.display().to_string();
+    let rows: Vec<String> = lines_of(output)
+        .into_iter()
+        .filter(|line| line.contains(&format!("{shown} [")))
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "expected one row for {shown}, listing was:\n{}",
+        stdout(output)
+    );
+    rows.into_iter().next().expect("one row")
+}
+
+/// The lines of standard error.
+fn stderr_lines(output: &Output) -> Vec<String> {
+    stderr(output).lines().map(str::to_string).collect()
+}
+
+/// A repository `one` on `main` with a GitHub origin, and a worktree on each of
+/// `branches`. The worktree of the branch `name` sits in `one-worktrees/NAME`.
+fn one_repo_with(root: &Path, branches: &[&str]) -> PathBuf {
+    let repo = root.join("one");
+    make_repo(&repo, "main");
+    for (index, branch) in branches.iter().enumerate() {
+        add_worktree(&repo, &format!("../one-worktrees/w{index}"), branch);
+    }
+    set_origin(&repo, "one");
+    repo
+}
+
+/// The family of the family tests: the repository `fam`, and the repository
+/// `kid` one level below it. Both have a worktree on a branch `shared`.
+///
+/// Returns the directory of `fam`, the worktree of `fam`, and the worktree of
+/// `kid`.
+fn family_with_shared_branch(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let fam = root.join("fam");
+    make_repo(&fam, "main");
+    set_origin(&fam, "fam");
+    add_worktree(&fam, "../fam-worktrees/shared", "shared");
+
+    let kid = fam.join("kid");
+    make_repo(&kid, "main");
+    set_origin(&kid, "kid");
+    add_worktree(&kid, "../kid-worktrees/shared", "shared");
+
+    let fam_shared = root.join("fam-worktrees/shared");
+    let kid_shared = fam.join("kid-worktrees/shared");
+    (fam, fam_shared, kid_shared)
+}
+
+/// The path of the program `git` that this test process would find.
+fn real_git() -> PathBuf {
+    let path = std::env::var_os("PATH").expect("PATH is not set");
+    std::env::split_paths(&path)
+        .map(|entry| entry.join("git"))
+        .find(|candidate| candidate.is_file())
+        .expect("no git on PATH")
+}
+
+#[test]
+fn two_pull_requests_of_one_branch_show_in_ascending_order() {
+    let (_tmp, root) = scratch();
+    let repo = one_repo_with(&root, &[]);
+
+    let stub = GhStub::new();
+    stub.answer(ONE, &[Pull::own("main", 519), Pull::own("main", 512)]);
+    let output = stub.run(&repo, &[], &[]);
+
+    assert_eq!(
+        lines_of(&output),
+        vec![format!("> {} [main] #512 #519", repo.display())]
+    );
+}
+
+#[test]
+fn a_detached_worktree_shows_no_number() {
+    let (_tmp, root) = scratch();
+    let repo = one_repo_with(&root, &[]);
+    let detached = root.join("one-worktrees/detached");
+    git(
+        &repo,
+        &["worktree", "add", "--detach", &detached.display().to_string()],
+    );
+
+    let stub = GhStub::new();
+    stub.answer(ONE, &[Pull::own("main", 1)]);
+    let output = stub.run(&repo, &[], &[]);
+
+    assert!(row_of(&output, &repo).ends_with("[main] #1"));
+    assert!(
+        !row_of(&output, &detached).contains('#'),
+        "a worktree with no branch has no number:\n{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_pull_request_from_a_fork_shows_no_number() {
+    let (_tmp, root) = scratch();
+    let repo = one_repo_with(&root, &[]);
+
+    let stub = GhStub::new();
+    stub.answer(ONE, &[Pull::fork("main", "someone-else", 9)]);
+    let output = stub.run(&repo, &[], &[]);
+
+    assert_eq!(
+        lines_of(&output),
+        vec![format!("> {} [main]", repo.display())]
+    );
+}
+
+#[test]
+fn more_than_thirty_pull_requests_do_not_hide_the_last_one() {
+    let (_tmp, root) = scratch();
+    let repo = one_repo_with(&root, &["feature"]);
+
+    // The stub cuts its answer to the `--limit` it gets, and the default of the
+    // real `gh` is 30. The branch with a worktree comes last, so a lookup that
+    // forgets `--limit` loses exactly the number that this test reads.
+    let mut pulls: Vec<Pull> = (1..=39)
+        .map(|number| Pull::own(&format!("topic-{number}"), number))
+        .collect();
+    pulls.push(Pull::own("feature", 40));
+    let stub = GhStub::new();
+    stub.answer(ONE, &pulls);
+    let output = stub.run(&repo, &[], &[]);
+
+    assert!(
+        row_of(&output, &root.join("one-worktrees/w0")).ends_with("[feature] #40"),
+        "the list was:\n{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_machine_with_no_gh_lists_without_numbers_and_without_a_word() {
+    let (_tmp, root) = scratch();
+    let repo = one_repo_with(&root, &[]);
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).expect("failed to create the bin directory");
+    std::os::unix::fs::symlink(real_git(), bin.join("git")).expect("failed to link git");
+
+    let output = run_cwt(&repo, &[], &[], bin.as_os_str());
+
+    assert!(output.status.success());
+    assert_eq!(
+        lines_of(&output),
+        vec![format!("> {} [main]", repo.display())]
+    );
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn a_failed_gh_gives_one_warning_and_no_numbers() {
+    let (_tmp, root) = scratch();
+    let repo = one_repo_with(&root, &[]);
+    let stub = GhStub::new();
+    stub.put(ONE, "fail", "gh: HTTP 401 bad credentials\n");
+
+    let output = stub.run(&repo, &[], &[]);
+    assert!(output.status.success());
+    assert_eq!(
+        lines_of(&output),
+        vec![format!("> {} [main]", repo.display())]
+    );
+    let warnings = stderr_lines(&output);
+    assert_eq!(warnings.len(), 1, "stderr was: {warnings:?}");
+    assert!(warnings[0].contains(ONE), "{}", warnings[0]);
+    assert!(warnings[0].contains("bad credentials"), "{}", warnings[0]);
+
+    // `--quiet` removes the warning and leaves the list.
+    let quiet = stub.run(&repo, &["-q"], &[]);
+    assert_eq!(stderr(&quiet), "");
+    assert_eq!(lines_of(&quiet), lines_of(&output));
+}
+
+#[test]
+fn a_gh_that_hangs_is_cut_off_with_one_warning() {
+    let (_tmp, root) = scratch();
+    let repo = one_repo_with(&root, &[]);
+    let stub = GhStub::new();
+    stub.put(ONE, "hang", "");
+
+    // The bound is loose on purpose. The test proves that the run ends well
+    // before the 120 seconds of the stub, and not how fast a loaded machine is.
+    let start = std::time::Instant::now();
+    let output = stub.run(&repo, &[], &[("CWT_PR_TIMEOUT", "1")]);
+    let elapsed = start.elapsed();
+
+    assert!(elapsed.as_secs() < 60, "the run took {elapsed:?}");
+    assert_eq!(
+        lines_of(&output),
+        vec![format!("> {} [main]", repo.display())]
+    );
+    let warnings = stderr_lines(&output);
+    assert_eq!(warnings.len(), 1, "stderr was: {warnings:?}");
+    assert!(warnings[0].contains("did not answer"), "{}", warnings[0]);
+}
+
+#[test]
+fn each_repository_of_a_family_shows_the_numbers_of_its_own_pull_requests() {
+    let (_tmp, root) = scratch();
+    let (fam, fam_shared, kid_shared) = family_with_shared_branch(&root);
+
+    let stub = GhStub::new();
+    stub.answer(FAM, &[Pull::own("shared", 1)]);
+    stub.answer(KID, &[Pull::own("shared", 2)]);
+    let output = stub.run(&fam, &[], &[]);
+
+    assert!(output.status.success(), "cwt failed: {}", stderr(&output));
+    assert!(row_of(&output, &fam_shared).ends_with("[shared] #1"));
+    assert!(row_of(&output, &kid_shared).ends_with("[shared] #2"));
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn the_lookups_of_a_family_run_at_the_same_time() {
+    let (_tmp, root) = scratch();
+    let (fam, fam_shared, kid_shared) = family_with_shared_branch(&root);
+
+    // Each stub waits, with a bound, until the other one has started. A run
+    // that asked one repository after the other would make the first stub give
+    // up and fail, and the listing would lose its numbers.
+    let stub = GhStub::new();
+    stub.answer(FAM, &[Pull::own("shared", 1)]);
+    stub.answer(KID, &[Pull::own("shared", 2)]);
+    stub.put(FAM, "wait-for", &GhStub::key(KID));
+    stub.put(KID, "wait-for", &GhStub::key(FAM));
+    let output = stub.run(&fam, &[], &[]);
+
+    assert!(row_of(&output, &fam_shared).ends_with("[shared] #1"));
+    assert!(row_of(&output, &kid_shared).ends_with("[shared] #2"));
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn moving_between_worktrees_never_runs_gh() {
+    let (_tmp, root) = scratch();
+    let repo = one_repo_with(&root, &["feature-a", "feature-b"]);
+    let here = root.join("one-worktrees/w0");
+
+    // Each case has its own stub, so a marker from one run cannot hide in the
+    // next. The stub answers, so a call of `gh` would succeed quietly and only
+    // the marker would tell.
+    let cases: [(&[&str], i32); 6] = [
+        (&["w1"], 0),
+        (&["-f"], 0),
+        (&["-p"], 0),
+        (&["-m"], 0),
+        (&["no-such-worktree"], 3),
+        (&["feature"], 6),
+    ];
+    for (args, exit_code) in cases {
+        let stub = GhStub::new();
+        stub.answer(ONE, &[Pull::own("main", 1)]);
+        let output = stub.run(&here, args, &[]);
+        assert_eq!(
+            support::code(&output),
+            exit_code,
+            "cwt {args:?}: {}",
+            support::combined(&output)
+        );
+        assert!(!stub.ran(), "cwt {args:?} ran gh");
+    }
+    assert!(repo.is_dir());
+}
+
+#[test]
+fn no_family_still_shows_the_numbers_of_the_one_repository() {
+    let (_tmp, root) = scratch();
+    let (fam, fam_shared, _kid_shared) = family_with_shared_branch(&root);
+
+    // The stub has no answer for `kid`. A run that asked about `kid` would
+    // print a warning.
+    let stub = GhStub::new();
+    stub.answer(FAM, &[Pull::own("shared", 1)]);
+    let output = stub.run(&fam, &["--no-family"], &[]);
+
+    assert!(row_of(&output, &fam_shared).ends_with("[shared] #1"));
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn branch_names_with_multibyte_characters_show_their_numbers() {
+    let (_tmp, root) = scratch();
+    let branches = ["日本語", "🎉", "café"];
+    let repo = one_repo_with(&root, &branches);
+
+    let pulls: Vec<Pull> = branches
+        .iter()
+        .zip(1..)
+        .map(|(branch, number)| Pull::own(branch, number))
+        .collect();
+    let stub = GhStub::new();
+    stub.answer(ONE, &pulls);
+    let output = stub.run(&repo, &[], &[]);
+
+    for (index, (branch, number)) in branches.iter().zip(1..).enumerate() {
+        let row = row_of(&output, &root.join(format!("one-worktrees/w{index}")));
+        assert!(
+            row.ends_with(&format!("[{branch}] #{number}")),
+            "row was {row:?}"
+        );
+    }
+}
+
+#[test]
+fn a_bad_time_limit_gives_one_warning_and_the_list_keeps_its_numbers() {
+    let (_tmp, root) = scratch();
+    let repo = one_repo_with(&root, &[]);
+
+    let stub = GhStub::new();
+    stub.answer(ONE, &[Pull::own("main", 547)]);
+    let output = stub.run(&repo, &[], &[("CWT_PR_TIMEOUT", "abc")]);
+
+    assert_eq!(
+        lines_of(&output),
+        vec![format!("> {} [main] #547", repo.display())]
+    );
+    let warnings = stderr_lines(&output);
+    assert_eq!(warnings.len(), 1, "stderr was: {warnings:?}");
+    assert!(warnings[0].contains("CWT_PR_TIMEOUT"), "{}", warnings[0]);
 }
