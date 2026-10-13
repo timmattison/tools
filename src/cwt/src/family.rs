@@ -919,6 +919,25 @@ mod tests {
     }
 
     #[test]
+    fn render_paints_the_numbers_of_the_current_row_green_and_the_others_dimmed() {
+        let one = family(
+            vec![("solo", "/repo", "main"), ("solo", "/repo-wt/x", "feature")],
+            false,
+            Some(0),
+        );
+        let pulls = pull_requests(&[&[("main", 547), ("feature", 512), ("feature", 519)]]);
+        let painted = testcolor::with_forced_ansi(|| {
+            let current = "#547".green().to_string();
+            let other = "#512 #519".dimmed().to_string();
+            (one.render(&pulls), current, other)
+        });
+        let (rendered, current, other) = painted;
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert!(lines[0].ends_with(&format!("] {current}")), "{rendered:?}");
+        assert!(lines[1].ends_with(&format!("] {other}")), "{rendered:?}");
+    }
+
+    #[test]
     fn main_worktree_picks_main() {
         let one = family(
             vec![
