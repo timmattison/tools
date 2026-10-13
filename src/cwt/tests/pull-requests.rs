@@ -263,7 +263,10 @@ fn a_branch_with_an_open_pull_request_shows_its_number() {
         lines,
         vec![
             format!("> {} [main] #547", repo.display()),
-            format!("  {} [feature]", root.join("one-worktrees/feature").display()),
+            format!(
+                "  {} [feature]",
+                root.join("one-worktrees/feature").display()
+            ),
         ]
     );
 }
@@ -296,7 +299,9 @@ fn gh_gets_the_documented_arguments_and_the_gh_variables_of_the_user() {
         ]
     );
     assert!(
-        stub.env().lines().any(|line| line == "GH_TOKEN=cwt-test-token"),
+        stub.env()
+            .lines()
+            .any(|line| line == "GH_TOKEN=cwt-test-token"),
         "GH_TOKEN must reach gh, but gh saw:\n{}",
         stub.env()
     );
@@ -392,7 +397,12 @@ fn a_detached_worktree_shows_no_number() {
     let detached = root.join("one-worktrees/detached");
     git(
         &repo,
-        &["worktree", "add", "--detach", &detached.display().to_string()],
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            &detached.display().to_string(),
+        ],
     );
 
     let stub = GhStub::new();
