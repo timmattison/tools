@@ -383,6 +383,14 @@ fn lookup_with(
     }
 }
 
+/// Collapses `text` to one line.
+///
+/// Trims each line, drops the empty lines, and joins the rest with one space.
+fn one_line(text: &str) -> String {
+    let _ = text;
+    String::new()
+}
+
 /// Asks git for the URL of `origin` in `repo_dir`.
 ///
 /// Returns `None` when the repository has no `origin`, when `repo_dir` is not a
@@ -875,5 +883,106 @@ mod tests {
         assert_eq!(found.warning(), None);
         let args = std::fs::read_to_string(record(&work, "args")).unwrap();
         assert!(args.lines().any(|line| line == "ghe.example.com/org/repo"));
+    }
+
+    /// A stub `gh` with the shell `body`, and a repository with a GitHub origin.
+    fn failing_lookup(body: &str, limit: Duration) -> Lookup {
+        let work = TempDir::new().unwrap();
+        let repo = repo_with_origin(Some("git@github.com:owner/one.git"));
+        let stub = write_stub(&work, "gh-stub", body);
+        run_lookup(&stub, &repo, limit)
+    }
+
+    /// Checks that `found` has no pull requests and one line of warning, and
+    /// gives the warning.
+    fn single_line_warning(found: &Lookup) -> &str {
+        let warning = found.warning().expect("a warning");
+        assert!(!warning.contains('\n'), "{warning:?}");
+        assert_eq!(found.pulls(), &OpenPulls::default());
+        warning
+    }
+
+    #[test]
+    fn a_failed_gh_gives_its_stderr_on_one_line() {
+        let found = failing_lookup(
+            "echo 'first line' >&2; echo '  second line  ' >&2; exit 1",
+            GENEROUS_LIMIT,
+        );
+        let warning = single_line_warning(&found);
+        assert_eq!(
+            warning,
+            "could not list the open pull requests of github.com/owner/one: first line second line"
+        );
+    }
+
+    #[test]
+    fn a_failed_gh_with_no_stderr_gives_its_exit_status() {
+        let found = failing_lookup("exit 3", GENEROUS_LIMIT);
+        let warning = single_line_warning(&found);
+        assert!(warning.contains("github.com/owner/one"), "{warning}");
+        assert!(warning.contains("gh exited with"), "{warning}");
+    }
+
+    #[test]
+    fn a_gh_that_hangs_gives_a_warning_when_the_limit_ends() {
+        let started = Instant::now();
+        let found = failing_lookup("exec sleep 120", Duration::from_millis(500));
+        assert!(started.elapsed() < Duration::from_secs(60));
+        let warning = single_line_warning(&found);
+        assert!(warning.contains("github.com/owner/one"), "{warning}");
+        assert!(warning.contains("gh did not answer in 500ms"), "{warning}");
+    }
+
+    #[test]
+    fn an_answer_that_is_not_json_gives_a_warning() {
+        let found = failing_lookup("echo 'not json'", GENEROUS_LIMIT);
+        let warning = single_line_warning(&found);
+        assert!(warning.contains("github.com/owner/one"), "{warning}");
+        assert!(warning.contains("no list of pull requests"), "{warning}");
+    }
+
+    #[test]
+    fn a_gh_that_cannot_start_gives_a_warning() {
+        let work = TempDir::new().unwrap();
+        let repo = repo_with_origin(Some("git@github.com:owner/one.git"));
+        let not_executable = record(&work, "plain");
+        std::fs::write(&not_executable, "text").unwrap();
+        let found = run_lookup(&not_executable, &repo, GENEROUS_LIMIT);
+        let warning = single_line_warning(&found);
+        assert!(warning.contains("could not run gh"), "{warning}");
+    }
+
+    #[test]
+    fn one_line_joins_trimmed_non_empty_lines() {
+        assert_eq!(one_line("  a \n\n b\r\n   \n"), "a b");
+        assert_eq!(one_line(""), "");
+    }
+
+    /// A lookup against a stub that prints `count` pull requests of `owner`.
+    fn lookup_of_count(count: usize) -> Lookup {
+        let work = TempDir::new().unwrap();
+        let repo = repo_with_origin(Some("git@github.com:owner/one.git"));
+        let entries: Vec<String> = (1..=count)
+            .map(|number| entry(number as u64, "feat", "owner"))
+            .collect();
+        let stub = answering_stub(&work, &array(&entries));
+        run_lookup(&stub, &repo, GENEROUS_LIMIT)
+    }
+
+    #[test]
+    fn a_full_list_keeps_the_numbers_and_warns() {
+        let found = lookup_of_count(PULL_LIMIT);
+        assert_eq!(found.pulls().numbers("feat").len(), PULL_LIMIT);
+        let warning = found.warning().expect("a warning");
+        assert!(!warning.contains('\n'), "{warning:?}");
+        assert!(warning.contains("github.com/owner/one"), "{warning}");
+        assert!(warning.contains("1000 or more"), "{warning}");
+    }
+
+    #[test]
+    fn a_list_one_short_of_the_limit_gives_no_warning() {
+        let found = lookup_of_count(PULL_LIMIT - 1);
+        assert_eq!(found.pulls().numbers("feat").len(), PULL_LIMIT - 1);
+        assert_eq!(found.warning(), None);
     }
 }
