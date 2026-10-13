@@ -1002,8 +1002,20 @@ mod tests {
     fn a_failed_gh_with_no_stderr_gives_its_exit_status() {
         let found = failing_lookup("exit 3", GENEROUS_LIMIT);
         let warning = single_line_warning(&found);
-        assert!(warning.contains("github.com/owner/one"), "{warning}");
-        assert!(warning.contains("gh exited with"), "{warning}");
+        assert_eq!(
+            warning,
+            "could not list the open pull requests of github.com/owner/one: gh exited with code 3"
+        );
+    }
+
+    #[test]
+    fn a_gh_stopped_by_a_signal_gives_the_signal() {
+        let found = failing_lookup("kill -9 $$", GENEROUS_LIMIT);
+        let warning = single_line_warning(&found);
+        assert_eq!(
+            warning,
+            "could not list the open pull requests of github.com/owner/one: gh was stopped by signal 9"
+        );
     }
 
     #[test]
