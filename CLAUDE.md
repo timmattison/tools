@@ -159,7 +159,6 @@ Benefits of the channel-based shutdown:
 
 - `prcp` - Progress Copy (copy, verify, and batch styles)
 - `prhash` - Progress Hash (custom template with dynamic width)
-- `org-borg` - Organization Backup (custom template with dynamic width)
 
 ## Colored Output in Tests
 

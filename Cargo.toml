@@ -44,7 +44,12 @@ glob = "0.3"
 notify = "8.2"
 
 # Git
-git2 = "0.20"
+# vendored-libgit2 compiles the bundled libgit2 and links it statically. A
+# system libgit2 puts its version-pinned Homebrew Cellar path in the build
+# cache, and each Homebrew upgrade then stops the link. The default ssh and
+# https transports are off, because no crate clones or fetches, and ssh links
+# the Homebrew OpenSSL dylib. Held by src/gitrdun/tests/vendored-libgit2.rs.
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
 gix = "0.83"
 
 # Hashing
