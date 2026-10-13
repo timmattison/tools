@@ -36,8 +36,8 @@ fn workspace_git2_links_the_bundled_libgit2_not_the_system_one() {
 }
 
 /// No crate in the workspace clones, fetches, or pushes with `git2`. Each one
-/// reads a repository on the local disk. Thus `git2` builds neither network
-/// transport.
+/// works only on a repository on the local disk. Thus `git2` builds neither
+/// network transport.
 ///
 /// The `ssh` feature builds `libssh2-sys`, which links the Homebrew OpenSSL
 /// dylib on a Mac. A crate that does not use SSH thus loads a Homebrew dylib
