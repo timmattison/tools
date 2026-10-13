@@ -21,7 +21,7 @@ pub struct PullNumber(u64);
 impl fmt::Display for PullNumber {
     /// Writes the number in the form that GitHub shows, for example `#547`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "")
+        write!(f, "#{}", self.0)
     }
 }
 
