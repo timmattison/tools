@@ -533,7 +533,7 @@ impl Family {
     ///
     /// A worktree with no branch has no number, and a branch with no open pull
     /// request has none either. Such a row does not change.
-    fn pull_numbers_of(&self, entry: &Entry, pulls: &PullRequests) -> Option<String> {
+    fn pull_numbers_of(entry: &Entry, pulls: &PullRequests) -> Option<String> {
         let branch = entry.worktree.branch.as_deref()?;
         let numbers = pulls.numbers(entry.group, branch);
         if numbers.is_empty() {
@@ -568,7 +568,7 @@ impl Family {
             let indent = if self.grouped { GROUP_INDENT } else { "" };
             let path = entry.worktree.path.display().to_string();
             let branch = entry.worktree.display_branch();
-            let numbers = self.pull_numbers_of(entry, pulls);
+            let numbers = Self::pull_numbers_of(entry, pulls);
             let numbers = |paint: fn(&str) -> String| {
                 numbers
                     .as_deref()
@@ -986,6 +986,96 @@ mod tests {
         };
         assert_eq!(pulls.warnings().collect::<Vec<_>>(), ["first", "last"]);
         assert_eq!(PullRequests::default().warnings().count(), 0);
+    }
+
+    #[test]
+    fn render_shows_ascending_numbers_whatever_the_order_they_came_in() {
+        let one = family(vec![("solo", "/repo", "feature")], false, Some(0));
+        let pulls = pull_requests(&[&[("feature", 519), ("feature", 512)]]);
+        assert_eq!(glyphs_with(&one, &pulls), "> /repo [feature] #512 #519\n");
+    }
+
+    #[test]
+    fn a_detached_worktree_never_shows_numbers() {
+        let one = detachable_family(vec![("solo", "/repo", None)], false, Some(0));
+        let shown = one.entries[0].worktree.display_branch();
+        let pulls = pull_requests(&[&[(shown.as_str(), 9)]]);
+        let rendered = glyphs_with(&one, &pulls);
+        assert_eq!(rendered, glyphs_of(&one));
+        assert!(!rendered.contains("#9"), "{rendered}");
+    }
+
+    #[test]
+    fn each_row_shows_the_numbers_of_its_own_repository() {
+        let two = family(
+            vec![("parent", "/p", "shared"), ("child", "/p/c", "shared")],
+            true,
+            Some(1),
+        );
+        let pulls = pull_requests(&[&[], &[("shared", 77)]]);
+        assert_eq!(
+            glyphs_with(&two, &pulls),
+            "parent\n    /p [shared]\n\nchild\n>   /p/c [shared] #77\n"
+        );
+    }
+
+    #[test]
+    fn multibyte_branch_names_show_their_numbers() {
+        let one = family(
+            vec![
+                ("solo", "/a", "\u{65e5}\u{672c}\u{8a9e}"),
+                ("solo", "/b", "\u{1f389}"),
+                ("solo", "/c", "caf\u{e9}"),
+            ],
+            false,
+            None,
+        );
+        let pulls = pull_requests(&[&[
+            ("\u{65e5}\u{672c}\u{8a9e}", 1),
+            ("\u{1f389}", 2),
+            ("caf\u{e9}", 3),
+        ]]);
+        assert_eq!(
+            glyphs_with(&one, &pulls),
+            "  /a [\u{65e5}\u{672c}\u{8a9e}] #1\n  /b [\u{1f389}] #2\n  /c [caf\u{e9}] #3\n"
+        );
+    }
+
+    #[test]
+    fn no_pull_requests_render_a_family_as_before() {
+        let two = family(
+            vec![("parent", "/p", "main"), ("child", "/p/c", "trunk")],
+            true,
+            Some(1),
+        );
+        assert_eq!(
+            glyphs_with(&two, &PullRequests::default()),
+            "parent\n    /p [main]\n\nchild\n>   /p/c [trunk]\n"
+        );
+    }
+
+    #[test]
+    fn in_waves_keeps_item_order_and_replaces_only_the_item_that_died() {
+        let items: Vec<usize> = (0..SCAN_WIDTH * 2 + 3).collect();
+        let answers = in_waves(
+            &items,
+            |&item| {
+                assert_ne!(item, 5, "this item panics on purpose");
+                item * 10
+            },
+            |&item| item + 1_000_000,
+        );
+        let expected: Vec<usize> = items
+            .iter()
+            .map(|&item| {
+                if item == 5 {
+                    item + 1_000_000
+                } else {
+                    item * 10
+                }
+            })
+            .collect();
+        assert_eq!(answers, expected);
     }
 
     #[test]
