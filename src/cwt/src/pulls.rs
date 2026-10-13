@@ -614,6 +614,21 @@ mod tests {
     }
 
     #[test]
+    fn the_ssh_host_of_github_on_port_443_is_github() {
+        for url in [
+            "ssh://git@ssh.github.com:443/owner/name.git",
+            "git@ssh.github.com:owner/name.git",
+            "ssh://git@SSH.GitHub.com:443/owner/name",
+        ] {
+            assert_eq!(
+                parsed(url).as_deref(),
+                Some("github.com/owner/name"),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
     fn host_comparison_ignores_case_and_stores_lowercase() {
         assert_eq!(
             parsed("git@GitHub.com:owner/name.git").as_deref(),
