@@ -11,6 +11,7 @@
 )]
 
 use std::process::exit;
+use std::time::Duration;
 
 use buildinfo::version_string;
 use clap::Parser;
@@ -218,6 +219,21 @@ fn no_family_in_env() -> bool {
         Ok(value) => !value.is_empty() && value != "0",
         Err(_) => false,
     }
+}
+
+/// The environment variable that sets the time limit of the pull request queries.
+const PR_TIMEOUT_ENV: &str = "CWT_PR_TIMEOUT";
+
+/// The time limit of the pull request queries when the variable is not set.
+///
+/// The queries of one wave run in parallel, so the limit bounds the whole wave
+/// and not each repository.
+const DEFAULT_PR_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Reads a time limit in seconds. Decimals are allowed.
+fn parse_pr_timeout(value: &str) -> Option<Duration> {
+    let _ = value;
+    None
 }
 
 /// The shell code to add to shell config files.
@@ -445,6 +461,21 @@ mod tests {
                 Cli::try_parse_from(&args).is_err(),
                 "{args:?} must be rejected"
             );
+        }
+    }
+
+    #[test]
+    fn test_parse_pr_timeout_accepts_whole_and_decimal_seconds() {
+        assert_eq!(parse_pr_timeout("3"), Some(Duration::from_secs(3)));
+        assert_eq!(parse_pr_timeout("10"), Some(Duration::from_secs(10)));
+        assert_eq!(parse_pr_timeout("0.5"), Some(Duration::from_millis(500)));
+        assert_eq!(parse_pr_timeout(" 2 \n"), Some(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn test_parse_pr_timeout_refuses_what_is_not_a_positive_finite_number() {
+        for value in ["0", "-1", "abc", "", "inf", "NaN", "1e30"] {
+            assert_eq!(parse_pr_timeout(value), None, "{value:?} must be refused");
         }
     }
 
