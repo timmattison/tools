@@ -340,12 +340,7 @@ pub fn lookup(repo_dir: &Path, limit: Duration) -> Lookup {
 ///
 /// The program is a parameter so a test can pass a stub script and never change
 /// the process-global `PATH`.
-fn lookup_with(
-    gh: &OsStr,
-    repo_dir: &Path,
-    limit: Duration,
-    extra_host: Option<&str>,
-) -> Lookup {
+fn lookup_with(gh: &OsStr, repo_dir: &Path, limit: Duration, extra_host: Option<&str>) -> Lookup {
     let Some(url) = origin_url(repo_dir) else {
         return Lookup::default();
     };
@@ -372,23 +367,58 @@ fn lookup_with(
     let output = match run_with_limit(&mut command, limit) {
         Ok(output) => output,
         Err(RunFailure::NotInstalled) => return Lookup::default(),
-        Err(_) => return Lookup::failed("not implemented".to_owned()),
+        Err(RunFailure::Spawn(error) | RunFailure::Wait(error)) => {
+            return Lookup::failed(could_not_list(&repo, &format!("could not run gh: {error}")));
+        }
+        Err(RunFailure::TimedOut(waited)) => {
+            return Lookup::failed(could_not_list(
+                &repo,
+                &format!("gh did not answer in {waited:?}"),
+            ));
+        }
     };
-    match parse_pull_list(&String::from_utf8_lossy(&output.stdout), repo.owner()) {
-        Ok((pulls, _total)) => Lookup {
-            pulls,
-            warning: None,
-        },
-        Err(_) => Lookup::failed("not implemented".to_owned()),
+    if !output.status.success() {
+        let stderr = one_line(&String::from_utf8_lossy(&output.stderr));
+        let cause = if stderr.is_empty() {
+            format!("gh exited with {}", output.status)
+        } else {
+            stderr
+        };
+        return Lookup::failed(could_not_list(&repo, &cause));
     }
+    match parse_pull_list(&String::from_utf8_lossy(&output.stdout), repo.owner()) {
+        Ok((pulls, total)) => {
+            let warning = (total >= PULL_LIMIT).then(|| {
+                format!(
+                    "{repo} has {PULL_LIMIT} or more open pull requests, so some numbers can be missing"
+                )
+            });
+            Lookup { pulls, warning }
+        }
+        Err(error) => Lookup::failed(could_not_list(
+            &repo,
+            &format!("gh answered with no list of pull requests: {error}"),
+        )),
+    }
+}
+
+/// The start that every warning of a failed lookup shares.
+const COULD_NOT_LIST: &str = "could not list the open pull requests of";
+
+/// Writes the warning for a lookup of `repo` that failed for `cause`.
+fn could_not_list(repo: &GithubRepo, cause: &str) -> String {
+    format!("{COULD_NOT_LIST} {repo}: {cause}")
 }
 
 /// Collapses `text` to one line.
 ///
 /// Trims each line, drops the empty lines, and joins the rest with one space.
 fn one_line(text: &str) -> String {
-    let _ = text;
-    String::new()
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Asks git for the URL of `origin` in `repo_dir`.
@@ -470,7 +500,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let missing = dir.path().join("does-not-exist");
         let result = run_with_limit(&mut Command::new(&missing), GENEROUS_LIMIT);
-        assert!(matches!(result, Err(RunFailure::NotInstalled)), "{result:?}");
+        assert!(
+            matches!(result, Err(RunFailure::NotInstalled)),
+            "{result:?}"
+        );
     }
 
     #[test]
