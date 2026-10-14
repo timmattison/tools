@@ -263,7 +263,6 @@ mod tests {
 
     /// The channels that the test holds, and the worker built from the
     /// other ends.
-    #[expect(dead_code, reason = "temporary: the next tests use these ends")]
     struct Channels {
         updates: Sender<Update>,
         commands: Receiver<Command>,
