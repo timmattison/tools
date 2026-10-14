@@ -949,4 +949,35 @@ mod tests {
         assert_eq!(view.first, 8);
         assert_eq!(marked(&view.rows), ["Run(101)*"]);
     }
+
+    #[test]
+    fn a_taller_view_shows_more_rows_above_instead_of_blank_rows_below() {
+        let mut board = long_board(10, 0);
+        for _ in 0..9 {
+            board.select_next(now());
+        }
+        assert_eq!(board.view(now(), 4).first, 7);
+
+        let taller = board.view(now(), 8);
+        assert_eq!(taller.first, 5);
+        assert_eq!(taller.rows.len(), 8);
+        assert!(marked(&taller.rows).contains(&"Run(10)*".to_owned()));
+
+        let everything = board.view(now(), 100);
+        assert_eq!(everything.first, 0);
+        assert_eq!(everything.rows.len(), 13);
+    }
+
+    #[test]
+    fn a_board_that_shrinks_pulls_the_offset_back() {
+        let mut board = long_board(10, 0);
+        for _ in 0..9 {
+            board.select_next(now());
+        }
+        assert_eq!(board.view(now(), 4).first, 7);
+        board.replace(repo("a/x"), vec![run(1, "a/x", RunState::Running, 5, 1)]);
+        let view = board.view(now(), 4);
+        assert_eq!(view.first, 0);
+        assert_eq!(view.rows.len(), 4);
+    }
 }
