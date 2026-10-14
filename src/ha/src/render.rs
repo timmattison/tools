@@ -4,10 +4,139 @@ use std::fmt::Display;
 use std::time::Duration;
 
 use chrono::{DateTime, TimeZone, Utc};
+use ratatui::style::Style;
 use ratatui::Frame;
+use textfit::pad_right;
 
-use crate::board::Board;
+use crate::board::{Board, Row, Section};
+use crate::run::{Run, RunState};
+use crate::settings::format_duration_setting;
 use crate::status::Status;
+
+/// The width of the marker column.
+const MARKER_WIDTH: usize = 1;
+/// The width of the started column.
+const STARTED_WIDTH: usize = 11;
+/// The width of the time column.
+const TIME_WIDTH: usize = 7;
+/// The width of the finished column.
+const FINISHED_WIDTH: usize = 8;
+/// The lines that are not board rows: the column header and the status line.
+const FIXED_LINES: usize = 2;
+/// The text that stands between two parts of the status line.
+const STATUS_SEPARATOR: &str = "  ·  ";
+/// The key hints at the end of the status line.
+const KEY_HINTS: &str = "↑↓ select  ⏎ open  r refresh  q quit";
+
+/// The widths of the four text columns.
+#[derive(Debug, Clone, Copy)]
+struct Widths {
+    repo: usize,
+    workflow: usize,
+    branch: usize,
+    title: usize,
+}
+
+impl Widths {
+    fn fixed() -> Widths {
+        Widths {
+            repo: 21,
+            workflow: 17,
+            branch: 17,
+            title: 31,
+        }
+    }
+}
+
+/// Joins the cells of one row into one line. One space stands between cells.
+fn cells(
+    widths: Widths,
+    marker: &str,
+    texts: [&str; 4],
+    started: &str,
+    time: &str,
+    finished: &str,
+) -> String {
+    let [repo, workflow, branch, title] = texts;
+    [
+        pad_right(marker, MARKER_WIDTH),
+        pad_right(repo, widths.repo),
+        pad_right(workflow, widths.workflow),
+        pad_right(branch, widths.branch),
+        pad_right(title, widths.title),
+        pad_right(started, STARTED_WIDTH),
+        pad_right(time, TIME_WIDTH),
+        pad_right(finished, FINISHED_WIDTH),
+    ]
+    .join(" ")
+}
+
+/// The marker glyph of a run state.
+fn marker(state: RunState) -> &'static str {
+    match state {
+        RunState::Running => "●",
+        RunState::Queued => "○",
+        RunState::Passed => "✓",
+        RunState::Failed => "✗",
+        RunState::Other => " ",
+    }
+}
+
+/// The time between two instants. A negative span gives the absolute value.
+fn span(from: DateTime<Utc>, to: DateTime<Utc>) -> Duration {
+    Duration::from_secs((to - from).num_seconds().unsigned_abs())
+}
+
+/// The started column: the clock for today, the date and the clock before.
+fn format_started(started: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    if started.date_naive() == now.date_naive() {
+        started.format("%H:%M:%S").to_string()
+    } else {
+        started.format("%m-%d %H:%M").to_string()
+    }
+}
+
+/// The line of one run.
+fn run_line(run: &Run, now: DateTime<Utc>, widths: Widths) -> String {
+    let (time, finished) = if run.state.is_active() {
+        (format_elapsed(span(run.started_at, now)), String::new())
+    } else {
+        (
+            format_elapsed(span(run.started_at, run.updated_at)),
+            format_ago(span(run.updated_at, now)),
+        )
+    };
+    cells(
+        widths,
+        marker(run.state),
+        [
+            &run.repo.to_string(),
+            &run.workflow,
+            &run.branch,
+            &run.title,
+        ],
+        &format_started(run.started_at, now),
+        &time,
+        &finished,
+    )
+}
+
+/// The line of a section header.
+fn header_line(
+    section: Section,
+    count: usize,
+    passed: usize,
+    failed: usize,
+    window: Duration,
+) -> String {
+    match section {
+        Section::Active => format!("Running · {count}"),
+        Section::Recent => format!(
+            "Last {} · {passed} passed · {failed} failed",
+            format_duration_setting(window)
+        ),
+    }
+}
 
 /// Draws one frame: the column header, the board rows, and the status line.
 ///
@@ -23,7 +152,46 @@ pub fn draw<Tz: TimeZone>(
 ) where
     Tz::Offset: Display,
 {
-    let _ = (frame, board, status, now, tz);
+    let _ = (status, tz);
+    let area = frame.area();
+    let widths = Widths::fixed();
+    let height = usize::from(area.height) - FIXED_LINES;
+    let window = board.window();
+    let mut put = |y: usize, text: &str| {
+        let y = area.y + u16::try_from(y).unwrap_or(u16::MAX);
+        frame
+            .buffer_mut()
+            .set_string(area.x, y, text, Style::default());
+    };
+    put(
+        0,
+        &cells(
+            widths,
+            " ",
+            ["REPO", "WORKFLOW", "BRANCH", "TITLE"],
+            "STARTED",
+            "TIME",
+            "FINISHED",
+        ),
+    );
+    let view = board.view(now, height);
+    for (index, row) in view.rows.iter().enumerate() {
+        let line = match row {
+            Row::Header {
+                section,
+                count,
+                passed,
+                failed,
+            } => header_line(*section, *count, *passed, *failed, window),
+            Row::Empty(_) => String::new(),
+            Row::Run { run, .. } => run_line(run, now, widths),
+        };
+        put(index + 1, &line);
+    }
+    put(
+        usize::from(area.height) - 1,
+        &format!("loading…{STATUS_SEPARATOR}{KEY_HINTS}"),
+    );
 }
 
 /// Writes how long a run took, in at most 7 columns.
