@@ -44,6 +44,18 @@ impl RunState {
             _ => RunState::Other,
         }
     }
+
+    /// Returns true while the run waits or runs.
+    #[must_use]
+    pub fn is_active(self) -> bool {
+        false
+    }
+
+    /// Returns true when the run passed or failed. The board shows these.
+    #[must_use]
+    pub fn is_finished(self) -> bool {
+        false
+    }
 }
 
 /// One workflow run of one repository.
@@ -122,5 +134,23 @@ mod tests {
         );
         assert_eq!(RunState::from_github("completed", None), RunState::Other);
         assert_eq!(RunState::from_github("", None), RunState::Other);
+    }
+
+    #[test]
+    fn only_queued_and_running_are_active() {
+        assert!(RunState::Queued.is_active());
+        assert!(RunState::Running.is_active());
+        assert!(!RunState::Passed.is_active());
+        assert!(!RunState::Failed.is_active());
+        assert!(!RunState::Other.is_active());
+    }
+
+    #[test]
+    fn only_passed_and_failed_are_finished() {
+        assert!(RunState::Passed.is_finished());
+        assert!(RunState::Failed.is_finished());
+        assert!(!RunState::Queued.is_finished());
+        assert!(!RunState::Running.is_finished());
+        assert!(!RunState::Other.is_finished());
     }
 }
