@@ -644,4 +644,25 @@ mod tests {
         assert!(most >= 2, "only {most} call in flight");
         assert!(most <= CONCURRENCY, "{most} calls in flight at once");
     }
+
+    #[test]
+    fn a_refresh_during_a_cycle_gives_exactly_one_more_cycle() {
+        let fake = Arc::new(FakeSource {
+            delay: Duration::from_millis(300),
+            ..FakeSource::default()
+        });
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        worker
+            .commands
+            .send(Command::RefreshNow)
+            .expect("the worker listens");
+
+        let first = one_cycle(&worker);
+        let second = one_cycle(&worker);
+
+        assert!(matches!(first.last(), Some(Update::CycleDone { .. })));
+        assert!(matches!(second.last(), Some(Update::CycleDone { .. })));
+        let third = worker.updates.recv_timeout(Duration::from_secs(1));
+        assert_eq!(third, Err(RecvTimeoutError::Timeout), "a third cycle ran");
+    }
 }
