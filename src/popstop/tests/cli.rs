@@ -18,7 +18,7 @@
 #[path = "shared/device-turn.rs"]
 mod device_turn;
 
-use std::ffi::{c_void, OsString};
+use std::ffi::{c_void, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::mem::{self, MaybeUninit};
@@ -46,16 +46,17 @@ const EXIT_AFTER_SECONDS: &str = "60";
 const HANDSHAKE_BOUND_FLAG: &str = "--handshake-bound";
 
 /// The longest time that a background start of this file waits for the
-/// report of its copy, as `--handshake-bound` takes it.
+/// report of its copy.
 ///
 /// The bound of a user ([`HANDSHAKE_BOUND`]) is ten seconds, and a machine
 /// that runs many tests together passes it. Thus each background start of this
 /// file gets the bound of [`LINE_TIMEOUT`], for the reason that bound gives.
-const HANDSHAKE_BOUND_SECONDS: &str = "60";
+/// The two values are one value, so a change of [`LINE_TIMEOUT`] changes this
+/// bound too.
+const HANDSHAKE_BOUND_OF_THE_TESTS: Duration = LINE_TIMEOUT;
 
-/// A bound for the report of a copy that a late copy always passes, as
-/// `--handshake-bound` takes it.
-const SHORT_HANDSHAKE_BOUND_SECONDS: &str = "1";
+/// A bound for the report of a copy that a late copy always passes.
+const SHORT_HANDSHAKE_BOUND: Duration = Duration::from_secs(1);
 
 /// The time by which a late copy passes the bound of a user.
 const LATE_BY: Duration = Duration::from_secs(1);
@@ -364,13 +365,13 @@ impl<'turn> BackgroundStart<'turn> {
     /// end. The copy that the command makes reports after the bound of a user
     /// passed.
     ///
-    /// The command waits for the report for `handshake_bound` seconds when it
-    /// is given. When it is not given, the command gets what each other
+    /// The command waits for the report for `handshake_bound` when it is
+    /// given. When it is not given, the command gets what each other
     /// background start of this file gets.
     fn make_with_a_late_copy(
         turn: &'turn DeviceTurn,
         late: &mut LateCopy,
-        handshake_bound: Option<&str>,
+        handshake_bound: Option<Duration>,
     ) -> Self {
         let start = Self::spawn(&mut Command::new(&late.program), &late.dir, handshake_bound);
         late.make_the_copy_late();
@@ -380,15 +381,14 @@ impl<'turn> BackgroundStart<'turn> {
     /// Starts `popstop --background` from `command`, with `state_dir` as the
     /// value of `--state-dir`, and returns at once.
     ///
-    /// The start waits for the report of its copy for `handshake_bound`
-    /// seconds when it is given, and for [`HANDSHAKE_BOUND_SECONDS`] when it
-    /// is not.
-    fn spawn(command: &mut Command, state_dir: &Path, handshake_bound: Option<&str>) -> Child {
+    /// The start waits for the report of its copy for `handshake_bound` when
+    /// it is given, and for [`HANDSHAKE_BOUND_OF_THE_TESTS`] when it is not.
+    fn spawn(command: &mut Command, state_dir: &Path, handshake_bound: Option<Duration>) -> Child {
         command
             .arg("--state-dir")
             .arg(state_dir)
             .args(background_start(
-                handshake_bound.unwrap_or(HANDSHAKE_BOUND_SECONDS),
+                handshake_bound.unwrap_or(HANDSHAKE_BOUND_OF_THE_TESTS),
             ))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -418,16 +418,17 @@ impl<'turn> BackgroundStart<'turn> {
 /// directory.
 ///
 /// The copy stops by itself after [`EXIT_AFTER_SECONDS`], and the start waits
-/// for the report of the copy for `handshake_bound` seconds. Each background
-/// start of this file takes its arguments here, thus no start waits for the
-/// bound of a user by mistake.
-fn background_start(handshake_bound: &str) -> [&str; 5] {
+/// for the report of the copy for `handshake_bound`. Each background start of
+/// this file takes its arguments here, thus no start waits for the bound of a
+/// user by mistake. This function is the one place that writes a bound as the
+/// text of `--handshake-bound`, which takes whole seconds.
+fn background_start(handshake_bound: Duration) -> [String; 5] {
     [
-        "--background",
-        "--exit-after",
-        EXIT_AFTER_SECONDS,
-        HANDSHAKE_BOUND_FLAG,
-        handshake_bound,
+        "--background".to_owned(),
+        "--exit-after".to_owned(),
+        EXIT_AFTER_SECONDS.to_owned(),
+        HANDSHAKE_BOUND_FLAG.to_owned(),
+        handshake_bound.as_secs().to_string(),
     ]
 }
 
@@ -671,7 +672,11 @@ fn ask(arguments: &[&str]) -> (ExitStatus, String) {
 /// that runs and end by themselves, thus they need no time limit. `--status`
 /// reads the name of the device, and a start opens it, thus the run takes the
 /// turn `_turn` of its test.
-fn ask_in(_turn: &DeviceTurn, dir: &Path, arguments: &[&str]) -> (ExitStatus, String, String) {
+fn ask_in(
+    _turn: &DeviceTurn,
+    dir: &Path,
+    arguments: &[impl AsRef<OsStr>],
+) -> (ExitStatus, String, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_popstop"));
     command.arg("--state-dir").arg(dir).args(arguments);
     outcome_of(&mut command)
@@ -687,7 +692,7 @@ fn ask_in(_turn: &DeviceTurn, dir: &Path, arguments: &[&str]) -> (ExitStatus, St
 fn ask_from(
     _turn: &DeviceTurn,
     working_dir: &Path,
-    arguments: &[&str],
+    arguments: &[impl AsRef<OsStr>],
 ) -> (ExitStatus, String, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_popstop"));
     command.current_dir(working_dir).args(arguments);
@@ -905,11 +910,8 @@ fn a_background_start_gives_up_after_the_handshake_bound_that_it_got() {
     let temp = tempfile::tempdir().expect("a temporary directory");
     let mut late = LateCopy::prepare(temp.path());
 
-    let start = BackgroundStart::make_with_a_late_copy(
-        &turn,
-        &mut late,
-        Some(SHORT_HANDSHAKE_BOUND_SECONDS),
-    );
+    let start =
+        BackgroundStart::make_with_a_late_copy(&turn, &mut late, Some(SHORT_HANDSHAKE_BOUND));
 
     assert_eq!(
         start.status.code(),
@@ -918,15 +920,10 @@ fn a_background_start_gives_up_after_the_handshake_bound_that_it_got() {
         start.status,
         start.errors
     );
-    let bound = Duration::from_secs(
-        SHORT_HANDSHAKE_BOUND_SECONDS
-            .parse()
-            .expect("the bound is a number of seconds"),
-    );
     let log = StateDir::new(late.dir.clone()).log_path();
     assert_eq!(
         start.errors,
-        format!("{}\n", did_not_report_within(bound, &log)),
+        format!("{}\n", did_not_report_within(SHORT_HANDSHAKE_BOUND, &log)),
         "the start names the bound that it got, and not the bound of a user"
     );
     assert_eq!(
@@ -1050,7 +1047,7 @@ fn a_background_start_refuses_with_the_words_of_a_foreground_start() {
     let (foreground, foreground_report, foreground_refusal) =
         ask_in(&turn, &dir, &["--exit-after", EXIT_AFTER_SECONDS]);
     let (background, background_report, background_refusal) =
-        ask_in(&turn, &dir, &background_start(HANDSHAKE_BOUND_SECONDS));
+        ask_in(&turn, &dir, &background_start(HANDSHAKE_BOUND_OF_THE_TESTS));
 
     assert_eq!(
         background.code(),
@@ -1170,15 +1167,9 @@ fn a_relative_state_directory_names_one_directory_in_the_start_the_copy_and_each
         &working_dir,
         &["--state-dir", relative, "--exit-after", EXIT_AFTER_SECONDS],
     );
-    let (background, _, background_refusal) = ask_from(
-        &turn,
-        &working_dir,
-        &[
-            &["--state-dir", relative][..],
-            &background_start(HANDSHAKE_BOUND_SECONDS),
-        ]
-        .concat(),
-    );
+    let mut background_arguments = vec!["--state-dir".to_owned(), relative.to_owned()];
+    background_arguments.extend(background_start(HANDSHAKE_BOUND_OF_THE_TESTS));
+    let (background, _, background_refusal) = ask_from(&turn, &working_dir, &background_arguments);
     assert_eq!(
         (foreground.code(), background.code()),
         (Some(3), Some(3)),
@@ -1319,7 +1310,8 @@ fn a_refused_background_start_leaves_the_log_of_the_copy_that_runs_alone() {
 
     // The second start does not take the lock, thus it does not play and it
     // does not stay. Its time limit is the backstop of a start that works.
-    let (status, report, refusal) = ask_in(&turn, &dir, &background_start(HANDSHAKE_BOUND_SECONDS));
+    let (status, report, refusal) =
+        ask_in(&turn, &dir, &background_start(HANDSHAKE_BOUND_OF_THE_TESTS));
 
     assert_eq!(
         status.code(),
@@ -1401,7 +1393,8 @@ fn a_copy_that_cannot_start_says_why_on_stderr_and_in_its_log() {
     // lock file. The start makes its log, and the copy fails before it plays.
     fs::create_dir_all(state.lock_path()).expect("make a lock file that no copy can open");
 
-    let (status, report, problem) = ask_in(&turn, &dir, &background_start(HANDSHAKE_BOUND_SECONDS));
+    let (status, report, problem) =
+        ask_in(&turn, &dir, &background_start(HANDSHAKE_BOUND_OF_THE_TESTS));
 
     assert_eq!(
         status.code(),
