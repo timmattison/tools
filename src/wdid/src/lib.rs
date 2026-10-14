@@ -6,12 +6,15 @@
 //! `wdid` reads that history through atuin, and it counts each tool.
 //!
 //! # The modules
+//! - [`catalog`] reads the tools of the workspace: names, crate directories,
+//!   added dates, and install state.
 //! - [`command_words`] gives the command words of one command line.
 //! - [`history`] gets the full atuin history as a list of rows.
 //! - [`rules`] gives the runs that one command word makes.
 //! - [`shell`] gets the aliases and the functions of the interactive shell.
 //! - [`tool`] holds the names of the tools of the workspace.
 
+pub mod catalog;
 pub mod command_words;
 pub mod history;
 pub mod rules;
