@@ -72,6 +72,20 @@ impl Settings {
     ///
     /// A full path stays as it is. The path keeps its symbolic links.
     ///
+    /// The handshake bound has a type of its own, thus a [`Duration`] does not
+    /// pass in its place, and a call that swaps the time limit and the
+    /// handshake bound does not compile:
+    ///
+    /// ```compile_fail
+    /// use std::time::Duration;
+    ///
+    /// use popstop::life_cycle::Settings;
+    ///
+    /// let exit_after = Some(Duration::from_secs(60));
+    /// let handshake_bound = Some(Duration::from_secs(10));
+    /// let _ = Settings::new(None, exit_after, handshake_bound);
+    /// ```
+    ///
     /// # Errors
     ///
     /// Returns a [`Failure`] with the status [`exit_status::ERROR`] when the
