@@ -103,7 +103,7 @@ impl IssueOutcome {
 /// rule, so the key means nothing while a run is open, and a user reads a key
 /// that does nothing as a key with nothing behind it. Sixty seconds is longer
 /// than a slow fetch and shorter than a session.
-const RUN_DEADLINE: Duration = Duration::from_secs(60);
+pub(crate) const RUN_DEADLINE: Duration = Duration::from_secs(60);
 
 /// Run `command` in `workdir` and report what to say about it.
 ///

@@ -1585,7 +1585,12 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     // The environment is read here, once, and the values go on from there. The
     // handles are dropped, which detaches the threads: the loop waits for no
     // probe.
-    spawn_command_probes(&CommandValues::read(), &shell, &tx);
+    spawn_command_probes(
+        &CommandValues::read(),
+        &shell,
+        crate::shell::PROBE_DEADLINE,
+        &tx,
+    );
 
     // The worker that measures for `m`. It reports on the channel of the loop,
     // as the push and the issue key do. The quit below waits for it, because a
@@ -1887,9 +1892,14 @@ fn read_value(name: &str) -> Option<String> {
 /// threads: the loop waits for no probe, and it quits without one. A test waits
 /// for them, because a test that read the record of the shells before they had
 /// run would report a probe that works as a probe that starts nothing.
+///
+/// Each shell gets `deadline` to answer. Production gives
+/// [`crate::shell::PROBE_DEADLINE`], and a test gives a bound of its own, for
+/// the reason [`crate::shell::resolve`] gives.
 fn spawn_command_probes(
     values: &CommandValues,
     shell: &OsStr,
+    deadline: Duration,
     tx: &Sender<Event>,
 ) -> Vec<thread::JoinHandle<()>> {
     let issue_tx = tx.clone();
@@ -1897,6 +1907,7 @@ fn spawn_command_probes(
         shell,
         values.issue.as_deref(),
         crate::issue::DEFAULT_ISSUE_COMMAND,
+        deadline,
         move |command| {
             let _ = issue_tx.send(Event::IssueCommandFound(command));
         },
@@ -1910,6 +1921,7 @@ fn spawn_command_probes(
             shell,
             values.base_update(update),
             update.default_command(),
+            deadline,
             move |command| {
                 let _ = update_tx.send(Event::BaseUpdateCommandFound(update, command));
             },
@@ -1921,13 +1933,15 @@ fn spawn_command_probes(
 /// Ask `shell` on a thread of its own about the command that `value` names,
 /// falling back on `default`, and hand a command it has to `found`.
 ///
-/// `found` runs on that thread and only where the shell said yes. A value that
-/// turns the key off starts no shell at all, which is what keeps a public
-/// repository from asking every user's shell about one person's function.
+/// `found` runs on that thread and only where the shell said yes within
+/// `deadline`. A value that turns the key off starts no shell at all, which is
+/// what keeps a public repository from asking every user's shell about one
+/// person's function.
 fn spawn_probe<Found>(
     shell: &OsStr,
     value: Option<&str>,
     default: &'static str,
+    deadline: Duration,
     found: Found,
 ) -> thread::JoinHandle<()>
 where
@@ -1936,7 +1950,7 @@ where
     let shell = shell.to_os_string();
     let value = value.map(str::to_string);
     thread::spawn(move || {
-        if let Some(command) = crate::shell::resolve(value.as_deref(), default, &shell) {
+        if let Some(command) = crate::shell::resolve(value.as_deref(), default, &shell, deadline) {
             found(command);
         }
     })
@@ -1945,7 +1959,7 @@ where
 #[cfg(all(test, unix))]
 mod probe_tests {
     use super::*;
-    use crate::shell::stub_shell::StubShell;
+    use crate::shell::stub_shell::{StubShell, ANSWER_DEADLINE};
     use crate::update::BaseUpdate;
 
     /// What a probe puts in front of the word it asks the shell about.
@@ -1976,14 +1990,16 @@ mod probe_tests {
     /// record as it runs, so a read before the shells had run would report a
     /// probe that works as a probe that starts nothing. The wait is bounded by
     /// the deadline of the probe itself, which kills a shell that never
-    /// answers.
+    /// answers. That deadline is [`ANSWER_DEADLINE`], a bound of the tests,
+    /// because each test here is about which key an answer reaches, and never
+    /// about how fast this machine starts a shell.
     ///
     /// Sorted, because three shells answer in whatever order they finish. What
     /// each test here is about is which questions were asked, and never which
     /// of them was asked first.
     fn probed(values: &CommandValues, stub: &StubShell) -> (Vec<String>, Vec<String>) {
         let (tx, rx) = mpsc::channel();
-        for handle in spawn_command_probes(values, stub.as_shell(), &tx) {
+        for handle in spawn_command_probes(values, stub.as_shell(), ANSWER_DEADLINE, &tx) {
             handle.join().expect("a probe thread must not panic");
         }
         // The spawn holds a sender for each key, and each of those goes with
@@ -2092,6 +2108,28 @@ mod probe_tests {
             answers,
             ["G ggs", "M gmp", "R grp"],
             "each key must be bound by the answer of its own probe",
+        );
+    }
+
+    #[test]
+    fn an_answer_after_the_bound_of_a_user_still_reaches_its_key() {
+        // The tests here are about which key each answer reaches, and never
+        // about how fast a shell answers. A busy machine can hold a stub that
+        // exits at once for longer than the bound of a user: a hook run of
+        // 2026-10-14 sent no answer at all, and the stubs it started had
+        // recorded all three questions.
+        //
+        // The stub answers one second after the bound of a user, on a machine
+        // of any speed. So this test fails wherever the probes of this module
+        // wait only for the bound of a user.
+        let late = crate::shell::PROBE_DEADLINE + Duration::from_secs(1);
+        let stub = StubShell::new(&format!("sleep {}; exit 0", late.as_secs()));
+        let (_, answers) = probed(&values(None, None, None), &stub);
+        assert_eq!(
+            answers,
+            ["G ggs", "M gmp", "R grp"],
+            "a slow answer must still reach its key. The probes of these tests must wait for a \
+             bound of their own, and not for the bound of a user",
         );
     }
 }
