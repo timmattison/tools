@@ -209,6 +209,7 @@ occ = { path = "src/occ" }
 portplz-core = { path = "src/portplz-core" }
 proctree = { path = "src/proctree" }
 repowalker = { path = "src/repowalker" }
+runlimit = { path = "src/runlimit" }
 shellquote = { path = "src/shellquote" }
 shellsetup = { path = "src/shellsetup" }
 termbar = { path = "src/termbar" }

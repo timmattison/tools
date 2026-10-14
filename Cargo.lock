@@ -1825,12 +1825,12 @@ dependencies = [
  "colored",
  "gitscratch",
  "repowalker",
+ "runlimit",
  "serde",
  "serde_json",
  "shellsetup",
  "tempfile",
  "testcolor",
- "wait-timeout",
 ]
 
 [[package]]
@@ -3856,6 +3856,7 @@ dependencies = [
  "gitscratch",
  "open",
  "ratatui",
+ "runlimit",
  "serde",
  "serde_json",
  "tempfile",
@@ -3863,7 +3864,6 @@ dependencies = [
  "thiserror 2.0.21",
  "toml",
  "unicode-width",
- "wait-timeout",
 ]
 
 [[package]]
@@ -7078,6 +7078,14 @@ dependencies = [
  "clap",
  "crossterm",
  "ratatui",
+]
+
+[[package]]
+name = "runlimit"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "wait-timeout",
 ]
 
 [[package]]

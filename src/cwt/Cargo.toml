@@ -17,12 +17,11 @@ colored.workspace = true
 # gitscratch rather than being copied here to drift.
 gitscratch.workspace = true
 repowalker.workspace = true
+runlimit.workspace = true
 # `serde` and `serde_json` read the JSON that `gh pr list --json` prints.
 serde.workspace = true
 serde_json.workspace = true
 shellsetup.workspace = true
-# Puts the time limit on the `gh` child.
-wait-timeout.workspace = true
 
 [dev-dependencies]
 gitscratch = { workspace = true, features = ["testing"] }

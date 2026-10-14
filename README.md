@@ -96,6 +96,11 @@ directory is merely missing right now. Used by `grist`, `grind` and `grime`.
 
 See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of guarantees.
 
+### runlimit
+A shared Rust library that runs a child program with a time limit. It drains stdout and stderr on reader threads,
+so a chatty child cannot fill a pipe. It kills and reaps a child that does not finish in time, so a hung child
+cannot hang the caller. Used by `cwt` and `ha`.
+
 ## The tools
 
 - dirhash
