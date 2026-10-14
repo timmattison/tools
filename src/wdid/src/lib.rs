@@ -7,3 +7,5 @@
 //!
 //! # The modules
 //! - [`history`] gets the full atuin history as a list of rows.
+
+pub mod history;
