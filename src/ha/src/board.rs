@@ -101,7 +101,10 @@ impl Board {
     }
 
     /// Drops the runs and the errors of every repository that is not in `repos`.
-    pub fn keep_only(&mut self, repos: &BTreeSet<RepoName>) {}
+    pub fn keep_only(&mut self, repos: &BTreeSet<RepoName>) {
+        self.runs.retain(|repo, _| repos.contains(repo));
+        self.errors.retain(|repo, _| repos.contains(repo));
+    }
 
     /// The error of each failed repository, sorted by repository.
     #[must_use]
