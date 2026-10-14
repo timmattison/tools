@@ -250,6 +250,29 @@ fn message_color(age: Duration) -> Color {
     Color::Indexed(MESSAGE_START_GRAY - step)
 }
 
+/// The text before the age of the last refresh.
+const REFRESH_AGE_PREFIX: &str = "updated ";
+/// The text after the age of the last refresh.
+const REFRESH_AGE_SUFFIX: &str = " ago";
+/// The width of the refresh part of the status line. The age is never wider
+/// than the time column.
+const REFRESH_AGE_WIDTH: usize = REFRESH_AGE_PREFIX.len() + TIME_WIDTH + REFRESH_AGE_SUFFIX.len();
+
+/// The refresh part of the status line: how long ago the last refresh cycle
+/// ended, for example `updated 1m 05s ago`.
+///
+/// The age has the units of the time column ([`format_elapsed`]). A last
+/// refresh in the future of `now` is `0s` ago. The part is padded to
+/// [`REFRESH_AGE_WIDTH`], thus the parts after it keep their columns when the
+/// age grows from `9s` to `10s` or from `59s` to `1m 00s`.
+fn refresh_age(last_refresh: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let age = format_elapsed(span(last_refresh, now));
+    pad_right(
+        &format!("{REFRESH_AGE_PREFIX}{age}{REFRESH_AGE_SUFFIX}"),
+        REFRESH_AGE_WIDTH,
+    )
+}
+
 /// The left part of the status line: the lead, the refresh, the rate limit,
 /// and the key hints.
 ///
@@ -262,7 +285,7 @@ where
 {
     let mut parts: Vec<String> = lead(board, status, now).into_iter().collect();
     parts.push(match status.last_refresh {
-        Some(at) => format!("updated {}", at.with_timezone(tz).format("%H:%M:%S")),
+        Some(at) => refresh_age(at, now),
         None => "loading…".to_owned(),
     });
     if let Some(rate) = status.rate {
