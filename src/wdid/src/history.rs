@@ -29,6 +29,19 @@ pub const SEARCH_ARGUMENTS: [&str; 10] = [
     "",
 ];
 
+/// The byte that ends each record of the output.
+const RECORD_SEPARATOR: u8 = 0;
+
+/// The byte that separates the fields of a record.
+const FIELD_SEPARATOR: u8 = b'\t';
+
+/// The number of fields in a record. The last field is the command, and it
+/// keeps every tab that it holds.
+const FIELD_COUNT: usize = 5;
+
+/// The format of the time field. The search states `--timezone +0`.
+const TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
+
 /// The exit code that a shell gives when it cannot find a command.
 pub const COMMAND_NOT_FOUND: i64 = 127;
 
@@ -54,7 +67,7 @@ impl Exit {
     /// True for 127: the shell did not find the command.
     #[must_use]
     pub const fn is_command_not_found(self) -> bool {
-        false
+        self.0 == COMMAND_NOT_FOUND
     }
 }
 
@@ -118,8 +131,47 @@ pub enum HistoryError {
 /// fields, a time that is not `%Y-%m-%d %H:%M:%S`, or an exit code that is not
 /// a number. This function never gives [`HistoryError::Empty`].
 pub fn parse(output: &[u8]) -> Result<Vec<HistoryEntry>, HistoryError> {
-    let _ = output;
-    Ok(Vec::new())
+    let mut records: Vec<&[u8]> = output.split(|byte| *byte == RECORD_SEPARATOR).collect();
+    if records.last().is_some_and(|last| last.is_empty()) {
+        records.pop();
+    }
+    records
+        .into_iter()
+        .enumerate()
+        .map(|(index, record)| parse_record(record, index + 1))
+        .collect()
+}
+
+/// Parses one record. `number` is the position of the record, from 1.
+fn parse_record(record: &[u8], number: usize) -> Result<HistoryEntry, HistoryError> {
+    let malformed = |reason: String| HistoryError::Malformed {
+        record: number,
+        reason,
+    };
+    let mut fields = record.splitn(FIELD_COUNT, |byte| *byte == FIELD_SEPARATOR);
+    let (Some(time), Some(exit), Some(host), Some(user), Some(command)) = (
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+    ) else {
+        return Err(malformed(format!("it has fewer than {FIELD_COUNT} fields")));
+    };
+    let time_text = String::from_utf8_lossy(time);
+    let time = chrono::NaiveDateTime::parse_from_str(&time_text, TIME_FORMAT)
+        .map_err(|error| malformed(format!("the time {time_text:?} is not valid: {error}")))?;
+    let exit_text = String::from_utf8_lossy(exit);
+    let exit = exit_text
+        .parse::<i64>()
+        .map_err(|error| malformed(format!("the exit code {exit_text:?} is not valid: {error}")))?;
+    Ok(HistoryEntry {
+        time,
+        exit: Exit::new(exit),
+        host: String::from_utf8_lossy(host).into_owned(),
+        user: String::from_utf8_lossy(user).into_owned(),
+        command: String::from_utf8_lossy(command).into_owned(),
+    })
 }
 
 /// Spawns `<program> SEARCH_ARGUMENTS...` and parses its output.
