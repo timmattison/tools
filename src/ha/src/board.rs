@@ -514,4 +514,46 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].1, "HTTP 500");
     }
+
+    #[test]
+    fn the_first_run_is_selected_at_the_start() {
+        let mut with_active = board();
+        with_active.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 5, 1),
+                run(2, "a/x", RunState::Passed, 30, 20),
+            ],
+        );
+        assert_eq!(
+            shape(&with_active.rows(now())),
+            [
+                "Header(Active,1,0,0)",
+                "Run(1)*",
+                "Header(Recent,1,1,0)",
+                "Run(2)"
+            ]
+        );
+
+        let mut only_recent = board();
+        only_recent.replace(
+            repo("a/x"),
+            vec![
+                run(3, "a/x", RunState::Passed, 30, 10),
+                run(2, "a/x", RunState::Failed, 30, 20),
+            ],
+        );
+        assert_eq!(
+            shape(&only_recent.rows(now()))[2..],
+            ["Header(Recent,2,1,1)", "Run(3)*", "Run(2)"]
+        );
+    }
+
+    #[test]
+    fn an_empty_board_has_no_selection() {
+        let mut board = board();
+        let rows = board.rows(now());
+        assert!(shape(&rows).iter().all(|row| !row.ends_with('*')));
+        assert_eq!(board.selected_url(now()), None);
+    }
 }
