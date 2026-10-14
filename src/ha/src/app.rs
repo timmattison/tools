@@ -555,4 +555,75 @@ mod tests {
             "{status_line:?}"
         );
     }
+
+    #[test]
+    fn up_and_down_move_the_highlight() {
+        let channels = channels();
+        send_runs(
+            &channels,
+            vec![active_run(1, 5), active_run(2, 20), active_run(3, 40)],
+        );
+        let opener = opener(false);
+        // Oldest first: run 3, run 2, run 1. Down, Up, Down ends on run 2.
+        let (result, _) = run_app(
+            &opener,
+            &channels,
+            vec![
+                press(KeyCode::Down),
+                press(KeyCode::Up),
+                press(KeyCode::Down),
+                press(KeyCode::Enter),
+                press(KeyCode::Char('q')),
+            ],
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(*opener.urls.borrow(), ["https://example.test/runs/2"]);
+    }
+
+    #[test]
+    fn an_idle_tick_and_a_resize_only_redraw() {
+        let channels = channels();
+        let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
+        let tz = FixedOffset::east_opt(0).unwrap();
+        let clock = now;
+        let opener = opener(false);
+        let mut app = App::new(
+            Board::new(Duration::from_hours(8)),
+            Status::default(),
+            &opener,
+            &channels.worker,
+            &clock,
+            &tz,
+        );
+        let events = vec![
+            None,
+            Some(Event::Resize(100, 10)),
+            press(KeyCode::Char('q')).into(),
+        ];
+        let result = app.run(&mut terminal, &mut script(events));
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn a_worker_that_has_ended_does_not_stop_the_loop() {
+        let Channels {
+            updates,
+            commands,
+            worker,
+        } = channels();
+        drop(updates);
+        drop(commands);
+        let channels = Channels {
+            updates: channel().0,
+            commands: channel().1,
+            worker,
+        };
+        let opener = opener(false);
+        let (result, _) = run_app(
+            &opener,
+            &channels,
+            vec![press(KeyCode::Char('r')), press(KeyCode::Char('q'))],
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
 }
