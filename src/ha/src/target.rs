@@ -88,32 +88,10 @@ impl Target {
     /// GitHub name cannot hold.
     pub fn parse(input: &str) -> Result<Target, TargetError> {
         let input = input.trim();
-        if input.is_empty() {
-            return Err(TargetError::Empty {
-                input: input.to_owned(),
-            });
-        }
-        let parts: Vec<&str> = input.split('/').collect();
-        if parts.len() > 2 {
-            return Err(TargetError::TooManySlashes {
-                input: input.to_owned(),
-            });
-        }
-        if parts.iter().any(|part| part.is_empty()) {
-            return Err(TargetError::EmptyPart {
-                input: input.to_owned(),
-            });
-        }
-        for part in &parts {
-            check_part(input, part)?;
-        }
-        match parts.as_slice() {
-            [owner] => Ok(Target::Owner(OwnerName((*owner).to_owned()))),
-            [owner, name] => Ok(Target::Repo(RepoName {
-                owner: OwnerName((*owner).to_owned()),
-                name: (*name).to_owned(),
-            })),
-            _ => unreachable!("a split gives one or two parts here"),
+        if input.contains('/') {
+            RepoName::parse(input).map(Target::Repo)
+        } else {
+            OwnerName::parse(input).map(Target::Owner)
         }
     }
 }
@@ -125,9 +103,35 @@ impl RepoName {
     ///
     /// Returns a [`TargetError`] when the text is not exactly `owner/name`
     /// with valid parts.
-    pub fn parse(_input: &str) -> Result<RepoName, TargetError> {
-        Err(TargetError::Empty {
-            input: String::new(),
+    pub fn parse(input: &str) -> Result<RepoName, TargetError> {
+        let input = input.trim();
+        if input.is_empty() {
+            return Err(TargetError::Empty {
+                input: input.to_owned(),
+            });
+        }
+        let parts: Vec<&str> = input.split('/').collect();
+        let [owner, name] = parts.as_slice() else {
+            return Err(if parts.len() > 2 {
+                TargetError::TooManySlashes {
+                    input: input.to_owned(),
+                }
+            } else {
+                TargetError::NotRepo {
+                    input: input.to_owned(),
+                }
+            });
+        };
+        if owner.is_empty() || name.is_empty() {
+            return Err(TargetError::EmptyPart {
+                input: input.to_owned(),
+            });
+        }
+        check_part(input, owner)?;
+        check_part(input, name)?;
+        Ok(RepoName {
+            owner: OwnerName((*owner).to_owned()),
+            name: (*name).to_owned(),
         })
     }
 
@@ -151,10 +155,20 @@ impl OwnerName {
     ///
     /// Returns a [`TargetError`] when the text has a slash, or when it is
     /// empty, dot-only, or holds a character that a GitHub name cannot hold.
-    pub fn parse(_input: &str) -> Result<OwnerName, TargetError> {
-        Err(TargetError::Empty {
-            input: String::new(),
-        })
+    pub fn parse(input: &str) -> Result<OwnerName, TargetError> {
+        let input = input.trim();
+        if input.is_empty() {
+            return Err(TargetError::Empty {
+                input: input.to_owned(),
+            });
+        }
+        if input.contains('/') {
+            return Err(TargetError::NotOwner {
+                input: input.to_owned(),
+            });
+        }
+        check_part(input, input)?;
+        Ok(OwnerName(input.to_owned()))
     }
 
     /// The name as given, with its case.
