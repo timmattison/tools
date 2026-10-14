@@ -1029,6 +1029,157 @@ mod tests {
         );
     }
 
+    /// The error that `runs_of` gives for a stub with this `case` body.
+    fn runs_error(cases: &str) -> SourceError {
+        let stub = Stub::new(cases);
+        stub.source()
+            .runs_of(&repo("o/r"), since_query())
+            .expect_err("an error")
+    }
+
+    fn http_output(status_line: &str, body: &str) -> String {
+        format!("{status_line}\nContent-Type: application/json\r\n\r\n{body}")
+    }
+
+    #[test]
+    fn a_missing_program_is_not_installed() {
+        let dir = TempDir::new().unwrap();
+        let source = GhSource::with_program(dir.path().join("missing"), GENEROUS_LIMIT);
+        let error = source
+            .runs_of(&repo("o/r"), since_query())
+            .expect_err("an error");
+        assert_eq!(error, SourceError::NotInstalled);
+    }
+
+    #[test]
+    fn exit_status_4_with_no_answer_is_not_logged_in() {
+        let text = "To get started with GitHub CLI, please run:  gh auth login";
+        let error = runs_error(&format!("echo '{text}' >&2; exit 4"));
+        assert_eq!(error, SourceError::NotLoggedIn(text.to_owned()));
+    }
+
+    #[test]
+    fn a_401_is_not_logged_in() {
+        let stub = Stub::new("cat \"$dir/page1.out\"; exit 1");
+        stub.file(
+            "page1.out",
+            &http_output(
+                "HTTP/2.0 401 Unauthorized",
+                "{\"message\":\"Bad credentials\"}",
+            ),
+        );
+        let error = stub
+            .source()
+            .runs_of(&repo("o/r"), since_query())
+            .expect_err("an error");
+        assert_eq!(
+            error,
+            SourceError::NotLoggedIn("Bad credentials".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_404_is_an_http_error_with_the_message_of_the_body() {
+        let stub = Stub::new("cat \"$dir/page1.out\"; exit 1");
+        stub.file(
+            "page1.out",
+            &http_output(
+                "HTTP/2.0 404 Not Found",
+                "{\"message\":\"Not Found\",\"documentation_url\":\"https://docs.github.com\"}",
+            ),
+        );
+        let error = stub
+            .source()
+            .runs_of(&repo("o/r"), since_query())
+            .expect_err("an error");
+        assert_eq!(
+            error,
+            SourceError::Http {
+                status: 404,
+                message: "Not Found".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn an_http_error_without_a_json_message_uses_the_reason_phrase() {
+        let stub = Stub::new("cat \"$dir/page1.out\"; exit 1");
+        stub.file(
+            "page1.out",
+            &http_output("HTTP/2.0 502 Bad Gateway", "<html>oops</html>"),
+        );
+        let error = stub
+            .source()
+            .runs_of(&repo("o/r"), since_query())
+            .expect_err("an error");
+        assert_eq!(
+            error,
+            SourceError::Http {
+                status: 502,
+                message: "Bad Gateway".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn a_program_that_hangs_is_timed_out() {
+        let stub = Stub::new("exec sleep 120");
+        let limit = Duration::from_millis(500);
+        let source = GhSource::with_program(stub.dir.path().join("gh"), limit);
+        let error = source
+            .runs_of(&repo("o/r"), since_query())
+            .expect_err("an error");
+        assert_eq!(error, SourceError::TimedOut(limit));
+    }
+
+    #[test]
+    fn an_exit_with_no_answer_is_failed_with_the_first_stderr_line() {
+        let error = runs_error("printf '\\nboom\\nsecond\\n' >&2; exit 1");
+        assert_eq!(error, SourceError::Failed("boom".to_owned()));
+    }
+
+    #[test]
+    fn an_exit_with_no_answer_and_no_stderr_names_the_exit_status() {
+        let error = runs_error("exit 7");
+        assert_eq!(
+            error,
+            SourceError::Failed("gh exited with status 7 and printed nothing".to_owned())
+        );
+    }
+
+    #[test]
+    fn each_error_displays_as_a_clear_sentence() {
+        let cases = [
+            (
+                SourceError::NotInstalled,
+                "gh is not installed: install it from https://cli.github.com",
+            ),
+            (
+                SourceError::NotLoggedIn("detail".to_owned()),
+                "gh is not logged in: run gh auth login",
+            ),
+            (
+                SourceError::TimedOut(Duration::from_secs(30)),
+                "gh did not finish within 30s",
+            ),
+            (
+                SourceError::Http {
+                    status: 404,
+                    message: "Not Found".to_owned(),
+                },
+                "GitHub answered 404: Not Found",
+            ),
+            (SourceError::Failed("boom".to_owned()), "gh failed: boom"),
+            (
+                SourceError::BadResponse("bad".to_owned()),
+                "gh gave an answer that ha cannot read: bad",
+            ),
+        ];
+        for (error, text) in cases {
+            assert_eq!(error.to_string(), text);
+        }
+    }
+
     #[test]
     fn run_with_limit_gives_up_on_a_program_that_hangs() {
         let dir = TempDir::new().unwrap();
