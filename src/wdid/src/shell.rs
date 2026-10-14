@@ -19,6 +19,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use wait_timeout::ChildExt;
 
 use crate::command_words::{command_words, Aliases, CommandWord, Parsed};
+use crate::rules::{runs, Run};
 use crate::tool::{ToolName, ToolNames};
 
 /// The file name of zsh.
@@ -376,8 +377,14 @@ impl Resolver {
     /// Resolves every function of `definitions` to the tools that it uses.
     #[must_use]
     pub fn new(definitions: &Definitions, tools: &ToolNames) -> Self {
-        let _ = (definitions, tools);
-        Self::default()
+        let tools_by_function = definitions
+            .functions
+            .keys()
+            .map(|name| (name.clone(), reachable_tools(name, definitions, tools)))
+            .collect();
+        Self {
+            tools: tools_by_function,
+        }
     }
 
     /// Gives the tools of the function `name`. Gives `None` when `name` is not
@@ -386,4 +393,37 @@ impl Resolver {
     pub fn tools_of(&self, name: &str) -> Option<&BTreeSet<ToolName>> {
         self.tools.get(name)
     }
+}
+
+/// Gives every tool that the function `start` uses, to any depth.
+///
+/// The walk visits each function once, thus a cycle of functions ends. A word
+/// can be a tool and a function, for example the function `crap` that runs
+/// `command crap`. Such a word adds the tool, and the walk enters the function
+/// too. A development run does not count as a use.
+fn reachable_tools(
+    start: &str,
+    definitions: &Definitions,
+    tools: &ToolNames,
+) -> BTreeSet<ToolName> {
+    let mut found = BTreeSet::new();
+    let mut visited: BTreeSet<&str> = BTreeSet::new();
+    let mut pending = vec![start];
+    while let Some(name) = pending.pop() {
+        let Some((name, words)) = definitions.functions.get_key_value(name) else {
+            continue;
+        };
+        if !visited.insert(name.as_str()) {
+            continue;
+        }
+        for word in words {
+            for run in runs(word, tools) {
+                if let Run::Use(tool) = run {
+                    found.insert(tool);
+                }
+            }
+            pending.push(word.word.as_str());
+        }
+    }
+    found
 }
