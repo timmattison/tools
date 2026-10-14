@@ -523,4 +523,39 @@ mod tests {
             assert!(!reversed(60, y), "line {y} middle");
         }
     }
+
+    #[test]
+    fn an_empty_board_says_so_in_each_section() {
+        let mut board = Board::new(Duration::from_hours(8));
+        let buffer = render_with(60, 8, &mut board, &Status::default());
+        let text = lines(&buffer);
+        assert_eq!(
+            text[1..5],
+            [
+                "Running · 0",
+                "  No runs in progress or in the queue.",
+                "Last 8h · 0 passed · 0 failed",
+                "  No runs finished in the last 8h.",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_window_text_follows_the_setting() {
+        let mut board = Board::new(Duration::from_mins(90));
+        let buffer = render_with(60, 8, &mut board, &Status::default());
+        let text = lines(&buffer);
+        assert_eq!(text[3], "Last 90m · 0 passed · 0 failed");
+        assert_eq!(text[4], "  No runs finished in the last 90m.");
+    }
+
+    #[test]
+    fn the_column_header_and_the_section_headers_are_bold() {
+        let mut board = four_run_board();
+        let buffer = render_with(120, 10, &mut board, &Status::default());
+        for y in [0_u16, 1, 4] {
+            assert!(buffer[(0, y)].modifier.contains(Modifier::BOLD), "line {y}");
+        }
+        assert!(!buffer[(2, 2)].modifier.contains(Modifier::BOLD));
+    }
 }
