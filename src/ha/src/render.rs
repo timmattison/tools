@@ -176,6 +176,33 @@ fn empty_line(section: Section, window: Duration) -> String {
     }
 }
 
+/// The status line: the refresh, the rate limit, and the key hints.
+///
+/// The parts stand in this order, with [`STATUS_SEPARATOR`] between them.
+fn status_line<Tz: TimeZone>(status: &Status, tz: &Tz) -> String
+where
+    Tz::Offset: Display,
+{
+    let mut parts: Vec<String> = Vec::new();
+    parts.push(match status.last_refresh {
+        Some(at) => format!("updated {}", at.with_timezone(tz).format("%H:%M:%S")),
+        None => "loading…".to_owned(),
+    });
+    if let Some(rate) = status.rate {
+        parts.push(match status.backoff_until {
+            Some(until) => format!(
+                "API low {}/{}, next refresh {}",
+                rate.remaining,
+                rate.limit,
+                until.with_timezone(tz).format("%H:%M")
+            ),
+            None => format!("API {}/{}", rate.remaining, rate.limit),
+        });
+    }
+    parts.push(KEY_HINTS.to_owned());
+    parts.join(STATUS_SEPARATOR)
+}
+
 /// Writes one line of text at row `y` of the area and returns the buffer row.
 fn put(buffer: &mut Buffer, y: usize, text: &str, style: Style) -> u16 {
     let area = buffer.area;
@@ -209,7 +236,6 @@ pub fn draw<Tz: TimeZone>(
 ) where
     Tz::Offset: Display,
 {
-    let _ = status;
     let area = frame.area();
     let widths = Widths::for_width(usize::from(area.width));
     let height = usize::from(area.height) - FIXED_LINES;
@@ -261,10 +287,11 @@ pub fn draw<Tz: TimeZone>(
             }
         }
     }
+    let line = status_line(status, tz);
     put(
         buffer,
         usize::from(area.height) - 1,
-        &format!("loading…{STATUS_SEPARATOR}{KEY_HINTS}"),
+        &truncate_to_budget(&line, usize::from(area.width)),
         Style::default(),
     );
 }
