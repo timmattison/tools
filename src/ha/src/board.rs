@@ -119,11 +119,12 @@ impl Board {
 
     /// Builds the full list of rows. The list has two sections.
     fn build_rows(&self, now: DateTime<Utc>) -> Vec<Row<'_>> {
-        let active: Vec<&Run> = self
+        let mut active: Vec<&Run> = self
             .runs
             .iter()
             .filter(|run| run.state.is_active())
             .collect();
+        active.sort_by_key(|run| (run.started_at, run.id));
         let recent: Vec<&Run> = self
             .runs
             .iter()
@@ -319,9 +320,6 @@ mod tests {
             ],
         );
         let rows = board.rows(now());
-        assert_eq!(
-            shape(&rows)[1..5],
-            ["Run(8)", "Run(5)", "Run(7)", "Run(9)"]
-        );
+        assert_eq!(shape(&rows)[1..5], ["Run(8)", "Run(5)", "Run(7)", "Run(9)"]);
     }
 }
