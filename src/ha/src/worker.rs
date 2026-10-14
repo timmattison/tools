@@ -339,6 +339,7 @@ mod tests {
     struct Script {
         owners: HashMap<OwnerName, Result<Vec<RepoName>, SourceError>>,
         created: HashMap<RepoName, Result<Vec<Run>, SourceError>>,
+        active: HashMap<RepoName, Result<Vec<Run>, SourceError>>,
         calls: Vec<(&'static str, String)>,
         since: Vec<DateTime<Utc>>,
         rate: Option<RateLimit>,
@@ -377,7 +378,11 @@ mod tests {
                 RunQuery::Active => "active",
             };
             script.calls.push((what, repo.to_string()));
-            let answer = script.created.get(repo).cloned().unwrap_or(Ok(Vec::new()));
+            let answers = match query {
+                RunQuery::CreatedSince(_) => &script.created,
+                RunQuery::Active => &script.active,
+            };
+            let answer = answers.get(repo).cloned().unwrap_or(Ok(Vec::new()));
             script.in_flight += 1;
             script.max_in_flight = script.max_in_flight.max(script.in_flight);
             drop(script);
@@ -411,6 +416,13 @@ mod tests {
             started_at: at,
             updated_at: at,
             url: format!("https://example.test/{id}"),
+        }
+    }
+
+    fn active_run(repo_text: &str, id: u64) -> Run {
+        Run {
+            state: RunState::Running,
+            ..run(repo_text, id)
         }
     }
 
@@ -763,6 +775,80 @@ mod tests {
                 repos: expected,
                 owner_errors: vec![(owner("acme"), failure.to_string())]
             }
+        );
+    }
+
+    #[test]
+    fn the_active_sweep_runs_on_the_slow_cadence_and_its_runs_are_kept() {
+        let fake = Arc::new(FakeSource::default());
+        fake.script()
+            .created
+            .insert(repo("acme/a"), Ok(vec![run("acme/a", 1), run("acme/a", 3)]));
+        fake.script().active.insert(
+            repo("acme/a"),
+            Ok(vec![active_run("acme/a", 1), active_run("acme/a", 2)]),
+        );
+        let worker = spawn_with(
+            Arc::clone(&fake),
+            &settings(&["acme/a"]),
+            Duration::from_hours(1),
+        );
+        let first = one_cycle(&worker);
+        worker
+            .commands
+            .send(Command::RefreshNow)
+            .expect("the worker listens");
+        let second = one_cycle(&worker);
+
+        let sweeps = fake
+            .script()
+            .calls
+            .iter()
+            .filter(|(what, _)| *what == "active")
+            .count();
+        assert_eq!(sweeps, 1, "the second cycle must not sweep again");
+        for updates in [&first, &second] {
+            let Some(Update::Runs { runs, .. }) = updates
+                .iter()
+                .find(|update| matches!(update, Update::Runs { .. }))
+            else {
+                panic!("no Runs update: {updates:?}");
+            };
+            let mut found: Vec<(u64, RunState)> =
+                runs.iter().map(|run| (run.id.0, run.state)).collect();
+            found.sort_by_key(|(id, _)| *id);
+            assert_eq!(
+                found,
+                vec![
+                    (1, RunState::Passed),
+                    (2, RunState::Running),
+                    (3, RunState::Passed)
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn a_failing_sweep_gives_one_failed_and_no_runs() {
+        let fake = Arc::new(FakeSource::default());
+        let failure = SourceError::Failed("boom".to_owned());
+        fake.script()
+            .active
+            .insert(repo("acme/a"), Err(failure.clone()));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+
+        let updates = one_cycle(&worker);
+
+        let for_repo: Vec<&Update> = updates
+            .iter()
+            .filter(|update| matches!(update, Update::Runs { .. } | Update::Failed { .. }))
+            .collect();
+        assert_eq!(
+            for_repo,
+            vec![&Update::Failed {
+                repo: repo("acme/a"),
+                error: failure.to_string()
+            }]
         );
     }
 }
