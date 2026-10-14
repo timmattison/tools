@@ -71,6 +71,7 @@ pub struct Board {
     runs: BTreeMap<RepoName, Vec<Run>>,
     errors: BTreeMap<RepoName, String>,
     selected: Option<(RunId, usize)>,
+    offset: usize,
 }
 
 impl Board {
@@ -82,6 +83,7 @@ impl Board {
             runs: BTreeMap::new(),
             errors: BTreeMap::new(),
             selected: None,
+            offset: 0,
         }
     }
 
@@ -126,8 +128,27 @@ impl Board {
     /// The rows that fit in `height` lines, with the selected row inside.
     pub fn view(&mut self, now: DateTime<Utc>, height: usize) -> View<'_> {
         self.settle(now);
-        let rows = self.build_rows(now).into_iter().take(height).collect();
-        View { rows, first: 0 }
+        if height > 0 {
+            let selected_row = self
+                .build_rows(now)
+                .iter()
+                .position(|row| matches!(row, Row::Run { selected: true, .. }));
+            if let Some(row) = selected_row {
+                if row >= self.offset + height {
+                    self.offset = row + 1 - height;
+                }
+            }
+        }
+        let rows = self
+            .build_rows(now)
+            .into_iter()
+            .skip(self.offset)
+            .take(height)
+            .collect();
+        View {
+            rows,
+            first: self.offset,
+        }
     }
 
     /// Splits the shown runs into the active list and the recent list.
