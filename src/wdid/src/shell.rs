@@ -9,9 +9,14 @@
 //! starts a process.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use wait_timeout::ChildExt;
 
 use crate::command_words::{command_words, Aliases, CommandWord, Parsed};
 use crate::tool::{ToolName, ToolNames};
@@ -47,6 +52,11 @@ const SUFFIX_OPTION: char = 's';
 
 /// The argument that ends the options of `alias`.
 const END_OF_OPTIONS: &str = "--";
+
+/// The time that the readers of the pipes get to finish, after the shell
+/// ends. A background process that the shell started can hold a pipe open, and
+/// that must not stop wdid.
+const PIPE_GRACE: Duration = Duration::from_secs(2);
 
 /// The default bound on the shell start.
 pub const TIMEOUT: Duration = Duration::from_secs(30);
@@ -295,12 +305,65 @@ fn read_alias_line(line: &str, definitions: &mut Definitions) {
 /// [`ShellError::Failed`] for a non-zero status, and [`ShellError::NoMarkers`]
 /// from [`parse_output`].
 pub fn read(
-    command: Command,
+    mut command: Command,
     kind: ShellKind,
     timeout: Duration,
 ) -> Result<Definitions, ShellError> {
-    let _ = (command, kind, timeout);
-    Ok(Definitions::default())
+    let shell = command.get_program().to_string_lossy().into_owned();
+    let marker = Marker::unique();
+    let mut child = command
+        .args(["-i", "-c"])
+        .arg(script(kind, &marker))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|source| ShellError::Spawn {
+            shell: shell.clone(),
+            source,
+        })?;
+    let stdout = collect(child.stdout.take());
+    let stderr = collect(child.stderr.take());
+    let timed_out = ShellError::TimedOut {
+        seconds: timeout.as_secs(),
+    };
+    let status = match child.wait_timeout(timeout) {
+        Ok(Some(status)) => status,
+        Ok(None) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(timed_out);
+        }
+        Err(source) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ShellError::Spawn { shell, source });
+        }
+    };
+    let stdout = stdout.recv_timeout(PIPE_GRACE).map_err(|_| timed_out)?;
+    let stderr = stderr.recv_timeout(PIPE_GRACE).unwrap_or_default();
+    if !status.success() {
+        return Err(ShellError::Failed {
+            status: status.to_string(),
+            stderr: String::from_utf8_lossy(&stderr).trim().to_owned(),
+        });
+    }
+    parse_output(&String::from_utf8_lossy(&stdout), &marker)
+}
+
+/// Reads a pipe to its end on its own thread. The output of the shell is
+/// larger than one pipe buffer, thus a read after the wait would block the
+/// shell forever. The receiver gets the bytes when the pipe closes.
+fn collect<R: Read + Send + 'static>(pipe: Option<R>) -> mpsc::Receiver<Vec<u8>> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut bytes);
+        }
+        let _ = sender.send(bytes);
+    });
+    receiver
 }
 
 /// The tools that each function resolves to.
