@@ -44,6 +44,12 @@ struct Cli {
     /// for ever.
     #[arg(long, hide = true, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
     exit_after: Option<u64>,
+    /// Wait this number of seconds for the report of the copy that
+    /// `--background` starts. The tests give each start a bound that is
+    /// longer than the bound of a user, so a machine that runs many tests
+    /// together does not fail them.
+    #[arg(long, hide = true, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
+    handshake_bound: Option<u64>,
 }
 
 fn main() -> ExitCode {
@@ -78,12 +84,14 @@ fn run(cli: &Cli) -> ExitCode {
     use std::io::Write;
     use std::time::Duration;
 
+    use popstop::background::HandshakeBound;
     use popstop::control;
     use popstop::life_cycle::{run_foreground, Settings};
 
     let settings = match Settings::new(
         cli.state_dir.as_deref(),
         cli.exit_after.map(Duration::from_secs),
+        cli.handshake_bound.map(HandshakeBound::from_secs),
     ) {
         Ok(settings) => settings,
         Err(failure) => return report(Err(failure)),
@@ -124,6 +132,7 @@ fn run(cli: &Cli) -> ExitCode {
         &cli.status,
         &cli.state_dir,
         &cli.exit_after,
+        &cli.handshake_bound,
     );
     let _ = writeln!(
         std::io::stderr(),
