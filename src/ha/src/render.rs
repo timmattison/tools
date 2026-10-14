@@ -176,14 +176,44 @@ fn empty_line(section: Section, window: Duration) -> String {
     }
 }
 
-/// The status line: the refresh, the rate limit, and the key hints.
+/// The first part of the status line, or `None` when there is nothing to say.
+///
+/// A message wins over the errors, and the errors win over the refresh mark.
+/// The errors come from the board (one for each repository) and from the
+/// status (one for each owner). The text names the first and counts the rest.
+fn lead(board: &Board, status: &Status) -> Option<String> {
+    if let Some(message) = &status.message {
+        return Some(message.clone());
+    }
+    let mut errors: Vec<(String, &str)> = board
+        .errors()
+        .into_iter()
+        .map(|(repo, error)| (repo.to_string(), error))
+        .collect();
+    errors.extend(
+        status
+            .owner_errors
+            .iter()
+            .map(|(owner, error)| (owner.to_string(), error.as_str())),
+    );
+    if let Some((name, error)) = errors.first() {
+        let more = match errors.len() - 1 {
+            0 => String::new(),
+            count => format!(" (+{count} more)"),
+        };
+        return Some(format!("⚠ {name}: {error}{more}"));
+    }
+    status.refreshing.then(|| "refreshing…".to_owned())
+}
+
+/// The status line: the lead, the refresh, the rate limit, and the key hints.
 ///
 /// The parts stand in this order, with [`STATUS_SEPARATOR`] between them.
-fn status_line<Tz: TimeZone>(status: &Status, tz: &Tz) -> String
+fn status_line<Tz: TimeZone>(board: &Board, status: &Status, tz: &Tz) -> String
 where
     Tz::Offset: Display,
 {
-    let mut parts: Vec<String> = Vec::new();
+    let mut parts: Vec<String> = lead(board, status).into_iter().collect();
     parts.push(match status.last_refresh {
         Some(at) => format!("updated {}", at.with_timezone(tz).format("%H:%M:%S")),
         None => "loading…".to_owned(),
@@ -287,7 +317,7 @@ pub fn draw<Tz: TimeZone>(
             }
         }
     }
-    let line = status_line(status, tz);
+    let line = status_line(board, status, tz);
     put(
         buffer,
         usize::from(area.height) - 1,
