@@ -9,4 +9,5 @@
     reason = "types such as run::RunState repeat the module name on purpose"
 )]
 pub mod run;
+pub mod status;
 pub mod target;
