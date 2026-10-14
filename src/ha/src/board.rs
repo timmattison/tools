@@ -134,6 +134,9 @@ impl Board {
                 .iter()
                 .position(|row| matches!(row, Row::Run { selected: true, .. }));
             if let Some(row) = selected_row {
+                if row < self.offset {
+                    self.offset = row;
+                }
                 if row >= self.offset + height {
                     self.offset = row + 1 - height;
                 }
