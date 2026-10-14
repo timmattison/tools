@@ -2,7 +2,7 @@
 //! and the list of the commands that did not parse.
 
 use chrono::NaiveDate;
-use comfy_table::{presets, CellAlignment, ContentArrangement, Table};
+use comfy_table::{presets, CellAlignment, ColumnConstraint, ContentArrangement, Table};
 use num_format::{Locale, ToFormattedString};
 use serde::Serialize;
 
@@ -26,6 +26,12 @@ const COLUMNS: [&str; 9] = [
 /// The places of the columns that hold a count. The table aligns them to the
 /// right, so the digits of two rows line up.
 const COUNT_COLUMNS: [usize; 3] = [1, 2, 4];
+
+/// The places of the columns whose cells never wrap: the tool, the three
+/// counts, and the three dates. A date or a count that wraps inside its cell
+/// cannot be read. Only the two text columns wrap. When the width is too
+/// small even for these columns, the table is wider than the width.
+const WHOLE_COLUMNS: [usize; 7] = [0, 1, 2, 4, 5, 6, 7];
 
 /// The text in place of a date that the tally does not know.
 const NO_DATE: &str = "-";
@@ -116,6 +122,11 @@ fn table(tally: &Tally, width: Option<u16>) -> String {
     for index in COUNT_COLUMNS {
         if let Some(column) = table.column_mut(index) {
             column.set_cell_alignment(CellAlignment::Right);
+        }
+    }
+    for index in WHOLE_COLUMNS {
+        if let Some(column) = table.column_mut(index) {
+            column.set_constraint(ColumnConstraint::ContentWidth);
         }
     }
     table.to_string()
