@@ -82,4 +82,26 @@ mod tests {
             assert_eq!(RunState::from_github(status, None), expected, "{status}");
         }
     }
+
+    #[test]
+    fn a_completed_run_maps_by_its_conclusion() {
+        let cases = [
+            ("success", RunState::Passed),
+            ("failure", RunState::Failed),
+            ("timed_out", RunState::Failed),
+            ("startup_failure", RunState::Failed),
+            ("cancelled", RunState::Other),
+            ("skipped", RunState::Other),
+            ("neutral", RunState::Other),
+            ("action_required", RunState::Other),
+            ("stale", RunState::Other),
+        ];
+        for (conclusion, expected) in cases {
+            assert_eq!(
+                RunState::from_github("completed", Some(conclusion)),
+                expected,
+                "{conclusion}"
+            );
+        }
+    }
 }
