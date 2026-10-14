@@ -318,4 +318,47 @@ mod tests {
         assert_eq!(settings.window, Duration::from_hours(8));
         assert_eq!(settings.interval, Duration::from_secs(60));
     }
+
+    #[test]
+    fn command_line_targets_replace_all_targets_of_the_file() {
+        let text = r#"
+            repos = ["timmattison/tools"]
+            owners = ["Lock-Free-Labs"]
+        "#;
+        let cli = CommandLine {
+            targets: vec!["octocat/hello-world".to_owned(), " rust-lang ".to_owned()],
+            ..CommandLine::default()
+        };
+        let settings = resolve_file(&cli, text).unwrap();
+        assert_eq!(
+            settings.targets,
+            vec![target("octocat/hello-world"), target("rust-lang")]
+        );
+    }
+
+    #[test]
+    fn command_line_window_and_interval_replace_the_file_values() {
+        let text = "owners = [\"timmattison\"]\nwindow = \"2d\"\ninterval = \"15m\"";
+        let cli = CommandLine {
+            window: Some(Duration::from_hours(1)),
+            interval: Some(Duration::from_secs(30)),
+            ..CommandLine::default()
+        };
+        let settings = resolve_file(&cli, text).unwrap();
+        assert_eq!(settings.targets, vec![target("timmattison")]);
+        assert_eq!(settings.window, Duration::from_hours(1));
+        assert_eq!(settings.interval, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn the_command_line_alone_is_enough() {
+        let cli = CommandLine {
+            targets: vec!["timmattison".to_owned()],
+            ..CommandLine::default()
+        };
+        let settings = resolve(&cli, None).unwrap();
+        assert_eq!(settings.targets, vec![target("timmattison")]);
+        assert_eq!(settings.window, Duration::from_hours(8));
+        assert_eq!(settings.interval, Duration::from_secs(60));
+    }
 }
