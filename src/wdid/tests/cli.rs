@@ -341,3 +341,83 @@ fn json_gives_the_counts_and_the_catalog_facts() {
     assert_eq!(two["added"], "2026-03-04");
     assert_eq!(document["never_used_old"], serde_json::json!([TOOL_TWO]));
 }
+
+#[test]
+fn a_missing_atuin_stops_the_run_and_names_atuin() {
+    let setup = Setup::new(&Atuin::Missing);
+    let output = setup.run(&[]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(stdout(&output).is_empty());
+    let message = stderr(&output);
+    assert!(message.starts_with("wdid: "), "{message}");
+    assert!(message.contains("atuin"), "{message}");
+}
+
+#[test]
+fn a_failing_atuin_stops_the_run_and_shows_its_stderr() {
+    let setup = Setup::new(&Atuin::Fails("database is locked"));
+    let output = setup.run(&[]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(stdout(&output).is_empty());
+    let message = stderr(&output);
+    assert!(message.starts_with("wdid: "), "{message}");
+    assert!(message.contains("database is locked"), "{message}");
+}
+
+#[test]
+fn an_empty_history_stops_the_run() {
+    let setup = Setup::new(&Atuin::Rows(&[]));
+    let output = setup.run(&[]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(stdout(&output).is_empty());
+    assert!(stderr(&output).contains("no history rows"), "{output:?}");
+}
+
+#[test]
+fn a_repo_that_is_not_a_workspace_stops_the_run_and_names_the_flag() {
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "ls")]));
+    let empty = tempfile::tempdir().unwrap();
+    let output = setup
+        .command()
+        .arg("--no-shell")
+        .arg("--repo")
+        .arg(empty.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(stdout(&output).is_empty());
+    let message = stderr(&output);
+    assert!(message.starts_with("wdid: "), "{message}");
+    assert!(message.contains("--repo"), "{message}");
+}
+
+#[test]
+fn a_shell_that_wdid_cannot_read_stops_the_run_and_names_no_shell() {
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "ls")]));
+    let output = setup
+        .command()
+        .env("SHELL", "/usr/bin/fish")
+        .arg("--repo")
+        .arg(setup.workspace.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let message = stderr(&output);
+    assert!(message.starts_with("wdid: "), "{message}");
+    assert!(message.contains("--no-shell"), "{message}");
+}
+
+#[test]
+fn json_and_unparsed_conflict_and_clap_gives_exit_two() {
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "ls")]));
+    let output = setup.run(&["--json", "--unparsed"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(stdout(&output).is_empty());
+}
+
+#[test]
+fn a_since_date_that_is_not_a_date_gives_exit_two() {
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "ls")]));
+    let output = setup.run(&["--since", "yesterday"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+}
