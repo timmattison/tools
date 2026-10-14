@@ -348,6 +348,21 @@ impl GhSource {
         }
     }
 
+    /// Checks that `gh` works, and returns the rate limit of the account.
+    ///
+    /// The call is `gh api -i rate_limit`. GitHub does not count this request
+    /// against the rate limit. The result is stored, thus `rate_limit` gives
+    /// it afterwards.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SourceError`] when `gh` is missing, is not logged in, does
+    /// not answer, or answers with no rate limit headers.
+    pub fn preflight(&self) -> Result<RateLimit, SourceError> {
+        let _ = self;
+        Err(SourceError::BadResponse(String::new()))
+    }
+
     /// A source that runs `program`, and gives each child at most `limit`.
     #[must_use]
     pub fn with_program(program: impl Into<OsString>, limit: Duration) -> GhSource {
@@ -1335,6 +1350,51 @@ mod tests {
                 "{output:?} gave {result:?}"
             );
         }
+    }
+
+    #[test]
+    fn preflight_returns_and_stores_the_rate_limit() {
+        let stub = Stub::new("cat \"$dir/page1.out\"");
+        stub.file("page1.out", &ok_output("{\"resources\":{}}"));
+        let source = stub.source();
+        assert_eq!(source.preflight(), Ok(rate(4866, 1_791_977_652)));
+        assert_eq!(source.rate_limit(), Some(rate(4866, 1_791_977_652)));
+        assert_eq!(stub.requests(), [["api", "-i", "rate_limit"]]);
+    }
+
+    #[test]
+    fn preflight_maps_a_missing_login_and_a_refused_token() {
+        let stub = Stub::new("echo 'gh auth login' >&2; exit 4");
+        assert_eq!(
+            stub.source().preflight(),
+            Err(SourceError::NotLoggedIn("gh auth login".to_owned()))
+        );
+        let stub = Stub::new("cat \"$dir/page1.out\"; exit 1");
+        stub.file(
+            "page1.out",
+            &http_output(
+                "HTTP/2.0 401 Unauthorized",
+                "{\"message\":\"Bad credentials\"}",
+            ),
+        );
+        assert_eq!(
+            stub.source().preflight(),
+            Err(SourceError::NotLoggedIn("Bad credentials".to_owned()))
+        );
+    }
+
+    #[test]
+    fn preflight_maps_a_missing_program_and_an_answer_with_no_rate_headers() {
+        let dir = TempDir::new().unwrap();
+        let source = GhSource::with_program(dir.path().join("missing"), GENEROUS_LIMIT);
+        assert_eq!(source.preflight(), Err(SourceError::NotInstalled));
+        let stub = Stub::new("cat \"$dir/page1.out\"");
+        stub.file("page1.out", "HTTP/2.0 200 OK\n\r\n{}");
+        let result = stub.source().preflight();
+        assert!(
+            matches!(result, Err(SourceError::BadResponse(_))),
+            "{result:?}"
+        );
     }
 
     #[test]
