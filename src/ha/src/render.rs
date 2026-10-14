@@ -29,8 +29,19 @@ pub fn format_elapsed(d: Duration) -> String {
 /// 100 days or more gives `>99d ago`.
 #[must_use]
 pub fn format_ago(d: Duration) -> String {
-    let _ = d;
-    String::new()
+    let total = d.as_secs();
+    let (minute, hour, day) = (60, 3_600, 86_400);
+    if total < minute {
+        format!("{total}s ago")
+    } else if total < hour {
+        format!("{}m ago", total / minute)
+    } else if total < day {
+        format!("{}h ago", total / hour)
+    } else if total < 100 * day {
+        format!("{}d ago", total / day)
+    } else {
+        ">99d ago".to_owned()
+    }
 }
 
 #[cfg(test)]
