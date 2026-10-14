@@ -226,6 +226,7 @@ pub fn tally(
     let mut cache: HashMap<&str, Parsed> = HashMap::new();
     let mut before_since: u64 = 0;
     let mut not_found: u64 = 0;
+    let mut unparsed_commands: HashMap<&str, u64> = HashMap::new();
     for entry in entries {
         if window.since.is_some_and(|since| entry.time.date() < since) {
             before_since += 1;
@@ -238,13 +239,18 @@ pub fn tally(
         let parsed = cache
             .entry(entry.command.as_str())
             .or_insert_with(|| command_words(&entry.command, &definitions.aliases));
-        if let Parsed::Words(words) = parsed {
-            for word in words.iter() {
-                count_word(word, entry.time.date(), &names, resolver, &mut counts);
+        match parsed {
+            Parsed::Words(words) => {
+                for word in words.iter() {
+                    count_word(word, entry.time.date(), &names, resolver, &mut counts);
+                }
+            }
+            Parsed::Unparsed => {
+                *unparsed_commands.entry(entry.command.as_str()).or_insert(0) += 1;
             }
         }
     }
-    let tools = catalog
+    let mut tools: Vec<ToolUsage> = catalog
         .tools
         .iter()
         .map(|tool| {
@@ -264,18 +270,38 @@ pub fn tally(
             }
         })
         .collect();
+    tools.sort_by(|left, right| {
+        right
+            .uses
+            .cmp(&left.uses)
+            .then_with(|| left.tool.name.cmp(&right.tool.name))
+    });
+    let mut unparsed: Vec<Unparsed> = unparsed_commands
+        .into_iter()
+        .map(|(command, rows)| Unparsed {
+            command: command.to_string(),
+            rows,
+        })
+        .collect();
+    unparsed.sort_by(|left, right| {
+        right
+            .rows
+            .cmp(&left.rows)
+            .then_with(|| left.command.cmp(&right.command))
+    });
+    let unparsed_rows = unparsed.iter().map(|group| group.rows).sum();
     Tally {
         tools,
         summary: Summary {
-            rows: 0,
+            rows: u64::try_from(entries.len()).unwrap_or(u64::MAX),
             before_since,
             not_found,
-            unparsed_rows: 0,
-            unparsed: Vec::new(),
-            aliases: 0,
-            functions: 0,
-            unparsed_functions: Vec::new(),
-            unparsed_aliases: 0,
+            unparsed_rows,
+            unparsed,
+            aliases: definitions.aliases.len(),
+            functions: definitions.functions.len() + definitions.unparsed_functions.len(),
+            unparsed_functions: definitions.unparsed_functions.clone(),
+            unparsed_aliases: definitions.unparsed_aliases.len(),
         },
     }
 }
