@@ -211,6 +211,18 @@ fn load_from(cli: &CommandLine, default_path: Option<&Path>) -> Result<Settings,
     }
 }
 
+/// The text that `ha --help` prints after the list of options.
+///
+/// It names the config file and shows an example of its content.
+/// `config_path` is the result of [`default_config_path`]. When it is `None`,
+/// the text says that the system gives no configuration directory and that
+/// `--config` still works.
+#[must_use]
+pub fn help_after(config_path: Option<&Path>) -> String {
+    let _ = config_path;
+    String::new()
+}
+
 /// Parses the `repos` and `owners` keys of the config file, in that order.
 fn file_targets(config: &FileConfig, path: &str) -> Result<Vec<Target>, SettingsError> {
     let repos = config.repos.iter().map(|text| {
@@ -621,5 +633,28 @@ mod tests {
             ..CommandLine::default()
         };
         assert!(load_from(&cli, None).is_ok());
+    }
+
+    #[test]
+    fn help_after_names_the_config_file_and_shows_an_example() {
+        let text = help_after(Some(Path::new(CONFIG_PATH)));
+        for needle in [
+            CONFIG_PATH,
+            "repos = [\"timmattison/tools\", \"Lock-Free-Labs/nvr-tools\"]",
+            "owners = [\"Lock-Free-Labs\"]",
+            "window = \"8h\"",
+            "interval = \"60s\"",
+            "--config",
+        ] {
+            assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
+        }
+    }
+
+    #[test]
+    fn help_after_without_a_config_directory_says_so_and_points_at_config() {
+        let text = help_after(None);
+        assert!(text.contains("no configuration directory"), "{text}");
+        assert!(text.contains("--config"), "{text}");
+        assert!(text.contains("repos = ["), "{text}");
     }
 }
