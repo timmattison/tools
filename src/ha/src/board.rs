@@ -8,6 +8,8 @@
 #![allow(
     unused_variables,
     clippy::unused_self,
+    clippy::needless_pass_by_value,
+    clippy::must_use_candidate,
     reason = "stubs for the red steps of the test-first build"
 )]
 
@@ -16,7 +18,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
-use crate::run::Run;
+use crate::run::{Run, RunState};
 use crate::target::RepoName;
 
 /// One of the two lists on the board.
@@ -104,7 +106,7 @@ impl Board {
 
     /// All rows of the board at time `now`.
     pub fn rows(&mut self, now: DateTime<Utc>) -> Vec<Row<'_>> {
-        Vec::new()
+        self.build_rows(now)
     }
 
     /// The rows that fit in `height` lines, with the selected row inside.
@@ -113,6 +115,39 @@ impl Board {
             rows: Vec::new(),
             first: 0,
         }
+    }
+
+    /// Builds the full list of rows. The list has two sections.
+    fn build_rows(&self, now: DateTime<Utc>) -> Vec<Row<'_>> {
+        let active: Vec<&Run> = self
+            .runs
+            .iter()
+            .filter(|run| run.state == RunState::Running)
+            .collect();
+        let recent: Vec<&Run> = self
+            .runs
+            .iter()
+            .filter(|run| run.state != RunState::Running)
+            .collect();
+        let passed = recent
+            .iter()
+            .filter(|run| run.state == RunState::Passed)
+            .count();
+        let mut rows = vec![Row::Header {
+            section: Section::Active,
+            count: active.len(),
+            passed: 0,
+            failed: 0,
+        }];
+        push_runs(&mut rows, &active, Section::Active);
+        rows.push(Row::Header {
+            section: Section::Recent,
+            count: recent.len(),
+            passed,
+            failed: recent.len() - passed,
+        });
+        push_runs(&mut rows, &recent, Section::Recent);
+        rows
     }
 
     /// Moves the selection to the next run.
@@ -127,10 +162,21 @@ impl Board {
     }
 }
 
+/// Adds the runs of one section to `rows`, or the empty row when there is none.
+fn push_runs<'a>(rows: &mut Vec<Row<'a>>, runs: &[&'a Run], section: Section) {
+    if runs.is_empty() {
+        rows.push(Row::Empty(section));
+    }
+    rows.extend(runs.iter().map(|&run| Row::Run {
+        run,
+        selected: false,
+    }));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::run::{RunId, RunState};
+    use crate::run::RunId;
     use chrono::{Duration as Span, TimeZone};
 
     const HOUR: u64 = 3600;
@@ -183,15 +229,6 @@ mod tests {
             .collect()
     }
 
-    fn run_ids(rows: &[Row<'_>]) -> Vec<u64> {
-        rows.iter()
-            .filter_map(|row| match row {
-                Row::Run { run, .. } => Some(run.id.0),
-                _ => None,
-            })
-            .collect()
-    }
-
     #[test]
     fn an_empty_board_shows_two_empty_sections() {
         let mut board = board();
@@ -237,10 +274,7 @@ mod tests {
         let mut only_active = board();
         only_active.replace(repo("a/x"), vec![run(1, "a/x", RunState::Running, 5, 1)]);
         let rows = only_active.rows(now());
-        assert_eq!(
-            shape(&rows)[2..],
-            ["Header(Recent,0,0,0)", "Empty(Recent)"]
-        );
+        assert_eq!(shape(&rows)[2..], ["Header(Recent,0,0,0)", "Empty(Recent)"]);
 
         let mut only_recent = board();
         only_recent.replace(repo("a/x"), vec![run(2, "a/x", RunState::Passed, 30, 20)]);
