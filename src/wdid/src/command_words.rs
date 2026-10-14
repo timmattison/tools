@@ -5,6 +5,15 @@
 //! category, so this module parses the line with a shell parser and walks the
 //! tree. It does not search the text for names.
 //!
+//! A wrapper runs another command. The line `sudo -u root prcp x` runs `prcp`,
+//! so the command word is `prcp` and its arguments are `x`. The walk skips a
+//! wrapper, the options of the wrapper, and the words that the wrapper takes
+//! for itself. It repeats that for a wrapper inside a wrapper. [`WRAPPERS`]
+//! holds the names and the option tables. A word that holds an expansion ends
+//! the options and has no literal text, so a wrapper that runs it gives no
+//! word. A wrapper that is not in the table makes a count too low, never too
+//! high.
+//!
 //! This module owns the parser. No type of the parser is part of a public
 //! signature, and no other module sees one.
 
@@ -210,6 +219,282 @@ fn unescape(escape: &str) -> &str {
     }
 }
 
+/// The word that ends the options of a command.
+const END_OF_OPTIONS: &str = "--";
+
+/// The character that starts an option.
+const OPTION_START: char = '-';
+
+/// The prefix of a long option.
+const LONG_OPTION_PREFIX: &str = "--";
+
+/// The character that joins the name of a long option to its value, and the
+/// name of a variable to its value.
+const ASSIGNMENT: char = '=';
+
+/// The short options of `command` that look a name up and run nothing.
+const LOOKUP_OPTIONS: [char; 2] = ['v', 'V'];
+
+/// The rules to skip one wrapper: how to find the word that the wrapper runs.
+struct Wrapper {
+    /// The name of the wrapper.
+    name: &'static str,
+    /// The short options that take an argument.
+    short_with_argument: &'static str,
+    /// The long options that take an argument.
+    long_with_argument: &'static [&'static str],
+    /// True when a lone `-` is an option of the wrapper.
+    lone_dash_is_option: bool,
+    /// True when the wrapper skips the `NAME=value` words after its options.
+    skips_assignments: bool,
+    /// The number of words that follow the options and the assignments, and
+    /// that the wrapper takes for itself. For example the duration of `timeout`.
+    positional: usize,
+    /// True when `-v` or `-V` among the options makes the wrapper look a name
+    /// up. The line then runs nothing.
+    lookup_options: bool,
+}
+
+/// A wrapper with no option that takes an argument. The wrapper tables below
+/// change the fields that differ.
+const PLAIN: Wrapper = Wrapper {
+    name: "",
+    short_with_argument: "",
+    long_with_argument: &[],
+    lone_dash_is_option: false,
+    skips_assignments: false,
+    positional: 0,
+    lookup_options: false,
+};
+
+/// Every wrapper that the walk knows, with its option tables.
+const WRAPPERS: &[Wrapper] = &[
+    Wrapper {
+        name: "sudo",
+        short_with_argument: "ugCDprtTURs",
+        long_with_argument: &[
+            "user",
+            "group",
+            "close-from",
+            "chdir",
+            "prompt",
+            "role",
+            "type",
+            "command-timeout",
+            "other-user",
+            "chroot",
+        ],
+        skips_assignments: true,
+        ..PLAIN
+    },
+    Wrapper {
+        name: "doas",
+        short_with_argument: "uCa",
+        ..PLAIN
+    },
+    Wrapper {
+        name: "time",
+        short_with_argument: "of",
+        long_with_argument: &["output", "format"],
+        ..PLAIN
+    },
+    Wrapper {
+        name: "nice",
+        short_with_argument: "n",
+        long_with_argument: &["adjustment"],
+        ..PLAIN
+    },
+    Wrapper {
+        name: "nohup",
+        ..PLAIN
+    },
+    Wrapper {
+        name: "env",
+        short_with_argument: "uCPS",
+        long_with_argument: &["unset", "chdir", "split-string"],
+        lone_dash_is_option: true,
+        skips_assignments: true,
+        ..PLAIN
+    },
+    Wrapper {
+        name: "command",
+        lookup_options: true,
+        ..PLAIN
+    },
+    Wrapper {
+        name: "exec",
+        short_with_argument: "a",
+        ..PLAIN
+    },
+    Wrapper {
+        name: "noglob",
+        ..PLAIN
+    },
+    Wrapper {
+        name: "builtin",
+        ..PLAIN
+    },
+    Wrapper {
+        name: "caffeinate",
+        short_with_argument: "tw",
+        ..PLAIN
+    },
+    Wrapper {
+        name: "xargs",
+        short_with_argument: "EIJLnPRSsad",
+        long_with_argument: &[
+            "arg-file",
+            "delimiter",
+            "max-lines",
+            "max-args",
+            "max-procs",
+            "max-chars",
+            "process-slot-var",
+        ],
+        ..PLAIN
+    },
+    Wrapper {
+        name: "watch",
+        short_with_argument: "n",
+        long_with_argument: &["interval"],
+        ..PLAIN
+    },
+    Wrapper {
+        name: "timeout",
+        short_with_argument: "sk",
+        long_with_argument: &["signal", "kill-after"],
+        positional: 1,
+        ..PLAIN
+    },
+    Wrapper {
+        name: "gtimeout",
+        short_with_argument: "sk",
+        long_with_argument: &["signal", "kill-after"],
+        positional: 1,
+        ..PLAIN
+    },
+];
+
+/// What one word is, when a wrapper reads it as an option.
+enum OptionForm {
+    /// The word is not an option. The options end before it.
+    NotAnOption,
+    /// The word is `--`. It is the last word of the options.
+    EndOfOptions,
+    /// The word is an option that takes no next word.
+    Alone,
+    /// The word is an option, and the next word is its argument.
+    WithNextWord,
+}
+
+/// What a wrapper learns from one word, when it reads the word as an option.
+struct ReadOption {
+    /// The form of the word.
+    form: OptionForm,
+    /// True when the word holds a `-v` or `-V` option.
+    lookup: bool,
+}
+
+impl Wrapper {
+    /// Reads `text` as an option of this wrapper, in the getopt form.
+    fn read_option(&self, text: &str) -> ReadOption {
+        let mut read = ReadOption {
+            form: OptionForm::NotAnOption,
+            lookup: false,
+        };
+        if text == END_OF_OPTIONS {
+            read.form = OptionForm::EndOfOptions;
+        } else if let Some(name) = text.strip_prefix(LONG_OPTION_PREFIX) {
+            read.form = if name.contains(ASSIGNMENT) || !self.long_with_argument.contains(&name) {
+                OptionForm::Alone
+            } else {
+                OptionForm::WithNextWord
+            };
+        } else if let Some(cluster) = text.strip_prefix(OPTION_START) {
+            if cluster.is_empty() {
+                if self.lone_dash_is_option {
+                    read.form = OptionForm::Alone;
+                }
+                return read;
+            }
+            read.form = OptionForm::Alone;
+            let mut characters = cluster.chars();
+            while let Some(character) = characters.next() {
+                if self.lookup_options && LOOKUP_OPTIONS.contains(&character) {
+                    read.lookup = true;
+                }
+                if self.short_with_argument.contains(character) {
+                    if characters.as_str().is_empty() {
+                        read.form = OptionForm::WithNextWord;
+                    }
+                    break;
+                }
+            }
+        }
+        read
+    }
+
+    /// Gives the index of the word that follows this wrapper and its options.
+    /// `start` is the index of the first word after the wrapper. Gives `None`
+    /// when the wrapper looks a name up and runs nothing.
+    fn skip(&self, words: &[&ReadWord], start: usize) -> Option<usize> {
+        let mut index = start;
+        let mut lookup = false;
+        while let Some(text) = words.get(index).and_then(|word| word.literal()) {
+            let read = self.read_option(&text);
+            lookup |= read.lookup;
+            match read.form {
+                OptionForm::NotAnOption => break,
+                OptionForm::EndOfOptions => {
+                    index += 1;
+                    break;
+                }
+                OptionForm::Alone => index += 1,
+                OptionForm::WithNextWord => index += 2,
+            }
+        }
+        if self.skips_assignments {
+            while words
+                .get(index)
+                .is_some_and(|word| is_assignment(&word.argument()))
+            {
+                index += 1;
+            }
+        }
+        (!lookup).then_some(index + self.positional)
+    }
+}
+
+/// True when `text` has the form `NAME=value`. The name starts with a letter or
+/// `_`, and holds only ASCII letters, digits, and `_`.
+fn is_assignment(text: &str) -> bool {
+    let Some((name, _value)) = text.split_once(ASSIGNMENT) else {
+        return false;
+    };
+    let mut characters = name.chars();
+    characters
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
+/// Gives the index of the word that a command really runs. `words` holds the
+/// command word and then the words after it, in order. The first word is the
+/// candidate. A wrapper hands the candidate to the word after its options, and
+/// the loop repeats for a wrapper inside a wrapper. Gives `None` when nothing
+/// runs: no word is left, the candidate holds an expansion, or the wrapper
+/// looks a name up.
+fn unwrap_command(words: &[&ReadWord]) -> Option<usize> {
+    let mut index = 0;
+    loop {
+        let literal = words.get(index)?.literal()?;
+        let Some(wrapper) = WRAPPERS.iter().find(|wrapper| wrapper.name == literal) else {
+            return Some(index);
+        };
+        index = wrapper.skip(words, index + 1)?;
+    }
+}
+
 /// The state of one walk over one line.
 struct Walker {
     /// The options of the parser. The same value serves every parse.
@@ -363,6 +648,7 @@ impl Walker {
     /// Walks a simple command: the prefix items, then the command word, then
     /// the suffix items. A command with no command word adds no word. A command
     /// word that holds an expansion has no literal, so it adds no word either.
+    /// A wrapper hands the command word to the word that it runs.
     fn walk_simple(
         &mut self,
         simple: &ast::SimpleCommand,
@@ -378,11 +664,17 @@ impl Walker {
             self.walk_item(item, None, context)?;
         }
         if let Some(command) = &command {
-            if let Some(literal) = command.literal() {
-                let args = suffix
-                    .iter()
-                    .filter_map(|(_, read)| read.as_ref().map(ReadWord::argument));
-                self.words.push(CommandWord::new(literal, args));
+            let sequence: Vec<&ReadWord> = std::iter::once(command)
+                .chain(suffix.iter().filter_map(|(_, read)| read.as_ref()))
+                .collect();
+            if let Some(index) = unwrap_command(&sequence) {
+                if let (Some(literal), Some(rest)) = (
+                    sequence.get(index).and_then(|word| word.literal()),
+                    sequence.get(index + 1..),
+                ) {
+                    let args = rest.iter().map(|word| word.argument());
+                    self.words.push(CommandWord::new(literal, args));
+                }
             }
             self.walk_pieces(&command.pieces, context)?;
         }
