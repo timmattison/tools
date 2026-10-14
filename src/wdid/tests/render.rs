@@ -262,9 +262,12 @@ fn the_table_width_takes_the_stated_width_then_the_terminal() {
 }
 
 /// The lines after the table in the report of the fixture at any width.
-const TAIL: &str = r#"Never used, old (added 90 or more days ago): goup
-Never used, new (added less than 90 days ago): faulte (added 2026-09-20)
-Idle (no use in the last 180 days): aa (218 uses, last use 2025-11-13)
+const TAIL: &str = r#"Never used, old (added 90 or more days ago):
+  goup
+Never used, new (added less than 90 days ago):
+  faulte (added 2026-09-20)
+Idle (no use in the last 180 days):
+  aa (218 uses, last use 2025-11-13)
 
 History: 1,234 rows. 12 not counted (exit 127). 3 did not parse (wdid --unparsed prints them).
 Shell: 5 aliases, 4 functions (1 did not parse).
@@ -342,9 +345,17 @@ fn each_group_is_sorted_and_names_its_facts() {
     assert_eq!(
         group_lines(&tally),
         [
-            "Never used, old (added 90 or more days ago): apple, pear",
-            "Never used, new (added less than 90 days ago): bat (added 2026-10-01), yak (added 2026-09-01)",
-            "Idle (no use in the last 180 days): zip (1,500 uses, last use 2025-03-04), alpha (2 uses, last use 2025-01-02), beta (2 uses, last use 2025-02-03), single (1 use, last use 2025-04-05)",
+            "Never used, old (added 90 or more days ago):",
+            "  apple",
+            "  pear",
+            "Never used, new (added less than 90 days ago):",
+            "  bat (added 2026-10-01)",
+            "  yak (added 2026-09-01)",
+            "Idle (no use in the last 180 days):",
+            "  zip (1,500 uses, last use 2025-03-04)",
+            "  alpha (2 uses, last use 2025-01-02)",
+            "  beta (2 uses, last use 2025-02-03)",
+            "  single (1 use, last use 2025-04-05)",
         ]
     );
 }
@@ -360,9 +371,9 @@ fn the_group_lines_name_the_limits_of_the_window() {
 
     let report = text(&fixture(), &window, None);
 
-    assert!(report.contains("Never used, old (added 30 or more days ago): goup\n"));
-    assert!(report.contains("Never used, new (added less than 30 days ago): faulte"));
-    assert!(report.contains("Idle (no use in the last 365 days): aa"));
+    assert!(report.contains("Never used, old (added 30 or more days ago):\n  goup\n"));
+    assert!(report.contains("Never used, new (added less than 30 days ago):\n  faulte"));
+    assert!(report.contains("Idle (no use in the last 365 days):\n  aa"));
 }
 
 /// An empty group says `none`.
