@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::target::{Target, TargetError};
+use crate::target::{OwnerName, RepoName, Target, TargetError};
 
 /// The window `ha` uses when nothing sets one: the finished runs of 8 hours.
 pub const DEFAULT_WINDOW: Duration = Duration::from_hours(8);
@@ -113,45 +113,86 @@ pub struct CommandLine {
 /// is not valid, or when no target is left.
 pub fn resolve(cli: &CommandLine, file: Option<(&Path, &str)>) -> Result<Settings, SettingsError> {
     let (path, parsed) = match file {
-        Some((path, text)) => (
-            path.display().to_string(),
-            toml::from_str::<FileConfig>(text).map_err(|source| SettingsError::Toml {
-                path: path.display().to_string(),
-                source,
-            })?,
-        ),
-        None => (String::new(), FileConfig::default()),
+        Some((path, text)) => {
+            let parsed =
+                toml::from_str::<FileConfig>(text).map_err(|source| SettingsError::Toml {
+                    path: path.display().to_string(),
+                    source,
+                })?;
+            (Some(path.display().to_string()), parsed)
+        }
+        None => (None, FileConfig::default()),
     };
-    let duration = |key: &'static str, value: Option<&String>, default: Duration| match value {
-        Some(text) => parse_duration(text).map_err(|source| SettingsError::FileDuration {
-            key,
-            path: path.clone(),
-            source: Box::new(source),
-        }),
-        None => Ok(default),
+    let shown_path = path.clone().unwrap_or_default();
+    let file_duration = |key: &'static str, value: Option<&String>, default: Duration| {
+        value.map_or(Ok(default), |text| {
+            parse_duration(text).map_err(|source| SettingsError::FileDuration {
+                key,
+                path: shown_path.clone(),
+                source: Box::new(source),
+            })
+        })
     };
-    let window = match cli.window {
-        Some(window) => window,
-        None => duration("window", parsed.window.as_ref(), DEFAULT_WINDOW)?,
-    };
-    let interval = match cli.interval {
-        Some(interval) => interval,
-        None => duration("interval", parsed.interval.as_ref(), DEFAULT_INTERVAL)?,
-    };
-    let texts: Vec<&String> = if cli.targets.is_empty() {
-        parsed.repos.iter().chain(&parsed.owners).collect()
+    let file_window = file_duration("window", parsed.window.as_ref(), DEFAULT_WINDOW)?;
+    let file_interval = file_duration("interval", parsed.interval.as_ref(), DEFAULT_INTERVAL)?;
+    let targets = if cli.targets.is_empty() {
+        file_targets(&parsed, &shown_path)?
     } else {
-        cli.targets.iter().collect()
+        cli.targets
+            .iter()
+            .map(|text| Target::parse(text).map_err(|source| SettingsError::CliTarget { source }))
+            .collect::<Result<Vec<_>, _>>()?
     };
-    let targets = texts
-        .into_iter()
-        .filter_map(|text| Target::parse(text).ok())
-        .collect();
+    if targets.is_empty() {
+        return Err(SettingsError::NoTargets {
+            config: path.unwrap_or_else(describe_default_config_path),
+        });
+    }
     Ok(Settings {
         targets,
-        window,
-        interval,
+        window: cli.window.unwrap_or(file_window),
+        interval: cli.interval.unwrap_or(file_interval),
     })
+}
+
+/// Parses the `repos` and `owners` keys of the config file, in that order.
+fn file_targets(config: &FileConfig, path: &str) -> Result<Vec<Target>, SettingsError> {
+    let repos = config.repos.iter().map(|text| {
+        RepoName::parse(text)
+            .map(Target::Repo)
+            .map_err(|source| SettingsError::FileTarget {
+                key: "repos",
+                path: path.to_owned(),
+                source,
+            })
+    });
+    let owners = config.owners.iter().map(|text| {
+        OwnerName::parse(text)
+            .map(Target::Owner)
+            .map_err(|source| SettingsError::FileTarget {
+                key: "owners",
+                path: path.to_owned(),
+                source,
+            })
+    });
+    repos.chain(owners).collect()
+}
+
+/// Names the config file for a message, when no file was read.
+fn describe_default_config_path() -> String {
+    default_config_path().map_or_else(
+        || "the config file (the system gives no configuration directory)".to_owned(),
+        |path| path.display().to_string(),
+    )
+}
+
+/// The place of the config file when `--config` does not name one:
+/// `ha/config.toml` in the configuration directory of the user.
+///
+/// Returns `None` when the system gives no configuration directory.
+#[must_use]
+pub fn default_config_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|directory| directory.join("ha").join("config.toml"))
 }
 
 /// The keys of the config file.
