@@ -12,7 +12,7 @@
     reason = "the parts of this module are joined in the next steps"
 )]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::Read;
 use std::process::{Command, Output, Stdio};
@@ -370,7 +370,15 @@ impl Source for GhSource {
                 let filter = format!("created=%3E%3D{}", hour_start(since));
                 self.all_runs(repo, &filter)
             }
-            RunQuery::Active => Ok(Vec::new()),
+            RunQuery::Active => {
+                let mut seen = HashSet::new();
+                let mut runs = self.all_runs(repo, "status=in_progress")?;
+                runs.extend(self.all_runs(repo, "status=queued")?);
+                // A run can change from queued to in progress between the two
+                // requests, and then both lists hold it. Keep the first one.
+                runs.retain(|run| seen.insert(run.id));
+                Ok(runs)
+            }
         }
     }
 
