@@ -323,6 +323,7 @@ mod tests {
     use ratatui::Terminal;
 
     use crate::run::{Run, RunId, RunState};
+    use crate::status::RateLimit;
     use crate::target::RepoName;
 
     fn at(text: &str) -> DateTime<Utc> {
@@ -920,5 +921,72 @@ mod tests {
         assert!(text[0].starts_with("  REPO"), "the column header stays");
         assert!(text[7].contains("q quit"), "the status line stays");
         assert!(!text.iter().any(|line| line.contains("title-00")));
+    }
+
+    /// The status line of a frame that holds an empty board.
+    fn status_line(width: u16, status: &Status) -> String {
+        let mut board = Board::new(Duration::from_hours(8));
+        let text = lines(&render_with(width, 8, &mut board, status));
+        text[7].clone()
+    }
+
+    fn rate(remaining: u64) -> RateLimit {
+        RateLimit {
+            limit: 5_000,
+            remaining,
+            reset: at("2026-10-14T12:34:56Z"),
+        }
+    }
+
+    #[test]
+    fn the_status_line_says_loading_before_the_first_refresh() {
+        assert_eq!(
+            status_line(80, &Status::default()),
+            "loading…  ·  ↑↓ select  ⏎ open  r refresh  q quit"
+        );
+    }
+
+    #[test]
+    fn the_status_line_shows_the_time_of_the_last_refresh() {
+        let status = Status {
+            last_refresh: Some(at("2026-10-14T11:59:30Z")),
+            ..Status::default()
+        };
+        assert_eq!(
+            status_line(80, &status),
+            "updated 11:59:30  ·  ↑↓ select  ⏎ open  r refresh  q quit"
+        );
+    }
+
+    #[test]
+    fn the_status_line_shows_the_rate_limit() {
+        let status = Status {
+            last_refresh: Some(at("2026-10-14T11:59:30Z")),
+            rate: Some(rate(4_821)),
+            ..Status::default()
+        };
+        assert_eq!(
+            status_line(100, &status),
+            "updated 11:59:30  ·  API 4821/5000  ·  ↑↓ select  ⏎ open  r refresh  q quit"
+        );
+    }
+
+    #[test]
+    fn the_status_line_names_the_next_refresh_during_a_backoff() {
+        let status = Status {
+            last_refresh: Some(at("2026-10-14T11:59:30Z")),
+            rate: Some(rate(412)),
+            backoff_until: Some(at("2026-10-14T12:34:56Z")),
+            ..Status::default()
+        };
+        assert_eq!(
+            status_line(120, &status),
+            "updated 11:59:30  ·  API low 412/5000, next refresh 12:34  ·  ↑↓ select  ⏎ open  r refresh  q quit"
+        );
+    }
+
+    #[test]
+    fn the_status_line_is_cut_to_the_width() {
+        assert_eq!(status_line(20, &Status::default()), "loading…  ·  ↑↓ sel…");
     }
 }
