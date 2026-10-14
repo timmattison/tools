@@ -370,4 +370,80 @@ mod tests {
         assert_eq!(settings.window, Duration::from_hours(8));
         assert_eq!(settings.interval, Duration::from_secs(60));
     }
+
+    /// Asserts that `error` names every one of `needles`.
+    fn assert_names(error: &SettingsError, needles: &[&str]) {
+        let message = error.to_string();
+        for needle in needles {
+            assert!(
+                message.contains(needle),
+                "the message does not name {needle:?}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_repos_entry_without_a_slash_names_the_key_the_value_and_the_file() {
+        let error = resolve_file(&CommandLine::default(), "repos = [\"tools\"]").unwrap_err();
+        assert_names(&error, &["repos", "\"tools\"", CONFIG_PATH]);
+    }
+
+    #[test]
+    fn an_owners_entry_with_a_slash_names_the_key_the_value_and_the_file() {
+        let error = resolve_file(&CommandLine::default(), "owners = [\"a/tools\"]").unwrap_err();
+        assert_names(&error, &["owners", "\"a/tools\"", CONFIG_PATH]);
+    }
+
+    #[test]
+    fn an_unknown_key_names_the_key_and_the_file() {
+        let error = resolve_file(&CommandLine::default(), "colour = \"red\"").unwrap_err();
+        assert_names(&error, &["colour", CONFIG_PATH]);
+    }
+
+    #[test]
+    fn a_bad_window_or_interval_names_the_key_the_value_and_the_file() {
+        let error = resolve_file(&CommandLine::default(), "window = \"8x\"").unwrap_err();
+        assert_names(&error, &["window", "\"8x\"", CONFIG_PATH]);
+        let error = resolve_file(&CommandLine::default(), "interval = \"0s\"").unwrap_err();
+        assert_names(&error, &["interval", "\"0s\"", CONFIG_PATH]);
+    }
+
+    #[test]
+    fn a_bad_file_value_is_an_error_even_when_the_command_line_sets_it() {
+        let cli = CommandLine {
+            targets: vec!["timmattison".to_owned()],
+            window: Some(Duration::from_hours(1)),
+            ..CommandLine::default()
+        };
+        let error = resolve_file(&cli, "window = \"8x\"").unwrap_err();
+        assert_names(&error, &["window", "\"8x\"", CONFIG_PATH]);
+    }
+
+    #[test]
+    fn a_bad_command_line_target_is_quoted() {
+        let cli = CommandLine {
+            targets: vec!["timmattison".to_owned(), "a/b/c".to_owned()],
+            ..CommandLine::default()
+        };
+        let error = resolve_file(&cli, "").unwrap_err();
+        assert_names(&error, &["\"a/b/c\""]);
+    }
+
+    #[test]
+    fn no_targets_names_both_ways_and_the_config_path() {
+        let error = resolve_file(&CommandLine::default(), "window = \"1h\"").unwrap_err();
+        assert_names(
+            &error,
+            &[
+                "no targets",
+                "owner/name",
+                "owner",
+                "repos",
+                "owners",
+                CONFIG_PATH,
+            ],
+        );
+        let error = resolve(&CommandLine::default(), None).unwrap_err();
+        assert_names(&error, &["no targets", "repos", "owners"]);
+    }
 }
