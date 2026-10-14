@@ -6,11 +6,16 @@
 //! classifies each tool by its age and by the date of its last use. The
 //! function is pure: it starts no process and reads no file.
 
+use std::collections::{BTreeMap, HashMap};
+
 use chrono::NaiveDate;
 
 use crate::catalog::{Catalog, Tool};
+use crate::command_words::{command_words, CommandWord, Parsed};
 use crate::history::HistoryEntry;
+use crate::rules::{runs, Run};
 use crate::shell::{Definitions, Resolver};
+use crate::tool::{ToolName, ToolNames};
 
 /// The days that the tally counts from, and the two age limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +108,70 @@ pub struct Tally {
     pub summary: Summary,
 }
 
+/// The counts of one tool, before they become a [`ToolUsage`].
+#[derive(Debug, Default)]
+struct Counts {
+    typed: u64,
+    through: BTreeMap<String, u64>,
+    development_runs: u64,
+    first_use: Option<NaiveDate>,
+    last_use: Option<NaiveDate>,
+}
+
+impl Counts {
+    /// Counts one use on `date`. `via` is the name that the person typed when
+    /// the use went through an alias or a function.
+    fn record_use(&mut self, via: Option<&str>, date: NaiveDate) {
+        match via {
+            Some(name) => *self.through.entry(name.to_string()).or_insert(0) += 1,
+            None => self.typed += 1,
+        }
+        self.first_use = Some(self.first_use.map_or(date, |first| first.min(date)));
+        self.last_use = Some(self.last_use.map_or(date, |last| last.max(date)));
+    }
+
+    /// Gives the uses through aliases and functions, most used first.
+    fn sorted_through(&self) -> Vec<(String, u64)> {
+        let mut through: Vec<(String, u64)> = self
+            .through
+            .iter()
+            .map(|(name, count)| (name.clone(), *count))
+            .collect();
+        through.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        through
+    }
+}
+
+/// Counts the runs of one command word on `date`.
+fn count_word(
+    word: &CommandWord,
+    date: NaiveDate,
+    names: &ToolNames,
+    resolver: &Resolver,
+    counts: &mut BTreeMap<ToolName, Counts>,
+) {
+    let mut counted: Vec<ToolName> = Vec::new();
+    for run in runs(word, names) {
+        match run {
+            Run::Use(tool) => {
+                if let Some(entry) = counts.get_mut(&tool) {
+                    entry.record_use(word.alias.as_deref(), date);
+                }
+                counted.push(tool);
+            }
+            Run::Development(_) => {}
+        }
+    }
+    if let Some(set) = resolver.tools_of(&word.word) {
+        let via = word.alias.as_deref().unwrap_or(&word.word);
+        for tool in set.iter().filter(|tool| !counted.contains(tool)) {
+            if let Some(entry) = counts.get_mut(tool) {
+                entry.record_use(Some(via), date);
+            }
+        }
+    }
+}
+
 /// Counts every tool of `catalog` in `entries`. Pure.
 ///
 /// The window drops the rows before `window.since`. A row with exit code 127
@@ -116,19 +185,41 @@ pub fn tally(
     catalog: &Catalog,
     window: &Window,
 ) -> Tally {
-    let _ = (entries, definitions, resolver, window);
+    let _ = window;
+    let names = catalog.names();
+    let mut counts: BTreeMap<ToolName, Counts> = catalog
+        .tools
+        .iter()
+        .map(|tool| (tool.name.clone(), Counts::default()))
+        .collect();
+    let mut cache: HashMap<&str, Parsed> = HashMap::new();
+    for entry in entries {
+        let parsed = cache
+            .entry(entry.command.as_str())
+            .or_insert_with(|| command_words(&entry.command, &definitions.aliases));
+        if let Parsed::Words(words) = parsed {
+            for word in words.iter() {
+                count_word(word, entry.time.date(), &names, resolver, &mut counts);
+            }
+        }
+    }
     let tools = catalog
         .tools
         .iter()
-        .map(|tool| ToolUsage {
-            tool: tool.clone(),
-            uses: 0,
-            typed: 0,
-            through: Vec::new(),
-            development_runs: 0,
-            first_use: None,
-            last_use: None,
-            classification: Classification::NeverUsedOld,
+        .map(|tool| {
+            let tool_counts = counts.remove(&tool.name).unwrap_or_default();
+            let through = tool_counts.sorted_through();
+            let through_total: u64 = through.iter().map(|(_, count)| count).sum();
+            ToolUsage {
+                tool: tool.clone(),
+                uses: tool_counts.typed + through_total,
+                typed: tool_counts.typed,
+                through,
+                development_runs: tool_counts.development_runs,
+                first_use: tool_counts.first_use,
+                last_use: tool_counts.last_use,
+                classification: Classification::NeverUsedOld,
+            }
         })
         .collect();
     Tally {

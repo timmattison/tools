@@ -150,11 +150,7 @@ fn a_use_through_an_alias_counts_for_the_alias() {
 #[test]
 fn a_use_through_a_function_counts_for_the_function() {
     let defs = definitions(&[], &[("wt", "cwt \"$@\"")]);
-    let result = run(
-        &[row(0, "wt a"), row(0, "wt b")],
-        &defs,
-        &catalog(&["cwt"]),
-    );
+    let result = run(&[row(0, "wt a"), row(0, "wt b")], &defs, &catalog(&["cwt"]));
     let cwt = usage(&result, "cwt");
     assert_eq!(cwt.typed, 0);
     assert_eq!(cwt.through, through(&[("wt", 2)]));
