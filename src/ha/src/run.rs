@@ -108,4 +108,19 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn a_value_that_github_does_not_document_maps_to_other() {
+        assert_eq!(RunState::from_github("brand_new", None), RunState::Other);
+        assert_eq!(
+            RunState::from_github("brand_new", Some("success")),
+            RunState::Other
+        );
+        assert_eq!(
+            RunState::from_github("completed", Some("brand_new")),
+            RunState::Other
+        );
+        assert_eq!(RunState::from_github("completed", None), RunState::Other);
+        assert_eq!(RunState::from_github("", None), RunState::Other);
+    }
 }
