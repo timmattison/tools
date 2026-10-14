@@ -320,6 +320,30 @@ fn the_text_report_counts_a_typed_use_and_shows_the_install_state() {
     assert!(text.ends_with('\n'), "{text:?}");
 }
 
+/// A reader that closes the pipe before the report arrives, as `wdid | true`
+/// does, ends the run with success and no message. Before, the write of the
+/// report panicked and the run exited 101.
+#[test]
+fn a_reader_that_closes_the_pipe_early_ends_the_run_quietly() {
+    let rows = [row(3, "wdid-fixture-one a")];
+    let setup = Setup::new(&Atuin::Rows(&rows));
+    let mut child = setup
+        .command()
+        .arg("--no-shell")
+        .arg("--repo")
+        .arg(setup.workspace.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+
+    let output = child.wait_with_output().unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(stderr(&output), "");
+}
+
 #[test]
 fn json_gives_the_counts_and_the_catalog_facts() {
     let rows = [row(3, "wdid-fixture-one a"), row(2, "wdid-fixture-one b")];
