@@ -816,4 +816,35 @@ mod tests {
         );
         assert_eq!(selected_text(&mut board).as_deref(), Some("Run(7)*"));
     }
+
+    #[test]
+    fn a_tall_view_shows_all_rows_from_the_first() {
+        let mut board = four_runs_in_two_sections();
+        let all = marked(&board.rows(now()));
+        let view = board.view(now(), 100);
+        assert_eq!(view.first, 0);
+        assert_eq!(marked(&view.rows), all);
+        assert_eq!(all.len(), 6);
+    }
+
+    #[test]
+    fn a_view_of_height_zero_has_no_rows() {
+        let mut board = four_runs_in_two_sections();
+        let view = board.view(now(), 0);
+        assert!(view.rows.is_empty());
+        assert_eq!(view.first, 0);
+        let mut empty = Board::new(Duration::from_secs(HOUR));
+        assert!(empty.view(now(), 0).rows.is_empty());
+    }
+
+    #[test]
+    fn a_short_view_shows_the_first_rows() {
+        let mut board = four_runs_in_two_sections();
+        let view = board.view(now(), 3);
+        assert_eq!(view.first, 0);
+        assert_eq!(
+            marked(&view.rows),
+            ["Header(Active,2,0,0)", "Run(1)*", "Run(2)"]
+        );
+    }
 }
