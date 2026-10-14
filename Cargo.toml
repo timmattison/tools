@@ -130,6 +130,9 @@ rodio = { version = "0.20", default-features = false, features = ["wav"] }
 log = "0.4"
 env_logger = "0.11"
 
+# Browser
+open = "5.4"
+
 # Misc
 syn = { version = "2", default-features = false, features = ["full", "parsing", "visit"] }
 proc-macro2 = "1"
