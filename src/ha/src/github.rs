@@ -753,6 +753,64 @@ mod tests {
         assert!(last[2].contains("&page=10&"), "{last:?}");
     }
 
+    const NOT_MODIFIED: &str = "HTTP/2.0 304 Not Modified\n\
+         Etag: \"4c00158b\"\r\n\
+         X-Ratelimit-Limit: 5000\r\n\
+         X-Ratelimit-Remaining: 4866\r\n\
+         X-Ratelimit-Reset: 1791977652\r\n\
+         \r\n";
+
+    /// A stub that answers `304` with exit status 1 when it gets an ETag.
+    const ETAG_CASES: &str = "case \"$*\" in
+  *If-None-Match*) cat \"$dir/not-modified.out\"; echo 'gh: HTTP 304' >&2; exit 1;;
+  *) cat \"$dir/page1.out\";;
+ esac";
+
+    #[test]
+    fn a_second_query_sends_the_etag_and_reuses_the_page_on_304() {
+        let stub = Stub::new(ETAG_CASES);
+        stub.file("page1.out", &ok_output(RUNS_JSON));
+        stub.file("not-modified.out", NOT_MODIFIED);
+        let source = stub.source();
+        let tools = repo("timmattison/tools");
+        let first = source.runs_of(&tools, since_query());
+        assert_eq!(first.as_ref().map(Vec::len), Ok(2));
+        let later = RunQuery::CreatedSince(time("2026-09-24T21:59:59Z"));
+        let second = source.runs_of(&tools, later);
+        assert_eq!(second, first);
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1][..4],
+            ["api", "-i", "-H", "If-None-Match: W/\"4c00158b\""]
+        );
+        assert_eq!(requests[1][4], requests[0][2]);
+    }
+
+    #[test]
+    fn a_query_for_another_hour_sends_no_etag() {
+        let stub = Stub::new(ETAG_CASES);
+        stub.file("page1.out", &ok_output(RUNS_JSON));
+        stub.file("not-modified.out", NOT_MODIFIED);
+        let source = stub.source();
+        let tools = repo("timmattison/tools");
+        source.runs_of(&tools, since_query()).expect("runs");
+        let next_hour = RunQuery::CreatedSince(time("2026-09-24T22:00:00Z"));
+        source.runs_of(&tools, next_hour).expect("runs");
+        assert!(!stub.requests()[1].contains(&"-H".to_owned()));
+    }
+
+    #[test]
+    fn a_304_with_no_cached_page_is_a_bad_response() {
+        let stub = Stub::new("cat \"$dir/not-modified.out\"; exit 1");
+        stub.file("not-modified.out", NOT_MODIFIED);
+        let result = stub.source().runs_of(&repo("o/r"), since_query());
+        assert!(
+            matches!(result, Err(SourceError::BadResponse(_))),
+            "{result:?}"
+        );
+    }
+
     #[test]
     fn run_with_limit_gives_up_on_a_program_that_hangs() {
         let dir = TempDir::new().unwrap();
