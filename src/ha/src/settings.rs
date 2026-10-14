@@ -9,6 +9,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use serde::Deserialize;
+
 use crate::target::{Target, TargetError};
 
 /// The window `ha` uses when nothing sets one: the finished runs of 8 hours.
@@ -29,6 +31,15 @@ pub enum SettingsError {
     InvalidDuration {
         /// The text as given, after the trim.
         input: String,
+    },
+    /// The config file is not valid TOML, or it holds a key that `ha` does not
+    /// know, or a value of the wrong type.
+    #[error("{path}: {source}")]
+    Toml {
+        /// The config file.
+        path: String,
+        /// What the TOML reader found.
+        source: toml::de::Error,
     },
     /// A duration in the config file is not valid.
     #[error("{key} in {path}: {source}")]
@@ -100,13 +111,50 @@ pub struct CommandLine {
 ///
 /// Returns a [`SettingsError`] when the file text is not valid, when a value
 /// is not valid, or when no target is left.
-pub fn resolve(cli: &CommandLine, file: Option<(&Path, &str)>) -> Result<Settings, SettingsError> {
-    let _ = (cli, file);
+pub fn resolve(_cli: &CommandLine, file: Option<(&Path, &str)>) -> Result<Settings, SettingsError> {
+    let (path, parsed) = match file {
+        Some((path, text)) => (
+            path.display().to_string(),
+            toml::from_str::<FileConfig>(text).map_err(|source| SettingsError::Toml {
+                path: path.display().to_string(),
+                source,
+            })?,
+        ),
+        None => (String::new(), FileConfig::default()),
+    };
+    let duration = |key: &'static str, value: Option<&String>, default: Duration| match value {
+        Some(text) => parse_duration(text).map_err(|source| SettingsError::FileDuration {
+            key,
+            path: path.clone(),
+            source: Box::new(source),
+        }),
+        None => Ok(default),
+    };
+    let window = duration("window", parsed.window.as_ref(), DEFAULT_WINDOW)?;
+    let interval = duration("interval", parsed.interval.as_ref(), DEFAULT_INTERVAL)?;
+    let targets = parsed
+        .repos
+        .iter()
+        .chain(&parsed.owners)
+        .filter_map(|text| Target::parse(text).ok())
+        .collect();
     Ok(Settings {
-        targets: Vec::new(),
-        window: Duration::ZERO,
-        interval: Duration::ZERO,
+        targets,
+        window,
+        interval,
     })
+}
+
+/// The keys of the config file.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileConfig {
+    #[serde(default)]
+    repos: Vec<String>,
+    #[serde(default)]
+    owners: Vec<String>,
+    window: Option<String>,
+    interval: Option<String>,
 }
 
 /// Reads a duration such as `30s`, `15m`, `8h`, or `2d`.

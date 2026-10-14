@@ -3851,7 +3851,9 @@ dependencies = [
  "buildinfo",
  "chrono",
  "clap",
+ "serde",
  "thiserror 2.0.21",
+ "toml",
 ]
 
 [[package]]
