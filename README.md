@@ -4409,7 +4409,7 @@ It does not use `atuin history list`. That command obeys `filter_mode` of your a
 ### What counts
 
 - A tool name in command position: the first word of a command, a word after `|`, `&&`, `||`, `;` or `&`, a word in a subshell, a brace group, `if`, `for`, `while`, `until` or `case`, and a word in a `$(...)` or backtick substitution or in `<(...)`.
-- A word that follows a wrapper: `sudo`, `doas`, `time`, `nice`, `nohup`, `env`, `command`, `exec`, `noglob`, `builtin`, `caffeinate`, `xargs`, `watch`, `timeout` and `gtimeout`. `wdid` skips the options of the wrapper. `command -v tool` is a lookup and does not count.
+- A word that follows a wrapper: `sudo`, `doas`, `time`, `nice`, `nohup`, `env`, `command`, `exec`, `noglob`, `builtin`, `caffeinate`, `xargs`, `watch`, `timeout` and `gtimeout`. `wdid` skips the options of the wrapper and their arguments (`sudo -u root`, `env -u NAME`, `nice -n 10`), the assignments of `env` and `sudo` (`env FOO=1`), and the duration of `timeout`. `command -v tool` is a lookup and does not count. A wrapper that is not in this list makes a count too low, never too high.
 - An alias, as the shell expands it. `wtm` with `alias wtm='wt --main'` counts for `wt`. The report shows the alias in the column `Through an alias or a function`.
 - A function, through its body, to any depth. A function that calls `cwt` gives `cwt` a use through that function.
 - A path in a `bin` directory. `~/.cargo/bin/prcp` is a use of `prcp`. A path anywhere else is not a use: each crate directory has the name of its tool, and zsh changes into a directory that you type alone, so `src/prcp` is a `cd`.
@@ -4436,7 +4436,7 @@ wdid --repo ~/code/tools --no-shell
 
 - `--repo <PATH>`: The cargo workspace to report on. Without it, `wdid` uses the git work tree that holds the current directory. The workspace must have a `Cargo.toml`.
 - `--since <YYYY-MM-DD>`: Count only the rows from this date on. A row on this date counts. The report says how many rows it left out.
-- `--json`: Print one JSON document in place of the table. It conflicts with `--unparsed`.
+- `--json`: Print the whole report as one JSON document. It conflicts with `--unparsed`.
 - `--unparsed`: Print the commands that `wdid` could not parse, one line for each (`<rows>`, a tab, the command), and the functions that it could not parse. Print no report.
 - `--no-shell`: Do not start your shell. Aliases and functions then do not count.
 - `--new-days <DAYS>`: A tool that never ran is new when it is younger than this. Defaults to 90.
@@ -4448,7 +4448,7 @@ The table fits `COLUMNS` when that variable is set, else the width of the termin
 
 ### The three groups
 
-After the table, `wdid` prints three lines:
+After the table, `wdid` prints three groups, with one tool on each line:
 
 - **Never used, old.** No use, and the tool was added `--new-days` days ago or more. A tool with an unknown age is old. These are the candidates to delete.
 - **Never used, new.** No use, and the tool was added less than `--new-days` days ago. It has had no time yet. The group shows the date of each tool.
@@ -4456,31 +4456,47 @@ After the table, `wdid` prints three lines:
 
 The date that a tool was added is the date of the oldest commit that touches its crate directory. A use before that date still counts, because the tool can have existed in another form before.
 
+### The column `Notes`
+
+- `not installed`: `cargo install --list` does not list the binary. A tool that is not installed has no uses for that reason.
+- `<path> runs first`: another program with the same name comes first in `PATH`, so the tool does not run when you type its name. On one Mac, `/usr/bin/aa` (Apple Archive) comes before `~/.cargo/bin/aa`.
+- `not on PATH`: the tool is installed, but no directory of `PATH` holds it.
+
 ### Example
 
-This is an example. The use counts come from the first run of the prototype. The dates, the other tools, and the last two lines are made up. The columns `Dev runs`, `First use`, `Added` and `Notes` are left out here to fit the page.
+An excerpt of a real run on 2026-10-14, against 347,212 rows of history:
 
 ```text
-┌──────────┬───────┬───────┬───────────────────────────────────────┬────────────┐
-│ Tool     ┆  Uses ┆ Typed ┆ Through an alias or a function        ┆ Last use   │
-╞══════════╪═══════╪═══════╪═══════════════════════════════════════╪════════════╡
-│ cwt      ┆ 6,989 ┆    31 ┆ wtm 3,061, wt 3,029, wtf 727, wtb 141 ┆ 2026-10-14 │
-│ gsw      ┆ 4,068 ┆ 4,068 ┆                                       ┆ 2026-10-14 │
-│ gitnuke  ┆ 1,706 ┆ 1,545 ┆ gitclean 161                          ┆ 2026-10-13 │
-└──────────┴───────┴───────┴───────────────────────────────────────┴────────────┘
+┌────────────────────────┬───────┬───────┬───────────────────────────────────────┬──────────┬────────────┬────────────┬────────────┬────────────────────────┐
+│ Tool                   ┆  Uses ┆ Typed ┆ Through an alias or a function        ┆ Dev runs ┆ First use  ┆ Last use   ┆ Added      ┆ Notes                  │
+╞════════════════════════╪═══════╪═══════╪═══════════════════════════════════════╪══════════╪════════════╪════════════╪════════════╪════════════════════════╡
+│ cwt                    ┆ 7,003 ┆    32 ┆ wtm 3,068, wt 3,035, wtf 727, wtb 141 ┆        0 ┆ 2026-01-08 ┆ 2026-10-14 ┆ 2026-01-08 ┆                        │
+│ gsw                    ┆ 4,073 ┆ 4,073 ┆                                       ┆        0 ┆ 2026-05-14 ┆ 2026-10-14 ┆ 2026-05-14 ┆                        │
+│ nwt                    ┆ 2,094 ┆ 1,031 ┆ si 1,063                              ┆        0 ┆ 2025-12-17 ┆ 2026-10-14 ┆ 2025-12-17 ┆                        │
+│ gitnuke                ┆ 1,710 ┆ 1,549 ┆ gitclean 161                          ┆        0 ┆ 2026-04-14 ┆ 2026-10-14 ┆ 2026-07-30 ┆                        │
+│ ic                     ┆   363 ┆   363 ┆                                       ┆      225 ┆ 2025-06-01 ┆ 2026-10-09 ┆ 2025-06-01 ┆                        │
+│ update-aws-credentials ┆   218 ┆   218 ┆                                       ┆        0 ┆ 2024-03-05 ┆ 2025-11-13 ┆ 2025-06-01 ┆                        │
+│ aa                     ┆    26 ┆    26 ┆                                       ┆        0 ┆ 2025-09-17 ┆ 2026-07-30 ┆ 2025-09-17 ┆ /usr/bin/aa runs first │
+│ goup                   ┆     0 ┆     0 ┆                                       ┆        0 ┆ -          ┆ -          ┆ 2025-08-26 ┆                        │
+└────────────────────────┴───────┴───────┴───────────────────────────────────────┴──────────┴────────────┴────────────┴────────────┴────────────────────────┘
 
 Never used, old (added 90 or more days ago):
   goup
   htmlboard
+  sirn
 Never used, new (added less than 90 days ago):
+  faulte (added 2026-09-18)
   localnext (added 2026-09-04)
+  occ (added 2026-08-14)
 Idle (no use in the last 180 days):
   update-aws-credentials (218 uses, last use 2025-11-13)
   repotidy (105 uses, last use 2025-05-15)
 
-History: 347,081 rows. 1,204 not counted (exit 127). 27 did not parse (wdid --unparsed prints them).
-Shell: 212 aliases, 168 functions (2 did not parse).
+History: 347,212 rows. 4,385 not counted (exit 127). 13 did not parse (wdid --unparsed prints them).
+Shell: 276 aliases, 1,267 functions (24 did not parse).
 ```
+
+The excerpt leaves out rows of the table and entries of the groups. `si` is a shell function that runs `env -u ZELLIJ nwt -b <branch>`, so each `si` is a use of `nwt`.
 
 ### Install
 
