@@ -45,12 +45,16 @@ fn a_word_that_names_a_tool_is_a_use() {
     ]);
 }
 
+/// A path counts only when it names an installed binary or a build. A crate
+/// directory has the name of its tool, and zsh changes into a directory that a
+/// person types alone (`autocd`). Thus `src/occ` is a `cd`, not a use of `occ`.
 #[test]
-fn a_path_to_a_tool_is_a_use_or_a_development_run() {
+fn a_path_in_a_bin_directory_is_a_use_and_a_path_under_target_is_a_development_run() {
     check(vec![
         ("~/.cargo/bin/prcp", &[], vec![used("prcp")]),
+        ("~tim/.cargo/bin/prcp", &[], vec![used("prcp")]),
         ("/usr/local/bin/cwt", &["x"], vec![used("cwt")]),
-        ("./prcp", &[], vec![used("prcp")]),
+        ("bin/prcp", &[], vec![used("prcp")]),
         ("./target/release/prcp", &[], vec![developed("prcp")]),
         ("target/debug/prcp", &[], vec![developed("prcp")]),
         (
@@ -58,13 +62,21 @@ fn a_path_to_a_tool_is_a_use_or_a_development_run() {
             &["a"],
             vec![developed("prcp")],
         ),
-        ("/x/target-old/prcp", &[], vec![used("prcp")]),
-        ("/x/mytarget/prcp", &[], vec![used("prcp")]),
+        ("/target/prcp", &[], vec![developed("prcp")]),
+        ("/x/target/bin/prcp", &[], vec![developed("prcp")]),
+        ("src/prcp", &[], vec![]),
+        ("/Volumes/x/tools-worktrees/cwt/src/cwt", &[], vec![]),
+        ("./prcp", &[], vec![]),
+        ("~/prcp", &[], vec![]),
+        ("~/code/tools/cmd/prcp/prcp", &[], vec![]),
+        ("/x/target-old/prcp", &[], vec![]),
+        ("/x/mytarget/prcp", &[], vec![]),
+        ("/x/bins/prcp", &[], vec![]),
         ("/x/target/", &[], vec![]),
+        ("/x/bin/", &[], vec![]),
         ("prcp/", &[], vec![]),
         ("./target/release/ls", &[], vec![]),
         ("/usr/bin/日本語", &[], vec![]),
-        ("/target/prcp", &[], vec![developed("prcp")]),
         ("target/prcp/", &[], vec![]),
     ]);
 }
