@@ -359,8 +359,10 @@ impl GhSource {
     /// Returns a [`SourceError`] when `gh` is missing, is not logged in, does
     /// not answer, or answers with no rate limit headers.
     pub fn preflight(&self) -> Result<RateLimit, SourceError> {
-        let _ = self;
-        Err(SourceError::BadResponse(String::new()))
+        let response = self.request("rate_limit", None)?;
+        rate_of(&response).ok_or_else(|| {
+            SourceError::BadResponse("the answer has no rate limit headers".to_owned())
+        })
     }
 
     /// A source that runs `program`, and gives each child at most `limit`.
