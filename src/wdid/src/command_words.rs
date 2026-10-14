@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::io::BufReader;
 
 use brush_parser::ast;
+use brush_parser::word::{self, WordPiece, WordPieceWithSource};
 use brush_parser::{Parser, ParserOptions};
 
 /// The alias table: the name of each alias and its value, after quote removal.
@@ -109,6 +110,10 @@ pub enum Parsed {
     Unparsed,
 }
 
+/// The most levels of nesting that the walk reads. A substitution inside a
+/// substitution adds one level. A line that nests deeper is refused.
+const MAX_DEPTH: usize = 64;
+
 /// The parser refused a part of the line. The walk stops at once, and the whole
 /// line is [`Parsed::Unparsed`]. No part is skipped.
 struct Refused;
@@ -120,6 +125,25 @@ struct Refused;
 struct TextContext<'t> {
     /// The text that the parser reads.
     text: &'t str,
+    /// The number of substitutions that hold this text. The line has depth 0.
+    depth: usize,
+}
+
+impl<'t> TextContext<'t> {
+    /// Makes the context of the line that the person typed.
+    const fn line(text: &'t str) -> Self {
+        Self { text, depth: 0 }
+    }
+
+    /// Makes the context of the text inside a substitution of this text.
+    /// Gives `Refused` when the nesting is too deep.
+    fn inside<'u>(&self, text: &'u str) -> Result<TextContext<'u>, Refused> {
+        let depth = self.depth + 1;
+        if depth > MAX_DEPTH {
+            return Err(Refused);
+        }
+        Ok(TextContext { text, depth })
+    }
 }
 
 /// The state of one walk over one line.
@@ -212,8 +236,15 @@ impl Walker {
     ) -> Result<(), Refused> {
         match command {
             ast::Command::Simple(simple) => self.walk_simple(simple, context),
-            ast::Command::Compound(compound, _redirects) => self.walk_compound(compound, context),
-            ast::Command::Function(_) | ast::Command::ExtendedTest(..) => Ok(()),
+            ast::Command::Compound(compound, redirects) => {
+                self.walk_compound(compound, context)?;
+                self.walk_redirect_list(redirects.as_ref(), context)
+            }
+            ast::Command::ExtendedTest(test, redirects) => {
+                self.walk_test_expression(&test.expr, context)?;
+                self.walk_redirect_list(redirects.as_ref(), context)
+            }
+            ast::Command::Function(_) => Ok(()),
         }
     }
 
@@ -231,8 +262,14 @@ impl Walker {
             Compound::ArithmeticForClause(clause) => self.walk_list(&clause.body.list, context),
             Compound::BraceGroup(group) => self.walk_list(&group.list, context),
             Compound::Subshell(subshell) => self.walk_list(&subshell.list, context),
-            Compound::ForClause(clause) => self.walk_list(&clause.body.list, context),
+            Compound::ForClause(clause) => {
+                for value in clause.values.iter().flatten() {
+                    self.walk_word(value, context)?;
+                }
+                self.walk_list(&clause.body.list, context)
+            }
             Compound::CaseClause(clause) => {
+                self.walk_word(&clause.value, context)?;
                 for item in &clause.cases {
                     if let Some(list) = &item.cmd {
                         self.walk_list(list, context)?;
@@ -261,16 +298,12 @@ impl Walker {
 
     /// Walks a simple command: the prefix items, then the command word, then
     /// the suffix items. A command with no command word adds no word.
-    #[allow(
-        clippy::unnecessary_wraps,
-        reason = "the walk of the substitutions in the words arrives in the next step"
-    )]
     fn walk_simple(
         &mut self,
         simple: &ast::SimpleCommand,
-        _context: &TextContext<'_>,
+        context: &TextContext<'_>,
     ) -> Result<(), Refused> {
-        let args = simple
+        let args: Vec<String> = simple
             .suffix
             .iter()
             .flat_map(|suffix| &suffix.0)
@@ -281,10 +314,134 @@ impl Walker {
                 }
                 ast::CommandPrefixOrSuffixItem::IoRedirect(_)
                 | ast::CommandPrefixOrSuffixItem::ProcessSubstitution(..) => None,
-            });
+            })
+            .collect();
+        for item in simple.prefix.iter().flat_map(|prefix| &prefix.0) {
+            self.walk_item(item, context)?;
+        }
         if let Some(command) = &simple.word_or_name {
             self.words
                 .push(CommandWord::new(command.value.clone(), args));
+            self.walk_word(command, context)?;
+        }
+        for item in simple.suffix.iter().flat_map(|suffix| &suffix.0) {
+            self.walk_item(item, context)?;
+        }
+        Ok(())
+    }
+
+    /// Walks the substitutions of one prefix or suffix item.
+    fn walk_item(
+        &mut self,
+        item: &ast::CommandPrefixOrSuffixItem,
+        context: &TextContext<'_>,
+    ) -> Result<(), Refused> {
+        match item {
+            ast::CommandPrefixOrSuffixItem::IoRedirect(redirect) => {
+                self.walk_redirect(redirect, context)
+            }
+            ast::CommandPrefixOrSuffixItem::Word(word)
+            | ast::CommandPrefixOrSuffixItem::AssignmentWord(_, word) => {
+                self.walk_word(word, context)
+            }
+            ast::CommandPrefixOrSuffixItem::ProcessSubstitution(_, subshell) => {
+                self.walk_list(&subshell.list, context)
+            }
+        }
+    }
+
+    /// Walks the redirects of a compound command, when there are any.
+    fn walk_redirect_list(
+        &mut self,
+        redirects: Option<&ast::RedirectList>,
+        context: &TextContext<'_>,
+    ) -> Result<(), Refused> {
+        for redirect in redirects.iter().flat_map(|list| &list.0) {
+            self.walk_redirect(redirect, context)?;
+        }
+        Ok(())
+    }
+
+    /// Walks the substitutions of one redirect. The body of a here document
+    /// whose delimiter is quoted is plain text, so nothing in it runs.
+    fn walk_redirect(
+        &mut self,
+        redirect: &ast::IoRedirect,
+        context: &TextContext<'_>,
+    ) -> Result<(), Refused> {
+        match redirect {
+            ast::IoRedirect::File(_, _, target) => match target {
+                ast::IoFileRedirectTarget::Filename(word)
+                | ast::IoFileRedirectTarget::Duplicate(word) => self.walk_word(word, context),
+                ast::IoFileRedirectTarget::Fd(_) => Ok(()),
+                ast::IoFileRedirectTarget::ProcessSubstitution(_, subshell) => {
+                    self.walk_list(&subshell.list, context)
+                }
+            },
+            ast::IoRedirect::HereDocument(_, document) => {
+                if !document.requires_expansion {
+                    return Ok(());
+                }
+                let pieces =
+                    word::parse_heredoc(&document.doc.value, &self.options).map_err(|_| Refused)?;
+                self.walk_pieces(&pieces, context)
+            }
+            ast::IoRedirect::HereString(_, word) | ast::IoRedirect::OutputAndError(word, _) => {
+                self.walk_word(word, context)
+            }
+        }
+    }
+
+    /// Walks the substitutions in every word of an expression of `[[ ... ]]`.
+    fn walk_test_expression(
+        &mut self,
+        expression: &ast::ExtendedTestExpr,
+        context: &TextContext<'_>,
+    ) -> Result<(), Refused> {
+        use ast::ExtendedTestExpr as Expression;
+        match expression {
+            Expression::And(left, right) | Expression::Or(left, right) => {
+                self.walk_test_expression(left, context)?;
+                self.walk_test_expression(right, context)
+            }
+            Expression::Not(inner) | Expression::Parenthesized(inner) => {
+                self.walk_test_expression(inner, context)
+            }
+            Expression::UnaryTest(_, word) => self.walk_word(word, context),
+            Expression::BinaryTest(_, left, right) => {
+                self.walk_word(left, context)?;
+                self.walk_word(right, context)
+            }
+        }
+    }
+
+    /// Walks the substitutions in one word. Gives `Refused` when the parser
+    /// cannot read the word.
+    fn walk_word(&mut self, word: &ast::Word, context: &TextContext<'_>) -> Result<(), Refused> {
+        let pieces = word::parse(&word.value, &self.options).map_err(|_| Refused)?;
+        self.walk_pieces(&pieces, context)
+    }
+
+    /// Walks the pieces of a word. A command substitution holds a program, so
+    /// the walk reads it at one level deeper. A double-quoted sequence holds
+    /// more pieces. The other pieces start no program.
+    fn walk_pieces(
+        &mut self,
+        pieces: &[WordPieceWithSource],
+        context: &TextContext<'_>,
+    ) -> Result<(), Refused> {
+        for WordPieceWithSource { piece, .. } in pieces {
+            match piece {
+                WordPiece::CommandSubstitution(text)
+                | WordPiece::BackquotedCommandSubstitution(text) => {
+                    self.walk_text(&context.inside(text)?)?;
+                }
+                WordPiece::DoubleQuotedSequence(inner)
+                | WordPiece::GettextDoubleQuotedSequence(inner) => {
+                    self.walk_pieces(inner, context)?;
+                }
+                _ => {}
+            }
         }
         Ok(())
     }
@@ -296,7 +453,7 @@ impl Walker {
 #[must_use]
 pub fn command_words(line: &str, _aliases: &Aliases) -> Parsed {
     let mut walker = Walker::new();
-    match walker.walk_text(&TextContext { text: line }) {
+    match walker.walk_text(&TextContext::line(line)) {
         Ok(()) => Parsed::Words(walker.words),
         Err(Refused) => Parsed::Unparsed,
     }

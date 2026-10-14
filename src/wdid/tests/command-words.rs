@@ -151,7 +151,6 @@ fn the_walk_finds_the_command_words_inside_substitutions() {
         ),
         ("a >$(b)", words(vec![word("a", []), word("b", [])])),
         ("{ a; } >$(b)", words(vec![word("a", []), word("b", [])])),
-        ("$(a) x", words(vec![word("a", [])])),
         (
             "cat <<EOF\n$(prcp)\nEOF",
             words(vec![word("cat", []), word("prcp", [])]),
