@@ -351,7 +351,7 @@ mod tests {
 
     use crate::run::{Run, RunId, RunState};
     use crate::status::RateLimit;
-    use crate::target::RepoName;
+    use crate::target::{OwnerName, RepoName};
 
     fn at(text: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(text)
@@ -1015,5 +1015,89 @@ mod tests {
     #[test]
     fn the_status_line_is_cut_to_the_width() {
         assert_eq!(status_line(20, &Status::default()), "loading…  ·  ↑↓ sel…");
+    }
+
+    /// The status line of a frame that holds the board `board`.
+    fn status_line_of(board: &mut Board, status: &Status) -> String {
+        let text = lines(&render_with(140, 8, board, status));
+        text[7].clone()
+    }
+
+    const HINTS_TAIL: &str = "loading…  ·  ↑↓ select  ⏎ open  r refresh  q quit";
+
+    #[test]
+    fn the_status_line_names_the_first_failed_repository_and_counts_the_rest() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.fail(repo("owner/y"), "HTTP 500".to_owned());
+        board.fail(repo("owner/x"), "HTTP 404".to_owned());
+        assert_eq!(
+            status_line_of(&mut board, &Status::default()),
+            format!("⚠ owner/x: HTTP 404 (+1 more)  ·  {HINTS_TAIL}")
+        );
+    }
+
+    #[test]
+    fn one_error_has_no_count() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.fail(repo("owner/x"), "HTTP 404".to_owned());
+        assert_eq!(
+            status_line_of(&mut board, &Status::default()),
+            format!("⚠ owner/x: HTTP 404  ·  {HINTS_TAIL}")
+        );
+    }
+
+    #[test]
+    fn an_owner_error_counts_with_the_repository_errors() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.fail(repo("owner/x"), "HTTP 404".to_owned());
+        let status = Status {
+            owner_errors: vec![(
+                OwnerName::parse("acme").expect("the test owner is valid"),
+                "not found".to_owned(),
+            )],
+            ..Status::default()
+        };
+        assert_eq!(
+            status_line_of(&mut board, &status),
+            format!("⚠ owner/x: HTTP 404 (+1 more)  ·  {HINTS_TAIL}")
+        );
+        let mut empty = Board::new(Duration::from_hours(8));
+        assert_eq!(
+            status_line_of(&mut empty, &status),
+            format!("⚠ acme: not found  ·  {HINTS_TAIL}")
+        );
+    }
+
+    #[test]
+    fn a_message_replaces_the_errors() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.fail(repo("owner/x"), "HTTP 404".to_owned());
+        let status = Status {
+            message: Some("could not open a browser: https://example.com/run/1".to_owned()),
+            refreshing: true,
+            ..Status::default()
+        };
+        assert_eq!(
+            status_line_of(&mut board, &status),
+            format!("could not open a browser: https://example.com/run/1  ·  {HINTS_TAIL}")
+        );
+    }
+
+    #[test]
+    fn refreshing_shows_when_there_is_no_error_and_no_message() {
+        let mut board = Board::new(Duration::from_hours(8));
+        let status = Status {
+            refreshing: true,
+            ..Status::default()
+        };
+        assert_eq!(
+            status_line_of(&mut board, &status),
+            format!("refreshing…  ·  {HINTS_TAIL}")
+        );
+        board.fail(repo("owner/x"), "HTTP 404".to_owned());
+        assert_eq!(
+            status_line_of(&mut board, &status),
+            format!("⚠ owner/x: HTTP 404  ·  {HINTS_TAIL}")
+        );
     }
 }
