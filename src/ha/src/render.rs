@@ -140,6 +140,17 @@ fn header_line(
     }
 }
 
+/// The line that stands in an empty section.
+fn empty_line(section: Section, window: Duration) -> String {
+    match section {
+        Section::Active => "  No runs in progress or in the queue.".to_owned(),
+        Section::Recent => format!(
+            "  No runs finished in the last {}.",
+            format_duration_setting(window)
+        ),
+    }
+}
+
 /// Writes one line of text at row `y` of the area and returns the buffer row.
 fn put(buffer: &mut Buffer, y: usize, text: &str, style: Style) -> u16 {
     let area = buffer.area;
@@ -205,8 +216,9 @@ pub fn draw<Tz: TimeZone>(
                 let line = header_line(*section, *count, *passed, *failed, window);
                 put(buffer, index + 1, &line, bold);
             }
-            Row::Empty(_) => {
-                put(buffer, index + 1, "", Style::default());
+            Row::Empty(section) => {
+                let line = empty_line(*section, window);
+                put(buffer, index + 1, &line, Style::default());
             }
             Row::Run { run, selected } => {
                 let line = run_line(run, now, widths);
