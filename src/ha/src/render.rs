@@ -294,7 +294,7 @@ mod tests {
 
     /// A board with one run in each of the four states.
     fn four_run_board() -> Board {
-        let mut board = Board::new(Duration::from_secs(8 * 3_600));
+        let mut board = Board::new(Duration::from_hours(8));
         board.replace(
             repo("timmattison/tools"),
             vec![
@@ -365,7 +365,7 @@ mod tests {
         (0..area.height)
             .map(|y| {
                 let mut line = String::new();
-                let mut skip = 0usize;
+                let mut skip = 0_usize;
                 for x in 0..area.width {
                     if skip > 0 {
                         skip -= 1;
