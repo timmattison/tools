@@ -122,12 +122,12 @@ impl Board {
         let active: Vec<&Run> = self
             .runs
             .iter()
-            .filter(|run| run.state == RunState::Running)
+            .filter(|run| run.state.is_active())
             .collect();
         let recent: Vec<&Run> = self
             .runs
             .iter()
-            .filter(|run| run.state != RunState::Running)
+            .filter(|run| run.state.is_finished())
             .collect();
         let passed = recent
             .iter()
