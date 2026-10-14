@@ -992,6 +992,36 @@ mod tests {
     }
 
     #[test]
+    fn an_active_query_asks_for_in_progress_and_queued_runs_once_each() {
+        let stub = Stub::new(
+            "case \"$*\" in
+  *status=in_progress*) cat \"$dir/page1.out\";;
+  *status=queued*) cat \"$dir/page2.out\";;
+ esac",
+        );
+        stub.file("page1.out", &ok_output(&runs_json(2, 1, 2)));
+        stub.file("page2.out", &ok_output(&runs_json(2, 2, 2)));
+        let runs = stub
+            .source()
+            .runs_of(&repo("o/r"), RunQuery::Active)
+            .expect("runs");
+        let ids: Vec<u64> = runs.iter().map(|run| run.id.0).collect();
+        assert_eq!(ids, [1, 2, 3]);
+        let paths: Vec<String> = stub
+            .requests()
+            .into_iter()
+            .map(|call| call[2].clone())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "repos/o/r/actions/runs?per_page=100&page=1&status=in_progress",
+                "repos/o/r/actions/runs?per_page=100&page=1&status=queued",
+            ]
+        );
+    }
+
+    #[test]
     fn run_with_limit_gives_up_on_a_program_that_hangs() {
         let dir = TempDir::new().unwrap();
         let stub = write_stub(&dir, "hangs", "exec sleep 120");
