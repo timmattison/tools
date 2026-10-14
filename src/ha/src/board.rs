@@ -431,4 +431,55 @@ mod tests {
         assert_eq!(shown[3..], ["Header(Recent,1,1,0)", "Run(4)"]);
         assert_eq!(shown.len(), 5);
     }
+
+    #[test]
+    fn a_failed_repository_keeps_its_last_good_runs_and_lists_its_error() {
+        let mut board = board();
+        board.replace(repo("a/x"), vec![run(1, "a/x", RunState::Running, 5, 1)]);
+        board.fail(repo("b/y"), "HTTP 404".to_owned());
+        board.fail(repo("a/x"), "timed out".to_owned());
+        board.fail(repo("a/w"), "HTTP 500".to_owned());
+
+        assert_eq!(shape(&board.rows(now()))[1], "Run(1)");
+        let errors = board.errors();
+        let listed: Vec<(String, &str)> = errors
+            .iter()
+            .map(|(repo, error)| (repo.to_string(), *error))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("a/w".to_owned(), "HTTP 500"),
+                ("a/x".to_owned(), "timed out"),
+                ("b/y".to_owned(), "HTTP 404"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_later_replace_clears_the_error_of_its_repository() {
+        let mut board = board();
+        board.fail(repo("a/x"), "timed out".to_owned());
+        board.fail(repo("b/y"), "HTTP 404".to_owned());
+        board.replace(repo("a/x"), Vec::new());
+        let errors = board.errors();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].0.to_string(), "b/y");
+    }
+
+    #[test]
+    fn a_repository_that_never_had_runs_can_fail_and_shows_no_run() {
+        let mut board = board();
+        board.fail(repo("a/x"), "HTTP 404".to_owned());
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Active,0,0,0)",
+                "Empty(Active)",
+                "Header(Recent,0,0,0)",
+                "Empty(Recent)"
+            ]
+        );
+        assert_eq!(board.errors().len(), 1);
+    }
 }
