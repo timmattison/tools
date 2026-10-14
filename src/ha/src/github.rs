@@ -168,10 +168,30 @@ struct RunJson {
 ///
 /// `Run::repo` is `repo`, the repository that the request named.
 fn parse_runs(body: &str, repo: &RepoName) -> Result<Page, SourceError> {
-    let _ = (body, repo);
+    let parsed: RunsBody =
+        serde_json::from_str(body).map_err(|error| SourceError::BadResponse(error.to_string()))?;
+    let runs = parsed
+        .workflow_runs
+        .into_iter()
+        .map(|json| {
+            let workflow = json.name.unwrap_or_default();
+            let status = json.status.unwrap_or_default();
+            Run {
+                id: RunId(json.id),
+                repo: repo.clone(),
+                state: RunState::from_github(&status, json.conclusion.as_deref()),
+                title: json.display_title.unwrap_or_else(|| workflow.clone()),
+                workflow,
+                branch: json.head_branch.unwrap_or_default(),
+                started_at: json.run_started_at.unwrap_or(json.created_at),
+                updated_at: json.updated_at,
+                url: json.html_url,
+            }
+        })
+        .collect();
     Ok(Page {
-        total_count: 0,
-        runs: Vec::new(),
+        total_count: parsed.total_count,
+        runs,
     })
 }
 
