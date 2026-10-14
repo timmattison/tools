@@ -9,6 +9,10 @@
 //! signature, and no other module sees one.
 
 use std::collections::HashMap;
+use std::io::BufReader;
+
+use brush_parser::ast;
+use brush_parser::{Parser, ParserOptions};
 
 /// The alias table: the name of each alias and its value, after quote removal.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -105,8 +109,72 @@ pub enum Parsed {
     Unparsed,
 }
 
+/// The parser refused a part of the line. The walk stops at once, and the whole
+/// line is [`Parsed::Unparsed`]. No part is skipped.
+struct Refused;
+
+/// One text that the walk reads: the line, or the text inside a substitution.
+///
+/// Every step of the walk takes the context of the text that it reads. Thus a
+/// step can state where it is in the nesting.
+struct TextContext<'t> {
+    /// The text that the parser reads.
+    text: &'t str,
+}
+
+/// The state of one walk over one line.
+struct Walker {
+    /// The options of the parser. The same value serves every parse.
+    options: ParserOptions,
+    /// The command words found so far, in source order.
+    words: Vec<CommandWord>,
+}
+
+impl Walker {
+    /// Makes a walker with no word.
+    fn new() -> Self {
+        Self {
+            options: ParserOptions::default(),
+            words: Vec::new(),
+        }
+    }
+
+    /// Parses the text of `context` as a program and walks it.
+    fn walk_text(&mut self, context: &TextContext<'_>) -> Result<(), Refused> {
+        let program = self.parse_program(context.text)?;
+        self.walk_program(&program, context)
+    }
+
+    /// Parses `text` as a program.
+    fn parse_program(&self, text: &str) -> Result<ast::Program, Refused> {
+        Parser::new(BufReader::new(text.as_bytes()), &self.options)
+            .parse_program()
+            .map_err(|_| Refused)
+    }
+
+    /// Walks each complete command of a program.
+    #[allow(
+        clippy::unused_self,
+        clippy::unnecessary_wraps,
+        reason = "the walk of the commands arrives in the next step"
+    )]
+    fn walk_program(
+        &mut self,
+        _program: &ast::Program,
+        _context: &TextContext<'_>,
+    ) -> Result<(), Refused> {
+        Ok(())
+    }
+}
+
 /// Gives each command word of one command line. Pure.
+///
+/// The alias table is accepted, and the walk does not use it yet.
 #[must_use]
-pub fn command_words(_line: &str, _aliases: &Aliases) -> Parsed {
-    Parsed::Words(Vec::new())
+pub fn command_words(line: &str, _aliases: &Aliases) -> Parsed {
+    let mut walker = Walker::new();
+    match walker.walk_text(&TextContext { text: line }) {
+        Ok(()) => Parsed::Words(walker.words),
+        Err(Refused) => Parsed::Unparsed,
+    }
 }

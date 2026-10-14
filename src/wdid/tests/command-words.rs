@@ -1,6 +1,6 @@
 //! Tests of the command words of one command line.
 
-use wdid::command_words::{command_words, Aliases, CommandWord, Parsed};
+use wdid::command_words::{command_words, Aliases, Parsed};
 
 /// Runs every row of a table. Each row is a line and the value that
 /// `command_words` must give for it, with an empty alias table.
