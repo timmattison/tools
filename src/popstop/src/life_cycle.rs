@@ -20,6 +20,7 @@ use std::time::Duration;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::{Handle, Signals};
 
+use crate::background::HandshakeBound;
 use crate::exit_status;
 use crate::keepalive::Keepalive;
 use crate::lock::{self, AcquireError, HolderRecord, LockGuard, Mode, StateDir};
@@ -56,7 +57,7 @@ pub struct Settings {
     /// The longest time that a background start waits for the report of its
     /// copy, from `--handshake-bound`. The bound of a user
     /// ([`crate::background::HANDSHAKE_BOUND`]), when it is `None`.
-    pub handshake_bound: Option<Duration>,
+    pub handshake_bound: Option<HandshakeBound>,
 }
 
 impl Settings {
@@ -86,6 +87,19 @@ impl Settings {
     /// let _ = Settings::new(None, exit_after, handshake_bound);
     /// ```
     ///
+    /// The same call with a [`HandshakeBound`] compiles:
+    ///
+    /// ```
+    /// use std::time::Duration;
+    ///
+    /// use popstop::background::HandshakeBound;
+    /// use popstop::life_cycle::Settings;
+    ///
+    /// let exit_after = Some(Duration::from_secs(60));
+    /// let handshake_bound = Some(HandshakeBound::from_secs(10));
+    /// assert!(Settings::new(None, exit_after, handshake_bound).is_ok());
+    /// ```
+    ///
     /// # Errors
     ///
     /// Returns a [`Failure`] with the status [`exit_status::ERROR`] when the
@@ -94,7 +108,7 @@ impl Settings {
     pub fn new(
         state_dir: Option<&Path>,
         exit_after: Option<Duration>,
-        handshake_bound: Option<Duration>,
+        handshake_bound: Option<HandshakeBound>,
     ) -> Result<Self, Failure> {
         let state_dir = state_dir
             .map(|path| {

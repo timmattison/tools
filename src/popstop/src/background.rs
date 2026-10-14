@@ -71,6 +71,29 @@ const ROOT_DIRECTORY: &str = "/";
 /// `--handshake-bound`.
 pub const HANDSHAKE_BOUND: Duration = Duration::from_secs(10);
 
+/// The longest time that a start waits for the report of its copy, when a
+/// caller states it with `--handshake-bound`.
+///
+/// This type is not a [`Duration`] on purpose. [`crate::life_cycle::Settings`]
+/// holds it next to the time limit of the copy, which is a [`Duration`]. Thus
+/// a call that swaps the two does not compile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandshakeBound(Duration);
+
+impl HandshakeBound {
+    /// Makes a handshake bound of `seconds` seconds.
+    #[must_use]
+    pub const fn from_secs(seconds: u64) -> Self {
+        Self(Duration::from_secs(seconds))
+    }
+
+    /// Gives the length of this handshake bound.
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        self.0
+    }
+}
+
 /// The longest time that a start waits for a copy that reported nothing.
 const END_BOUND: Duration = Duration::from_secs(5);
 
@@ -106,7 +129,9 @@ pub fn start(settings: &Settings) -> Result<Report, Failure> {
         ))
     })?;
     let mut copy = make_the_copy(settings, log)?;
-    let bound = settings.handshake_bound.unwrap_or(HANDSHAKE_BOUND);
+    let bound = settings
+        .handshake_bound
+        .map_or(HANDSHAKE_BOUND, HandshakeBound::duration);
 
     match read_the_report(&mut copy, bound)? {
         Answer::Reported(Handshake::Ready { device_name, pid }) => Ok(Report::new(

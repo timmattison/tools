@@ -84,13 +84,14 @@ fn run(cli: &Cli) -> ExitCode {
     use std::io::Write;
     use std::time::Duration;
 
+    use popstop::background::HandshakeBound;
     use popstop::control;
     use popstop::life_cycle::{run_foreground, Settings};
 
     let settings = match Settings::new(
         cli.state_dir.as_deref(),
         cli.exit_after.map(Duration::from_secs),
-        cli.handshake_bound.map(Duration::from_secs),
+        cli.handshake_bound.map(HandshakeBound::from_secs),
     ) {
         Ok(settings) => settings,
         Err(failure) => return report(Err(failure)),
