@@ -16,7 +16,8 @@ pub struct RunId(pub u64);
 /// What a run is doing now, or how it ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunState {
-    /// The run waits for a runner or for an approval.
+    /// The run waits for a runner, for an approval, or for another run of its
+    /// concurrency group.
     Queued,
     /// The run is in progress.
     Running,

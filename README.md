@@ -2017,7 +2017,8 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     that refreshes itself. The GitHub web interface and `gh run list` show one repository at a
     time, and `gh run list` does not refresh.
   - The top section, "Running", shows the runs that are in progress (`●`) or in the queue (`○`),
-    the oldest first. Each row shows the start time in the local time zone and the elapsed time,
+    the oldest first. A run that waits for an approval or for another run also shows with `○`.
+    Each row shows the start time in the local time zone and the elapsed time,
     which increases each second. A run that is active for too long is often a stuck runner.
   - The bottom section shows the runs that passed (`✓`, green) or failed (`✗`, red) in the last
     8 hours, the newest first, with how long each run took and how long ago it finished. A run

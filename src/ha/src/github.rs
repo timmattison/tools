@@ -199,9 +199,21 @@ fn parse_runs(body: &str, repo: &RepoName) -> Result<Page, SourceError> {
 pub enum RunQuery {
     /// Every run created at or after the start of the UTC hour of this time.
     CreatedSince(DateTime<Utc>),
-    /// Every run that is in progress or in the queue.
+    /// Every run that is in progress, in the queue, or waiting (for an approval
+    /// or for another run of its concurrency group).
     Active,
 }
+
+/// The statuses that the sweep for active runs asks for, one request family each.
+/// - `in_progress` is a run that executes now.
+/// - `queued` is a run that waits for a runner.
+/// - `waiting` is a run that waits for an environment approval. It can wait up
+///   to 30 days.
+/// - `pending` is a run that waits for another run of its concurrency group. It
+///   waits as long as that run lasts.
+///
+/// `requested` is not here, because a run stays in it for seconds only.
+const ACTIVE_STATUSES: [&str; 4] = ["in_progress", "queued", "waiting", "pending"];
 
 /// The most repositories of one owner that `ha` watches.
 pub const REPO_LIMIT: usize = 1000;
@@ -477,10 +489,12 @@ impl Source for GhSource {
                 self.all_runs(repo, "created", &filter)
             }
             RunQuery::Active => {
-                let mut runs = self.all_runs(repo, "in_progress", "status=in_progress")?;
-                runs.extend(self.all_runs(repo, "queued", "status=queued")?);
-                // A run can change from queued to in progress between the two
-                // requests, and then both lists hold it. Keep the first one.
+                let mut runs = Vec::new();
+                for status in ACTIVE_STATUSES {
+                    runs.extend(self.all_runs(repo, status, &format!("status={status}"))?);
+                }
+                // A run can change state between the requests, and then two
+                // lists hold it. Keep the first one.
                 keep_first_of_each_id(&mut runs);
                 Ok(runs)
             }
