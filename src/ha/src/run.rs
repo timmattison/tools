@@ -26,6 +26,18 @@ pub enum RunState {
     Other,
 }
 
+impl RunState {
+    /// Folds a GitHub `status` and `conclusion` into a state.
+    ///
+    /// A value that GitHub does not document gives [`RunState::Other`].
+    /// This function never fails.
+    #[must_use]
+    pub fn from_github(status: &str, conclusion: Option<&str>) -> RunState {
+        let _ = (status, conclusion);
+        RunState::Other
+    }
+}
+
 /// One workflow run of one repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Run {
@@ -47,4 +59,23 @@ pub struct Run {
     pub updated_at: DateTime<Utc>,
     /// The address of the run page on GitHub.
     pub url: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_active_status_maps_to_its_state() {
+        let cases = [
+            ("queued", RunState::Queued),
+            ("waiting", RunState::Queued),
+            ("pending", RunState::Queued),
+            ("requested", RunState::Queued),
+            ("in_progress", RunState::Running),
+        ];
+        for (status, expected) in cases {
+            assert_eq!(RunState::from_github(status, None), expected, "{status}");
+        }
+    }
 }
