@@ -1740,18 +1740,21 @@ pub(crate) mod stub_shell {
         unsafe { libc::kill(pid, libc::SIGKILL) };
     }
 
-    /// How long a busy machine held a healthy child of
-    /// [`a_child_of_this_test_passes`], and one second more.
+    /// The bound of the parent before this branch.
     ///
-    /// Alone, each such child takes 0.3 to 2 seconds. A hook run of
-    /// 2026-10-14 held two of them for more than 30 seconds.
-    const HELD_BY_A_BUSY_MACHINE: Duration = Duration::from_secs(31);
+    /// A hook run of 2026-10-14 held two healthy children of
+    /// [`a_child_of_this_test_passes`] for longer, and the parent killed them
+    /// at this bound. How long the machine really held them is unknown. This
+    /// is the least that it held them, not the most. The assertion below is a
+    /// floor, not a measure: a bound just above 30 seconds still passes it,
+    /// and such a bound can still fail a hook run on such a machine.
+    const CROSSED_BY_A_BUSY_MACHINE: Duration = Duration::from_secs(30);
 
     // The parent outwaits the bound that a busy machine crossed on 2026-10-14.
     // This check replaces a test that slept 31 seconds in a child.
     const _: () = assert!(
-        CHILD_DEADLINE.as_nanos() > HELD_BY_A_BUSY_MACHINE.as_nanos(),
-        "the bound of the parent must be above the time a busy machine held a healthy child",
+        CHILD_DEADLINE.as_nanos() > CROSSED_BY_A_BUSY_MACHINE.as_nanos(),
+        "the bound of the parent must be above the bound that a busy machine crossed",
     );
 }
 
