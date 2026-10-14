@@ -192,3 +192,95 @@ fn the_depth_limit_is_64_levels_of_substitutions() {
     assert_eq!(inside.last().unwrap().word, "prcp");
     assert_eq!(command_words(&nested(65), &aliases), Parsed::Unparsed);
 }
+
+#[test]
+fn quote_removal_applies_to_the_command_word_and_the_arguments() {
+    check(vec![
+        (
+            "git commit -m \"fix prcp\"",
+            words(vec![word("git", ["commit", "-m", "fix prcp"])]),
+        ),
+        ("echo 'prcp'", words(vec![word("echo", ["prcp"])])),
+        (
+            "echo '$x' \"$y\" $z",
+            words(vec![word("echo", ["$x", "\"$y\"", "$z"])]),
+        ),
+        ("echo '' \"\"", words(vec![word("echo", ["", ""])])),
+        ("\"prcp\" x", words(vec![word("prcp", ["x"])])),
+        ("'prcp' x", words(vec![word("prcp", ["x"])])),
+        ("pr\"c\"'p' x", words(vec![word("prcp", ["x"])])),
+        ("\\prcp", words(vec![word("prcp", [])])),
+        ("$EDITOR x", words(vec![])),
+        ("pr$(x)cp y", words(vec![word("x", [])])),
+        ("$(a) x", words(vec![word("a", [])])),
+        (
+            "~/.cargo/bin/prcp x",
+            words(vec![word("~/.cargo/bin/prcp", ["x"])]),
+        ),
+        ("~tim/bin/prcp", words(vec![word("~tim/bin/prcp", [])])),
+        ("~+/prcp", words(vec![])),
+        (
+            "export FOO=\"a b\" BAR=$(a)",
+            words(vec![word("export", ["FOO=a b", "BAR=$(a)"]), word("a", [])]),
+        ),
+        ("cat <<'EOF'\nprcp\nEOF", words(vec![word("cat", [])])),
+    ]);
+}
+
+#[test]
+fn an_escape_sequence_gives_the_character_after_the_backslash() {
+    check(vec![
+        ("echo a\\ b", words(vec![word("echo", ["a b"])])),
+        ("echo \\$HOME", words(vec![word("echo", ["$HOME"])])),
+        ("echo x\\'y", words(vec![word("echo", ["x'y"])])),
+        ("echo a\\\\b", words(vec![word("echo", ["a\\b"])])),
+        ("echo a\\\nb", words(vec![word("echo", ["ab"])])),
+        ("echo \"a\\\"b\"", words(vec![word("echo", ["a\"b"])])),
+        ("echo \"a\\\\b\"", words(vec![word("echo", ["a\\b"])])),
+        ("echo \"a\\$b\"", words(vec![word("echo", ["a$b"])])),
+        ("echo \"a\\nb\"", words(vec![word("echo", ["a\\nb"])])),
+        ("echo a\\ b\\ c", words(vec![word("echo", ["a b c"])])),
+        ("a\\ b x", words(vec![word("a b", ["x"])])),
+    ]);
+}
+
+#[test]
+fn a_piece_that_is_not_text_keeps_the_raw_text_of_the_argument() {
+    check(vec![
+        (
+            "echo ~ ~tim ~+",
+            words(vec![word("echo", ["~", "~tim", "~+"])]),
+        ),
+        (
+            "echo ${x} $'a\\tb'",
+            words(vec![word("echo", ["${x}", "$'a\\tb'"])]),
+        ),
+        (
+            "echo a${x}b \"a${x}b\"",
+            words(vec![word("echo", ["a${x}b", "\"a${x}b\""])]),
+        ),
+        ("echo $((1 + 2))", words(vec![word("echo", ["$((1 + 2))"])])),
+    ]);
+}
+
+#[test]
+fn multibyte_text_survives_the_walk_and_the_quote_removal() {
+    check(vec![
+        (
+            "prcp 日本語.txt 🎉/",
+            words(vec![word("prcp", ["日本語.txt", "🎉/"])]),
+        ),
+        (
+            "echo \"日本語 prcp\" 'café' 🎉",
+            words(vec![word("echo", ["日本語 prcp", "café", "🎉"])]),
+        ),
+        (
+            "echo 日本語$(prcp 🎉)",
+            words(vec![
+                word("echo", ["日本語$(prcp 🎉)"]),
+                word("prcp", ["🎉"]),
+            ]),
+        ),
+        ("日本語 x", words(vec![word("日本語", ["x"])])),
+    ]);
+}
