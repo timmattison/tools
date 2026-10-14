@@ -221,6 +221,21 @@ fn a_table_too_narrow_for_its_dates_keeps_each_date_whole() {
     assert_whole_values(table_of(&report));
 }
 
+/// A text column keeps a width that a person can read, also when the width of
+/// the table is too small. A real run gave each text column one character, and
+/// the header `Through an alias or a function` filled 30 lines.
+#[test]
+fn a_text_column_keeps_a_width_that_a_person_can_read() {
+    let report = text(&fixture(), &window(), Some(60));
+    let table = table_of(&report);
+    for value in ["wtm 3,061, wt 3,029", "not installed", "Through an alias"] {
+        assert!(
+            table.lines().any(|line| line.contains(value)),
+            "{value:?} is not whole on one line:\n{table}"
+        );
+    }
+}
+
 /// `COLUMNS` wins, then the terminal, else there is no width. A value that is
 /// not a positive integer is ignored.
 #[test]
