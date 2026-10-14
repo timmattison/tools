@@ -926,4 +926,24 @@ mod tests {
         let up = offsets_while(&mut board, 4, 4, Board::select_previous);
         assert_eq!(up, [3, 3, 3, 2]);
     }
+
+    #[test]
+    fn the_header_above_the_selected_row_stays_in_view() {
+        let mut board = long_board(6, 3);
+        let down = offsets_while(&mut board, 3, 8, Board::select_next);
+        assert_eq!(down, [0, 1, 2, 3, 4, 6, 7, 8]);
+        let up = offsets_while(&mut board, 3, 3, Board::select_previous);
+        assert_eq!(up, [8, 7, 6]);
+    }
+
+    #[test]
+    fn a_view_of_one_row_cannot_keep_the_header_too() {
+        let mut board = long_board(6, 3);
+        for _ in 0..6 {
+            board.select_next(now());
+        }
+        let view = board.view(now(), 1);
+        assert_eq!(view.first, 8);
+        assert_eq!(marked(&view.rows), ["Run(101)*"]);
+    }
 }
