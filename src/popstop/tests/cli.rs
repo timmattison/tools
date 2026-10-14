@@ -6,11 +6,13 @@
 //! kills what stays, so a test that fails leaves no copy that plays for ever.
 //!
 //! These tests open the real default output device and play the inaudible
-//! keepalive signal. Each test that runs popstop with a state directory first
-//! takes the turn at the device (see `shared/device-turn.rs`), thus one test at
-//! a time opens it. Each helper that runs popstop with a state directory
-//! borrows that turn. Thus no test can skip the turn, and the turn of a test
-//! ends after each copy of that test stopped.
+//! keepalive signal. Each test that opens the device first takes the turn at
+//! the device (see `shared/device-turn.rs`), thus one test at a time opens it.
+//! `Copy`, `BackgroundStart`, `ask_in`, and `ask_from` each borrow that turn.
+//! Thus the compiler refuses a test that starts popstop through one of them
+//! with no turn, and the turn of a test ends after each copy of that test
+//! stopped. A test that builds its own `Command` gets no such check, thus it
+//! must open no device or take the turn itself.
 
 // popstop plays audio on macOS only.
 #![cfg(target_os = "macos")]
