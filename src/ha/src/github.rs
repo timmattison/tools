@@ -230,7 +230,7 @@ pub trait Source: Send + Sync {
 
 /// A `Source` that runs the `gh` program.
 ///
-/// One value serves many threads. The ETag cache and the rate limit sit behind
+/// One value serves many threads. The `ETag` cache and the rate limit sit behind
 /// mutexes. No lock is held while a child runs.
 pub struct GhSource {
     program: OsString,
@@ -244,6 +244,36 @@ impl GhSource {
     #[must_use]
     pub fn new() -> GhSource {
         GhSource::with_program("gh", Duration::from_secs(30))
+    }
+
+    /// Runs `gh` with `args` and returns what it printed.
+    fn run_gh(&self, args: &[&str]) -> Result<Output, SourceError> {
+        let mut command = Command::new(&self.program);
+        gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
+        command
+            .env("GH_NO_UPDATE_NOTIFIER", "1")
+            .env("GH_PROMPT_DISABLED", "1")
+            .args(args);
+        run_with_limit(&mut command, self.limit)
+            .map_err(|failure| SourceError::Failed(format!("{failure:?}")))
+    }
+
+    /// Fetches `path` with `gh api -i` and splits the answer.
+    fn request(&self, path: &str) -> Result<Response, SourceError> {
+        let output = self.run_gh(&["api", "-i", path])?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        parse_response(&text).ok_or_else(|| SourceError::Failed(first_line(&output.stderr)))
+    }
+
+    /// Fetches the page `number` of the runs of `repo` for `filter`.
+    fn runs_page(&self, repo: &RepoName, filter: &str, number: u32) -> Result<Page, SourceError> {
+        let path = format!(
+            "repos/{}/{}/actions/runs?per_page={PAGE_SIZE}&page={number}&{filter}",
+            repo.owner(),
+            repo.name()
+        );
+        let response = self.request(&path)?;
+        parse_runs(&response.body, repo)
     }
 
     /// A source that runs `program`, and gives each child at most `limit`.
@@ -271,13 +301,43 @@ impl Source for GhSource {
     }
 
     fn runs_of(&self, repo: &RepoName, query: RunQuery) -> Result<Vec<Run>, SourceError> {
-        let _ = (repo, query);
-        Ok(Vec::new())
+        match query {
+            RunQuery::CreatedSince(since) => {
+                let filter = format!("created=%3E%3D{}", hour_start(since));
+                Ok(self.runs_page(repo, &filter, 1)?.runs)
+            }
+            RunQuery::Active => Ok(Vec::new()),
+        }
     }
 
     fn rate_limit(&self) -> Option<RateLimit> {
         None
     }
+}
+
+/// The number of runs in one full page. GitHub allows 100 at most.
+const PAGE_SIZE: usize = 100;
+
+/// The start of the UTC hour of `time`, as GitHub writes a time.
+///
+/// The text stays the same for one hour. The path of a request thus stays the
+/// same between refreshes, and the `ETag` of GitHub can match.
+fn hour_start(time: DateTime<Utc>) -> String {
+    let seconds = time.timestamp().div_euclid(3600) * 3600;
+    DateTime::<Utc>::from_timestamp(seconds, 0)
+        .unwrap_or(time)
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
+}
+
+/// The first non-empty line of `bytes`, trimmed. The text is empty when none.
+fn first_line(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .to_owned()
 }
 
 /// One answer of `gh api -i`, split into its parts.
