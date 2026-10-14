@@ -467,3 +467,38 @@ fn a_row_with_exit_127_does_not_count() {
     assert_eq!(document["history"]["not_found"], 1);
     assert_eq!(tool(&document, TOOL_ONE)["uses"], 1);
 }
+
+/// The zsh that the real-shell test starts.
+const ZSH: &str = "/bin/zsh";
+
+#[test]
+fn a_use_through_an_alias_of_the_real_zsh_counts_for_the_tool() {
+    if !Path::new(ZSH).exists() {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "one x")]));
+    std::fs::write(
+        setup.home.path().join(".zshrc"),
+        format!("alias one='{TOOL_ONE} --flag'\n"),
+    )
+    .unwrap();
+    let output = setup
+        .command()
+        .env("SHELL", ZSH)
+        .env("ZDOTDIR", setup.home.path())
+        .arg("--json")
+        .arg("--repo")
+        .arg(setup.workspace.path())
+        .output()
+        .unwrap();
+    let document = json(&output);
+    let one = tool(&document, TOOL_ONE);
+    assert_eq!(one["uses"], 1, "{document}");
+    assert_eq!(one["typed"], 0, "{document}");
+    assert_eq!(
+        one["through"],
+        serde_json::json!([{ "name": "one", "uses": 1 }])
+    );
+    assert_eq!(document["shell"]["aliases"], 1, "{document}");
+}
