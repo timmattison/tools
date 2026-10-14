@@ -5,14 +5,6 @@
 //! It does no I/O. Every reader takes the current time as an argument, so a
 //! test uses one fixed time and never reads the clock.
 
-#![allow(
-    unused_variables,
-    clippy::unused_self,
-    clippy::needless_pass_by_value,
-    clippy::must_use_candidate,
-    reason = "stubs for the red steps of the test-first build"
-)]
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
@@ -201,7 +193,7 @@ impl Board {
 
     /// Builds the full list of rows. The list has two sections.
     ///
-    /// `selected` is the position of the selected run among all runs.
+    /// The row of the selected run carries the selection mark.
     fn build_rows(&self, now: DateTime<Utc>) -> Vec<Row<'_>> {
         let (active, recent) = self.sections(now);
         let passed = recent
