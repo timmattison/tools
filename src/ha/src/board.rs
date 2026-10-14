@@ -13,7 +13,7 @@
     reason = "stubs for the red steps of the test-first build"
 )]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -68,7 +68,7 @@ pub struct View<'a> {
 #[derive(Debug)]
 pub struct Board {
     window: Duration,
-    runs: Vec<Run>,
+    runs: BTreeMap<RepoName, Vec<Run>>,
 }
 
 impl Board {
@@ -77,7 +77,7 @@ impl Board {
     pub fn new(window: Duration) -> Board {
         Board {
             window,
-            runs: Vec::new(),
+            runs: BTreeMap::new(),
         }
     }
 
@@ -89,7 +89,7 @@ impl Board {
 
     /// Stores the runs of one repository and clears the error of that repository.
     pub fn replace(&mut self, repo: RepoName, runs: Vec<Run>) {
-        self.runs.extend(runs);
+        self.runs.insert(repo, runs);
     }
 
     /// Records an error for one repository. The last good runs stay.
@@ -121,7 +121,8 @@ impl Board {
     fn build_rows(&self, now: DateTime<Utc>) -> Vec<Row<'_>> {
         let mut active: Vec<&Run> = self
             .runs
-            .iter()
+            .values()
+            .flatten()
             .filter(|run| run.state.is_active())
             .collect();
         active.sort_by_key(|run| (run.started_at, run.id));
@@ -131,7 +132,8 @@ impl Board {
             .unwrap_or(DateTime::<Utc>::MIN_UTC);
         let mut recent: Vec<&Run> = self
             .runs
-            .iter()
+            .values()
+            .flatten()
             .filter(|run| run.state.is_finished() && run.updated_at >= oldest)
             .collect();
         recent.sort_by_key(|run| std::cmp::Reverse((run.updated_at, run.id)));
@@ -427,6 +429,6 @@ mod tests {
         assert_eq!(shown[1], "Run(3)");
         assert_eq!(shown[2], "Run(2)");
         assert_eq!(shown[3..], ["Header(Recent,1,1,0)", "Run(4)"]);
-        assert_eq!(shown.len(), 6);
+        assert_eq!(shown.len(), 5);
     }
 }
