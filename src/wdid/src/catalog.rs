@@ -17,6 +17,15 @@ use chrono::NaiveDate;
 
 use crate::tool::{ToolName, ToolNames};
 
+/// The kind of a cargo target that is a binary.
+const BINARY_KIND: &str = "bin";
+
+/// The byte that starts each record of the git log.
+const LOG_RECORD_START: char = '\0';
+
+/// The format of the date that `%as` prints.
+const LOG_DATE_FORMAT: &str = "%Y-%m-%d";
+
 /// The programs that the catalog starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Programs {
@@ -173,15 +182,77 @@ pub fn binaries(
     metadata_json: &str,
     root: &Path,
 ) -> Result<Vec<(ToolName, PathBuf)>, CatalogError> {
-    let _ = (metadata_json, root);
-    Ok(Vec::new())
+    let document: MetadataDocument =
+        serde_json::from_str(metadata_json).map_err(|error| CatalogError::Metadata {
+            reason: error.to_string(),
+        })?;
+    let canonical_root = canonical_or_plain(root);
+    let mut found: Vec<(ToolName, PathBuf)> = Vec::new();
+    for package in &document.packages {
+        let manifest = Path::new(&package.manifest_path);
+        let directory = manifest.parent().unwrap_or(manifest);
+        let crate_dir = relative_to(&canonical_root, directory);
+        for target in &package.targets {
+            if target.kind.iter().any(|kind| kind == BINARY_KIND) {
+                found.push((ToolName::new(target.name.as_str()), crate_dir.clone()));
+            }
+        }
+    }
+    if found.is_empty() {
+        return Err(CatalogError::NoBinaries {
+            dir: root.to_path_buf(),
+        });
+    }
+    found.sort();
+    Ok(found)
+}
+
+/// The part of the `cargo metadata` document that wdid reads.
+#[derive(serde::Deserialize)]
+struct MetadataDocument {
+    packages: Vec<MetadataPackage>,
+}
+
+/// One package of the `cargo metadata` document.
+#[derive(serde::Deserialize)]
+struct MetadataPackage {
+    manifest_path: String,
+    targets: Vec<MetadataTarget>,
+}
+
+/// One target of a package.
+#[derive(serde::Deserialize)]
+struct MetadataTarget {
+    name: String,
+    kind: Vec<String>,
+}
+
+/// Gives the canonical form of a path, or the path itself when the file system
+/// cannot canonicalize it.
+fn canonical_or_plain(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Gives `directory` relative to the canonical `root`. Both sides are
+/// canonical before the cut, because a symlink can name one directory in two
+/// ways. A directory outside the root keeps its absolute path.
+fn relative_to(canonical_root: &Path, directory: &Path) -> PathBuf {
+    let canonical_directory = canonical_or_plain(directory);
+    canonical_directory
+        .strip_prefix(canonical_root)
+        .map_or_else(|_| directory.to_path_buf(), Path::to_path_buf)
 }
 
 /// Gives the binary names that `cargo install --list` prints. Pure.
 #[must_use]
 pub fn installed_binaries(install_list: &str) -> BTreeSet<String> {
-    let _ = install_list;
-    BTreeSet::new()
+    install_list
+        .lines()
+        .filter(|line| line.starts_with(char::is_whitespace))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 /// Gives the oldest commit date for each crate directory. Pure.
@@ -190,8 +261,29 @@ pub fn installed_binaries(install_list: &str) -> BTreeSet<String> {
 /// --relative`. A crate directory that no commit touches has no entry.
 #[must_use]
 pub fn added_dates(log: &str, crate_dirs: &[PathBuf]) -> BTreeMap<PathBuf, NaiveDate> {
-    let _ = (log, crate_dirs);
-    BTreeMap::new()
+    let mut oldest: BTreeMap<PathBuf, NaiveDate> = BTreeMap::new();
+    for record in log.split(LOG_RECORD_START) {
+        let mut lines = record.lines();
+        let Some(date) = lines
+            .next()
+            .and_then(|line| NaiveDate::parse_from_str(line.trim(), LOG_DATE_FORMAT).ok())
+        else {
+            continue;
+        };
+        let files: Vec<&Path> = lines
+            .filter(|line| !line.is_empty())
+            .map(Path::new)
+            .collect();
+        for crate_dir in crate_dirs {
+            if files.iter().any(|file| file.starts_with(crate_dir)) {
+                oldest
+                    .entry(crate_dir.clone())
+                    .and_modify(|known| *known = (*known).min(date))
+                    .or_insert(date);
+            }
+        }
+    }
+    oldest
 }
 
 /// Says which program the PATH runs first for `name`. Pure over the file

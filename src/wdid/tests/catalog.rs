@@ -13,9 +13,12 @@ fn date(year: i32, month: u32, day: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(year, month, day).unwrap()
 }
 
-/// Makes a `cargo metadata` document with the given packages. Each package is
-/// a name, a manifest path, and the kinds of its targets.
-fn metadata(packages: &[(&str, &str, &[(&str, &str)])]) -> String {
+/// A package of the fixture document: name, manifest path, and targets as
+/// pairs of a name and a kind.
+type FixturePackage<'a> = (&'a str, &'a str, &'a [(&'a str, &'a str)]);
+
+/// Makes a `cargo metadata` document with the given packages.
+fn metadata(packages: &[FixturePackage<'_>]) -> String {
     let packages: Vec<String> = packages
         .iter()
         .map(|(name, manifest, targets)| {
@@ -130,15 +133,15 @@ fn installed_binaries_gives_nothing_for_empty_text() {
 
 #[test]
 fn added_dates_gives_the_oldest_date_for_each_crate_dir() {
-    let log = "\02026-10-14\n\ngsw/src/issue.rs\ngsw/src/shell.rs\n\
-               \02026-03-04\n\ngsw/Cargo.toml\nprcp/src/main.rs\n\
-               \02025-01-02\n\nprcp/Cargo.toml\nREADME.md\n";
+    let log = "\x002026-10-14\n\ngsw/src/issue.rs\ngsw/src/shell.rs\n\
+               \x002026-03-04\n\ngsw/Cargo.toml\nprcp/src/main.rs\n\
+               \x002025-01-02\n\nprcp/Cargo.toml\nREADME.md\n";
     let dirs = vec![
         PathBuf::from("gsw"),
         PathBuf::from("prcp"),
         PathBuf::from("none"),
     ];
-    let found = added_dates(&log, &dirs);
+    let found = added_dates(log, &dirs);
     assert_eq!(found.len(), 2, "{found:?}");
     assert_eq!(found[&PathBuf::from("gsw")], date(2026, 3, 4));
     assert_eq!(found[&PathBuf::from("prcp")], date(2025, 1, 2));
@@ -146,15 +149,15 @@ fn added_dates_gives_the_oldest_date_for_each_crate_dir() {
 
 #[test]
 fn added_dates_matches_whole_directory_names_only() {
-    let log = "\02025-01-02\n\ngsw-extra/src/main.rs\n";
+    let log = "\x002025-01-02\n\ngsw-extra/src/main.rs\n";
     let found = added_dates(log, &[PathBuf::from("gsw")]);
     assert!(found.is_empty(), "{found:?}");
 }
 
 #[test]
 fn added_dates_handles_nested_crate_dirs_and_the_root() {
-    let log = "\02025-06-01\n\nsrc/aa/src/main.rs\nCargo.toml\n\
-               \02024-02-03\n\nsrc/aa/Cargo.toml\n";
+    let log = "\x002025-06-01\n\nsrc/aa/src/main.rs\nCargo.toml\n\
+               \x002024-02-03\n\nsrc/aa/Cargo.toml\n";
     let dirs = vec![PathBuf::from("src/aa"), PathBuf::new()];
     let found = added_dates(log, &dirs);
     assert_eq!(found[&PathBuf::from("src/aa")], date(2024, 2, 3));
@@ -163,7 +166,7 @@ fn added_dates_handles_nested_crate_dirs_and_the_root() {
 
 #[test]
 fn added_dates_skips_a_record_with_a_bad_date_and_reads_multibyte_paths() {
-    let log = "\0not-a-date\n\nsrc/aa/x\n\02025-01-02\n\nsrc/日本語/🎉.rs\n";
+    let log = "\x00not-a-date\n\nsrc/aa/x\n\x002025-01-02\n\nsrc/日本語/🎉.rs\n";
     let dirs = vec![PathBuf::from("src/aa"), PathBuf::from("src/日本語")];
     let found = added_dates(log, &dirs);
     assert_eq!(found.len(), 1, "{found:?}");
