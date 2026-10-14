@@ -302,4 +302,63 @@ mod tests {
             assert_eq!(error.to_string(), message);
         }
     }
+
+    #[test]
+    fn a_character_outside_the_allowed_set_is_refused() {
+        let cases = [
+            ("a b", ' '),
+            ("a/b c", ' '),
+            ("café/x", 'é'),
+            ("x/日本語", '日'),
+            ("a/b@c", '@'),
+            ("🎉", '🎉'),
+        ];
+        for (input, character) in cases {
+            assert_eq!(
+                Target::parse(input),
+                Err(TargetError::BadCharacter {
+                    input: input.to_owned(),
+                    character
+                }),
+                "input {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_part_that_is_only_dots_is_refused() {
+        for input in [".", "..", "./x", "x/.", "x/..", "../x"] {
+            assert_eq!(
+                Target::parse(input),
+                Err(TargetError::DotPart {
+                    input: input.to_owned()
+                }),
+                "input {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dot_inside_a_part_is_allowed() {
+        assert_eq!(
+            Target::parse("a.b/.github"),
+            Ok(Target::Repo(repo("a.b", ".github")))
+        );
+        assert_eq!(Target::parse("a_b-c"), Ok(Target::Owner(owner("a_b-c"))));
+        assert_eq!(Target::parse("..x"), Ok(Target::Owner(owner("..x"))));
+    }
+
+    #[test]
+    fn the_character_and_dot_errors_quote_the_input() {
+        let error = Target::parse("café/x").expect_err("refused");
+        assert_eq!(
+            error.to_string(),
+            "\"café/x\" holds the character 'é'. A name holds only letters, digits, \"-\", \"_\", and \".\"."
+        );
+        let error = Target::parse("a/..").expect_err("refused");
+        assert_eq!(
+            error.to_string(),
+            "\"a/..\" has a part that is \".\" or \"..\". A name cannot be a dot."
+        );
+    }
 }
