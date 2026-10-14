@@ -152,35 +152,49 @@ fn run_loop<S: Source>(
     settings: &Settings,
     slow: Duration,
     updates: &Sender<Update>,
-    _commands: &Receiver<Command>,
+    commands: &Receiver<Command>,
 ) {
     let mut state = State {
         owner_cadence: Cadence::new(slow),
         owner_lists: BTreeMap::new(),
     };
-    let _ = cycle(source, settings, &mut state, updates);
+    while let Ok(delay) = cycle(source, settings, &mut state, updates) {
+        if !refresh_requested(commands) {
+            let _ = commands.recv_timeout(delay);
+        }
+    }
+}
+
+/// Takes every command that is waiting. True when one asked for a refresh.
+fn refresh_requested(commands: &Receiver<Command>) -> bool {
+    let mut requested = false;
+    while let Ok(Command::RefreshNow) = commands.try_recv() {
+        requested = true;
+    }
+    requested
 }
 
 /// Runs one cycle: lists the owners when due, fetches every repository, and
-/// reports the end of the cycle.
+/// reports the end of the cycle. Returns how long to wait before the next one.
 fn cycle<S: Source>(
     source: &S,
     settings: &Settings,
     state: &mut State,
     updates: &Sender<Update>,
-) -> Result<(), ReceiverGone> {
+) -> Result<Duration, ReceiverGone> {
     let repos = refresh_repos(source, settings, state, updates)?;
     fetch_all(source, &repos, window_start(settings.window), updates)?;
     let now = Utc::now();
     let rate = source.rate_limit();
-    let (_delay, backoff_until) = next_delay(settings.interval, rate, now);
+    let (delay, backoff_until) = next_delay(settings.interval, rate, now);
     updates
         .send(Update::CycleDone {
             finished_at: now,
             rate,
             backoff_until,
         })
-        .map_err(|_| ReceiverGone)
+        .map_err(|_| ReceiverGone)?;
+    Ok(delay)
 }
 
 /// Fetches the runs of every repository with a pool of threads.
