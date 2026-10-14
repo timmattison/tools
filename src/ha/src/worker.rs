@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -159,19 +159,43 @@ fn run_loop<S: Source>(
         owner_lists: BTreeMap::new(),
     };
     while let Ok(delay) = cycle(source, settings, &mut state, updates) {
-        if !refresh_requested(commands) {
-            let _ = commands.recv_timeout(delay);
+        if wait_for_next_cycle(commands, delay) == Wake::Stop {
+            return;
         }
     }
 }
 
-/// Takes every command that is waiting. True when one asked for a refresh.
-fn refresh_requested(commands: &Receiver<Command>) -> bool {
+/// Why the worker stops waiting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Wake {
+    /// A cycle is due now.
+    Cycle,
+    /// The command sender is gone, so the thread ends.
+    Stop,
+}
+
+/// Waits for the next cycle.
+///
+/// A refresh command that arrived during the last cycle starts the next cycle
+/// at once. Otherwise the wait lasts `delay`, and a refresh command ends it.
+/// A refresh command also ends a wait for a rate limit reset, because the
+/// person asked for it.
+fn wait_for_next_cycle(commands: &Receiver<Command>, delay: Duration) -> Wake {
     let mut requested = false;
-    while let Ok(Command::RefreshNow) = commands.try_recv() {
-        requested = true;
+    loop {
+        match commands.try_recv() {
+            Ok(Command::RefreshNow) => requested = true,
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => return Wake::Stop,
+        }
     }
-    requested
+    if requested {
+        return Wake::Cycle;
+    }
+    match commands.recv_timeout(delay) {
+        Ok(Command::RefreshNow) | Err(RecvTimeoutError::Timeout) => Wake::Cycle,
+        Err(RecvTimeoutError::Disconnected) => Wake::Stop,
+    }
 }
 
 /// Runs one cycle: lists the owners when due, fetches every repository, and
@@ -300,7 +324,6 @@ fn window_start(window: Duration) -> DateTime<Utc> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::mpsc::RecvTimeoutError;
     use std::sync::{Arc, Mutex, PoisonError};
 
     use super::*;
