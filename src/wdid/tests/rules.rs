@@ -68,3 +68,81 @@ fn a_path_to_a_tool_is_a_use_or_a_development_run() {
         ("target/prcp/", &[], vec![]),
     ]);
 }
+
+#[test]
+fn cargo_run_gives_a_development_run_for_each_binary_it_names() {
+    check(vec![
+        ("cargo", &["run", "--bin", "prcp"], vec![developed("prcp")]),
+        ("cargo", &["run", "--bin=prcp"], vec![developed("prcp")]),
+        ("cargo", &["run", "-p", "cwt"], vec![developed("cwt")]),
+        ("cargo", &["run", "-pcwt"], vec![developed("cwt")]),
+        (
+            "cargo",
+            &["run", "--package", "cwt"],
+            vec![developed("cwt")],
+        ),
+        ("cargo", &["run", "--package=cwt"], vec![developed("cwt")]),
+        (
+            "cargo",
+            &["run", "--release", "--bin", "prcp", "--", "a.txt", "b/"],
+            vec![developed("prcp")],
+        ),
+        ("cargo", &["r", "--bin", "prcp"], vec![developed("prcp")]),
+        (
+            "cargo",
+            &["+nightly", "run", "--bin", "prcp"],
+            vec![developed("prcp")],
+        ),
+        (
+            "cargo",
+            &["--quiet", "run", "-p", "cwt"],
+            vec![developed("cwt")],
+        ),
+        // After `--` the words belong to the program that cargo runs.
+        ("cargo", &["run", "--", "--bin", "prcp"], vec![]),
+        (
+            "cargo",
+            &["run", "--bin", "prcp", "--", "--bin", "cwt"],
+            vec![developed("prcp")],
+        ),
+        // Other subcommands do not run a binary.
+        ("cargo", &["build", "--bin", "prcp"], vec![]),
+        ("cargo", &["install", "--bin", "prcp"], vec![]),
+        ("cargo", &["test", "-p", "cwt"], vec![]),
+        ("cargo", &[], vec![]),
+        ("cargo", &["run"], vec![]),
+        // `--bin` values win over package values.
+        (
+            "cargo",
+            &["run", "-p", "a", "--bin", "prcp"],
+            vec![developed("prcp")],
+        ),
+        (
+            "cargo",
+            &["run", "--bin", "prcp", "-p", "cwt"],
+            vec![developed("prcp")],
+        ),
+        // A package that is not a tool gives nothing.
+        ("cargo", &["run", "-p", "a"], vec![]),
+        ("cargo", &["run", "--bin", "ls"], vec![]),
+        // Several values, one run for each tool, in order of first appearance.
+        (
+            "cargo",
+            &[
+                "run", "--bin", "prcp", "--bin", "ls", "--bin", "cwt", "--bin", "prcp",
+            ],
+            vec![developed("prcp"), developed("cwt")],
+        ),
+        (
+            "cargo",
+            &["run", "-p", "cwt", "--package=prcp", "-pcwt"],
+            vec![developed("cwt"), developed("prcp")],
+        ),
+        // A value that is missing at the end of the arguments gives nothing.
+        ("cargo", &["run", "--bin"], vec![]),
+        // Only the exact word `cargo` is cargo.
+        ("cargo2", &["run", "--bin", "prcp"], vec![]),
+        ("/usr/bin/cargo", &["run", "--bin", "prcp"], vec![]),
+        ("cargo", &["run", "--bin", "日本語"], vec![]),
+    ]);
+}
