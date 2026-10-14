@@ -125,10 +125,9 @@ impl Board {
 
     /// The rows that fit in `height` lines, with the selected row inside.
     pub fn view(&mut self, now: DateTime<Utc>, height: usize) -> View<'_> {
-        View {
-            rows: Vec::new(),
-            first: 0,
-        }
+        self.settle(now);
+        let rows = self.build_rows(now).into_iter().take(height).collect();
+        View { rows, first: 0 }
     }
 
     /// Splits the shown runs into the active list and the recent list.
