@@ -88,16 +88,29 @@ impl Target {
     /// GitHub name cannot hold.
     pub fn parse(input: &str) -> Result<Target, TargetError> {
         let input = input.trim();
+        if input.is_empty() {
+            return Err(TargetError::Empty {
+                input: input.to_owned(),
+            });
+        }
         let parts: Vec<&str> = input.split('/').collect();
+        if parts.len() > 2 {
+            return Err(TargetError::TooManySlashes {
+                input: input.to_owned(),
+            });
+        }
+        if parts.iter().any(|part| part.is_empty()) {
+            return Err(TargetError::EmptyPart {
+                input: input.to_owned(),
+            });
+        }
         match parts.as_slice() {
             [owner] => Ok(Target::Owner(OwnerName((*owner).to_owned()))),
             [owner, name] => Ok(Target::Repo(RepoName {
                 owner: OwnerName((*owner).to_owned()),
                 name: (*name).to_owned(),
             })),
-            _ => Err(TargetError::TooManySlashes {
-                input: input.to_owned(),
-            }),
+            _ => unreachable!("a split gives one or two parts here"),
         }
     }
 }
