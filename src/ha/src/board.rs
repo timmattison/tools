@@ -679,4 +679,19 @@ mod tests {
         board.select_previous(now());
         assert_eq!(selected_text(&mut board), None);
     }
+
+    #[test]
+    fn selected_url_is_the_url_of_the_selected_run() {
+        let mut board = four_runs_in_two_sections();
+        assert_eq!(
+            board.selected_url(now()).as_deref(),
+            Some("https://example.test/a/x/runs/1")
+        );
+        board.select_next(now());
+        board.select_next(now());
+        assert_eq!(
+            board.selected_url(now()).as_deref(),
+            Some("https://example.test/a/x/runs/3")
+        );
+    }
 }
