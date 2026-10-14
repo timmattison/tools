@@ -69,6 +69,7 @@ pub struct View<'a> {
 pub struct Board {
     window: Duration,
     runs: BTreeMap<RepoName, Vec<Run>>,
+    errors: BTreeMap<RepoName, String>,
 }
 
 impl Board {
@@ -78,6 +79,7 @@ impl Board {
         Board {
             window,
             runs: BTreeMap::new(),
+            errors: BTreeMap::new(),
         }
     }
 
@@ -89,11 +91,14 @@ impl Board {
 
     /// Stores the runs of one repository and clears the error of that repository.
     pub fn replace(&mut self, repo: RepoName, runs: Vec<Run>) {
+        self.errors.remove(&repo);
         self.runs.insert(repo, runs);
     }
 
     /// Records an error for one repository. The last good runs stay.
-    pub fn fail(&mut self, repo: RepoName, error: String) {}
+    pub fn fail(&mut self, repo: RepoName, error: String) {
+        self.errors.insert(repo, error);
+    }
 
     /// Drops the runs and the errors of every repository that is not in `repos`.
     pub fn keep_only(&mut self, repos: &BTreeSet<RepoName>) {}
@@ -101,7 +106,10 @@ impl Board {
     /// The error of each failed repository, sorted by repository.
     #[must_use]
     pub fn errors(&self) -> Vec<(&RepoName, &str)> {
-        Vec::new()
+        self.errors
+            .iter()
+            .map(|(repo, error)| (repo, error.as_str()))
+            .collect()
     }
 
     /// All rows of the board at time `now`.
