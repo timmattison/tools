@@ -269,6 +269,8 @@ mod tests {
         owners: HashMap<OwnerName, Result<Vec<RepoName>, SourceError>>,
         created: HashMap<RepoName, Result<Vec<Run>, SourceError>>,
         calls: Vec<(&'static str, String)>,
+        since: Vec<DateTime<Utc>>,
+        rate: Option<RateLimit>,
     }
 
     /// A [`Source`] that answers from a script and logs each call.
@@ -293,7 +295,10 @@ mod tests {
         fn runs_of(&self, repo: &RepoName, query: RunQuery) -> Result<Vec<Run>, SourceError> {
             let mut script = self.script();
             let what = match query {
-                RunQuery::CreatedSince(_) => "created",
+                RunQuery::CreatedSince(since) => {
+                    script.since.push(since);
+                    "created"
+                }
                 RunQuery::Active => "active",
             };
             script.calls.push((what, repo.to_string()));
@@ -301,7 +306,7 @@ mod tests {
         }
 
         fn rate_limit(&self) -> Option<RateLimit> {
-            None
+            self.script().rate
         }
     }
 
@@ -536,5 +541,45 @@ mod tests {
         assert!(!updates
             .iter()
             .any(|update| matches!(update, Update::Runs { repo: r, .. } if *r == repo("acme/a"))));
+    }
+
+    #[test]
+    fn the_created_since_time_is_the_window_plus_one_day_back() {
+        let fake = Arc::new(FakeSource::default());
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+
+        let _ = one_cycle(&worker);
+
+        let expected = Utc::now() - chrono::TimeDelta::hours(8 + 24);
+        let since = fake.script().since.clone();
+        assert_eq!(since.len(), 1, "{since:?}");
+        let off = (since[0] - expected).abs();
+        assert!(off < chrono::TimeDelta::seconds(60), "off by {off}");
+    }
+
+    #[test]
+    fn cycle_done_carries_the_rate_limit_and_the_backoff() {
+        let fake = Arc::new(FakeSource::default());
+        let reset = Utc::now() + chrono::TimeDelta::hours(1);
+        let low = RateLimit {
+            limit: 5000,
+            remaining: 10,
+            reset,
+        };
+        fake.script().rate = Some(low);
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+
+        let updates = one_cycle(&worker);
+
+        let Some(Update::CycleDone {
+            rate,
+            backoff_until,
+            ..
+        }) = updates.last()
+        else {
+            panic!("the last update is not CycleDone: {updates:?}");
+        };
+        assert_eq!(*rate, Some(low));
+        assert_eq!(*backoff_until, Some(reset));
     }
 }
