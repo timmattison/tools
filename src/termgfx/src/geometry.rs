@@ -360,10 +360,6 @@ pub(crate) fn cell_pixels_or_estimate_of(
 /// # Returns
 /// The height of the cell over its width. A typical terminal gives about 2.
 #[must_use]
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "a character cell is a few tens of pixels, far inside the exact range of f64"
-)]
 pub(crate) fn cell_aspect_of(cell_width_px: u32, cell_height_px: u32) -> f64 {
     cell_height_px as f64 / cell_width_px as f64
 }
@@ -400,7 +396,6 @@ fn cells_to_pixels(cols: u32, rows: u32, cell_w: u32, cell_h: u32) -> (u32, u32)
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    clippy::cast_precision_loss,
     reason = "display dimensions are always positive and fit in u32"
 )]
 pub(crate) fn calculate_aspect_preserving_size(
@@ -528,7 +523,6 @@ pub(crate) fn downscale_to_display_pixels<'a>(
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    clippy::cast_precision_loss,
     reason = "pixel dimensions are always positive and fit in u32"
 )]
 pub(crate) fn calculate_sixel_dimensions(
@@ -1313,10 +1307,6 @@ mod tests {
     // =========================================================================
 
     #[test]
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "a character cell is a few tens of pixels, far inside the exact range of f64"
-    )]
     fn constants_have_reasonable_values() {
         // Derived cell aspect ratio (from fallback constants) should be reasonable (1.5 to 3.0)
         let fallback_aspect = ESTIMATED_CELL_HEIGHT_PX as f64 / ESTIMATED_CELL_WIDTH_PX as f64;
@@ -1440,10 +1430,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "the dimensions of a test image are a few hundred pixels, far inside the exact range of f64"
-    )]
     fn downscale_preserves_aspect_ratio() {
         // A cell of 10 pixels by 20 gives 10 columns by 5 rows a box of 100
         // pixels by 100. The image is 5 times as wide as it is tall, and it is

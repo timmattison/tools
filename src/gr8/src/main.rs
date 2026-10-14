@@ -268,7 +268,6 @@ fn predict_exhaustion(rate_limit: &RateLimit) -> ExhaustionPrediction {
     // defined for arbitrarily small rates.
     #[expect(
         clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
         reason = "clamped to [0, i64::MAX] above, so the cast is representable in i64"
     )]
     let time_to_exhaust_seconds =
