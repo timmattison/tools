@@ -4,7 +4,9 @@ use std::fmt::Display;
 use std::time::Duration;
 
 use chrono::{DateTime, TimeZone, Utc};
-use ratatui::style::Style;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::Frame;
 use textfit::pad_right;
 
@@ -138,6 +140,25 @@ fn header_line(
     }
 }
 
+/// Writes one line of text at row `y` of the area and returns the buffer row.
+fn put(buffer: &mut Buffer, y: usize, text: &str, style: Style) -> u16 {
+    let area = buffer.area;
+    let y = area.y + u16::try_from(y).unwrap_or(u16::MAX);
+    buffer.set_string(area.x, y, text, style);
+    y
+}
+
+/// The color of the marker of a run state.
+fn marker_color(state: RunState) -> Color {
+    match state {
+        RunState::Running => Color::Yellow,
+        RunState::Queued => Color::Blue,
+        RunState::Passed => Color::Green,
+        RunState::Failed => Color::Red,
+        RunState::Other => Color::Reset,
+    }
+}
+
 /// Draws one frame: the column header, the board rows, and the status line.
 ///
 /// The board rows come from [`Board::view`] with the frame height minus the
@@ -157,13 +178,10 @@ pub fn draw<Tz: TimeZone>(
     let widths = Widths::fixed();
     let height = usize::from(area.height) - FIXED_LINES;
     let window = board.window();
-    let mut put = |y: usize, text: &str| {
-        let y = area.y + u16::try_from(y).unwrap_or(u16::MAX);
-        frame
-            .buffer_mut()
-            .set_string(area.x, y, text, Style::default());
-    };
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let buffer = frame.buffer_mut();
     put(
+        buffer,
         0,
         &cells(
             widths,
@@ -173,24 +191,44 @@ pub fn draw<Tz: TimeZone>(
             "TIME",
             "FINISHED",
         ),
+        bold,
     );
     let view = board.view(now, height);
     for (index, row) in view.rows.iter().enumerate() {
-        let line = match row {
+        match row {
             Row::Header {
                 section,
                 count,
                 passed,
                 failed,
-            } => header_line(*section, *count, *passed, *failed, window),
-            Row::Empty(_) => String::new(),
-            Row::Run { run, .. } => run_line(run, now, widths),
-        };
-        put(index + 1, &line);
+            } => {
+                let line = header_line(*section, *count, *passed, *failed, window);
+                put(buffer, index + 1, &line, bold);
+            }
+            Row::Empty(_) => {
+                put(buffer, index + 1, "", Style::default());
+            }
+            Row::Run { run, selected } => {
+                let line = run_line(run, now, widths);
+                let y = put(buffer, index + 1, &line, Style::default());
+                buffer.set_style(
+                    Rect::new(area.x, y, 1, 1),
+                    Style::default().fg(marker_color(run.state)),
+                );
+                if *selected {
+                    buffer.set_style(
+                        Rect::new(area.x, y, area.width, 1),
+                        Style::default().add_modifier(Modifier::REVERSED),
+                    );
+                }
+            }
+        }
     }
     put(
+        buffer,
         usize::from(area.height) - 1,
         &format!("loading…{STATUS_SEPARATOR}{KEY_HINTS}"),
+        Style::default(),
     );
 }
 
