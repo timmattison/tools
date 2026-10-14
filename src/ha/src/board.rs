@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
-use crate::run::{Run, RunState};
+use crate::run::{Run, RunId, RunState};
 use crate::target::RepoName;
 
 /// One of the two lists on the board.
@@ -70,7 +70,7 @@ pub struct Board {
     window: Duration,
     runs: BTreeMap<RepoName, Vec<Run>>,
     errors: BTreeMap<RepoName, String>,
-    selected: Option<usize>,
+    selected: Option<(RunId, usize)>,
 }
 
 impl Board {
@@ -156,20 +156,22 @@ impl Board {
         (active, recent)
     }
 
-    /// The number of runs that show at `now`.
-    fn run_count(&self, now: DateTime<Utc>) -> usize {
+    /// All runs that show at `now`, in the order of the board: active, then recent.
+    fn selectable(&self, now: DateTime<Utc>) -> Vec<&Run> {
         let (active, recent) = self.sections(now);
-        active.len() + recent.len()
+        active.into_iter().chain(recent).collect()
     }
 
     /// Makes the selection valid for the runs that show at `now`.
+    ///
+    /// The selection follows its run. When the run is gone, the first run is selected.
     fn settle(&mut self, now: DateTime<Utc>) {
-        let count = self.run_count(now);
-        self.selected = match self.selected {
-            _ if count == 0 => None,
-            None => Some(0),
-            Some(index) => Some(index.min(count - 1)),
-        };
+        let runs = self.selectable(now);
+        let position = self
+            .selected
+            .and_then(|(id, _)| runs.iter().position(|run| run.id == id))
+            .unwrap_or(0);
+        self.selected = runs.get(position).map(|run| (run.id, position));
     }
 
     /// Builds the full list of rows. The list has two sections.
@@ -187,44 +189,49 @@ impl Board {
             passed: 0,
             failed: 0,
         }];
-        push_runs(&mut rows, &active, Section::Active, 0, self.selected);
+        let selected = self.selected.map(|(_, index)| index);
+        push_runs(&mut rows, &active, Section::Active, 0, selected);
         rows.push(Row::Header {
             section: Section::Recent,
             count: recent.len(),
             passed,
             failed: recent.len() - passed,
         });
-        push_runs(
-            &mut rows,
-            &recent,
-            Section::Recent,
-            active.len(),
-            self.selected,
-        );
+        push_runs(&mut rows, &recent, Section::Recent, active.len(), selected);
         rows
     }
 
     /// Moves the selection to the next run.
     pub fn select_next(&mut self, now: DateTime<Utc>) {
         self.settle(now);
-        let count = self.run_count(now);
-        self.selected = self.selected.map(|index| (index + 1).min(count - 1));
+        self.move_selection(now, |index, count| (index + 1).min(count - 1));
     }
 
     /// Moves the selection to the previous run.
     pub fn select_previous(&mut self, now: DateTime<Utc>) {
         self.settle(now);
-        self.selected = self.selected.map(|index| index.saturating_sub(1));
+        self.move_selection(now, |index, _| index.saturating_sub(1));
+    }
+
+    /// Moves the selection to the run at the position that `target` gives.
+    ///
+    /// `target` gets the current position and the number of runs.
+    fn move_selection(&mut self, now: DateTime<Utc>, target: impl Fn(usize, usize) -> usize) {
+        let runs = self.selectable(now);
+        let moved = self.selected.and_then(|(_, index)| {
+            let position = target(index, runs.len());
+            runs.get(position).map(|run| (run.id, position))
+        });
+        self.selected = moved;
     }
 
     /// The address of the selected run, or `None` when the board has no run.
     pub fn selected_url(&mut self, now: DateTime<Utc>) -> Option<String> {
         self.settle(now);
-        let (active, recent) = self.sections(now);
-        active
+        let (id, _) = self.selected?;
+        self.selectable(now)
             .into_iter()
-            .chain(recent)
-            .nth(self.selected?)
+            .find(|run| run.id == id)
             .map(|run| run.url.clone())
     }
 }
@@ -252,7 +259,6 @@ fn push_runs<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::run::RunId;
     use chrono::{Duration as Span, TimeZone};
 
     const HOUR: u64 = 3600;
