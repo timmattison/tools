@@ -25,6 +25,34 @@ const MANIFEST: &str = "Cargo.toml";
 /// The arguments that give the top level of the git work tree.
 const TOP_LEVEL_ARGUMENTS: [&str; 2] = ["rev-parse", "--show-toplevel"];
 
+/// The arguments of `cargo metadata`, before the manifest path.
+const METADATA_ARGUMENTS: [&str; 5] = [
+    "metadata",
+    "--no-deps",
+    "--format-version",
+    "1",
+    "--manifest-path",
+];
+
+/// The text that names `cargo metadata` in an error.
+const METADATA_COMMAND: &str = "cargo metadata";
+
+/// The arguments that list the installed binaries.
+const INSTALL_ARGUMENTS: [&str; 2] = ["install", "--list"];
+
+/// The text that names `cargo install --list` in an error.
+const INSTALL_COMMAND: &str = "cargo install --list";
+
+/// The arguments of the one `git log` that gives the added dates. A record
+/// starts with NUL and a date, then the files of the commit.
+const LOG_ARGUMENTS: [&str; 5] = [
+    "log",
+    "--format=%x00%as",
+    "--name-only",
+    "--no-renames",
+    "--relative",
+];
+
 /// The mode bits that make a file executable for its owner, group, or others.
 const EXECUTE_BITS: u32 = 0o111;
 
@@ -100,7 +128,7 @@ impl Catalog {
     /// Gives the names of the tools as a set.
     #[must_use]
     pub fn names(&self) -> ToolNames {
-        ToolNames::default()
+        self.tools.iter().map(|tool| tool.name.clone()).collect()
     }
 }
 
@@ -225,11 +253,89 @@ pub fn read(
     search_path: Option<&OsStr>,
     cargo_bin: Option<&Path>,
 ) -> Result<Catalog, CatalogError> {
-    let _ = (programs, search_path, cargo_bin);
+    let manifest = root.join(MANIFEST);
+    let mut metadata_command = Command::new(&programs.cargo);
+    metadata_command
+        .args(METADATA_ARGUMENTS)
+        .arg(&manifest)
+        .stdin(Stdio::null());
+    let metadata = run_checked(&mut metadata_command, &programs.cargo, METADATA_COMMAND)?;
+    let found = binaries(&String::from_utf8_lossy(&metadata.stdout), root)?;
+
+    let mut install_command = Command::new(&programs.cargo);
+    install_command.args(INSTALL_ARGUMENTS).stdin(Stdio::null());
+    let install = run_checked(&mut install_command, &programs.cargo, INSTALL_COMMAND)?;
+    let installed = installed_binaries(&String::from_utf8_lossy(&install.stdout));
+
+    let crate_dirs: Vec<PathBuf> = found.iter().map(|(_, dir)| dir.clone()).collect();
+    let dates = read_added_dates(root, programs, &crate_dirs)?;
+
+    let tools = found
+        .into_iter()
+        .map(|(name, crate_dir)| {
+            let is_installed = installed.contains(name.as_str());
+            let path = is_installed.then(|| match (search_path, cargo_bin) {
+                (Some(search_path), Some(cargo_bin)) => {
+                    path_state(name.as_str(), search_path, cargo_bin)
+                }
+                (Some(search_path), None) => path_state(name.as_str(), search_path, Path::new("")),
+                (None, _) => PathState::NotOnPath,
+            });
+            Tool {
+                added: dates.get(&crate_dir).copied(),
+                name,
+                crate_dir,
+                installed: is_installed,
+                path,
+            }
+        })
+        .collect();
     Ok(Catalog {
         root: root.to_path_buf(),
-        tools: Vec::new(),
+        tools,
     })
+}
+
+/// Runs `command` and gives its output. A non-zero status is
+/// [`CatalogError::Failed`]. `label` names the command in that error.
+fn run_checked(
+    command: &mut Command,
+    program: &OsStr,
+    label: &str,
+) -> Result<Output, CatalogError> {
+    let output = run(command, program)?;
+    if output.status.success() {
+        Ok(output)
+    } else {
+        Err(CatalogError::Failed {
+            command: label.to_string(),
+            status: output.status.to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        })
+    }
+}
+
+/// Asks git for the added date of each crate directory. A root that is not in
+/// a git repository gives an empty map, because the dates are optional.
+fn read_added_dates(
+    root: &Path,
+    programs: &Programs,
+    crate_dirs: &[PathBuf],
+) -> Result<BTreeMap<PathBuf, NaiveDate>, CatalogError> {
+    let mut command = Command::new(&programs.git);
+    gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
+    command
+        .args(LOG_ARGUMENTS)
+        .current_dir(root)
+        .stdin(Stdio::null());
+    let output = run(&mut command, &programs.git)?;
+    if !output.status.success() {
+        return Ok(BTreeMap::new());
+    }
+    Ok(added_dates(
+        &String::from_utf8_lossy(&output.stdout),
+        crate_dirs,
+    ))
 }
 
 /// Gives the binary targets of a `cargo metadata` document, each with its
