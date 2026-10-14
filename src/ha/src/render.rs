@@ -293,6 +293,8 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
     use ratatui::style::{Color, Modifier};
+    use std::fmt::Display;
+
     use ratatui::Terminal;
 
     use crate::run::{Run, RunId, RunState};
@@ -399,14 +401,28 @@ mod tests {
         board
     }
 
-    /// Draws one frame and returns the buffer.
-    fn render_with(width: u16, height: u16, board: &mut Board, status: &Status) -> Buffer {
+    /// Draws one frame in the time zone `tz` and returns the buffer.
+    fn render_in<Tz: TimeZone>(
+        width: u16,
+        height: u16,
+        board: &mut Board,
+        status: &Status,
+        tz: &Tz,
+    ) -> Buffer
+    where
+        Tz::Offset: Display,
+    {
         let mut terminal =
             Terminal::new(TestBackend::new(width, height)).expect("a test terminal opens");
         terminal
-            .draw(|frame| draw(frame, board, status, now(), &utc()))
+            .draw(|frame| draw(frame, board, status, now(), tz))
             .expect("a test frame draws");
         terminal.backend().buffer().clone()
+    }
+
+    /// Draws one frame in UTC and returns the buffer.
+    fn render_with(width: u16, height: u16, board: &mut Board, status: &Status) -> Buffer {
+        render_in(width, height, board, status, &utc())
     }
 
     /// Reads each line of a buffer as text. A wide glyph fills one cell and
@@ -569,5 +585,77 @@ mod tests {
             assert!(buffer[(0, y)].modifier.contains(Modifier::BOLD), "line {y}");
         }
         assert!(!buffer[(2, 2)].modifier.contains(Modifier::BOLD));
+    }
+
+    fn started_cells(text: &[String], y: usize) -> String {
+        // The started column starts after 1 + 21 + 17 + 17 + 31 + 5 spaces.
+        text[y]
+            .chars()
+            .skip(92)
+            .take(11)
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    }
+
+    #[test]
+    fn the_started_column_follows_the_time_zone() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(
+                    1,
+                    "a/x",
+                    "CI",
+                    "main",
+                    "early",
+                    RunState::Running,
+                    "2026-10-13T16:00:00Z",
+                    "2026-10-13T16:00:00Z",
+                ),
+                run(
+                    2,
+                    "a/x",
+                    "CI",
+                    "main",
+                    "late",
+                    RunState::Running,
+                    "2026-10-13T14:59:00Z",
+                    "2026-10-13T14:59:00Z",
+                ),
+            ],
+        );
+        let tokyo = chrono::FixedOffset::east_opt(9 * 3_600).expect("nine hours is valid");
+        let in_tokyo = lines(&render_in(120, 8, &mut board, &Status::default(), &tokyo));
+        let in_utc = lines(&render_with(120, 8, &mut board, &Status::default()));
+        // Tokyo reads 21:00 on 10-14 now. 14:59 UTC is 23:59 on 10-13 there,
+        // and 16:00 UTC is 01:00 on 10-14 there.
+        assert_eq!(started_cells(&in_tokyo, 2), "10-13 23:59");
+        assert_eq!(started_cells(&in_tokyo, 3), "01:00:00");
+        assert_eq!(started_cells(&in_utc, 2), "10-13 14:59");
+        assert_eq!(started_cells(&in_utc, 3), "10-13 16:00");
+    }
+
+    #[test]
+    fn a_run_from_earlier_today_shows_the_clock_in_the_time_zone() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("a/x"),
+            vec![run(
+                1,
+                "a/x",
+                "CI",
+                "main",
+                "t",
+                RunState::Running,
+                "2026-10-13T16:00:00Z",
+                "2026-10-13T16:00:00Z",
+            )],
+        );
+        // 16:00 UTC on 10-13 is 01:00 on 10-14 at +09:00, and now is 21:00 on 10-14 there.
+        let tokyo = chrono::FixedOffset::east_opt(9 * 3_600).expect("nine hours is valid");
+        let text = lines(&render_in(120, 8, &mut board, &Status::default(), &tokyo));
+        assert_eq!(started_cells(&text, 2), "01:00:00");
     }
 }
