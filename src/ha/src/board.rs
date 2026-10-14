@@ -129,13 +129,16 @@ impl Board {
     pub fn view(&mut self, now: DateTime<Utc>, height: usize) -> View<'_> {
         self.settle(now);
         if height > 0 {
-            let selected_row = self
-                .build_rows(now)
+            let rows = self.build_rows(now);
+            let selected_row = rows
                 .iter()
                 .position(|row| matches!(row, Row::Run { selected: true, .. }));
             if let Some(row) = selected_row {
-                if row < self.offset {
-                    self.offset = row;
+                let header_above =
+                    height >= 2 && row > 0 && matches!(rows.get(row - 1), Some(Row::Header { .. }));
+                let top = if header_above { row - 1 } else { row };
+                if top < self.offset {
+                    self.offset = top;
                 }
                 if row >= self.offset + height {
                     self.offset = row + 1 - height;
