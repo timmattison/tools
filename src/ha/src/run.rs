@@ -3,6 +3,8 @@
 //! GitHub names many statuses and conclusions. The board needs only five
 //! states, thus [`RunState`] folds the GitHub values into those five.
 
+use std::collections::HashSet;
+
 use chrono::{DateTime, Utc};
 
 use crate::target::RepoName;
@@ -81,9 +83,55 @@ pub struct Run {
     pub url: String,
 }
 
+/// Keeps the first run of each ID and drops the later runs of the same ID.
+///
+/// The order of the kept runs does not change. A list can hold one run two
+/// times when the run moves between two requests, and the board needs one row
+/// for each ID.
+pub fn keep_first_of_each_id(runs: &mut Vec<Run>) {
+    let mut seen = HashSet::new();
+    runs.retain(|run| seen.insert(run.id));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run_with(id: u64, title: &str) -> Run {
+        let time = DateTime::<Utc>::UNIX_EPOCH;
+        Run {
+            id: RunId(id),
+            repo: RepoName::parse("o/r").expect("a valid repository"),
+            workflow: "ci".to_owned(),
+            branch: "main".to_owned(),
+            title: title.to_owned(),
+            state: RunState::Running,
+            started_at: time,
+            updated_at: time,
+            url: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_first_run_of_an_id_stays() {
+        let mut runs = vec![run_with(5, "first"), run_with(5, "second")];
+        keep_first_of_each_id(&mut runs);
+        assert_eq!(runs, [run_with(5, "first")]);
+    }
+
+    #[test]
+    fn the_order_of_the_kept_runs_does_not_change() {
+        let mut runs = vec![
+            run_with(7, "a"),
+            run_with(3, "b"),
+            run_with(7, "c"),
+            run_with(9, "d"),
+            run_with(3, "e"),
+        ];
+        keep_first_of_each_id(&mut runs);
+        let ids: Vec<u64> = runs.iter().map(|run| run.id.0).collect();
+        assert_eq!(ids, [7, 3, 9]);
+    }
 
     #[test]
     fn each_active_status_maps_to_its_state() {

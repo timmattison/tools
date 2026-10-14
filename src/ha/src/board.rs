@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
-use crate::run::{Run, RunId, RunState};
+use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
 use crate::target::RepoName;
 
 /// One of the two lists on the board.
@@ -86,7 +86,9 @@ impl Board {
     }
 
     /// Stores the runs of one repository and clears the error of that repository.
-    pub fn replace(&mut self, repo: RepoName, runs: Vec<Run>) {
+    /// A repeated run ID keeps its first run only.
+    pub fn replace(&mut self, repo: RepoName, mut runs: Vec<Run>) {
+        keep_first_of_each_id(&mut runs);
         self.errors.remove(&repo);
         self.runs.insert(repo, runs);
     }
@@ -720,7 +722,7 @@ mod tests {
             vec![
                 run(5, "a/x", RunState::Running, 10, 1),
                 run(5, "a/x", RunState::Running, 10, 1),
-                run(4, "a/x", RunState::Running, 20, 1),
+                run(4, "a/x", RunState::Running, 5, 1),
             ],
         );
         let rows = board.rows(now());

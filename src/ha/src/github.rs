@@ -7,7 +7,7 @@
 //! `run_with_limit`, `RunFailure`, and `drain`, with their tests, come from
 //! `src/cwt/src/pulls.rs`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::Read;
 use std::process::{Command, Output, Stdio};
@@ -20,7 +20,7 @@ use wait_timeout::ChildExt;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
-use crate::run::{Run, RunId, RunState};
+use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
 use crate::status::RateLimit;
 use crate::target::{OwnerName, RepoName};
 
@@ -347,7 +347,8 @@ impl GhSource {
     /// Fetches every page of the runs of `repo` for `filter`.
     ///
     /// The fetch goes on while the last page was full and the count so far is
-    /// below `total_count`. It stops after `MAX_PAGES` pages.
+    /// below `total_count`. It stops after `MAX_PAGES` pages. A run that moves
+    /// from one page to the next between two requests is kept once.
     fn all_runs(
         &self,
         repo: &RepoName,
@@ -363,6 +364,7 @@ impl GhSource {
                 break;
             }
         }
+        keep_first_of_each_id(&mut runs);
         Ok(runs)
     }
 
@@ -447,12 +449,11 @@ impl Source for GhSource {
                 self.all_runs(repo, "created", &filter)
             }
             RunQuery::Active => {
-                let mut seen = HashSet::new();
                 let mut runs = self.all_runs(repo, "in_progress", "status=in_progress")?;
                 runs.extend(self.all_runs(repo, "queued", "status=queued")?);
                 // A run can change from queued to in progress between the two
                 // requests, and then both lists hold it. Keep the first one.
-                runs.retain(|run| seen.insert(run.id));
+                keep_first_of_each_id(&mut runs);
                 Ok(runs)
             }
         }
@@ -976,8 +977,19 @@ mod tests {
 
     #[test]
     fn the_fetch_stops_after_ten_pages() {
-        let stub = Stub::new("cat \"$dir/page1.out\"");
-        stub.file("page1.out", &ok_output(&runs_json(5000, 1, 100)));
+        // Each page holds its own run IDs, so the join keeps all of them.
+        let lines: Vec<String> = (1..=10)
+            .map(|page| format!("  *'&page={page}&'*) cat \"$dir/page{page}.out\";;"))
+            .collect();
+        let cases = lines.join("\n");
+        let stub = Stub::new(&format!("case \"$*\" in\n{cases} esac"));
+        for page in 1..=10_u64 {
+            let first_id = (page - 1) * 100 + 1;
+            stub.file(
+                &format!("page{page}.out"),
+                &ok_output(&runs_json(5000, first_id, 100)),
+            );
+        }
         let runs = stub
             .source()
             .runs_of(&repo("o/r"), since_query())
