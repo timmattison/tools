@@ -11,10 +11,30 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::command_words::{Aliases, CommandWord};
 use crate::tool::{ToolName, ToolNames};
+
+/// The file name of zsh.
+const ZSH: &str = "zsh";
+
+/// The file name of bash.
+const BASH: &str = "bash";
+
+/// The text that follows the marker on the line that starts the aliases.
+const ALIASES_LABEL: &str = "ALIASES";
+
+/// The text that follows the marker on the line that starts a function. The
+/// name of the function follows this text.
+const FUNCTION_LABEL: &str = "FUNCTION";
+
+/// The text that follows the marker on the line that ends the output.
+const END_LABEL: &str = "END";
+
+/// The name of the loop variable in the script. It is unlikely to clash with a
+/// name that the person uses.
+const LOOP_VARIABLE: &str = "__wdid_function";
 
 /// The default bound on the shell start.
 pub const TIMEOUT: Duration = Duration::from_secs(30);
@@ -33,8 +53,11 @@ impl ShellKind {
     /// Gives `None` for any other name.
     #[must_use]
     pub fn of(shell: &Path) -> Option<Self> {
-        let _ = shell;
-        None
+        match shell.file_name()?.to_str()? {
+            ZSH => Some(Self::Zsh),
+            BASH => Some(Self::Bash),
+            _ => None,
+        }
     }
 }
 
@@ -50,7 +73,10 @@ impl Marker {
     /// nanoseconds since the Unix epoch.
     #[must_use]
     pub fn unique() -> Self {
-        Self(String::new())
+        let nanoseconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        Self(format!("__WDID_{}_{nanoseconds}__", std::process::id()))
     }
 
     /// Makes a marker from a text. The tests use this function.
@@ -61,7 +87,12 @@ impl Marker {
     /// shell text, and only these characters need no quoting.
     #[must_use]
     pub fn new(text: impl Into<String>) -> Self {
-        Self(text.into())
+        let text = text.into();
+        assert!(
+            !text.is_empty() && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            "a marker holds only ASCII letters, digits, and underscores: {text:?}"
+        );
+        Self(text)
     }
 
     /// Gives the text of the marker.
@@ -74,8 +105,27 @@ impl Marker {
 /// Gives the text of the `-c` argument for the shell.
 #[must_use]
 pub fn script(kind: ShellKind, marker: &Marker) -> String {
-    let _ = (kind, marker);
-    String::new()
+    let marker = marker.as_str();
+    match kind {
+        ShellKind::Zsh => format!(
+            "print -r -- '{marker} {ALIASES_LABEL}'\n\
+             alias -L\n\
+             for {LOOP_VARIABLE} in ${{(ok)functions}}; do\n\
+             \x20 print -r -- \"{marker} {FUNCTION_LABEL} ${LOOP_VARIABLE}\"\n\
+             \x20 print -r -- \"${{functions[${LOOP_VARIABLE}]}}\"\n\
+             done\n\
+             print -r -- '{marker} {END_LABEL}'\n"
+        ),
+        ShellKind::Bash => format!(
+            "printf '%s\\n' '{marker} {ALIASES_LABEL}'\n\
+             alias -p\n\
+             for {LOOP_VARIABLE} in $(compgen -A function); do\n\
+             \x20 printf '%s\\n' \"{marker} {FUNCTION_LABEL} ${LOOP_VARIABLE}\"\n\
+             \x20 declare -f -- \"${LOOP_VARIABLE}\" | tail -n +2\n\
+             done\n\
+             printf '%s\\n' '{marker} {END_LABEL}'\n"
+        ),
+    }
 }
 
 /// The aliases and the functions that the shell defines.
