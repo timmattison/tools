@@ -4,8 +4,10 @@
 //! every repository, sends each answer to the screen as an [`Update`], and
 //! then waits for the next cycle. The screen sends [`Command`] values back.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -168,20 +170,7 @@ fn cycle<S: Source>(
     updates: &Sender<Update>,
 ) -> Result<(), ReceiverGone> {
     let repos = refresh_repos(source, settings, state, updates)?;
-    let since = window_start(settings.window);
-    for repo in &repos {
-        let message = match source.runs_of(repo, RunQuery::CreatedSince(since)) {
-            Ok(runs) => Update::Runs {
-                repo: repo.clone(),
-                runs,
-            },
-            Err(error) => Update::Failed {
-                repo: repo.clone(),
-                error: error.to_string(),
-            },
-        };
-        updates.send(message).map_err(|_| ReceiverGone)?;
-    }
+    fetch_all(source, &repos, window_start(settings.window), updates)?;
     let now = Utc::now();
     let rate = source.rate_limit();
     let (_delay, backoff_until) = next_delay(settings.interval, rate, now);
@@ -192,6 +181,51 @@ fn cycle<S: Source>(
             backoff_until,
         })
         .map_err(|_| ReceiverGone)
+}
+
+/// Fetches the runs of every repository with a pool of threads.
+///
+/// The threads take repositories from one shared queue. No thread holds the
+/// queue lock while it waits for the source.
+fn fetch_all<S: Source>(
+    source: &S,
+    repos: &BTreeSet<RepoName>,
+    since: DateTime<Utc>,
+    updates: &Sender<Update>,
+) -> Result<(), ReceiverGone> {
+    let queue = Mutex::new(repos.iter().collect::<VecDeque<_>>());
+    let gone = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        for _ in 0..CONCURRENCY.min(repos.len()) {
+            scope.spawn(|| {
+                while !gone.load(Ordering::Relaxed) {
+                    let next = queue
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .pop_front();
+                    let Some(repo) = next else { break };
+                    let message = match source.runs_of(repo, RunQuery::CreatedSince(since)) {
+                        Ok(runs) => Update::Runs {
+                            repo: repo.clone(),
+                            runs,
+                        },
+                        Err(error) => Update::Failed {
+                            repo: repo.clone(),
+                            error: error.to_string(),
+                        },
+                    };
+                    if updates.send(message).is_err() {
+                        gone.store(true, Ordering::Relaxed);
+                    }
+                }
+            });
+        }
+    });
+    if gone.load(Ordering::Relaxed) {
+        Err(ReceiverGone)
+    } else {
+        Ok(())
+    }
 }
 
 /// Builds the repository set. When the owner cadence is due, it lists every
