@@ -914,4 +914,13 @@ mod tests {
         let offsets = offsets_while(&mut board, 4, 6, Board::select_next);
         assert_eq!(offsets, [0, 0, 1, 2, 3, 4]);
     }
+
+    #[test]
+    fn moving_the_selection_up_scrolls_by_the_least_amount() {
+        let mut board = long_board(10, 0);
+        let down = offsets_while(&mut board, 4, 5, Board::select_next);
+        assert_eq!(down.last(), Some(&3));
+        let up = offsets_while(&mut board, 4, 4, Board::select_previous);
+        assert_eq!(up, [3, 3, 3, 2]);
+    }
 }
