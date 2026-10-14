@@ -1,0 +1,52 @@
+//! Draws the board of `ha` and the text formats of its columns.
+
+use std::time::Duration;
+
+/// Writes how long a run took, in at most 7 columns.
+///
+/// Examples are `45s`, `12m 03s`, `2h 14m`, and `3d 04h`. A duration of 100
+/// days or more gives `>99d`.
+#[must_use]
+pub fn format_elapsed(d: Duration) -> String {
+    let _ = d;
+    String::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_elapsed_writes_two_units_and_a_cap() {
+        let cases: [(u64, &str); 13] = [
+            (0, "0s"),
+            (45, "45s"),
+            (59, "59s"),
+            (60, "1m 00s"),
+            (723, "12m 03s"),
+            (3_599, "59m 59s"),
+            (3_600, "1h 00m"),
+            (8_040, "2h 14m"),
+            (86_399, "23h 59m"),
+            (86_400, "1d 00h"),
+            (3 * 86_400 + 4 * 3_600, "3d 04h"),
+            (99 * 86_400 + 23 * 3_600 + 3_599, "99d 23h"),
+            (100 * 86_400, ">99d"),
+        ];
+        for (seconds, expected) in cases {
+            assert_eq!(format_elapsed(Duration::from_secs(seconds)), expected);
+        }
+    }
+
+    #[test]
+    fn format_elapsed_is_never_wider_than_seven_columns() {
+        let mut seconds: u64 = 0;
+        while seconds < 200 * 86_400 {
+            let text = format_elapsed(Duration::from_secs(seconds));
+            assert!(text.chars().count() <= 7, "{seconds}s gave {text:?}");
+            seconds += 997;
+        }
+        let text = format_elapsed(Duration::from_secs(u64::MAX));
+        assert_eq!(text, ">99d");
+    }
+}
