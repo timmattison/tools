@@ -1242,21 +1242,25 @@ mod tests {
     }
 
     #[test]
-    fn an_active_query_asks_for_in_progress_and_queued_runs_once_each() {
+    fn an_active_query_asks_for_each_active_status_once() {
         let stub = Stub::new(
             "case \"$*\" in
   *status=in_progress*) cat \"$dir/page1.out\";;
   *status=queued*) cat \"$dir/page2.out\";;
+  *status=waiting*) cat \"$dir/page3.out\";;
+  *status=pending*) cat \"$dir/page4.out\";;
  esac",
         );
         stub.file("page1.out", &ok_output(&runs_json(2, 1, 2)));
         stub.file("page2.out", &ok_output(&runs_json(2, 2, 2)));
+        stub.file("page3.out", &ok_output(&runs_json(2, 3, 2)));
+        stub.file("page4.out", &ok_output(&runs_json(2, 4, 2)));
         let runs = stub
             .source()
             .runs_of(&repo("o/r"), RunQuery::Active)
             .expect("runs");
         let ids: Vec<u64> = runs.iter().map(|run| run.id.0).collect();
-        assert_eq!(ids, [1, 2, 3]);
+        assert_eq!(ids, [1, 2, 3, 4, 5]);
         let paths: Vec<String> = stub
             .requests()
             .into_iter()
@@ -1267,8 +1271,34 @@ mod tests {
             [
                 "repos/o/r/actions/runs?per_page=100&page=1&status=in_progress",
                 "repos/o/r/actions/runs?per_page=100&page=1&status=queued",
+                "repos/o/r/actions/runs?per_page=100&page=1&status=waiting",
+                "repos/o/r/actions/runs?per_page=100&page=1&status=pending",
             ]
         );
+    }
+
+    #[test]
+    fn an_active_query_finds_a_run_that_waits_for_an_approval() {
+        let stub = Stub::new(
+            "case \"$*\" in
+  *status=waiting*) cat \"$dir/waiting.out\";;
+  *) cat \"$dir/empty.out\";;
+ esac",
+        );
+        let waiting = r#"{"total_count":1,"workflow_runs":[
+        {"id":42,"name":"Deploy","display_title":"Ship it","head_branch":"main",
+         "status":"waiting","conclusion":null,"run_started_at":null,
+         "created_at":"2026-08-01T01:02:03Z","updated_at":"2026-08-01T01:03:00Z",
+         "html_url":"https://github.com/o/r/actions/runs/42"}]}"#;
+        stub.file("waiting.out", &ok_output(waiting));
+        stub.file("empty.out", &ok_output(&runs_json(0, 1, 0)));
+        let runs = stub
+            .source()
+            .runs_of(&repo("o/r"), RunQuery::Active)
+            .expect("runs");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id.0, 42);
+        assert_eq!(runs[0].state, RunState::Queued);
     }
 
     /// The error that `runs_of` gives for a stub with this `case` body.
