@@ -596,6 +596,42 @@ fn read_gives_the_tools_sorted_by_name_with_every_fact() {
     assert_eq!(two.path, None);
 }
 
+/// Git quotes a path that holds a byte outside ASCII (`"drei-\303\274/..."`)
+/// unless `core.quotepath` is off. A quoted path matches no crate directory,
+/// and the crate got no added date.
+#[test]
+fn read_gives_the_added_date_of_a_crate_dir_with_a_multibyte_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let crate_dir = "drei-ü";
+    std::fs::write(
+        root.join("Cargo.toml"),
+        format!("[workspace]\nresolver = \"2\"\nmembers = [\"{crate_dir}\"]\n"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join(crate_dir).join("src")).unwrap();
+    std::fs::write(
+        root.join(crate_dir).join("Cargo.toml"),
+        "[package]\nname = \"wdid-fixture-drei\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(root.join(crate_dir).join("src/main.rs"), "fn main() {}\n").unwrap();
+    git(root, &["init", "-q", "-b", "main"], None);
+    git(root, &["add", "."], None);
+    git(
+        root,
+        &["commit", "-q", "-m", "add drei"],
+        Some(ONE_COMMIT_DATE),
+    );
+    let stub = StubCargo::new();
+
+    let catalog = read(root, &stub.programs(), None, None).unwrap();
+
+    assert_eq!(catalog.tools.len(), 1);
+    assert_eq!(catalog.tools[0].crate_dir, PathBuf::from(crate_dir));
+    assert_eq!(catalog.tools[0].added, Some(date(2025, 1, 2)));
+}
+
 #[test]
 fn read_names_gives_the_tool_names() {
     let fixture = Fixture::with_history();
