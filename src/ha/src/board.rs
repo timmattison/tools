@@ -846,4 +846,51 @@ mod tests {
             ["Header(Active,2,0,0)", "Run(1)*", "Run(2)"]
         );
     }
+
+    /// A board with `active` running runs (ids 1.., oldest first) and `recent`
+    /// passed runs (ids 101.., newest first).
+    fn long_board(active: u64, recent: u64) -> Board {
+        let mut board = board();
+        let mut runs = Vec::new();
+        for id in 1..=active {
+            let started = 200 - i64::try_from(id).expect("a small id");
+            runs.push(run(id, "a/x", RunState::Running, started, 1));
+        }
+        for id in 101..101 + recent {
+            let finished = i64::try_from(id).expect("a small id") - 100;
+            runs.push(run(id, "a/x", RunState::Passed, 300, finished));
+        }
+        board.replace(repo("a/x"), runs);
+        board
+    }
+
+    /// Moves the selection with `step` and reads the scroll offset after each
+    /// move. The selected row must be inside the view each time.
+    fn offsets_while(
+        board: &mut Board,
+        height: usize,
+        moves: usize,
+        step: fn(&mut Board, DateTime<Utc>),
+    ) -> Vec<usize> {
+        let mut offsets = Vec::new();
+        for _ in 0..moves {
+            step(board, now());
+            let view = board.view(now(), height);
+            assert!(
+                marked(&view.rows).iter().any(|row| row.ends_with('*')),
+                "the selected row is outside the view at first = {}",
+                view.first
+            );
+            offsets.push(view.first);
+        }
+        offsets
+    }
+
+    #[test]
+    fn moving_the_selection_down_scrolls_by_the_least_amount() {
+        let mut board = long_board(10, 0);
+        assert_eq!(board.view(now(), 4).first, 0);
+        let offsets = offsets_while(&mut board, 4, 6, Board::select_next);
+        assert_eq!(offsets, [0, 0, 1, 2, 3, 4]);
+    }
 }
