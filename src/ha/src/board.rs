@@ -490,4 +490,25 @@ mod tests {
         );
         assert_eq!(board.errors().len(), 1);
     }
+
+    #[test]
+    fn keep_only_drops_the_runs_and_errors_of_other_repositories() {
+        let mut board = board();
+        board.replace(repo("a/x"), vec![run(1, "a/x", RunState::Running, 5, 1)]);
+        board.replace(repo("b/y"), vec![run(2, "b/y", RunState::Running, 4, 1)]);
+        board.fail(repo("b/y"), "timed out".to_owned());
+        board.fail(repo("c/z"), "HTTP 404".to_owned());
+        board.fail(repo("a/x"), "HTTP 500".to_owned());
+
+        let keep: BTreeSet<RepoName> = [repo("A/X")].into_iter().collect();
+        board.keep_only(&keep);
+
+        assert_eq!(
+            shape(&board.rows(now()))[..3],
+            ["Header(Active,1,0,0)", "Run(1)", "Header(Recent,0,0,0)"]
+        );
+        let errors = board.errors();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].1, "HTTP 500");
+    }
 }
