@@ -13,6 +13,10 @@ const PATH_SEPARATOR: char = '/';
 /// development build.
 const TARGET_DIRECTORY: &str = "target";
 
+/// The directory that holds installed binaries. A path whose parent has this
+/// name is a use of an installed tool.
+const BIN_DIRECTORY: &str = "bin";
+
 /// The command word of cargo.
 const CARGO: &str = "cargo";
 
@@ -122,14 +126,25 @@ fn long_option_value<'a>(arg: &'a str, option: &str) -> Option<&'a str> {
 
 /// Gives the run of a command word that holds a path. `directory` is the text
 /// before the last separator. `name` is the text after it.
+///
+/// A path under a [`TARGET_DIRECTORY`] is a development run. A path whose
+/// parent directory is a [`BIN_DIRECTORY`] is a use: `~/.cargo/bin/prcp`,
+/// `/usr/local/bin/prcp`. Any other path gives no run. Each crate directory of
+/// the workspace has the name of its tool, and zsh changes into a directory
+/// that a person types alone (`autocd`). Thus `src/occ` is a `cd`, and a rule
+/// that took every path counted 32 crate directories of a real history as
+/// uses.
 fn path_run(directory: &str, name: &str, tools: &ToolNames) -> Option<Run> {
     let tool = tools.get(name)?.clone();
-    if directory
-        .split(PATH_SEPARATOR)
+    let mut components = directory.split(PATH_SEPARATOR);
+    if components
+        .clone()
         .any(|component| component == TARGET_DIRECTORY)
     {
         Some(Run::Development(tool))
-    } else {
+    } else if components.next_back() == Some(BIN_DIRECTORY) {
         Some(Run::Use(tool))
+    } else {
+        None
     }
 }

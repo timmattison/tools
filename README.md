@@ -4412,7 +4412,7 @@ It does not use `atuin history list`. That command obeys `filter_mode` of your a
 - A word that follows a wrapper: `sudo`, `doas`, `time`, `nice`, `nohup`, `env`, `command`, `exec`, `noglob`, `builtin`, `caffeinate`, `xargs`, `watch`, `timeout` and `gtimeout`. `wdid` skips the options of the wrapper. `command -v tool` is a lookup and does not count.
 - An alias, as the shell expands it. `wtm` with `alias wtm='wt --main'` counts for `wt`. The report shows the alias in the column `Through an alias or a function`.
 - A function, through its body, to any depth. A function that calls `cwt` gives `cwt` a use through that function.
-- A path. `~/.cargo/bin/prcp` is a use of `prcp`.
+- A path in a `bin` directory. `~/.cargo/bin/prcp` is a use of `prcp`. A path anywhere else is not a use: each crate directory has the name of its tool, and zsh changes into a directory that you type alone, so `src/prcp` is a `cd`.
 - `cargo run --bin <tool>` and `cargo run -p <tool>` count as a development run. The report shows them in the column `Dev runs`. They are not uses, and they do not change the first use or the last use. A path with a `target` directory (`./target/release/prcp`) is a development run as well.
 
 ### What does not count
