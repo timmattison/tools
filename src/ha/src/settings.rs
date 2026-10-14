@@ -120,6 +120,16 @@ pub struct CommandLine {
 /// Returns a [`SettingsError`] when the file text is not valid, when a value
 /// is not valid, or when no target is left.
 pub fn resolve(cli: &CommandLine, file: Option<(&Path, &str)>) -> Result<Settings, SettingsError> {
+    resolve_with(cli, file, default_config_path().as_deref())
+}
+
+/// The work of [`resolve`]. `default_path` is the file that a "no targets"
+/// message names when `file` is `None`.
+fn resolve_with(
+    cli: &CommandLine,
+    file: Option<(&Path, &str)>,
+    default_path: Option<&Path>,
+) -> Result<Settings, SettingsError> {
     let (path, parsed) = match file {
         Some((path, text)) => {
             let parsed =
@@ -153,7 +163,7 @@ pub fn resolve(cli: &CommandLine, file: Option<(&Path, &str)>) -> Result<Setting
     };
     if targets.is_empty() {
         return Err(SettingsError::NoTargets {
-            config: path.unwrap_or_else(describe_default_config_path),
+            config: path.unwrap_or_else(|| describe_config_path(default_path)),
         });
     }
     Ok(Settings {
@@ -182,10 +192,23 @@ pub fn load(cli: &CommandLine) -> Result<Settings, SettingsError> {
 /// The work of [`load`], with the default config file as a parameter so a test
 /// never reads the real configuration of the user.
 fn load_from(cli: &CommandLine, default_path: Option<&Path>) -> Result<Settings, SettingsError> {
-    let _ = (cli, default_path);
-    Err(SettingsError::NoTargets {
-        config: String::new(),
-    })
+    let (path, required) = match (&cli.config, default_path) {
+        (Some(chosen), _) => (Some(chosen.as_path()), true),
+        (None, default) => (default, false),
+    };
+    let Some(path) = path else {
+        return resolve_with(cli, None, None);
+    };
+    match std::fs::read_to_string(path) {
+        Ok(text) => resolve_with(cli, Some((path, &text)), default_path),
+        Err(source) if !required && source.kind() == std::io::ErrorKind::NotFound => {
+            resolve_with(cli, None, Some(path))
+        }
+        Err(source) => Err(SettingsError::Read {
+            path: path.display().to_string(),
+            source,
+        }),
+    }
 }
 
 /// Parses the `repos` and `owners` keys of the config file, in that order.
@@ -212,8 +235,8 @@ fn file_targets(config: &FileConfig, path: &str) -> Result<Vec<Target>, Settings
 }
 
 /// Names the config file for a message, when no file was read.
-fn describe_default_config_path() -> String {
-    default_config_path().map_or_else(
+fn describe_config_path(default_path: Option<&Path>) -> String {
+    default_path.map_or_else(
         || "the config file (the system gives no configuration directory)".to_owned(),
         |path| path.display().to_string(),
     )
