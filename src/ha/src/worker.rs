@@ -4,17 +4,17 @@
 //! every repository, sends each answer to the screen as an [`Update`], and
 //! then waits for the next cycle. The screen sends [`Command`] values back.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 
-use crate::github::Source;
+use crate::github::{RunQuery, Source};
 use crate::run::Run;
 use crate::settings::Settings;
 use crate::status::RateLimit;
-use crate::target::{OwnerName, RepoName};
+use crate::target::{OwnerName, RepoName, Target};
 
 /// How many repositories the worker fetches at the same time.
 pub const CONCURRENCY: usize = 8;
@@ -125,10 +125,124 @@ pub fn spawn<S: Source + 'static>(source: S, settings: &Settings) -> Worker {
     spawn_with(source, settings, SLOW_CADENCE)
 }
 
-fn spawn_with<S: Source + 'static>(_source: S, _settings: &Settings, _slow: Duration) -> Worker {
-    let (_updates_tx, updates) = mpsc::channel();
-    let (commands, _commands_rx) = mpsc::channel();
+fn spawn_with<S: Source + 'static>(source: S, settings: &Settings, slow: Duration) -> Worker {
+    let (updates_tx, updates) = mpsc::channel();
+    let (commands, commands_rx) = mpsc::channel();
+    let settings = settings.clone();
+    std::thread::Builder::new()
+        .name("ha-worker".to_owned())
+        .spawn(move || run_loop(&source, &settings, slow, &updates_tx, &commands_rx))
+        .expect("the system can start the worker thread");
     Worker { updates, commands }
+}
+
+/// The receiver of the updates is gone, so the thread has no reason to run.
+struct ReceiverGone;
+
+/// What the worker keeps from one cycle to the next.
+struct State {
+    owner_cadence: Cadence,
+    owner_lists: BTreeMap<OwnerName, Vec<RepoName>>,
+}
+
+fn run_loop<S: Source>(
+    source: &S,
+    settings: &Settings,
+    slow: Duration,
+    updates: &Sender<Update>,
+    _commands: &Receiver<Command>,
+) {
+    let mut state = State {
+        owner_cadence: Cadence::new(slow),
+        owner_lists: BTreeMap::new(),
+    };
+    let _ = cycle(source, settings, &mut state, updates);
+}
+
+/// Runs one cycle: lists the owners when due, fetches every repository, and
+/// reports the end of the cycle.
+fn cycle<S: Source>(
+    source: &S,
+    settings: &Settings,
+    state: &mut State,
+    updates: &Sender<Update>,
+) -> Result<(), ReceiverGone> {
+    let repos = refresh_repos(source, settings, state, updates)?;
+    let since = window_start(settings.window);
+    for repo in &repos {
+        if let Ok(runs) = source.runs_of(repo, RunQuery::CreatedSince(since)) {
+            let message = Update::Runs {
+                repo: repo.clone(),
+                runs,
+            };
+            updates.send(message).map_err(|_| ReceiverGone)?;
+        }
+    }
+    let now = Utc::now();
+    let rate = source.rate_limit();
+    let (_delay, backoff_until) = next_delay(settings.interval, rate, now);
+    updates
+        .send(Update::CycleDone {
+            finished_at: now,
+            rate,
+            backoff_until,
+        })
+        .map_err(|_| ReceiverGone)
+}
+
+/// Builds the repository set. When the owner cadence is due, it lists every
+/// owner again and sends the set.
+fn refresh_repos<S: Source>(
+    source: &S,
+    settings: &Settings,
+    state: &mut State,
+    updates: &Sender<Update>,
+) -> Result<BTreeSet<RepoName>, ReceiverGone> {
+    let now = Instant::now();
+    let due = state.owner_cadence.due(now);
+    let mut owner_errors = Vec::new();
+    if due {
+        state.owner_cadence.mark(now);
+        for target in &settings.targets {
+            if let Target::Owner(owner) = target {
+                match source.repos_of(owner) {
+                    Ok(list) => {
+                        state.owner_lists.insert(owner.clone(), list);
+                    }
+                    Err(error) => owner_errors.push((owner.clone(), error.to_string())),
+                }
+            }
+        }
+    }
+    let mut repos = BTreeSet::new();
+    for target in &settings.targets {
+        match target {
+            Target::Repo(repo) => {
+                repos.insert(repo.clone());
+            }
+            Target::Owner(owner) => {
+                repos.extend(state.owner_lists.get(owner).into_iter().flatten().cloned());
+            }
+        }
+    }
+    if due {
+        updates
+            .send(Update::Repos {
+                repos: repos.clone(),
+                owner_errors,
+            })
+            .map_err(|_| ReceiverGone)?;
+    }
+    Ok(repos)
+}
+
+/// The oldest creation time the worker asks for: the window plus one day, so
+/// a run that started before the window and ended inside it still shows.
+fn window_start(window: Duration) -> DateTime<Utc> {
+    chrono::TimeDelta::from_std(window)
+        .ok()
+        .and_then(|window| Utc::now().checked_sub_signed(window + chrono::TimeDelta::hours(24)))
+        .unwrap_or(DateTime::<Utc>::MIN_UTC)
 }
 
 #[cfg(test)]
