@@ -69,8 +69,12 @@ impl Status {
     /// future of `now` is live. Every reader of the message uses this method,
     /// so the rule for the end of its life is in one place.
     #[must_use]
-    pub fn message_at(&self, _now: DateTime<Utc>) -> Option<&Message> {
-        self.message.as_ref()
+    pub fn message_at(&self, now: DateTime<Utc>) -> Option<&Message> {
+        self.message.as_ref().filter(|message| {
+            (now - message.posted_at)
+                .to_std()
+                .map_or(true, |age| age < MESSAGE_LIFETIME)
+        })
     }
 }
 

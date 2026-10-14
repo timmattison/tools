@@ -7,13 +7,14 @@ use chrono::{DateTime, TimeZone, Utc};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::Span;
 use ratatui::Frame;
 use textfit::{pad_right, truncate_to_budget};
 
 use crate::board::{Board, Row, Section};
 use crate::run::{Run, RunState};
 use crate::settings::format_duration_setting;
-use crate::status::Status;
+use crate::status::{Status, MESSAGE_LIFETIME};
 
 /// The width of the marker column.
 const MARKER_WIDTH: usize = 1;
@@ -178,8 +179,9 @@ fn empty_line(section: Section, window: Duration) -> String {
 
 /// The first part of the status line, or `None` when there is nothing to say.
 ///
-/// A message wins over the errors, and the errors win over the refresh mark.
-/// The errors come from the board (one for each repository) and from the
+/// A live message wins over the errors, and the errors win over the refresh
+/// mark. A message that is [`MESSAGE_LIFETIME`] old or older is absent, thus
+/// the errors or the refresh mark show. The errors come from the board (one for each repository) and from the
 /// status (one for each owner). The text names the first and counts the rest.
 fn lead(board: &Board, status: &Status, now: DateTime<Utc>) -> Option<String> {
     if let Some(message) = status.message_at(now) {
@@ -204,6 +206,27 @@ fn lead(board: &Board, status: &Status, now: DateTime<Utc>) -> Option<String> {
         return Some(format!("⚠ {name}: {error}{more}"));
     }
     status.refreshing.then(|| "refreshing…".to_owned())
+}
+
+/// The first index of the xterm 256-color gray ramp that a new message uses.
+/// Index 252 is the color (208, 208, 208), the light gray that the push
+/// status of `gsw` starts with.
+const MESSAGE_START_GRAY: u8 = 252;
+/// The number of steps from the first gray to the last. Index 232 is the
+/// color (8, 8, 8), which is near black.
+const MESSAGE_FADE_STEPS: u8 = 20;
+
+/// The color of a status message of the age `age`.
+///
+/// The message fades from light gray to near black over [`MESSAGE_LIFETIME`].
+/// The color comes from the gray ramp of the 256-color palette, which every
+/// terminal that shows 256 colors has. Thus `ha` needs no detection of
+/// truecolor support. An age of zero gives index 252, half of the lifetime
+/// gives index 242, and an age of the lifetime or more gives index 232.
+fn message_color(age: Duration) -> Color {
+    let steps = u128::from(MESSAGE_FADE_STEPS) * age.as_millis() / MESSAGE_LIFETIME.as_millis();
+    let step = u8::try_from(steps).map_or(MESSAGE_FADE_STEPS, |s| s.min(MESSAGE_FADE_STEPS));
+    Color::Indexed(MESSAGE_START_GRAY - step)
 }
 
 /// The status line: the lead, the refresh, the rate limit, and the key hints.
@@ -322,12 +345,21 @@ pub fn draw<Tz: TimeZone>(
     }
     if usize::from(area.height) >= FIXED_LINES {
         let line = status_line(board, status, now, tz);
-        put(
+        let y = put(
             buffer,
             usize::from(area.height) - 1,
             &truncate_to_budget(&line, usize::from(area.width)),
             Style::default(),
         );
+        if let Some(message) = status.message_at(now) {
+            let width = u16::try_from(Span::raw(message.text.as_str()).width())
+                .unwrap_or(u16::MAX)
+                .min(area.width);
+            buffer.set_style(
+                Rect::new(area.x, y, width, 1),
+                Style::default().fg(message_color(span(message.posted_at, now))),
+            );
+        }
     }
 }
 

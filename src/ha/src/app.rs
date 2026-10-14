@@ -152,8 +152,10 @@ where
         }
     }
 
-    /// Acts on one key press.
+    /// Acts on one key press. Each key press removes the status message
+    /// first. The `Enter` key can then post a new one.
     fn handle_key(&mut self, key: KeyEvent) -> Flow {
+        self.status.message = None;
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => Flow::Quit,
