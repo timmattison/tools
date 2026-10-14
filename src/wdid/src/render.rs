@@ -273,8 +273,13 @@ fn summary_lines(summary: &Summary, window: &Window) -> String {
     };
     if summary.unparsed_aliases > 0 {
         shell.push_str(&format!(
-            " {} alias lines did not parse.",
-            number_of(summary.unparsed_aliases)
+            " {} alias {} did not parse.",
+            number_of(summary.unparsed_aliases),
+            if summary.unparsed_aliases == 1 {
+                "line"
+            } else {
+                "lines"
+            },
         ));
     }
     format!("{history}\n{shell}")
@@ -477,8 +482,8 @@ fn escape(command: &str) -> String {
 /// Gives the commands that did not parse, then the functions that did not
 /// parse.
 ///
-/// Each command has one line: the number of rows, a tab, and the escaped
-/// command. A blank line and the names of the functions follow, when a function
+/// Each command has one line: the number of rows in plain digits, a tab, and
+/// the escaped command. Plain digits let `sort -n` and `awk` read the list. A blank line and the names of the functions follow, when a function
 /// did not parse. With no command and no function, the text says that every
 /// command parsed.
 #[must_use]
@@ -489,7 +494,7 @@ pub fn unparsed(tally: &Tally) -> String {
         let lines: Vec<String> = summary
             .unparsed
             .iter()
-            .map(|group| format!("{}\t{}", number(group.rows), escape(&group.command)))
+            .map(|group| format!("{}\t{}", group.rows, escape(&group.command)))
             .collect();
         blocks.push(lines.join("\n"));
     }
