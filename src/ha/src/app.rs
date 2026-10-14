@@ -10,7 +10,7 @@ use ratatui::Terminal;
 
 use crate::board::Board;
 use crate::render;
-use crate::status::Status;
+use crate::status::{Message, Status};
 use crate::worker::{Command, Update, Worker};
 
 /// How long the loop waits for an event before it draws again.
@@ -175,7 +175,10 @@ where
                 if let Some(url) = self.board.selected_url((self.now)()) {
                     self.status.message = match self.opener.open(&url) {
                         Ok(()) => None,
-                        Err(_) => Some(format!("could not open a browser: {url}")),
+                        Err(_) => Some(Message {
+                            text: format!("could not open a browser: {url}"),
+                            posted_at: (self.now)(),
+                        }),
                     };
                 }
                 Flow::Continue
@@ -435,6 +438,39 @@ mod tests {
         let status_line = frame.last().unwrap();
         assert!(
             status_line.contains("could not open a browser: https://example.test/runs/1"),
+            "{status_line:?}"
+        );
+    }
+
+    #[test]
+    fn a_key_press_clears_the_message_and_the_error_shows() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        channels
+            .updates
+            .send(Update::Failed {
+                repo: repo(),
+                error: "boom".to_owned(),
+            })
+            .unwrap();
+        let opener = opener(true);
+        let (result, frame) = run_app(
+            &opener,
+            &channels,
+            vec![
+                press(KeyCode::Enter),
+                press(KeyCode::Char('x')),
+                press(KeyCode::Char('q')),
+            ],
+        );
+        assert!(result.is_ok(), "{result:?}");
+        let status_line = frame.last().unwrap();
+        assert!(
+            status_line.contains("acme/widgets: boom"),
+            "{status_line:?}"
+        );
+        assert!(
+            !status_line.contains("could not open a browser"),
             "{status_line:?}"
         );
     }

@@ -1,6 +1,8 @@
 //! What the status line of `ha` shows: the last refresh, the rate limit of
 //! the GitHub API, and the errors that are not about one repository.
 
+use std::time::Duration;
+
 use chrono::{DateTime, Utc};
 
 use crate::target::OwnerName;
@@ -27,6 +29,19 @@ impl RateLimit {
     }
 }
 
+/// How long a [`Message`] stays on the status line. A key press removes it
+/// sooner.
+pub const MESSAGE_LIFETIME: Duration = Duration::from_secs(30);
+
+/// A one-off message on the status line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message {
+    /// The text that the status line shows.
+    pub text: String,
+    /// When the message was posted. The message ages from this instant.
+    pub posted_at: DateTime<Utc>,
+}
+
 /// The state that the status line shows.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Status {
@@ -40,8 +55,23 @@ pub struct Status {
     pub backoff_until: Option<DateTime<Utc>>,
     /// The owners whose repository list failed, with the error of each.
     pub owner_errors: Vec<(OwnerName, String)>,
-    /// A one-off message, for example the address after a failed open.
-    pub message: Option<String>,
+    /// A one-off message, for example the address after a failed open. It
+    /// fades out over [`MESSAGE_LIFETIME`], then leaves. A key press removes
+    /// it sooner. Read it with [`Status::message_at`].
+    pub message: Option<Message>,
+}
+
+impl Status {
+    /// Returns the message that is live at `now`, or `None`.
+    ///
+    /// There is no live message when none was posted, or when it is
+    /// [`MESSAGE_LIFETIME`] old or older. A message that is posted in the
+    /// future of `now` is live. Every reader of the message uses this method,
+    /// so the rule for the end of its life is in one place.
+    #[must_use]
+    pub fn message_at(&self, _now: DateTime<Utc>) -> Option<&Message> {
+        self.message.as_ref()
+    }
 }
 
 #[cfg(test)]

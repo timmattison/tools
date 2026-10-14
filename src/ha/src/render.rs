@@ -181,9 +181,9 @@ fn empty_line(section: Section, window: Duration) -> String {
 /// A message wins over the errors, and the errors win over the refresh mark.
 /// The errors come from the board (one for each repository) and from the
 /// status (one for each owner). The text names the first and counts the rest.
-fn lead(board: &Board, status: &Status) -> Option<String> {
-    if let Some(message) = &status.message {
-        return Some(message.clone());
+fn lead(board: &Board, status: &Status, now: DateTime<Utc>) -> Option<String> {
+    if let Some(message) = status.message_at(now) {
+        return Some(message.text.clone());
     }
     let mut errors: Vec<(String, &str)> = board
         .errors()
@@ -209,11 +209,11 @@ fn lead(board: &Board, status: &Status) -> Option<String> {
 /// The status line: the lead, the refresh, the rate limit, and the key hints.
 ///
 /// The parts stand in this order, with [`STATUS_SEPARATOR`] between them.
-fn status_line<Tz: TimeZone>(board: &Board, status: &Status, tz: &Tz) -> String
+fn status_line<Tz: TimeZone>(board: &Board, status: &Status, now: DateTime<Utc>, tz: &Tz) -> String
 where
     Tz::Offset: Display,
 {
-    let mut parts: Vec<String> = lead(board, status).into_iter().collect();
+    let mut parts: Vec<String> = lead(board, status, now).into_iter().collect();
     parts.push(match status.last_refresh {
         Some(at) => format!("updated {}", at.with_timezone(tz).format("%H:%M:%S")),
         None => "loading…".to_owned(),
@@ -321,7 +321,7 @@ pub fn draw<Tz: TimeZone>(
         }
     }
     if usize::from(area.height) >= FIXED_LINES {
-        let line = status_line(board, status, tz);
+        let line = status_line(board, status, now, tz);
         put(
             buffer,
             usize::from(area.height) - 1,
@@ -385,7 +385,7 @@ mod tests {
     use ratatui::Terminal;
 
     use crate::run::{Run, RunId, RunState};
-    use crate::status::RateLimit;
+    use crate::status::{Message, RateLimit};
     use crate::target::{OwnerName, RepoName};
 
     fn at(text: &str) -> DateTime<Utc> {
@@ -1108,7 +1108,10 @@ mod tests {
         let mut board = Board::new(Duration::from_hours(8));
         board.fail(repo("owner/x"), "HTTP 404".to_owned());
         let status = Status {
-            message: Some("could not open a browser: https://example.com/run/1".to_owned()),
+            message: Some(Message {
+                text: "could not open a browser: https://example.com/run/1".to_owned(),
+                posted_at: now(),
+            }),
             refreshing: true,
             ..Status::default()
         };
@@ -1116,6 +1119,48 @@ mod tests {
             status_line_of(&mut board, &status),
             format!("could not open a browser: https://example.com/run/1  ·  {HINTS_TAIL}")
         );
+    }
+
+    /// A status whose message `text` was posted `age_seconds` before `now()`.
+    fn status_with_message_aged(text: &str, age_seconds: i64) -> Status {
+        Status {
+            message: Some(Message {
+                text: text.to_owned(),
+                posted_at: now() - chrono::Duration::seconds(age_seconds),
+            }),
+            ..Status::default()
+        }
+    }
+
+    #[test]
+    fn a_message_leaves_the_status_line_after_its_lifetime() {
+        let mut board = Board::new(Duration::from_hours(8));
+        assert_eq!(
+            status_line_of(&mut board, &status_with_message_aged("hello there", 29)),
+            format!("hello there  ·  {HINTS_TAIL}")
+        );
+        assert_eq!(
+            status_line_of(&mut board, &status_with_message_aged("hello there", 30)),
+            status_line_of(&mut board, &Status::default())
+        );
+    }
+
+    #[test]
+    fn a_message_fades_along_the_gray_ramp() {
+        let mut board = Board::new(Duration::from_hours(8));
+        let text = "hello there";
+        let after = u16::try_from(text.len() + STATUS_SEPARATOR.chars().count()).unwrap();
+        for (age, gray) in [(0, 252), (15, 242), (29, 233)] {
+            let buffer = render_with(140, 8, &mut board, &status_with_message_aged(text, age));
+            assert_eq!(buffer[(0, 7)].fg, Color::Indexed(gray), "age {age}");
+            assert_eq!(
+                buffer[(u16::try_from(text.len()).unwrap() - 1, 7)].fg,
+                Color::Indexed(gray),
+                "age {age}"
+            );
+            assert_eq!(buffer[(after, 7)].symbol(), "l", "age {age}");
+            assert_eq!(buffer[(after, 7)].fg, Color::Reset, "age {age}");
+        }
     }
 
     #[test]
