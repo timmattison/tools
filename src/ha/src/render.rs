@@ -752,4 +752,120 @@ mod tests {
         assert_eq!(time_cells(&text, 2), ("0s".to_owned(), String::new()));
         assert_eq!(time_cells(&text, 4), ("0s".to_owned(), "0s ago".to_owned()));
     }
+
+    fn display_width(text: &str) -> usize {
+        unicode_width::UnicodeWidthStr::width(text)
+    }
+
+    #[test]
+    fn long_text_keeps_its_start_and_ends_with_an_ellipsis() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("timmattison/tools"),
+            vec![run(
+                1,
+                "timmattison/tools",
+                "Continuous Integration",
+                "feature/long-branch",
+                "A very long title indeed",
+                RunState::Running,
+                "2026-10-14T11:55:00Z",
+                "2026-10-14T11:55:00Z",
+            )],
+        );
+        let text = lines(&render_with(60, 6, &mut board, &Status::default()));
+        // 60 - 34 = 26 columns for the text: 6, 5, 5, and 10.
+        assert_eq!(
+            text[2],
+            "● timma… Cont… feat… A very lo… 11:55:00    5m 00s"
+        );
+    }
+
+    #[test]
+    fn wide_and_accented_branch_names_truncate_by_display_width() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(
+                    1,
+                    "a/x",
+                    "CI",
+                    "日本語のブランチ名",
+                    "t",
+                    RunState::Running,
+                    "2026-10-14T11:51:00Z",
+                    "2026-10-14T11:51:00Z",
+                ),
+                run(
+                    2,
+                    "a/x",
+                    "CI",
+                    "café-au-lait-branch",
+                    "t",
+                    RunState::Running,
+                    "2026-10-14T11:52:00Z",
+                    "2026-10-14T11:52:00Z",
+                ),
+                run(
+                    3,
+                    "a/x",
+                    "CI",
+                    "🎉🎉🎉🎉🎉🎉",
+                    "t",
+                    RunState::Running,
+                    "2026-10-14T11:53:00Z",
+                    "2026-10-14T11:53:00Z",
+                ),
+            ],
+        );
+        let text = lines(&render_with(60, 7, &mut board, &Status::default()));
+        assert_eq!(
+            text[2],
+            "● a/x    CI    日本… t          11:51:00    9m 00s"
+        );
+        assert_eq!(
+            text[3],
+            "● a/x    CI    café… t          11:52:00    8m 00s"
+        );
+        assert_eq!(
+            text[4],
+            "● a/x    CI    🎉🎉… t          11:53:00    7m 00s"
+        );
+        for line in &text {
+            assert!(display_width(line) <= 60, "{line:?} is too wide");
+        }
+    }
+
+    #[test]
+    fn the_text_columns_share_the_width_at_every_size() {
+        let title = "Fix the flaky retry logic in the uploader";
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("timmattison/tools"),
+            vec![run(
+                1,
+                "timmattison/tools",
+                "CI",
+                "main",
+                title,
+                RunState::Running,
+                "2026-10-14T11:55:00Z",
+                "2026-10-14T11:55:00Z",
+            )],
+        );
+        let narrow = lines(&render_with(80, 6, &mut board, &Status::default()));
+        let wide = lines(&render_with(160, 6, &mut board, &Status::default()));
+        assert_eq!(display_width(&narrow[0]), 80, "the header fills 80 columns");
+        assert_eq!(display_width(&wide[0]), 160, "the header fills 160 columns");
+        for line in &narrow {
+            assert!(display_width(line) <= 80, "{line:?} is too wide");
+        }
+        for line in &wide {
+            assert!(display_width(line) <= 160, "{line:?} is too wide");
+        }
+        assert!(!narrow[2].contains(title), "80 columns cut the title");
+        assert!(narrow[2].contains('…'));
+        assert!(wide[2].contains(title), "160 columns show the title whole");
+    }
 }
