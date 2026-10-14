@@ -1,10 +1,13 @@
 //! Tests of the shell definitions: the kind of the shell, the marker, the
 //! script, the parse of the output, the read of a real shell, and the resolver.
 
-use std::path::Path;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
 
 use wdid::command_words::CommandWord;
-use wdid::shell::{parse_output, script, Marker, ShellError, ShellKind};
+use wdid::shell::{parse_output, read, script, Marker, ShellError, ShellKind};
 
 #[test]
 fn kind_comes_from_the_file_name() {
@@ -310,4 +313,141 @@ fn functions_after_the_end_marker_are_ignored() {
     let stdout = "M ALIASES\nM FUNCTION a\n\tprcp\nM END\nM FUNCTION b\n\tcwt\n";
     let definitions = parsed(stdout);
     assert_eq!(definitions.functions.keys().collect::<Vec<_>>(), ["a"]);
+}
+
+/// Writes an executable stub shell into a new temporary directory.
+fn stub(body: &str) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("stub-shell");
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    (dir, path)
+}
+
+#[test]
+fn a_shell_that_runs_too_long_is_timed_out_and_killed() {
+    let (_dir, path) = stub("exec sleep 5");
+    let started = std::time::Instant::now();
+    let result = read(Command::new(&path), ShellKind::Zsh, Duration::from_secs(1));
+    assert!(
+        matches!(result, Err(ShellError::TimedOut { seconds: 1 })),
+        "{result:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn a_shell_that_exits_with_a_failure_is_failed_with_its_stderr() {
+    let (_dir, path) = stub("echo 'bad config' >&2\nexit 3");
+    let result = read(Command::new(&path), ShellKind::Zsh, Duration::from_secs(10));
+    match result {
+        Err(ShellError::Failed { status, stderr }) => {
+            assert!(status.contains('3'), "{status}");
+            assert_eq!(stderr, "bad config");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_shell_that_prints_no_markers_is_no_markers() {
+    let (_dir, path) = stub("echo hello");
+    let result = read(
+        Command::new(&path),
+        ShellKind::Bash,
+        Duration::from_secs(10),
+    );
+    assert!(matches!(result, Err(ShellError::NoMarkers)), "{result:?}");
+}
+
+#[test]
+fn a_shell_that_does_not_exist_is_a_spawn_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("no-such-shell");
+    let result = read(Command::new(&path), ShellKind::Zsh, Duration::from_secs(10));
+    match result {
+        Err(ShellError::Spawn { shell, source }) => {
+            assert_eq!(shell, path.to_string_lossy());
+            assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn the_shell_gets_the_interactive_flag_and_the_script_with_stdin_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let record = dir.path().join("record");
+    let (_stub_dir, path) = stub(&format!(
+        "printf '%s\\n' \"$1\" \"$2\" \"$#\" > '{}'\nif read -r line; then echo \"stdin: $line\" >&2; fi\nprintf '%s' \"$3\" >> '{}'\nexit 4",
+        record.display(),
+        record.display()
+    ));
+    let result = read(Command::new(&path), ShellKind::Zsh, Duration::from_secs(10));
+    match result {
+        Err(ShellError::Failed { stderr, .. }) => assert_eq!(stderr, ""),
+        other => panic!("{other:?}"),
+    }
+    let text = std::fs::read_to_string(&record).unwrap();
+    let mut lines = text.lines();
+    assert_eq!(lines.next(), Some("-i"));
+    assert_eq!(lines.next(), Some("-c"));
+    assert_eq!(lines.next(), Some("3"));
+    let script_text: Vec<&str> = lines.collect();
+    let first = script_text.first().copied().unwrap_or_default();
+    assert!(first.starts_with("print -r -- '__WDID_"), "{first}");
+}
+
+#[test]
+fn every_error_message_ends_with_the_no_shell_hint() {
+    const HINT: &str = " (wdid --no-shell skips the aliases and functions)";
+    let errors = [
+        ShellError::NotSet,
+        ShellError::NotSupported {
+            shell: "/bin/fish".to_owned(),
+        },
+        ShellError::Spawn {
+            shell: "zsh".to_owned(),
+            source: std::io::Error::from(std::io::ErrorKind::NotFound),
+        },
+        ShellError::TimedOut { seconds: 30 },
+        ShellError::Failed {
+            status: "exit status: 3".to_owned(),
+            stderr: "boom".to_owned(),
+        },
+        ShellError::NoMarkers,
+    ];
+    for error in &errors {
+        assert!(error.to_string().ends_with(HINT), "{error}");
+    }
+    assert_eq!(
+        errors[0].to_string(),
+        format!("SHELL is not set, so wdid cannot read the aliases and functions{HINT}")
+    );
+    assert_eq!(
+        errors[1].to_string(),
+        format!(
+            "wdid reads aliases and functions from zsh and bash only, and SHELL is /bin/fish{HINT}"
+        )
+    );
+    assert_eq!(
+        errors[3].to_string(),
+        format!("the shell did not stop in 30 seconds{HINT}")
+    );
+    assert_eq!(
+        errors[4].to_string(),
+        format!("the shell failed (exit status: 3): boom{HINT}")
+    );
+    assert_eq!(
+        errors[5].to_string(),
+        format!("the shell output does not hold the start and end markers of wdid{HINT}")
+    );
+    assert_eq!(
+        errors[2].to_string(),
+        format!("cannot start zsh: entity not found{HINT}")
+    );
 }
