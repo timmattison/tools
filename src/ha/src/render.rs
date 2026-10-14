@@ -267,8 +267,11 @@ pub fn draw<Tz: TimeZone>(
     Tz::Offset: Display,
 {
     let area = frame.area();
+    if area.is_empty() {
+        return;
+    }
     let widths = Widths::for_width(usize::from(area.width));
-    let height = usize::from(area.height) - FIXED_LINES;
+    let height = usize::from(area.height).saturating_sub(FIXED_LINES);
     let window = board.window();
     let bold = Style::default().add_modifier(Modifier::BOLD);
     let buffer = frame.buffer_mut();
@@ -317,13 +320,15 @@ pub fn draw<Tz: TimeZone>(
             }
         }
     }
-    let line = status_line(board, status, tz);
-    put(
-        buffer,
-        usize::from(area.height) - 1,
-        &truncate_to_budget(&line, usize::from(area.width)),
-        Style::default(),
-    );
+    if usize::from(area.height) >= FIXED_LINES {
+        let line = status_line(board, status, tz);
+        put(
+            buffer,
+            usize::from(area.height) - 1,
+            &truncate_to_budget(&line, usize::from(area.width)),
+            Style::default(),
+        );
+    }
 }
 
 /// Writes how long a run took, in at most 7 columns.
