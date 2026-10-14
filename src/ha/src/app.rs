@@ -188,7 +188,7 @@ mod tests {
 
     use super::*;
     use crate::run::{Run, RunId, RunState};
-    use crate::target::RepoName;
+    use crate::target::{OwnerName, RepoName};
     use crate::worker::{Command, Update};
 
     /// Gives the events of a script, then an error, so a loop that does not
@@ -323,12 +323,22 @@ mod tests {
         channels: &Channels,
         events: Vec<Event>,
     ) -> (std::io::Result<()>, Vec<String>) {
+        run_app_from(Status::default(), opener, channels, events)
+    }
+
+    /// Like `run_app`, with a given first status.
+    fn run_app_from(
+        status: Status,
+        opener: &RecordingOpener,
+        channels: &Channels,
+        events: Vec<Event>,
+    ) -> (std::io::Result<()>, Vec<String>) {
         let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
         let tz = FixedOffset::east_opt(0).unwrap();
         let clock = now;
         let mut app = App::new(
             Board::new(Duration::from_hours(8)),
-            Status::default(),
+            status,
             opener,
             &channels.worker,
             &clock,
@@ -441,5 +451,91 @@ mod tests {
         assert!(channels.commands.try_recv().is_err(), "exactly one command");
         let status_line = frame.last().unwrap();
         assert!(status_line.contains("refreshing…"), "{status_line:?}");
+    }
+
+    fn quit() -> Vec<Event> {
+        vec![press(KeyCode::Char('q'))]
+    }
+
+    #[test]
+    fn a_failed_update_shows_the_error_on_the_status_line() {
+        let channels = channels();
+        channels
+            .updates
+            .send(Update::Failed {
+                repo: repo(),
+                error: "boom".to_owned(),
+            })
+            .unwrap();
+        let (result, frame) = run_app(&opener(false), &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        let status_line = frame.last().unwrap();
+        assert!(
+            status_line.contains("acme/widgets: boom"),
+            "{status_line:?}"
+        );
+    }
+
+    #[test]
+    fn a_finished_cycle_shows_the_time_and_ends_refreshing() {
+        let channels = channels();
+        channels
+            .updates
+            .send(Update::CycleDone {
+                finished_at: now(),
+                rate: None,
+                backoff_until: None,
+            })
+            .unwrap();
+        let refreshing = Status {
+            refreshing: true,
+            ..Status::default()
+        };
+        let (result, frame) = run_app_from(refreshing, &opener(false), &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        let status_line = frame.last().unwrap();
+        assert!(status_line.contains("updated 12:00:00"), "{status_line:?}");
+        assert!(!status_line.contains("refreshing…"), "{status_line:?}");
+    }
+
+    #[test]
+    fn a_repository_list_without_a_repository_removes_its_runs() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        channels
+            .updates
+            .send(Update::Repos {
+                repos: std::collections::BTreeSet::new(),
+                owner_errors: Vec::new(),
+            })
+            .unwrap();
+        let (result, frame) = run_app(&opener(false), &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            frame.iter().all(|line| !line.contains("run 1")),
+            "{frame:?}"
+        );
+    }
+
+    #[test]
+    fn owner_errors_show_on_the_status_line() {
+        let channels = channels();
+        channels
+            .updates
+            .send(Update::Repos {
+                repos: std::collections::BTreeSet::new(),
+                owner_errors: vec![(
+                    OwnerName::parse("acme").unwrap(),
+                    "no such owner".to_owned(),
+                )],
+            })
+            .unwrap();
+        let (result, frame) = run_app(&opener(false), &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        let status_line = frame.last().unwrap();
+        assert!(
+            status_line.contains("acme: no such owner"),
+            "{status_line:?}"
+        );
     }
 }
