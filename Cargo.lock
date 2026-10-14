@@ -9246,6 +9246,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "termsize",
  "thiserror 2.0.21",
  "wait-timeout",
 ]
