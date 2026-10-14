@@ -276,6 +276,23 @@ impl GhSource {
         parse_runs(&response.body, repo)
     }
 
+    /// Fetches every page of the runs of `repo` for `filter`.
+    ///
+    /// The fetch goes on while the last page was full and the count so far is
+    /// below `total_count`. It stops after `MAX_PAGES` pages.
+    fn all_runs(&self, repo: &RepoName, filter: &str) -> Result<Vec<Run>, SourceError> {
+        let mut runs = Vec::new();
+        for number in 1..=MAX_PAGES {
+            let page = self.runs_page(repo, filter, number)?;
+            let full = page.runs.len() >= PAGE_SIZE;
+            runs.extend(page.runs);
+            if !full || (runs.len() as u64) >= page.total_count {
+                break;
+            }
+        }
+        Ok(runs)
+    }
+
     /// A source that runs `program`, and gives each child at most `limit`.
     #[must_use]
     pub fn with_program(program: impl Into<OsString>, limit: Duration) -> GhSource {
@@ -304,7 +321,7 @@ impl Source for GhSource {
         match query {
             RunQuery::CreatedSince(since) => {
                 let filter = format!("created=%3E%3D{}", hour_start(since));
-                Ok(self.runs_page(repo, &filter, 1)?.runs)
+                self.all_runs(repo, &filter)
             }
             RunQuery::Active => Ok(Vec::new()),
         }
@@ -317,6 +334,9 @@ impl Source for GhSource {
 
 /// The number of runs in one full page. GitHub allows 100 at most.
 const PAGE_SIZE: usize = 100;
+
+/// The most pages that one query fetches. A query reaches 1000 runs at most.
+const MAX_PAGES: u32 = 10;
 
 /// The start of the UTC hour of `time`, as GitHub writes a time.
 ///
