@@ -6,7 +6,16 @@
 //! sources, and checks every value. Each error names the key, the value, and
 //! the file, so a person can find the mistake at once.
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use crate::target::{Target, TargetError};
+
+/// The window `ha` uses when nothing sets one: the finished runs of 8 hours.
+pub const DEFAULT_WINDOW: Duration = Duration::from_hours(8);
+
+/// The refresh interval `ha` uses when nothing sets one: 60 seconds.
+pub const DEFAULT_INTERVAL: Duration = Duration::from_mins(1);
 
 /// The reasons why `ha` cannot build its settings. Each message names the
 /// input that caused the error.
@@ -21,6 +30,83 @@ pub enum SettingsError {
         /// The text as given, after the trim.
         input: String,
     },
+    /// A duration in the config file is not valid.
+    #[error("{key} in {path}: {source}")]
+    FileDuration {
+        /// The config key that holds the value.
+        key: &'static str,
+        /// The config file.
+        path: String,
+        /// Why the duration is not valid.
+        source: Box<SettingsError>,
+    },
+    /// A repository or owner in the config file is not valid.
+    #[error("{key} in {path}: {source}")]
+    FileTarget {
+        /// The config key that holds the value.
+        key: &'static str,
+        /// The config file.
+        path: String,
+        /// Why the value is not valid.
+        source: TargetError,
+    },
+    /// A target on the command line is not valid.
+    #[error("target on the command line: {source}")]
+    CliTarget {
+        /// Why the target is not valid.
+        source: TargetError,
+    },
+    /// Nothing says what to watch.
+    #[error("no targets: give owner/name or owner arguments, or add repos or owners to {config}")]
+    NoTargets {
+        /// The config file, or a description of it when the system gives no
+        /// path.
+        config: String,
+    },
+}
+
+/// What `ha` needs to run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Settings {
+    /// The repositories and owners to watch. The list is never empty.
+    pub targets: Vec<Target>,
+    /// How far back the board shows finished runs.
+    pub window: Duration,
+    /// How long `ha` waits between two refreshes.
+    pub interval: Duration,
+}
+
+/// The settings that the command line gave. The command line wins over the
+/// config file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommandLine {
+    /// The `owner` and `owner/name` arguments, as typed. When the list is not
+    /// empty, it replaces all targets of the config file.
+    pub targets: Vec<String>,
+    /// The `--config` path.
+    pub config: Option<PathBuf>,
+    /// The `--window` value.
+    pub window: Option<Duration>,
+    /// The `--interval` value.
+    pub interval: Option<Duration>,
+}
+
+/// Builds the settings from the command line and the text of the config file.
+///
+/// `file` holds the path of the config file and its text, or `None` when there
+/// is no file. The path is only for error messages. This function does no I/O.
+///
+/// # Errors
+///
+/// Returns a [`SettingsError`] when the file text is not valid, when a value
+/// is not valid, or when no target is left.
+pub fn resolve(cli: &CommandLine, file: Option<(&Path, &str)>) -> Result<Settings, SettingsError> {
+    let _ = (cli, file);
+    Ok(Settings {
+        targets: Vec::new(),
+        window: Duration::ZERO,
+        interval: Duration::ZERO,
+    })
 }
 
 /// Reads a duration such as `30s`, `15m`, `8h`, or `2d`.
@@ -78,6 +164,16 @@ pub fn format_duration_setting(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CONFIG_PATH: &str = "/home/tester/.config/ha/config.toml";
+
+    fn target(text: &str) -> Target {
+        Target::parse(text).expect("the test target is valid")
+    }
+
+    fn resolve_file(cli: &CommandLine, text: &str) -> Result<Settings, SettingsError> {
+        resolve(cli, Some((Path::new(CONFIG_PATH), text)))
+    }
 
     #[test]
     fn parse_duration_reads_each_unit() {
@@ -144,5 +240,34 @@ mod tests {
             let duration = parse_duration(text).unwrap();
             assert_eq!(format_duration_setting(duration), text);
         }
+    }
+
+    #[test]
+    fn resolve_reads_every_key_of_the_file() {
+        let text = r#"
+            repos = ["timmattison/tools", "Lock-Free-Labs/nvr-tools"]
+            owners = ["Lock-Free-Labs"]
+            window = "2d"
+            interval = "15m"
+        "#;
+        let settings = resolve_file(&CommandLine::default(), text).unwrap();
+        assert_eq!(
+            settings.targets,
+            vec![
+                target("timmattison/tools"),
+                target("Lock-Free-Labs/nvr-tools"),
+                target("Lock-Free-Labs"),
+            ]
+        );
+        assert_eq!(settings.window, Duration::from_hours(48));
+        assert_eq!(settings.interval, Duration::from_mins(15));
+    }
+
+    #[test]
+    fn resolve_uses_the_defaults_for_a_key_the_file_leaves_out() {
+        let settings = resolve_file(&CommandLine::default(), "owners = [\"timmattison\"]").unwrap();
+        assert_eq!(settings.targets, vec![target("timmattison")]);
+        assert_eq!(settings.window, Duration::from_hours(8));
+        assert_eq!(settings.interval, Duration::from_secs(60));
     }
 }
