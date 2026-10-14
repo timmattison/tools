@@ -68,4 +68,34 @@ mod tests {
     fn parse_duration_trims_whitespace() {
         assert_eq!(parse_duration("  8h\t").unwrap(), Duration::from_hours(8));
     }
+
+    #[test]
+    fn parse_duration_rejects_a_bad_text_and_quotes_it() {
+        let bad = [
+            "0s",
+            "0d",
+            "8x",
+            "h",
+            "",
+            "   ",
+            "-1h",
+            "+5s",
+            "1.5h",
+            "8 h",
+            "99999999999999999999d",
+            "18446744073709551615d",
+            "日本語h",
+        ];
+        for input in bad {
+            let error = parse_duration(input).expect_err(input).to_string();
+            assert!(
+                error.contains(&format!("\"{}\"", input.trim())),
+                "{input:?}: the message does not quote the input: {error}"
+            );
+            assert!(
+                error.contains("s, m, h, or d"),
+                "{input:?}: the message does not name the units: {error}"
+            );
+        }
+    }
 }
