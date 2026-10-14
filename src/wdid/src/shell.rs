@@ -9,12 +9,12 @@
 //! starts a process.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Read;
+use std::io::{ErrorKind, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use wait_timeout::ChildExt;
 
@@ -54,10 +54,17 @@ const SUFFIX_OPTION: char = 's';
 /// The argument that ends the options of `alias`.
 const END_OF_OPTIONS: &str = "--";
 
-/// The time that the readers of the pipes get to finish, after the shell
-/// ends. A background process that the shell started can hold a pipe open, and
-/// that must not stop wdid.
+/// The time that the readers of the pipes get to read what is left in the
+/// pipes, after the shell ends.
+///
+/// A process that the shell started in the background can keep a pipe open
+/// after the shell ends, for example `( sleep 10 & )` in `.zshrc`. The output
+/// is complete when the shell ends, so after this time wdid takes the bytes
+/// that the readers have, and it does not wait for that process.
 const PIPE_GRACE: Duration = Duration::from_secs(2);
+
+/// The size of one read from a pipe.
+const READ_CHUNK: usize = 64 * 1024;
 
 /// The default bound on the shell start.
 pub const TIMEOUT: Duration = Duration::from_secs(30);
@@ -341,8 +348,9 @@ pub fn read(
             return Err(ShellError::Spawn { shell, source });
         }
     };
-    let stdout = stdout.recv_timeout(PIPE_GRACE).map_err(|_| timed_out)?;
-    let stderr = stderr.recv_timeout(PIPE_GRACE).unwrap_or_default();
+    let deadline = Instant::now() + PIPE_GRACE;
+    let stdout = stdout.take(deadline);
+    let stderr = stderr.take(deadline);
     if !status.success() {
         return Err(ShellError::Failed {
             status: status.to_string(),
@@ -352,19 +360,53 @@ pub fn read(
     parse_output(&String::from_utf8_lossy(&stdout), &marker)
 }
 
+/// The bytes that a reader thread got from one pipe, and the signal that the
+/// pipe closed.
+struct Collected {
+    /// The bytes so far. The reader adds each chunk as it arrives, so the
+    /// bytes stay available when the pipe never closes.
+    bytes: Arc<Mutex<Vec<u8>>>,
+    /// Gets a message when the pipe closes.
+    closed: mpsc::Receiver<()>,
+}
+
+impl Collected {
+    /// Waits until the pipe closes or until `deadline`, then gives the bytes
+    /// that the reader got.
+    fn take(self, deadline: Instant) -> Vec<u8> {
+        let _ = self
+            .closed
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()));
+        let mut bytes = self.bytes.lock().unwrap_or_else(PoisonError::into_inner);
+        std::mem::take(&mut *bytes)
+    }
+}
+
 /// Reads a pipe to its end on its own thread. The output of the shell is
 /// larger than one pipe buffer, thus a read after the wait would block the
-/// shell forever. The receiver gets the bytes when the pipe closes.
-fn collect<R: Read + Send + 'static>(pipe: Option<R>) -> mpsc::Receiver<Vec<u8>> {
-    let (sender, receiver) = mpsc::channel();
+/// shell forever.
+fn collect<R: Read + Send + 'static>(pipe: Option<R>) -> Collected {
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let (sender, closed) = mpsc::channel();
+    let shared = Arc::clone(&bytes);
     thread::spawn(move || {
-        let mut bytes = Vec::new();
         if let Some(mut pipe) = pipe {
-            let _ = pipe.read_to_end(&mut bytes);
+            let mut chunk = vec![0_u8; READ_CHUNK];
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(count) => shared
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .extend_from_slice(&chunk[..count]),
+                    Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
         }
-        let _ = sender.send(bytes);
+        let _ = sender.send(());
     });
-    receiver
+    Collected { bytes, closed }
 }
 
 /// The tools that each function resolves to.
