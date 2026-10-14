@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use chrono::NaiveDate;
 use wdid::catalog::{PathState, Tool};
-use wdid::render::{json, table_width, text};
+use wdid::render::{json, table_width, text, unparsed};
 use wdid::tally::{Classification, Summary, Tally, ToolUsage, Unparsed, Window};
 use wdid::tool::ToolName;
 
@@ -557,4 +557,72 @@ fn the_json_lists_follow_the_order_of_the_text_report() {
         serde_json::json!(["apple", "pear"])
     );
     assert_eq!(value["never_used_new"], serde_json::json!(["bat", "yak"]));
+}
+
+/// Makes a tally that has only the summary lines in the test.
+fn tally_with(unparsed: Vec<Unparsed>, unparsed_functions: Vec<&str>) -> Tally {
+    Tally {
+        tools: vec![],
+        summary: Summary {
+            unparsed,
+            unparsed_functions: unparsed_functions.into_iter().map(str::to_string).collect(),
+            ..summary()
+        },
+    }
+}
+
+/// Makes one group of unparsed rows.
+fn group(command: &str, rows: u64) -> Unparsed {
+    Unparsed {
+        command: command.to_string(),
+        rows,
+    }
+}
+
+/// Each command has a line: the rows, a tab, and the escaped command. The
+/// escape keeps one command on one line, so a newline, a tab, a CR, and a
+/// backslash do not break the line.
+#[test]
+fn an_unparsed_command_is_one_escaped_line() {
+    let tally = tally_with(
+        vec![
+            group("echo $(\nls\t-l\r\\", 1_200),
+            group("a |", 2),
+            group("日本語 🎉 café $(", 1),
+        ],
+        vec![],
+    );
+
+    assert_eq!(
+        unparsed(&tally),
+        "1,200\techo $(\\nls\\t-l\\r\\\\\n2\ta |\n1\t日本語 🎉 café $(\n"
+    );
+}
+
+/// A function that did not parse comes after the commands, under a blank line.
+#[test]
+fn the_unparsed_functions_follow_the_commands() {
+    let tally = tally_with(vec![group("a |", 2)], vec!["alpha", "beta"]);
+
+    assert_eq!(
+        unparsed(&tally),
+        "2\ta |\n\nFunctions that did not parse: alpha, beta\n"
+    );
+}
+
+/// With no command, the functions line stands alone.
+#[test]
+fn unparsed_functions_alone_have_no_blank_line_before_them() {
+    let tally = tally_with(vec![], vec!["alpha"]);
+
+    assert_eq!(unparsed(&tally), "Functions that did not parse: alpha\n");
+}
+
+/// A run with nothing that failed says so.
+#[test]
+fn a_run_with_no_unparsed_command_and_no_unparsed_function_says_so() {
+    assert_eq!(
+        unparsed(&tally_with(vec![], vec![])),
+        "Every command parsed.\n"
+    );
 }
