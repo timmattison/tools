@@ -94,3 +94,102 @@ fn an_empty_line_and_a_comment_line_give_no_words() {
         ("\n\n", words(vec![])),
     ]);
 }
+
+#[test]
+fn the_walk_finds_the_command_words_inside_substitutions() {
+    check(vec![
+        (
+            "echo $(prcp x)",
+            words(vec![word("echo", ["$(prcp x)"]), word("prcp", ["x"])]),
+        ),
+        (
+            "echo `prcp x`",
+            words(vec![word("echo", ["`prcp x`"]), word("prcp", ["x"])]),
+        ),
+        (
+            "echo \"$(prcp x)\"",
+            words(vec![word("echo", ["\"$(prcp x)\""]), word("prcp", ["x"])]),
+        ),
+        (
+            "echo \"a $(b \"$(c)\")\"",
+            words(vec![
+                word("echo", ["\"a $(b \"$(c)\")\""]),
+                word("b", ["\"$(c)\""]),
+                word("c", []),
+            ]),
+        ),
+        (
+            "eval $(dirc -paste)",
+            words(vec![
+                word("eval", ["$(dirc -paste)"]),
+                word("dirc", ["-paste"]),
+            ]),
+        ),
+        (
+            "for f in $(ls); do prcp $f; done",
+            words(vec![word("ls", []), word("prcp", ["$f"])]),
+        ),
+        (
+            "case $(a) in p) b;; esac",
+            words(vec![word("a", []), word("b", [])]),
+        ),
+        ("x=$(cwt)", words(vec![word("cwt", [])])),
+        ("FOO=bar prcp", words(vec![word("prcp", [])])),
+        (
+            "FOO=$(a) b c=$(d)",
+            words(vec![word("a", []), word("b", ["c=$(d)"]), word("d", [])]),
+        ),
+        (
+            "diff <(a) <(b)",
+            words(vec![word("diff", []), word("a", []), word("b", [])]),
+        ),
+        ("cat < <(a)", words(vec![word("cat", []), word("a", [])])),
+        ("[[ $(a) == x ]]", words(vec![word("a", [])])),
+        (
+            "[[ -n x && ( $(a) != $(b) ) ]] >$(c)",
+            words(vec![word("a", []), word("b", []), word("c", [])]),
+        ),
+        ("a >$(b)", words(vec![word("a", []), word("b", [])])),
+        ("{ a; } >$(b)", words(vec![word("a", []), word("b", [])])),
+        ("$(a) x", words(vec![word("a", [])])),
+        (
+            "cat <<EOF\n$(prcp)\nEOF",
+            words(vec![word("cat", []), word("prcp", [])]),
+        ),
+        ("cat <<'EOF'\nprcp\nEOF", words(vec![word("cat", [])])),
+        ("cat <<EOF\nprcp $x\nEOF", words(vec![word("cat", [])])),
+        (
+            "cat <<<$(prcp)",
+            words(vec![word("cat", []), word("prcp", [])]),
+        ),
+        ("f() { $(a); }", words(vec![])),
+        ("echo $((1 + 2))", words(vec![word("echo", ["$((1 + 2))"])])),
+    ]);
+}
+
+#[test]
+fn a_substitution_that_the_parser_refuses_gives_unparsed() {
+    check(vec![
+        ("echo \"$(;;)\"", Parsed::Unparsed),
+        ("echo $(a |)", Parsed::Unparsed),
+        ("echo `a |`", Parsed::Unparsed),
+        ("echo $(echo $(;;))", Parsed::Unparsed),
+        ("cat <<EOF\n$(a |)\nEOF", Parsed::Unparsed),
+    ]);
+}
+
+/// Makes a line that nests `levels` command substitutions around `prcp`.
+fn nested(levels: usize) -> String {
+    format!("{}prcp{}", "echo $(".repeat(levels), ")".repeat(levels))
+}
+
+#[test]
+fn the_depth_limit_is_64_levels_of_substitutions() {
+    let aliases = Aliases::new();
+    let Parsed::Words(inside) = command_words(&nested(64), &aliases) else {
+        panic!("64 levels must parse");
+    };
+    assert_eq!(inside.len(), 65);
+    assert_eq!(inside.last().unwrap().word, "prcp");
+    assert_eq!(command_words(&nested(65), &aliases), Parsed::Unparsed);
+}
