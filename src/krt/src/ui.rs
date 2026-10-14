@@ -2088,10 +2088,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::duration_suboptimal_units,
-        reason = "the seconds are the behavior: a duration of 3600 seconds renders as hours"
-    )]
     fn renders_seconds_that_make_a_whole_hour_as_hours() {
         assert_eq!(render_duration(Duration::from_secs(3600)), "1h");
     }
