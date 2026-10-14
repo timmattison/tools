@@ -4,12 +4,19 @@
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use chrono::{Local, Utc};
 use clap::{CommandFactory, FromArgMatches, Parser};
-use ha::settings::{self, CommandLine};
+use ha::app::{App, BrowserOpener, TerminalEvents};
+use ha::board::Board;
+use ha::github::GhSource;
+use ha::settings::{self, CommandLine, Settings};
+use ha::status::{RateLimit, Status};
+use ha::worker::{self, Worker};
 
 /// The exit status of a run that `ha` refuses because of its settings.
 const EXIT_USAGE: u8 = 2;
@@ -58,6 +65,19 @@ impl From<Cli> for CommandLine {
     }
 }
 
+/// The exit status of a run that fails after the settings are good.
+const EXIT_FAILURE: u8 = 1;
+
+/// Restores the terminal when it drops, so every way out of `run` leaves
+/// the terminal as it was.
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        ratatui::restore();
+    }
+}
+
 fn main() -> ExitCode {
     let command = Cli::command().after_help(settings::help_after(
         settings::default_config_path().as_deref(),
@@ -67,12 +87,56 @@ fn main() -> ExitCode {
         Ok(cli) => cli,
         Err(error) => error.exit(),
     };
-    match settings::load(&cli.into()) {
-        // Slice 8 adds the terminal check and the full-screen view here.
-        Ok(_settings) => ExitCode::SUCCESS,
+    let settings = match settings::load(&cli.into()) {
+        Ok(settings) => settings,
         Err(error) => {
             eprintln!("ha: {error}");
-            ExitCode::from(EXIT_USAGE)
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+    if !std::io::stdout().is_terminal() {
+        eprintln!(
+            "ha: standard output is not a terminal. ha draws a full-screen view and has no plain-text mode."
+        );
+        return ExitCode::from(EXIT_USAGE);
+    }
+    let source = GhSource::new();
+    let rate = match source.preflight() {
+        Ok(rate) => rate,
+        Err(error) => {
+            eprintln!("ha: {error}");
+            return ExitCode::from(EXIT_FAILURE);
+        }
+    };
+    // The worker thread is not joined: a `gh` child can run for 30 seconds.
+    let worker = worker::spawn(source, &settings);
+    match run_view(&settings, rate, &worker) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("ha: {error}");
+            ExitCode::from(EXIT_FAILURE)
         }
     }
+}
+
+/// Draws the full-screen view until the user quits. The terminal is back
+/// in its normal state when this function returns.
+fn run_view(settings: &Settings, rate: RateLimit, worker: &Worker) -> std::io::Result<()> {
+    // `ratatui::init` also installs a panic hook that restores the terminal.
+    let mut terminal = ratatui::init();
+    let _guard = TerminalGuard;
+    let status = Status {
+        rate: Some(rate),
+        ..Status::default()
+    };
+    let tz = Local;
+    let mut app = App::new(
+        Board::new(settings.window),
+        status,
+        &BrowserOpener,
+        worker,
+        &Utc::now,
+        &tz,
+    );
+    app.run(&mut terminal, &mut TerminalEvents)
 }
