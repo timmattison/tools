@@ -386,4 +386,78 @@ mod tests {
             "\"a/..\" has a part that is \".\" or \"..\". A name cannot be a dot."
         );
     }
+
+    #[test]
+    fn owner_parse_takes_an_owner_and_refuses_a_slash() {
+        assert_eq!(OwnerName::parse(" Octo-Cat "), Ok(owner("Octo-Cat")));
+        assert_eq!(
+            OwnerName::parse("a/b"),
+            Err(TargetError::NotOwner {
+                input: "a/b".to_owned()
+            })
+        );
+        assert_eq!(
+            OwnerName::parse("a b"),
+            Err(TargetError::BadCharacter {
+                input: "a b".to_owned(),
+                character: ' '
+            })
+        );
+        assert_eq!(
+            OwnerName::parse("  "),
+            Err(TargetError::Empty {
+                input: String::new()
+            })
+        );
+        assert_eq!(
+            OwnerName::parse(".."),
+            Err(TargetError::DotPart {
+                input: "..".to_owned()
+            })
+        );
+        assert_eq!(
+            OwnerName::parse("a/b").expect_err("refused").to_string(),
+            "\"a/b\" has a \"/\". An owner name has none."
+        );
+    }
+
+    #[test]
+    fn repo_parse_takes_owner_slash_name_and_refuses_the_rest() {
+        assert_eq!(RepoName::parse(" a/b "), Ok(repo("a", "b")));
+        assert_eq!(
+            RepoName::parse("timmattison"),
+            Err(TargetError::NotRepo {
+                input: "timmattison".to_owned()
+            })
+        );
+        assert_eq!(
+            RepoName::parse("a/b/c"),
+            Err(TargetError::TooManySlashes {
+                input: "a/b/c".to_owned()
+            })
+        );
+        assert_eq!(
+            RepoName::parse("a/"),
+            Err(TargetError::EmptyPart {
+                input: "a/".to_owned()
+            })
+        );
+        assert_eq!(
+            RepoName::parse("a/b c"),
+            Err(TargetError::BadCharacter {
+                input: "a/b c".to_owned(),
+                character: ' '
+            })
+        );
+        assert_eq!(
+            RepoName::parse("").expect_err("refused"),
+            TargetError::Empty {
+                input: String::new()
+            }
+        );
+        assert_eq!(
+            RepoName::parse("a").expect_err("refused").to_string(),
+            "\"a\" has no \"/\". A repository is owner/name."
+        );
+    }
 }
