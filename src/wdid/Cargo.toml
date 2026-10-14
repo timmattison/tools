@@ -19,6 +19,7 @@ brush-parser.workspace = true
 buildinfo.workspace = true
 chrono.workspace = true
 clap.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
