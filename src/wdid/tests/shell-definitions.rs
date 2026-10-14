@@ -478,6 +478,36 @@ fn real_shell(path: &Path, home: &Path) -> Command {
     command
 }
 
+/// A process that `.zshrc` starts in the background keeps the pipes of the
+/// shell open after the shell ends. The output is complete when the shell
+/// ends, so `read` gives it after a short grace and does not wait for that
+/// process. Before, `read` gave `TimedOut` after the grace and lost the
+/// output.
+#[test]
+fn a_background_process_that_holds_the_pipes_does_not_lose_the_output() {
+    let Some(zsh) = find_shell("zsh") else {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join(".zshrc"),
+        "alias wtm='wt --main'\n( sleep 10 & )\n",
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+
+    let definitions = read(
+        real_shell(&zsh, home.path()),
+        ShellKind::Zsh,
+        Duration::from_secs(60),
+    );
+
+    let elapsed = started.elapsed();
+    assert_eq!(definitions.unwrap().aliases.get("wtm"), Some("wt --main"));
+    assert!(elapsed < Duration::from_secs(8), "{elapsed:?}");
+}
+
 #[test]
 fn a_real_zsh_gives_its_aliases_and_functions() {
     let Some(zsh) = find_shell("zsh") else {
