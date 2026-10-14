@@ -4,7 +4,7 @@
 //! every repository, sends each answer to the screen as an [`Update`], and
 //! then waits for the next cycle. The screen sends [`Command`] values back.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Mutex, PoisonError};
@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 
-use crate::github::{RunQuery, Source};
-use crate::run::Run;
+use crate::github::{RunQuery, Source, SourceError};
+use crate::run::{Run, RunId};
 use crate::settings::Settings;
 use crate::status::RateLimit;
 use crate::target::{OwnerName, RepoName, Target};
@@ -145,6 +145,9 @@ struct ReceiverGone;
 struct State {
     owner_cadence: Cadence,
     owner_lists: BTreeMap<OwnerName, Vec<RepoName>>,
+    sweep_cadence: Cadence,
+    /// The active runs of the last good sweep, for each repository.
+    sweeps: Mutex<HashMap<RepoName, Vec<Run>>>,
 }
 
 fn run_loop<S: Source>(
@@ -157,6 +160,8 @@ fn run_loop<S: Source>(
     let mut state = State {
         owner_cadence: Cadence::new(slow),
         owner_lists: BTreeMap::new(),
+        sweep_cadence: Cadence::new(slow),
+        sweeps: Mutex::new(HashMap::new()),
     };
     while let Ok(delay) = cycle(source, settings, &mut state, updates) {
         if wait_for_next_cycle(commands, delay) == Wake::Stop {
@@ -207,7 +212,22 @@ fn cycle<S: Source>(
     updates: &Sender<Update>,
 ) -> Result<Duration, ReceiverGone> {
     let repos = refresh_repos(source, settings, state, updates)?;
-    fetch_all(source, &repos, window_start(settings.window), updates)?;
+    let now = Instant::now();
+    let sweep_due = state.sweep_cadence.due(now);
+    if sweep_due {
+        state.sweep_cadence.mark(now);
+    }
+    state
+        .sweeps
+        .get_mut()
+        .unwrap_or_else(PoisonError::into_inner)
+        .retain(|repo, _| repos.contains(repo));
+    let fetch = Fetch {
+        since: window_start(settings.window),
+        sweep_due,
+        sweeps: &state.sweeps,
+    };
+    fetch_all(source, &repos, &fetch, updates)?;
     let now = Utc::now();
     let rate = source.rate_limit();
     let (delay, backoff_until) = next_delay(settings.interval, rate, now);
@@ -221,6 +241,47 @@ fn cycle<S: Source>(
     Ok(delay)
 }
 
+/// What every fetch of one cycle shares.
+struct Fetch<'a> {
+    /// The oldest creation time to ask for.
+    since: DateTime<Utc>,
+    /// True when this cycle also asks for the active runs.
+    sweep_due: bool,
+    /// The stored sweep results. No thread holds this lock during a call.
+    sweeps: &'a Mutex<HashMap<RepoName, Vec<Run>>>,
+}
+
+/// Fetches the runs of one repository and merges in the last sweep.
+///
+/// The result holds every run of the recent answer. It also holds each run of
+/// the last sweep that the recent answer lacks. Those runs started before the
+/// window and still run.
+fn fetch_repo<S: Source>(
+    source: &S,
+    repo: &RepoName,
+    fetch: &Fetch<'_>,
+) -> Result<Vec<Run>, SourceError> {
+    let mut runs = source.runs_of(repo, RunQuery::CreatedSince(fetch.since))?;
+    if fetch.sweep_due {
+        let active = source.runs_of(repo, RunQuery::Active)?;
+        fetch
+            .sweeps
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(repo.clone(), active);
+    }
+    let known: HashSet<RunId> = runs.iter().map(|run| run.id).collect();
+    if let Some(swept) = fetch
+        .sweeps
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(repo)
+    {
+        runs.extend(swept.iter().filter(|run| !known.contains(&run.id)).cloned());
+    }
+    Ok(runs)
+}
+
 /// Fetches the runs of every repository with a pool of threads.
 ///
 /// The threads take repositories from one shared queue. No thread holds the
@@ -228,7 +289,7 @@ fn cycle<S: Source>(
 fn fetch_all<S: Source>(
     source: &S,
     repos: &BTreeSet<RepoName>,
-    since: DateTime<Utc>,
+    fetch: &Fetch<'_>,
     updates: &Sender<Update>,
 ) -> Result<(), ReceiverGone> {
     let queue = Mutex::new(repos.iter().collect::<VecDeque<_>>());
@@ -242,7 +303,7 @@ fn fetch_all<S: Source>(
                         .unwrap_or_else(PoisonError::into_inner)
                         .pop_front();
                     let Some(repo) = next else { break };
-                    let message = match source.runs_of(repo, RunQuery::CreatedSince(since)) {
+                    let message = match fetch_repo(source, repo, fetch) {
                         Ok(runs) => Update::Runs {
                             repo: repo.clone(),
                             runs,
