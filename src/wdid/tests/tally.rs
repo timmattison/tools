@@ -442,6 +442,146 @@ fn a_development_run_alone_does_not_make_a_tool_used() {
     assert_eq!(prcp.classification, Classification::NeverUsedOld);
 }
 
-/// Keeps the imports of later groups in use.
-#[allow(dead_code, reason = "later test groups use these items")]
-fn later(_: Unparsed) {}
+/// Makes the expected `Unparsed` value.
+fn unparsed(command: &str, rows: u64) -> Unparsed {
+    Unparsed {
+        command: command.to_string(),
+        rows,
+    }
+}
+
+#[test]
+fn unparsed_rows_are_counted_and_grouped_by_command() {
+    let result = run(
+        &[
+            row(0, "echo $("),
+            row(0, "a |"),
+            row(0, "echo $("),
+            row(0, "prcp x"),
+            row(0, "echo $("),
+            row(0, "a |"),
+            row(0, ";;"),
+        ],
+        &Definitions::default(),
+        &catalog(&["prcp"]),
+    );
+    assert_eq!(result.summary.unparsed_rows, 6);
+    assert_eq!(
+        result.summary.unparsed,
+        vec![
+            unparsed("echo $(", 3),
+            unparsed("a |", 2),
+            unparsed(";;", 1)
+        ]
+    );
+}
+
+#[test]
+fn unparsed_commands_with_equal_rows_sort_by_command() {
+    let result = run(
+        &[row(0, "b |"), row(0, "a |"), row(0, "c |")],
+        &Definitions::default(),
+        &catalog(&["prcp"]),
+    );
+    assert_eq!(
+        result.summary.unparsed,
+        vec![unparsed("a |", 1), unparsed("b |", 1), unparsed("c |", 1)]
+    );
+}
+
+#[test]
+fn unparsed_rows_skip_the_rows_that_the_filters_drop() {
+    let since = date(2026, 6, 15);
+    let result = run_in(
+        &[
+            row_on(date(2026, 6, 1), 0, "a |"),
+            row_on(date(2026, 6, 20), 127, "a |"),
+            row_on(date(2026, 6, 20), 0, "a |"),
+        ],
+        &Definitions::default(),
+        &catalog(&["prcp"]),
+        &Window {
+            since: Some(since),
+            ..window()
+        },
+    );
+    assert_eq!(result.summary.unparsed_rows, 1);
+    assert_eq!(result.summary.unparsed, vec![unparsed("a |", 1)]);
+}
+
+#[test]
+fn the_summary_counts_rows_aliases_and_functions() {
+    let mut defs = definitions(
+        &[("pc", "prcp"), ("ll", "ls -l"), ("bad", "echo $(")],
+        &[("wt", "cwt"), ("broken", "echo $("), ("worse", "a |")],
+    );
+    defs.unparsed_aliases = vec!["alias x=".to_string()];
+    let result = run(
+        &[
+            row_on(date(2020, 1, 1), 0, "prcp"),
+            row(127, "nothing"),
+            row(0, "ls"),
+        ],
+        &defs,
+        &catalog(&["cwt", "prcp"]),
+    );
+    let summary = &result.summary;
+    assert_eq!(summary.rows, 3);
+    assert_eq!(summary.not_found, 1);
+    assert_eq!(summary.aliases, 3);
+    assert_eq!(summary.functions, 3);
+    assert_eq!(
+        summary.unparsed_functions,
+        vec!["broken".to_string(), "worse".to_string()]
+    );
+    assert_eq!(summary.unparsed_aliases, 1);
+}
+
+#[test]
+fn the_rows_of_the_summary_include_the_rows_before_since() {
+    let result = run_in(
+        &[row_on(date(2026, 1, 1), 0, "prcp"), row(0, "prcp")],
+        &Definitions::default(),
+        &catalog(&["prcp"]),
+        &Window {
+            since: Some(date(2026, 6, 15)),
+            ..window()
+        },
+    );
+    assert_eq!(result.summary.rows, 2);
+    assert_eq!(result.summary.before_since, 1);
+}
+
+#[test]
+fn every_tool_of_the_catalog_has_an_entry_even_without_a_use() {
+    let result = run(
+        &[row(0, "ls")],
+        &Definitions::default(),
+        &catalog(&["a", "b", "c"]),
+    );
+    assert_eq!(result.tools.len(), 3);
+    assert!(result.tools.iter().all(|usage| usage.uses == 0));
+}
+
+#[test]
+fn tools_sort_by_uses_then_by_name() {
+    let result = run(
+        &[
+            row(0, "mid"),
+            row(0, "most"),
+            row(0, "most"),
+            row(0, "most"),
+            row(0, "mid"),
+            row(0, "also"),
+            row(0, "also"),
+        ],
+        &Definitions::default(),
+        &catalog(&["also", "mid", "most", "none", "zero"]),
+    );
+    let names: Vec<&str> = result
+        .tools
+        .iter()
+        .map(|usage| usage.tool.name.as_str())
+        .collect();
+    assert_eq!(names, ["most", "also", "mid", "none", "zero"]);
+}
