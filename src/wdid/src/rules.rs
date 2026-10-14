@@ -6,6 +6,13 @@
 use crate::command_words::CommandWord;
 use crate::tool::{ToolName, ToolNames};
 
+/// The separator of the components of a path.
+const PATH_SEPARATOR: char = '/';
+
+/// The directory that cargo builds into. A path with this component is a
+/// development build.
+const TARGET_DIRECTORY: &str = "target";
+
 /// One run that a command word makes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Run {
@@ -20,9 +27,25 @@ pub enum Run {
 /// The result has at most one entry for each tool.
 #[must_use]
 pub fn runs(word: &CommandWord, tools: &ToolNames) -> Vec<Run> {
-    tools
-        .get(&word.word)
-        .map(|tool| Run::Use(tool.clone()))
-        .into_iter()
-        .collect()
+    if let Some(tool) = tools.get(&word.word) {
+        return vec![Run::Use(tool.clone())];
+    }
+    if let Some((directory, name)) = word.word.rsplit_once(PATH_SEPARATOR) {
+        return path_run(directory, name, tools).into_iter().collect();
+    }
+    Vec::new()
+}
+
+/// Gives the run of a command word that holds a path. `directory` is the text
+/// before the last separator. `name` is the text after it.
+fn path_run(directory: &str, name: &str, tools: &ToolNames) -> Option<Run> {
+    let tool = tools.get(name)?.clone();
+    if directory
+        .split(PATH_SEPARATOR)
+        .any(|component| component == TARGET_DIRECTORY)
+    {
+        Some(Run::Development(tool))
+    } else {
+        Some(Run::Use(tool))
+    }
 }
