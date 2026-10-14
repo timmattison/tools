@@ -499,11 +499,16 @@ fn rate_of(response: &Response) -> Option<RateLimit> {
 
 /// Chooses between the stored rate limit and a new one.
 ///
-/// A later `reset` is a newer window and wins. In the same window, the lower
-/// `remaining` is the newer count, because the count only falls.
+/// In the same window, the lower `remaining` is the newer count, because the
+/// count only falls. Answers that run at the same time can arrive out of
+/// order, and this rule keeps the order of their counts.
+///
+/// An answer with another `reset` replaces the stored rate. Two endpoints of
+/// GitHub can state different resets for one budget: `rate_limit` stated a
+/// reset 130 seconds later than the runs endpoint, with a count that the runs
+/// endpoint had already spent. A reset thus does not order two answers.
 fn newer_rate(stored: Option<RateLimit>, new: RateLimit) -> RateLimit {
     match stored {
-        Some(old) if old.reset > new.reset => old,
         Some(old) if old.reset == new.reset && old.remaining < new.remaining => old,
         _ => new,
     }
