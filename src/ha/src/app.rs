@@ -11,7 +11,7 @@ use ratatui::Terminal;
 use crate::board::Board;
 use crate::render;
 use crate::status::Status;
-use crate::worker::Worker;
+use crate::worker::{Update, Worker};
 
 /// How long the loop waits for an event before it draws again.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -59,7 +59,6 @@ impl Events for TerminalEvents {
 }
 
 /// The state of one run of the event loop.
-#[allow(dead_code, reason = "temporary: the next keys read these fields")]
 pub struct App<'a, O: Opener, Tz: TimeZone> {
     /// The runs to show.
     pub board: Board,
@@ -107,6 +106,7 @@ where
         E: Events,
     {
         loop {
+            self.apply_updates();
             let now = (self.now)();
             terminal
                 .draw(|frame| {
@@ -124,13 +124,37 @@ where
         }
     }
 
+    /// Applies each update that the worker has sent. A worker that has
+    /// ended sends nothing more, and that is not an error.
+    fn apply_updates(&mut self) {
+        while let Ok(update) = self.worker.updates.try_recv() {
+            match update {
+                Update::Runs { repo, runs } => self.board.replace(repo, runs),
+                Update::Repos { .. } | Update::Failed { .. } | Update::CycleDone { .. } => {}
+            }
+        }
+    }
+
     /// Acts on one key press.
-    #[allow(clippy::unused_self, reason = "temporary: the next keys use the state")]
     fn handle_key(&mut self, key: KeyEvent) -> Flow {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => Flow::Quit,
             KeyCode::Char('c') if control => Flow::Quit,
+            KeyCode::Up => {
+                self.board.select_previous((self.now)());
+                Flow::Continue
+            }
+            KeyCode::Down => {
+                self.board.select_next((self.now)());
+                Flow::Continue
+            }
+            KeyCode::Enter => {
+                if let Some(url) = self.board.selected_url((self.now)()) {
+                    let _ = self.opener.open(&url);
+                }
+                Flow::Continue
+            }
             _ => Flow::Continue,
         }
     }
