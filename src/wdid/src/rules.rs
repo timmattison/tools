@@ -20,6 +20,9 @@ pub enum Run {
 /// The result has at most one entry for each tool.
 #[must_use]
 pub fn runs(word: &CommandWord, tools: &ToolNames) -> Vec<Run> {
-    let _ = (word, tools);
-    Vec::new()
+    tools
+        .get(&word.word)
+        .map(|tool| Run::Use(tool.clone()))
+        .into_iter()
+        .collect()
 }
