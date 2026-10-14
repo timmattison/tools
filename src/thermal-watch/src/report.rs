@@ -335,7 +335,7 @@ fn mean_clock<'a>(samples: impl Iterator<Item = &'a Sample>) -> Option<Mhz> {
     // Round to the nearest megahertz rather than toward zero, so a run at a
     // steady clock reports exactly that clock.
     let rounded = (total + count / 2) / count;
-    #[allow(
+    #[expect(
         clippy::cast_possible_truncation,
         reason = "the mean of a list of u32 clocks cannot exceed u32::MAX"
     )]

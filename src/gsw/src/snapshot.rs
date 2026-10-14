@@ -11,7 +11,7 @@ use crate::render::{RenderEntry, Snapshot};
 ///
 /// `staged_numstat` and `unstaged_numstat` are keyed on the post-rename path.
 /// `ages` maps file path → mtime age; missing entries become `None`.
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "build_snapshot fans in five distinct inputs; grouping them obscures rather than clarifies"
 )]

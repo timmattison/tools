@@ -136,7 +136,7 @@ pub fn scale_rgb(base: (u8, u8, u8), scale: f32) -> (u8, u8, u8) {
     let scale = scale.clamp(0.0, 1.0);
     // The cast is bounded: `scale` is in [0.0, 1.0] and `c` is u8, so the
     // product is in [0, 255]; the explicit clamp is belt-and-braces.
-    #[allow(
+    #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "value is clamped to [0.0, 255.0] before the cast"
@@ -412,7 +412,7 @@ mod tests {
         // factor=1 should scale every channel to FADE_FLOOR * base, rounded.
         let base: (u8, u8, u8) = (200, 100, 50);
         let (r, g, b) = fade_rgb(base, 1.0);
-        #[allow(
+        #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
             reason = "c is u8 and FADE_FLOOR is in (0, 1), so the product is in [0, 255]"

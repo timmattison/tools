@@ -2088,7 +2088,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(
+    #[expect(
         clippy::duration_suboptimal_units,
         reason = "the seconds are the behavior: a duration of 3600 seconds renders as hours"
     )]

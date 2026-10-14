@@ -238,7 +238,7 @@ async fn main() -> Result<()> {
 
     // Process each file
     for (idx, file) in args.files.iter().enumerate() {
-        #[allow(
+        #[expect(
             clippy::arithmetic_side_effects,
             reason = "idx comes from enumerate() over args.files, which is bounded by memory, so idx < usize::MAX and idx + 1 cannot overflow"
         )]
@@ -363,7 +363,7 @@ async fn hash_file_with_progress(
         };
 
         // Update hash
-        #[allow(
+        #[expect(
             clippy::indexing_slicing,
             reason = "bytes_read is the return value of read(), which guarantees bytes_read <= buffer.len(), so this slice is always in bounds"
         )]

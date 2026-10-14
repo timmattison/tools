@@ -98,9 +98,12 @@ pub type IOPSData = Arc<parking_lot::RwLock<HashMap<u32, Arc<AtomicIOPSCounter>>
 /// currently displayed in the UI, it can be accessed via `IOPSCollector::parser_stats()`
 /// to diagnose issues with fs_usage parsing.
 #[derive(Debug, Default, Clone)]
-#[allow(
-    dead_code,
-    reason = "Diagnostic API - used in tests and available for debugging"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Diagnostic API - used in tests and available for debugging"
+    )
 )]
 pub struct ParserStats {
     /// Number of lines that were not disk I/O operations.
@@ -129,9 +132,12 @@ struct AtomicParserStats {
 
 impl AtomicParserStats {
     /// Returns a snapshot of the current statistics.
-    #[allow(
-        dead_code,
-        reason = "Diagnostic API - used in tests and available for debugging"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Diagnostic API - used in tests and available for debugging"
+        )
     )]
     fn snapshot(&self) -> ParserStats {
         ParserStats {
@@ -199,9 +205,12 @@ impl IOPSCollector {
     /// This can be useful for debugging or monitoring the health of the parser.
     /// A high skip rate relative to processed lines might indicate issues with
     /// the fs_usage output format or parser logic.
-    #[allow(
-        dead_code,
-        reason = "Diagnostic API - used in tests and available for debugging"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Diagnostic API - used in tests and available for debugging"
+        )
     )]
     pub fn parser_stats(&self) -> ParserStats {
         self.parser_stats.snapshot()

@@ -248,7 +248,7 @@ impl TreeChange {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
     reason = "tests use unwrap for brevity and clear failure messages"
 )]
@@ -346,7 +346,7 @@ mod tests {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
     reason = "tests use unwrap for brevity and clear failure messages"
 )]

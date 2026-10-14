@@ -575,7 +575,7 @@ impl CopyPlan {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
     clippy::expect_used,
     reason = "tests use unwrap for brevity and clear failure messages"

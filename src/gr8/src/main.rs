@@ -266,7 +266,7 @@ fn predict_exhaustion(rate_limit: &RateLimit) -> ExhaustionPrediction {
     // Clamp before casting: the value is always non-negative (rate_per_minute > 0
     // and remaining >= 0) and we cap at i64::MAX to ensure the cast is well
     // defined for arbitrarily small rates.
-    #[allow(
+    #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "clamped to [0, i64::MAX] above, so the cast is representable in i64"

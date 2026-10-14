@@ -124,7 +124,7 @@ macro_rules! error {
 // Without this, clap folds the long help into one paragraph and the code blocks
 // below come out as a single run-on line.
 #[command(verbatim_doc_comment)]
-#[allow(
+#[expect(
     clippy::struct_excessive_bools,
     reason = "each bool is a distinct CLI flag clap fills in; grouping them into an enum would hide the flags from the derive"
 )]

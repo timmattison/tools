@@ -210,7 +210,7 @@ fn generate_and_encode_video(
     optimize_web: bool,
 ) -> Result<usize> {
     let frame_duration = 1.0 / f64::from(fps);
-    #[allow(
+    #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "the saturating float cast is the clamp we want: a negative or NaN duration yields no frames, and a recording long enough to exceed usize would exhaust the disk long before the cast mattered"
@@ -309,7 +309,7 @@ fn calculate_font_baseline(font: &impl Font, font_size: f32) -> f32 {
 /// Grid coordinates are bounded by the recording's `u16` terminal dimensions and
 /// `cell_size` is a small compile-time constant, so `index * cell_size + padding`
 /// always fits in a `u32`.
-#[allow(
+#[expect(
     clippy::cast_possible_truncation,
     reason = "grid indices come from the recording's u16 terminal dimensions, so they always fit in u32"
 )]
@@ -323,7 +323,7 @@ fn cell_offset(index: usize, cell_size: u32, padding: u32) -> u32 {
 /// Every offset is produced by [`cell_offset`], i.e. a grid index bounded by the
 /// recording's `u16` terminal size times a small cell constant, so it stays far
 /// below `i32::MAX` and cannot wrap.
-#[allow(
+#[expect(
     clippy::cast_possible_wrap,
     reason = "pixel offsets are bounded by the recording's u16 terminal size times a small cell constant, so they never reach i32::MAX"
 )]
@@ -336,7 +336,7 @@ const fn pixel_coord(offset: u32) -> i32 {
 /// `cell_top` is a bounded pixel offset (see [`pixel_coord`]) and
 /// [`calculate_font_baseline`] caps the offset at 48 pixels, so the rounded sum
 /// always fits in an `i32`.
-#[allow(
+#[expect(
     clippy::cast_possible_truncation,
     reason = "a bounded cell offset plus a baseline capped at 48 pixels stays far inside i32's range"
 )]
@@ -488,7 +488,7 @@ fn render_terminal_to_image(
 
             // Position cursor to align with text baseline - start from baseline and extend down
             // This matches how terminals typically render cursors
-            #[allow(
+            #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
                 reason = "calculate_font_baseline already rounds its result and caps it at 48.0, and a font ascent is never negative, so this converts a whole number of pixels in 0..=48"

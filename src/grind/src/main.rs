@@ -95,7 +95,7 @@ fn main() -> ExitCode {
 /// itself.
 fn decide_color() {
     if termwindow::should_force_colors_here() {
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this process decides its own color output at startup; the ban covers the tests, which must go through testcolor::with_forced_ansi"
         )]

@@ -390,7 +390,7 @@ pub async fn export_web(
     };
 
     // Format duration
-    #[allow(
+    #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "the duration is a count of seconds; the saturating float cast clamps a negative or NaN duration from a corrupt recording to 0:00"

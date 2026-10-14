@@ -45,7 +45,7 @@ pub fn bar(ratio: f64, width: usize) -> String {
 }
 
 /// How many eighths of a cell a ratio fills across `width` cells.
-#[allow(
+#[expect(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,

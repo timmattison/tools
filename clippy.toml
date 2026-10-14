@@ -19,7 +19,7 @@
 # output against plain text, passed in a redirected run, and failed under a
 # hand-typed `git commit`. Clippy reads the nearest clippy.toml and no other, so
 # a member that must keep the raw call cannot narrow this file — it says so at
-# the call site with an `#[allow]` and a reason, where a reader sees it.
+# the call site with an `#[expect]` and a reason, where a reader sees it.
 disallowed-methods = [
     { path = "colored::control::set_override", reason = "call testcolor::with_forced_ansi instead; it holds the one lock on this process-global override" },
     { path = "colored::control::unset_override", reason = "testcolor::with_forced_ansi puts the override back on its own, on the panic path as well" },
@@ -64,12 +64,12 @@ disallowed-methods = [
     # pixels at all and drew at a guess. GitHub issue #350 reports that defect.
     #
     # `termsize` holds the only read of a window this ban allows, and it says so
-    # at the call site with an `#[allow]` and a reason. The other calls are a
+    # at the call site with an `#[expect]` and a reason. The other calls are a
     # different request. The pseudo-terminal helpers of the tests, in
     # `src/ic/tests/common/pty.rs` and in `gitscratch::testing::pty`, send
     # `TIOCSCTTY`, which reads no window and claims a controlling terminal for a
     # child.
     { path = "crossterm::terminal::size", reason = "call termsize::controlling_size or termsize::controlling_columns instead; a terminal that carries no window answers this call with Ok((0, 0)), and zero columns is not a width" },
     { path = "terminal_size::terminal_size", reason = "call termsize::stdout_size or termsize::stdout_columns instead; this call hands a zero back on Windows, and zero columns is not a width" },
-    { path = "libc::ioctl", reason = "call termsize::drawing_window instead; a raw TIOCGWINSZ on one file descriptor is the bypass that termgfx held, and GitHub issue #350 reports what it cost. An ioctl of another request says so at its call site with an #[allow]" },
+    { path = "libc::ioctl", reason = "call termsize::drawing_window instead; a raw TIOCGWINSZ on one file descriptor is the bypass that termgfx held, and GitHub issue #350 reports what it cost. An ioctl of another request says so at its call site with an #[expect]" },
 ]

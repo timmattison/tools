@@ -406,7 +406,7 @@ mod tests {
         RepoName::parse(text).expect("the test repository is valid")
     }
 
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "a test fixture states every field"
     )]

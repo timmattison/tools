@@ -98,7 +98,7 @@ fn mean(values: &[f64]) -> Option<f64> {
         return None;
     }
     let total: f64 = values.iter().sum();
-    #[allow(
+    #[expect(
         clippy::cast_precision_loss,
         reason = "a sample carries a handful of clusters, far below the precision of f64"
     )]
@@ -106,7 +106,7 @@ fn mean(values: &[f64]) -> Option<f64> {
 }
 
 /// Round a measured frequency onto the nearest whole megahertz.
-#[allow(
+#[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     reason = "powermetrics reports a non-negative clock below 100 GHz, which fits in u32"
@@ -116,7 +116,7 @@ fn round_to_mhz(value: f64) -> Mhz {
 }
 
 /// Round a measured power onto the nearest whole milliwatt.
-#[allow(
+#[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     reason = "powermetrics reports a non-negative power far below u32::MAX milliwatts"

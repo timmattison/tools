@@ -219,7 +219,7 @@ impl Pty {
                     return Err(io::Error::last_os_error());
                 }
 
-                #[allow(
+                #[expect(
                     clippy::disallowed_methods,
                     reason = "the ban covers the read of a window, and `TIOCSCTTY` reads none. It claims the pseudo-terminal as the controlling terminal of the child, and termsize offers no call for that"
                 )]

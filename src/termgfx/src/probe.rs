@@ -1294,7 +1294,7 @@ mod tests {
             if libc::setsid() == -1 {
                 libc::_exit(FAILED);
             }
-            #[allow(
+            #[expect(
                 clippy::disallowed_methods,
                 reason = "the ban covers the read of a window, and `TIOCSCTTY` reads none. It claims the pseudo-terminal as the controlling terminal of this child, and termsize offers no call for that"
             )]
@@ -1557,7 +1557,7 @@ mod tests {
             if libc::setsid() == -1 {
                 leave(FAILED);
             }
-            #[allow(
+            #[expect(
                 clippy::disallowed_methods,
                 reason = "the ban covers the read of a window, and `TIOCSCTTY` reads none. It claims the pseudo-terminal as the controlling terminal of this child, and termsize offers no call for that"
             )]

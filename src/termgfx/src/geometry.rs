@@ -360,7 +360,7 @@ pub(crate) fn cell_pixels_or_estimate_of(
 /// # Returns
 /// The height of the cell over its width. A typical terminal gives about 2.
 #[must_use]
-#[allow(
+#[expect(
     clippy::cast_precision_loss,
     reason = "a character cell is a few tens of pixels, far inside the exact range of f64"
 )]
@@ -397,7 +397,7 @@ fn cells_to_pixels(cols: u32, rows: u32, cell_w: u32, cell_h: u32) -> (u32, u32)
 /// The casts from f64 to u32 are intentional - display dimensions are always positive
 /// and will never exceed u32::MAX for any reasonable terminal size.
 #[must_use]
-#[allow(
+#[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss,
@@ -525,7 +525,7 @@ pub(crate) fn downscale_to_display_pixels<'a>(
 /// The casts from f64 to u32 are intentional - pixel dimensions are always positive
 /// and will never exceed u32::MAX for any reasonable display.
 #[must_use]
-#[allow(
+#[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss,
@@ -587,7 +587,7 @@ pub(crate) fn calculate_sixel_dimensions(
 /// The width and the height of the budget in pixels. Each axis is 1 or more, so
 /// a degenerate terminal cannot ask the encoder for an image of no size.
 #[must_use]
-#[allow(
+#[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     reason = "pixel dimensions are always positive and fit in u32"
@@ -1313,7 +1313,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    #[allow(
+    #[expect(
         clippy::cast_precision_loss,
         reason = "a character cell is a few tens of pixels, far inside the exact range of f64"
     )]
@@ -1440,7 +1440,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(
+    #[expect(
         clippy::cast_precision_loss,
         reason = "the dimensions of a test image are a few hundred pixels, far inside the exact range of f64"
     )]

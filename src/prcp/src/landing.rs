@@ -234,7 +234,7 @@ fn ends_with_a_slash(source: &Path) -> bool {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
     clippy::expect_used,
     reason = "tests use unwrap for brevity and clear failure messages"
