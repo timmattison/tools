@@ -1525,10 +1525,17 @@ pub(crate) mod stub_shell {
 
     /// How long the parent waits for the child.
     ///
-    /// The stub shell answers at once, so a healthy child takes milliseconds.
     /// The bound is here for the child that hangs: a test that waits for such a
-    /// child holds the run for the life of the session.
-    const CHILD_DEADLINE: Duration = Duration::from_secs(30);
+    /// child holds the run for the life of the session. **A slow child is not
+    /// one.** Alone, a healthy child takes 0.3 to 2 seconds, but a hook run of
+    /// 2026-10-14 held two of them for more than 30 seconds on a busy machine.
+    /// [`a_child_that_a_busy_machine_holds_still_passes`] holds this bound
+    /// above that.
+    ///
+    /// It is twice [`ANSWER_DEADLINE`]. A child can wait for a whole
+    /// [`ANSWER_DEADLINE`] inside, so the parent must wait for longer, or it
+    /// kills a child that is still inside a bound of its own.
+    const CHILD_DEADLINE: Duration = ANSWER_DEADLINE.saturating_mul(2);
 
     /// A hostile environment: every variable that aims git, or configures it,
     /// or stops it from finding a repository at all, and that no user states
