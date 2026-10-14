@@ -156,14 +156,19 @@ impl Board {
         (active, recent)
     }
 
+    /// The number of runs that show at `now`.
+    fn run_count(&self, now: DateTime<Utc>) -> usize {
+        let (active, recent) = self.sections(now);
+        active.len() + recent.len()
+    }
+
     /// Makes the selection valid for the runs that show at `now`.
     fn settle(&mut self, now: DateTime<Utc>) {
-        let (active, recent) = self.sections(now);
-        let count = active.len() + recent.len();
+        let count = self.run_count(now);
         self.selected = match self.selected {
             _ if count == 0 => None,
             None => Some(0),
-            Some(index) => Some(index),
+            Some(index) => Some(index.min(count - 1)),
         };
     }
 
@@ -200,10 +205,17 @@ impl Board {
     }
 
     /// Moves the selection to the next run.
-    pub fn select_next(&mut self, now: DateTime<Utc>) {}
+    pub fn select_next(&mut self, now: DateTime<Utc>) {
+        self.settle(now);
+        let count = self.run_count(now);
+        self.selected = self.selected.map(|index| (index + 1).min(count - 1));
+    }
 
     /// Moves the selection to the previous run.
-    pub fn select_previous(&mut self, now: DateTime<Utc>) {}
+    pub fn select_previous(&mut self, now: DateTime<Utc>) {
+        self.settle(now);
+        self.selected = self.selected.map(|index| index.saturating_sub(1));
+    }
 
     /// The address of the selected run, or `None` when the board has no run.
     pub fn selected_url(&mut self, now: DateTime<Utc>) -> Option<String> {
