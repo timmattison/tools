@@ -1529,8 +1529,7 @@ pub(crate) mod stub_shell {
     /// child holds the run for the life of the session. **A slow child is not
     /// one.** Alone, a healthy child takes 0.3 to 2 seconds, but a hook run of
     /// 2026-10-14 held two of them for more than 30 seconds on a busy machine.
-    /// [`a_child_that_a_busy_machine_holds_still_passes`] holds this bound
-    /// above that.
+    /// A compile-time assertion below holds this bound above that.
     ///
     /// It is twice [`ANSWER_DEADLINE`]. A child can wait for a whole
     /// [`ANSWER_DEADLINE`] inside, so the parent must wait for longer, or it
@@ -1748,27 +1747,12 @@ pub(crate) mod stub_shell {
     /// 2026-10-14 held two of them for more than 30 seconds.
     const HELD_BY_A_BUSY_MACHINE: Duration = Duration::from_secs(31);
 
-    #[test]
-    fn a_child_that_a_busy_machine_holds_still_passes() {
-        // The bound of the parent is for a child that hangs, and a slow child
-        // is not one. A bound that a busy machine crosses fails a healthy test
-        // for a reason that has nothing to do with gsw, and it blocks the
-        // commit of whatever crate is under the hook.
-        //
-        // The child sleeps for as long as the busy machine held the children
-        // of that hook run, on a machine of any speed. So this test fails
-        // wherever the parent gives up sooner.
-        if std::env::var_os(HOSTILE_MARKER).is_none() {
-            a_child_of_this_test_passes(&test_name(
-                module_path!(),
-                "a_child_that_a_busy_machine_holds_still_passes",
-            ));
-            return;
-        }
-
-        std::thread::sleep(HELD_BY_A_BUSY_MACHINE);
-        println!("{CHILD_RAN}");
-    }
+    // The parent outwaits the bound that a busy machine crossed on 2026-10-14.
+    // This check replaces a test that slept 31 seconds in a child.
+    const _: () = assert!(
+        CHILD_DEADLINE.as_nanos() > HELD_BY_A_BUSY_MACHINE.as_nanos(),
+        "the bound of the parent must be above the time a busy machine held a healthy child",
+    );
 }
 
 #[cfg(all(test, unix))]
