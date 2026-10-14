@@ -21,6 +21,9 @@ use ha::worker::{self, Worker};
 /// The exit status of a run that `ha` refuses because of its settings.
 const EXIT_USAGE: u8 = 2;
 
+/// The exit status of a run that fails after the settings are good.
+const EXIT_FAILURE: u8 = 1;
+
 /// The command line of `ha`.
 #[derive(Parser)]
 #[command(
@@ -64,9 +67,6 @@ impl From<Cli> for CommandLine {
         }
     }
 }
-
-/// The exit status of a run that fails after the settings are good.
-const EXIT_FAILURE: u8 = 1;
 
 /// Restores the terminal when it drops, so every way out of `run` leaves
 /// the terminal as it was.
