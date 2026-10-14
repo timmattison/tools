@@ -578,7 +578,7 @@ mod tests {
         let (result, frame) = run_app_from(refreshing, &opener(false), &channels, quit());
         assert!(result.is_ok(), "{result:?}");
         let status_line = frame.last().unwrap();
-        assert!(status_line.contains("updated 12:00:00"), "{status_line:?}");
+        assert!(status_line.contains("updated 0s ago"), "{status_line:?}");
         assert!(!status_line.contains("refreshing…"), "{status_line:?}");
     }
 

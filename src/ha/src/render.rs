@@ -660,7 +660,7 @@ mod tests {
                 "✗ acme/widgets          Release           issue-11          Broken build                    10-13 23:50 4h 40m  7h ago",
                 "",
                 "",
-                "updated 11:59:30  ·  ↑↓ select  ⏎ open  r refresh  q quit",
+                "updated 30s ago      ·  ↑↓ select  ⏎ open  r refresh  q quit",
             ]
         );
     }
@@ -1160,14 +1160,14 @@ mod tests {
     }
 
     #[test]
-    fn the_status_line_shows_the_time_of_the_last_refresh() {
+    fn the_status_line_shows_how_long_ago_the_last_refresh_ended() {
         let status = Status {
             last_refresh: Some(at("2026-10-14T11:59:30Z")),
             ..Status::default()
         };
         assert_eq!(
             status_line(80, &status),
-            "updated 11:59:30  ·  ↑↓ select  ⏎ open  r refresh  q quit"
+            "updated 30s ago      ·  ↑↓ select  ⏎ open  r refresh  q quit"
         );
     }
 
@@ -1180,7 +1180,7 @@ mod tests {
         };
         assert_eq!(
             status_line(100, &status),
-            "updated 11:59:30  ·  API 4821/5000  ·  ↑↓ select  ⏎ open  r refresh  q quit"
+            "updated 30s ago      ·  API 4821/5000  ·  ↑↓ select  ⏎ open  r refresh  q quit"
         );
     }
 
@@ -1194,8 +1194,51 @@ mod tests {
         };
         assert_eq!(
             status_line(120, &status),
-            "updated 11:59:30  ·  API low 412/5000, next refresh 12:34  ·  ↑↓ select  ⏎ open  r refresh  q quit"
+            "updated 30s ago      ·  API low 412/5000, next refresh 12:34  ·  ↑↓ select  ⏎ open  r refresh  q quit"
         );
+    }
+
+    /// The status line of an 80-column frame whose last refresh ended
+    /// `age_seconds` before `now()`.
+    fn status_line_aged(age_seconds: i64) -> String {
+        let status = Status {
+            last_refresh: Some(now() - chrono::Duration::seconds(age_seconds)),
+            ..Status::default()
+        };
+        status_line(80, &status)
+    }
+
+    #[test]
+    fn the_age_of_the_last_refresh_has_the_units_of_the_time_column() {
+        for (age, text) in [
+            (0, "updated 0s ago "),
+            (59, "updated 59s ago "),
+            (65, "updated 1m 05s ago "),
+            (723, "updated 12m 03s ago "),
+            (8_040, "updated 2h 14m ago "),
+        ] {
+            let line = status_line_aged(age);
+            assert!(line.starts_with(text), "{age}s: {line:?}");
+        }
+    }
+
+    #[test]
+    fn a_last_refresh_in_the_future_is_zero_seconds_ago() {
+        let line = status_line_aged(-5);
+        assert!(line.starts_with("updated 0s ago "), "{line:?}");
+    }
+
+    #[test]
+    fn the_parts_after_the_age_keep_their_columns_as_the_age_grows() {
+        let hints_column = |line: &str| {
+            line.split_once("↑↓")
+                .map(|(before, _)| display_width(before))
+        };
+        let first = hints_column(&status_line_aged(0));
+        assert!(first.is_some(), "the 80-column line holds the key hints");
+        for age in [9, 10, 59, 60, 599, 600, 3_599, 3_600, 86_399, 86_400] {
+            assert_eq!(hints_column(&status_line_aged(age)), first, "{age}s");
+        }
     }
 
     #[test]
