@@ -155,6 +155,8 @@ mod tests {
     use ratatui::buffer::Buffer;
 
     use super::*;
+    use crate::run::{Run, RunId, RunState};
+    use crate::target::RepoName;
     use crate::worker::{Command, Update};
 
     /// Gives the events of a script, then an error, so a loop that does not
@@ -236,6 +238,32 @@ mod tests {
         Utc.with_ymd_and_hms(2026, 10, 14, 12, 0, 0).unwrap()
     }
 
+    fn repo() -> RepoName {
+        RepoName::parse("acme/widgets").unwrap()
+    }
+
+    /// An active run that started `started` minutes before `now`.
+    fn active_run(id: u64, started: i64) -> Run {
+        Run {
+            id: RunId(id),
+            repo: repo(),
+            workflow: "ci".to_owned(),
+            branch: "main".to_owned(),
+            title: format!("run {id}"),
+            state: RunState::Running,
+            started_at: now() - chrono::Duration::minutes(started),
+            updated_at: now(),
+            url: format!("https://example.test/runs/{id}"),
+        }
+    }
+
+    fn send_runs(channels: &Channels, runs: Vec<Run>) {
+        channels
+            .updates
+            .send(Update::Runs { repo: repo(), runs })
+            .unwrap();
+    }
+
     fn lines(buffer: &Buffer) -> Vec<String> {
         let area = buffer.area;
         (0..area.height)
@@ -314,5 +342,24 @@ mod tests {
         let (result, _) = run_app(&opener(false), &channels(), vec![release]);
         let error = result.expect_err("the script ends before the loop stops");
         assert_eq!(error.to_string(), "script ended");
+    }
+
+    #[test]
+    fn enter_opens_the_address_of_the_highlighted_run() {
+        let channels = channels();
+        // The older run (id 2) is the first row, the newer run (id 1) the second.
+        send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
+        let opener = opener(false);
+        let (result, _) = run_app(
+            &opener,
+            &channels,
+            vec![
+                press(KeyCode::Down),
+                press(KeyCode::Enter),
+                press(KeyCode::Char('q')),
+            ],
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(*opener.urls.borrow(), ["https://example.test/runs/1"]);
     }
 }
