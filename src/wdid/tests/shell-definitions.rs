@@ -451,3 +451,97 @@ fn every_error_message_ends_with_the_no_shell_hint() {
         format!("cannot start zsh: entity not found{HINT}")
     );
 }
+
+/// Finds a shell program for the real-shell tests: the fixed path first, then
+/// the name on the PATH. Gives `None` when the shell is not installed.
+fn find_shell(name: &str) -> Option<PathBuf> {
+    let fixed = PathBuf::from("/bin").join(name);
+    if fixed.exists() {
+        return Some(fixed);
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Makes a command for a real shell with `HOME` and `ZDOTDIR` in `home`.
+fn real_shell(path: &Path, home: &Path) -> Command {
+    let mut command = Command::new(path);
+    command
+        .env("HOME", home)
+        .env("ZDOTDIR", home)
+        .env("TERM", "dumb");
+    command
+}
+
+#[test]
+fn a_real_zsh_gives_its_aliases_and_functions() {
+    let Some(zsh) = find_shell("zsh") else {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    let big_body: String = (0..4000)
+        .map(|n| format!("\techo line {n} with some padding to make the output large\n"))
+        .collect();
+    std::fs::write(
+        home.path().join(".zshrc"),
+        format!(
+            "alias wtm='wt --main'\nwt() {{ cwt \"$@\" }}\ngitclean() {{ gitnuke --safe \"$@\" }}\nbig() {{\n{big_body}}}\n"
+        ),
+    )
+    .unwrap();
+    let definitions = read(
+        real_shell(&zsh, home.path()),
+        ShellKind::Zsh,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    assert_eq!(definitions.aliases.get("wtm"), Some("wt --main"));
+    assert_eq!(
+        definitions.functions.get("wt"),
+        Some(&vec![CommandWord::new("cwt", ["\"$@\""])])
+    );
+    assert_eq!(
+        definitions.functions.get("gitclean"),
+        Some(&vec![CommandWord::new("gitnuke", ["--safe", "\"$@\""])])
+    );
+    assert_eq!(definitions.functions["big"].len(), 4000);
+    assert!(
+        definitions.unparsed_aliases.is_empty(),
+        "{:?}",
+        definitions.unparsed_aliases
+    );
+}
+
+#[test]
+fn a_real_bash_gives_its_aliases_and_functions() {
+    let Some(bash) = find_shell("bash") else {
+        eprintln!("skipped: bash is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join(".bashrc"),
+        "alias wtm='wt --main'\nwt() { cwt \"$@\"; }\ngitclean() { gitnuke --safe \"$@\"; }\n",
+    )
+    .unwrap();
+    let definitions = read(
+        real_shell(&bash, home.path()),
+        ShellKind::Bash,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    assert_eq!(definitions.aliases.get("wtm"), Some("wt --main"));
+    let wt: Vec<&str> = definitions.functions["wt"]
+        .iter()
+        .map(|w| w.word.as_str())
+        .collect();
+    assert_eq!(wt, ["cwt"]);
+    let gitclean: Vec<&str> = definitions.functions["gitclean"]
+        .iter()
+        .map(|w| w.word.as_str())
+        .collect();
+    assert_eq!(gitclean, ["gitnuke"]);
+}
