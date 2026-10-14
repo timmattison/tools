@@ -368,8 +368,22 @@ impl Default for GhSource {
 
 impl Source for GhSource {
     fn repos_of(&self, owner: &OwnerName) -> Result<Vec<RepoName>, SourceError> {
-        let _ = owner;
-        Ok(Vec::new())
+        // The default `--limit` of `gh repo list` is 30. A larger limit stops
+        // an owner with many repositories from losing the rest with no message.
+        let output = self.run_gh(&[
+            "repo",
+            "list",
+            owner.as_str(),
+            "--no-archived",
+            "--limit",
+            "1000",
+            "--json",
+            "nameWithOwner",
+        ])?;
+        if !output.status.success() {
+            return Err(no_answer_error(&output));
+        }
+        parse_repos(&String::from_utf8_lossy(&output.stdout))
     }
 
     fn runs_of(&self, repo: &RepoName, query: RunQuery) -> Result<Vec<Run>, SourceError> {
@@ -439,6 +453,24 @@ fn newer_rate(stored: Option<RateLimit>, new: RateLimit) -> RateLimit {
         Some(old) if old.reset == new.reset && old.remaining < new.remaining => old,
         _ => new,
     }
+}
+
+/// Maps the JSON of `gh repo list --json nameWithOwner` to repository names.
+fn parse_repos(json: &str) -> Result<Vec<RepoName>, SourceError> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Entry {
+        name_with_owner: String,
+    }
+    let entries: Vec<Entry> =
+        serde_json::from_str(json).map_err(|error| SourceError::BadResponse(error.to_string()))?;
+    entries
+        .into_iter()
+        .map(|entry| {
+            RepoName::parse(&entry.name_with_owner)
+                .map_err(|error| SourceError::BadResponse(error.to_string()))
+        })
+        .collect()
 }
 
 /// The error for a run of `gh` that printed no HTTP status line.
