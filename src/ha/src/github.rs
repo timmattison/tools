@@ -19,6 +19,12 @@ use std::time::Duration;
 
 use wait_timeout::ChildExt;
 
+use chrono::{DateTime, Utc};
+use serde::Deserialize;
+
+use crate::run::{Run, RunId, RunState};
+use crate::target::RepoName;
+
 /// Why `run_with_limit` gave no output.
 #[derive(Debug)]
 pub enum RunFailure {
@@ -96,6 +102,76 @@ fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> JoinHandle<Vec<u8>> {
             let _ = pipe.read_to_end(&mut bytes);
         }
         bytes
+    })
+}
+
+/// Why a request to GitHub gave no answer that `ha` can use.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SourceError {
+    /// The `gh` program is not on the path.
+    #[error("gh is not installed: install it from https://cli.github.com")]
+    NotInstalled,
+    /// `gh` has no login, or GitHub refused the token. The text is the detail.
+    #[error("gh is not logged in: run gh auth login")]
+    NotLoggedIn(String),
+    /// `gh` did not finish in the time limit.
+    #[error("gh did not finish within {0:?}")]
+    TimedOut(Duration),
+    /// GitHub answered with a status of 400 or more.
+    #[error("GitHub answered {status}: {message}")]
+    Http {
+        /// The HTTP status code.
+        status: u16,
+        /// The `message` of the JSON body, or the reason phrase.
+        message: String,
+    },
+    /// `gh` ended with an error and no HTTP answer. The text is one line of stderr.
+    #[error("gh failed: {0}")]
+    Failed(String),
+    /// `gh` printed an answer that `ha` cannot read. The text says why.
+    #[error("gh gave an answer that ha cannot read: {0}")]
+    BadResponse(String),
+}
+
+/// One page of workflow runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Page {
+    /// The `total_count` that GitHub states for the whole query.
+    total_count: u64,
+    /// The runs of this page.
+    runs: Vec<Run>,
+}
+
+/// The JSON body of one page, as GitHub writes it.
+#[derive(Deserialize)]
+struct RunsBody {
+    total_count: u64,
+    workflow_runs: Vec<RunJson>,
+}
+
+/// One element of `workflow_runs`. Only the fields that `ha` reads are here.
+#[derive(Deserialize)]
+struct RunJson {
+    id: u64,
+    name: Option<String>,
+    display_title: Option<String>,
+    head_branch: Option<String>,
+    status: Option<String>,
+    conclusion: Option<String>,
+    run_started_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    html_url: String,
+}
+
+/// Maps the JSON body of one page of runs to a [`Page`].
+///
+/// `Run::repo` is `repo`, the repository that the request named.
+fn parse_runs(body: &str, repo: &RepoName) -> Result<Page, SourceError> {
+    let _ = (body, repo);
+    Ok(Page {
+        total_count: 0,
+        runs: Vec::new(),
     })
 }
 
@@ -275,6 +351,82 @@ mod tests {
         assert_eq!(parse_response("not http\r\n\r\nbody"), None);
         assert_eq!(parse_response("HTTP/2.0 abc OK\n\n"), None);
         assert_eq!(parse_response("{\"message\":\"x\"}"), None);
+    }
+
+    fn repo(text: &str) -> RepoName {
+        RepoName::parse(text).expect("a valid repository")
+    }
+
+    fn time(text: &str) -> DateTime<Utc> {
+        text.parse().expect("a valid time")
+    }
+
+    const RUNS_JSON: &str = r#"{"total_count":2,"workflow_runs":[
+        {"id":36064582280,"name":"CI","display_title":"Fix the thing","head_branch":"main",
+         "status":"completed","conclusion":"failure","run_started_at":"2026-09-24T21:56:49Z",
+         "created_at":"2026-09-24T21:50:00Z","updated_at":"2026-09-24T21:57:56Z",
+         "html_url":"https://github.com/timmattison/tools/actions/runs/36064582280",
+         "repository":{"full_name":"other/place"}},
+        {"id":7,"name":"Release","display_title":null,"head_branch":null,
+         "status":"in_progress","conclusion":null,"run_started_at":null,
+         "created_at":"2026-09-25T01:02:03Z","updated_at":"2026-09-25T01:03:00Z",
+         "html_url":"https://github.com/timmattison/tools/actions/runs/7"}]}"#;
+
+    #[test]
+    fn the_runs_json_maps_to_runs() {
+        let tools = repo("timmattison/tools");
+        let page = parse_runs(RUNS_JSON, &tools).expect("a page");
+        assert_eq!(page.total_count, 2);
+        assert_eq!(
+            page.runs,
+            [
+                Run {
+                    id: RunId(36_064_582_280),
+                    repo: tools.clone(),
+                    workflow: "CI".to_owned(),
+                    branch: "main".to_owned(),
+                    title: "Fix the thing".to_owned(),
+                    state: RunState::Failed,
+                    started_at: time("2026-09-24T21:56:49Z"),
+                    updated_at: time("2026-09-24T21:57:56Z"),
+                    url: "https://github.com/timmattison/tools/actions/runs/36064582280".to_owned(),
+                },
+                Run {
+                    id: RunId(7),
+                    repo: tools,
+                    workflow: "Release".to_owned(),
+                    branch: String::new(),
+                    title: "Release".to_owned(),
+                    state: RunState::Running,
+                    started_at: time("2026-09-25T01:02:03Z"),
+                    updated_at: time("2026-09-25T01:03:00Z"),
+                    url: "https://github.com/timmattison/tools/actions/runs/7".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_takes_the_repository_that_the_request_named() {
+        let asked = repo("Timmattison/Tools");
+        let page = parse_runs(RUNS_JSON, &asked).expect("a page");
+        assert_eq!(page.runs.len(), 2);
+        assert!(page
+            .runs
+            .iter()
+            .all(|run| run.repo.to_string() == "Timmattison/Tools"));
+    }
+
+    #[test]
+    fn invalid_json_is_a_bad_response() {
+        let tools = repo("timmattison/tools");
+        for body in ["", "not json", "{}", "{\"total_count\":1}", "[]"] {
+            let result = parse_runs(body, &tools);
+            assert!(
+                matches!(result, Err(SourceError::BadResponse(_))),
+                "{body:?} gave {result:?}"
+            );
+        }
     }
 
     #[test]

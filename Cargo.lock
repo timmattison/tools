@@ -3854,6 +3854,7 @@ dependencies = [
  "dirs",
  "ratatui",
  "serde",
+ "serde_json",
  "tempfile",
  "textfit",
  "thiserror 2.0.21",
