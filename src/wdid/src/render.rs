@@ -128,8 +128,8 @@ const ENTRY_SEPARATOR: &str = ", ";
 /// What holds the blocks of the text report apart: one blank line.
 const BETWEEN_BLOCKS: &str = "\n\n";
 
-/// Gives the names of the tools that have `classification`, sorted by name.
-fn names_of(tally: &Tally, classification: Classification) -> Vec<&ToolUsage> {
+/// Gives the tools that have `classification`, sorted by name.
+fn tools_with(tally: &Tally, classification: Classification) -> Vec<&ToolUsage> {
     let mut found: Vec<&ToolUsage> = tally
         .tools
         .iter()
@@ -150,11 +150,11 @@ fn entries_or_none(entries: &[String]) -> String {
 
 /// Gives the three lines that name the tools never used and the tools idle.
 fn group_lines(tally: &Tally, window: &Window) -> String {
-    let old: Vec<String> = names_of(tally, Classification::NeverUsedOld)
+    let old: Vec<String> = tools_with(tally, Classification::NeverUsedOld)
         .iter()
         .map(|usage| usage.tool.name.to_string())
         .collect();
-    let new: Vec<String> = names_of(tally, Classification::NeverUsedNew)
+    let new: Vec<String> = tools_with(tally, Classification::NeverUsedNew)
         .iter()
         .map(|usage| {
             format!(
@@ -164,8 +164,8 @@ fn group_lines(tally: &Tally, window: &Window) -> String {
             )
         })
         .collect();
-    let mut idle = names_of(tally, Classification::Idle);
-    idle.sort_by(|left, right| right.uses.cmp(&left.uses));
+    let mut idle = tools_with(tally, Classification::Idle);
+    idle.sort_by_key(|usage| std::cmp::Reverse(usage.uses));
     let idle: Vec<String> = idle
         .iter()
         .map(|usage| {
