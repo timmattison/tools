@@ -164,13 +164,18 @@ impl Board {
 
     /// Makes the selection valid for the runs that show at `now`.
     ///
-    /// The selection follows its run. When the run is gone, the first run is selected.
+    /// The selection follows its run. When the run is gone, the run at the old
+    /// position is selected, or the last run when the old position is past the
+    /// end. A board with no run has no selection. A new selection is the first run.
     fn settle(&mut self, now: DateTime<Utc>) {
         let runs = self.selectable(now);
-        let position = self
-            .selected
-            .and_then(|(id, _)| runs.iter().position(|run| run.id == id))
-            .unwrap_or(0);
+        let position = match self.selected {
+            None => 0,
+            Some((id, old)) => runs
+                .iter()
+                .position(|run| run.id == id)
+                .unwrap_or_else(|| old.min(runs.len().saturating_sub(1))),
+        };
         self.selected = runs.get(position).map(|run| (run.id, position));
     }
 
