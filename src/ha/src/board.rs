@@ -125,10 +125,14 @@ impl Board {
             .filter(|run| run.state.is_active())
             .collect();
         active.sort_by_key(|run| (run.started_at, run.id));
+        let oldest = chrono::Duration::from_std(self.window)
+            .ok()
+            .and_then(|window| now.checked_sub_signed(window))
+            .unwrap_or(DateTime::<Utc>::MIN_UTC);
         let mut recent: Vec<&Run> = self
             .runs
             .iter()
-            .filter(|run| run.state.is_finished())
+            .filter(|run| run.state.is_finished() && run.updated_at >= oldest)
             .collect();
         recent.sort_by_key(|run| std::cmp::Reverse((run.updated_at, run.id)));
         let passed = recent
