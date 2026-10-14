@@ -531,6 +531,36 @@ mod tests {
     }
 
     #[test]
+    fn the_board_says_loading_until_the_first_cycle_ends() {
+        let channels = channels();
+        let (result, before) = run_app(&opener(false), &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(
+            before[1..5],
+            ["Running", "  Loading…", "Last 8h", "  Loading…"]
+        );
+        channels
+            .updates
+            .send(Update::CycleDone {
+                finished_at: now(),
+                rate: None,
+                backoff_until: None,
+            })
+            .unwrap();
+        let (result, after) = run_app(&opener(false), &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(
+            after[1..5],
+            [
+                "Running · 0",
+                "  No runs in progress or in the queue.",
+                "Last 8h · 0 passed · 0 failed",
+                "  No runs finished in the last 8h.",
+            ]
+        );
+    }
+
+    #[test]
     fn a_finished_cycle_shows_the_time_and_ends_refreshing() {
         let channels = channels();
         channels

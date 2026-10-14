@@ -567,10 +567,18 @@ mod tests {
             .collect()
     }
 
+    /// A status after the first refresh cycle ended at 11:59:30.
+    fn loaded() -> Status {
+        Status {
+            last_refresh: Some(at("2026-10-14T11:59:30Z")),
+            ..Status::default()
+        }
+    }
+
     #[test]
     fn the_frame_holds_the_header_the_rows_and_the_status_line() {
         let mut board = four_run_board();
-        let buffer = render_with(120, 10, &mut board, &Status::default());
+        let buffer = render_with(120, 10, &mut board, &loaded());
         assert_eq!(
             lines(&buffer),
             [
@@ -583,9 +591,51 @@ mod tests {
                 "✗ acme/widgets          Release           issue-11          Broken build                    10-13 23:50 4h 40m  7h ago",
                 "",
                 "",
-                "loading…  ·  ↑↓ select  ⏎ open  r refresh  q quit",
+                "updated 11:59:30  ·  ↑↓ select  ⏎ open  r refresh  q quit",
             ]
         );
+    }
+
+    #[test]
+    fn each_empty_section_says_loading_before_the_first_refresh_ends() {
+        let mut board = Board::new(Duration::from_hours(8));
+        let text = lines(&render_with(60, 8, &mut board, &Status::default()));
+        assert_eq!(
+            text[1..5],
+            ["Running", "  Loading…", "Last 8h", "  Loading…"]
+        );
+    }
+
+    #[test]
+    fn the_headers_give_no_counts_before_the_first_refresh_ends() {
+        let mut board = four_run_board();
+        let text = lines(&render_with(120, 10, &mut board, &Status::default()));
+        assert_eq!(text[1], "Running");
+        assert!(text[2].starts_with("● timmattison/tools"), "{:?}", text[2]);
+        assert_eq!(text[4], "Last 8h");
+        assert!(text[5].starts_with("✓ timmattison/tools"), "{:?}", text[5]);
+    }
+
+    #[test]
+    fn a_section_that_the_first_cycle_did_not_fill_yet_says_loading() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("timmattison/tools"),
+            vec![run(
+                1,
+                "timmattison/tools",
+                "CI",
+                "main",
+                "Fix the thing",
+                RunState::Running,
+                "2026-10-14T11:45:30Z",
+                "2026-10-14T11:59:00Z",
+            )],
+        );
+        let text = lines(&render_with(120, 8, &mut board, &Status::default()));
+        assert_eq!(text[1], "Running");
+        assert!(text[2].starts_with("● timmattison/tools"), "{:?}", text[2]);
+        assert_eq!(text[3..5], ["Last 8h", "  Loading…"]);
     }
 
     #[test]
@@ -675,7 +725,7 @@ mod tests {
     #[test]
     fn an_empty_board_says_so_in_each_section() {
         let mut board = Board::new(Duration::from_hours(8));
-        let buffer = render_with(60, 8, &mut board, &Status::default());
+        let buffer = render_with(60, 8, &mut board, &loaded());
         let text = lines(&buffer);
         assert_eq!(
             text[1..5],
@@ -691,7 +741,7 @@ mod tests {
     #[test]
     fn the_window_text_follows_the_setting() {
         let mut board = Board::new(Duration::from_mins(90));
-        let buffer = render_with(60, 8, &mut board, &Status::default());
+        let buffer = render_with(60, 8, &mut board, &loaded());
         let text = lines(&buffer);
         assert_eq!(text[3], "Last 90m · 0 passed · 0 failed");
         assert_eq!(text[4], "  No runs finished in the last 90m.");
