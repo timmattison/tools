@@ -6,8 +6,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use wdid::command_words::CommandWord;
-use wdid::shell::{parse_output, read, script, Marker, ShellError, ShellKind};
+use wdid::command_words::{command_words, Aliases, CommandWord, Parsed};
+use wdid::shell::{
+    parse_output, read, script, Definitions, Marker, Resolver, ShellError, ShellKind,
+};
+use wdid::tool::{ToolName, ToolNames};
 
 #[test]
 fn kind_comes_from_the_file_name() {
@@ -544,4 +547,138 @@ fn a_real_bash_gives_its_aliases_and_functions() {
         .map(|w| w.word.as_str())
         .collect();
     assert_eq!(gitclean, ["gitnuke"]);
+}
+
+/// The tools of the fixture workspace.
+fn tools() -> ToolNames {
+    ["prcp", "cwt", "crap", "prhash"]
+        .into_iter()
+        .map(ToolName::new)
+        .collect()
+}
+
+/// Makes definitions from function names and bodies. Each body is parsed with
+/// no aliases, as the shell module parses it.
+fn functions(rows: &[(&str, &str)]) -> Definitions {
+    let mut definitions = Definitions::default();
+    for (name, body) in rows {
+        let Parsed::Words(words) = command_words(body, &Aliases::new()) else {
+            panic!("the body of {name} does not parse: {body}");
+        };
+        definitions.functions.insert((*name).to_owned(), words);
+    }
+    definitions
+}
+
+/// Gives the names of the tools of a function, or `None` for a name that is
+/// not a function.
+fn tools_of(resolver: &Resolver, name: &str) -> Option<Vec<String>> {
+    resolver
+        .tools_of(name)
+        .map(|set| set.iter().map(ToString::to_string).collect())
+}
+
+#[test]
+fn a_function_resolves_to_the_tool_that_it_calls() {
+    let resolver = Resolver::new(&functions(&[("wt", "cwt \"$@\"")]), &tools());
+    assert_eq!(tools_of(&resolver, "wt"), Some(vec!["cwt".to_owned()]));
+}
+
+#[test]
+fn a_function_that_calls_a_function_resolves_to_the_tools_of_both() {
+    let definitions = functions(&[("wt", "cwt"), ("wtf", "wt -f\nprcp x")]);
+    let resolver = Resolver::new(&definitions, &tools());
+    assert_eq!(tools_of(&resolver, "wt"), Some(vec!["cwt".to_owned()]));
+    assert_eq!(
+        tools_of(&resolver, "wtf"),
+        Some(vec!["cwt".to_owned(), "prcp".to_owned()])
+    );
+}
+
+#[test]
+fn a_chain_of_functions_resolves_to_any_depth() {
+    let definitions = functions(&[("a", "b"), ("b", "c"), ("c", "d"), ("d", "cwt")]);
+    let resolver = Resolver::new(&definitions, &tools());
+    for name in ["a", "b", "c", "d"] {
+        assert_eq!(
+            tools_of(&resolver, name),
+            Some(vec!["cwt".to_owned()]),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_function_that_calls_two_tools_resolves_to_both() {
+    let resolver = Resolver::new(
+        &functions(&[("both", "prcp a && cat x | prhash")]),
+        &tools(),
+    );
+    assert_eq!(
+        tools_of(&resolver, "both"),
+        Some(vec!["prcp".to_owned(), "prhash".to_owned()])
+    );
+}
+
+#[test]
+fn a_cycle_of_functions_stops_and_keeps_every_tool() {
+    let definitions = functions(&[("a", "b"), ("b", "a\nprcp")]);
+    let resolver = Resolver::new(&definitions, &tools());
+    assert_eq!(tools_of(&resolver, "a"), Some(vec!["prcp".to_owned()]));
+    assert_eq!(tools_of(&resolver, "b"), Some(vec!["prcp".to_owned()]));
+}
+
+#[test]
+fn a_function_that_calls_itself_resolves() {
+    let resolver = Resolver::new(&functions(&[("loop", "loop\ncwt")]), &tools());
+    assert_eq!(tools_of(&resolver, "loop"), Some(vec!["cwt".to_owned()]));
+}
+
+#[test]
+fn a_function_named_like_a_tool_that_calls_the_tool_through_command() {
+    let definitions = functions(&[("crap", "command crap --here \"$@\"")]);
+    let resolver = Resolver::new(&definitions, &tools());
+    assert_eq!(tools_of(&resolver, "crap"), Some(vec!["crap".to_owned()]));
+}
+
+#[test]
+fn a_tool_in_a_command_substitution_of_an_assignment_counts() {
+    let resolver = Resolver::new(&functions(&[("f", "x=$(cwt)")]), &tools());
+    assert_eq!(tools_of(&resolver, "f"), Some(vec!["cwt".to_owned()]));
+}
+
+#[test]
+fn a_development_run_does_not_count() {
+    let definitions = functions(&[("f", "./target/release/prcp x\ncargo run --bin cwt")]);
+    let resolver = Resolver::new(&definitions, &tools());
+    assert_eq!(tools_of(&resolver, "f"), Some(Vec::new()));
+}
+
+#[test]
+fn a_function_without_a_tool_has_an_empty_entry() {
+    let resolver = Resolver::new(&functions(&[("ll", "ls -l"), ("nothing", "")]), &tools());
+    assert_eq!(tools_of(&resolver, "ll"), Some(Vec::new()));
+    assert_eq!(tools_of(&resolver, "nothing"), Some(Vec::new()));
+}
+
+#[test]
+fn a_name_that_is_not_a_function_has_no_entry() {
+    let resolver = Resolver::new(&functions(&[("wt", "cwt")]), &tools());
+    assert_eq!(tools_of(&resolver, "cwt"), None);
+    assert_eq!(tools_of(&resolver, "missing"), None);
+}
+
+#[test]
+fn a_function_that_did_not_parse_has_no_entry_and_adds_no_tool() {
+    let mut definitions = functions(&[("caller", "broken\nprcp")]);
+    definitions.unparsed_functions.push("broken".to_owned());
+    let resolver = Resolver::new(&definitions, &tools());
+    assert_eq!(tools_of(&resolver, "broken"), None);
+    assert_eq!(tools_of(&resolver, "caller"), Some(vec!["prcp".to_owned()]));
+}
+
+#[test]
+fn an_empty_resolver_has_no_entry() {
+    let resolver = Resolver::new(&Definitions::default(), &tools());
+    assert_eq!(tools_of(&resolver, "wt"), None);
 }
