@@ -159,7 +159,11 @@ fn count_word(
                 }
                 counted.push(tool);
             }
-            Run::Development(_) => {}
+            Run::Development(tool) => {
+                if let Some(entry) = counts.get_mut(&tool) {
+                    entry.development_runs += 1;
+                }
+            }
         }
     }
     if let Some(set) = resolver.tools_of(&word.word) {
@@ -185,7 +189,6 @@ pub fn tally(
     catalog: &Catalog,
     window: &Window,
 ) -> Tally {
-    let _ = window;
     let names = catalog.names();
     let mut counts: BTreeMap<ToolName, Counts> = catalog
         .tools
@@ -193,7 +196,17 @@ pub fn tally(
         .map(|tool| (tool.name.clone(), Counts::default()))
         .collect();
     let mut cache: HashMap<&str, Parsed> = HashMap::new();
+    let mut before_since: u64 = 0;
+    let mut not_found: u64 = 0;
     for entry in entries {
+        if window.since.is_some_and(|since| entry.time.date() < since) {
+            before_since += 1;
+            continue;
+        }
+        if entry.exit.is_command_not_found() {
+            not_found += 1;
+            continue;
+        }
         let parsed = cache
             .entry(entry.command.as_str())
             .or_insert_with(|| command_words(&entry.command, &definitions.aliases));
@@ -226,8 +239,8 @@ pub fn tally(
         tools,
         summary: Summary {
             rows: 0,
-            before_since: 0,
-            not_found: 0,
+            before_since,
+            not_found,
             unparsed_rows: 0,
             unparsed: Vec::new(),
             aliases: 0,
