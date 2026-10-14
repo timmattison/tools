@@ -419,4 +419,22 @@ mod tests {
         assert!(result.is_ok(), "{result:?}");
         assert!(opener.urls.borrow().is_empty());
     }
+
+    #[test]
+    fn r_asks_the_worker_for_one_refresh_and_shows_refreshing() {
+        let channels = channels();
+        let (result, frame) = run_app(
+            &opener(false),
+            &channels,
+            vec![press(KeyCode::Char('r')), press(KeyCode::Char('q'))],
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert!(matches!(
+            channels.commands.try_recv(),
+            Ok(Command::RefreshNow)
+        ));
+        assert!(channels.commands.try_recv().is_err(), "exactly one command");
+        let status_line = frame.last().unwrap();
+        assert!(status_line.contains("refreshing…"), "{status_line:?}");
+    }
 }
