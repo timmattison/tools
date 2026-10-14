@@ -1160,6 +1160,15 @@ mod tests {
 
     const HINTS_TAIL: &str = "loading…  ·  ↑↓ select  ⏎ open  r refresh  q quit";
 
+    /// The mark at the right end of the status line during a refresh.
+    const MARK: &str = "refreshing…";
+
+    /// The status line of a 140-column frame: `left` at the start and the
+    /// refresh mark at the end.
+    fn with_mark(left: &str) -> String {
+        format!("{}{MARK}", pad_right(left, 140 - display_width(MARK)))
+    }
+
     #[test]
     fn the_status_line_names_the_first_failed_repository_and_counts_the_rest() {
         let mut board = Board::new(Duration::from_hours(8));
@@ -1217,7 +1226,9 @@ mod tests {
         };
         assert_eq!(
             status_line_of(&mut board, &status),
-            format!("could not open a browser: https://example.com/run/1  ·  {HINTS_TAIL}")
+            with_mark(&format!(
+                "could not open a browser: https://example.com/run/1  ·  {HINTS_TAIL}"
+            ))
         );
     }
 
@@ -1274,21 +1285,77 @@ mod tests {
     }
 
     #[test]
-    fn refreshing_shows_when_there_is_no_error_and_no_message() {
+    fn refreshing_stands_at_the_right_end_of_the_status_line() {
         let mut board = Board::new(Duration::from_hours(8));
         let status = Status {
             refreshing: true,
             ..Status::default()
         };
-        assert_eq!(
-            status_line_of(&mut board, &status),
-            format!("refreshing…  ·  {HINTS_TAIL}")
-        );
+        assert_eq!(status_line_of(&mut board, &status), with_mark(HINTS_TAIL));
         board.fail(repo("owner/x"), "HTTP 404".to_owned());
         assert_eq!(
             status_line_of(&mut board, &status),
-            format!("⚠ owner/x: HTTP 404  ·  {HINTS_TAIL}")
+            with_mark(&format!("⚠ owner/x: HTTP 404  ·  {HINTS_TAIL}"))
         );
+    }
+
+    #[test]
+    fn a_refresh_moves_no_part_of_the_status_line() {
+        let mut board = Board::new(Duration::from_hours(8));
+        let idle = Status {
+            rate: Some(rate(4_821)),
+            ..loaded()
+        };
+        let busy = Status {
+            refreshing: true,
+            ..idle.clone()
+        };
+        let idle_line = status_line_of(&mut board, &idle);
+        let busy_line = status_line_of(&mut board, &busy);
+        assert!(busy_line.starts_with(&idle_line), "{busy_line:?}");
+        assert!(busy_line.ends_with(MARK), "{busy_line:?}");
+        assert_eq!(display_width(&busy_line), 140, "{busy_line:?}");
+    }
+
+    #[test]
+    fn on_a_narrow_frame_the_refresh_mark_cuts_the_left_part() {
+        let status = Status {
+            refreshing: true,
+            ..Status::default()
+        };
+        assert_eq!(
+            status_line(40, &status),
+            "loading…  ·  ↑↓ select  ⏎ …  refreshing…"
+        );
+    }
+
+    #[test]
+    fn a_frame_narrower_than_the_refresh_mark_shows_the_left_part_only() {
+        let busy = Status {
+            refreshing: true,
+            ..Status::default()
+        };
+        assert_eq!(status_line(10, &busy), status_line(10, &Status::default()));
+    }
+
+    #[test]
+    fn a_long_message_does_not_fade_the_refresh_mark() {
+        let mut board = Board::new(Duration::from_hours(8));
+        let status = Status {
+            refreshing: true,
+            ..status_with_message_aged(&"m".repeat(50), 0)
+        };
+        let buffer = render_with(40, 8, &mut board, &status);
+        assert_eq!(
+            lines(&buffer)[7],
+            format!("{}…  refreshing…", "m".repeat(26))
+        );
+        for x in 0..27 {
+            assert_eq!(buffer[(x, 7)].fg, Color::Indexed(252), "cell {x}");
+        }
+        for x in 27..40 {
+            assert_eq!(buffer[(x, 7)].fg, Color::Reset, "cell {x}");
+        }
     }
 
     #[test]
