@@ -230,8 +230,26 @@ pub trait Source: Send + Sync {
 pub struct GhSource {
     program: OsString,
     limit: Duration,
-    etags: Mutex<HashMap<String, (String, Page)>>,
+    etags: Mutex<HashMap<String, Cached>>,
     rate: Mutex<Option<RateLimit>>,
+}
+
+/// One page in the `ETag` cache.
+///
+/// The cache key names the repository, the filter family, and the page
+/// number, but not the value of the filter. A created-since filter holds the
+/// start of the hour, thus its path changes each hour. With the path as the key,
+/// the cache would keep one stale page for each hour, and a session that runs
+/// for days would grow with no limit. The path is kept here instead, and the
+/// `ETag` goes out only when the path of the request is the same.
+#[derive(Debug, Clone)]
+struct Cached {
+    /// The path of the request that gave this page.
+    path: String,
+    /// The `ETag` of that answer.
+    etag: String,
+    /// The page that the answer held.
+    page: Page,
 }
 
 impl GhSource {
@@ -280,19 +298,34 @@ impl GhSource {
     }
 
     /// Fetches the page `number` of the runs of `repo` for `filter`.
-    fn runs_page(&self, repo: &RepoName, filter: &str, number: u32) -> Result<Page, SourceError> {
+    ///
+    /// `family` names the kind of filter without its value, for the cache key
+    /// (see [`Cached`]).
+    fn runs_page(
+        &self,
+        repo: &RepoName,
+        family: &str,
+        filter: &str,
+        number: u32,
+    ) -> Result<Page, SourceError> {
         let path = format!(
             "repos/{}/{}/actions/runs?per_page={PAGE_SIZE}&page={number}&{filter}",
             repo.owner(),
             repo.name()
         );
-        let etag = self.lock_etags().get(&path).map(|(etag, _)| etag.clone());
+        let key = format!("{repo}#{family}#{number}");
+        let etag = self
+            .lock_etags()
+            .get(&key)
+            .filter(|cached| cached.path == path)
+            .map(|cached| cached.etag.clone());
         let response = self.request(&path, etag.as_deref())?;
         if response.status == 304 {
             return self
                 .lock_etags()
-                .get(&path)
-                .map(|(_, page)| page.clone())
+                .get(&key)
+                .filter(|cached| cached.path == path)
+                .map(|cached| cached.page.clone())
                 .ok_or_else(|| {
                     SourceError::BadResponse(
                         "GitHub said 304 for a page that ha has not seen".to_owned(),
@@ -301,8 +334,12 @@ impl GhSource {
         }
         let page = parse_runs(&response.body, repo)?;
         if let Some(etag) = response.header("etag") {
-            self.lock_etags()
-                .insert(path, (etag.to_owned(), page.clone()));
+            let cached = Cached {
+                path,
+                etag: etag.to_owned(),
+                page: page.clone(),
+            };
+            self.lock_etags().insert(key, cached);
         }
         Ok(page)
     }
@@ -311,10 +348,15 @@ impl GhSource {
     ///
     /// The fetch goes on while the last page was full and the count so far is
     /// below `total_count`. It stops after `MAX_PAGES` pages.
-    fn all_runs(&self, repo: &RepoName, filter: &str) -> Result<Vec<Run>, SourceError> {
+    fn all_runs(
+        &self,
+        repo: &RepoName,
+        family: &str,
+        filter: &str,
+    ) -> Result<Vec<Run>, SourceError> {
         let mut runs = Vec::new();
         for number in 1..=MAX_PAGES {
-            let page = self.runs_page(repo, filter, number)?;
+            let page = self.runs_page(repo, family, filter, number)?;
             let full = page.runs.len() >= PAGE_SIZE;
             runs.extend(page.runs);
             if !full || (runs.len() as u64) >= page.total_count {
@@ -326,7 +368,7 @@ impl GhSource {
 
     /// The `ETag` cache. The guard lives for one statement. A poisoned lock still
     /// holds a usable map, thus the poison is ignored.
-    fn lock_etags(&self) -> std::sync::MutexGuard<'_, HashMap<String, (String, Page)>> {
+    fn lock_etags(&self) -> std::sync::MutexGuard<'_, HashMap<String, Cached>> {
         self.etags
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -402,12 +444,12 @@ impl Source for GhSource {
         match query {
             RunQuery::CreatedSince(since) => {
                 let filter = format!("created=%3E%3D{}", hour_start(since));
-                self.all_runs(repo, &filter)
+                self.all_runs(repo, "created", &filter)
             }
             RunQuery::Active => {
                 let mut seen = HashSet::new();
-                let mut runs = self.all_runs(repo, "status=in_progress")?;
-                runs.extend(self.all_runs(repo, "status=queued")?);
+                let mut runs = self.all_runs(repo, "in_progress", "status=in_progress")?;
+                runs.extend(self.all_runs(repo, "queued", "status=queued")?);
                 // A run can change from queued to in progress between the two
                 // requests, and then both lists hold it. Keep the first one.
                 runs.retain(|run| seen.insert(run.id));
