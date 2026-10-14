@@ -339,4 +339,68 @@ mod tests {
         let rows = board.rows(now());
         assert_eq!(shape(&rows)[3..], ["Run(2)", "Run(4)", "Run(3)", "Run(1)"]);
     }
+
+    /// Makes a run that finished `seconds` before `now()`.
+    fn finished_run(id: u64, state: RunState, started_secs: i64, finished_secs: i64) -> Run {
+        let mut made = run(id, "a/x", state, 0, 0);
+        made.started_at = now() - Span::seconds(started_secs);
+        made.updated_at = now() - Span::seconds(finished_secs);
+        made
+    }
+
+    #[test]
+    fn a_finished_run_shows_while_it_ended_inside_the_window() {
+        let window = 8 * 3600;
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                finished_run(1, RunState::Passed, window + 100, window - 1),
+                finished_run(2, RunState::Passed, window + 100, window + 1),
+                finished_run(3, RunState::Failed, window + 100, window),
+            ],
+        );
+        let rows = board.rows(now());
+        assert_eq!(
+            shape(&rows),
+            [
+                "Header(Active,0,0,0)",
+                "Empty(Active)",
+                "Header(Recent,2,1,1)",
+                "Run(1)",
+                "Run(3)",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_that_started_before_the_window_and_ended_inside_it_shows() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![finished_run(1, RunState::Passed, 9 * 3600, 3600)],
+        );
+        assert_eq!(shape(&board.rows(now()))[3..], ["Run(1)"]);
+    }
+
+    #[test]
+    fn active_runs_show_whatever_the_window_is() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                finished_run(1, RunState::Running, 3 * 24 * 3600, 3 * 24 * 3600),
+                finished_run(2, RunState::Queued, 20 * 3600, 20 * 3600),
+            ],
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[..4],
+            [
+                "Header(Active,2,0,0)",
+                "Run(1)",
+                "Run(2)",
+                "Header(Recent,0,0,0)",
+            ]
+        );
+    }
 }
