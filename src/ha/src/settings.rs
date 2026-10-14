@@ -68,7 +68,7 @@ pub fn format_duration_setting(d: Duration) -> String {
     let seconds = d.as_secs();
     let units = [(86_400, 'd'), (3_600, 'h'), (60, 'm')];
     for (seconds_per_unit, suffix) in units {
-        if seconds > 0 && seconds % seconds_per_unit == 0 {
+        if seconds > 0 && seconds.is_multiple_of(seconds_per_unit) {
             return format!("{}{suffix}", seconds / seconds_per_unit);
         }
     }
