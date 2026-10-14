@@ -116,3 +116,16 @@ fn a_bad_window_is_a_usage_error_that_quotes_the_value() {
     assert_eq!(run.code, Some(2), "{}", run.stderr);
     assert!(run.stderr.contains("8x"), "{}", run.stderr);
 }
+
+#[test]
+fn standard_output_that_is_not_a_terminal_is_refused_before_any_drawing() {
+    let home = tempfile::tempdir().expect("a temporary directory");
+    let run = run_ha(&home, &["timmattison/tools"]);
+    assert_eq!(run.code, Some(2), "{}", run.stderr);
+    assert!(run.stdout.is_empty(), "{:?}", run.stdout);
+    assert!(
+        run.stderr.contains("standard output is not a terminal"),
+        "{}",
+        run.stderr
+    );
+}
