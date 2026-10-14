@@ -84,3 +84,13 @@ fn the_walk_finds_the_command_words_of_every_list_and_group() {
         ("(( 1 + 2 ))", words(vec![])),
     ]);
 }
+
+#[test]
+fn an_empty_line_and_a_comment_line_give_no_words() {
+    check(vec![
+        ("", words(vec![])),
+        ("   \t ", words(vec![])),
+        ("# prcp a b", words(vec![])),
+        ("\n\n", words(vec![])),
+    ]);
+}
