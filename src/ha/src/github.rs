@@ -7,11 +7,6 @@
 //! `run_with_limit`, `RunFailure`, and `drain`, with their tests, come from
 //! `src/cwt/src/pulls.rs`.
 
-#![allow(
-    dead_code,
-    reason = "the parts of this module are joined in the next steps"
-)]
-
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::Read;
@@ -1397,6 +1392,15 @@ mod tests {
             matches!(result, Err(SourceError::BadResponse(_))),
             "{result:?}"
         );
+    }
+
+    #[test]
+    fn new_runs_gh_from_the_path_with_a_limit_of_30_seconds() {
+        for source in [GhSource::new(), GhSource::default()] {
+            assert_eq!(source.program, OsString::from("gh"));
+            assert_eq!(source.limit, Duration::from_secs(30));
+            assert_eq!(source.rate_limit(), None);
+        }
     }
 
     #[test]
