@@ -8,7 +8,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::Frame;
-use textfit::pad_right;
+use textfit::{pad_right, truncate_to_budget};
 
 use crate::board::{Board, Row, Section};
 use crate::run::{Run, RunState};
@@ -23,6 +23,9 @@ const STARTED_WIDTH: usize = 11;
 const TIME_WIDTH: usize = 7;
 /// The width of the finished column.
 const FINISHED_WIDTH: usize = 8;
+/// The columns that the text columns do not share: the marker, the started,
+/// time, and finished columns, and the seven spaces between the columns.
+const FIXED_COLUMNS: usize = MARKER_WIDTH + STARTED_WIDTH + TIME_WIDTH + FINISHED_WIDTH + 7;
 /// The lines that are not board rows: the column header and the status line.
 const FIXED_LINES: usize = 2;
 /// The text that stands between two parts of the status line.
@@ -40,14 +43,26 @@ struct Widths {
 }
 
 impl Widths {
-    fn fixed() -> Widths {
+    /// Shares the columns that the fixed columns leave over: 25 percent to the
+    /// repository, 20 percent to the workflow, 20 percent to the branch, and
+    /// the rest to the title. A frame that is too narrow gives each 0.
+    fn for_width(width: usize) -> Widths {
+        let room = width.saturating_sub(FIXED_COLUMNS);
+        let repo = room * 25 / 100;
+        let workflow = room * 20 / 100;
+        let branch = room * 20 / 100;
         Widths {
-            repo: 21,
-            workflow: 17,
-            branch: 17,
-            title: 31,
+            repo,
+            workflow,
+            branch,
+            title: room - repo - workflow - branch,
         }
     }
+}
+
+/// Cuts a text to a column width, then pads it to that width.
+fn fit(text: &str, width: usize) -> String {
+    pad_right(&truncate_to_budget(text, width), width)
 }
 
 /// Joins the cells of one row into one line. One space stands between cells.
@@ -62,10 +77,10 @@ fn cells(
     let [repo, workflow, branch, title] = texts;
     [
         pad_right(marker, MARKER_WIDTH),
-        pad_right(repo, widths.repo),
-        pad_right(workflow, widths.workflow),
-        pad_right(branch, widths.branch),
-        pad_right(title, widths.title),
+        fit(repo, widths.repo),
+        fit(workflow, widths.workflow),
+        fit(branch, widths.branch),
+        fit(title, widths.title),
         pad_right(started, STARTED_WIDTH),
         pad_right(time, TIME_WIDTH),
         pad_right(finished, FINISHED_WIDTH),
@@ -196,7 +211,7 @@ pub fn draw<Tz: TimeZone>(
 {
     let _ = status;
     let area = frame.area();
-    let widths = Widths::fixed();
+    let widths = Widths::for_width(usize::from(area.width));
     let height = usize::from(area.height) - FIXED_LINES;
     let window = board.window();
     let bold = Style::default().add_modifier(Modifier::BOLD);
