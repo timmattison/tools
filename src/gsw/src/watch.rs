@@ -2094,6 +2094,28 @@ mod probe_tests {
             "each key must be bound by the answer of its own probe",
         );
     }
+
+    #[test]
+    fn an_answer_after_the_bound_of_a_user_still_reaches_its_key() {
+        // The tests here are about which key each answer reaches, and never
+        // about how fast a shell answers. A busy machine can hold a stub that
+        // exits at once for longer than the bound of a user: a hook run of
+        // 2026-10-14 sent no answer at all, and the stubs it started had
+        // recorded all three questions.
+        //
+        // The stub answers one second after the bound of a user, on a machine
+        // of any speed. So this test fails wherever the probes of this module
+        // wait only for the bound of a user.
+        let late = crate::shell::PROBE_DEADLINE + Duration::from_secs(1);
+        let stub = StubShell::new(&format!("sleep {}; exit 0", late.as_secs()));
+        let (_, answers) = probed(&values(None, None, None), &stub);
+        assert_eq!(
+            answers,
+            ["G ggs", "M gmp", "R grp"],
+            "a slow answer must still reach its key. The probes of these tests must wait for a \
+             bound of their own, and not for the bound of a user",
+        );
+    }
 }
 
 /// Start the recursive filesystem watcher that feeds [`Event::FsChanged`] into
