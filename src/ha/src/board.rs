@@ -305,4 +305,23 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn active_runs_are_ordered_oldest_first_and_ties_by_id() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(9, "a/x", RunState::Running, 5, 1),
+                run(8, "a/x", RunState::Queued, 30, 1),
+                run(7, "a/x", RunState::Running, 10, 1),
+                run(5, "a/x", RunState::Running, 10, 1),
+            ],
+        );
+        let rows = board.rows(now());
+        assert_eq!(
+            shape(&rows)[1..5],
+            ["Run(8)", "Run(5)", "Run(7)", "Run(9)"]
+        );
+    }
 }
