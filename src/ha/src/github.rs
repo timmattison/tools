@@ -259,8 +259,16 @@ impl GhSource {
     }
 
     /// Fetches `path` with `gh api -i` and splits the answer.
-    fn request(&self, path: &str) -> Result<Response, SourceError> {
-        let output = self.run_gh(&["api", "-i", path])?;
+    ///
+    /// With an `etag`, the request carries an `If-None-Match` header.
+    fn request(&self, path: &str, etag: Option<&str>) -> Result<Response, SourceError> {
+        let condition = etag.map(|etag| format!("If-None-Match: {etag}"));
+        let mut args = vec!["api", "-i"];
+        if let Some(condition) = &condition {
+            args.extend(["-H", condition]);
+        }
+        args.push(path);
+        let output = self.run_gh(&args)?;
         let text = String::from_utf8_lossy(&output.stdout);
         parse_response(&text).ok_or_else(|| SourceError::Failed(first_line(&output.stderr)))
     }
@@ -272,8 +280,25 @@ impl GhSource {
             repo.owner(),
             repo.name()
         );
-        let response = self.request(&path)?;
-        parse_runs(&response.body, repo)
+        let etag = self.lock_etags().get(&path).map(|(etag, _)| etag.clone());
+        let response = self.request(&path, etag.as_deref())?;
+        if response.status == 304 {
+            return self
+                .lock_etags()
+                .get(&path)
+                .map(|(_, page)| page.clone())
+                .ok_or_else(|| {
+                    SourceError::BadResponse(
+                        "GitHub said 304 for a page that ha has not seen".to_owned(),
+                    )
+                });
+        }
+        let page = parse_runs(&response.body, repo)?;
+        if let Some(etag) = response.header("etag") {
+            self.lock_etags()
+                .insert(path, (etag.to_owned(), page.clone()));
+        }
+        Ok(page)
     }
 
     /// Fetches every page of the runs of `repo` for `filter`.
@@ -291,6 +316,14 @@ impl GhSource {
             }
         }
         Ok(runs)
+    }
+
+    /// The `ETag` cache. The guard lives for one statement. A poisoned lock still
+    /// holds a usable map, thus the poison is ignored.
+    fn lock_etags(&self) -> std::sync::MutexGuard<'_, HashMap<String, (String, Page)>> {
+        self.etags
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// A source that runs `program`, and gives each child at most `limit`.
@@ -760,7 +793,7 @@ mod tests {
          X-Ratelimit-Reset: 1791977652\r\n\
          \r\n";
 
-    /// A stub that answers `304` with exit status 1 when it gets an ETag.
+    /// A stub that answers `304` with exit status 1 when it gets an `ETag`.
     const ETAG_CASES: &str = "case \"$*\" in
   *If-None-Match*) cat \"$dir/not-modified.out\"; echo 'gh: HTTP 304' >&2; exit 1;;
   *) cat \"$dir/page1.out\";;
