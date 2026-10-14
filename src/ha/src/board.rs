@@ -407,4 +407,26 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn replace_changes_only_the_runs_of_its_repository() {
+        let mut board = board();
+        board.replace(repo("a/x"), vec![run(1, "a/x", RunState::Running, 5, 1)]);
+        board.replace(repo("b/y"), vec![run(2, "b/y", RunState::Running, 4, 1)]);
+        assert_eq!(shape(&board.rows(now()))[1..3], ["Run(1)", "Run(2)"]);
+
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(3, "a/x", RunState::Running, 6, 1),
+                run(4, "a/x", RunState::Passed, 9, 8),
+            ],
+        );
+        let rows = board.rows(now());
+        let shown = shape(&rows);
+        assert_eq!(shown[1], "Run(3)");
+        assert_eq!(shown[2], "Run(2)");
+        assert_eq!(shown[3..], ["Header(Recent,1,1,0)", "Run(4)"]);
+        assert_eq!(shown.len(), 6);
+    }
 }
