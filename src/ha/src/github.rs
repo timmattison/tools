@@ -270,7 +270,10 @@ impl GhSource {
         args.push(path);
         let output = self.run_gh(&args)?;
         let text = String::from_utf8_lossy(&output.stdout);
-        parse_response(&text).ok_or_else(|| SourceError::Failed(first_line(&output.stderr)))
+        let response =
+            parse_response(&text).ok_or_else(|| SourceError::Failed(first_line(&output.stderr)))?;
+        self.note_rate(&response);
+        Ok(response)
     }
 
     /// Fetches the page `number` of the runs of `repo` for `filter`.
@@ -326,6 +329,17 @@ impl GhSource {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Merges the rate limit headers of `response` into the stored rate limit.
+    fn note_rate(&self, response: &Response) {
+        if let Some(new) = rate_of(response) {
+            let mut stored = self
+                .rate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *stored = Some(newer_rate(*stored, new));
+        }
+    }
+
     /// A source that runs `program`, and gives each child at most `limit`.
     #[must_use]
     pub fn with_program(program: impl Into<OsString>, limit: Duration) -> GhSource {
@@ -361,7 +375,10 @@ impl Source for GhSource {
     }
 
     fn rate_limit(&self) -> Option<RateLimit> {
-        None
+        *self
+            .rate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -381,6 +398,31 @@ fn hour_start(time: DateTime<Utc>) -> String {
         .unwrap_or(time)
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string()
+}
+
+/// Reads the three `X-Ratelimit` headers of `response`.
+///
+/// Returns `None` when a header is missing or is not a number.
+fn rate_of(response: &Response) -> Option<RateLimit> {
+    let number = |name: &str| response.header(name)?.parse::<u64>().ok();
+    let reset = i64::try_from(number("x-ratelimit-reset")?).ok()?;
+    Some(RateLimit {
+        limit: number("x-ratelimit-limit")?,
+        remaining: number("x-ratelimit-remaining")?,
+        reset: DateTime::from_timestamp(reset, 0)?,
+    })
+}
+
+/// Chooses between the stored rate limit and a new one.
+///
+/// A later `reset` is a newer window and wins. In the same window, the lower
+/// `remaining` is the newer count, because the count only falls.
+fn newer_rate(stored: Option<RateLimit>, new: RateLimit) -> RateLimit {
+    match stored {
+        Some(old) if old.reset > new.reset => old,
+        Some(old) if old.reset == new.reset && old.remaining < new.remaining => old,
+        _ => new,
+    }
 }
 
 /// The first non-empty line of `bytes`, trimmed. The text is empty when none.
