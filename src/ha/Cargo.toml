@@ -6,6 +6,7 @@ description = "Hot action: a self-refreshing terminal view of GitHub Actions run
 
 [dependencies]
 buildinfo.workspace = true
+chrono.workspace = true
 clap.workspace = true
 thiserror.workspace = true
 
