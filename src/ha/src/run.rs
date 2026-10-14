@@ -48,13 +48,13 @@ impl RunState {
     /// Returns true while the run waits or runs.
     #[must_use]
     pub fn is_active(self) -> bool {
-        false
+        matches!(self, RunState::Queued | RunState::Running)
     }
 
     /// Returns true when the run passed or failed. The board shows these.
     #[must_use]
     pub fn is_finished(self) -> bool {
-        false
+        matches!(self, RunState::Passed | RunState::Failed)
     }
 }
 
