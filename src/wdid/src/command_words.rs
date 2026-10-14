@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::io::BufReader;
 
 use brush_parser::ast;
-use brush_parser::word::{self, WordPiece, WordPieceWithSource};
+use brush_parser::word::{self, TildeExpr, WordPiece, WordPieceWithSource};
 use brush_parser::{Parser, ParserOptions};
 
 /// The alias table: the name of each alias and its value, after quote removal.
@@ -143,6 +143,70 @@ impl<'t> TextContext<'t> {
             return Err(Refused);
         }
         Ok(TextContext { text, depth })
+    }
+}
+
+/// The backslash that starts an escape sequence.
+const BACKSLASH: char = '\\';
+
+/// The newline. A backslash before it joins two lines, so it gives no character.
+const NEWLINE: char = '\n';
+
+/// The text that stands for the home directory of the current user.
+const HOME_TILDE: &str = "~";
+
+/// One word of the line, read once: its raw text and its pieces.
+struct ReadWord {
+    /// The text as the person typed it, quotes included.
+    raw: String,
+    /// The pieces that the word parser found.
+    pieces: Vec<WordPieceWithSource>,
+}
+
+impl ReadWord {
+    /// Gives the word after quote removal, or `None` when the word holds an
+    /// expansion. A word with an expansion has no literal text.
+    fn literal(&self) -> Option<String> {
+        literal_of(&self.pieces)
+    }
+
+    /// Gives the literal text of the word, or its raw text when it has none.
+    /// This is the form of an argument.
+    fn argument(&self) -> String {
+        self.literal().unwrap_or_else(|| self.raw.clone())
+    }
+}
+
+/// Removes the quotes from the pieces of a word and joins them. Gives `None`
+/// when one piece is not plain text (a parameter, a substitution, an arithmetic
+/// expansion, an ANSI-C string, or a tilde that is not `~` or `~user`).
+fn literal_of(pieces: &[WordPieceWithSource]) -> Option<String> {
+    let mut text = String::new();
+    for WordPieceWithSource { piece, .. } in pieces {
+        match piece {
+            WordPiece::Text(plain) | WordPiece::SingleQuotedText(plain) => text.push_str(plain),
+            WordPiece::EscapeSequence(escape) => text.push_str(unescape(escape)),
+            WordPiece::DoubleQuotedSequence(inner) => text.push_str(&literal_of(inner)?),
+            WordPiece::TildeExpansion(TildeExpr::Home) => text.push_str(HOME_TILDE),
+            WordPiece::TildeExpansion(TildeExpr::UserHome(user)) => {
+                text.push_str(HOME_TILDE);
+                text.push_str(user);
+            }
+            _ => return None,
+        }
+    }
+    Some(text)
+}
+
+/// Removes the backslash from an escape sequence such as `\ `. The parser
+/// keeps the backslash in the piece. A backslash before a newline is a line
+/// join, so it gives nothing.
+fn unescape(escape: &str) -> &str {
+    let rest = escape.strip_prefix(BACKSLASH).unwrap_or(escape);
+    if rest.starts_with(NEWLINE) {
+        ""
+    } else {
+        rest
     }
 }
 
@@ -297,43 +361,66 @@ impl Walker {
     }
 
     /// Walks a simple command: the prefix items, then the command word, then
-    /// the suffix items. A command with no command word adds no word.
+    /// the suffix items. A command with no command word adds no word. A command
+    /// word that holds an expansion has no literal, so it adds no word either.
     fn walk_simple(
         &mut self,
         simple: &ast::SimpleCommand,
         context: &TextContext<'_>,
     ) -> Result<(), Refused> {
-        let args: Vec<String> = simple
-            .suffix
-            .iter()
-            .flat_map(|suffix| &suffix.0)
-            .filter_map(|item| match item {
-                ast::CommandPrefixOrSuffixItem::Word(word)
-                | ast::CommandPrefixOrSuffixItem::AssignmentWord(_, word) => {
-                    Some(word.value.clone())
-                }
-                ast::CommandPrefixOrSuffixItem::IoRedirect(_)
-                | ast::CommandPrefixOrSuffixItem::ProcessSubstitution(..) => None,
-            })
-            .collect();
+        let command = simple
+            .word_or_name
+            .as_ref()
+            .map(|word| self.read_word(word))
+            .transpose()?;
+        let suffix = self.read_items(simple.suffix.as_ref().map(|suffix| suffix.0.as_slice()))?;
         for item in simple.prefix.iter().flat_map(|prefix| &prefix.0) {
-            self.walk_item(item, context)?;
+            self.walk_item(item, None, context)?;
         }
-        if let Some(command) = &simple.word_or_name {
-            self.words
-                .push(CommandWord::new(command.value.clone(), args));
-            self.walk_word(command, context)?;
+        if let Some(command) = &command {
+            if let Some(literal) = command.literal() {
+                let args = suffix
+                    .iter()
+                    .filter_map(|(_, read)| read.as_ref().map(ReadWord::argument));
+                self.words.push(CommandWord::new(literal, args));
+            }
+            self.walk_pieces(&command.pieces, context)?;
         }
-        for item in simple.suffix.iter().flat_map(|suffix| &suffix.0) {
-            self.walk_item(item, context)?;
+        for (item, read) in &suffix {
+            self.walk_item(item, read.as_ref(), context)?;
         }
         Ok(())
     }
 
-    /// Walks the substitutions of one prefix or suffix item.
+    /// Reads the word of each item. A redirect and a process substitution hold
+    /// no word of the command, so they give `None`.
+    fn read_items<'i>(
+        &self,
+        items: Option<&'i [ast::CommandPrefixOrSuffixItem]>,
+    ) -> Result<Vec<(&'i ast::CommandPrefixOrSuffixItem, Option<ReadWord>)>, Refused> {
+        items
+            .unwrap_or_default()
+            .iter()
+            .map(|item| {
+                let read = match item {
+                    ast::CommandPrefixOrSuffixItem::Word(word)
+                    | ast::CommandPrefixOrSuffixItem::AssignmentWord(_, word) => {
+                        Some(self.read_word(word)?)
+                    }
+                    ast::CommandPrefixOrSuffixItem::IoRedirect(_)
+                    | ast::CommandPrefixOrSuffixItem::ProcessSubstitution(..) => None,
+                };
+                Ok((item, read))
+            })
+            .collect()
+    }
+
+    /// Walks the substitutions of one prefix or suffix item. `read` is the word
+    /// of the item when the caller read it already.
     fn walk_item(
         &mut self,
         item: &ast::CommandPrefixOrSuffixItem,
+        read: Option<&ReadWord>,
         context: &TextContext<'_>,
     ) -> Result<(), Refused> {
         match item {
@@ -341,9 +428,10 @@ impl Walker {
                 self.walk_redirect(redirect, context)
             }
             ast::CommandPrefixOrSuffixItem::Word(word)
-            | ast::CommandPrefixOrSuffixItem::AssignmentWord(_, word) => {
-                self.walk_word(word, context)
-            }
+            | ast::CommandPrefixOrSuffixItem::AssignmentWord(_, word) => match read {
+                Some(read) => self.walk_pieces(&read.pieces, context),
+                None => self.walk_word(word, context),
+            },
             ast::CommandPrefixOrSuffixItem::ProcessSubstitution(_, subshell) => {
                 self.walk_list(&subshell.list, context)
             }
@@ -418,8 +506,17 @@ impl Walker {
     /// Walks the substitutions in one word. Gives `Refused` when the parser
     /// cannot read the word.
     fn walk_word(&mut self, word: &ast::Word, context: &TextContext<'_>) -> Result<(), Refused> {
+        let read = self.read_word(word)?;
+        self.walk_pieces(&read.pieces, context)
+    }
+
+    /// Parses one word into pieces. Gives `Refused` when the parser cannot read it.
+    fn read_word(&self, word: &ast::Word) -> Result<ReadWord, Refused> {
         let pieces = word::parse(&word.value, &self.options).map_err(|_| Refused)?;
-        self.walk_pieces(&pieces, context)
+        Ok(ReadWord {
+            raw: word.value.clone(),
+            pieces,
+        })
     }
 
     /// Walks the pieces of a word. A command substitution holds a program, so
