@@ -254,8 +254,12 @@ impl GhSource {
             .env("GH_NO_UPDATE_NOTIFIER", "1")
             .env("GH_PROMPT_DISABLED", "1")
             .args(args);
-        run_with_limit(&mut command, self.limit)
-            .map_err(|failure| SourceError::Failed(format!("{failure:?}")))
+        run_with_limit(&mut command, self.limit).map_err(|failure| match failure {
+            RunFailure::NotInstalled => SourceError::NotInstalled,
+            RunFailure::TimedOut(limit) => SourceError::TimedOut(limit),
+            RunFailure::Spawn(error) => SourceError::Failed(format!("cannot start gh: {error}")),
+            RunFailure::Wait(error) => SourceError::Failed(format!("cannot wait for gh: {error}")),
+        })
     }
 
     /// Fetches `path` with `gh api -i` and splits the answer.
@@ -270,9 +274,13 @@ impl GhSource {
         args.push(path);
         let output = self.run_gh(&args)?;
         let text = String::from_utf8_lossy(&output.stdout);
-        let response =
-            parse_response(&text).ok_or_else(|| SourceError::Failed(first_line(&output.stderr)))?;
+        let Some(response) = parse_response(&text) else {
+            return Err(no_answer_error(&output));
+        };
         self.note_rate(&response);
+        if response.status >= 400 {
+            return Err(http_error(&response));
+        }
         Ok(response)
     }
 
@@ -430,6 +438,45 @@ fn newer_rate(stored: Option<RateLimit>, new: RateLimit) -> RateLimit {
         Some(old) if old.reset > new.reset => old,
         Some(old) if old.reset == new.reset && old.remaining < new.remaining => old,
         _ => new,
+    }
+}
+
+/// The error for a run of `gh` that printed no HTTP status line.
+///
+/// Exit status 4 is the code of `gh` for a missing login. Any other exit
+/// gives the first line of stderr.
+fn no_answer_error(output: &Output) -> SourceError {
+    let line = first_line(&output.stderr);
+    if output.status.code() == Some(4) {
+        return SourceError::NotLoggedIn(line);
+    }
+    if line.is_empty() {
+        let status = output
+            .status
+            .code()
+            .map_or_else(|| "a signal".to_owned(), |code| format!("status {code}"));
+        return SourceError::Failed(format!("gh exited with {status} and printed nothing"));
+    }
+    SourceError::Failed(line)
+}
+
+/// The error for an HTTP answer with a status of 400 or more.
+///
+/// The message is the `message` field of the JSON body. The reason phrase of
+/// the status line is the fallback. A 401 means that the login is not valid.
+fn http_error(response: &Response) -> SourceError {
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        message: String,
+    }
+    let message = serde_json::from_str::<ErrorBody>(&response.body)
+        .map_or_else(|_| response.reason.clone(), |body| body.message);
+    if response.status == 401 {
+        return SourceError::NotLoggedIn(message);
+    }
+    SourceError::Http {
+        status: response.status,
+        message,
     }
 }
 
