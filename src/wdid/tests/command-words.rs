@@ -424,3 +424,338 @@ fn the_special_rules_of_the_wrappers() {
         ("sudo 日本語 🎉", words(vec![word("日本語", ["🎉"])])),
     ]);
 }
+
+/// Makes an alias table from pairs of a name and a value.
+fn table<const N: usize>(pairs: [(&str, &str); N]) -> Aliases {
+    pairs
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .collect()
+}
+
+/// Runs every row of a table with the alias table `aliases`.
+fn check_with(aliases: &Aliases, rows: Vec<(&str, Parsed)>) {
+    for (line, expected) in rows {
+        assert_eq!(command_words(line, aliases), expected, "line: {line:?}");
+    }
+}
+
+#[test]
+fn an_alias_at_command_position_gives_the_words_of_its_value() {
+    let aliases = table([
+        ("wtm", "wt --main"),
+        ("crr", "cargo run --release"),
+        ("a", "b x"),
+        ("b", "prcp"),
+        ("e", ""),
+    ]);
+    check_with(
+        &aliases,
+        vec![
+            ("wtm", words(vec![word("wt", ["--main"]).through("wtm")])),
+            (
+                "crr --bin prcp",
+                words(vec![
+                    word("cargo", ["run", "--release", "--bin", "prcp"]).through("crr")
+                ]),
+            ),
+            ("a y", words(vec![word("prcp", ["x", "y"]).through("a")])),
+            ("b", words(vec![word("prcp", []).through("b")])),
+            (
+                "cat x | wtm | prhash",
+                words(vec![
+                    word("cat", ["x"]),
+                    word("wt", ["--main"]).through("wtm"),
+                    word("prhash", []),
+                ]),
+            ),
+            (
+                "a && wtm; prcp",
+                words(vec![
+                    word("prcp", ["x"]).through("a"),
+                    word("wt", ["--main"]).through("wtm"),
+                    word("prcp", []),
+                ]),
+            ),
+            ("e prcp", words(vec![word("prcp", [])])),
+        ],
+    );
+}
+
+#[test]
+fn an_alias_that_names_itself_is_not_expanded_again() {
+    let aliases = table([
+        ("ls", "ls -G"),
+        ("a", "b"),
+        ("b", "a"),
+        ("c", "echo $(c)"),
+        ("d", "echo $(e)"),
+        ("e", "d"),
+    ]);
+    check_with(
+        &aliases,
+        vec![
+            ("ls x", words(vec![word("ls", ["-G", "x"]).through("ls")])),
+            ("a", words(vec![word("a", []).through("a")])),
+            ("b", words(vec![word("b", []).through("b")])),
+            (
+                "c",
+                words(vec![
+                    word("echo", ["$(c)"]).through("c"),
+                    word("c", []).through("c"),
+                ]),
+            ),
+            (
+                "d",
+                words(vec![
+                    word("echo", ["$(e)"]).through("d"),
+                    word("d", []).through("d"),
+                ]),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn a_value_that_ends_with_a_blank_expands_the_next_word() {
+    let aliases = table([
+        ("_", "sudo "),
+        ("wtm", "wt --main"),
+        ("s", "sudo "),
+        ("n", "nice "),
+        ("t", "sudo\t"),
+    ]);
+    check_with(
+        &aliases,
+        vec![
+            ("_ prcp", words(vec![word("prcp", [])])),
+            ("_ wtm", words(vec![word("wt", ["--main"]).through("wtm")])),
+            (
+                "_ wtm x",
+                words(vec![word("wt", ["--main", "x"]).through("wtm")]),
+            ),
+            ("_ _ prcp", words(vec![word("_", ["prcp"])])),
+            ("s n prcp x", words(vec![word("prcp", ["x"])])),
+            (
+                "s n wtm",
+                words(vec![word("wt", ["--main"]).through("wtm")]),
+            ),
+            ("t wtm", words(vec![word("wt", ["--main"]).through("wtm")])),
+            ("_ \"wtm\"", words(vec![word("wtm", [])])),
+            (
+                "wtm _ prcp",
+                words(vec![word("wt", ["--main", "_", "prcp"]).through("wtm")]),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn the_words_of_a_substitution_keep_the_origin_of_the_word_that_holds_it() {
+    let aliases = table([("dirp", "eval $(dirc -paste)"), ("wtm", "wt --main")]);
+    check_with(
+        &aliases,
+        vec![
+            (
+                "dirp",
+                words(vec![
+                    word("eval", ["$(dirc -paste)"]).through("dirp"),
+                    word("dirc", ["-paste"]).through("dirp"),
+                ]),
+            ),
+            (
+                "echo $(wtm)",
+                words(vec![
+                    word("echo", ["$(wtm)"]),
+                    word("wt", ["--main"]).through("wtm"),
+                ]),
+            ),
+            (
+                "echo \"a $(wtm x)\"",
+                words(vec![
+                    word("echo", ["\"a $(wtm x)\""]),
+                    word("wt", ["--main", "x"]).through("wtm"),
+                ]),
+            ),
+            (
+                "echo `wtm`",
+                words(vec![
+                    word("echo", ["`wtm`"]),
+                    word("wt", ["--main"]).through("wtm"),
+                ]),
+            ),
+            (
+                "x=$(wtm)",
+                words(vec![word("wt", ["--main"]).through("wtm")]),
+            ),
+            (
+                "dirp x",
+                words(vec![
+                    word("eval", ["$(dirc -paste)", "x"]).through("dirp"),
+                    word("dirc", ["-paste"]).through("dirp"),
+                ]),
+            ),
+            (
+                "dirp $(prcp)",
+                words(vec![
+                    word("eval", ["$(dirc -paste)", "$(prcp)"]).through("dirp"),
+                    word("dirc", ["-paste"]).through("dirp"),
+                    word("prcp", []),
+                ]),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn a_word_that_is_not_at_command_position_or_not_plain_is_not_expanded() {
+    let aliases = table([("wtm", "wt --main"), ("sudo", "sudo -n")]);
+    check_with(
+        &aliases,
+        vec![
+            ("\"wtm\"", words(vec![word("wtm", [])])),
+            ("'wtm' x", words(vec![word("wtm", ["x"])])),
+            ("\\wtm", words(vec![word("wtm", [])])),
+            ("w\"t\"m", words(vec![word("wtm", [])])),
+            ("echo wtm", words(vec![word("echo", ["wtm"])])),
+            ("xargs wtm", words(vec![word("wtm", [])])),
+            ("env wtm x", words(vec![word("wtm", ["x"])])),
+            ("nohup wtm", words(vec![word("wtm", [])])),
+            ("wtmx", words(vec![word("wtmx", [])])),
+            ("f() { wtm; }", words(vec![])),
+            ("sudo xargs wtm", words(vec![word("wtm", [])])),
+        ],
+    );
+}
+
+#[test]
+fn an_alias_value_with_a_pipe_gives_a_word_for_each_command() {
+    let aliases = table([("p", "prcp | prhash"), ("q", "cat x |")]);
+    check_with(
+        &aliases,
+        vec![
+            (
+                "p x",
+                words(vec![
+                    word("prcp", []).through("p"),
+                    word("prhash", ["x"]).through("p"),
+                ]),
+            ),
+            (
+                "p",
+                words(vec![
+                    word("prcp", []).through("p"),
+                    word("prhash", []).through("p"),
+                ]),
+            ),
+            (
+                "q prcp",
+                words(vec![word("cat", ["x"]).through("q"), word("prcp", [])]),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn a_prefix_and_a_redirect_stay_outside_the_new_text() {
+    let aliases = table([("wtm", "wt --main")]);
+    check_with(
+        &aliases,
+        vec![
+            (
+                "FOO=1 wtm",
+                words(vec![word("wt", ["--main"]).through("wtm")]),
+            ),
+            (
+                "FOO=$(a) wtm",
+                words(vec![word("a", []), word("wt", ["--main"]).through("wtm")]),
+            ),
+            (
+                "wtm >out.txt",
+                words(vec![word("wt", ["--main"]).through("wtm")]),
+            ),
+            (
+                "wtm x >out.txt 2>&1",
+                words(vec![word("wt", ["--main", "x"]).through("wtm")]),
+            ),
+            (
+                "wtm >$(a)",
+                words(vec![word("wt", ["--main"]).through("wtm"), word("a", [])]),
+            ),
+            (
+                "wtm <(a) $(b)",
+                words(vec![
+                    word("wt", ["--main", "$(b)"]).through("wtm"),
+                    word("b", []),
+                    word("a", []),
+                ]),
+            ),
+            (
+                "wtm <<EOF\n$(a)\nEOF",
+                words(vec![word("wt", ["--main"]).through("wtm"), word("a", [])]),
+            ),
+            (
+                "wtm y=$(a) z",
+                words(vec![
+                    word("wt", ["--main", "y=$(a)", "z"]).through("wtm"),
+                    word("a", []),
+                ]),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn an_alias_value_that_does_not_parse_gives_unparsed() {
+    let aliases = table([("bad", "a |"), ("broken", "echo $("), ("ok", "prcp")]);
+    check_with(
+        &aliases,
+        vec![
+            ("bad", Parsed::Unparsed),
+            ("broken x", Parsed::Unparsed),
+            ("echo $(bad)", Parsed::Unparsed),
+            ("ok", words(vec![word("prcp", []).through("ok")])),
+        ],
+    );
+}
+
+#[test]
+fn multibyte_text_survives_the_alias_expansion() {
+    let aliases = table([
+        ("ch", "crap --here"),
+        ("pj", "echo 日本語日本語日本語 |"),
+        ("jp", "日本語 --x"),
+        ("wtm", "wt --main"),
+    ]);
+    check_with(
+        &aliases,
+        vec![
+            (
+                "ch 日本語",
+                words(vec![word("crap", ["--here", "日本語"]).through("ch")]),
+            ),
+            (
+                "pj prcp",
+                words(vec![
+                    word("echo", ["日本語日本語日本語"]).through("pj"),
+                    word("prcp", []),
+                ]),
+            ),
+            (
+                "jp 🎉 $(wtm)",
+                words(vec![
+                    word("日本語", ["--x", "🎉", "$(wtm)"]).through("jp"),
+                    word("wt", ["--main"]).through("wtm"),
+                ]),
+            ),
+            (
+                "日本語日本語 | pj 🎉",
+                words(vec![
+                    word("日本語日本語", []),
+                    word("echo", ["日本語日本語日本語"]).through("pj"),
+                    word("🎉", []),
+                ]),
+            ),
+        ],
+    );
+}
