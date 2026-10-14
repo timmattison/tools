@@ -133,7 +133,115 @@ fn spawn_with<S: Source + 'static>(_source: S, _settings: &Settings, _slow: Dura
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::sync::{Arc, Mutex, PoisonError};
+
     use super::*;
+    use crate::github::{RunQuery, SourceError};
+    use crate::run::{RunId, RunState};
+    use crate::target::Target;
+
+    /// The longest a test waits for one update.
+    const WAIT: Duration = Duration::from_secs(30);
+
+    /// The answers and the call log of a [`FakeSource`].
+    #[derive(Default)]
+    struct Script {
+        owners: HashMap<OwnerName, Result<Vec<RepoName>, SourceError>>,
+        created: HashMap<RepoName, Result<Vec<Run>, SourceError>>,
+        calls: Vec<(&'static str, String)>,
+    }
+
+    /// A [`Source`] that answers from a script and logs each call.
+    #[derive(Default)]
+    struct FakeSource {
+        script: Mutex<Script>,
+    }
+
+    impl FakeSource {
+        fn script(&self) -> std::sync::MutexGuard<'_, Script> {
+            self.script.lock().unwrap_or_else(PoisonError::into_inner)
+        }
+    }
+
+    impl Source for Arc<FakeSource> {
+        fn repos_of(&self, owner: &OwnerName) -> Result<Vec<RepoName>, SourceError> {
+            let mut script = self.script();
+            script.calls.push(("owner", owner.to_string()));
+            script.owners.get(owner).cloned().unwrap_or(Ok(Vec::new()))
+        }
+
+        fn runs_of(&self, repo: &RepoName, query: RunQuery) -> Result<Vec<Run>, SourceError> {
+            let mut script = self.script();
+            let what = match query {
+                RunQuery::CreatedSince(_) => "created",
+                RunQuery::Active => "active",
+            };
+            script.calls.push((what, repo.to_string()));
+            script.created.get(repo).cloned().unwrap_or(Ok(Vec::new()))
+        }
+
+        fn rate_limit(&self) -> Option<RateLimit> {
+            None
+        }
+    }
+
+    fn repo(text: &str) -> RepoName {
+        RepoName::parse(text).expect("test repository name")
+    }
+
+    fn owner(text: &str) -> OwnerName {
+        OwnerName::parse(text).expect("test owner name")
+    }
+
+    fn run(repo_text: &str, id: u64) -> Run {
+        let at = Utc::now();
+        Run {
+            id: RunId(id),
+            repo: repo(repo_text),
+            workflow: "ci".to_owned(),
+            branch: "main".to_owned(),
+            title: format!("run {id}"),
+            state: RunState::Passed,
+            started_at: at,
+            updated_at: at,
+            url: format!("https://example.test/{id}"),
+        }
+    }
+
+    fn settings(targets: &[&str]) -> Settings {
+        Settings {
+            targets: targets
+                .iter()
+                .map(|text| Target::parse(text).expect("test target"))
+                .collect(),
+            window: Duration::from_hours(8),
+            interval: Duration::from_hours(1),
+        }
+    }
+
+    /// Reads updates until `CycleDone` and returns them, `CycleDone` last.
+    fn one_cycle(worker: &Worker) -> Vec<Update> {
+        let mut updates = Vec::new();
+        loop {
+            match worker.updates.recv_timeout(WAIT) {
+                Ok(update) => {
+                    let done = matches!(update, Update::CycleDone { .. });
+                    updates.push(update);
+                    if done {
+                        return updates;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    panic!("no update in {WAIT:?}; got {updates:?}")
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    panic!("the worker ended before CycleDone; got {updates:?}")
+                }
+            }
+        }
+    }
 
     #[test]
     fn cadence_is_due_when_never_marked() {
@@ -219,5 +327,51 @@ mod tests {
             next_delay(INTERVAL, Some(rate(10, reset)), now),
             (INTERVAL, None)
         );
+    }
+
+    #[test]
+    fn the_first_cycle_sends_the_repositories_then_the_runs_then_done() {
+        let fake = Arc::new(FakeSource::default());
+        fake.script()
+            .owners
+            .insert(owner("acme"), Ok(vec![repo("ACME/A"), repo("acme/c")]));
+        fake.script()
+            .created
+            .insert(repo("acme/a"), Ok(vec![run("acme/a", 1)]));
+        let worker = spawn_with(
+            Arc::clone(&fake),
+            &settings(&["acme", "acme/a", "other/b"]),
+            SLOW_CADENCE,
+        );
+
+        let updates = one_cycle(&worker);
+
+        let Update::Repos {
+            repos,
+            owner_errors,
+        } = &updates[0]
+        else {
+            panic!("the first update is not Repos: {updates:?}");
+        };
+        assert_eq!(repos.len(), 3, "{repos:?}");
+        assert!(owner_errors.is_empty());
+        assert_eq!(updates.len(), 5, "{updates:?}");
+        let mut with_runs = Vec::new();
+        for update in &updates[1..4] {
+            let Update::Runs { repo, runs } = update else {
+                panic!("not a Runs update: {update:?}");
+            };
+            with_runs.push((repo.clone(), runs.len()));
+        }
+        with_runs.sort();
+        assert_eq!(
+            with_runs,
+            vec![
+                (repo("acme/a"), 1),
+                (repo("acme/c"), 0),
+                (repo("other/b"), 0)
+            ]
+        );
+        assert!(matches!(updates[4], Update::CycleDone { .. }));
     }
 }
