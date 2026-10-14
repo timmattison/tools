@@ -31,8 +31,13 @@ const FIXED_COLUMNS: usize = MARKER_WIDTH + STARTED_WIDTH + TIME_WIDTH + FINISHE
 const FIXED_LINES: usize = 2;
 /// The text that stands between two parts of the status line.
 const STATUS_SEPARATOR: &str = "  ·  ";
-/// The key hints at the end of the status line.
+/// The key hints at the end of the left part of the status line.
 const KEY_HINTS: &str = "↑↓ select  ⏎ open  r refresh  q quit";
+/// The mark at the right end of the status line while a refresh cycle runs.
+const REFRESH_MARK: &str = "refreshing…";
+/// The least number of columns between the left part of the status line and
+/// the refresh mark.
+const MARK_GAP: usize = 2;
 
 /// The widths of the four text columns.
 #[derive(Debug, Clone, Copy)]
@@ -195,10 +200,10 @@ fn empty_line(section: Section, window: Duration, loaded: bool) -> String {
 
 /// The first part of the status line, or `None` when there is nothing to say.
 ///
-/// A live message wins over the errors, and the errors win over the refresh
-/// mark. A message that is [`MESSAGE_LIFETIME`] old or older is absent, thus
-/// the errors or the refresh mark show. The errors come from the board (one for each repository) and from the
-/// status (one for each owner). The text names the first and counts the rest.
+/// A live message wins over the errors. A message that is
+/// [`MESSAGE_LIFETIME`] old or older is absent, thus the errors show. The
+/// errors come from the board (one for each repository) and from the status
+/// (one for each owner). The text names the first and counts the rest.
 fn lead(board: &Board, status: &Status, now: DateTime<Utc>) -> Option<String> {
     if let Some(message) = status.message_at(now) {
         return Some(message.text.clone());
@@ -221,7 +226,7 @@ fn lead(board: &Board, status: &Status, now: DateTime<Utc>) -> Option<String> {
         };
         return Some(format!("⚠ {name}: {error}{more}"));
     }
-    status.refreshing.then(|| "refreshing…".to_owned())
+    None
 }
 
 /// The first index of the xterm 256-color gray ramp that a new message uses.
@@ -245,9 +250,12 @@ fn message_color(age: Duration) -> Color {
     Color::Indexed(MESSAGE_START_GRAY - step)
 }
 
-/// The status line: the lead, the refresh, the rate limit, and the key hints.
+/// The left part of the status line: the lead, the refresh, the rate limit,
+/// and the key hints.
 ///
 /// The parts stand in this order, with [`STATUS_SEPARATOR`] between them.
+/// The refresh mark is not part of it. [`layout_status`] puts the mark at the
+/// right end of the line.
 fn status_line<Tz: TimeZone>(board: &Board, status: &Status, now: DateTime<Utc>, tz: &Tz) -> String
 where
     Tz::Offset: Display,
@@ -270,6 +278,44 @@ where
     }
     parts.push(KEY_HINTS.to_owned());
     parts.join(STATUS_SEPARATOR)
+}
+
+/// The status line, laid out in the columns of the frame.
+#[derive(Debug, PartialEq, Eq)]
+struct StatusLayout {
+    /// The text of the whole line. It is never wider than the frame.
+    text: String,
+    /// The number of columns that the left part can fill, from the first
+    /// column. The fade of a message stops at this column.
+    left_room: usize,
+}
+
+/// Lays out the status line in `width` columns.
+///
+/// The left part starts at the first column. The mark `mark`, when there is
+/// one, ends at the last column. Thus a mark that comes and goes moves no part
+/// of the left part. The left part gets the columns that the mark and a gap of
+/// [`MARK_GAP`] columns leave, and a wider left part ends in `…`. When the
+/// frame is narrower than the mark, the line holds the left part only.
+fn layout_status(left: &str, mark: Option<&str>, width: usize) -> StatusLayout {
+    let mark = mark.map(|mark| (mark, Span::raw(mark).width()));
+    match mark {
+        Some((mark, mark_width)) if mark_width <= width => {
+            let mark_start = width - mark_width;
+            let left_room = mark_start.saturating_sub(MARK_GAP);
+            StatusLayout {
+                text: format!(
+                    "{}{mark}",
+                    pad_right(&truncate_to_budget(left, left_room), mark_start)
+                ),
+                left_room,
+            }
+        }
+        _ => StatusLayout {
+            text: truncate_to_budget(left, width),
+            left_room: width,
+        },
+    }
 }
 
 /// Writes one line of text at row `y` of the area and returns the buffer row.
@@ -362,17 +408,22 @@ pub fn draw<Tz: TimeZone>(
         }
     }
     if usize::from(area.height) >= FIXED_LINES {
-        let line = status_line(board, status, now, tz);
+        let layout = layout_status(
+            &status_line(board, status, now, tz),
+            status.refreshing.then_some(REFRESH_MARK),
+            usize::from(area.width),
+        );
         let y = put(
             buffer,
             usize::from(area.height) - 1,
-            &truncate_to_budget(&line, usize::from(area.width)),
+            &layout.text,
             Style::default(),
         );
         if let Some(message) = status.message_at(now) {
-            let width = u16::try_from(Span::raw(message.text.as_str()).width())
-                .unwrap_or(u16::MAX)
-                .min(area.width);
+            let width = Span::raw(message.text.as_str())
+                .width()
+                .min(layout.left_room);
+            let width = u16::try_from(width).unwrap_or(u16::MAX);
             buffer.set_style(
                 Rect::new(area.x, y, width, 1),
                 Style::default().fg(message_color(span(message.posted_at, now))),
