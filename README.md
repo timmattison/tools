@@ -4451,8 +4451,8 @@ The table fits `COLUMNS` when that variable is set, else the width of the termin
 After the table, `wdid` prints three lines:
 
 - **Never used, old.** No use, and the tool was added `--new-days` days ago or more. A tool with an unknown age is old. These are the candidates to delete.
-- **Never used, new.** No use, and the tool was added less than `--new-days` days ago. It has had no time yet. The line shows the date of each tool.
-- **Idle.** The tool has uses, and the last use is older than `--idle-days` days. The line shows the uses and the date of the last use.
+- **Never used, new.** No use, and the tool was added less than `--new-days` days ago. It has had no time yet. The group shows the date of each tool.
+- **Idle.** The tool has uses, and the last use is older than `--idle-days` days. The group shows the uses and the date of the last use.
 
 The date that a tool was added is the date of the oldest commit that touches its crate directory. A use before that date still counts, because the tool can have existed in another form before.
 
@@ -4469,9 +4469,14 @@ This is an example. The use counts come from the first run of the prototype. The
 │ gitnuke  ┆ 1,706 ┆ 1,545 ┆ gitclean 161                          ┆ 2026-10-13 │
 └──────────┴───────┴───────┴───────────────────────────────────────┴────────────┘
 
-Never used, old (added 90 or more days ago): goup, tmpclean
-Never used, new (added less than 90 days ago): faulte (added 2026-09-20)
-Idle (no use in the last 180 days): repotidy (218 uses, last use 2025-11-13)
+Never used, old (added 90 or more days ago):
+  goup
+  htmlboard
+Never used, new (added less than 90 days ago):
+  localnext (added 2026-09-04)
+Idle (no use in the last 180 days):
+  update-aws-credentials (218 uses, last use 2025-11-13)
+  repotidy (105 uses, last use 2025-05-15)
 
 History: 347,081 rows. 1,204 not counted (exit 127). 27 did not parse (wdid --unparsed prints them).
 Shell: 212 aliases, 168 functions (2 did not parse).

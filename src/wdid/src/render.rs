@@ -172,16 +172,29 @@ fn idle_tools(tally: &Tally) -> Vec<&ToolUsage> {
     idle
 }
 
-/// Gives `entries` joined, or `none` when there is no entry.
-fn entries_or_none(entries: &[String]) -> String {
+/// What starts each entry of a group: two spaces, so that the entries stand
+/// under their heading.
+const ENTRY_INDENT: &str = "  ";
+
+/// Gives one group: the heading and a colon, then one indented line for each
+/// entry. A group with no entry is one line that ends with `none`.
+///
+/// One line for each entry keeps a long group readable. On a real history the
+/// idle group held 21 tools, which on one line took 870 characters.
+fn group(heading: &str, entries: &[String]) -> String {
     if entries.is_empty() {
-        NONE.to_string()
-    } else {
-        entries.join(ENTRY_SEPARATOR)
+        return format!("{heading}: {NONE}");
     }
+    let mut text = format!("{heading}:");
+    for entry in entries {
+        text.push('\n');
+        text.push_str(ENTRY_INDENT);
+        text.push_str(entry);
+    }
+    text
 }
 
-/// Gives the three lines that name the tools never used and the tools idle.
+/// Gives the three groups that name the tools never used and the tools idle.
 fn group_lines(tally: &Tally, window: &Window) -> String {
     let old: Vec<String> = tools_with(tally, Classification::NeverUsedOld)
         .iter()
@@ -209,17 +222,27 @@ fn group_lines(tally: &Tally, window: &Window) -> String {
             )
         })
         .collect();
-    format!(
-        "Never used, old (added {} or more days ago): {}\n\
-         Never used, new (added less than {} days ago): {}\n\
-         Idle (no use in the last {} days): {}",
-        window.new_days,
-        entries_or_none(&old),
-        window.new_days,
-        entries_or_none(&new),
-        window.idle_days,
-        entries_or_none(&idle),
-    )
+    [
+        group(
+            &format!(
+                "Never used, old (added {} or more days ago)",
+                window.new_days
+            ),
+            &old,
+        ),
+        group(
+            &format!(
+                "Never used, new (added less than {} days ago)",
+                window.new_days
+            ),
+            &new,
+        ),
+        group(
+            &format!("Idle (no use in the last {} days)", window.idle_days),
+            &idle,
+        ),
+    ]
+    .join("\n")
 }
 
 /// Gives the two lines that summarize the history and the shell.
