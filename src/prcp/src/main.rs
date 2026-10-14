@@ -1822,12 +1822,15 @@ fn try_preallocate(file: &File, size: u64) {
     use std::os::unix::io::AsRawFd;
     // posix_fallocate returns 0 on success, error code on failure
     // We ignore the result since this is just an optimization
+    // A size that does not fit in off_t skips the preallocation.
+    let Ok(length) = libc::off_t::try_from(size) else {
+        return;
+    };
     // SAFETY: posix_fallocate is a standard POSIX function. We pass a valid file descriptor
-    // obtained from AsRawFd, offset 0, and the file size. The cast to off_t is safe for
-    // typical file sizes (up to i64::MAX bytes). Errors are ignored as this is an optimization.
-    #[allow(clippy::cast_possible_wrap)]
+    // obtained from AsRawFd, offset 0, and the file size. A size that does not fit in off_t
+    // skips the preallocation. Errors are ignored as this is an optimization.
     unsafe {
-        libc::posix_fallocate(file.as_raw_fd(), 0, size as libc::off_t);
+        libc::posix_fallocate(file.as_raw_fd(), 0, length);
     }
 }
 
