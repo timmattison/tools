@@ -58,6 +58,17 @@ pub fn parse_duration(input: &str) -> Result<Duration, SettingsError> {
     Ok(Duration::from_secs(seconds))
 }
 
+/// Writes a duration the way a person writes it in a setting.
+///
+/// The text uses the largest unit that divides the duration exactly, for
+/// example `8h`, `90m`, `45s`, or `2d`. A zero duration gives `0s`. Parts of
+/// a second do not show.
+#[must_use]
+pub fn format_duration_setting(d: Duration) -> String {
+    let _ = d;
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,6 +113,30 @@ mod tests {
                 error.contains("s, m, h, or d"),
                 "{input:?}: the message does not name the units: {error}"
             );
+        }
+    }
+
+    #[test]
+    fn format_duration_setting_uses_the_largest_exact_unit() {
+        let cases = [
+            (Duration::from_hours(8), "8h"),
+            (Duration::from_mins(90), "90m"),
+            (Duration::from_secs(45), "45s"),
+            (Duration::from_hours(48), "2d"),
+            (Duration::from_secs(86_401), "86401s"),
+            (Duration::from_hours(36), "36h"),
+            (Duration::ZERO, "0s"),
+        ];
+        for (duration, expected) in cases {
+            assert_eq!(format_duration_setting(duration), expected);
+        }
+    }
+
+    #[test]
+    fn format_duration_setting_round_trips_through_parse_duration() {
+        for text in ["30s", "90m", "8h", "2d", "7d"] {
+            let duration = parse_duration(text).unwrap();
+            assert_eq!(format_duration_setting(duration), text);
         }
     }
 }
