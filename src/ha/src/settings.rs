@@ -219,8 +219,33 @@ fn load_from(cli: &CommandLine, default_path: Option<&Path>) -> Result<Settings,
 /// `--config` still works.
 #[must_use]
 pub fn help_after(config_path: Option<&Path>) -> String {
-    let _ = config_path;
-    String::new()
+    let location = config_path.map_or_else(
+        || {
+            "The system gives no configuration directory, so ha has no default config file.\n\
+             Use --config <PATH> to read one."
+                .to_owned()
+        },
+        |path| {
+            format!(
+                "Config file: {}\n\
+                 Use --config <PATH> to read another file. Arguments on the command line\n\
+                 replace the repos and owners of the file.",
+                path.display()
+            )
+        },
+    );
+    format!(
+        "{location}\n\
+         \n\
+         Example config file:\n\
+         \n\
+         \x20   repos = [\"timmattison/tools\", \"Lock-Free-Labs/nvr-tools\"]\n\
+         \x20   owners = [\"Lock-Free-Labs\"]\n\
+         \x20   window = \"8h\"\n\
+         \x20   interval = \"60s\"\n\
+         \n\
+         A window or interval is a whole number and a unit: s, m, h, or d."
+    )
 }
 
 /// Parses the `repos` and `owners` keys of the config file, in that order.
