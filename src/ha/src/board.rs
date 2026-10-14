@@ -125,11 +125,12 @@ impl Board {
             .filter(|run| run.state.is_active())
             .collect();
         active.sort_by_key(|run| (run.started_at, run.id));
-        let recent: Vec<&Run> = self
+        let mut recent: Vec<&Run> = self
             .runs
             .iter()
             .filter(|run| run.state.is_finished())
             .collect();
+        recent.sort_by_key(|run| std::cmp::Reverse((run.updated_at, run.id)));
         let passed = recent
             .iter()
             .filter(|run| run.state == RunState::Passed)
@@ -336,9 +337,6 @@ mod tests {
             ],
         );
         let rows = board.rows(now());
-        assert_eq!(
-            shape(&rows)[3..],
-            ["Run(2)", "Run(4)", "Run(3)", "Run(1)"]
-        );
+        assert_eq!(shape(&rows)[3..], ["Run(2)", "Run(4)", "Run(3)", "Run(1)"]);
     }
 }
