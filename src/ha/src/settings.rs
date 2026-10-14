@@ -111,7 +111,7 @@ pub struct CommandLine {
 ///
 /// Returns a [`SettingsError`] when the file text is not valid, when a value
 /// is not valid, or when no target is left.
-pub fn resolve(_cli: &CommandLine, file: Option<(&Path, &str)>) -> Result<Settings, SettingsError> {
+pub fn resolve(cli: &CommandLine, file: Option<(&Path, &str)>) -> Result<Settings, SettingsError> {
     let (path, parsed) = match file {
         Some((path, text)) => (
             path.display().to_string(),
@@ -130,12 +130,21 @@ pub fn resolve(_cli: &CommandLine, file: Option<(&Path, &str)>) -> Result<Settin
         }),
         None => Ok(default),
     };
-    let window = duration("window", parsed.window.as_ref(), DEFAULT_WINDOW)?;
-    let interval = duration("interval", parsed.interval.as_ref(), DEFAULT_INTERVAL)?;
-    let targets = parsed
-        .repos
-        .iter()
-        .chain(&parsed.owners)
+    let window = match cli.window {
+        Some(window) => window,
+        None => duration("window", parsed.window.as_ref(), DEFAULT_WINDOW)?,
+    };
+    let interval = match cli.interval {
+        Some(interval) => interval,
+        None => duration("interval", parsed.interval.as_ref(), DEFAULT_INTERVAL)?,
+    };
+    let texts: Vec<&String> = if cli.targets.is_empty() {
+        parsed.repos.iter().chain(&parsed.owners).collect()
+    } else {
+        cli.targets.iter().collect()
+    };
+    let targets = texts
+        .into_iter()
         .filter_map(|text| Target::parse(text).ok())
         .collect();
     Ok(Settings {
