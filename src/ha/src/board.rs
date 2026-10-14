@@ -70,6 +70,7 @@ pub struct Board {
     window: Duration,
     runs: BTreeMap<RepoName, Vec<Run>>,
     errors: BTreeMap<RepoName, String>,
+    selected: Option<usize>,
 }
 
 impl Board {
@@ -80,6 +81,7 @@ impl Board {
             window,
             runs: BTreeMap::new(),
             errors: BTreeMap::new(),
+            selected: None,
         }
     }
 
@@ -117,6 +119,7 @@ impl Board {
 
     /// All rows of the board at time `now`.
     pub fn rows(&mut self, now: DateTime<Utc>) -> Vec<Row<'_>> {
+        self.settle(now);
         self.build_rows(now)
     }
 
@@ -128,8 +131,10 @@ impl Board {
         }
     }
 
-    /// Builds the full list of rows. The list has two sections.
-    fn build_rows(&self, now: DateTime<Utc>) -> Vec<Row<'_>> {
+    /// Splits the shown runs into the active list and the recent list.
+    ///
+    /// Both lists are sorted. A run that is not shown at `now` is in neither.
+    fn sections(&self, now: DateTime<Utc>) -> (Vec<&Run>, Vec<&Run>) {
         let mut active: Vec<&Run> = self
             .runs
             .values()
@@ -148,6 +153,25 @@ impl Board {
             .filter(|run| run.state.is_finished() && run.updated_at >= oldest)
             .collect();
         recent.sort_by_key(|run| std::cmp::Reverse((run.updated_at, run.id)));
+        (active, recent)
+    }
+
+    /// Makes the selection valid for the runs that show at `now`.
+    fn settle(&mut self, now: DateTime<Utc>) {
+        let (active, recent) = self.sections(now);
+        let count = active.len() + recent.len();
+        self.selected = match self.selected {
+            _ if count == 0 => None,
+            None => Some(0),
+            Some(index) => Some(index),
+        };
+    }
+
+    /// Builds the full list of rows. The list has two sections.
+    ///
+    /// `selected` is the position of the selected run among all runs.
+    fn build_rows(&self, now: DateTime<Utc>) -> Vec<Row<'_>> {
+        let (active, recent) = self.sections(now);
         let passed = recent
             .iter()
             .filter(|run| run.state == RunState::Passed)
@@ -158,14 +182,20 @@ impl Board {
             passed: 0,
             failed: 0,
         }];
-        push_runs(&mut rows, &active, Section::Active);
+        push_runs(&mut rows, &active, Section::Active, 0, self.selected);
         rows.push(Row::Header {
             section: Section::Recent,
             count: recent.len(),
             passed,
             failed: recent.len() - passed,
         });
-        push_runs(&mut rows, &recent, Section::Recent);
+        push_runs(
+            &mut rows,
+            &recent,
+            Section::Recent,
+            active.len(),
+            self.selected,
+        );
         rows
     }
 
@@ -182,13 +212,22 @@ impl Board {
 }
 
 /// Adds the runs of one section to `rows`, or the empty row when there is none.
-fn push_runs<'a>(rows: &mut Vec<Row<'a>>, runs: &[&'a Run], section: Section) {
+///
+/// `first` is the position of the first run of `runs` among all runs. The run
+/// at position `selected` gets the mark.
+fn push_runs<'a>(
+    rows: &mut Vec<Row<'a>>,
+    runs: &[&'a Run],
+    section: Section,
+    first: usize,
+    selected: Option<usize>,
+) {
     if runs.is_empty() {
         rows.push(Row::Empty(section));
     }
-    rows.extend(runs.iter().map(|&run| Row::Run {
+    rows.extend(runs.iter().enumerate().map(|(offset, &run)| Row::Run {
         run,
-        selected: false,
+        selected: selected == Some(first + offset),
     }));
 }
 
@@ -230,8 +269,16 @@ mod tests {
     }
 
     /// Writes each row as short text: `Header(Active,2,0,0)`, `Empty(Recent)`,
-    /// `Run(7)`, or `Run(7)*` for the selected run.
+    /// or `Run(7)`. The selection mark is left out, see `marked`.
     fn shape(rows: &[Row<'_>]) -> Vec<String> {
+        marked(rows)
+            .into_iter()
+            .map(|row| row.trim_end_matches('*').to_owned())
+            .collect()
+    }
+
+    /// Like `shape`, and a selected run reads `Run(7)*`.
+    fn marked(rows: &[Row<'_>]) -> Vec<String> {
         rows.iter()
             .map(|row| match row {
                 Row::Header {
@@ -526,7 +573,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            shape(&with_active.rows(now())),
+            marked(&with_active.rows(now())),
             [
                 "Header(Active,1,0,0)",
                 "Run(1)*",
@@ -544,7 +591,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            shape(&only_recent.rows(now()))[2..],
+            marked(&only_recent.rows(now()))[2..],
             ["Header(Recent,2,1,1)", "Run(3)*", "Run(2)"]
         );
     }
@@ -553,7 +600,7 @@ mod tests {
     fn an_empty_board_has_no_selection() {
         let mut board = board();
         let rows = board.rows(now());
-        assert!(shape(&rows).iter().all(|row| !row.ends_with('*')));
+        assert!(marked(&rows).iter().all(|row| !row.ends_with('*')));
         assert_eq!(board.selected_url(now()), None);
     }
 }
