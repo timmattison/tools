@@ -23,6 +23,16 @@ pub fn format_elapsed(d: Duration) -> String {
     }
 }
 
+/// Writes how long ago a run finished, with one unit.
+///
+/// Examples are `45s ago`, `12m ago`, `2h ago`, and `3d ago`. A duration of
+/// 100 days or more gives `>99d ago`.
+#[must_use]
+pub fn format_ago(d: Duration) -> String {
+    let _ = d;
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,5 +69,22 @@ mod tests {
         }
         let text = format_elapsed(Duration::from_secs(u64::MAX));
         assert_eq!(text, ">99d");
+    }
+
+    #[test]
+    fn format_ago_writes_one_unit_and_a_cap() {
+        let cases: [(u64, &str); 8] = [
+            (0, "0s ago"),
+            (45, "45s ago"),
+            (12 * 60 + 30, "12m ago"),
+            (2 * 3_600 + 59, "2h ago"),
+            (3 * 86_400 + 5, "3d ago"),
+            (99 * 86_400 + 86_399, "99d ago"),
+            (100 * 86_400, ">99d ago"),
+            (u64::MAX, ">99d ago"),
+        ];
+        for (seconds, expected) in cases {
+            assert_eq!(format_ago(Duration::from_secs(seconds)), expected);
+        }
     }
 }
