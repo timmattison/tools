@@ -447,23 +447,27 @@ impl Default for GhSource {
 
 impl Source for GhSource {
     fn repos_of(&self, owner: &OwnerName) -> Result<RepoList, SourceError> {
-        // The default `--limit` of `gh repo list` is 30. A larger limit stops
-        // an owner with many repositories from losing the rest with no message.
+        // The default `--limit` of `gh repo list` is 30. `ha` asks for one more
+        // than `REPO_LIMIT`, so a longer list shows as cut instead of losing
+        // the rest with no message.
+        let limit = (REPO_LIMIT + 1).to_string();
         let output = self.run_gh(&[
             "repo",
             "list",
             owner.as_str(),
             "--no-archived",
             "--limit",
-            "1000",
+            &limit,
             "--json",
             "nameWithOwner",
         ])?;
         if !output.status.success() {
             return Err(no_answer_error(&output));
         }
-        let repos = parse_repos(&String::from_utf8_lossy(&output.stdout))?;
-        Ok(RepoList { repos, cut: false })
+        let mut repos = parse_repos(&String::from_utf8_lossy(&output.stdout))?;
+        let cut = repos.len() > REPO_LIMIT;
+        repos.truncate(REPO_LIMIT);
+        Ok(RepoList { repos, cut })
     }
 
     fn runs_of(&self, repo: &RepoName, query: RunQuery) -> Result<Vec<Run>, SourceError> {

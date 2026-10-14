@@ -2031,8 +2031,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     line shows the URL for 30 seconds. The URL fades out, and a key press removes it sooner. `r`
     refreshes now. `q`, Esc, or Ctrl-C quits and gives back the terminal.
   - A target is a repository (`owner/name`) or an owner (`owner`, an organization or a user). An
-    owner target means every repository of that owner that is not archived. A repository that
-    you name and that an owner also holds shows once.
+    owner target means every repository of that owner that is not archived. `ha` watches up to
+    1,000 repositories of one owner, and when an owner has more, the status line says that the
+    list is cut. A repository that you name and that an owner also holds shows once.
   - Usage: `ha timmattison/tools Lock-Free-Labs`, or `ha` alone with a configuration file at
     `<config_dir>/ha/config.toml` (on macOS, `~/Library/Application Support/ha/config.toml`):
 

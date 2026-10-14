@@ -361,8 +361,15 @@ fn refresh_repos<S: Source>(
         listed = true;
         match source.repos_of(owner) {
             Ok(list) => {
+                match list.warning() {
+                    Some(text) => {
+                        state.owner_errors.insert(owner.clone(), text);
+                    }
+                    None => {
+                        state.owner_errors.remove(owner);
+                    }
+                }
                 state.owner_lists.insert(owner.clone(), list.repos);
-                state.owner_errors.remove(owner);
             }
             Err(error) => {
                 state.owner_errors.insert(owner.clone(), error.to_string());
