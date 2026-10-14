@@ -713,6 +713,29 @@ mod tests {
     }
 
     #[test]
+    fn a_repeated_run_id_shows_one_row() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(5, "a/x", RunState::Running, 10, 1),
+                run(5, "a/x", RunState::Running, 10, 1),
+                run(4, "a/x", RunState::Running, 20, 1),
+            ],
+        );
+        let rows = board.rows(now());
+        let shown = shape(&rows);
+        assert_eq!(shown.iter().filter(|row| *row == "Run(5)").count(), 1);
+        assert_eq!(shown[0], "Header(Active,2,0,0)");
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            seen.push(selected_text(&mut board).expect("a selection"));
+            board.select_next(now());
+        }
+        assert_eq!(seen, ["Run(5)*", "Run(4)*", "Run(4)*"]);
+    }
+
+    #[test]
     fn select_previous_moves_back_through_one_list_and_stops_at_the_start() {
         let mut board = four_runs_in_two_sections();
         for _ in 0..3 {

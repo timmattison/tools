@@ -935,6 +935,20 @@ mod tests {
     }
 
     #[test]
+    fn a_run_that_moves_to_the_next_page_shows_once() {
+        let stub = Stub::new(PAGE_CASES);
+        stub.file("page1.out", &ok_output(&runs_json(150, 1, 100)));
+        stub.file("page2.out", &ok_output(&runs_json(150, 100, 50)));
+        let runs = stub
+            .source()
+            .runs_of(&repo("o/r"), since_query())
+            .expect("runs");
+        assert_eq!(runs.len(), 149);
+        assert_eq!(runs.iter().filter(|run| run.id == RunId(100)).count(), 1);
+        assert_eq!(stub.requests().len(), 2);
+    }
+
+    #[test]
     fn a_page_with_fewer_than_100_runs_ends_the_fetch() {
         let stub = Stub::new(PAGE_CASES);
         stub.file("page1.out", &ok_output(&runs_json(500, 1, 99)));
