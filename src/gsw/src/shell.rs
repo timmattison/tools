@@ -1536,6 +1536,16 @@ pub(crate) mod stub_shell {
     /// kills a child that is still inside a bound of its own.
     const CHILD_DEADLINE: Duration = ANSWER_DEADLINE.saturating_mul(2);
 
+    // The child with the longest series of bounds waits for a probe, then for a run.
+    // The parent must wait for longer than that series.
+    const _: () = assert!(
+        CHILD_DEADLINE.as_nanos()
+            > ANSWER_DEADLINE
+                .saturating_add(crate::issue::RUN_DEADLINE)
+                .as_nanos(),
+        "the parent gives up while a child is still inside its own bounds",
+    );
+
     /// A hostile environment: every variable that aims git, or configures it,
     /// or stops it from finding a repository at all, and that no user states
     /// on purpose. No child of `gsw` may carry one of these.
