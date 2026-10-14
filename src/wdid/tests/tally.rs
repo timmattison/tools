@@ -337,6 +337,111 @@ fn without_since_every_row_counts() {
     assert_eq!(result.summary.before_since, 0);
 }
 
+/// Gives the date that is `days` days before today.
+fn days_ago(days: u64) -> NaiveDate {
+    today().checked_sub_days(Days::new(days)).unwrap()
+}
+
+/// Classifies a tool that was added on `added` and that ran last on `last`.
+fn classify(added: Option<NaiveDate>, last: Option<NaiveDate>) -> Classification {
+    let catalog = Catalog {
+        root: "/work".into(),
+        tools: vec![tool("prcp", added)],
+    };
+    let entries: Vec<HistoryEntry> = last.map(|day| row_on(day, 0, "prcp")).into_iter().collect();
+    let result = run(&entries, &Definitions::default(), &catalog);
+    usage(&result, "prcp").classification
+}
+
+#[test]
+fn a_tool_that_never_ran_is_new_below_the_new_days_limit() {
+    assert_eq!(
+        classify(Some(days_ago(89)), None),
+        Classification::NeverUsedNew
+    );
+    assert_eq!(
+        classify(Some(days_ago(90)), None),
+        Classification::NeverUsedOld
+    );
+    assert_eq!(
+        classify(Some(days_ago(91)), None),
+        Classification::NeverUsedOld
+    );
+    assert_eq!(classify(Some(today()), None), Classification::NeverUsedNew);
+}
+
+#[test]
+fn a_tool_with_an_unknown_added_date_that_never_ran_is_old() {
+    assert_eq!(classify(None, None), Classification::NeverUsedOld);
+}
+
+#[test]
+fn a_tool_that_ran_is_idle_above_the_idle_days_limit() {
+    let added = Some(days_ago(1000));
+    assert_eq!(classify(added, Some(days_ago(179))), Classification::Used);
+    assert_eq!(classify(added, Some(days_ago(180))), Classification::Used);
+    assert_eq!(classify(added, Some(days_ago(181))), Classification::Idle);
+    assert_eq!(classify(added, Some(today())), Classification::Used);
+}
+
+#[test]
+fn the_limits_come_from_the_window() {
+    let catalog = Catalog {
+        root: "/work".into(),
+        tools: vec![
+            tool("old", Some(days_ago(10))),
+            tool("ran", Some(days_ago(500))),
+        ],
+    };
+    let entries = [row_on(days_ago(20), 0, "ran")];
+    let result = run_in(
+        &entries,
+        &Definitions::default(),
+        &catalog,
+        &Window {
+            new_days: 5,
+            idle_days: 19,
+            ..window()
+        },
+    );
+    assert_eq!(
+        usage(&result, "old").classification,
+        Classification::NeverUsedOld
+    );
+    assert_eq!(usage(&result, "ran").classification, Classification::Idle);
+}
+
+#[test]
+fn a_use_before_the_added_date_counts() {
+    let added = date(2026, 5, 1);
+    let catalog = Catalog {
+        root: "/work".into(),
+        tools: vec![tool("prcp", Some(added))],
+    };
+    let result = run(
+        &[row_on(date(2026, 2, 1), 0, "prcp")],
+        &Definitions::default(),
+        &catalog,
+    );
+    let prcp = usage(&result, "prcp");
+    assert_eq!(prcp.uses, 1);
+    assert_eq!(prcp.first_use, Some(date(2026, 2, 1)));
+    assert!(prcp.first_use < prcp.tool.added);
+    assert_eq!(prcp.classification, Classification::Used);
+}
+
+#[test]
+fn a_development_run_alone_does_not_make_a_tool_used() {
+    let result = run(
+        &[row_on(days_ago(1), 0, "./target/debug/prcp")],
+        &Definitions::default(),
+        &catalog(&["prcp"]),
+    );
+    let prcp = usage(&result, "prcp");
+    assert_eq!(prcp.development_runs, 1);
+    assert_eq!(prcp.classification, Classification::NeverUsedOld);
+}
+
 /// Keeps the imports of later groups in use.
 #[allow(dead_code, reason = "later test groups use these items")]
-fn later(_: Days, _: Classification, _: Unparsed) {}
+fn later(_: Unparsed) {}
