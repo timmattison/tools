@@ -413,19 +413,19 @@ fn the_limits_come_from_the_window() {
 
 #[test]
 fn a_use_before_the_added_date_counts() {
-    let added = date(2026, 5, 1);
+    let added = date(2026, 9, 1);
     let catalog = Catalog {
         root: "/work".into(),
         tools: vec![tool("prcp", Some(added))],
     };
     let result = run(
-        &[row_on(date(2026, 2, 1), 0, "prcp")],
+        &[row_on(date(2026, 8, 1), 0, "prcp")],
         &Definitions::default(),
         &catalog,
     );
     let prcp = usage(&result, "prcp");
     assert_eq!(prcp.uses, 1);
-    assert_eq!(prcp.first_use, Some(date(2026, 2, 1)));
+    assert_eq!(prcp.first_use, Some(date(2026, 8, 1)));
     assert!(prcp.first_use < prcp.tool.added);
     assert_eq!(prcp.classification, Classification::Used);
 }

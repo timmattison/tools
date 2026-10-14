@@ -142,6 +142,34 @@ impl Counts {
     }
 }
 
+/// Gives the number of whole days from `date` to `today`.
+fn days_since(today: NaiveDate, date: NaiveDate) -> i64 {
+    (today - date).num_days()
+}
+
+/// Classifies one tool. A tool with no use is new when its added date is known
+/// and younger than `new_days` days. A tool with a use is idle when its last
+/// use is older than `idle_days` days.
+fn classify(
+    tool: &Tool,
+    uses: u64,
+    last_use: Option<NaiveDate>,
+    window: &Window,
+) -> Classification {
+    match (uses, last_use) {
+        (0, _) | (_, None) => match tool.added {
+            Some(added) if days_since(window.today, added) < i64::from(window.new_days) => {
+                Classification::NeverUsedNew
+            }
+            _ => Classification::NeverUsedOld,
+        },
+        (_, Some(last)) if days_since(window.today, last) > i64::from(window.idle_days) => {
+            Classification::Idle
+        }
+        _ => Classification::Used,
+    }
+}
+
 /// Counts the runs of one command word on `date`.
 fn count_word(
     word: &CommandWord,
@@ -223,15 +251,16 @@ pub fn tally(
             let tool_counts = counts.remove(&tool.name).unwrap_or_default();
             let through = tool_counts.sorted_through();
             let through_total: u64 = through.iter().map(|(_, count)| count).sum();
+            let uses = tool_counts.typed + through_total;
             ToolUsage {
                 tool: tool.clone(),
-                uses: tool_counts.typed + through_total,
+                uses,
                 typed: tool_counts.typed,
                 through,
                 development_runs: tool_counts.development_runs,
                 first_use: tool_counts.first_use,
                 last_use: tool_counts.last_use,
-                classification: Classification::NeverUsedOld,
+                classification: classify(tool, uses, tool_counts.last_use, window),
             }
         })
         .collect();
