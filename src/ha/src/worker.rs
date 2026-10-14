@@ -488,4 +488,49 @@ mod tests {
         );
         assert!(matches!(updates[4], Update::CycleDone { .. }));
     }
+
+    #[test]
+    fn a_failing_repository_gives_failed_and_the_others_still_give_runs() {
+        let fake = Arc::new(FakeSource::default());
+        fake.script().created.insert(
+            repo("acme/a"),
+            Err(SourceError::Http {
+                status: 502,
+                message: "Bad Gateway".to_owned(),
+            }),
+        );
+        fake.script()
+            .created
+            .insert(repo("acme/b"), Ok(vec![run("acme/b", 7)]));
+        let worker = spawn_with(
+            Arc::clone(&fake),
+            &settings(&["acme/a", "acme/b"]),
+            SLOW_CADENCE,
+        );
+
+        let updates = one_cycle(&worker);
+
+        let error = SourceError::Http {
+            status: 502,
+            message: "Bad Gateway".to_owned(),
+        }
+        .to_string();
+        let failed: Vec<_> = updates
+            .iter()
+            .filter(|update| matches!(update, Update::Failed { .. }))
+            .collect();
+        assert_eq!(
+            failed,
+            vec![&Update::Failed {
+                repo: repo("acme/a"),
+                error
+            }]
+        );
+        assert!(updates.iter().any(
+            |update| matches!(update, Update::Runs { repo: r, runs } if *r == repo("acme/b") && runs.len() == 1)
+        ));
+        assert!(!updates
+            .iter()
+            .any(|update| matches!(update, Update::Runs { repo: r, .. } if *r == repo("acme/a"))));
+    }
 }
