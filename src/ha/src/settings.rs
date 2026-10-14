@@ -47,8 +47,14 @@ pub fn parse_duration(input: &str) -> Result<Duration, SettingsError> {
         _ => return Err(invalid()),
     };
     let digits = text.strip_suffix(unit).ok_or_else(invalid)?;
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return Err(invalid());
+    }
     let count: u64 = digits.parse().map_err(|_| invalid())?;
     let seconds = count.checked_mul(seconds_per_unit).ok_or_else(invalid)?;
+    if seconds == 0 {
+        return Err(invalid());
+    }
     Ok(Duration::from_secs(seconds))
 }
 
