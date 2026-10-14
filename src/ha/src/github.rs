@@ -1124,7 +1124,7 @@ mod tests {
     }
 
     #[test]
-    fn a_later_reset_wins_even_with_more_requests_remaining() {
+    fn the_latest_answer_wins_over_a_lower_count_with_another_reset() {
         let stub = hour_stub(
             &rated_output(&runs_json(0, 1, 0), 100, 1_000),
             &rated_output(&runs_json(0, 1, 0), 4999, 4_600),
