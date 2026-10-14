@@ -8,6 +8,7 @@
     clippy::module_name_repetitions,
     reason = "types such as run::RunState repeat the module name on purpose"
 )]
+pub mod board;
 pub mod run;
 pub mod settings;
 pub mod status;
