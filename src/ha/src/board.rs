@@ -603,4 +603,68 @@ mod tests {
         assert!(marked(&rows).iter().all(|row| !row.ends_with('*')));
         assert_eq!(board.selected_url(now()), None);
     }
+
+    /// The text of the one selected row, or `None` when no row is selected.
+    fn selected_text(board: &mut Board) -> Option<String> {
+        let rows = board.rows(now());
+        let found: Vec<String> = marked(&rows)
+            .into_iter()
+            .filter(|row| row.ends_with('*'))
+            .collect();
+        assert!(found.len() <= 1, "more than one selected row: {found:?}");
+        found.into_iter().next()
+    }
+
+    fn four_runs_in_two_sections() -> Board {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Queued, 20, 1),
+                run(3, "a/x", RunState::Passed, 60, 10),
+                run(4, "a/x", RunState::Failed, 60, 20),
+            ],
+        );
+        board
+    }
+
+    #[test]
+    fn select_next_moves_through_one_list_and_stops_at_the_end() {
+        let mut board = four_runs_in_two_sections();
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            seen.push(selected_text(&mut board).expect("a selection"));
+            board.select_next(now());
+        }
+        assert_eq!(
+            seen,
+            ["Run(1)*", "Run(2)*", "Run(3)*", "Run(4)*", "Run(4)*"]
+        );
+    }
+
+    #[test]
+    fn select_previous_moves_back_through_one_list_and_stops_at_the_start() {
+        let mut board = four_runs_in_two_sections();
+        for _ in 0..3 {
+            board.select_next(now());
+        }
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            seen.push(selected_text(&mut board).expect("a selection"));
+            board.select_previous(now());
+        }
+        assert_eq!(
+            seen,
+            ["Run(4)*", "Run(3)*", "Run(2)*", "Run(1)*", "Run(1)*"]
+        );
+    }
+
+    #[test]
+    fn the_selection_moves_on_an_empty_board_without_a_selection() {
+        let mut board = board();
+        board.select_next(now());
+        board.select_previous(now());
+        assert_eq!(selected_text(&mut board), None);
+    }
 }
