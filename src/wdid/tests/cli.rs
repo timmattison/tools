@@ -421,3 +421,49 @@ fn a_since_date_that_is_not_a_date_gives_exit_two() {
     let output = setup.run(&["--since", "yesterday"]);
     assert_eq!(output.status.code(), Some(2), "{output:?}");
 }
+
+#[test]
+fn unparsed_prints_the_rows_and_the_command_that_did_not_parse() {
+    let rows = [
+        row(3, "echo $("),
+        row(2, "echo $("),
+        row(2, "wdid-fixture-one a"),
+    ];
+    let setup = Setup::new(&Atuin::Rows(&rows));
+    let output = setup.run(&["--unparsed"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(stdout(&output), "2\techo $(\n");
+}
+
+#[test]
+fn since_drops_a_row_before_the_date() {
+    let rows = [
+        row(10, "wdid-fixture-one old"),
+        row(2, "wdid-fixture-one new"),
+    ];
+    let setup = Setup::new(&Atuin::Rows(&rows));
+    let since = (Utc::now() - Duration::days(5))
+        .format(DATE_FORMAT)
+        .to_string();
+    let document = json(&setup.run(&["--json", "--since", &since]));
+    assert_eq!(document["since"], since.as_str());
+    assert_eq!(document["history"]["rows"], 2);
+    assert_eq!(document["history"]["before_since"], 1);
+    assert_eq!(tool(&document, TOOL_ONE)["uses"], 1);
+}
+
+#[test]
+fn a_row_with_exit_127_does_not_count() {
+    let rows = [
+        Row {
+            days_ago: 1,
+            exit: 127,
+            command: "wdid-fixture-one a",
+        },
+        row(1, "wdid-fixture-one b"),
+    ];
+    let setup = Setup::new(&Atuin::Rows(&rows));
+    let document = json(&setup.run(&["--json"]));
+    assert_eq!(document["history"]["not_found"], 1);
+    assert_eq!(tool(&document, TOOL_ONE)["uses"], 1);
+}
