@@ -322,4 +322,23 @@ mod tests {
         let rows = board.rows(now());
         assert_eq!(shape(&rows)[1..5], ["Run(8)", "Run(5)", "Run(7)", "Run(9)"]);
     }
+
+    #[test]
+    fn recent_runs_are_ordered_newest_first_and_ties_by_id_descending() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Passed, 100, 50),
+                run(2, "a/x", RunState::Failed, 100, 10),
+                run(3, "a/x", RunState::Passed, 100, 30),
+                run(4, "a/x", RunState::Passed, 100, 30),
+            ],
+        );
+        let rows = board.rows(now());
+        assert_eq!(
+            shape(&rows)[3..],
+            ["Run(2)", "Run(4)", "Run(3)", "Run(1)"]
+        );
+    }
 }
