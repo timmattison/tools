@@ -13,7 +13,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::command_words::{Aliases, CommandWord};
+use crate::command_words::{command_words, Aliases, CommandWord, Parsed};
 use crate::tool::{ToolName, ToolNames};
 
 /// The file name of zsh.
@@ -35,6 +35,18 @@ const END_LABEL: &str = "END";
 /// The name of the loop variable in the script. It is unlikely to clash with a
 /// name that the person uses.
 const LOOP_VARIABLE: &str = "__wdid_function";
+
+/// The command word of every alias line.
+const ALIAS_COMMAND: &str = "alias";
+
+/// The option of `alias` that makes a global alias.
+const GLOBAL_OPTION: char = 'g';
+
+/// The option of `alias` that makes a suffix alias.
+const SUFFIX_OPTION: char = 's';
+
+/// The argument that ends the options of `alias`.
+const END_OF_OPTIONS: &str = "--";
 
 /// The default bound on the shell start.
 pub const TIMEOUT: Duration = Duration::from_secs(30);
@@ -188,8 +200,69 @@ pub enum ShellError {
 /// Gives [`ShellError::NoMarkers`] when the output has no start marker line, or
 /// no end marker line after it.
 pub fn parse_output(stdout: &str, marker: &Marker) -> Result<Definitions, ShellError> {
-    let _ = (stdout, marker);
-    Ok(Definitions::default())
+    let marker = marker.as_str();
+    let aliases_line = format!("{marker} {ALIASES_LABEL}");
+    let end_line = format!("{marker} {END_LABEL}");
+    let function_prefix = format!("{marker} {FUNCTION_LABEL} ");
+    let mut lines = stdout.lines().skip_while(|line| *line != aliases_line);
+    lines.next().ok_or(ShellError::NoMarkers)?;
+    let mut definitions = Definitions::default();
+    let mut ended = false;
+    let mut in_function = false;
+    for line in lines {
+        if line == end_line {
+            ended = true;
+            break;
+        }
+        if line.starts_with(&function_prefix) {
+            in_function = true;
+        } else if !in_function {
+            read_alias_line(line, &mut definitions);
+        }
+    }
+    if ended {
+        Ok(definitions)
+    } else {
+        Err(ShellError::NoMarkers)
+    }
+}
+
+/// Reads one line of the alias listing into `definitions`.
+///
+/// A line that is not exactly one `alias` command goes to
+/// `unparsed_aliases`. A global alias and a suffix alias are skipped, because
+/// the shell does not expand them in command position.
+fn read_alias_line(line: &str, definitions: &mut Definitions) {
+    if line.trim().is_empty() {
+        return;
+    }
+    let args = match command_words(line, &Aliases::new()) {
+        Parsed::Words(words) => match <[CommandWord; 1]>::try_from(words) {
+            Ok([word]) if word.word == ALIAS_COMMAND => word.args,
+            _ => Vec::new(),
+        },
+        Parsed::Unparsed => Vec::new(),
+    };
+    if args.is_empty() {
+        definitions.unparsed_aliases.push(line.to_owned());
+        return;
+    }
+    let mut definitions_in_line = Vec::new();
+    let mut options_ended = false;
+    for arg in &args {
+        if options_ended || arg.contains('=') {
+            if let Some((name, value)) = arg.split_once('=') {
+                definitions_in_line.push((name, value));
+            }
+        } else if arg == END_OF_OPTIONS {
+            options_ended = true;
+        } else if arg.starts_with('-') && arg.contains([GLOBAL_OPTION, SUFFIX_OPTION]) {
+            return;
+        }
+    }
+    for (name, value) in definitions_in_line {
+        definitions.aliases.insert(name, value);
+    }
 }
 
 /// Runs `command -i -c <script>` and parses the output.
