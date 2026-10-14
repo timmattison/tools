@@ -2012,6 +2012,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     Code sessions after a question. It supports macOS only. See below for the full entry.
   - To install: `cargo install --git https://github.com/timmattison/tools faulte`
 
+- ha (hot action)
+  - Shows the GitHub Actions runs of many repositories and owners in one self-refreshing
+    terminal view. A later commit of issue #552 completes this entry.
+  - To install: `cargo install --git https://github.com/timmattison/tools ha`
+
 ## dirhash
 
 Calculate a SHA256 hash of a directory tree that's deterministic based on file contents. Skips hidden files and the files that .gitignore and the other standard ignore files name.
