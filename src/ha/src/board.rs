@@ -144,6 +144,7 @@ impl Board {
                     self.offset = row + 1 - height;
                 }
             }
+            self.offset = self.offset.min(rows.len().saturating_sub(height));
         }
         let rows = self
             .build_rows(now)
