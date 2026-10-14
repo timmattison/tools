@@ -23,7 +23,7 @@ impl RateLimit {
     /// is never low.
     #[must_use]
     pub fn is_low(&self) -> bool {
-        false
+        self.remaining.saturating_mul(10) < self.limit
     }
 }
 
