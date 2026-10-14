@@ -170,13 +170,17 @@ fn cycle<S: Source>(
     let repos = refresh_repos(source, settings, state, updates)?;
     let since = window_start(settings.window);
     for repo in &repos {
-        if let Ok(runs) = source.runs_of(repo, RunQuery::CreatedSince(since)) {
-            let message = Update::Runs {
+        let message = match source.runs_of(repo, RunQuery::CreatedSince(since)) {
+            Ok(runs) => Update::Runs {
                 repo: repo.clone(),
                 runs,
-            };
-            updates.send(message).map_err(|_| ReceiverGone)?;
-        }
+            },
+            Err(error) => Update::Failed {
+                repo: repo.clone(),
+                error: error.to_string(),
+            },
+        };
+        updates.send(message).map_err(|_| ReceiverGone)?;
     }
     let now = Utc::now();
     let rate = source.rate_limit();
