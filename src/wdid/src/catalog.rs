@@ -11,7 +11,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -60,6 +59,7 @@ const LOG_ARGUMENTS: [&str; 7] = [
 ];
 
 /// The mode bits that make a file executable for its owner, group, or others.
+#[cfg(unix)]
 const EXECUTE_BITS: u32 = 0o111;
 
 /// The name of the directory that holds the binaries of cargo.
@@ -495,7 +495,18 @@ pub fn cargo_bin(cargo_home: Option<&OsStr>, home: Option<&Path>) -> Option<Path
 
 /// True when `path` is a file (a symlink is followed) with an execute bit.
 fn is_executable_file(path: &Path) -> bool {
-    std::fs::metadata(path).is_ok_and(|metadata| {
-        metadata.is_file() && metadata.permissions().mode() & EXECUTE_BITS != 0
-    })
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && has_execute_bit(&metadata))
+}
+
+/// True when one of the execute bits of the mode is on.
+#[cfg(unix)]
+fn has_execute_bit(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & EXECUTE_BITS != 0
+}
+
+/// A file system without execute bits runs any file that the PATH finds.
+#[cfg(not(unix))]
+fn has_execute_bit(_metadata: &std::fs::Metadata) -> bool {
+    true
 }
