@@ -34,9 +34,22 @@ pub enum SettingsError {
 /// Returns [`SettingsError::InvalidDuration`] when the text has another shape,
 /// when the number is zero, or when the result does not fit in a duration.
 pub fn parse_duration(input: &str) -> Result<Duration, SettingsError> {
-    Err(SettingsError::InvalidDuration {
-        input: input.trim().to_owned(),
-    })
+    let text = input.trim();
+    let invalid = || SettingsError::InvalidDuration {
+        input: text.to_owned(),
+    };
+    let unit = text.chars().next_back().ok_or_else(invalid)?;
+    let seconds_per_unit: u64 = match unit {
+        's' => 1,
+        'm' => 60,
+        'h' => 3_600,
+        'd' => 86_400,
+        _ => return Err(invalid()),
+    };
+    let digits = text.strip_suffix(unit).ok_or_else(invalid)?;
+    let count: u64 = digits.parse().map_err(|_| invalid())?;
+    let seconds = count.checked_mul(seconds_per_unit).ok_or_else(invalid)?;
+    Ok(Duration::from_secs(seconds))
 }
 
 #[cfg(test)]
@@ -46,16 +59,13 @@ mod tests {
     #[test]
     fn parse_duration_reads_each_unit() {
         assert_eq!(parse_duration("30s").unwrap(), Duration::from_secs(30));
-        assert_eq!(parse_duration("15m").unwrap(), Duration::from_secs(900));
-        assert_eq!(parse_duration("8h").unwrap(), Duration::from_secs(28_800));
-        assert_eq!(parse_duration("2d").unwrap(), Duration::from_secs(172_800));
+        assert_eq!(parse_duration("15m").unwrap(), Duration::from_mins(15));
+        assert_eq!(parse_duration("8h").unwrap(), Duration::from_hours(8));
+        assert_eq!(parse_duration("2d").unwrap(), Duration::from_hours(48));
     }
 
     #[test]
     fn parse_duration_trims_whitespace() {
-        assert_eq!(
-            parse_duration("  8h\t").unwrap(),
-            Duration::from_secs(28_800)
-        );
+        assert_eq!(parse_duration("  8h\t").unwrap(), Duration::from_hours(8));
     }
 }
