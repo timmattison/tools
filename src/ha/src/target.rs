@@ -104,6 +104,9 @@ impl Target {
                 input: input.to_owned(),
             });
         }
+        for part in &parts {
+            check_part(input, part)?;
+        }
         match parts.as_slice() {
             [owner] => Ok(Target::Owner(OwnerName((*owner).to_owned()))),
             [owner, name] => Ok(Target::Repo(RepoName {
@@ -159,6 +162,28 @@ impl OwnerName {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// Checks one part of a target: an owner, or the name of a repository.
+///
+/// `input` is the whole text. The error quotes it, so the user sees what
+/// they typed.
+fn check_part(input: &str, part: &str) -> Result<(), TargetError> {
+    if let Some(character) = part
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+    {
+        return Err(TargetError::BadCharacter {
+            input: input.to_owned(),
+            character,
+        });
+    }
+    if part == "." || part == ".." {
+        return Err(TargetError::DotPart {
+            input: input.to_owned(),
+        });
+    }
+    Ok(())
 }
 
 impl fmt::Display for OwnerName {
