@@ -11,7 +11,7 @@ use ratatui::Terminal;
 use crate::board::Board;
 use crate::render;
 use crate::status::Status;
-use crate::worker::{Update, Worker};
+use crate::worker::{Command, Update, Worker};
 
 /// How long the loop waits for an event before it draws again.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -147,6 +147,11 @@ where
             }
             KeyCode::Down => {
                 self.board.select_next((self.now)());
+                Flow::Continue
+            }
+            KeyCode::Char('r') => {
+                let _ = self.worker.commands.send(Command::RefreshNow);
+                self.status.refreshing = true;
                 Flow::Continue
             }
             KeyCode::Enter => {
