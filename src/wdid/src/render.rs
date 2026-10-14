@@ -2,7 +2,7 @@
 //! and the list of the commands that did not parse.
 
 use chrono::NaiveDate;
-use comfy_table::{presets, CellAlignment, ColumnConstraint, ContentArrangement, Table};
+use comfy_table::{presets, CellAlignment, ColumnConstraint, ContentArrangement, Table, Width};
 use num_format::{Locale, ToFormattedString};
 use serde::Serialize;
 
@@ -32,6 +32,13 @@ const COUNT_COLUMNS: [usize; 3] = [1, 2, 4];
 /// cannot be read. Only the two text columns wrap. When the width is too
 /// small even for these columns, the table is wider than the width.
 const WHOLE_COLUMNS: [usize; 7] = [0, 1, 2, 4, 5, 6, 7];
+
+/// The places of the two text columns, and the width under which each one
+/// does not shrink: the through column and the notes column. Without a floor,
+/// a narrow table gave each text column one character. A width of
+/// `comfy_table` holds the padding of one space on each side, so the text gets
+/// two characters less.
+const TEXT_COLUMNS: [(usize, u16); 2] = [(3, 22), (8, 16)];
 
 /// The text in place of a date that the tally does not know.
 const NO_DATE: &str = "-";
@@ -127,6 +134,11 @@ fn table(tally: &Tally, width: Option<u16>) -> String {
     for index in WHOLE_COLUMNS {
         if let Some(column) = table.column_mut(index) {
             column.set_constraint(ColumnConstraint::ContentWidth);
+        }
+    }
+    for (index, floor) in TEXT_COLUMNS {
+        if let Some(column) = table.column_mut(index) {
+            column.set_constraint(ColumnConstraint::LowerBoundary(Width::Fixed(floor)));
         }
     }
     table.to_string()

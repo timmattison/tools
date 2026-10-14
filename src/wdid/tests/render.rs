@@ -200,15 +200,15 @@ fn assert_whole_values(table: &str) {
 /// stays whole, and no line is longer than the width.
 #[test]
 fn a_narrow_table_wraps_only_the_text_columns() {
-    let report = text(&fixture(), &window(), Some(110));
+    let report = text(&fixture(), &window(), Some(120));
     let table = table_of(&report);
 
     assert!(table.lines().count() > 8, "the text cells wrap:\n{table}");
     assert_whole_values(table);
     for line in table.lines() {
         assert!(
-            line.chars().count() <= 110,
-            "the line is longer than 110 columns: {line:?}"
+            line.chars().count() <= 120,
+            "the line is longer than 120 columns: {line:?}"
         );
     }
 }
