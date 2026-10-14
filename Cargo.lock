@@ -9042,6 +9042,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "wdid"
+version = "0.1.0"
+dependencies = [
+ "buildinfo",
+ "chrono",
+ "clap",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "web-sys"
 version = "0.3.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"

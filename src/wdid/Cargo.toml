@@ -1,0 +1,27 @@
+[package]
+name = "wdid"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "What do I do: count which tools of this workspace the atuin history uses"
+
+[lib]
+name = "wdid"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wdid"
+path = "src/main.rs"
+
+[dependencies]
+buildinfo.workspace = true
+chrono.workspace = true
+clap.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
