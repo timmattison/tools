@@ -65,8 +65,14 @@ pub fn parse_duration(input: &str) -> Result<Duration, SettingsError> {
 /// a second do not show.
 #[must_use]
 pub fn format_duration_setting(d: Duration) -> String {
-    let _ = d;
-    String::new()
+    let seconds = d.as_secs();
+    let units = [(86_400, 'd'), (3_600, 'h'), (60, 'm')];
+    for (seconds_per_unit, suffix) in units {
+        if seconds > 0 && seconds % seconds_per_unit == 0 {
+            return format!("{}{suffix}", seconds / seconds_per_unit);
+        }
+    }
+    format!("{seconds}s")
 }
 
 #[cfg(test)]
