@@ -219,4 +219,74 @@ mod tests {
         let target = Target::parse("Lock-Free-Labs").expect("valid");
         assert_eq!(target.to_string(), "Lock-Free-Labs");
     }
+
+    #[test]
+    fn a_text_with_a_wrong_shape_is_refused() {
+        let cases = [
+            (
+                "",
+                TargetError::Empty {
+                    input: String::new(),
+                },
+            ),
+            (
+                "   ",
+                TargetError::Empty {
+                    input: String::new(),
+                },
+            ),
+            (
+                "a/b/c",
+                TargetError::TooManySlashes {
+                    input: "a/b/c".to_owned(),
+                },
+            ),
+            (
+                "a//b",
+                TargetError::TooManySlashes {
+                    input: "a//b".to_owned(),
+                },
+            ),
+            (
+                "/x",
+                TargetError::EmptyPart {
+                    input: "/x".to_owned(),
+                },
+            ),
+            (
+                "x/",
+                TargetError::EmptyPart {
+                    input: "x/".to_owned(),
+                },
+            ),
+            (
+                "/",
+                TargetError::EmptyPart {
+                    input: "/".to_owned(),
+                },
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(Target::parse(input), Err(expected), "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn each_shape_error_quotes_the_input() {
+        let cases = [
+            (
+                "a/b/c",
+                "\"a/b/c\" has more than one \"/\". A target is owner or owner/name.",
+            ),
+            (
+                "/x",
+                "\"/x\" has an empty part. A target is owner or owner/name.",
+            ),
+            ("", "\"\" is empty. A target is owner or owner/name."),
+        ];
+        for (input, message) in cases {
+            let error = Target::parse(input).expect_err("a refused input");
+            assert_eq!(error.to_string(), message);
+        }
+    }
 }
