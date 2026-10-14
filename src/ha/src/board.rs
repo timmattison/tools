@@ -133,18 +133,11 @@ impl Board {
             let selected_row = rows
                 .iter()
                 .position(|row| matches!(row, Row::Run { selected: true, .. }));
-            if let Some(row) = selected_row {
-                let header_above =
-                    height >= 2 && row > 0 && matches!(rows.get(row - 1), Some(Row::Header { .. }));
-                let top = if header_above { row - 1 } else { row };
-                if top < self.offset {
-                    self.offset = top;
-                }
-                if row >= self.offset + height {
-                    self.offset = row + 1 - height;
-                }
-            }
-            self.offset = self.offset.min(rows.len().saturating_sub(height));
+            let header_above = selected_row.is_some_and(|row| {
+                row > 0 && matches!(rows.get(row - 1), Some(Row::Header { .. }))
+            });
+            let len = rows.len();
+            self.offset = scroll(self.offset, height, len, selected_row, header_above);
         }
         let rows = self
             .build_rows(now)
@@ -266,6 +259,34 @@ impl Board {
             .find(|run| run.id == id)
             .map(|run| run.url.clone())
     }
+}
+
+/// Finds the scroll offset for a view of `height` rows over `len` rows.
+///
+/// The offset changes as little as possible to put `selected_row` inside the
+/// view. With a `header_above` the selected row and also that header stay
+/// inside, when the view has two rows or more. The offset never goes past the
+/// last full view. `height` is at least 1.
+fn scroll(
+    offset: usize,
+    height: usize,
+    len: usize,
+    selected_row: Option<usize>,
+    header_above: bool,
+) -> usize {
+    let mut offset = offset;
+    if let Some(row) = selected_row {
+        let top = if header_above && height >= 2 {
+            row - 1
+        } else {
+            row
+        };
+        offset = offset.min(top);
+        if row >= offset + height {
+            offset = row + 1 - height;
+        }
+    }
+    offset.min(len.saturating_sub(height))
 }
 
 /// Adds the runs of one section to `rows`, or the empty row when there is none.
