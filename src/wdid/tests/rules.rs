@@ -44,3 +44,27 @@ fn a_word_that_names_a_tool_is_a_use() {
         ("", &[], vec![]),
     ]);
 }
+
+#[test]
+fn a_path_to_a_tool_is_a_use_or_a_development_run() {
+    check(vec![
+        ("~/.cargo/bin/prcp", &[], vec![used("prcp")]),
+        ("/usr/local/bin/cwt", &["x"], vec![used("cwt")]),
+        ("./prcp", &[], vec![used("prcp")]),
+        ("./target/release/prcp", &[], vec![developed("prcp")]),
+        ("target/debug/prcp", &[], vec![developed("prcp")]),
+        (
+            "~/code/tools/target/debug/prcp",
+            &["a"],
+            vec![developed("prcp")],
+        ),
+        ("/x/target-old/prcp", &[], vec![used("prcp")]),
+        ("/x/mytarget/prcp", &[], vec![used("prcp")]),
+        ("/x/target/", &[], vec![]),
+        ("prcp/", &[], vec![]),
+        ("./target/release/ls", &[], vec![]),
+        ("/usr/bin/日本語", &[], vec![]),
+        ("/target/prcp", &[], vec![developed("prcp")]),
+        ("target/prcp/", &[], vec![]),
+    ]);
+}
