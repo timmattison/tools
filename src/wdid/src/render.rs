@@ -4,9 +4,11 @@
 use chrono::NaiveDate;
 use comfy_table::{presets, CellAlignment, ContentArrangement, Table};
 use num_format::{Locale, ToFormattedString};
+use serde::Serialize;
 
 use crate::catalog::PathState;
 use crate::tally::{Classification, Summary, Tally, ToolUsage, Window};
+use crate::tool::ToolName;
 
 /// The name of each column of the table, in order.
 const COLUMNS: [&str; 9] = [
@@ -139,6 +141,14 @@ fn tools_with(tally: &Tally, classification: Classification) -> Vec<&ToolUsage> 
     found
 }
 
+/// Gives the idle tools, the tool with the most uses first. Tools with equal
+/// uses stay in name order.
+fn idle_tools(tally: &Tally) -> Vec<&ToolUsage> {
+    let mut idle = tools_with(tally, Classification::Idle);
+    idle.sort_by_key(|usage| std::cmp::Reverse(usage.uses));
+    idle
+}
+
 /// Gives `entries` joined, or `none` when there is no entry.
 fn entries_or_none(entries: &[String]) -> String {
     if entries.is_empty() {
@@ -164,9 +174,7 @@ fn group_lines(tally: &Tally, window: &Window) -> String {
             )
         })
         .collect();
-    let mut idle = tools_with(tally, Classification::Idle);
-    idle.sort_by_key(|usage| std::cmp::Reverse(usage.uses));
-    let idle: Vec<String> = idle
+    let idle: Vec<String> = idle_tools(tally)
         .iter()
         .map(|usage| {
             format!(
@@ -238,11 +246,164 @@ pub fn text(tally: &Tally, window: &Window, width: Option<u16>) -> String {
         + "\n"
 }
 
+/// The `history` block of the JSON document.
+#[derive(Serialize)]
+struct HistoryDocument<'a> {
+    rows: u64,
+    before_since: u64,
+    not_found: u64,
+    unparsed_rows: u64,
+    unparsed: Vec<UnparsedDocument<'a>>,
+}
+
+/// One command that did not parse, in the JSON document.
+#[derive(Serialize)]
+struct UnparsedDocument<'a> {
+    command: &'a str,
+    rows: u64,
+}
+
+/// The `shell` block of the JSON document.
+#[derive(Serialize)]
+struct ShellDocument<'a> {
+    aliases: usize,
+    functions: usize,
+    unparsed_functions: &'a [String],
+    unparsed_aliases: usize,
+}
+
+/// One use through an alias or a function, in the JSON document.
+#[derive(Serialize)]
+struct ThroughDocument<'a> {
+    name: &'a str,
+    uses: u64,
+}
+
+/// The state of the PATH for one tool, in the JSON document.
+#[derive(Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum PathDocument {
+    Cargo,
+    Shadowed { by: String },
+    NotOnPath,
+}
+
+/// One tool in the JSON document.
+#[derive(Serialize)]
+struct ToolDocument<'a> {
+    name: &'a ToolName,
+    crate_dir: String,
+    uses: u64,
+    typed: u64,
+    through: Vec<ThroughDocument<'a>>,
+    development_runs: u64,
+    first_use: Option<NaiveDate>,
+    last_use: Option<NaiveDate>,
+    added: Option<NaiveDate>,
+    installed: bool,
+    path: Option<PathDocument>,
+    classification: Classification,
+}
+
+/// The whole JSON document.
+#[derive(Serialize)]
+struct Document<'a> {
+    today: NaiveDate,
+    since: Option<NaiveDate>,
+    new_days: u32,
+    idle_days: u32,
+    history: HistoryDocument<'a>,
+    shell: ShellDocument<'a>,
+    tools: Vec<ToolDocument<'a>>,
+    never_used_old: Vec<&'a ToolName>,
+    never_used_new: Vec<&'a ToolName>,
+    idle: Vec<&'a ToolName>,
+}
+
+/// Gives the JSON form of the state of the PATH.
+fn path_document(state: &PathState) -> PathDocument {
+    match state {
+        PathState::Cargo => PathDocument::Cargo,
+        PathState::Shadowed(path) => PathDocument::Shadowed {
+            by: path.to_string_lossy().into_owned(),
+        },
+        PathState::NotOnPath => PathDocument::NotOnPath,
+    }
+}
+
+/// Gives the JSON form of one tool.
+fn tool_document(usage: &ToolUsage) -> ToolDocument<'_> {
+    ToolDocument {
+        name: &usage.tool.name,
+        crate_dir: usage.tool.crate_dir.to_string_lossy().into_owned(),
+        uses: usage.uses,
+        typed: usage.typed,
+        through: usage
+            .through
+            .iter()
+            .map(|(name, uses)| ThroughDocument { name, uses: *uses })
+            .collect(),
+        development_runs: usage.development_runs,
+        first_use: usage.first_use,
+        last_use: usage.last_use,
+        added: usage.tool.added,
+        installed: usage.tool.installed,
+        path: usage.tool.path.as_ref().map(path_document),
+        classification: usage.classification,
+    }
+}
+
+/// Gives the names of `tools`.
+fn names_of<'a>(tools: &[&'a ToolUsage]) -> Vec<&'a ToolName> {
+    tools.iter().map(|usage| &usage.tool.name).collect()
+}
+
 /// Gives the JSON document, pretty-printed, with a final newline.
+///
+/// The crate directory is a text with `/` separators. The three lists at the
+/// end follow the order of the text report.
+///
+/// # Panics
+///
+/// Never in practice. The document holds only numbers, dates, and text, and
+/// `serde_json` serializes each of them without an error.
 #[must_use]
 pub fn json(tally: &Tally, window: &Window) -> String {
-    let _ = (tally, window);
-    String::new()
+    let summary = &tally.summary;
+    let document = Document {
+        today: window.today,
+        since: window.since,
+        new_days: window.new_days,
+        idle_days: window.idle_days,
+        history: HistoryDocument {
+            rows: summary.rows,
+            before_since: summary.before_since,
+            not_found: summary.not_found,
+            unparsed_rows: summary.unparsed_rows,
+            unparsed: summary
+                .unparsed
+                .iter()
+                .map(|group| UnparsedDocument {
+                    command: &group.command,
+                    rows: group.rows,
+                })
+                .collect(),
+        },
+        shell: ShellDocument {
+            aliases: summary.aliases,
+            functions: summary.functions,
+            unparsed_functions: &summary.unparsed_functions,
+            unparsed_aliases: summary.unparsed_aliases,
+        },
+        tools: tally.tools.iter().map(tool_document).collect(),
+        never_used_old: names_of(&tools_with(tally, Classification::NeverUsedOld)),
+        never_used_new: names_of(&tools_with(tally, Classification::NeverUsedNew)),
+        idle: names_of(&idle_tools(tally)),
+    };
+    let mut text = serde_json::to_string_pretty(&document)
+        .expect("a document of numbers, dates, and text always serializes");
+    text.push('\n');
+    text
 }
 
 /// Gives the unparsed commands, then the unparsed functions.
