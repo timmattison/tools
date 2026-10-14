@@ -655,6 +655,84 @@ mod tests {
         );
     }
 
+    /// A runs body with `count` runs numbered from `first_id`, and `total` as the count.
+    fn runs_json(total: u64, first_id: u64, count: u64) -> String {
+        let runs: Vec<String> = (first_id..first_id + count)
+            .map(|id| {
+                format!(
+                    r#"{{"id":{id},"name":"CI","display_title":"t","head_branch":"main","status":"completed","conclusion":"success","run_started_at":"2026-09-24T21:56:49Z","created_at":"2026-09-24T21:56:49Z","updated_at":"2026-09-24T21:57:56Z","html_url":"https://github.com/o/r/actions/runs/{id}"}}"#
+                )
+            })
+            .collect();
+        format!(
+            r#"{{"total_count":{total},"workflow_runs":[{}]}}"#,
+            runs.join(",")
+        )
+    }
+
+    const PAGE_CASES: &str = "case \"$*\" in
+  *'&page=1&'*) cat \"$dir/page1.out\";;
+  *'&page=2&'*) cat \"$dir/page2.out\";;
+ esac";
+
+    fn since_query() -> RunQuery {
+        RunQuery::CreatedSince(time("2026-09-24T21:56:49Z"))
+    }
+
+    #[test]
+    fn a_second_page_is_fetched_while_the_count_is_below_the_total() {
+        let stub = Stub::new(PAGE_CASES);
+        stub.file("page1.out", &ok_output(&runs_json(150, 1, 100)));
+        stub.file("page2.out", &ok_output(&runs_json(150, 101, 50)));
+        let runs = stub
+            .source()
+            .runs_of(&repo("o/r"), since_query())
+            .expect("runs");
+        assert_eq!(runs.len(), 150);
+        assert_eq!(runs[149].id, RunId(150));
+        assert_eq!(stub.requests().len(), 2);
+    }
+
+    #[test]
+    fn a_page_with_fewer_than_100_runs_ends_the_fetch() {
+        let stub = Stub::new(PAGE_CASES);
+        stub.file("page1.out", &ok_output(&runs_json(500, 1, 99)));
+        stub.file("page2.out", &ok_output(&runs_json(500, 100, 99)));
+        let runs = stub
+            .source()
+            .runs_of(&repo("o/r"), since_query())
+            .expect("runs");
+        assert_eq!(runs.len(), 99);
+        assert_eq!(stub.requests().len(), 1);
+    }
+
+    #[test]
+    fn the_fetch_ends_at_the_total_count() {
+        let stub = Stub::new(PAGE_CASES);
+        stub.file("page1.out", &ok_output(&runs_json(100, 1, 100)));
+        stub.file("page2.out", &ok_output(&runs_json(100, 101, 100)));
+        let runs = stub
+            .source()
+            .runs_of(&repo("o/r"), since_query())
+            .expect("runs");
+        assert_eq!(runs.len(), 100);
+        assert_eq!(stub.requests().len(), 1);
+    }
+
+    #[test]
+    fn the_fetch_stops_after_ten_pages() {
+        let stub = Stub::new("cat \"$dir/page1.out\"");
+        stub.file("page1.out", &ok_output(&runs_json(5000, 1, 100)));
+        let runs = stub
+            .source()
+            .runs_of(&repo("o/r"), since_query())
+            .expect("runs");
+        assert_eq!(runs.len(), 1000);
+        assert_eq!(stub.requests().len(), 10);
+        let last = stub.requests().pop().expect("a request");
+        assert!(last[2].contains("&page=10&"), "{last:?}");
+    }
+
     #[test]
     fn run_with_limit_gives_up_on_a_program_that_hangs() {
         let dir = TempDir::new().unwrap();
