@@ -208,22 +208,42 @@ pub fn parse_output(stdout: &str, marker: &Marker) -> Result<Definitions, ShellE
     lines.next().ok_or(ShellError::NoMarkers)?;
     let mut definitions = Definitions::default();
     let mut ended = false;
-    let mut in_function = false;
+    let mut function: Option<(&str, Vec<&str>)> = None;
     for line in lines {
+        let starts_function = line.strip_prefix(function_prefix.as_str());
+        if starts_function.is_some() || line == end_line {
+            if let Some((name, body)) = function.take() {
+                read_function(name, &body.join("\n"), &mut definitions);
+            }
+        }
         if line == end_line {
             ended = true;
             break;
         }
-        if line.starts_with(&function_prefix) {
-            in_function = true;
-        } else if !in_function {
-            read_alias_line(line, &mut definitions);
+        match (starts_function, function.as_mut()) {
+            (Some(name), _) => function = Some((name, Vec::new())),
+            (None, Some((_, body))) => body.push(line),
+            (None, None) => read_alias_line(line, &mut definitions),
         }
     }
     if ended {
+        definitions.unparsed_functions.sort();
         Ok(definitions)
     } else {
         Err(ShellError::NoMarkers)
+    }
+}
+
+/// Reads the body of one function into `definitions`.
+///
+/// The shell expanded the aliases of the body when it read the definition.
+/// Thus the parse of the body uses an empty alias table.
+fn read_function(name: &str, body: &str, definitions: &mut Definitions) {
+    match command_words(body, &Aliases::new()) {
+        Parsed::Words(words) => {
+            definitions.functions.insert(name.to_owned(), words);
+        }
+        Parsed::Unparsed => definitions.unparsed_functions.push(name.to_owned()),
     }
 }
 

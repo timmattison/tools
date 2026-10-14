@@ -223,7 +223,7 @@ fn a_function_body_gives_its_command_words() {
     ));
     assert_eq!(
         definitions.functions.get("gitclean"),
-        Some(&vec![CommandWord::new("gitnuke", ["--safe", "$@"])])
+        Some(&vec![CommandWord::new("gitnuke", ["--safe", "\"$@\""])])
     );
     assert_eq!(definitions.functions.len(), 1);
     assert_eq!(definitions.aliases.len(), 1);
