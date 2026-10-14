@@ -667,4 +667,88 @@ mod tests {
         let text = lines(&render_in(120, 8, &mut board, &Status::default(), &tokyo));
         assert_eq!(started_cells(&text, 2), "01:00:00");
     }
+
+    /// The text of the time and finished columns of line `y`.
+    fn time_cells(text: &[String], y: usize) -> (String, String) {
+        // After the started column: 1 + 21 + 17 + 17 + 31 + 11 + 6 spaces.
+        let time: String = text[y].chars().skip(104).take(7).collect();
+        let finished: String = text[y].chars().skip(112).take(8).collect();
+        (time.trim_end().to_owned(), finished.trim_end().to_owned())
+    }
+
+    #[test]
+    fn an_active_run_shows_the_time_since_the_start_and_no_finish() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("a/x"),
+            vec![run(
+                1,
+                "a/x",
+                "CI",
+                "main",
+                "t",
+                RunState::Running,
+                "2026-10-14T10:45:30Z",
+                "2026-10-14T11:59:59Z",
+            )],
+        );
+        let text = lines(&render_with(120, 8, &mut board, &Status::default()));
+        assert_eq!(time_cells(&text, 2), ("1h 14m".to_owned(), String::new()));
+    }
+
+    #[test]
+    fn a_finished_run_shows_its_own_duration_and_the_time_since_it_ended() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("a/x"),
+            vec![run(
+                1,
+                "a/x",
+                "CI",
+                "main",
+                "t",
+                RunState::Failed,
+                "2026-10-14T10:00:00Z",
+                "2026-10-14T10:03:07Z",
+            )],
+        );
+        let text = lines(&render_with(120, 8, &mut board, &Status::default()));
+        assert_eq!(
+            time_cells(&text, 4),
+            ("3m 07s".to_owned(), "1h ago".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_clock_that_runs_behind_gives_zero_and_no_panic() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(
+                    1,
+                    "a/x",
+                    "CI",
+                    "main",
+                    "future start",
+                    RunState::Running,
+                    "2026-10-14T12:05:00Z",
+                    "2026-10-14T12:05:00Z",
+                ),
+                run(
+                    2,
+                    "a/x",
+                    "CI",
+                    "main",
+                    "future end",
+                    RunState::Passed,
+                    "2026-10-14T12:10:00Z",
+                    "2026-10-14T12:02:00Z",
+                ),
+            ],
+        );
+        let text = lines(&render_with(120, 8, &mut board, &Status::default()));
+        assert_eq!(time_cells(&text, 2), ("0s".to_owned(), String::new()));
+        assert_eq!(time_cells(&text, 4), ("0s".to_owned(), "0s ago".to_owned()));
+    }
 }
