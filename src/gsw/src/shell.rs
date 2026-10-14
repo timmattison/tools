@@ -454,15 +454,25 @@ fn probe_with_deadline(shell: &OsStr, command: &ShellCommand, deadline: Duration
 /// `value` is the value of the key's own variable and `default` is the name it
 /// carries where that variable is unset.
 ///
-/// Blocking: it starts a shell and waits for it. The caller runs it on a
-/// thread of its own.
+/// Blocking: it starts a shell and waits for it, for no longer than
+/// `deadline`. The caller runs it on a thread of its own.
+///
+/// **The caller gives the deadline.** gsw gives [`PROBE_DEADLINE`]. A test
+/// gives a bound of its own, because a stub that answers at once can still
+/// take longer than [`PROBE_DEADLINE`] on a busy machine, and the test is about
+/// the answer, not about the speed of the machine.
 ///
 /// A value that turns the feature off starts no shell at all, which is what
 /// keeps a public repository from asking every user's shell about one person's
 /// function.
-pub(crate) fn resolve(value: Option<&str>, default: &str, shell: &OsStr) -> Option<ShellCommand> {
+pub(crate) fn resolve(
+    value: Option<&str>,
+    default: &str,
+    shell: &OsStr,
+    deadline: Duration,
+) -> Option<ShellCommand> {
     let command = ShellCommand::new(value, default)?;
-    probe_with_deadline(shell, &command, PROBE_DEADLINE).then_some(command)
+    probe_with_deadline(shell, &command, deadline).then_some(command)
 }
 
 /// The last line of `lines` that has text in it, with the space after it
@@ -1034,11 +1044,15 @@ pub(crate) mod stub_shell {
 
     /// The deadline for a stub that answers.
     ///
-    /// It is the production deadline, and it costs nothing: a probe returns as
-    /// soon as the shell exits. A shorter one would measure how fast this
-    /// machine starts a process rather than what the probe does with the
-    /// answer — the first start of a freshly written script took 600 ms here.
-    pub(crate) const ANSWER_DEADLINE: Duration = PROBE_DEADLINE;
+    /// **It is a bound of the tests, and not [`PROBE_DEADLINE`].** A test that
+    /// uses the bound of a user measures how fast this machine starts a
+    /// process, and not what the probe does with the answer. A hook run of
+    /// 2026-10-14 held three stubs that exit at once for longer than 5
+    /// seconds, and the test failed for that reason alone.
+    ///
+    /// The long bound costs nothing: a probe returns as soon as the shell
+    /// exits. It is 60 seconds, as the bound of the child in `testrepo.rs` is.
+    pub(crate) const ANSWER_DEADLINE: Duration = Duration::from_secs(60);
 
     /// The deadline for the stub that hangs.
     ///
@@ -1835,7 +1849,12 @@ mod probe_tests {
     fn a_value_that_turns_the_feature_off_starts_no_shell() {
         let stub = StubShell::answering(0);
         assert_eq!(
-            resolve(Some(""), DEFAULT_ISSUE_COMMAND, stub.as_shell()),
+            resolve(
+                Some(""),
+                DEFAULT_ISSUE_COMMAND,
+                stub.as_shell(),
+                ANSWER_DEADLINE
+            ),
             None,
             "an empty value must turn the feature off",
         );
