@@ -14,11 +14,39 @@
 //! word. A wrapper that is not in the table makes a count too low, never too
 //! high.
 //!
+//! An alias expands as the shell expands it, at command position only.
+//!
+//! - The command word is an alias when its raw text equals the name of an
+//!   alias. A quote or a backslash in the word stops the expansion. An alias
+//!   that the walk already expanded on the path to the word is not expanded
+//!   again, thus `ls='ls -G'` gives `ls` with the arguments `-G x` for `ls x`
+//!   and an alias cycle ends.
+//! - The new text is the value of the alias, then the raw text of each word of
+//!   the suffix, with one space between them. The walk reads the new text as a
+//!   program. The value can hold a pipe or a substitution, and then it gives
+//!   more than one command word. The redirects and the process substitutions
+//!   of the suffix stay outside the new text. The walk reads them after it.
+//! - A value that ends with a blank also expands the next word, when that word
+//!   is an alias. This repeats while the value just put in ends with a blank.
+//!   The wrappers run after the expansion. A word after a wrapper is not
+//!   expanded, except through this rule.
+//! - The chain of expanded names goes into each substitution. An alias
+//!   expansion counts as one level of nesting, as a substitution does.
+//!
+//! Each command word has an origin, which is [`CommandWord::alias`]. A word
+//! that comes from the value of an alias has the origin of the word that the
+//! value replaced. That is the origin of the replaced word when it has one,
+//! and else the name of the alias. A word that comes from the suffix keeps its
+//! own origin. A word in a substitution has the origin of the word that holds
+//! the substitution. The walk keeps the origin of each part of the new text as
+//! a range of character indexes, because the parser counts characters.
+//!
 //! This module owns the parser. No type of the parser is part of a public
 //! signature, and no other module sees one.
 
 use std::collections::HashMap;
 use std::io::BufReader;
+use std::ops::Range;
 
 use brush_parser::ast;
 use brush_parser::word::{self, TildeExpr, WordPiece, WordPieceWithSource};
@@ -134,26 +162,129 @@ struct Refused;
 struct TextContext<'t> {
     /// The text that the parser reads.
     text: &'t str,
-    /// The number of substitutions that hold this text. The line has depth 0.
+    /// The number of substitutions and alias expansions that hold this text.
+    /// The line has depth 0.
     depth: usize,
+    /// The names of the aliases that the walk already expanded on the path to
+    /// this text. An alias in the chain is not expanded again.
+    chain: Vec<String>,
+    /// The origin of each part of the text, as a range of character indexes.
+    /// The parser counts characters, not bytes.
+    parts: Vec<(Range<usize>, Option<String>)>,
+    /// The origin of a position that is in no part.
+    default_origin: Option<String>,
 }
 
 impl<'t> TextContext<'t> {
     /// Makes the context of the line that the person typed.
     const fn line(text: &'t str) -> Self {
-        Self { text, depth: 0 }
+        Self {
+            text,
+            depth: 0,
+            chain: Vec::new(),
+            parts: Vec::new(),
+            default_origin: None,
+        }
     }
 
-    /// Makes the context of the text inside a substitution of this text.
+    /// Makes the context of the text inside a substitution of this text. The
+    /// substitution keeps the chain. It has no part, and every word in it has
+    /// the origin `origin`, which is the origin of the word that holds it.
     /// Gives `Refused` when the nesting is too deep.
-    fn inside<'u>(&self, text: &'u str) -> Result<TextContext<'u>, Refused> {
+    fn inside<'u>(&self, text: &'u str, origin: Option<&str>) -> Result<TextContext<'u>, Refused> {
+        self.nested(text, Vec::new(), Vec::new(), origin.map(str::to_owned))
+    }
+
+    /// Makes the context of the text that an alias expansion builds. The text
+    /// has the parts `parts`. The chain gets the alias names `names`. A word
+    /// that is in no part has the origin of this context.
+    /// Gives `Refused` when the nesting is too deep.
+    fn expanded<'u>(
+        &self,
+        text: &'u str,
+        parts: Vec<(Range<usize>, Option<String>)>,
+        names: Vec<String>,
+    ) -> Result<TextContext<'u>, Refused> {
+        self.nested(text, parts, names, self.default_origin.clone())
+    }
+
+    /// Makes the context of a text that one more level holds. The chain of the
+    /// new context is the chain of this one plus `names`.
+    fn nested<'u>(
+        &self,
+        text: &'u str,
+        parts: Vec<(Range<usize>, Option<String>)>,
+        names: Vec<String>,
+        default_origin: Option<String>,
+    ) -> Result<TextContext<'u>, Refused> {
         let depth = self.depth + 1;
         if depth > MAX_DEPTH {
             return Err(Refused);
         }
-        Ok(TextContext { text, depth })
+        let mut chain = self.chain.clone();
+        chain.extend(names);
+        Ok(TextContext {
+            text,
+            depth,
+            chain,
+            parts,
+            default_origin,
+        })
+    }
+
+    /// Gives the origin of the word that starts at the character index
+    /// `index`: the origin of the part that holds the index, or else the
+    /// default origin. A word without a position has the default origin.
+    fn origin_at(&self, index: Option<usize>) -> Option<String> {
+        index
+            .and_then(|index| {
+                self.parts
+                    .iter()
+                    .find(|(range, _)| range.contains(&index))
+                    .map(|(_, origin)| origin.clone())
+            })
+            .unwrap_or_else(|| self.default_origin.clone())
+    }
+
+    /// True when the walk already expanded the alias `name` on the path to
+    /// this text.
+    fn in_chain(&self, name: &str) -> bool {
+        self.chain.iter().any(|expanded| expanded == name)
     }
 }
+
+/// The text that an alias expansion builds, with the origin of each part.
+#[derive(Default)]
+struct ExpandedText {
+    /// The text so far.
+    text: String,
+    /// The number of characters in `text`.
+    characters: usize,
+    /// The origin of each part, as a range of character indexes.
+    parts: Vec<(Range<usize>, Option<String>)>,
+}
+
+impl ExpandedText {
+    /// Adds `piece` after one space, and states that it has the origin
+    /// `origin`. The first piece has no space before it.
+    fn push(&mut self, piece: &str, origin: Option<String>) {
+        if !self.text.is_empty() {
+            self.text.push(SEPARATOR);
+            self.characters += 1;
+        }
+        let start = self.characters;
+        self.text.push_str(piece);
+        self.characters += piece.chars().count();
+        self.parts.push((start..self.characters, origin));
+    }
+}
+
+/// The text that joins the pieces of an expanded alias.
+const SEPARATOR: char = ' ';
+
+/// The characters that make an alias expand the next word too, when the value
+/// of the alias ends with one of them.
+const BLANKS: [char; 2] = [' ', '\t'];
 
 /// The backslash that starts an escape sequence.
 const BACKSLASH: char = '\\';
@@ -168,6 +299,9 @@ const HOME_TILDE: &str = "~";
 struct ReadWord {
     /// The text as the person typed it, quotes included.
     raw: String,
+    /// The character index where the word starts in its text, when the parser
+    /// states it.
+    start: Option<usize>,
     /// The pieces that the word parser found.
     pieces: Vec<WordPieceWithSource>,
 }
@@ -495,18 +629,26 @@ fn unwrap_command(words: &[&ReadWord]) -> Option<usize> {
     }
 }
 
+/// Gives the character index where `word` starts, when the parser states it.
+fn start_of(word: &ast::Word) -> Option<usize> {
+    word.loc.as_ref().map(|span| span.start.index)
+}
+
 /// The state of one walk over one line.
-struct Walker {
+struct Walker<'a> {
+    /// The aliases that the walk expands.
+    aliases: &'a Aliases,
     /// The options of the parser. The same value serves every parse.
     options: ParserOptions,
     /// The command words found so far, in source order.
     words: Vec<CommandWord>,
 }
 
-impl Walker {
+impl<'a> Walker<'a> {
     /// Makes a walker with no word.
-    fn new() -> Self {
+    fn new(aliases: &'a Aliases) -> Self {
         Self {
+            aliases,
             options: ParserOptions::default(),
             words: Vec::new(),
         }
@@ -648,7 +790,8 @@ impl Walker {
     /// Walks a simple command: the prefix items, then the command word, then
     /// the suffix items. A command with no command word adds no word. A command
     /// word that holds an expansion has no literal, so it adds no word either.
-    /// A wrapper hands the command word to the word that it runs.
+    /// An alias at the command word expands first. A wrapper hands the command
+    /// word to the word that it runs.
     fn walk_simple(
         &mut self,
         simple: &ast::SimpleCommand,
@@ -664,22 +807,87 @@ impl Walker {
             self.walk_item(item, None, context)?;
         }
         if let Some(command) = &command {
+            if let Some(value) = self.alias_value(&command.raw, context, &[]) {
+                return self.walk_alias(command, value, &suffix, context);
+            }
             let sequence: Vec<&ReadWord> = std::iter::once(command)
                 .chain(suffix.iter().filter_map(|(_, read)| read.as_ref()))
                 .collect();
             if let Some(index) = unwrap_command(&sequence) {
-                if let (Some(literal), Some(rest)) = (
-                    sequence.get(index).and_then(|word| word.literal()),
-                    sequence.get(index + 1..),
-                ) {
-                    let args = rest.iter().map(|word| word.argument());
-                    self.words.push(CommandWord::new(literal, args));
+                if let (Some(runs), Some(rest)) = (sequence.get(index), sequence.get(index + 1..)) {
+                    if let Some(literal) = runs.literal() {
+                        let args = rest.iter().map(|word| word.argument());
+                        let mut word = CommandWord::new(literal, args);
+                        word.alias = context.origin_at(runs.start);
+                        self.words.push(word);
+                    }
                 }
             }
-            self.walk_pieces(&command.pieces, context)?;
+            self.walk_read_word(command, context)?;
         }
         for (item, read) in &suffix {
             self.walk_item(item, read.as_ref(), context)?;
+        }
+        Ok(())
+    }
+
+    /// Gives the value of the alias `name`, when the walk expands it here. An
+    /// alias is not expanded when its name is in the chain of `context`, or
+    /// among the `names` that the current expansion added.
+    fn alias_value(
+        &self,
+        name: &str,
+        context: &TextContext<'_>,
+        names: &[String],
+    ) -> Option<&'a str> {
+        if context.in_chain(name) || names.iter().any(|expanded| expanded == name) {
+            return None;
+        }
+        self.aliases.get(name)
+    }
+
+    /// Expands the alias that is the command word `command`, and walks the
+    /// result. The new text is the value, then the raw text of each word of the
+    /// suffix. A value that ends with a blank also expands the next word, when
+    /// that word is an alias. The redirects and the process substitutions of the
+    /// suffix stay outside the new text, and the walk reads them after it.
+    fn walk_alias(
+        &mut self,
+        command: &ReadWord,
+        value: &str,
+        suffix: &[(&ast::CommandPrefixOrSuffixItem, Option<ReadWord>)],
+        context: &TextContext<'_>,
+    ) -> Result<(), Refused> {
+        let mut names = vec![command.raw.clone()];
+        let mut expanded = ExpandedText::default();
+        let replaced_origin = |name: &str, start: Option<usize>| {
+            context.origin_at(start).or_else(|| Some(name.to_owned()))
+        };
+        expanded.push(value, replaced_origin(&command.raw, command.start));
+        let mut rest = suffix
+            .iter()
+            .filter_map(|(_, read)| read.as_ref())
+            .peekable();
+        let mut last = value;
+        while last.ends_with(BLANKS) {
+            let Some(next) = rest.peek() else { break };
+            let Some(next_value) = self.alias_value(&next.raw, context, &names) else {
+                break;
+            };
+            expanded.push(next_value, replaced_origin(&next.raw, next.start));
+            names.push(next.raw.clone());
+            last = next_value;
+            rest.next();
+        }
+        for word in rest {
+            expanded.push(&word.raw, context.origin_at(word.start));
+        }
+        let ExpandedText { text, parts, .. } = expanded;
+        self.walk_text(&context.expanded(&text, parts, names)?)?;
+        for (item, read) in suffix {
+            if read.is_none() {
+                self.walk_item(item, None, context)?;
+            }
         }
         Ok(())
     }
@@ -721,7 +929,7 @@ impl Walker {
             }
             ast::CommandPrefixOrSuffixItem::Word(word)
             | ast::CommandPrefixOrSuffixItem::AssignmentWord(_, word) => match read {
-                Some(read) => self.walk_pieces(&read.pieces, context),
+                Some(read) => self.walk_read_word(read, context),
                 None => self.walk_word(word, context),
             },
             ast::CommandPrefixOrSuffixItem::ProcessSubstitution(_, subshell) => {
@@ -764,7 +972,8 @@ impl Walker {
                 }
                 let pieces =
                     word::parse_heredoc(&document.doc.value, &self.options).map_err(|_| Refused)?;
-                self.walk_pieces(&pieces, context)
+                let origin = context.origin_at(start_of(&document.doc));
+                self.walk_pieces(&pieces, origin.as_deref(), context)
             }
             ast::IoRedirect::HereString(_, word) | ast::IoRedirect::OutputAndError(word, _) => {
                 self.walk_word(word, context)
@@ -799,7 +1008,18 @@ impl Walker {
     /// cannot read the word.
     fn walk_word(&mut self, word: &ast::Word, context: &TextContext<'_>) -> Result<(), Refused> {
         let read = self.read_word(word)?;
-        self.walk_pieces(&read.pieces, context)
+        self.walk_read_word(&read, context)
+    }
+
+    /// Walks the substitutions in a word that the caller read already. They
+    /// have the origin of the word.
+    fn walk_read_word(
+        &mut self,
+        read: &ReadWord,
+        context: &TextContext<'_>,
+    ) -> Result<(), Refused> {
+        let origin = context.origin_at(read.start);
+        self.walk_pieces(&read.pieces, origin.as_deref(), context)
     }
 
     /// Parses one word into pieces. Gives `Refused` when the parser cannot read it.
@@ -807,27 +1027,30 @@ impl Walker {
         let pieces = word::parse(&word.value, &self.options).map_err(|_| Refused)?;
         Ok(ReadWord {
             raw: word.value.clone(),
+            start: start_of(word),
             pieces,
         })
     }
 
     /// Walks the pieces of a word. A command substitution holds a program, so
     /// the walk reads it at one level deeper. A double-quoted sequence holds
-    /// more pieces. The other pieces start no program.
+    /// more pieces. The other pieces start no program. The words in a
+    /// substitution have the origin `origin`.
     fn walk_pieces(
         &mut self,
         pieces: &[WordPieceWithSource],
+        origin: Option<&str>,
         context: &TextContext<'_>,
     ) -> Result<(), Refused> {
         for WordPieceWithSource { piece, .. } in pieces {
             match piece {
                 WordPiece::CommandSubstitution(text)
                 | WordPiece::BackquotedCommandSubstitution(text) => {
-                    self.walk_text(&context.inside(text)?)?;
+                    self.walk_text(&context.inside(text, origin)?)?;
                 }
                 WordPiece::DoubleQuotedSequence(inner)
                 | WordPiece::GettextDoubleQuotedSequence(inner) => {
-                    self.walk_pieces(inner, context)?;
+                    self.walk_pieces(inner, origin, context)?;
                 }
                 _ => {}
             }
@@ -838,10 +1061,11 @@ impl Walker {
 
 /// Gives each command word of one command line. Pure.
 ///
-/// The alias table is accepted, and the walk does not use it yet.
+/// `aliases` holds the aliases of the shell. See the module documentation for
+/// the rules of the expansion and of the origin of each word.
 #[must_use]
-pub fn command_words(line: &str, _aliases: &Aliases) -> Parsed {
-    let mut walker = Walker::new();
+pub fn command_words(line: &str, aliases: &Aliases) -> Parsed {
+    let mut walker = Walker::new(aliases);
     match walker.walk_text(&TextContext::line(line)) {
         Ok(()) => Parsed::Words(walker.words),
         Err(Refused) => Parsed::Unparsed,

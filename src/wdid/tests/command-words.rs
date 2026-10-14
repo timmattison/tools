@@ -759,3 +759,27 @@ fn multibyte_text_survives_the_alias_expansion() {
         ],
     );
 }
+
+/// Makes `count` aliases where `a0` expands to `a1`, `a1` to `a2`, and the
+/// last one to `prcp`.
+fn alias_ladder(count: usize) -> Aliases {
+    (0..count)
+        .map(|index| {
+            let value = if index + 1 == count {
+                "prcp".to_owned()
+            } else {
+                format!("a{}", index + 1)
+            };
+            (format!("a{index}"), value)
+        })
+        .collect()
+}
+
+#[test]
+fn each_alias_expansion_counts_as_one_level_of_the_depth_limit() {
+    let Parsed::Words(inside) = command_words("a0", &alias_ladder(64)) else {
+        panic!("64 expansions must parse");
+    };
+    assert_eq!(inside, vec![word("prcp", []).through("a0")]);
+    assert_eq!(command_words("a0", &alias_ladder(65)), Parsed::Unparsed);
+}
