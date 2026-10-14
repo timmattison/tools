@@ -224,6 +224,8 @@ impl fmt::Display for Target {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cmp::Ordering;
+    use std::collections::{BTreeSet, HashSet};
 
     fn owner(text: &str) -> OwnerName {
         OwnerName(text.to_owned())
@@ -473,5 +475,67 @@ mod tests {
             RepoName::parse("a").expect_err("refused").to_string(),
             "\"a\" has no \"/\". A repository is owner/name."
         );
+    }
+
+    #[test]
+    fn names_that_differ_only_in_case_are_equal() {
+        assert_eq!(owner("Lock-Free-Labs"), owner("lock-free-labs"));
+        assert_eq!(repo("Lock-Free-Labs", "X"), repo("lock-free-labs", "x"));
+        assert_ne!(repo("a", "x"), repo("a", "y"));
+        assert_ne!(repo("a", "x"), repo("b", "x"));
+        assert_eq!(
+            Target::parse("Lock-Free-Labs/X"),
+            Target::parse("lock-free-labs/x")
+        );
+        assert_ne!(
+            Target::parse("lock-free-labs"),
+            Target::parse("lock-free-labs/x")
+        );
+    }
+
+    #[test]
+    fn a_btree_set_holds_one_of_two_names_that_differ_in_case() {
+        let mut repos = BTreeSet::new();
+        assert!(repos.insert(repo("Lock-Free-Labs", "X")));
+        assert!(!repos.insert(repo("lock-free-labs", "x")));
+        assert_eq!(repos.len(), 1);
+        let mut owners = BTreeSet::new();
+        owners.insert(owner("ABC"));
+        owners.insert(owner("abc"));
+        assert_eq!(owners.len(), 1);
+    }
+
+    #[test]
+    fn a_hash_set_holds_one_of_two_names_that_differ_in_case() {
+        let mut repos = HashSet::new();
+        assert!(repos.insert(repo("Lock-Free-Labs", "X")));
+        assert!(!repos.insert(repo("lock-free-labs", "x")));
+        assert_eq!(repos.len(), 1);
+        let mut targets = HashSet::new();
+        targets.insert(Target::Owner(owner("ABC")));
+        targets.insert(Target::Owner(owner("abc")));
+        assert_eq!(targets.len(), 1);
+    }
+
+    #[test]
+    fn names_order_by_their_lowercase_form() {
+        assert!(owner("b") > owner("A"));
+        assert!(owner("a") < owner("B"));
+        assert_eq!(owner("A").cmp(&owner("a")), Ordering::Equal);
+        assert!(repo("a", "Z") > repo("A", "b"));
+        assert!(repo("a", "b") < repo("A", "C"));
+        let mut sorted = vec![repo("b", "x"), repo("A", "Y"), repo("a", "x")];
+        sorted.sort();
+        let shown: Vec<String> = sorted.iter().map(ToString::to_string).collect();
+        assert_eq!(shown, ["a/x", "A/Y", "b/x"]);
+    }
+
+    #[test]
+    fn the_stored_name_keeps_the_case_as_given() {
+        let kept = BTreeSet::from([repo("Lock-Free-Labs", "X"), repo("lock-free-labs", "x")]);
+        let only = kept.iter().next().expect("one name");
+        assert_eq!(only.to_string(), "Lock-Free-Labs/X");
+        assert_eq!(only.owner().as_str(), "Lock-Free-Labs");
+        assert_eq!(only.name(), "X");
     }
 }
