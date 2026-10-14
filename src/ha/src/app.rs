@@ -130,7 +130,24 @@ where
         while let Ok(update) = self.worker.updates.try_recv() {
             match update {
                 Update::Runs { repo, runs } => self.board.replace(repo, runs),
-                Update::Repos { .. } | Update::Failed { .. } | Update::CycleDone { .. } => {}
+                Update::Failed { repo, error } => self.board.fail(repo, error),
+                Update::Repos {
+                    repos,
+                    owner_errors,
+                } => {
+                    self.board.keep_only(&repos);
+                    self.status.owner_errors = owner_errors;
+                }
+                Update::CycleDone {
+                    finished_at,
+                    rate,
+                    backoff_until,
+                } => {
+                    self.status.last_refresh = Some(finished_at);
+                    self.status.rate = rate;
+                    self.status.backoff_until = backoff_until;
+                    self.status.refreshing = false;
+                }
             }
         }
     }
