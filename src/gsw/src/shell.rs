@@ -1531,10 +1531,17 @@ pub(crate) mod stub_shell {
     /// 2026-10-14 held two of them for more than 30 seconds on a busy machine.
     /// A compile-time assertion below holds this bound above that.
     ///
-    /// It is twice [`ANSWER_DEADLINE`]. A child can wait for a whole
-    /// [`ANSWER_DEADLINE`] inside, so the parent must wait for longer, or it
-    /// kills a child that is still inside a bound of its own.
-    const CHILD_DEADLINE: Duration = ANSWER_DEADLINE.saturating_mul(2);
+    /// The parent waits for the longest series of bounds that one child holds,
+    /// and for one [`ANSWER_DEADLINE`] more. The child
+    /// `each_child_sheds_the_git_variables_of_gsw_and_keeps_those_of_the_user`
+    /// waits for a probe under [`ANSWER_DEADLINE`] and then for a run under
+    /// `RUN_DEADLINE`. A parent that gives up sooner kills a child that is still
+    /// inside a bound of its own. Its message then replaces the more specific
+    /// message of the child. The last [`ANSWER_DEADLINE`] is for the start of the
+    /// child itself, which a busy machine stalls as it stalls the start of a stub.
+    const CHILD_DEADLINE: Duration = ANSWER_DEADLINE
+        .saturating_add(crate::issue::RUN_DEADLINE)
+        .saturating_add(ANSWER_DEADLINE);
 
     // The child with the longest series of bounds waits for a probe, then for a run.
     // The parent must wait for longer than that series.
@@ -1750,7 +1757,7 @@ pub(crate) mod stub_shell {
         unsafe { libc::kill(pid, libc::SIGKILL) };
     }
 
-    /// The bound of the parent before this branch.
+    /// The bound of the parent until 2026-10-14.
     ///
     /// A hook run of 2026-10-14 held two healthy children of
     /// [`a_child_of_this_test_passes`] for longer, and the parent killed them
