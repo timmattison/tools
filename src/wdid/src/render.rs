@@ -406,11 +406,57 @@ pub fn json(tally: &Tally, window: &Window) -> String {
     text
 }
 
-/// Gives the unparsed commands, then the unparsed functions.
+/// The line that `unparsed` gives when every command parsed.
+const ALL_PARSED: &str = "Every command parsed.";
+
+/// What starts the line of the functions that did not parse.
+const FUNCTIONS_LABEL: &str = "Functions that did not parse: ";
+
+/// Gives `command` on one line: a backslash, a newline, a carriage return, and
+/// a tab become `\\`, `\n`, `\r`, and `\t`.
+fn escape(command: &str) -> String {
+    let mut escaped = String::with_capacity(command.len());
+    for character in command.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
+/// Gives the commands that did not parse, then the functions that did not
+/// parse.
+///
+/// Each command has one line: the number of rows, a tab, and the escaped
+/// command. A blank line and the names of the functions follow, when a function
+/// did not parse. With no command and no function, the text says that every
+/// command parsed.
 #[must_use]
 pub fn unparsed(tally: &Tally) -> String {
-    let _ = tally;
-    String::new()
+    let summary = &tally.summary;
+    let mut blocks: Vec<String> = Vec::new();
+    if !summary.unparsed.is_empty() {
+        let lines: Vec<String> = summary
+            .unparsed
+            .iter()
+            .map(|group| format!("{}\t{}", number(group.rows), escape(&group.command)))
+            .collect();
+        blocks.push(lines.join("\n"));
+    }
+    if !summary.unparsed_functions.is_empty() {
+        blocks.push(format!(
+            "{FUNCTIONS_LABEL}{}",
+            summary.unparsed_functions.join(ENTRY_SEPARATOR)
+        ));
+    }
+    if blocks.is_empty() {
+        blocks.push(ALL_PARSED.to_string());
+    }
+    blocks.join(BETWEEN_BLOCKS) + "\n"
 }
 
 /// Gives the table width.
