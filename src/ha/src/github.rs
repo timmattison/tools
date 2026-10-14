@@ -974,6 +974,27 @@ mod tests {
         assert!(!stub.requests()[1].contains(&"-H".to_owned()));
     }
 
+    /// A session that runs for days asks with a new hour each hour. The cache
+    /// keeps one page for each repository, filter, and page number, not one
+    /// for each hour, or it grows with no limit.
+    #[test]
+    fn the_cache_keeps_one_page_per_query_when_the_hour_changes() {
+        let stub = Stub::new(ETAG_CASES);
+        stub.file("page1.out", &ok_output(RUNS_JSON));
+        stub.file("not-modified.out", NOT_MODIFIED);
+        let source = stub.source();
+        let tools = repo("timmattison/tools");
+        for hour in [
+            "2026-09-24T21:00:00Z",
+            "2026-09-24T22:00:00Z",
+            "2026-09-24T23:00:00Z",
+        ] {
+            let query = RunQuery::CreatedSince(time(hour));
+            source.runs_of(&tools, query).expect("runs");
+        }
+        assert_eq!(source.lock_etags().len(), 1);
+    }
+
     #[test]
     fn a_304_with_no_cached_page_is_a_bad_response() {
         let stub = Stub::new("cat \"$dir/not-modified.out\"; exit 1");
