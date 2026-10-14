@@ -168,19 +168,57 @@ fn the_table_shows_one_row_for_each_tool() {
     assert_eq!(table_of(&report), TABLE_200);
 }
 
-/// A narrow width wraps the cells, and no line is longer than the width.
-#[test]
-fn a_narrow_table_wraps_inside_its_width() {
-    let report = text(&fixture(), &window(), Some(60));
-    let table = table_of(&report);
+/// The values that a cell must show whole: the dates, the counts, and the tool
+/// names of the fixture. A date that wraps inside its cell cannot be read.
+const WHOLE_VALUES: [&str; 13] = [
+    "2025-02-27",
+    "2026-10-13",
+    "2025-06-01",
+    "2024-01-05",
+    "2025-11-13",
+    "2024-01-01",
+    "2026-09-20",
+    "2024-03-02",
+    "6,121",
+    "218",
+    "faulte",
+    "goup",
+    "Dev runs",
+];
 
-    assert!(table.lines().count() > 6, "the cells wrap:\n{table}");
-    for line in table.lines() {
+/// Makes sure that each value of [`WHOLE_VALUES`] is whole on one line.
+fn assert_whole_values(table: &str) {
+    for value in WHOLE_VALUES {
         assert!(
-            line.chars().count() <= 60,
-            "the line is longer than 60 columns: {line:?}"
+            table.lines().any(|line| line.contains(value)),
+            "{value:?} is not whole on one line:\n{table}"
         );
     }
+}
+
+/// A narrow width wraps only the two text columns. Each name, count, and date
+/// stays whole, and no line is longer than the width.
+#[test]
+fn a_narrow_table_wraps_only_the_text_columns() {
+    let report = text(&fixture(), &window(), Some(110));
+    let table = table_of(&report);
+
+    assert!(table.lines().count() > 8, "the text cells wrap:\n{table}");
+    assert_whole_values(table);
+    for line in table.lines() {
+        assert!(
+            line.chars().count() <= 110,
+            "the line is longer than 110 columns: {line:?}"
+        );
+    }
+}
+
+/// A width that is too small for the names, the counts, and the dates gives a
+/// table that is wider than the width. Each value stays whole.
+#[test]
+fn a_table_too_narrow_for_its_dates_keeps_each_date_whole() {
+    let report = text(&fixture(), &window(), Some(60));
+    assert_whole_values(table_of(&report));
 }
 
 /// `COLUMNS` wins, then the terminal, else there is no width. A value that is
