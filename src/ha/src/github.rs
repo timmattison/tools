@@ -844,6 +844,111 @@ mod tests {
         );
     }
 
+    /// Like `ok_output`, with the rate limit headers set by the caller.
+    fn rated_output(body: &str, remaining: u64, reset: i64) -> String {
+        format!(
+            "HTTP/2.0 200 OK\n\
+             Etag: W/\"e{remaining}\"\r\n\
+             X-Ratelimit-Limit: 5000\r\n\
+             X-Ratelimit-Remaining: {remaining}\r\n\
+             X-Ratelimit-Reset: {reset}\r\n\
+             \r\n{body}"
+        )
+    }
+
+    fn rate(remaining: u64, reset: i64) -> RateLimit {
+        RateLimit {
+            limit: 5000,
+            remaining,
+            reset: DateTime::from_timestamp(reset, 0).expect("a valid time"),
+        }
+    }
+
+    /// A stub with one canned page for the 21:00 hour and one for the 22:00 hour.
+    fn hour_stub(first: &str, second: &str) -> Stub {
+        let stub = Stub::new(
+            "case \"$*\" in
+  *'T21:'*) cat \"$dir/page1.out\";;
+  *'T22:'*) cat \"$dir/page2.out\";;
+ esac",
+        );
+        stub.file("page1.out", first);
+        stub.file("page2.out", second);
+        stub
+    }
+
+    fn ask_both_hours(source: &GhSource) {
+        let tools = repo("o/r");
+        source.runs_of(&tools, since_query()).expect("runs");
+        let next = RunQuery::CreatedSince(time("2026-09-24T22:10:00Z"));
+        source.runs_of(&tools, next).expect("runs");
+    }
+
+    #[test]
+    fn the_rate_limit_is_none_before_any_request() {
+        let stub = Stub::new("exit 1");
+        assert_eq!(stub.source().rate_limit(), None);
+    }
+
+    #[test]
+    fn the_rate_limit_comes_from_the_headers_of_a_response() {
+        let stub = Stub::new("cat \"$dir/page1.out\"");
+        stub.file("page1.out", &ok_output(RUNS_JSON));
+        let source = stub.source();
+        source.runs_of(&repo("o/r"), since_query()).expect("runs");
+        assert_eq!(source.rate_limit(), Some(rate(4866, 1_791_977_652)));
+    }
+
+    #[test]
+    fn a_304_updates_the_rate_limit_too() {
+        let stub = Stub::new(ETAG_CASES);
+        stub.file("page1.out", &ok_output(RUNS_JSON));
+        stub.file(
+            "not-modified.out",
+            &NOT_MODIFIED.replace("Remaining: 4866", "Remaining: 4800"),
+        );
+        let source = stub.source();
+        let tools = repo("o/r");
+        source.runs_of(&tools, since_query()).expect("runs");
+        source.runs_of(&tools, since_query()).expect("runs");
+        assert_eq!(source.rate_limit(), Some(rate(4800, 1_791_977_652)));
+    }
+
+    #[test]
+    fn a_later_reset_wins_even_with_more_requests_remaining() {
+        let stub = hour_stub(
+            &rated_output(&runs_json(0, 1, 0), 100, 1_000),
+            &rated_output(&runs_json(0, 1, 0), 4999, 4_600),
+        );
+        let source = stub.source();
+        ask_both_hours(&source);
+        assert_eq!(source.rate_limit(), Some(rate(4999, 4_600)));
+    }
+
+    #[test]
+    fn an_earlier_reset_does_not_replace_a_later_one() {
+        let stub = hour_stub(
+            &rated_output(&runs_json(0, 1, 0), 4999, 4_600),
+            &rated_output(&runs_json(0, 1, 0), 100, 1_000),
+        );
+        let source = stub.source();
+        ask_both_hours(&source);
+        assert_eq!(source.rate_limit(), Some(rate(4999, 4_600)));
+    }
+
+    #[test]
+    fn with_the_same_reset_the_lower_remaining_wins() {
+        for (first, second) in [(4000, 3000), (3000, 4000)] {
+            let stub = hour_stub(
+                &rated_output(&runs_json(0, 1, 0), first, 4_600),
+                &rated_output(&runs_json(0, 1, 0), second, 4_600),
+            );
+            let source = stub.source();
+            ask_both_hours(&source);
+            assert_eq!(source.rate_limit(), Some(rate(3000, 4_600)));
+        }
+    }
+
     #[test]
     fn run_with_limit_gives_up_on_a_program_that_hangs() {
         let dir = TempDir::new().unwrap();
