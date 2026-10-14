@@ -3,6 +3,7 @@
 
 use std::path::Path;
 
+use wdid::command_words::CommandWord;
 use wdid::shell::{parse_output, script, Marker, ShellError, ShellKind};
 
 #[test]
@@ -202,4 +203,111 @@ fn an_end_marker_before_the_start_marker_is_no_markers() {
 fn another_marker_text_is_not_a_marker() {
     let result = parse_output("N ALIASES\nalias a=b\nN END\n", &Marker::new("M"));
     assert!(matches!(result, Err(ShellError::NoMarkers)), "{result:?}");
+}
+
+/// Wraps an alias listing and function sections in the markers of `M`.
+fn with_functions(alias_lines: &str, sections: &[(&str, &str)]) -> String {
+    let mut text = format!("noise\nM ALIASES\n{alias_lines}");
+    for (name, body) in sections {
+        text.push_str(&format!("M FUNCTION {name}\n{body}\n"));
+    }
+    text.push_str("M END\nnoise\n");
+    text
+}
+
+#[test]
+fn a_function_body_gives_its_command_words() {
+    let definitions = parsed(&with_functions(
+        "alias a=b\n",
+        &[("gitclean", "\tgitnuke --safe \"$@\"")],
+    ));
+    assert_eq!(
+        definitions.functions.get("gitclean"),
+        Some(&vec![CommandWord::new("gitnuke", ["--safe", "$@"])])
+    );
+    assert_eq!(definitions.functions.len(), 1);
+    assert_eq!(definitions.aliases.len(), 1);
+    assert!(definitions.unparsed_functions.is_empty());
+}
+
+#[test]
+fn a_function_body_of_many_lines_is_read_as_one_script() {
+    let body = "\tif [[ -n $1 ]]; then\n\t\tcwt \"$1\"\n\telse\n\t\tcat x | prhash\n\tfi";
+    let definitions = parsed(&with_functions("", &[("wt", body)]));
+    let words: Vec<&str> = definitions.functions["wt"]
+        .iter()
+        .map(|word| word.word.as_str())
+        .collect();
+    assert_eq!(words, ["cwt", "cat", "prhash"]);
+}
+
+#[test]
+fn many_functions_are_kept_apart() {
+    let definitions = parsed(&with_functions(
+        "",
+        &[("a", "\tprcp x"), ("b", "\tcwt"), ("c", "")],
+    ));
+    assert_eq!(
+        definitions
+            .functions
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["a", "b", "c"]
+    );
+    assert_eq!(
+        definitions.functions["a"],
+        vec![CommandWord::new("prcp", ["x"])]
+    );
+    assert_eq!(
+        definitions.functions["b"],
+        vec![CommandWord::new("cwt", [] as [&str; 0])]
+    );
+    assert!(definitions.functions["c"].is_empty());
+}
+
+#[test]
+fn a_function_body_is_not_read_as_aliases() {
+    let definitions = parsed(&with_functions("", &[("f", "\talias x=y")]));
+    assert!(definitions.aliases.is_empty());
+    assert!(definitions.unparsed_aliases.is_empty());
+    assert_eq!(
+        definitions.functions["f"],
+        vec![CommandWord::new("alias", ["x=y"])]
+    );
+}
+
+#[test]
+fn aliases_are_not_expanded_in_a_function_body() {
+    let definitions = parsed(&with_functions("alias ll='ls -l'\n", &[("f", "\tll x")]));
+    assert_eq!(
+        definitions.functions["f"],
+        vec![CommandWord::new("ll", ["x"])]
+    );
+}
+
+#[test]
+fn a_function_body_that_does_not_parse_is_listed_by_name_in_sorted_order() {
+    let definitions = parsed(&with_functions(
+        "",
+        &[("zed", "\techo $("), ("ok", "\tprcp"), ("alpha", "\ta |")],
+    ));
+    assert_eq!(definitions.unparsed_functions, ["alpha", "zed"]);
+    assert_eq!(definitions.functions.keys().collect::<Vec<_>>(), ["ok"]);
+}
+
+#[test]
+fn a_multibyte_function_name_and_body_are_read() {
+    let definitions = parsed(&with_functions("", &[("日本", "\tprcp 日本語.txt 🎉/")]));
+    assert_eq!(
+        definitions.functions["日本"],
+        vec![CommandWord::new("prcp", ["日本語.txt", "🎉/"])]
+    );
+}
+
+#[test]
+fn functions_after_the_end_marker_are_ignored() {
+    let stdout = "M ALIASES\nM FUNCTION a\n\tprcp\nM END\nM FUNCTION b\n\tcwt\n";
+    let definitions = parsed(stdout);
+    assert_eq!(definitions.functions.keys().collect::<Vec<_>>(), ["a"]);
 }
