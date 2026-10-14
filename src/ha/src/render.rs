@@ -84,9 +84,10 @@ fn marker(state: RunState) -> &'static str {
     }
 }
 
-/// The time between two instants. A negative span gives the absolute value.
+/// The time from one instant to a later one. A clock that runs behind makes
+/// a negative span, and that gives zero.
 fn span(from: DateTime<Utc>, to: DateTime<Utc>) -> Duration {
-    Duration::from_secs((to - from).num_seconds().unsigned_abs())
+    Duration::from_secs(u64::try_from((to - from).num_seconds()).unwrap_or(0))
 }
 
 /// The started column: the clock for today, the date and the clock before.
