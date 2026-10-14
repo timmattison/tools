@@ -242,6 +242,101 @@ fn a_multibyte_command_counts() {
     assert_eq!(usage(&result, "prcp").typed, 1);
 }
 
+#[test]
+fn a_development_run_counts_apart_from_the_uses() {
+    let result = run(
+        &[
+            row_on(date(2026, 9, 1), 0, "./target/release/prcp a"),
+            row_on(date(2026, 9, 2), 0, "cargo run --bin prcp -- x"),
+            row_on(date(2026, 9, 3), 0, "~/.cargo/bin/prcp"),
+        ],
+        &Definitions::default(),
+        &catalog(&["prcp"]),
+    );
+    let prcp = usage(&result, "prcp");
+    assert_eq!(prcp.development_runs, 2);
+    assert_eq!(prcp.typed, 1);
+    assert_eq!(prcp.uses, 1);
+    assert_eq!(prcp.first_use, Some(date(2026, 9, 3)));
+    assert_eq!(prcp.last_use, Some(date(2026, 9, 3)));
+}
+
+#[test]
+fn a_row_with_exit_127_is_not_counted() {
+    let result = run(
+        &[row(127, "prcp a"), row(0, "prcp b")],
+        &Definitions::default(),
+        &catalog(&["prcp"]),
+    );
+    assert_eq!(usage(&result, "prcp").uses, 1);
+    assert_eq!(result.summary.not_found, 1);
+}
+
+#[test]
+fn a_row_with_exit_minus_one_is_counted() {
+    let result = run(
+        &[row(-1, "prcp a"), row(1, "prcp b")],
+        &Definitions::default(),
+        &catalog(&["prcp"]),
+    );
+    assert_eq!(usage(&result, "prcp").uses, 2);
+    assert_eq!(result.summary.not_found, 0);
+}
+
+#[test]
+fn the_since_date_drops_the_days_before_it_and_keeps_the_day_itself() {
+    let since = date(2026, 6, 15);
+    let entries = [
+        row_on(since.pred_opt().unwrap(), 0, "prcp"),
+        row_on(since, 0, "prcp"),
+        row_on(since.succ_opt().unwrap(), 0, "prcp"),
+    ];
+    let result = run_in(
+        &entries,
+        &Definitions::default(),
+        &catalog(&["prcp"]),
+        &Window {
+            since: Some(since),
+            ..window()
+        },
+    );
+    let prcp = usage(&result, "prcp");
+    assert_eq!(prcp.uses, 2);
+    assert_eq!(prcp.first_use, Some(since));
+    assert_eq!(result.summary.before_since, 1);
+}
+
+#[test]
+fn a_row_before_since_is_not_a_not_found_row() {
+    let since = date(2026, 6, 15);
+    let entries = [
+        row_on(date(2026, 6, 1), 127, "prcp"),
+        row_on(date(2026, 6, 20), 127, "prcp"),
+    ];
+    let result = run_in(
+        &entries,
+        &Definitions::default(),
+        &catalog(&["prcp"]),
+        &Window {
+            since: Some(since),
+            ..window()
+        },
+    );
+    assert_eq!(result.summary.before_since, 1);
+    assert_eq!(result.summary.not_found, 1);
+}
+
+#[test]
+fn without_since_every_row_counts() {
+    let result = run(
+        &[row_on(date(1999, 1, 1), 0, "prcp")],
+        &Definitions::default(),
+        &catalog(&["prcp"]),
+    );
+    assert_eq!(usage(&result, "prcp").uses, 1);
+    assert_eq!(result.summary.before_since, 0);
+}
+
 /// Keeps the imports of later groups in use.
 #[allow(dead_code, reason = "later test groups use these items")]
 fn later(_: Days, _: Classification, _: Unparsed) {}
