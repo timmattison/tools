@@ -13,10 +13,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
 
 use chrono::NaiveDate;
 
 use crate::tool::{ToolName, ToolNames};
+
+/// The file that marks a cargo workspace.
+const MANIFEST: &str = "Cargo.toml";
+
+/// The arguments that give the top level of the git work tree.
+const TOP_LEVEL_ARGUMENTS: [&str; 2] = ["rev-parse", "--show-toplevel"];
 
 /// The mode bits that make a file executable for its owner, group, or others.
 const EXECUTE_BITS: u32 = 0o111;
@@ -156,8 +163,51 @@ pub fn workspace_root(
     cwd: &Path,
     programs: &Programs,
 ) -> Result<PathBuf, CatalogError> {
-    let _ = (repo, programs);
-    Ok(cwd.to_path_buf())
+    if let Some(repo) = repo {
+        let canonical = repo
+            .canonicalize()
+            .map_err(|_| CatalogError::NotAWorkspace {
+                dir: repo.to_path_buf(),
+            })?;
+        return require_manifest(canonical);
+    }
+    let mut command = Command::new(&programs.git);
+    gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
+    command
+        .args(TOP_LEVEL_ARGUMENTS)
+        .current_dir(cwd)
+        .stdin(Stdio::null());
+    let output = run(&mut command, &programs.git)?;
+    if !output.status.success() {
+        return Err(CatalogError::NotAWorkTree {
+            dir: cwd.to_path_buf(),
+        });
+    }
+    let top_level = String::from_utf8_lossy(&output.stdout);
+    require_manifest(PathBuf::from(top_level.trim_end_matches(['\n', '\r'])))
+}
+
+/// Gives `root` when it holds a `Cargo.toml`, else
+/// [`CatalogError::NotAWorkspace`].
+fn require_manifest(root: PathBuf) -> Result<PathBuf, CatalogError> {
+    if root.join(MANIFEST).is_file() {
+        Ok(root)
+    } else {
+        Err(CatalogError::NotAWorkspace { dir: root })
+    }
+}
+
+/// Runs `command` to its end with both output pipes read. `program` names the
+/// program in an error.
+fn run(command: &mut Command, program: &OsStr) -> Result<Output, CatalogError> {
+    command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|source| CatalogError::Spawn {
+            program: program.to_string_lossy().into_owned(),
+            source,
+        })
 }
 
 /// Reads the whole catalog.
