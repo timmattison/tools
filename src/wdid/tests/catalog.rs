@@ -2,10 +2,14 @@
 //! fixture workspace.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::ffi::OsStr;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 
 use chrono::NaiveDate;
-use wdid::catalog::{added_dates, binaries, installed_binaries, CatalogError};
+use wdid::catalog::{
+    added_dates, binaries, cargo_bin, installed_binaries, path_state, CatalogError, PathState,
+};
 use wdid::tool::ToolName;
 
 /// Makes a date for the expected values.
@@ -176,4 +180,146 @@ fn added_dates_skips_a_record_with_a_bad_date_and_reads_multibyte_paths() {
 #[test]
 fn added_dates_gives_nothing_for_an_empty_log() {
     assert!(added_dates("", &[PathBuf::from("aa")]).is_empty());
+}
+
+/// Writes a file in `dir` with the given Unix mode.
+fn write_file(dir: &Path, name: &str, mode: u32) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    path
+}
+
+/// Joins directories into a PATH value.
+fn search_path(dirs: &[&Path]) -> std::ffi::OsString {
+    std::env::join_paths(dirs).unwrap()
+}
+
+#[test]
+fn path_state_is_cargo_when_the_cargo_bin_dir_comes_first() {
+    let cargo = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    write_file(cargo.path(), "aa", 0o755);
+    write_file(other.path(), "aa", 0o755);
+    let path = search_path(&[cargo.path(), other.path()]);
+    assert_eq!(path_state("aa", &path, cargo.path()), PathState::Cargo);
+}
+
+#[test]
+fn path_state_is_shadowed_when_another_program_comes_first() {
+    let cargo = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    write_file(cargo.path(), "aa", 0o755);
+    let shadow = write_file(other.path(), "aa", 0o755);
+    let path = search_path(&[other.path(), cargo.path()]);
+    assert_eq!(
+        path_state("aa", &path, cargo.path()),
+        PathState::Shadowed(shadow)
+    );
+}
+
+#[test]
+fn path_state_is_not_on_path_when_no_directory_holds_the_name() {
+    let cargo = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    write_file(other.path(), "bb", 0o755);
+    let path = search_path(&[other.path(), cargo.path()]);
+    assert_eq!(path_state("aa", &path, cargo.path()), PathState::NotOnPath);
+    assert_eq!(
+        path_state("aa", OsStr::new(""), cargo.path()),
+        PathState::NotOnPath
+    );
+}
+
+#[test]
+fn path_state_skips_a_file_without_the_execute_bit() {
+    let cargo = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    write_file(other.path(), "aa", 0o644);
+    write_file(cargo.path(), "aa", 0o755);
+    let path = search_path(&[other.path(), cargo.path()]);
+    assert_eq!(path_state("aa", &path, cargo.path()), PathState::Cargo);
+}
+
+#[test]
+fn path_state_skips_a_directory_with_the_name() {
+    let cargo = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    std::fs::create_dir(other.path().join("aa")).unwrap();
+    write_file(cargo.path(), "aa", 0o755);
+    let path = search_path(&[other.path(), cargo.path()]);
+    assert_eq!(path_state("aa", &path, cargo.path()), PathState::Cargo);
+}
+
+#[test]
+fn path_state_follows_a_symlink_to_an_executable() {
+    let cargo = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let target = write_file(other.path(), "real", 0o755);
+    let link = other.path().join("aa");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let path = search_path(&[other.path(), cargo.path()]);
+    assert_eq!(
+        path_state("aa", &path, cargo.path()),
+        PathState::Shadowed(link)
+    );
+}
+
+#[test]
+fn path_state_skips_an_empty_directory_of_the_path() {
+    let cargo = tempfile::tempdir().unwrap();
+    write_file(cargo.path(), "aa", 0o755);
+    let mut path = std::ffi::OsString::from(":");
+    path.push(cargo.path());
+    assert_eq!(path_state("aa", &path, cargo.path()), PathState::Cargo);
+}
+
+#[test]
+fn path_state_compares_canonical_paths_for_the_cargo_bin_dir() {
+    let base = tempfile::tempdir().unwrap();
+    let real = base.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    write_file(&real, "aa", 0o755);
+    let link = base.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let path = search_path(&[&link]);
+    assert_eq!(path_state("aa", &path, &real), PathState::Cargo);
+}
+
+#[test]
+fn path_state_compares_plain_paths_when_the_cargo_bin_dir_does_not_exist() {
+    let other = tempfile::tempdir().unwrap();
+    let shadow = write_file(other.path(), "aa", 0o755);
+    let missing = other.path().join("no-such-dir");
+    let path = search_path(&[other.path()]);
+    assert_eq!(
+        path_state("aa", &path, &missing),
+        PathState::Shadowed(shadow)
+    );
+}
+
+#[test]
+fn cargo_bin_prefers_cargo_home() {
+    assert_eq!(
+        cargo_bin(Some(OsStr::new("/c/home")), Some(Path::new("/u"))),
+        Some(PathBuf::from("/c/home/bin"))
+    );
+}
+
+#[test]
+fn cargo_bin_falls_back_to_the_home_directory() {
+    assert_eq!(
+        cargo_bin(None, Some(Path::new("/u"))),
+        Some(PathBuf::from("/u/.cargo/bin"))
+    );
+    assert_eq!(
+        cargo_bin(Some(OsStr::new("")), Some(Path::new("/u"))),
+        Some(PathBuf::from("/u/.cargo/bin"))
+    );
+}
+
+#[test]
+fn cargo_bin_is_none_without_cargo_home_and_home() {
+    assert_eq!(cargo_bin(None, None), None);
+    assert_eq!(cargo_bin(Some(OsStr::new("")), None), None);
 }
