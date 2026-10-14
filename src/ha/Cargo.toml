@@ -9,12 +9,15 @@ buildinfo.workspace = true
 chrono.workspace = true
 clap.workspace = true
 dirs.workspace = true
+ratatui.workspace = true
 serde.workspace = true
+textfit.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+unicode-width.workspace = true
 
 [lints]
 workspace = true
