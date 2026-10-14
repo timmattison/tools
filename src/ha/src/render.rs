@@ -242,6 +242,7 @@ mod tests {
 
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
+    use ratatui::style::{Color, Modifier};
     use ratatui::Terminal;
 
     use crate::run::{Run, RunId, RunState};
@@ -449,6 +450,39 @@ mod tests {
         ];
         for (seconds, expected) in cases {
             assert_eq!(format_ago(Duration::from_secs(seconds)), expected);
+        }
+    }
+
+    #[test]
+    fn each_marker_has_the_color_of_its_state() {
+        let mut board = four_run_board();
+        let buffer = render_with(120, 10, &mut board, &Status::default());
+        let marks: Vec<(&str, Color)> = [2_u16, 3, 5, 6]
+            .iter()
+            .map(|y| (buffer[(0, *y)].symbol(), buffer[(0, *y)].fg))
+            .collect();
+        assert_eq!(
+            marks,
+            [
+                ("●", Color::Yellow),
+                ("○", Color::Blue),
+                ("✓", Color::Green),
+                ("✗", Color::Red),
+            ]
+        );
+    }
+
+    #[test]
+    fn only_the_selected_row_is_reversed() {
+        let mut board = four_run_board();
+        let buffer = render_with(120, 10, &mut board, &Status::default());
+        let reversed = |x: u16, y: u16| buffer[(x, y)].modifier.contains(Modifier::REVERSED);
+        assert!(reversed(0, 2), "the marker of the selected row");
+        assert!(reversed(60, 2), "the middle of the selected row");
+        assert!(reversed(119, 2), "the end of the selected row");
+        for y in [0_u16, 1, 3, 4, 5, 6, 9] {
+            assert!(!reversed(0, y), "line {y} start");
+            assert!(!reversed(60, y), "line {y} middle");
         }
     }
 }
