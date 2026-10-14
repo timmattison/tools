@@ -86,10 +86,19 @@ impl Target {
     /// Returns a [`TargetError`] when the text is empty, has more than one
     /// slash, has an empty or dot-only part, or holds a character that a
     /// GitHub name cannot hold.
-    pub fn parse(_input: &str) -> Result<Target, TargetError> {
-        Err(TargetError::Empty {
-            input: String::new(),
-        })
+    pub fn parse(input: &str) -> Result<Target, TargetError> {
+        let input = input.trim();
+        let parts: Vec<&str> = input.split('/').collect();
+        match parts.as_slice() {
+            [owner] => Ok(Target::Owner(OwnerName((*owner).to_owned()))),
+            [owner, name] => Ok(Target::Repo(RepoName {
+                owner: OwnerName((*owner).to_owned()),
+                name: (*name).to_owned(),
+            })),
+            _ => Err(TargetError::TooManySlashes {
+                input: input.to_owned(),
+            }),
+        }
     }
 }
 
