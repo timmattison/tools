@@ -33,8 +33,12 @@ impl RunState {
     /// This function never fails.
     #[must_use]
     pub fn from_github(status: &str, conclusion: Option<&str>) -> RunState {
-        let _ = (status, conclusion);
-        RunState::Other
+        let _ = conclusion;
+        match status {
+            "queued" | "waiting" | "pending" | "requested" => RunState::Queued,
+            "in_progress" => RunState::Running,
+            _ => RunState::Other,
+        }
     }
 }
 
