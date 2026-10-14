@@ -1733,6 +1733,35 @@ pub(crate) mod stub_shell {
         // touches no memory of this process.
         unsafe { libc::kill(pid, libc::SIGKILL) };
     }
+
+    /// How long a busy machine held a healthy child of
+    /// [`a_child_of_this_test_passes`], and one second more.
+    ///
+    /// Alone, each such child takes 0.3 to 2 seconds. A hook run of
+    /// 2026-10-14 held two of them for more than 30 seconds.
+    const HELD_BY_A_BUSY_MACHINE: Duration = Duration::from_secs(31);
+
+    #[test]
+    fn a_child_that_a_busy_machine_holds_still_passes() {
+        // The bound of the parent is for a child that hangs, and a slow child
+        // is not one. A bound that a busy machine crosses fails a healthy test
+        // for a reason that has nothing to do with gsw, and it blocks the
+        // commit of whatever crate is under the hook.
+        //
+        // The child sleeps for as long as the busy machine held the children
+        // of that hook run, on a machine of any speed. So this test fails
+        // wherever the parent gives up sooner.
+        if std::env::var_os(HOSTILE_MARKER).is_none() {
+            a_child_of_this_test_passes(&test_name(
+                module_path!(),
+                "a_child_that_a_busy_machine_holds_still_passes",
+            ));
+            return;
+        }
+
+        std::thread::sleep(HELD_BY_A_BUSY_MACHINE);
+        println!("{CHILD_RAN}");
+    }
 }
 
 #[cfg(all(test, unix))]
