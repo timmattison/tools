@@ -883,4 +883,42 @@ mod tests {
         assert!(narrow[2].contains('…'));
         assert!(wide[2].contains(title), "160 columns show the title whole");
     }
+
+    #[test]
+    fn the_selected_run_stays_in_view_when_the_board_is_taller_than_the_frame() {
+        let mut board = Board::new(Duration::from_hours(8));
+        let runs: Vec<Run> = (0..12_u64)
+            .map(|index| {
+                let started = format!("2026-10-14T11:{:02}:00Z", 10 + index);
+                run(
+                    index + 1,
+                    "a/x",
+                    "CI",
+                    "main",
+                    &format!("title-{index:02}"),
+                    RunState::Running,
+                    &started,
+                    &started,
+                )
+            })
+            .collect();
+        board.replace(repo("a/x"), runs);
+        for _ in 0..9 {
+            board.select_next(now());
+        }
+        // A frame of 8 lines leaves 6 for the board.
+        let buffer = render_with(120, 8, &mut board, &Status::default());
+        let text = lines(&buffer);
+        let selected_line = (1..7_u16)
+            .find(|y| buffer[(60, *y)].modifier.contains(Modifier::REVERSED))
+            .expect("one visible row is selected");
+        assert!(
+            text[usize::from(selected_line)].contains("title-09"),
+            "{:?}",
+            text[usize::from(selected_line)]
+        );
+        assert!(text[0].starts_with("  REPO"), "the column header stays");
+        assert!(text[7].contains("q quit"), "the status line stays");
+        assert!(!text.iter().any(|line| line.contains("title-00")));
+    }
 }
