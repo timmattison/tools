@@ -679,4 +679,31 @@ mod tests {
         let third = worker.updates.recv_timeout(Duration::from_secs(1));
         assert_eq!(third, Err(RecvTimeoutError::Timeout), "a third cycle ran");
     }
+
+    #[test]
+    fn dropping_the_command_sender_ends_the_thread() {
+        let fake = Arc::new(FakeSource::default());
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let _ = one_cycle(&worker);
+        let Worker { updates, commands } = worker;
+
+        drop(commands);
+
+        let mut extra_cycles = 0;
+        loop {
+            match updates.recv_timeout(WAIT) {
+                Ok(Update::CycleDone { .. }) => {
+                    extra_cycles += 1;
+                    assert!(
+                        extra_cycles <= 1,
+                        "the worker keeps cycling without a sender"
+                    );
+                }
+                Ok(_) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => panic!("the worker thread did not end"),
+            }
+        }
+        assert_eq!(extra_cycles, 0, "a cycle ran after the sender dropped");
+    }
 }
