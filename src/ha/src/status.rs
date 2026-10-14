@@ -53,7 +53,8 @@ pub struct Status {
     pub rate: Option<RateLimit>,
     /// When the worker stops to slow down. `Some` while it slows down.
     pub backoff_until: Option<DateTime<Utc>>,
-    /// The owners whose repository list failed, with the error of each.
+    /// The owners whose repository list failed or was cut, with the text to show
+    /// for each: the error of a failed list, or the warning of a cut list.
     pub owner_errors: Vec<(OwnerName, String)>,
     /// A one-off message, for example the address after a failed open. It
     /// fades out over [`MESSAGE_LIFETIME`], then leaves. A key press removes

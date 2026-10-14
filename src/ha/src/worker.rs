@@ -29,11 +29,11 @@ pub const SLOW_CADENCE: Duration = Duration::from_secs(600);
 /// One message from the worker to the screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Update {
-    /// The repositories to watch now, and the owners that could not be listed.
+    /// The repositories to watch now, and the owners whose list failed or was cut.
     Repos {
         /// Every repository to watch, without duplicates.
         repos: BTreeSet<RepoName>,
-        /// The owners whose list failed, with the error text.
+        /// The owners whose list failed or was cut, with the text to show.
         owner_errors: Vec<(OwnerName, String)>,
     },
     /// The runs of one repository.
@@ -146,7 +146,7 @@ struct ReceiverGone;
 struct State {
     owner_cadence: Cadence,
     owner_lists: BTreeMap<OwnerName, Vec<RepoName>>,
-    /// The error text of the last list of each owner that failed.
+    /// The text to show for each owner whose last list failed or was cut.
     owner_errors: BTreeMap<OwnerName, String>,
     sweep_cadence: Cadence,
     /// The active runs of the last good sweep, for each repository.
