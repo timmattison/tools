@@ -101,6 +101,19 @@ impl Cadence {
     }
 }
 
+/// Decides how long the worker waits after a cycle.
+///
+/// Returns the delay and, while the worker slows down for a low rate limit,
+/// the time the limit resets. The delay is never shorter than `interval`.
+#[must_use]
+pub fn next_delay(
+    interval: Duration,
+    _rate: Option<RateLimit>,
+    _now: DateTime<Utc>,
+) -> (Duration, Option<DateTime<Utc>>) {
+    (Duration::ZERO, None)
+}
+
 /// Starts the worker thread with the real slow cadence.
 #[must_use]
 pub fn spawn<S: Source + 'static>(source: S, settings: &Settings) -> Worker {
@@ -146,5 +159,57 @@ mod tests {
         let mut cadence = Cadence::new(Duration::ZERO);
         cadence.mark(now);
         assert!(cadence.due(now));
+    }
+
+    fn rate(remaining: u64, reset: DateTime<Utc>) -> Option<RateLimit> {
+        Some(RateLimit {
+            limit: 5000,
+            remaining,
+            reset,
+        })
+    }
+
+    const INTERVAL: Duration = Duration::from_secs(60);
+
+    #[test]
+    fn the_delay_is_the_interval_when_the_rate_is_not_low() {
+        let now = Utc::now();
+        let reset = now + chrono::TimeDelta::hours(1);
+        assert_eq!(
+            next_delay(INTERVAL, rate(4000, reset), now),
+            (INTERVAL, None)
+        );
+    }
+
+    #[test]
+    fn the_delay_is_the_interval_without_a_rate() {
+        assert_eq!(next_delay(INTERVAL, None, Utc::now()), (INTERVAL, None));
+    }
+
+    #[test]
+    fn a_low_rate_waits_for_a_reset_that_is_longer_than_the_interval() {
+        let now = Utc::now();
+        let reset = now + chrono::TimeDelta::minutes(30);
+        assert_eq!(
+            next_delay(INTERVAL, rate(10, reset), now),
+            (Duration::from_secs(30 * 60), Some(reset))
+        );
+    }
+
+    #[test]
+    fn a_low_rate_keeps_the_interval_when_the_reset_is_sooner() {
+        let now = Utc::now();
+        let reset = now + chrono::TimeDelta::seconds(20);
+        assert_eq!(
+            next_delay(INTERVAL, rate(10, reset), now),
+            (INTERVAL, Some(reset))
+        );
+    }
+
+    #[test]
+    fn a_low_rate_with_a_reset_in_the_past_changes_nothing() {
+        let now = Utc::now();
+        let reset = now - chrono::TimeDelta::seconds(5);
+        assert_eq!(next_delay(INTERVAL, rate(10, reset), now), (INTERVAL, None));
     }
 }
