@@ -12,8 +12,11 @@
     reason = "the parts of this module are joined in the next steps"
 )]
 
+use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io::Read;
 use std::process::{Command, Output, Stdio};
+use std::sync::Mutex;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -23,7 +26,8 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::run::{Run, RunId, RunState};
-use crate::target::RepoName;
+use crate::status::RateLimit;
+use crate::target::{OwnerName, RepoName};
 
 /// Why `run_with_limit` gave no output.
 #[derive(Debug)]
@@ -193,6 +197,87 @@ fn parse_runs(body: &str, repo: &RepoName) -> Result<Page, SourceError> {
         total_count: parsed.total_count,
         runs,
     })
+}
+
+/// Which runs of a repository to ask for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunQuery {
+    /// Every run created at or after the start of the UTC hour of this time.
+    CreatedSince(DateTime<Utc>),
+    /// Every run that is in progress or in the queue.
+    Active,
+}
+
+/// Where `ha` gets its data. `GhSource` is the real one.
+pub trait Source: Send + Sync {
+    /// Lists the repositories of an owner. Archived repositories are left out.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SourceError`] when the list cannot be fetched.
+    fn repos_of(&self, owner: &OwnerName) -> Result<Vec<RepoName>, SourceError>;
+
+    /// Lists the workflow runs of a repository that match `query`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SourceError`] when a page of runs cannot be fetched.
+    fn runs_of(&self, repo: &RepoName, query: RunQuery) -> Result<Vec<Run>, SourceError>;
+
+    /// The rate limit that the last response stated. `None` before any response.
+    fn rate_limit(&self) -> Option<RateLimit>;
+}
+
+/// A `Source` that runs the `gh` program.
+///
+/// One value serves many threads. The ETag cache and the rate limit sit behind
+/// mutexes. No lock is held while a child runs.
+pub struct GhSource {
+    program: OsString,
+    limit: Duration,
+    etags: Mutex<HashMap<String, (String, Page)>>,
+    rate: Mutex<Option<RateLimit>>,
+}
+
+impl GhSource {
+    /// A source that runs `gh` from the path. Each child gets 30 seconds.
+    #[must_use]
+    pub fn new() -> GhSource {
+        GhSource::with_program("gh", Duration::from_secs(30))
+    }
+
+    /// A source that runs `program`, and gives each child at most `limit`.
+    #[must_use]
+    pub fn with_program(program: impl Into<OsString>, limit: Duration) -> GhSource {
+        GhSource {
+            program: program.into(),
+            limit,
+            etags: Mutex::new(HashMap::new()),
+            rate: Mutex::new(None),
+        }
+    }
+}
+
+impl Default for GhSource {
+    fn default() -> Self {
+        GhSource::new()
+    }
+}
+
+impl Source for GhSource {
+    fn repos_of(&self, owner: &OwnerName) -> Result<Vec<RepoName>, SourceError> {
+        let _ = owner;
+        Ok(Vec::new())
+    }
+
+    fn runs_of(&self, repo: &RepoName, query: RunQuery) -> Result<Vec<Run>, SourceError> {
+        let _ = (repo, query);
+        Ok(Vec::new())
+    }
+
+    fn rate_limit(&self) -> Option<RateLimit> {
+        None
+    }
 }
 
 /// One answer of `gh api -i`, split into its parts.
@@ -447,6 +532,67 @@ mod tests {
                 "{body:?} gave {result:?}"
             );
         }
+    }
+
+    /// A stub `gh` in a temporary directory. The script logs its arguments to
+    /// `args.log` and then runs the `case` body that the test gives. The body can
+    /// use `$dir`, the directory of the stub, to `cat` the canned outputs.
+    struct Stub {
+        dir: TempDir,
+    }
+
+    impl Stub {
+        fn new(cases: &str) -> Stub {
+            let dir = TempDir::new().unwrap();
+            let body = format!(
+                "dir=$(dirname \"$0\")\n{{ printf '%s\\n' \"$@\"; echo '--'; }} >> \"$dir/args.log\"\n{cases}"
+            );
+            write_stub(&dir, "gh", &body);
+            Stub { dir }
+        }
+
+        /// Writes a canned output file next to the stub.
+        fn file(&self, name: &str, content: &str) {
+            std::fs::write(self.dir.path().join(name), content).unwrap();
+        }
+
+        fn source(&self) -> GhSource {
+            GhSource::with_program(self.dir.path().join("gh"), GENEROUS_LIMIT)
+        }
+
+        /// The arguments of each call, in order.
+        fn requests(&self) -> Vec<Vec<String>> {
+            let log = std::fs::read_to_string(self.dir.path().join("args.log")).unwrap_or_default();
+            let mut calls = Vec::new();
+            let mut current = Vec::new();
+            for line in log.lines() {
+                if line == "--" {
+                    calls.push(std::mem::take(&mut current));
+                } else {
+                    current.push(line.to_owned());
+                }
+            }
+            calls
+        }
+    }
+
+    #[test]
+    fn a_created_since_query_asks_for_one_hour_aligned_page() {
+        let stub = Stub::new("cat \"$dir/page1.out\"");
+        stub.file("page1.out", &ok_output(RUNS_JSON));
+        let tools = repo("timmattison/tools");
+        let query = RunQuery::CreatedSince(time("2026-09-24T21:56:49Z"));
+        let runs = stub.source().runs_of(&tools, query).expect("runs");
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].id, RunId(36_064_582_280));
+        assert_eq!(
+            stub.requests(),
+            [[
+                "api",
+                "-i",
+                "repos/timmattison/tools/actions/runs?per_page=100&page=1&created=%3E%3D2026-09-24T21:00:00Z"
+            ]]
+        );
     }
 
     #[test]

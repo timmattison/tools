@@ -9,6 +9,7 @@ buildinfo.workspace = true
 chrono.workspace = true
 clap.workspace = true
 dirs.workspace = true
+gitscratch.workspace = true
 ratatui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
