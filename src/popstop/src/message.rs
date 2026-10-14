@@ -471,6 +471,22 @@ mod tests {
     }
 
     #[test]
+    fn a_bound_of_one_second_is_one_second_in_the_text() {
+        assert_eq!(
+            did_not_report_within(
+                Duration::from_secs(1),
+                Path::new("/tmp/state/popstop.log")
+            ),
+            "popstop: the background copy did not report that it plays within 1 second\n\
+             popstop: the log of that copy says why: /tmp/state/popstop.log"
+        );
+        assert_eq!(
+            did_not_stop(4242, Duration::from_secs(1)),
+            "popstop: the copy did not stop within 1 second (pid 4242)"
+        );
+    }
+
+    #[test]
     fn the_stop_texts_say_what_happened_to_the_copy_and_name_its_pid() {
         assert_eq!(no_copy_runs(), "popstop: no copy runs");
         assert_eq!(stopped(4242), "popstop: the copy stopped (pid 4242)");
