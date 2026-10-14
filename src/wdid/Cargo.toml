@@ -21,6 +21,7 @@ chrono.workspace = true
 clap.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+wait-timeout.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
