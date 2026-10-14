@@ -1129,15 +1129,44 @@ mod tests {
         assert_eq!(source.rate_limit(), Some(rate(4999, 4_600)));
     }
 
+    /// Two endpoints of GitHub can state different resets for one budget, so
+    /// a reset that differs from the stored one says nothing about which count
+    /// is newer. The latest answer wins.
     #[test]
-    fn an_earlier_reset_does_not_replace_a_later_one() {
+    fn an_answer_with_another_reset_replaces_the_stored_rate() {
         let stub = hour_stub(
             &rated_output(&runs_json(0, 1, 0), 4999, 4_600),
             &rated_output(&runs_json(0, 1, 0), 100, 1_000),
         );
         let source = stub.source();
         ask_both_hours(&source);
-        assert_eq!(source.rate_limit(), Some(rate(4999, 4_600)));
+        assert_eq!(source.rate_limit(), Some(rate(100, 1_000)));
+    }
+
+    /// Measured on 2026-10-14: `rate_limit` stated `remaining 5000, reset
+    /// 1791985018`, and a runs request a moment later stated `remaining 4977,
+    /// reset 1791984888`. A rule of "the later reset wins" kept the stale
+    /// 5000 for the rest of the hour.
+    #[test]
+    fn a_runs_answer_replaces_the_rate_of_the_preflight() {
+        let stub = Stub::new(
+            "case \"$*\" in
+  *rate_limit*) cat \"$dir/preflight.out\";;
+  *) cat \"$dir/runs.out\";;
+ esac",
+        );
+        stub.file(
+            "preflight.out",
+            &rated_output("{\"resources\":{}}", 5000, 1_791_985_018),
+        );
+        stub.file(
+            "runs.out",
+            &rated_output(&runs_json(0, 1, 0), 4977, 1_791_984_888),
+        );
+        let source = stub.source();
+        source.preflight().expect("preflight");
+        source.runs_of(&repo("o/r"), since_query()).expect("runs");
+        assert_eq!(source.rate_limit(), Some(rate(4977, 1_791_984_888)));
     }
 
     #[test]
