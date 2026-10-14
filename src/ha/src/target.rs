@@ -5,14 +5,16 @@
 //! thus the types here compare, order, and hash on the ASCII lowercase form
 //! and keep the case as given for display.
 
+use std::cmp::Ordering;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 
 /// The name of a GitHub user or organization.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone)]
 pub struct OwnerName(String);
 
 /// The name of one repository, with the owner that holds it.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone)]
 pub struct RepoName {
     owner: OwnerName,
     name: String,
@@ -198,6 +200,76 @@ fn check_part(input: &str, part: &str) -> Result<(), TargetError> {
         });
     }
     Ok(())
+}
+
+/// The bytes of `text` in ASCII lowercase. GitHub names are case-insensitive,
+/// thus every comparison and every hash goes through this view.
+fn folded(text: &str) -> impl Iterator<Item = u8> + '_ {
+    text.bytes().map(|byte| byte.to_ascii_lowercase())
+}
+
+/// Feeds the folded form of `text` to `state`, with the end marker that
+/// `str` uses. The marker keeps `("ab", "c")` apart from `("a", "bc")`.
+fn hash_folded<H: Hasher>(text: &str, state: &mut H) {
+    for byte in folded(text) {
+        state.write_u8(byte);
+    }
+    state.write_u8(0xff);
+}
+
+impl PartialEq for OwnerName {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for OwnerName {}
+
+impl PartialOrd for OwnerName {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OwnerName {
+    fn cmp(&self, other: &Self) -> Ordering {
+        folded(&self.0).cmp(folded(&other.0))
+    }
+}
+
+impl Hash for OwnerName {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        hash_folded(&self.0, state);
+    }
+}
+
+impl PartialEq for RepoName {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for RepoName {}
+
+impl PartialOrd for RepoName {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RepoName {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.owner
+            .cmp(&other.owner)
+            .then_with(|| folded(&self.name).cmp(folded(&other.name)))
+    }
+}
+
+impl Hash for RepoName {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.owner.hash(state);
+        hash_folded(&self.name, state);
+    }
 }
 
 impl fmt::Display for OwnerName {
@@ -524,7 +596,7 @@ mod tests {
         assert_eq!(owner("A").cmp(&owner("a")), Ordering::Equal);
         assert!(repo("a", "Z") > repo("A", "b"));
         assert!(repo("a", "b") < repo("A", "C"));
-        let mut sorted = vec![repo("b", "x"), repo("A", "Y"), repo("a", "x")];
+        let mut sorted = [repo("b", "x"), repo("A", "Y"), repo("a", "x")];
         sorted.sort();
         let shown: Vec<String> = sorted.iter().map(ToString::to_string).collect();
         assert_eq!(shown, ["a/x", "A/Y", "b/x"]);
@@ -532,7 +604,9 @@ mod tests {
 
     #[test]
     fn the_stored_name_keeps_the_case_as_given() {
-        let kept = BTreeSet::from([repo("Lock-Free-Labs", "X"), repo("lock-free-labs", "x")]);
+        let mut kept = BTreeSet::new();
+        kept.insert(repo("Lock-Free-Labs", "X"));
+        kept.insert(repo("lock-free-labs", "x"));
         let only = kept.iter().next().expect("one name");
         assert_eq!(only.to_string(), "Lock-Free-Labs/X");
         assert_eq!(only.owner().as_str(), "Lock-Free-Labs");
