@@ -90,16 +90,25 @@ fn span(from: DateTime<Utc>, to: DateTime<Utc>) -> Duration {
 }
 
 /// The started column: the clock for today, the date and the clock before.
-fn format_started(started: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    if started.date_naive() == now.date_naive() {
-        started.format("%H:%M:%S").to_string()
+///
+/// A day starts and ends at midnight in the time zone `tz`.
+fn format_started<Tz: TimeZone>(started: DateTime<Utc>, now: DateTime<Utc>, tz: &Tz) -> String
+where
+    Tz::Offset: Display,
+{
+    let local = started.with_timezone(tz);
+    if local.date_naive() == now.with_timezone(tz).date_naive() {
+        local.format("%H:%M:%S").to_string()
     } else {
-        started.format("%m-%d %H:%M").to_string()
+        local.format("%m-%d %H:%M").to_string()
     }
 }
 
 /// The line of one run.
-fn run_line(run: &Run, now: DateTime<Utc>, widths: Widths) -> String {
+fn run_line<Tz: TimeZone>(run: &Run, now: DateTime<Utc>, tz: &Tz, widths: Widths) -> String
+where
+    Tz::Offset: Display,
+{
     let (time, finished) = if run.state.is_active() {
         (format_elapsed(span(run.started_at, now)), String::new())
     } else {
@@ -117,7 +126,7 @@ fn run_line(run: &Run, now: DateTime<Utc>, widths: Widths) -> String {
             &run.branch,
             &run.title,
         ],
-        &format_started(run.started_at, now),
+        &format_started(run.started_at, now, tz),
         &time,
         &finished,
     )
@@ -184,7 +193,7 @@ pub fn draw<Tz: TimeZone>(
 ) where
     Tz::Offset: Display,
 {
-    let _ = (status, tz);
+    let _ = status;
     let area = frame.area();
     let widths = Widths::fixed();
     let height = usize::from(area.height) - FIXED_LINES;
@@ -221,7 +230,7 @@ pub fn draw<Tz: TimeZone>(
                 put(buffer, index + 1, &line, Style::default());
             }
             Row::Run { run, selected } => {
-                let line = run_line(run, now, widths);
+                let line = run_line(run, now, tz, widths);
                 let y = put(buffer, index + 1, &line, Style::default());
                 buffer.set_style(
                     Rect::new(area.x, y, 1, 1),
