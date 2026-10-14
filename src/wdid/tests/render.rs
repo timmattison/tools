@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use chrono::NaiveDate;
 use wdid::catalog::{PathState, Tool};
-use wdid::render::{table_width, text};
+use wdid::render::{json, table_width, text};
 use wdid::tally::{Classification, Summary, Tally, ToolUsage, Unparsed, Window};
 use wdid::tool::ToolName;
 
@@ -390,4 +390,171 @@ fn the_shell_line_counts_the_definitions() {
         nothing[1],
         "Shell: no aliases and no functions (--no-shell, or none defined)."
     );
+}
+
+/// Parses the JSON of `tally`. The test fails when the text is not one pretty
+/// JSON document with a final newline.
+fn document(tally: &Tally, window: &Window) -> serde_json::Value {
+    let raw = json(tally, window);
+    assert!(raw.ends_with("}\n"), "no final newline: {raw:?}");
+    assert!(raw.contains("\n  \"today\""), "not pretty-printed: {raw:?}");
+    serde_json::from_str(&raw).expect("the report is JSON")
+}
+
+/// The document has exactly the keys of the design, and the header values come
+/// from the window.
+#[test]
+fn the_json_document_has_the_keys_of_the_design() {
+    let value = document(&fixture(), &window());
+    let object = value.as_object().unwrap();
+    let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+
+    assert_eq!(
+        keys,
+        [
+            "history",
+            "idle",
+            "idle_days",
+            "never_used_new",
+            "never_used_old",
+            "new_days",
+            "shell",
+            "since",
+            "today",
+            "tools"
+        ]
+    );
+    assert_eq!(value["today"], "2026-10-14");
+    assert_eq!(value["since"], serde_json::Value::Null);
+    assert_eq!(value["new_days"], 90);
+    assert_eq!(value["idle_days"], 180);
+    assert_eq!(value["never_used_old"], serde_json::json!(["goup"]));
+    assert_eq!(value["never_used_new"], serde_json::json!(["faulte"]));
+    assert_eq!(value["idle"], serde_json::json!(["aa"]));
+}
+
+/// A `since` date is a date text.
+#[test]
+fn the_json_since_is_a_date_when_the_window_has_one() {
+    let window = Window {
+        since: Some(date(2026, 1, 1)),
+        ..window()
+    };
+
+    assert_eq!(document(&fixture(), &window)["since"], "2026-01-01");
+}
+
+/// The history and the shell blocks hold the counts of the summary.
+#[test]
+fn the_json_history_and_shell_blocks_hold_the_summary() {
+    let value = document(&fixture(), &window());
+
+    assert_eq!(
+        value["history"],
+        serde_json::json!({
+            "rows": 1234,
+            "before_since": 0,
+            "not_found": 12,
+            "unparsed_rows": 3,
+            "unparsed": [
+                { "command": "echo $(", "rows": 2 },
+                { "command": "a |", "rows": 1 },
+            ],
+        })
+    );
+    assert_eq!(
+        value["shell"],
+        serde_json::json!({
+            "aliases": 5,
+            "functions": 4,
+            "unparsed_functions": ["broken"],
+            "unparsed_aliases": 0,
+        })
+    );
+}
+
+/// A tool that was used holds every fact, with the `through` list, the crate
+/// directory with `/` separators, and the state of the PATH.
+#[test]
+fn the_json_tool_holds_every_fact() {
+    let value = document(&fixture(), &window());
+
+    assert_eq!(
+        value["tools"][0],
+        serde_json::json!({
+            "name": "cwt",
+            "crate_dir": "src/cwt",
+            "uses": 6121,
+            "typed": 31,
+            "through": [
+                { "name": "wtm", "uses": 3061 },
+                { "name": "wt", "uses": 3029 },
+            ],
+            "development_runs": 2,
+            "first_use": "2025-02-27",
+            "last_use": "2026-10-13",
+            "added": "2025-06-01",
+            "installed": true,
+            "path": { "state": "cargo" },
+            "classification": "used",
+        })
+    );
+}
+
+/// The `path` of a tool has one form for each state, and `null` when the tool
+/// is not installed. An absent date is `null`.
+#[test]
+fn the_json_path_has_one_form_for_each_state() {
+    let value = document(&fixture(), &window());
+    let tools = value["tools"].as_array().unwrap();
+
+    assert_eq!(
+        tools[1]["path"],
+        serde_json::json!({ "state": "shadowed", "by": "/usr/bin/aa" })
+    );
+    assert_eq!(tools[1]["classification"], "idle");
+    assert_eq!(
+        tools[2]["path"],
+        serde_json::json!({ "state": "not_on_path" })
+    );
+    assert_eq!(tools[2]["classification"], "never_used_new");
+    assert_eq!(tools[3]["path"], serde_json::Value::Null);
+    assert_eq!(tools[3]["installed"], false);
+    assert_eq!(tools[3]["first_use"], serde_json::Value::Null);
+    assert_eq!(tools[3]["last_use"], serde_json::Value::Null);
+    assert_eq!(tools[3]["through"], serde_json::json!([]));
+    assert_eq!(tools[3]["classification"], "never_used_old");
+}
+
+/// The three lists are in the order of the text report: by name, and the idle
+/// list by uses (most first), then by name. A tool with no known `added` date
+/// still has a name in its list.
+#[test]
+fn the_json_lists_follow_the_order_of_the_text_report() {
+    let tally = Tally {
+        tools: vec![
+            idle("zip", 1_500, date(2025, 3, 4)),
+            idle("alpha", 2, date(2025, 1, 2)),
+            idle("beta", 2, date(2025, 2, 3)),
+            never_used("pear", None, Classification::NeverUsedOld),
+            never_used(
+                "apple",
+                Some(date(2024, 5, 6)),
+                Classification::NeverUsedOld,
+            ),
+            never_used("yak", Some(date(2026, 9, 1)), Classification::NeverUsedNew),
+            never_used("bat", Some(date(2026, 10, 1)), Classification::NeverUsedNew),
+        ],
+        summary: summary(),
+    };
+
+    let value = document(&tally, &window());
+
+    assert_eq!(value["idle"], serde_json::json!(["zip", "alpha", "beta"]));
+    assert_eq!(
+        value["never_used_old"],
+        serde_json::json!(["apple", "pear"])
+    );
+    assert_eq!(value["never_used_new"], serde_json::json!(["bat", "yak"]));
 }
