@@ -14,6 +14,7 @@ serde.workspace = true
 textfit.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+wait-timeout.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
