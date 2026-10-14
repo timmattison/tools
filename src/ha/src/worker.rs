@@ -729,4 +729,40 @@ mod tests {
         }
         assert_eq!(extra_cycles, 0, "a cycle ran after the sender dropped");
     }
+
+    #[test]
+    fn an_owner_that_fails_to_list_keeps_its_last_good_list() {
+        let fake = Arc::new(FakeSource::default());
+        fake.script()
+            .owners
+            .insert(owner("acme"), Ok(vec![repo("acme/a"), repo("acme/b")]));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme"]), Duration::ZERO);
+        let first = one_cycle(&worker);
+
+        let failure = SourceError::Failed("boom".to_owned());
+        fake.script()
+            .owners
+            .insert(owner("acme"), Err(failure.clone()));
+        worker
+            .commands
+            .send(Command::RefreshNow)
+            .expect("the worker listens");
+        let second = one_cycle(&worker);
+
+        let expected: BTreeSet<RepoName> = [repo("acme/a"), repo("acme/b")].into();
+        assert_eq!(
+            first[0],
+            Update::Repos {
+                repos: expected.clone(),
+                owner_errors: Vec::new()
+            }
+        );
+        assert_eq!(
+            second[0],
+            Update::Repos {
+                repos: expected,
+                owner_errors: vec![(owner("acme"), failure.to_string())]
+            }
+        );
+    }
 }
