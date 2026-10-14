@@ -6,6 +6,8 @@
 //! `wdid` reads that history through atuin, and it counts each tool.
 //!
 //! # The modules
+//! - [`command_words`] gives the command words of one command line.
 //! - [`history`] gets the full atuin history as a list of rows.
 
+pub mod command_words;
 pub mod history;

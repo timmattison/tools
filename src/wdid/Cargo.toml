@@ -15,6 +15,7 @@ name = "wdid"
 path = "src/main.rs"
 
 [dependencies]
+brush-parser.workspace = true
 buildinfo.workspace = true
 chrono.workspace = true
 clap.workspace = true
