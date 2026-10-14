@@ -7,6 +7,11 @@
 //! `run_with_limit`, `RunFailure`, and `drain`, with their tests, come from
 //! `src/cwt/src/pulls.rs`.
 
+#![allow(
+    dead_code,
+    reason = "the parts of this module are joined in the next steps"
+)]
+
 use std::io::Read;
 use std::process::{Command, Output, Stdio};
 use std::thread::JoinHandle;
@@ -110,17 +115,55 @@ struct Response {
 impl Response {
     /// The value of the first header with this name. The name match ignores case.
     fn header(&self, name: &str) -> Option<&str> {
-        let _ = name;
-        None
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
     }
+}
+
+/// Splits `text` at the first empty line. The first part is the status line
+/// and the headers, line by line. The second part is the body. A text with no
+/// empty line has an empty body.
+fn split_head(text: &str) -> (Vec<&str>, &str) {
+    let mut head = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let (line, after) = rest.split_once('\n').unwrap_or((rest, ""));
+        rest = after;
+        if line.strip_suffix('\r').unwrap_or(line).is_empty() {
+            return (head, rest);
+        }
+        head.push(line);
+    }
+    (head, "")
 }
 
 /// Splits the output of `gh api -i` into status, headers, and body.
 ///
 /// Returns `None` when the first line is not an HTTP status line.
 fn parse_response(text: &str) -> Option<Response> {
-    let _ = text;
-    None
+    let (head, body) = split_head(text);
+    let mut lines = head
+        .iter()
+        .map(|line| line.strip_suffix('\r').unwrap_or(line));
+    let status_line = lines.next()?;
+    let mut parts = status_line.splitn(3, ' ');
+    if !parts.next()?.starts_with("HTTP/") {
+        return None;
+    }
+    let status = parts.next()?.parse().ok()?;
+    let reason = parts.next().unwrap_or_default().trim().to_owned();
+    let headers = lines
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.trim().to_owned(), value.trim().to_owned()))
+        .collect();
+    Some(Response {
+        status,
+        reason,
+        headers,
+        body: body.to_owned(),
+    })
 }
 
 #[cfg(test)]
