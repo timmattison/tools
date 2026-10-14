@@ -1196,6 +1196,16 @@ mod tests {
     }
 
     #[test]
+    fn a_long_message_on_a_narrow_frame_fades_every_cell_it_covers() {
+        let mut board = Board::new(Duration::from_hours(8));
+        let status = status_with_message_aged(&"m".repeat(50), 0);
+        let buffer = render_with(20, 8, &mut board, &status);
+        for x in 0..20 {
+            assert_eq!(buffer[(x, 7)].fg, Color::Indexed(252), "cell {x}");
+        }
+    }
+
+    #[test]
     fn refreshing_shows_when_there_is_no_error_and_no_message() {
         let mut board = Board::new(Duration::from_hours(8));
         let status = Status {
