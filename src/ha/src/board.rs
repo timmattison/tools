@@ -219,7 +219,13 @@ impl Board {
 
     /// The address of the selected run, or `None` when the board has no run.
     pub fn selected_url(&mut self, now: DateTime<Utc>) -> Option<String> {
-        None
+        self.settle(now);
+        let (active, recent) = self.sections(now);
+        active
+            .into_iter()
+            .chain(recent)
+            .nth(self.selected?)
+            .map(|run| run.url.clone())
     }
 }
 
