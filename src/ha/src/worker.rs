@@ -22,7 +22,8 @@ use crate::target::{OwnerName, RepoName, Target};
 pub const CONCURRENCY: usize = 8;
 
 /// How often the worker lists the repositories of the owners and sweeps for
-/// active runs. The sweep finds runs that started before the window.
+/// active runs. The sweep finds runs that started before the window. An owner
+/// with no good list is listed on every cycle until a list succeeds.
 pub const SLOW_CADENCE: Duration = Duration::from_secs(600);
 
 /// One message from the worker to the screen.
@@ -206,7 +207,7 @@ fn wait_for_next_cycle(commands: &Receiver<Command>, delay: Duration) -> Wake {
     }
 }
 
-/// Runs one cycle: lists the owners when due, fetches every repository, and
+/// Runs one cycle: lists the owners that need it, fetches every repository, and
 /// reports the end of the cycle. Returns how long to wait before the next one.
 fn cycle<S: Source>(
     source: &S,
@@ -330,8 +331,14 @@ fn fetch_all<S: Source>(
     }
 }
 
-/// Builds the repository set. When the owner cadence is due, it lists every
-/// owner again and sends the set.
+/// Builds the repository set and sends it when it can have changed.
+///
+/// When the owner cadence is due, the function lists every owner again. On
+/// every cycle it also lists each owner that has no good list yet, so the `r`
+/// key tries a failed owner again at once. An owner with a good list waits for
+/// the cadence. The function keeps the last list error of each owner in
+/// `state`, and it clears that error when a list succeeds. It sends
+/// [`Update::Repos`] when the cadence is due or when it listed an owner.
 fn refresh_repos<S: Source>(
     source: &S,
     settings: &Settings,
@@ -340,17 +347,25 @@ fn refresh_repos<S: Source>(
 ) -> Result<BTreeSet<RepoName>, ReceiverGone> {
     let now = Instant::now();
     let due = state.owner_cadence.due(now);
-    let mut owner_errors = Vec::new();
     if due {
         state.owner_cadence.mark(now);
-        for target in &settings.targets {
-            if let Target::Owner(owner) = target {
-                match source.repos_of(owner) {
-                    Ok(list) => {
-                        state.owner_lists.insert(owner.clone(), list);
-                    }
-                    Err(error) => owner_errors.push((owner.clone(), error.to_string())),
-                }
+    }
+    let mut listed = false;
+    for target in &settings.targets {
+        let Target::Owner(owner) = target else {
+            continue;
+        };
+        if !due && state.owner_lists.contains_key(owner) {
+            continue;
+        }
+        listed = true;
+        match source.repos_of(owner) {
+            Ok(list) => {
+                state.owner_lists.insert(owner.clone(), list);
+                state.owner_errors.remove(owner);
+            }
+            Err(error) => {
+                state.owner_errors.insert(owner.clone(), error.to_string());
             }
         }
     }
@@ -365,7 +380,18 @@ fn refresh_repos<S: Source>(
             }
         }
     }
-    if due {
+    if due || listed {
+        let owner_errors = settings
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                Target::Owner(owner) => state
+                    .owner_errors
+                    .get(owner)
+                    .map(|error| (owner.clone(), error.clone())),
+                Target::Repo(_) => None,
+            })
+            .collect();
         updates
             .send(Update::Repos {
                 repos: repos.clone(),

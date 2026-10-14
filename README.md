@@ -2054,7 +2054,8 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     back in `If-None-Match`, and GitHub does not count a `304 Not Modified` answer. The lookback
     of a query starts on the hour, so the request stays the same and its `ETag` can match. The
     repository list of an owner and the sweep for runs older than the lookback refresh every
-    10 minutes. At most 8 `gh` children run at the same time. The status line shows the remaining
+    10 minutes. An owner whose list has not yet succeeded is listed again on each refresh, so `r`
+    tries it again at once. At most 8 `gh` children run at the same time. The status line shows the remaining
     budget. When less than 10% remains, `ha` waits until the reset of the budget and says so.
   - A failure for one repository shows in the status line, and the board keeps the last good runs
     of that repository.
