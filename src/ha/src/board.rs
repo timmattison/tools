@@ -281,4 +281,28 @@ mod tests {
         let rows = only_recent.rows(now());
         assert_eq!(shape(&rows)[..2], ["Header(Active,0,0,0)", "Empty(Active)"]);
     }
+
+    #[test]
+    fn queued_and_running_runs_are_active_and_other_runs_never_show() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Queued, 20, 20),
+                run(2, "a/x", RunState::Running, 10, 5),
+                run(3, "a/x", RunState::Other, 30, 25),
+                run(4, "a/x", RunState::Passed, 40, 30),
+            ],
+        );
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Active,2,0,0)",
+                "Run(1)",
+                "Run(2)",
+                "Header(Recent,1,1,0)",
+                "Run(4)",
+            ]
+        );
+    }
 }
