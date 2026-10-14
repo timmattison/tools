@@ -8,6 +8,8 @@
 //! is the one function that starts a process.
 
 use std::ffi::OsStr;
+use std::io::ErrorKind;
+use std::process::{Command, Stdio};
 
 /// The program that holds the history.
 pub const ATUIN: &str = "atuin";
@@ -184,6 +186,34 @@ fn parse_record(record: &[u8], number: usize) -> Result<HistoryEntry, HistoryErr
 /// [`HistoryError::Empty`] for zero rows, and [`HistoryError::Malformed`] from
 /// [`parse`].
 pub fn read(program: &OsStr) -> Result<Vec<HistoryEntry>, HistoryError> {
-    let _ = program;
-    Ok(Vec::new())
+    let program_text = program.to_string_lossy().into_owned();
+    let output = Command::new(program)
+        .args(SEARCH_ARGUMENTS)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|source| {
+            if source.kind() == ErrorKind::NotFound {
+                HistoryError::NotInstalled {
+                    program: program_text.clone(),
+                }
+            } else {
+                HistoryError::Spawn {
+                    program: program_text.clone(),
+                    source,
+                }
+            }
+        })?;
+    if !output.status.success() {
+        return Err(HistoryError::Failed {
+            status: output.status.to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
+    }
+    let entries = parse(&output.stdout)?;
+    if entries.is_empty() {
+        return Err(HistoryError::Empty);
+    }
+    Ok(entries)
 }
