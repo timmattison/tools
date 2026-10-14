@@ -700,4 +700,34 @@ mod tests {
             Some("https://example.test/a/x/runs/3")
         );
     }
+
+    #[test]
+    fn the_selection_stays_on_its_run_when_runs_arrive_above_it() {
+        let mut board = four_runs_in_two_sections();
+        board.select_next(now());
+        board.select_next(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(3)*"));
+
+        board.replace(
+            repo("b/y"),
+            vec![
+                run(5, "b/y", RunState::Running, 90, 1),
+                run(6, "b/y", RunState::Passed, 60, 2),
+            ],
+        );
+        let rows = board.rows(now());
+        assert_eq!(
+            marked(&rows),
+            [
+                "Header(Active,3,0,0)",
+                "Run(5)",
+                "Run(1)",
+                "Run(2)",
+                "Header(Recent,3,2,1)",
+                "Run(6)",
+                "Run(3)*",
+                "Run(4)",
+            ]
+        );
+    }
 }
