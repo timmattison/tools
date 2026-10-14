@@ -5,10 +5,12 @@ use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use chrono::NaiveDate;
 use wdid::catalog::{
-    added_dates, binaries, cargo_bin, installed_binaries, path_state, CatalogError, PathState,
+    added_dates, binaries, cargo_bin, installed_binaries, path_state, workspace_root, CatalogError,
+    PathState, Programs,
 };
 use wdid::tool::ToolName;
 
@@ -322,4 +324,189 @@ fn cargo_bin_falls_back_to_the_home_directory() {
 fn cargo_bin_is_none_without_cargo_home_and_home() {
     assert_eq!(cargo_bin(None, None), None);
     assert_eq!(cargo_bin(Some(OsStr::new("")), None), None);
+}
+
+/// The date of the commit that adds the crate `one`.
+const ONE_COMMIT_DATE: &str = "2025-01-02T12:00:00Z";
+
+/// The date of the commit that adds the crate `two`.
+const TWO_COMMIT_DATE: &str = "2026-03-04T12:00:00Z";
+
+/// Runs git in `dir` with no inherited git environment. `date` states the
+/// author and committer date, after the sweep.
+fn git(dir: &Path, args: &[&str], date: Option<&str>) {
+    let mut command = Command::new("git");
+    gitscratch::shed_inherited_git_environment(&mut command);
+    if let Some(date) = date {
+        command
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date);
+    }
+    let output = command
+        .args([
+            "-c",
+            "user.name=wdid-test",
+            "-c",
+            "user.email=wdid-test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Writes the workspace files of the fixture: a root manifest and the crates
+/// `one` and `two`.
+fn write_workspace(root: &Path) {
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nresolver = \"2\"\nmembers = [\"one\", \"two\"]\n",
+    )
+    .unwrap();
+    for (dir, name) in [("one", "wdid-fixture-one"), ("two", "wdid-fixture-two")] {
+        std::fs::create_dir_all(root.join(dir).join("src")).unwrap();
+        std::fs::write(
+            root.join(dir).join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        )
+        .unwrap();
+        std::fs::write(root.join(dir).join("src/main.rs"), "fn main() {}\n").unwrap();
+    }
+}
+
+/// A fixture workspace in a temporary directory, with a git history.
+struct Fixture {
+    dir: tempfile::TempDir,
+}
+
+impl Fixture {
+    /// The workspace without a git repository.
+    fn without_history() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        write_workspace(dir.path());
+        Self { dir }
+    }
+
+    /// The workspace with two commits: `one` first, then `two`.
+    fn with_history() -> Self {
+        let fixture = Self::without_history();
+        let root = fixture.root();
+        git(root, &["init", "-q", "-b", "main"], None);
+        git(root, &["add", "Cargo.toml", "one"], None);
+        git(
+            root,
+            &["commit", "-q", "-m", "add one"],
+            Some(ONE_COMMIT_DATE),
+        );
+        git(root, &["add", "two"], None);
+        git(
+            root,
+            &["commit", "-q", "-m", "add two"],
+            Some(TWO_COMMIT_DATE),
+        );
+        fixture
+    }
+
+    /// The root of the workspace.
+    fn root(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
+/// Canonicalizes a path for a comparison.
+fn canonical(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap()
+}
+
+#[test]
+fn workspace_root_from_a_subdirectory_gives_the_work_tree_root() {
+    let fixture = Fixture::with_history();
+    let cwd = fixture.root().join("one/src");
+    let root = workspace_root(None, &cwd, &Programs::default()).unwrap();
+    assert_eq!(canonical(&root), canonical(fixture.root()));
+}
+
+#[test]
+fn workspace_root_with_repo_gives_the_canonical_repo() {
+    let fixture = Fixture::without_history();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let root =
+        workspace_root(Some(fixture.root()), elsewhere.path(), &Programs::default()).unwrap();
+    assert_eq!(root, canonical(fixture.root()));
+}
+
+#[test]
+fn workspace_root_with_repo_refuses_a_directory_without_cargo_toml() {
+    let empty = tempfile::tempdir().unwrap();
+    let error = workspace_root(Some(empty.path()), empty.path(), &Programs::default()).unwrap_err();
+    assert!(
+        matches!(error, CatalogError::NotAWorkspace { .. }),
+        "{error}"
+    );
+    assert!(error.to_string().contains("--repo <path>"), "{error}");
+}
+
+#[test]
+fn workspace_root_with_repo_refuses_a_missing_directory() {
+    let base = tempfile::tempdir().unwrap();
+    let missing = base.path().join("no-such-dir");
+    let error = workspace_root(Some(&missing), base.path(), &Programs::default()).unwrap_err();
+    assert!(
+        matches!(error, CatalogError::NotAWorkspace { .. }),
+        "{error}"
+    );
+}
+
+#[test]
+fn workspace_root_refuses_a_work_tree_without_cargo_toml() {
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"], None);
+    let error = workspace_root(None, dir.path(), &Programs::default()).unwrap_err();
+    assert!(
+        matches!(error, CatalogError::NotAWorkspace { .. }),
+        "{error}"
+    );
+}
+
+#[test]
+fn workspace_root_outside_any_work_tree_is_not_a_work_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut probe = Command::new("git");
+    gitscratch::shed_inherited_git_environment(&mut probe);
+    let inside = probe
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap()
+        .status
+        .success();
+    if inside {
+        eprintln!("skipped: the temporary directory is inside a git work tree");
+        return;
+    }
+    let error = workspace_root(None, dir.path(), &Programs::default()).unwrap_err();
+    assert!(
+        matches!(error, CatalogError::NotAWorkTree { .. }),
+        "{error}"
+    );
+    assert!(error.to_string().contains("--repo <path>"), "{error}");
+}
+
+#[test]
+fn workspace_root_names_a_git_that_does_not_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let programs = Programs {
+        git: dir.path().join("no-such-git").into_os_string(),
+        ..Programs::default()
+    };
+    let error = workspace_root(None, dir.path(), &programs).unwrap_err();
+    assert!(matches!(error, CatalogError::Spawn { .. }), "{error}");
+    assert!(error.to_string().contains("no-such-git"), "{error}");
 }
