@@ -736,4 +736,79 @@ mod tests {
             ]
         );
     }
+
+    fn select_third(board: &mut Board) {
+        board.select_next(now());
+        board.select_next(now());
+        assert_eq!(selected_text(board).as_deref(), Some("Run(3)*"));
+    }
+
+    #[test]
+    fn when_the_selected_run_is_dropped_the_run_at_its_position_is_selected() {
+        let mut board = four_runs_in_two_sections();
+        select_third(&mut board);
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Queued, 20, 1),
+                run(4, "a/x", RunState::Failed, 60, 20),
+            ],
+        );
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(4)*"));
+    }
+
+    #[test]
+    fn when_the_selected_run_was_the_last_the_new_last_run_is_selected() {
+        let mut board = four_runs_in_two_sections();
+        for _ in 0..3 {
+            board.select_next(now());
+        }
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(4)*"));
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Queued, 20, 1),
+                run(3, "a/x", RunState::Passed, 60, 10),
+            ],
+        );
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(3)*"));
+    }
+
+    #[test]
+    fn when_the_selected_run_leaves_the_window_the_nearest_run_is_selected() {
+        let mut board = four_runs_in_two_sections();
+        select_third(&mut board);
+        let later = now() + Span::hours(8) + Span::minutes(15);
+        let rows = board.rows(later);
+        assert_eq!(
+            marked(&rows),
+            [
+                "Header(Active,2,0,0)",
+                "Run(1)",
+                "Run(2)*",
+                "Header(Recent,0,0,0)",
+                "Empty(Recent)",
+            ]
+        );
+    }
+
+    #[test]
+    fn with_no_run_left_nothing_is_selected_and_the_first_run_is_selected_again_later() {
+        let mut board = four_runs_in_two_sections();
+        select_third(&mut board);
+        board.replace(repo("a/x"), Vec::new());
+        assert_eq!(selected_text(&mut board), None);
+        assert_eq!(board.selected_url(now()), None);
+
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(7, "a/x", RunState::Running, 30, 1),
+                run(8, "a/x", RunState::Passed, 60, 10),
+            ],
+        );
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(7)*"));
+    }
 }
