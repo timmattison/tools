@@ -1,6 +1,7 @@
 //! `wdid` — "what do i do": counts which tools of this workspace the atuin
 //! history uses.
 
+use buildinfo::version_string;
 use clap::Parser;
 
 /// The one-line description that `--help` shows.
@@ -8,7 +9,7 @@ const ABOUT: &str = "What do I do: count which tools of this workspace the atuin
 
 /// The command line of `wdid`.
 #[derive(Parser)]
-#[command(about = ABOUT)]
+#[command(version = version_string!(), about = ABOUT)]
 struct Cli {}
 
 fn main() {
