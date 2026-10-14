@@ -2,6 +2,7 @@
 //! history uses.
 
 use std::ffi::{OsStr, OsString};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -160,13 +161,29 @@ fn run(cli: &Cli) -> Result<String, Error> {
     })
 }
 
+/// Writes the output to standard output.
+///
+/// A reader that closed the pipe (`wdid | head`, `wdid | true`) took what it
+/// wanted, so a broken pipe is a success. `print!` panics on it instead.
+fn write_output(output: &str) -> ExitCode {
+    let mut stdout = io::stdout().lock();
+    match stdout
+        .write_all(output.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{TOOL}: cannot write the output: {error}");
+            ExitCode::from(EXIT_ERROR)
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(&cli) {
-        Ok(output) => {
-            print!("{output}");
-            ExitCode::SUCCESS
-        }
+        Ok(output) => write_output(&output),
         Err(error) => {
             eprintln!("{TOOL}: {error}");
             ExitCode::from(EXIT_ERROR)
