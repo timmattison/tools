@@ -4386,3 +4386,99 @@ The transcript of a session stays on disk after the stop, so `crap` takes that s
 - `0`: Success. A question that the person declined is a success as well, because `faulte` did what the answer said.
 - `1`: The platform is not macOS, or `faulte kill` found candidates and its input is not a terminal.
 - `2`: A source of this Mac failed, or its output failed a parser, or a stop did not do what the plan said that it would do. `faulte` prints the reason, and it never prints an empty ranking.
+
+## wdid (what do i do)
+
+Count which tools of this workspace you really use. `wdid` reads the whole shell history through atuin. It gives each tool a use count, the date of the first use and of the last use, and the way you ran it. It also lists the tools that you never used, and the tools that you stopped using.
+
+`atuin stats` cannot answer this question. It ranks the first word of each command. A tool that you run through an alias (`wtm`), through a function (`wt`), after a pipe, or after `sudo` has no count under its own name. `wdid` parses each command line, finds each word in command position, and follows aliases and functions down to the tool.
+
+### How it reads the history
+
+`wdid` runs one command:
+
+```bash
+atuin search --filter-mode global --include-duplicates --print0 --timezone +0 \
+  --format '{time}\t{exit}\t{host}\t{user}\t{command}' ''
+```
+
+It does not use `atuin history list`. That command obeys `filter_mode` of your atuin config, and a config with `filter_mode = "session"` gives one row. The search above always gives every row. The times are in UTC.
+
+`wdid` reads the aliases and the functions from your interactive shell (`$SHELL`, zsh or bash). It starts `$SHELL -i -c` with a script that prints them between two unique markers, so text from your startup files does no damage. The shell has 30 seconds. `--no-shell` skips this step.
+
+### What counts
+
+- A tool name in command position: the first word of a command, a word after `|`, `&&`, `||`, `;` or `&`, a word in a subshell, a brace group, `if`, `for`, `while`, `until` or `case`, and a word in a `$(...)` or backtick substitution or in `<(...)`.
+- A word that follows a wrapper: `sudo`, `doas`, `time`, `nice`, `nohup`, `env`, `command`, `exec`, `noglob`, `builtin`, `caffeinate`, `xargs`, `watch`, `timeout` and `gtimeout`. `wdid` skips the options of the wrapper. `command -v tool` is a lookup and does not count.
+- An alias, as the shell expands it. `wtm` with `alias wtm='wt --main'` counts for `wt`. The report shows the alias in the column `Through an alias or a function`.
+- A function, through its body, to any depth. A function that calls `cwt` gives `cwt` a use through that function.
+- A path. `~/.cargo/bin/prcp` is a use of `prcp`.
+- `cargo run --bin <tool>` and `cargo run -p <tool>` count as a development run. The report shows them in the column `Dev runs`. They are not uses, and they do not change the first use or the last use. A path with a `target` directory (`./target/release/prcp`) is a development run as well.
+
+### What does not count
+
+- Quoted text. `git commit -m "fix prcp"` does not use `prcp`.
+- A row with exit code 127. The shell did not find the command.
+- A line that does not parse. `wdid` does not guess. The report counts these rows, and `wdid --unparsed` lists them, with the number of rows for each command. It also lists the functions whose body did not parse.
+- Uses by scripts and by agents. atuin records only what you type in an interactive shell. A tool that a script runs for you has no count here.
+
+### Basic Usage
+
+```bash
+wdid
+wdid --json
+wdid --since 2026-01-01
+wdid --unparsed
+wdid --repo ~/code/tools --no-shell
+```
+
+### Options
+
+- `--repo <PATH>`: The cargo workspace to report on. Without it, `wdid` uses the git work tree that holds the current directory. The workspace must have a `Cargo.toml`.
+- `--since <YYYY-MM-DD>`: Count only the rows from this date on. A row on this date counts. The report says how many rows it left out.
+- `--json`: Print one JSON document in place of the table. It conflicts with `--unparsed`.
+- `--unparsed`: Print the commands that `wdid` could not parse, one line for each (`<rows>`, a tab, the command), and the functions that it could not parse. Print no report.
+- `--no-shell`: Do not start your shell. Aliases and functions then do not count.
+- `--new-days <DAYS>`: A tool that never ran is new when it is younger than this. Defaults to 90.
+- `--idle-days <DAYS>`: A tool is idle when its last use is older than this. Defaults to 180.
+- `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
+- `-h`, `--help`: Print the usage.
+
+The table fits `COLUMNS` when that variable is set, else the width of the terminal. An error prints `wdid: <reason>` on standard error and exits 1. A usage error exits 2.
+
+### The three groups
+
+After the table, `wdid` prints three lines:
+
+- **Never used, old.** No use, and the tool was added `--new-days` days ago or more. A tool with an unknown age is old. These are the candidates to delete.
+- **Never used, new.** No use, and the tool was added less than `--new-days` days ago. It has had no time yet. The line shows the date of each tool.
+- **Idle.** The tool has uses, and the last use is older than `--idle-days` days. The line shows the uses and the date of the last use.
+
+The date that a tool was added is the date of the oldest commit that touches its crate directory. A use before that date still counts, because the tool can have existed in another form before.
+
+### Example
+
+This is an example. The use counts come from the first run of the prototype. The dates, the other tools, and the last two lines are made up. The columns `Dev runs`, `First use`, `Added` and `Notes` are left out here to fit the page.
+
+```text
+┌──────────┬───────┬───────┬───────────────────────────────────────┬────────────┐
+│ Tool     ┆  Uses ┆ Typed ┆ Through an alias or a function        ┆ Last use   │
+╞══════════╪═══════╪═══════╪═══════════════════════════════════════╪════════════╡
+│ cwt      ┆ 6,989 ┆    31 ┆ wtm 3,061, wt 3,029, wtf 727, wtb 141 ┆ 2026-10-14 │
+│ gsw      ┆ 4,068 ┆ 4,068 ┆                                       ┆ 2026-10-14 │
+│ gitnuke  ┆ 1,706 ┆ 1,545 ┆ gitclean 161                          ┆ 2026-10-13 │
+└──────────┴───────┴───────┴───────────────────────────────────────┴────────────┘
+
+Never used, old (added 90 or more days ago): goup, tmpclean
+Never used, new (added less than 90 days ago): faulte (added 2026-09-20)
+Idle (no use in the last 180 days): repotidy (218 uses, last use 2025-11-13)
+
+History: 347,081 rows. 1,204 not counted (exit 127). 27 did not parse (wdid --unparsed prints them).
+Shell: 212 aliases, 168 functions (2 did not parse).
+```
+
+### Install
+
+```bash
+cargo install --git https://github.com/timmattison/tools wdid
+```
