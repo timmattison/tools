@@ -1130,4 +1130,44 @@ mod tests {
             format!("⚠ owner/x: HTTP 404  ·  {HINTS_TAIL}")
         );
     }
+
+    #[test]
+    fn a_tiny_frame_does_not_panic_and_nothing_overflows() {
+        for (width, height) in [
+            (0_u16, 0_u16),
+            (1, 1),
+            (3, 2),
+            (20, 3),
+            (33, 4),
+            (34, 5),
+            (1, 40),
+            (200, 1),
+        ] {
+            let mut board = four_run_board();
+            board.fail(repo("owner/x"), "HTTP 404".to_owned());
+            let status = Status {
+                refreshing: true,
+                last_refresh: Some(at("2026-10-14T11:59:30Z")),
+                rate: Some(rate(412)),
+                backoff_until: Some(at("2026-10-14T12:34:56Z")),
+                ..Status::default()
+            };
+            let buffer = render_with(width, height, &mut board, &status);
+            for line in lines(&buffer) {
+                assert!(
+                    display_width(&line) <= usize::from(width),
+                    "{width}x{height}: {line:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_frame_of_two_lines_holds_the_header_and_the_status_line() {
+        let mut board = four_run_board();
+        let text = lines(&render_with(120, 2, &mut board, &Status::default()));
+        assert_eq!(text.len(), 2);
+        assert!(text[0].starts_with("  REPO"));
+        assert!(text[1].starts_with("loading…"));
+    }
 }
