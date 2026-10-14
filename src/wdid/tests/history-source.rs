@@ -159,3 +159,138 @@ fn malformed_message_names_the_record() {
         "{error}"
     );
 }
+
+mod read {
+    use std::ffi::OsStr;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    use tempfile::TempDir;
+    use wdid::history::{read, HistoryError, SEARCH_ARGUMENTS};
+
+    /// A stub `atuin` in its own temporary directory.
+    struct Stub {
+        dir: TempDir,
+    }
+
+    impl Stub {
+        /// Writes a stub that records its arguments, one for each line, and
+        /// then runs `body`. The file is closed before this function returns.
+        fn new(body: &str) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let script = format!(
+                "#!/bin/sh\nfor argument in \"$@\"; do printf '%s\\n' \"$argument\"; done > '{}'\n{body}\n",
+                dir.path().join("arguments.txt").display()
+            );
+            let path = dir.path().join("atuin");
+            fs::write(&path, script).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            Self { dir }
+        }
+
+        fn program(&self) -> PathBuf {
+            self.dir.path().join("atuin")
+        }
+
+        /// The arguments that the stub received, one for each line.
+        fn arguments(&self) -> String {
+            fs::read_to_string(self.dir.path().join("arguments.txt")).unwrap()
+        }
+    }
+
+    fn read_path(path: &Path) -> Result<Vec<wdid::history::HistoryEntry>, HistoryError> {
+        read(OsStr::new(path))
+    }
+
+    #[test]
+    fn read_gives_the_rows_of_the_stub() {
+        let stub = Stub::new(
+            "printf '2026-10-14 08:30:05\\t0\\tmac\\ttim\\tprcp a\\0'\n\
+             printf '2026-10-14 08:30:06\\t127\\tmac\\ttim\\tnope\\0'",
+        );
+        let entries = read_path(&stub.program()).unwrap();
+        let commands: Vec<&str> = entries.iter().map(|e| e.command.as_str()).collect();
+        assert_eq!(commands, ["prcp a", "nope"]);
+        assert!(entries[1].exit.is_command_not_found());
+    }
+
+    #[test]
+    fn read_passes_exactly_the_search_arguments() {
+        let stub = Stub::new("printf '2026-10-14 08:30:05\\t0\\tmac\\ttim\\tx\\0'");
+        read_path(&stub.program()).unwrap();
+        let expected: String = SEARCH_ARGUMENTS
+            .iter()
+            .map(|argument| format!("{argument}\n"))
+            .collect();
+        assert_eq!(stub.arguments(), expected);
+    }
+
+    #[test]
+    fn read_refuses_an_empty_output() {
+        let stub = Stub::new("exit 0");
+        let error = read_path(&stub.program()).unwrap_err();
+        assert!(matches!(error, HistoryError::Empty), "{error:?}");
+    }
+
+    #[test]
+    fn read_reports_a_missing_program_as_not_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("atuin");
+        let error = read_path(&missing).unwrap_err();
+        match &error {
+            HistoryError::NotInstalled { program } => {
+                assert_eq!(program, &missing.display().to_string());
+            }
+            other => panic!("expected NotInstalled, got {other:?}"),
+        }
+        assert!(error.to_string().contains("not installed"), "{error}");
+    }
+
+    #[test]
+    fn read_reports_a_program_that_cannot_run_as_a_spawn_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let not_executable = dir.path().join("atuin");
+        fs::write(&not_executable, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&not_executable, fs::Permissions::from_mode(0o644)).unwrap();
+        let error = read_path(&not_executable).unwrap_err();
+        assert!(matches!(error, HistoryError::Spawn { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn read_reports_a_non_zero_exit_with_the_trimmed_stderr() {
+        let stub = Stub::new("printf 'database is locked\\n\\n' >&2\nexit 3");
+        let error = read_path(&stub.program()).unwrap_err();
+        match &error {
+            HistoryError::Failed { status, stderr } => {
+                assert_eq!(stderr, "database is locked");
+                assert!(status.contains('3'), "{status}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert!(
+            error.to_string().starts_with("atuin search failed ("),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn read_ignores_warnings_on_stderr_when_the_exit_is_zero() {
+        let stub = Stub::new(
+            "printf 'WARN slow statement\\n' >&2\n\
+             printf '2026-10-14 08:30:05\\t0\\tmac\\ttim\\tx\\0'",
+        );
+        let entries = read_path(&stub.program()).unwrap();
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn read_reports_a_malformed_record() {
+        let stub = Stub::new("printf 'garbage\\0'");
+        let error = read_path(&stub.program()).unwrap_err();
+        assert!(
+            matches!(error, HistoryError::Malformed { record: 1, .. }),
+            "{error:?}"
+        );
+    }
+}
