@@ -271,7 +271,7 @@ const PLAIN: Wrapper = Wrapper {
 const WRAPPERS: &[Wrapper] = &[
     Wrapper {
         name: "sudo",
-        short_with_argument: "ugCDprtTURs",
+        short_with_argument: "ugCDprtTUR",
         long_with_argument: &[
             "user",
             "group",
