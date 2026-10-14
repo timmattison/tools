@@ -284,3 +284,143 @@ fn multibyte_text_survives_the_walk_and_the_quote_removal() {
         ("日本語 x", words(vec![word("日本語", ["x"])])),
     ]);
 }
+
+#[test]
+fn a_wrapper_gives_the_command_word_that_it_runs() {
+    check(vec![
+        ("sudo prcp x", words(vec![word("prcp", ["x"])])),
+        ("doas prcp x", words(vec![word("prcp", ["x"])])),
+        (
+            "env time -o out.txt prcp x",
+            words(vec![word("prcp", ["x"])]),
+        ),
+        ("nice prcp x", words(vec![word("prcp", ["x"])])),
+        ("nohup prcp x", words(vec![word("prcp", ["x"])])),
+        ("env prcp x", words(vec![word("prcp", ["x"])])),
+        ("command prcp x", words(vec![word("prcp", ["x"])])),
+        ("exec -a name prcp x", words(vec![word("prcp", ["x"])])),
+        ("noglob prcp x", words(vec![word("prcp", ["x"])])),
+        ("builtin prcp x", words(vec![word("prcp", ["x"])])),
+        ("caffeinate -t 10 prcp x", words(vec![word("prcp", ["x"])])),
+        ("xargs prcp x", words(vec![word("prcp", ["x"])])),
+        ("watch -n 5 prcp x", words(vec![word("prcp", ["x"])])),
+        ("timeout 10 prcp x", words(vec![word("prcp", ["x"])])),
+        ("gtimeout 10 prcp x", words(vec![word("prcp", ["x"])])),
+        ("sudo nohup prcp", words(vec![word("prcp", [])])),
+        (
+            "sudo env nice -n 5 timeout 9 prcp x",
+            words(vec![word("prcp", ["x"])]),
+        ),
+        ("\"sudo\" prcp", words(vec![word("prcp", [])])),
+        (
+            "cat x | xargs prhash",
+            words(vec![word("cat", ["x"]), word("prhash", [])]),
+        ),
+        ("a && sudo b", words(vec![word("a", []), word("b", [])])),
+        (
+            "sudo prcp $(cwt)",
+            words(vec![word("prcp", ["$(cwt)"]), word("cwt", [])]),
+        ),
+        ("sudo >out.txt prcp", words(vec![word("prcp", [])])),
+        ("prcp sudo x", words(vec![word("prcp", ["sudo", "x"])])),
+        ("sudoku x", words(vec![word("sudoku", ["x"])])),
+    ]);
+}
+
+#[test]
+fn a_wrapper_skips_its_options_in_the_getopt_form() {
+    check(vec![
+        ("sudo -u root prcp x", words(vec![word("prcp", ["x"])])),
+        ("sudo -uroot prcp x", words(vec![word("prcp", ["x"])])),
+        ("sudo --user=root prcp x", words(vec![word("prcp", ["x"])])),
+        ("sudo --user root prcp x", words(vec![word("prcp", ["x"])])),
+        (
+            "sudo --preserve-env prcp x",
+            words(vec![word("prcp", ["x"])]),
+        ),
+        ("sudo -nu root prcp x", words(vec![word("prcp", ["x"])])),
+        ("sudo -n -E -u root prcp", words(vec![word("prcp", [])])),
+        ("sudo -- prcp x", words(vec![word("prcp", ["x"])])),
+        ("sudo -- -u", words(vec![word("-u", [])])),
+        ("sudo \"-u\" root prcp", words(vec![word("prcp", [])])),
+        ("nice -n 10 prcp", words(vec![word("prcp", [])])),
+        ("nice -n10 prcp", words(vec![word("prcp", [])])),
+        ("nice -10 prcp", words(vec![word("prcp", [])])),
+        ("nice --adjustment 5 prcp", words(vec![word("prcp", [])])),
+        ("nohup -u prcp", words(vec![word("prcp", [])])),
+        ("env -u FOO prcp", words(vec![word("prcp", [])])),
+        ("env -i -u FOO -C /tmp prcp", words(vec![word("prcp", [])])),
+        ("env --unset FOO prcp", words(vec![word("prcp", [])])),
+        ("env - prcp", words(vec![word("prcp", [])])),
+        ("sudo - prcp", words(vec![word("-", ["prcp"])])),
+        ("xargs -I {} prcp {}", words(vec![word("prcp", ["{}"])])),
+        ("xargs -0 prcp", words(vec![word("prcp", [])])),
+        ("xargs -n 1 -P 4 prcp", words(vec![word("prcp", [])])),
+        ("xargs -n1 -0 prcp", words(vec![word("prcp", [])])),
+        ("xargs --max-args 1 prcp", words(vec![word("prcp", [])])),
+        ("xargs --null prcp", words(vec![word("prcp", [])])),
+        ("watch -n 5 -d prcp", words(vec![word("prcp", [])])),
+        ("exec -a name prcp", words(vec![word("prcp", [])])),
+        ("doas -u root prcp", words(vec![word("prcp", [])])),
+        ("caffeinate -i -t 10 prcp", words(vec![word("prcp", [])])),
+        ("sudo -u root -- prcp x", words(vec![word("prcp", ["x"])])),
+    ]);
+}
+
+#[test]
+fn the_special_rules_of_the_wrappers() {
+    check(vec![
+        ("sudo -E FOO=1 prcp", words(vec![word("prcp", [])])),
+        ("sudo FOO=1 BAR=2 prcp x", words(vec![word("prcp", ["x"])])),
+        ("env FOO=bar BAZ=1 prcp", words(vec![word("prcp", [])])),
+        ("env -i FOO=bar prcp", words(vec![word("prcp", [])])),
+        ("env FOO=$x prcp", words(vec![word("prcp", [])])),
+        ("env _a1=2 prcp", words(vec![word("prcp", [])])),
+        ("env 1A=2 prcp", words(vec![word("1A=2", ["prcp"])])),
+        ("env =2 prcp", words(vec![word("=2", ["prcp"])])),
+        ("env A-B=2 prcp", words(vec![word("A-B=2", ["prcp"])])),
+        ("nice FOO=1 prcp", words(vec![word("FOO=1", ["prcp"])])),
+        ("timeout 10 prcp", words(vec![word("prcp", [])])),
+        ("timeout -s KILL 10 prcp", words(vec![word("prcp", [])])),
+        ("timeout -sKILL 10 prcp", words(vec![word("prcp", [])])),
+        (
+            "timeout --signal KILL 10 prcp",
+            words(vec![word("prcp", [])]),
+        ),
+        (
+            "timeout --signal=KILL 10 prcp",
+            words(vec![word("prcp", [])]),
+        ),
+        (
+            "timeout -k 5 -s KILL 10 prcp x",
+            words(vec![word("prcp", ["x"])]),
+        ),
+        (
+            "gtimeout --foreground 10 prcp",
+            words(vec![word("prcp", [])]),
+        ),
+        ("timeout 10", words(vec![])),
+        ("timeout", words(vec![])),
+        ("command -v prcp", words(vec![])),
+        ("command -V prcp", words(vec![])),
+        ("command -pv prcp", words(vec![])),
+        ("command -p -v prcp", words(vec![])),
+        ("command -p prcp", words(vec![word("prcp", [])])),
+        ("command -- prcp", words(vec![word("prcp", [])])),
+        ("sudo command -v prcp", words(vec![])),
+        ("sudo -v prcp", words(vec![word("prcp", [])])),
+        ("sudo", words(vec![])),
+        ("sudo -u", words(vec![])),
+        ("sudo -u root", words(vec![])),
+        ("sudo --", words(vec![])),
+        ("sudo nohup", words(vec![])),
+        ("env FOO=1", words(vec![])),
+        ("sudo $CMD", words(vec![])),
+        ("sudo $CMD prcp", words(vec![])),
+        ("sudo \"$CMD\" prcp", words(vec![])),
+        ("sudo -u $USER prcp", words(vec![word("prcp", [])])),
+        ("sudo $(a)", words(vec![word("a", [])])),
+        ("xargs -I", words(vec![])),
+        ("sudo 日本語 🎉", words(vec![word("日本語", ["🎉"])])),
+    ]);
+}
