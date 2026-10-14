@@ -145,6 +145,8 @@ struct ReceiverGone;
 struct State {
     owner_cadence: Cadence,
     owner_lists: BTreeMap<OwnerName, Vec<RepoName>>,
+    /// The error text of the last list of each owner that failed.
+    owner_errors: BTreeMap<OwnerName, String>,
     sweep_cadence: Cadence,
     /// The active runs of the last good sweep, for each repository.
     sweeps: Mutex<HashMap<RepoName, Vec<Run>>>,
@@ -160,6 +162,7 @@ fn run_loop<S: Source>(
     let mut state = State {
         owner_cadence: Cadence::new(slow),
         owner_lists: BTreeMap::new(),
+        owner_errors: BTreeMap::new(),
         sweep_cadence: Cadence::new(slow),
         sweeps: Mutex::new(HashMap::new()),
     };
@@ -911,5 +914,114 @@ mod tests {
                 error: failure.to_string()
             }]
         );
+    }
+
+    #[test]
+    fn an_owner_whose_first_list_fails_is_listed_again_on_the_next_cycle() {
+        let fake = Arc::new(FakeSource::default());
+        let failure = SourceError::Failed("boom".to_owned());
+        fake.script()
+            .owners
+            .insert(owner("acme"), Err(failure.clone()));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme"]), SLOW_CADENCE);
+        let first = one_cycle(&worker);
+
+        fake.script()
+            .owners
+            .insert(owner("acme"), Ok(vec![repo("acme/a")]));
+        fake.script()
+            .created
+            .insert(repo("acme/a"), Ok(vec![run("acme/a", 1)]));
+        worker
+            .commands
+            .send(Command::RefreshNow)
+            .expect("the worker listens");
+        let second = one_cycle(&worker);
+        worker
+            .commands
+            .send(Command::RefreshNow)
+            .expect("the worker listens");
+        let third = one_cycle(&worker);
+
+        assert_eq!(
+            first[0],
+            Update::Repos {
+                repos: BTreeSet::new(),
+                owner_errors: vec![(owner("acme"), failure.to_string())]
+            }
+        );
+        assert_eq!(
+            second[0],
+            Update::Repos {
+                repos: [repo("acme/a")].into(),
+                owner_errors: Vec::new()
+            }
+        );
+        assert!(
+            second.iter().any(|update| matches!(
+                update,
+                Update::Runs { repo: r, runs } if *r == repo("acme/a") && runs.len() == 1
+            )),
+            "no Runs update for acme/a: {second:?}"
+        );
+        assert!(matches!(third.last(), Some(Update::CycleDone { .. })));
+        let owner_calls = fake
+            .script()
+            .calls
+            .iter()
+            .filter(|(what, _)| *what == "owner")
+            .count();
+        assert_eq!(
+            owner_calls, 2,
+            "an owner with a good list waits for the cadence"
+        );
+    }
+
+    #[test]
+    fn a_retry_keeps_the_error_of_an_owner_that_kept_its_old_list() {
+        let fake = Arc::new(FakeSource::default());
+        let failure = SourceError::Failed("boom".to_owned());
+        fake.script()
+            .owners
+            .insert(owner("acme-a"), Err(failure.clone()));
+        let mut cadence = Cadence::new(SLOW_CADENCE);
+        cadence.mark(Instant::now());
+        let mut state = State {
+            owner_cadence: cadence,
+            owner_lists: BTreeMap::from([(owner("acme-b"), vec![repo("acme-b/x")])]),
+            owner_errors: BTreeMap::from([(owner("acme-b"), "old error".to_owned())]),
+            sweep_cadence: Cadence::new(SLOW_CADENCE),
+            sweeps: Mutex::new(HashMap::new()),
+        };
+        let (updates_tx, updates_rx) = mpsc::channel();
+
+        let repos = refresh_repos(
+            &Arc::clone(&fake),
+            &settings(&["acme-a", "acme-b"]),
+            &mut state,
+            &updates_tx,
+        )
+        .unwrap_or_else(|_| panic!("the receiver is alive"));
+
+        assert_eq!(repos, BTreeSet::from([repo("acme-b/x")]));
+        assert_eq!(
+            updates_rx.try_recv(),
+            Ok(Update::Repos {
+                repos: BTreeSet::from([repo("acme-b/x")]),
+                owner_errors: vec![
+                    (owner("acme-a"), failure.to_string()),
+                    (owner("acme-b"), "old error".to_owned()),
+                ]
+            })
+        );
+        assert_eq!(updates_rx.try_recv(), Err(TryRecvError::Empty));
+        let owner_calls: Vec<String> = fake
+            .script()
+            .calls
+            .iter()
+            .filter(|(what, _)| *what == "owner")
+            .map(|(_, name)| name.clone())
+            .collect();
+        assert_eq!(owner_calls, vec!["acme-a".to_owned()]);
     }
 }
