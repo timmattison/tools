@@ -271,12 +271,16 @@ mod tests {
         calls: Vec<(&'static str, String)>,
         since: Vec<DateTime<Utc>>,
         rate: Option<RateLimit>,
+        in_flight: usize,
+        max_in_flight: usize,
     }
 
     /// A [`Source`] that answers from a script and logs each call.
     #[derive(Default)]
     struct FakeSource {
         script: Mutex<Script>,
+        /// How long each `runs_of` call sleeps.
+        delay: Duration,
     }
 
     impl FakeSource {
@@ -302,7 +306,13 @@ mod tests {
                 RunQuery::Active => "active",
             };
             script.calls.push((what, repo.to_string()));
-            script.created.get(repo).cloned().unwrap_or(Ok(Vec::new()))
+            let answer = script.created.get(repo).cloned().unwrap_or(Ok(Vec::new()));
+            script.in_flight += 1;
+            script.max_in_flight = script.max_in_flight.max(script.in_flight);
+            drop(script);
+            std::thread::sleep(self.delay);
+            self.script().in_flight -= 1;
+            answer
         }
 
         fn rate_limit(&self) -> Option<RateLimit> {
@@ -581,5 +591,23 @@ mod tests {
         };
         assert_eq!(*rate, Some(low));
         assert_eq!(*backoff_until, Some(reset));
+    }
+
+    #[test]
+    fn the_worker_fetches_several_repositories_at_once_but_not_too_many() {
+        let fake = Arc::new(FakeSource {
+            delay: Duration::from_millis(100),
+            ..FakeSource::default()
+        });
+        let names: Vec<String> = (0..20).map(|n| format!("acme/r{n}")).collect();
+        let targets: Vec<&str> = names.iter().map(String::as_str).collect();
+        let worker = spawn_with(Arc::clone(&fake), &settings(&targets), SLOW_CADENCE);
+
+        let updates = one_cycle(&worker);
+
+        assert_eq!(updates.len(), 22, "Repos, 20 Runs, CycleDone");
+        let most = fake.script().max_in_flight;
+        assert!(most >= 2, "only {most} call in flight");
+        assert!(most <= CONCURRENCY, "{most} calls in flight at once");
     }
 }
