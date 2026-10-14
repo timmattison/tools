@@ -1228,6 +1228,84 @@ mod tests {
     }
 
     #[test]
+    fn repos_of_lists_the_repositories_of_an_owner() {
+        let stub = Stub::new("cat \"$dir/list.out\"");
+        stub.file(
+            "list.out",
+            r#"[{"nameWithOwner":"Lock-Free-Labs/nvr-tools"},{"nameWithOwner":"Lock-Free-Labs/.github"}]"#,
+        );
+        let owner = OwnerName::parse("Lock-Free-Labs").unwrap();
+        let repos = stub.source().repos_of(&owner).expect("repositories");
+        assert_eq!(
+            repos,
+            [
+                repo("Lock-Free-Labs/nvr-tools"),
+                repo("Lock-Free-Labs/.github")
+            ]
+        );
+        assert_eq!(
+            stub.requests(),
+            [[
+                "repo",
+                "list",
+                "Lock-Free-Labs",
+                "--no-archived",
+                "--limit",
+                "1000",
+                "--json",
+                "nameWithOwner"
+            ]]
+        );
+    }
+
+    #[test]
+    fn repos_of_gives_an_empty_list_for_an_owner_with_no_repositories() {
+        let stub = Stub::new("echo '[]'");
+        let owner = OwnerName::parse("nobody").unwrap();
+        assert_eq!(stub.source().repos_of(&owner), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn repos_of_fails_with_the_stderr_text_for_an_unknown_owner() {
+        let text =
+            "the owner handle \"x\" was not recognized as either a GitHub user or an organization";
+        let stub = Stub::new(&format!("echo '{text}' >&2; exit 1"));
+        let owner = OwnerName::parse("x").unwrap();
+        assert_eq!(
+            stub.source().repos_of(&owner),
+            Err(SourceError::Failed(text.to_owned()))
+        );
+    }
+
+    #[test]
+    fn repos_of_is_not_logged_in_on_exit_status_4() {
+        let stub = Stub::new("echo 'gh auth login' >&2; exit 4");
+        let owner = OwnerName::parse("x").unwrap();
+        assert_eq!(
+            stub.source().repos_of(&owner),
+            Err(SourceError::NotLoggedIn("gh auth login".to_owned()))
+        );
+    }
+
+    #[test]
+    fn repos_of_refuses_output_that_is_not_a_list_of_repositories() {
+        let owner = OwnerName::parse("x").unwrap();
+        for output in [
+            "not json",
+            "{}",
+            "[{\"nameWithOwner\":\"no-slash\"}]",
+            "[{\"other\":1}]",
+        ] {
+            let stub = Stub::new(&format!("echo '{output}'"));
+            let result = stub.source().repos_of(&owner);
+            assert!(
+                matches!(result, Err(SourceError::BadResponse(_))),
+                "{output:?} gave {result:?}"
+            );
+        }
+    }
+
+    #[test]
     fn run_with_limit_gives_up_on_a_program_that_hangs() {
         let dir = TempDir::new().unwrap();
         let stub = write_stub(&dir, "hangs", "exec sleep 120");
