@@ -4,11 +4,12 @@
 use std::time::Duration;
 
 use chrono::{DateTime, TimeZone, Utc};
-use crossterm::event::Event;
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::backend::Backend;
 use ratatui::Terminal;
 
 use crate::board::Board;
+use crate::render;
 use crate::status::Status;
 use crate::worker::Worker;
 
@@ -58,6 +59,7 @@ impl Events for TerminalEvents {
 }
 
 /// The state of one run of the event loop.
+#[allow(dead_code, reason = "temporary: the next keys read these fields")]
 pub struct App<'a, O: Opener, Tz: TimeZone> {
     /// The runs to show.
     pub board: Board,
@@ -98,21 +100,47 @@ where
     ///
     /// # Errors
     /// Returns the error of the terminal when it cannot draw or read.
-    pub fn run<B: Backend, E: Events>(
-        &mut self,
-        terminal: &mut Terminal<B>,
-        events: &mut E,
-    ) -> std::io::Result<()> {
-        let _ = (
-            terminal,
-            events,
-            self.opener,
-            self.worker,
-            self.now,
-            self.tz,
-        );
-        Err(std::io::Error::other("not implemented"))
+    pub fn run<B, E>(&mut self, terminal: &mut Terminal<B>, events: &mut E) -> std::io::Result<()>
+    where
+        B: Backend,
+        B::Error: std::error::Error + Send + Sync + 'static,
+        E: Events,
+    {
+        loop {
+            let now = (self.now)();
+            terminal
+                .draw(|frame| {
+                    render::draw(frame, &mut self.board, &self.status, now, self.tz);
+                })
+                .map_err(std::io::Error::other)?;
+            let Some(event) = events.next(POLL_INTERVAL)? else {
+                continue;
+            };
+            if let Event::Key(key) = event {
+                if key.kind == KeyEventKind::Press && self.handle_key(key) == Flow::Quit {
+                    return Ok(());
+                }
+            }
+        }
     }
+
+    /// Acts on one key press.
+    #[allow(clippy::unused_self, reason = "temporary: the next keys use the state")]
+    fn handle_key(&mut self, key: KeyEvent) -> Flow {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => Flow::Quit,
+            KeyCode::Char('c') if control => Flow::Quit,
+            _ => Flow::Continue,
+        }
+    }
+}
+
+/// What the loop does after a key.
+#[derive(Debug, PartialEq, Eq)]
+enum Flow {
+    Continue,
+    Quit,
 }
 
 #[cfg(test)]
@@ -121,8 +149,8 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::mpsc::{channel, Receiver, Sender};
 
-    use chrono::{FixedOffset, TimeZone as _};
-    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+    use chrono::FixedOffset;
+    use crossterm::event::KeyEventState;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
 
@@ -165,16 +193,16 @@ mod tests {
         }
     }
 
-    fn key_event(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) -> Option<Event> {
-        Some(Event::Key(KeyEvent {
+    fn key_event(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) -> Event {
+        Event::Key(KeyEvent {
             code,
             modifiers,
             kind,
             state: KeyEventState::NONE,
-        }))
+        })
     }
 
-    fn press(code: KeyCode) -> Option<Event> {
+    fn press(code: KeyCode) -> Event {
         key_event(code, KeyModifiers::NONE, KeyEventKind::Press)
     }
 
@@ -184,6 +212,7 @@ mod tests {
 
     /// The channels that the test holds, and the worker built from the
     /// other ends.
+    #[allow(dead_code, reason = "temporary: the next tests use these ends")]
     struct Channels {
         updates: Sender<Update>,
         commands: Receiver<Command>,
@@ -212,7 +241,7 @@ mod tests {
         (0..area.height)
             .map(|y| {
                 let mut line = String::new();
-                let mut skip = 0usize;
+                let mut skip = 0_usize;
                 for x in 0..area.width {
                     if skip > 0 {
                         skip -= 1;
@@ -232,20 +261,23 @@ mod tests {
     fn run_app(
         opener: &RecordingOpener,
         channels: &Channels,
-        events: Vec<Option<Event>>,
+        events: Vec<Event>,
     ) -> (std::io::Result<()>, Vec<String>) {
         let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
         let tz = FixedOffset::east_opt(0).unwrap();
         let clock = now;
         let mut app = App::new(
-            Board::new(Duration::from_secs(8 * 3600)),
+            Board::new(Duration::from_hours(8)),
             Status::default(),
             opener,
             &channels.worker,
             &clock,
             &tz,
         );
-        let result = app.run(&mut terminal, &mut script(events));
+        let result = app.run(
+            &mut terminal,
+            &mut script(events.into_iter().map(Some).collect()),
+        );
         (result, lines(terminal.backend().buffer()))
     }
 
