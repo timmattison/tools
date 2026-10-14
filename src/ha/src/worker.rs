@@ -90,8 +90,9 @@ impl Cadence {
 
     /// True when the job is due at `now`.
     #[must_use]
-    pub fn due(&self, _now: Instant) -> bool {
-        false
+    pub fn due(&self, now: Instant) -> bool {
+        self.last
+            .is_none_or(|last| now.saturating_duration_since(last) >= self.period)
     }
 
     /// Records that the job ran at `now`.
