@@ -151,7 +151,10 @@ where
             }
             KeyCode::Enter => {
                 if let Some(url) = self.board.selected_url((self.now)()) {
-                    let _ = self.opener.open(&url);
+                    self.status.message = match self.opener.open(&url) {
+                        Ok(()) => None,
+                        Err(_) => Some(format!("could not open a browser: {url}")),
+                    };
                 }
                 Flow::Continue
             }
