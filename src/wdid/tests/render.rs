@@ -439,6 +439,10 @@ fn the_shell_line_counts_the_definitions() {
         unparsed_aliases: 2,
         ..summary()
     });
+    let one_alias_line = summary_lines(Summary {
+        unparsed_aliases: 1,
+        ..summary()
+    });
     let nothing = summary_lines(Summary {
         aliases: 0,
         functions: 0,
@@ -449,6 +453,10 @@ fn the_shell_line_counts_the_definitions() {
     assert_eq!(
         with_aliases[1],
         "Shell: 5 aliases, 4 functions (1 did not parse). 2 alias lines did not parse."
+    );
+    assert_eq!(
+        one_alias_line[1],
+        "Shell: 5 aliases, 4 functions (1 did not parse). 1 alias line did not parse."
     );
     assert_eq!(
         nothing[1],
@@ -645,7 +653,8 @@ fn group(command: &str, rows: u64) -> Unparsed {
 
 /// Each command has a line: the rows, a tab, and the escaped command. The
 /// escape keeps one command on one line, so a newline, a tab, a CR, and a
-/// backslash do not break the line.
+/// backslash do not break the line. The rows are plain digits, so that
+/// `sort -n` and `awk` read them.
 #[test]
 fn an_unparsed_command_is_one_escaped_line() {
     let tally = tally_with(
@@ -659,7 +668,7 @@ fn an_unparsed_command_is_one_escaped_line() {
 
     assert_eq!(
         unparsed(&tally),
-        "1,200\techo $(\\nls\\t-l\\r\\\\\n2\ta |\n1\t日本語 🎉 café $(\n"
+        "1200\techo $(\\nls\\t-l\\r\\\\\n2\ta |\n1\t日本語 🎉 café $(\n"
     );
 }
 
