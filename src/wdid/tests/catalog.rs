@@ -9,8 +9,8 @@ use std::process::Command;
 
 use chrono::NaiveDate;
 use wdid::catalog::{
-    added_dates, binaries, cargo_bin, installed_binaries, path_state, workspace_root, CatalogError,
-    PathState, Programs,
+    added_dates, binaries, cargo_bin, installed_binaries, path_state, read, workspace_root,
+    CatalogError, PathState, Programs,
 };
 use wdid::tool::ToolName;
 
@@ -509,4 +509,173 @@ fn workspace_root_names_a_git_that_does_not_start() {
     let error = workspace_root(None, dir.path(), &programs).unwrap_err();
     assert!(matches!(error, CatalogError::Spawn { .. }), "{error}");
     assert!(error.to_string().contains("no-such-git"), "{error}");
+}
+
+/// A stub `cargo` in a temporary directory. It prints a fixed install list for
+/// `install --list`, and it runs the real cargo for every other command.
+struct StubCargo {
+    dir: tempfile::TempDir,
+}
+
+impl StubCargo {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let script = format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = install ] && [ \"$2\" = --list ]; then\n\
+             \x20 printf 'wdid-fixture-one v0.1.0 (/somewhere):\\n    wdid-fixture-one\\n'\n\
+             \x20 exit 0\n\
+             fi\n\
+             exec \"{}\" \"$@\"\n",
+            env!("CARGO")
+        );
+        let path = dir.path().join("cargo");
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Self { dir }
+    }
+
+    /// The programs that use the stub as cargo.
+    fn programs(&self) -> Programs {
+        Programs {
+            cargo: self.dir.path().join("cargo").into_os_string(),
+            ..Programs::default()
+        }
+    }
+}
+
+/// A directory that stands for the cargo bin directory. It holds an executable
+/// `wdid-fixture-one`.
+fn fake_cargo_bin() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "wdid-fixture-one", 0o755);
+    dir
+}
+
+/// True when git finds a work tree that holds `dir`.
+fn inside_work_tree(dir: &Path) -> bool {
+    let mut probe = Command::new("git");
+    gitscratch::shed_inherited_git_environment(&mut probe);
+    probe
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(dir)
+        .output()
+        .unwrap()
+        .status
+        .success()
+}
+
+#[test]
+fn read_gives_the_tools_sorted_by_name_with_every_fact() {
+    let fixture = Fixture::with_history();
+    let stub = StubCargo::new();
+    let bin = fake_cargo_bin();
+    let path = search_path(&[bin.path()]);
+    let catalog = read(
+        fixture.root(),
+        &stub.programs(),
+        Some(&path),
+        Some(bin.path()),
+    )
+    .unwrap();
+    assert_eq!(catalog.root, fixture.root());
+    let names: Vec<&str> = catalog
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect();
+    assert_eq!(names, ["wdid-fixture-one", "wdid-fixture-two"]);
+    let (one, two) = (&catalog.tools[0], &catalog.tools[1]);
+    assert_eq!(one.crate_dir, PathBuf::from("one"));
+    assert_eq!(two.crate_dir, PathBuf::from("two"));
+    assert_eq!(one.added, Some(date(2025, 1, 2)));
+    assert_eq!(two.added, Some(date(2026, 3, 4)));
+    assert!(one.installed);
+    assert!(!two.installed);
+    assert_eq!(one.path, Some(PathState::Cargo));
+    assert_eq!(two.path, None);
+}
+
+#[test]
+fn read_names_gives_the_tool_names() {
+    let fixture = Fixture::with_history();
+    let stub = StubCargo::new();
+    let catalog = read(fixture.root(), &stub.programs(), None, None).unwrap();
+    let names = catalog.names();
+    assert_eq!(names.len(), 2);
+    assert!(names.get("wdid-fixture-one").is_some());
+    assert!(names.get("wdid-fixture-two").is_some());
+    assert!(names.get("other").is_none());
+}
+
+#[test]
+fn read_without_a_path_says_every_installed_tool_is_not_on_path() {
+    let fixture = Fixture::with_history();
+    let stub = StubCargo::new();
+    let catalog = read(fixture.root(), &stub.programs(), None, None).unwrap();
+    assert_eq!(catalog.tools[0].path, Some(PathState::NotOnPath));
+    assert_eq!(catalog.tools[1].path, None);
+}
+
+#[test]
+fn read_without_a_cargo_bin_dir_says_the_first_match_is_shadowed() {
+    let fixture = Fixture::with_history();
+    let stub = StubCargo::new();
+    let bin = fake_cargo_bin();
+    let path = search_path(&[bin.path()]);
+    let catalog = read(fixture.root(), &stub.programs(), Some(&path), None).unwrap();
+    assert_eq!(
+        catalog.tools[0].path,
+        Some(PathState::Shadowed(bin.path().join("wdid-fixture-one")))
+    );
+}
+
+#[test]
+fn read_without_a_git_repository_gives_no_added_dates_and_does_not_fail() {
+    let fixture = Fixture::without_history();
+    if inside_work_tree(fixture.root()) {
+        eprintln!("skipped: the temporary directory is inside a git work tree");
+        return;
+    }
+    let stub = StubCargo::new();
+    let catalog = read(fixture.root(), &stub.programs(), None, None).unwrap();
+    assert_eq!(catalog.tools.len(), 2);
+    assert!(catalog.tools.iter().all(|tool| tool.added.is_none()));
+    assert!(catalog.tools[0].installed);
+}
+
+#[test]
+fn read_names_a_cargo_that_does_not_start() {
+    let fixture = Fixture::with_history();
+    let missing = fixture.root().join("no-such-cargo");
+    let programs = Programs {
+        cargo: missing.into_os_string(),
+        ..Programs::default()
+    };
+    let error = read(fixture.root(), &programs, None, None).unwrap_err();
+    assert!(matches!(error, CatalogError::Spawn { .. }), "{error}");
+}
+
+#[test]
+fn read_gives_the_stderr_of_a_cargo_that_fails() {
+    let fixture = Fixture::with_history();
+    std::fs::write(fixture.root().join("Cargo.toml"), "this is not toml [").unwrap();
+    let stub = StubCargo::new();
+    let error = read(fixture.root(), &stub.programs(), None, None).unwrap_err();
+    assert!(matches!(error, CatalogError::Failed { .. }), "{error}");
+    let text = error.to_string();
+    assert!(text.starts_with("cargo metadata failed ("), "{text}");
+    assert!(text.contains("Cargo.toml"), "{text}");
+}
+
+#[test]
+fn read_refuses_a_workspace_without_binaries() {
+    let fixture = Fixture::without_history();
+    for dir in ["one", "two"] {
+        std::fs::remove_file(fixture.root().join(dir).join("src/main.rs")).unwrap();
+        std::fs::write(fixture.root().join(dir).join("src/lib.rs"), "").unwrap();
+    }
+    let stub = StubCargo::new();
+    let error = read(fixture.root(), &stub.programs(), None, None).unwrap_err();
+    assert!(matches!(error, CatalogError::NoBinaries { .. }), "{error}");
 }
