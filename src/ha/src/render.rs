@@ -8,8 +8,19 @@ use std::time::Duration;
 /// days or more gives `>99d`.
 #[must_use]
 pub fn format_elapsed(d: Duration) -> String {
-    let _ = d;
-    String::new()
+    let total = d.as_secs();
+    let (minute, hour, day) = (60, 3_600, 86_400);
+    if total < minute {
+        format!("{total}s")
+    } else if total < hour {
+        format!("{}m {:02}s", total / minute, total % minute)
+    } else if total < day {
+        format!("{}h {:02}m", total / hour, total % hour / minute)
+    } else if total < 100 * day {
+        format!("{}d {:02}h", total / day, total % day / hour)
+    } else {
+        ">99d".to_owned()
+    }
 }
 
 #[cfg(test)]
