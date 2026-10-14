@@ -11,11 +11,21 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use chrono::NaiveDate;
 
 use crate::tool::{ToolName, ToolNames};
+
+/// The mode bits that make a file executable for its owner, group, or others.
+const EXECUTE_BITS: u32 = 0o111;
+
+/// The name of the directory that holds the binaries of cargo.
+const BIN_DIRECTORY: &str = "bin";
+
+/// The name of the cargo directory in the home directory.
+const CARGO_DIRECTORY: &str = ".cargo";
 
 /// The kind of a cargo target that is a binary.
 const BINARY_KIND: &str = "bin";
@@ -290,13 +300,40 @@ pub fn added_dates(log: &str, crate_dirs: &[PathBuf]) -> BTreeMap<PathBuf, Naive
 /// system.
 #[must_use]
 pub fn path_state(name: &str, search_path: &OsStr, cargo_bin: &Path) -> PathState {
-    let _ = (name, search_path, cargo_bin);
+    let cargo_bin_canonical = canonical_or_plain(cargo_bin);
+    for directory in std::env::split_paths(search_path) {
+        if directory.as_os_str().is_empty() {
+            continue;
+        }
+        let candidate = directory.join(name);
+        if !is_executable_file(&candidate) {
+            continue;
+        }
+        let same_directory =
+            directory == cargo_bin || canonical_or_plain(&directory) == cargo_bin_canonical;
+        return if same_directory {
+            PathState::Cargo
+        } else {
+            PathState::Shadowed(candidate)
+        };
+    }
     PathState::NotOnPath
 }
 
 /// Gives the cargo bin directory: `$CARGO_HOME/bin`, else `<home>/.cargo/bin`.
 #[must_use]
 pub fn cargo_bin(cargo_home: Option<&OsStr>, home: Option<&Path>) -> Option<PathBuf> {
-    let _ = (cargo_home, home);
-    None
+    match cargo_home {
+        Some(cargo_home) if !cargo_home.is_empty() => {
+            Some(Path::new(cargo_home).join(BIN_DIRECTORY))
+        }
+        _ => home.map(|home| home.join(CARGO_DIRECTORY).join(BIN_DIRECTORY)),
+    }
+}
+
+/// True when `path` is a file (a symlink is followed) with an execute bit.
+fn is_executable_file(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| {
+        metadata.is_file() && metadata.permissions().mode() & EXECUTE_BITS != 0
+    })
 }
