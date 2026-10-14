@@ -2029,6 +2029,8 @@ cannot hang the caller. Used by `cwt` and `ha`.
     8 hours, the newest first, with how long each run took and how long ago it finished. A run
     that timed out or that failed to start counts as failed. A cancelled or skipped run does not
     show.
+  - Until the first refresh ends, an empty section shows `Loading…` and the section headers
+    show no counts. Thus a board that did not load yet does not look like a board with no runs.
   - Each row shows the repository, the workflow, the branch, and the run title. A long name keeps
     its start and ends in `…`. The cut is by display width, thus `日本語` and emoji do not break a
     row. The columns fit the terminal again when its size changes.

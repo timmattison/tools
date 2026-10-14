@@ -149,25 +149,41 @@ where
     )
 }
 
+/// The line that stands in an empty section before the first refresh cycle
+/// ends.
+const SECTION_LOADING: &str = "  Loading…";
+
 /// The line of a section header.
+///
+/// Before the first refresh cycle ends (`loaded` is false), the header gives
+/// no counts. The board then holds only the repositories that the worker
+/// fetched so far, thus a count is too low.
 fn header_line(
     section: Section,
     count: usize,
     passed: usize,
     failed: usize,
     window: Duration,
+    loaded: bool,
 ) -> String {
-    match section {
-        Section::Active => format!("Running · {count}"),
-        Section::Recent => format!(
-            "Last {} · {passed} passed · {failed} failed",
-            format_duration_setting(window)
-        ),
+    let window = format_duration_setting(window);
+    match (section, loaded) {
+        (Section::Active, false) => "Running".to_owned(),
+        (Section::Active, true) => format!("Running · {count}"),
+        (Section::Recent, false) => format!("Last {window}"),
+        (Section::Recent, true) => format!("Last {window} · {passed} passed · {failed} failed"),
     }
 }
 
 /// The line that stands in an empty section.
-fn empty_line(section: Section, window: Duration) -> String {
+///
+/// Before the first refresh cycle ends (`loaded` is false), the line is
+/// [`SECTION_LOADING`]. A section that is empty then can still get runs, and
+/// a text that says "no runs" makes a person think that nothing runs.
+fn empty_line(section: Section, window: Duration, loaded: bool) -> String {
+    if !loaded {
+        return SECTION_LOADING.to_owned();
+    }
     match section {
         Section::Active => "  No runs in progress or in the queue.".to_owned(),
         Section::Recent => format!(
@@ -296,6 +312,8 @@ pub fn draw<Tz: TimeZone>(
     let widths = Widths::for_width(usize::from(area.width));
     let height = usize::from(area.height).saturating_sub(FIXED_LINES);
     let window = board.window();
+    // The first refresh cycle ended. Until then, the board can miss runs.
+    let loaded = status.last_refresh.is_some();
     let bold = Style::default().add_modifier(Modifier::BOLD);
     let buffer = frame.buffer_mut();
     put(
@@ -320,11 +338,11 @@ pub fn draw<Tz: TimeZone>(
                 passed,
                 failed,
             } => {
-                let line = header_line(*section, *count, *passed, *failed, window);
+                let line = header_line(*section, *count, *passed, *failed, window, loaded);
                 put(buffer, index + 1, &line, bold);
             }
             Row::Empty(section) => {
-                let line = empty_line(*section, window);
+                let line = empty_line(*section, window, loaded);
                 put(buffer, index + 1, &line, Style::default());
             }
             Row::Run { run, selected } => {
