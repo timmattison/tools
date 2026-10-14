@@ -45,7 +45,13 @@ const INSTALL_COMMAND: &str = "cargo install --list";
 
 /// The arguments of the one `git log` that gives the added dates. A record
 /// starts with NUL and a date, then the files of the commit.
-const LOG_ARGUMENTS: [&str; 5] = [
+///
+/// `core.quotepath=false` comes first. Without it, git writes a path that
+/// holds a byte outside ASCII as a quoted octal text (`"drei-\303\274/x"`),
+/// and that text matches no crate directory.
+const LOG_ARGUMENTS: [&str; 7] = [
+    "-c",
+    "core.quotepath=false",
     "log",
     "--format=%x00%as",
     "--name-only",
