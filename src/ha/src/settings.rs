@@ -41,6 +41,14 @@ pub enum SettingsError {
         /// What the TOML reader found.
         source: toml::de::Error,
     },
+    /// A config file cannot be read.
+    #[error("cannot read the config file {path}: {source}")]
+    Read {
+        /// The config file.
+        path: String,
+        /// Why the read failed.
+        source: std::io::Error,
+    },
     /// A duration in the config file is not valid.
     #[error("{key} in {path}: {source}")]
     FileDuration {
@@ -152,6 +160,31 @@ pub fn resolve(cli: &CommandLine, file: Option<(&Path, &str)>) -> Result<Setting
         targets,
         window: cli.window.unwrap_or(file_window),
         interval: cli.interval.unwrap_or(file_interval),
+    })
+}
+
+/// Reads the config file, then builds the settings from it and the command
+/// line.
+///
+/// When the command line names a file with `--config`, that file must exist.
+/// Otherwise `ha` reads [`default_config_path`] when a file is there, and a
+/// missing file is not an error. This is the one function of this module that
+/// reads a file.
+///
+/// # Errors
+///
+/// Returns a [`SettingsError`] when a file cannot be read or when
+/// [`resolve`] refuses its input.
+pub fn load(cli: &CommandLine) -> Result<Settings, SettingsError> {
+    load_from(cli, default_config_path().as_deref())
+}
+
+/// The work of [`load`], with the default config file as a parameter so a test
+/// never reads the real configuration of the user.
+fn load_from(cli: &CommandLine, default_path: Option<&Path>) -> Result<Settings, SettingsError> {
+    let _ = (cli, default_path);
+    Err(SettingsError::NoTargets {
+        config: String::new(),
     })
 }
 
@@ -486,5 +519,84 @@ mod tests {
         );
         let error = resolve(&CommandLine::default(), None).unwrap_err();
         assert_names(&error, &["no targets", "repos", "owners"]);
+    }
+
+    /// Writes `text` to a file named `name` in `directory` and returns the path.
+    fn write_file(directory: &tempfile::TempDir, name: &str, text: &str) -> PathBuf {
+        let path = directory.path().join(name);
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    fn cli_with_config(path: &Path) -> CommandLine {
+        CommandLine {
+            config: Some(path.to_owned()),
+            ..CommandLine::default()
+        }
+    }
+
+    #[test]
+    fn load_reads_the_file_that_config_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = write_file(&directory, "mine.toml", "owners = [\"timmattison\"]");
+        let settings = load_from(&cli_with_config(&path), None).unwrap();
+        assert_eq!(settings.targets, vec![target("timmattison")]);
+    }
+
+    #[test]
+    fn load_refuses_a_config_file_that_does_not_exist() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("missing.toml");
+        let error = load_from(&cli_with_config(&path), None).unwrap_err();
+        assert!(matches!(error, SettingsError::Read { .. }), "{error}");
+        assert_names(&error, &[&path.display().to_string()]);
+    }
+
+    #[test]
+    fn load_refuses_a_config_path_that_is_a_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let error = load_from(&cli_with_config(directory.path()), None).unwrap_err();
+        assert!(matches!(error, SettingsError::Read { .. }), "{error}");
+    }
+
+    #[test]
+    fn load_reads_the_default_file_when_it_exists() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = write_file(&directory, "config.toml", "repos = [\"a/b\"]");
+        let settings = load_from(&CommandLine::default(), Some(&path)).unwrap();
+        assert_eq!(settings.targets, vec![target("a/b")]);
+    }
+
+    #[test]
+    fn config_wins_over_the_default_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let default = write_file(&directory, "config.toml", "repos = [\"a/b\"]");
+        let chosen = write_file(&directory, "mine.toml", "repos = [\"c/d\"]");
+        let settings = load_from(&cli_with_config(&chosen), Some(&default)).unwrap();
+        assert_eq!(settings.targets, vec![target("c/d")]);
+    }
+
+    #[test]
+    fn a_missing_default_file_is_not_an_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("config.toml");
+        let cli = CommandLine {
+            targets: vec!["timmattison".to_owned()],
+            ..CommandLine::default()
+        };
+        let settings = load_from(&cli, Some(&missing)).unwrap();
+        assert_eq!(settings.targets, vec![target("timmattison")]);
+        let error = load_from(&CommandLine::default(), Some(&missing)).unwrap_err();
+        assert!(matches!(error, SettingsError::NoTargets { .. }), "{error}");
+        assert_names(&error, &[&missing.display().to_string()]);
+    }
+
+    #[test]
+    fn no_default_path_is_not_an_error() {
+        let cli = CommandLine {
+            targets: vec!["timmattison".to_owned()],
+            ..CommandLine::default()
+        };
+        assert!(load_from(&cli, None).is_ok());
     }
 }
