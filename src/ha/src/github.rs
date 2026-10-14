@@ -203,14 +203,37 @@ pub enum RunQuery {
     Active,
 }
 
+/// The most repositories of one owner that `ha` watches.
+pub const REPO_LIMIT: usize = 1000;
+
+/// The repositories of one owner, as `Source::repos_of` lists them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoList {
+    /// The repositories that are not archived, at most `REPO_LIMIT`.
+    pub repos: Vec<RepoName>,
+    /// True when the owner has more than `REPO_LIMIT`, so `repos` holds the first `REPO_LIMIT` only.
+    pub cut: bool,
+}
+
+impl RepoList {
+    /// The warning to show for this list, or `None` when the list is whole.
+    #[must_use]
+    pub fn warning(&self) -> Option<String> {
+        self.cut.then(|| {
+            format!("more than {REPO_LIMIT} repositories, ha watches the first {REPO_LIMIT}")
+        })
+    }
+}
+
 /// Where `ha` gets its data. `GhSource` is the real one.
 pub trait Source: Send + Sync {
     /// Lists the repositories of an owner. Archived repositories are left out.
+    /// A list longer than `REPO_LIMIT` comes back cut, and `RepoList::cut` says so.
     ///
     /// # Errors
     ///
     /// Returns a [`SourceError`] when the list cannot be fetched.
-    fn repos_of(&self, owner: &OwnerName) -> Result<Vec<RepoName>, SourceError>;
+    fn repos_of(&self, owner: &OwnerName) -> Result<RepoList, SourceError>;
 
     /// Lists the workflow runs of a repository that match `query`.
     ///
@@ -423,7 +446,7 @@ impl Default for GhSource {
 }
 
 impl Source for GhSource {
-    fn repos_of(&self, owner: &OwnerName) -> Result<Vec<RepoName>, SourceError> {
+    fn repos_of(&self, owner: &OwnerName) -> Result<RepoList, SourceError> {
         // The default `--limit` of `gh repo list` is 30. A larger limit stops
         // an owner with many repositories from losing the rest with no message.
         let output = self.run_gh(&[
@@ -439,7 +462,8 @@ impl Source for GhSource {
         if !output.status.success() {
             return Err(no_answer_error(&output));
         }
-        parse_repos(&String::from_utf8_lossy(&output.stdout))
+        let repos = parse_repos(&String::from_utf8_lossy(&output.stdout))?;
+        Ok(RepoList { repos, cut: false })
     }
 
     fn runs_of(&self, repo: &RepoName, query: RunQuery) -> Result<Vec<Run>, SourceError> {
@@ -1402,13 +1426,16 @@ mod tests {
             r#"[{"nameWithOwner":"Lock-Free-Labs/nvr-tools"},{"nameWithOwner":"Lock-Free-Labs/.github"}]"#,
         );
         let owner = OwnerName::parse("Lock-Free-Labs").unwrap();
-        let repos = stub.source().repos_of(&owner).expect("repositories");
+        let list = stub.source().repos_of(&owner).expect("repositories");
         assert_eq!(
-            repos,
-            [
-                repo("Lock-Free-Labs/nvr-tools"),
-                repo("Lock-Free-Labs/.github")
-            ]
+            list,
+            RepoList {
+                repos: vec![
+                    repo("Lock-Free-Labs/nvr-tools"),
+                    repo("Lock-Free-Labs/.github")
+                ],
+                cut: false
+            }
         );
         assert_eq!(
             stub.requests(),
@@ -1418,18 +1445,78 @@ mod tests {
                 "Lock-Free-Labs",
                 "--no-archived",
                 "--limit",
-                "1000",
+                "1001",
                 "--json",
                 "nameWithOwner"
             ]]
         );
     }
 
+    /// A stub whose `gh repo list` prints `count` repositories of `acme`.
+    fn stub_with_repos(count: usize) -> Stub {
+        let stub = Stub::new("cat \"$dir/list.out\"");
+        let entries: Vec<String> = (0..count)
+            .map(|n| format!("{{\"nameWithOwner\":\"acme/r{n}\"}}"))
+            .collect();
+        stub.file("list.out", &format!("[{}]", entries.join(",")));
+        stub
+    }
+
+    #[test]
+    fn repos_of_cuts_a_list_of_more_than_1000_and_says_so() {
+        let stub = stub_with_repos(1001);
+        let owner = OwnerName::parse("acme").unwrap();
+        let list = stub.source().repos_of(&owner).expect("repositories");
+        assert_eq!(list.repos.len(), 1000);
+        assert_eq!(list.repos[0], repo("acme/r0"));
+        assert_eq!(list.repos[999], repo("acme/r999"));
+        assert!(list.cut);
+        let requests = stub.requests();
+        assert!(
+            requests[0]
+                .windows(2)
+                .any(|pair| pair == ["--limit", "1001"]),
+            "{requests:?}"
+        );
+    }
+
+    #[test]
+    fn repos_of_with_exactly_1000_is_not_cut() {
+        let stub = stub_with_repos(1000);
+        let owner = OwnerName::parse("acme").unwrap();
+        let list = stub.source().repos_of(&owner).expect("repositories");
+        assert_eq!(list.repos.len(), 1000);
+        assert!(!list.cut);
+    }
+
+    #[test]
+    fn a_cut_list_has_a_warning_and_a_whole_list_has_none() {
+        let cut = RepoList {
+            repos: Vec::new(),
+            cut: true,
+        };
+        let whole = RepoList {
+            repos: Vec::new(),
+            cut: false,
+        };
+        assert_eq!(
+            cut.warning().as_deref(),
+            Some("more than 1000 repositories, ha watches the first 1000")
+        );
+        assert_eq!(whole.warning(), None);
+    }
+
     #[test]
     fn repos_of_gives_an_empty_list_for_an_owner_with_no_repositories() {
         let stub = Stub::new("echo '[]'");
         let owner = OwnerName::parse("nobody").unwrap();
-        assert_eq!(stub.source().repos_of(&owner), Ok(Vec::new()));
+        assert_eq!(
+            stub.source().repos_of(&owner),
+            Ok(RepoList {
+                repos: Vec::new(),
+                cut: false
+            })
+        );
     }
 
     #[test]

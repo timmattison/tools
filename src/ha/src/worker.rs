@@ -361,7 +361,7 @@ fn refresh_repos<S: Source>(
         listed = true;
         match source.repos_of(owner) {
             Ok(list) => {
-                state.owner_lists.insert(owner.clone(), list);
+                state.owner_lists.insert(owner.clone(), list.repos);
                 state.owner_errors.remove(owner);
             }
             Err(error) => {
@@ -417,7 +417,7 @@ mod tests {
     use std::sync::{Arc, Mutex, PoisonError};
 
     use super::*;
-    use crate::github::{RunQuery, SourceError};
+    use crate::github::{RepoList, RunQuery, SourceError};
     use crate::run::{RunId, RunState};
     use crate::target::Target;
 
@@ -428,6 +428,8 @@ mod tests {
     #[derive(Default)]
     struct Script {
         owners: HashMap<OwnerName, Result<Vec<RepoName>, SourceError>>,
+        /// The owners whose list the fake gives as cut.
+        cut: std::collections::HashSet<OwnerName>,
         created: HashMap<RepoName, Result<Vec<Run>, SourceError>>,
         active: HashMap<RepoName, Result<Vec<Run>, SourceError>>,
         calls: Vec<(&'static str, String)>,
@@ -452,10 +454,16 @@ mod tests {
     }
 
     impl Source for Arc<FakeSource> {
-        fn repos_of(&self, owner: &OwnerName) -> Result<Vec<RepoName>, SourceError> {
+        fn repos_of(&self, owner: &OwnerName) -> Result<RepoList, SourceError> {
             let mut script = self.script();
             script.calls.push(("owner", owner.to_string()));
-            script.owners.get(owner).cloned().unwrap_or(Ok(Vec::new()))
+            let cut = script.cut.contains(owner);
+            script
+                .owners
+                .get(owner)
+                .cloned()
+                .unwrap_or(Ok(Vec::new()))
+                .map(|repos| RepoList { repos, cut })
         }
 
         fn runs_of(&self, repo: &RepoName, query: RunQuery) -> Result<Vec<Run>, SourceError> {
@@ -940,6 +948,35 @@ mod tests {
                 error: failure.to_string()
             }]
         );
+    }
+
+    #[test]
+    fn a_cut_owner_list_shows_an_owner_error_and_keeps_its_repositories() {
+        let fake = Arc::new(FakeSource::default());
+        fake.script()
+            .owners
+            .insert(owner("acme"), Ok(vec![repo("acme/a")]));
+        fake.script().cut.insert(owner("acme"));
+        fake.script()
+            .created
+            .insert(repo("acme/a"), Ok(vec![run("acme/a", 1)]));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme"]), SLOW_CADENCE);
+        let first = one_cycle(&worker);
+
+        assert_eq!(
+            first[0],
+            Update::Repos {
+                repos: [repo("acme/a")].into(),
+                owner_errors: vec![(
+                    owner("acme"),
+                    "more than 1000 repositories, ha watches the first 1000".to_owned()
+                )]
+            }
+        );
+        assert!(first.iter().any(|update| matches!(
+            update,
+            Update::Runs { repo: r, .. } if *r == repo("acme/a")
+        )));
     }
 
     #[test]
