@@ -11,6 +11,7 @@
 
 mod config;
 mod docker_args;
+mod flag_check;
 mod fleet;
 mod host;
 mod survey;

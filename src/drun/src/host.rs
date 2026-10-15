@@ -151,6 +151,17 @@ pub fn ask(context: &ContextName, args: &[&str], limit: Duration) -> Result<Stri
         .map_err(|_| HostFailure::Unreadable("the output is not UTF-8".to_owned()))
 }
 
+/// Runs `docker <subcommand> --help` on this computer, without a context,
+/// and gives back its stdout. The docker CLI prints the help without a
+/// connection to an engine.
+///
+/// # Errors
+///
+/// Returns a [`HostFailure`] for the same reasons as [`ask`].
+pub fn docker_help(subcommand: &str, limit: Duration) -> Result<String, HostFailure> {
+    todo!("{subcommand} {limit:?}")
+}
+
 /// Asks every host in `contexts` the same `question`, all at the same time.
 ///
 /// The answers come back in the order of `contexts`.
