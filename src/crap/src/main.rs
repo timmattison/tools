@@ -1633,16 +1633,15 @@ fn format_fork_at_output(
 /// `command crap`, forwarding all arguments (so flags like `--force` and
 /// `--here` work). The helper `__crap_launch` starts Claude, with the same argv
 /// on every path. It starts Claude through the shell text in `CRAP_LAUNCHER`
-/// when that variable is set and not empty, else through `clauded` when that
-/// name exists, else through plain `claude`. The function never guesses at a
-/// generic name such as `c`, because many users give `c` to a command that is
-/// not Claude. The helper evaluates the launcher through `eval`, so an alias is
-/// expanded at call time (shell aliases are otherwise not expanded inside
-/// function bodies), and a launcher with flags of its own works. A launcher
-/// that keeps the session id in its own argv lets a Zellij resurrect resume a
-/// fork, because the fork argv pins the fork id. If the binary exits non-zero
-/// (session not found, already running, …) its message is shown and the
-/// function does nothing further.
+/// when that variable is set and not empty, else through plain `claude`. The
+/// function never guesses at a generic name such as `c`, because many users
+/// give `c` to a command that is not Claude. The helper evaluates the launcher
+/// through `eval`, so an alias is expanded at call time (shell aliases are
+/// otherwise not expanded inside function bodies), and a launcher with flags
+/// of its own works. A launcher that keeps the session id in its own argv lets
+/// a Zellij resurrect resume a fork, because the fork argv pins the fork id. If
+/// the binary exits non-zero (session not found, already running, …) its
+/// message is shown and the function does nothing further.
 ///
 /// The binary speaks one of three output shapes:
 ///
@@ -1678,18 +1677,12 @@ fn format_fork_at_output(
 /// `crap <new-id>` can resume the fork.
 const SHELL_CODE: &str = r#"
 # Start Claude with the argv in "$@". CRAP_LAUNCHER holds the launcher as shell
-# text: an alias, a function, or a command with flags. Else clauded starts
-# Claude when it exists, else plain claude does. A shell does not expand an
-# alias in a function body that it parsed before the alias existed, and eval
-# parses the text when this function runs.
+# text: an alias, a function, or a command with flags. When it is empty, plain
+# claude starts Claude. A shell does not expand an alias in a function body
+# that it parsed before the alias existed, and eval parses the text when this
+# function runs.
 function __crap_launch() {
-    if [ -n "${CRAP_LAUNCHER:-}" ]; then
-        eval "$CRAP_LAUNCHER"' "$@"'
-    elif command -v clauded >/dev/null 2>&1; then
-        eval 'clauded "$@"'
-    else
-        claude "$@"
-    fi
+    eval "${CRAP_LAUNCHER:-claude}"' "$@"'
 }
 function crap() {
     # These flags make the binary print to stdout and exit 0 without mutating
@@ -4404,8 +4397,8 @@ mod tests {
     /// The directories that hold the tools that the shell function and the
     /// fakes use: `find`, `wc`, `cat`, `basename`, and the shells.
     ///
-    /// A test does not inherit `PATH`. A `c` or a `clauded` in a directory of
-    /// the developer then cannot answer for a fake that the test leaves out on
+    /// A test does not inherit `PATH`. A launcher in a directory of the
+    /// developer then cannot answer for a fake that the test leaves out on
     /// purpose.
     #[cfg(unix)]
     const SYSTEM_PATH: &str = "/usr/bin:/bin";
@@ -4454,8 +4447,7 @@ mod tests {
     }
 
     /// Sources `SHELL_CODE` in a real `bash`, with a fake `crap` binary (and
-    /// fake `claude`, `clauded`, and `c`) ahead of it on `PATH`, then runs
-    /// `crap <args>`.
+    /// fake `claude` and `c`) ahead of it on `PATH`, then runs `crap <args>`.
     ///
     /// The fake binary mimics clap: informational flags print a recognizable
     /// marker to stdout and exit 0; anything else emits a `<session>\n<dir>`
@@ -4485,14 +4477,13 @@ mod tests {
             esac\n\
             printf 'session-xyz\\n/tmp/crap-resume-dir\\n'\n";
 
-        // Fake `claude`, `clauded`, and `c`: record that a resume was attempted.
+        // Fake `claude` and `c`: record that a resume was attempted.
         let marker_q = shellquote::shell_quote(&claude_marker.to_string_lossy());
         let fake_claude = format!("#!/bin/sh\n: > {marker_q}\n");
 
         for (name, body) in [
             ("crap", fake_crap.to_string()),
             ("claude", fake_claude.clone()),
-            ("clauded", fake_claude.clone()),
             ("c", fake_claude),
         ] {
             let path = dir.join(name);
@@ -4542,10 +4533,8 @@ mod tests {
     #[cfg(unix)]
     #[derive(Clone, Copy, Debug)]
     struct Launchers {
-        /// A fake named `c` is on `PATH`.
-        c: bool,
-        /// A fake named `clauded` is on `PATH`.
-        clauded: bool,
+        /// The names of the fakes on `PATH` in addition to the fake `claude`.
+        fakes: &'static [&'static str],
         /// The value of `CRAP_LAUNCHER`, or `None` to leave it unset.
         crap_launcher: Option<&'static str>,
     }
@@ -4554,37 +4543,26 @@ mod tests {
     impl Launchers {
         /// Only the fake `claude` is on `PATH`, and `CRAP_LAUNCHER` is unset.
         const PLAIN_CLAUDE: Self = Self {
-            c: false,
-            clauded: false,
-            crap_launcher: None,
-        };
-
-        /// A fake `clauded` is on `PATH`, and `CRAP_LAUNCHER` is unset.
-        const CLAUDED: Self = Self {
-            c: false,
-            clauded: true,
+            fakes: &[],
             crap_launcher: None,
         };
 
         /// A fake `c` is on `PATH`, and `CRAP_LAUNCHER` is unset. For many
         /// users `c` is `clear`, `code`, or a `cd` helper, not Claude.
         const UNNAMED_C: Self = Self {
-            c: true,
-            clauded: false,
+            fakes: &["c"],
             crap_launcher: None,
         };
 
-        /// `CRAP_LAUNCHER=c`, with a fake `c` and a fake `clauded` both on
-        /// `PATH`.
+        /// `CRAP_LAUNCHER=c`, with a fake `c` on `PATH`.
         const NAMED_C: Self = Self {
-            c: true,
-            clauded: true,
+            fakes: &["c"],
             crap_launcher: Some("c"),
         };
 
         /// One case for each branch of the launcher choice: `CRAP_LAUNCHER`,
-        /// then `clauded`, then plain `claude`.
-        const EVERY_BRANCH: [Self; 3] = [Self::NAMED_C, Self::CLAUDED, Self::PLAIN_CLAUDE];
+        /// then plain `claude`.
+        const EVERY_BRANCH: [Self; 2] = [Self::NAMED_C, Self::PLAIN_CLAUDE];
     }
 
     /// What one run of the shell function in a fork mode left behind.
@@ -4595,7 +4573,7 @@ mod tests {
         /// The directory that the fake launcher ran in. It is canonicalized
         /// while the temp directory still exists.
         claude_cwd: PathBuf,
-        /// The name of the fake that ran: `c`, `clauded`, or `claude`. It is
+        /// The name of the fake that ran, for example `c` or `claude`. It is
         /// empty when no fake ran.
         launcher: String,
         /// What the shell function wrote to standard output.
@@ -4621,9 +4599,9 @@ mod tests {
     /// error to stderr and exits 1. The real binary does the same when it
     /// finds, or does not find, the transcript of `<id>`.
     ///
-    /// The fake `claude` is always on `PATH`. The fakes `c` and `clauded` are
-    /// on `PATH` as `launchers` says, and `CRAP_LAUNCHER` holds the value that
-    /// `launchers` gives. The fakes are identical except for their name. Each
+    /// The fake `claude` is always on `PATH`, and so is each fake that
+    /// `launchers` names. `CRAP_LAUNCHER` holds the value that `launchers`
+    /// gives. The fakes are identical except for their name. Each
     /// one records its arguments, the directory it ran in, and its own name.
     /// When `save_fork` is true, it also saves the id that follows
     /// `--session-id`. That is how the fakes show a fork that Claude saved:
@@ -4669,9 +4647,8 @@ mod tests {
              cat {wire_q}\n"
         );
 
-        // Fake `claude`, `clauded`, and `c`: record the argv, the cwd, and its
-        // own name. When the fork is saved, also save the id that follows
-        // `--session-id`.
+        // Each fake launcher records the argv, the cwd, and its own name. When
+        // the fork is saved, it also saves the id that follows `--session-id`.
         let save_step = if save_fork {
             format!(
                 "prev=\n\
@@ -4691,11 +4668,8 @@ mod tests {
             );
 
         let mut tools = vec![("crap", fake_crap), ("claude", fake_claude.clone())];
-        if launchers.c {
-            tools.push(("c", fake_claude.clone()));
-        }
-        if launchers.clauded {
-            tools.push(("clauded", fake_claude));
+        for &name in launchers.fakes {
+            tools.push((name, fake_claude.clone()));
         }
         for (name, body) in tools {
             let path = dir.join(name);
@@ -4776,7 +4750,7 @@ mod tests {
     fn shell_function_pins_forced_new_id_via_session_id() {
         // When the binary supplies a forced id, the resume must fork *and* pin
         // the fork to that id with `--session-id`, on each dispatch path:
-        // `CRAP_LAUNCHER`, `clauded`, and plain `claude`.
+        // `CRAP_LAUNCHER` and plain `claude`.
         for launchers in Launchers::EVERY_BRANCH {
             let run = run_here_shell_function(FORCED_NEW_ID, launchers, true);
             assert!(
@@ -4964,7 +4938,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn shell_function_starts_claude_through_crap_launcher() {
-        // `CRAP_LAUNCHER` names the launcher, and it outranks a `clauded`. A
+        // `CRAP_LAUNCHER` names the launcher, and it outranks plain `claude`. A
         // launcher that keeps the session id in its own argv lets a Zellij
         // resurrect resume a fork and not fork the original again, so the
         // Claude argv must get to it unchanged.
@@ -4995,18 +4969,22 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn shell_function_starts_claude_through_clauded_when_crap_launcher_is_unset() {
-        // A user who sets no `CRAP_LAUNCHER` keeps the behavior from before
-        // the variable: a `clauded`, often with flags of its own, starts
-        // Claude. An empty `CRAP_LAUNCHER` is the same as no `CRAP_LAUNCHER`,
-        // and a `c` on `PATH` does not change that.
-        assert_launches_through(Launchers::CLAUDED, "clauded", &[]);
-        let empty = Launchers {
-            c: true,
-            crap_launcher: Some(""),
-            ..Launchers::CLAUDED
+    fn shell_function_never_starts_clauded() {
+        // `clauded` was a launcher that added `--dangerously-skip-permissions`,
+        // and nothing uses it now (issue #558). A `clauded` that stays on
+        // `PATH` must not start Claude. When `CRAP_LAUNCHER` is unset or
+        // empty, plain `claude` starts, and a `c` on `PATH` does not change
+        // that.
+        let unset = Launchers {
+            fakes: &["clauded"],
+            crap_launcher: None,
         };
-        assert_launches_through(empty, "clauded", &[]);
+        assert_launches_through(unset, "claude", &[]);
+        let empty = Launchers {
+            fakes: &["c", "clauded"],
+            crap_launcher: Some(""),
+        };
+        assert_launches_through(empty, "claude", &[]);
     }
 
     #[cfg(unix)]
