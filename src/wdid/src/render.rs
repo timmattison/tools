@@ -483,9 +483,10 @@ fn escape(command: &str) -> String {
 /// parse.
 ///
 /// Each command has one line: the number of rows in plain digits, a tab, and
-/// the escaped command. Plain digits let `sort -n` and `awk` read the list. A blank line and the names of the functions follow, when a function
-/// did not parse. With no command and no function, the text says that every
-/// command parsed.
+/// the escaped command. Plain digits let `sort -n` and `awk` read the list. A
+/// blank line and the names of the functions follow, when a function did not
+/// parse. With no command and no function, the text says that every command
+/// parsed.
 #[must_use]
 pub fn unparsed(tally: &Tally) -> String {
     let summary = &tally.summary;
