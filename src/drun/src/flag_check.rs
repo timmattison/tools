@@ -326,7 +326,7 @@ mod tests {
     #[test]
     fn the_help_of_docker_run_gives_each_flag_and_its_value() {
         let flags = parse_help(committed_help("run")).unwrap();
-        assert_eq!(flags.len(), 98);
+        assert_eq!(flags.len(), 102);
         let expect = |long: &str, short: Option<char>, takes_value: bool| {
             assert_eq!(
                 find(&flags, long),

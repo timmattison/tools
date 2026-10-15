@@ -14,6 +14,15 @@ use runlimit::RunFailure;
 /// The program that `drun` runs for every host.
 const DOCKER: &str = "docker";
 
+/// The prefix of every environment variable that the docker CLI reads.
+const DOCKER_ENVIRONMENT_PREFIX: &str = "DOCKER_";
+
+/// The `DOCKER_HOST` that `drun` gives `docker <subcommand> --help`.
+/// `/dev/null` is not a directory, so no engine can listen at this path, and
+/// docker prints the help of the CLI alone. `DOCKER_HOST` beats the current
+/// context in the docker config.
+const NO_ENGINE_HOST: &str = "unix:///dev/null/drun-no-engine.sock";
+
 /// The most characters of an error from docker that a message shows.
 const DETAIL_LIMIT: usize = 200;
 
@@ -144,14 +153,25 @@ pub fn ask(context: &ContextName, args: &[&str], limit: Duration) -> Result<Stri
 }
 
 /// Runs `docker <subcommand> --help` on this computer, without a context,
-/// and gives back its stdout. The docker CLI prints the help without a
-/// connection to an engine.
+/// and gives back its stdout. The docker CLI hides each flag that the engine
+/// or `DOCKER_API_VERSION` does not support. So `drun` removes the `DOCKER_`
+/// environment and points docker at no engine, and docker lists every flag
+/// that the CLI knows.
 ///
 /// # Errors
 ///
 /// Returns a [`HostFailure`] for the same reasons as [`ask`].
 pub fn docker_help(subcommand: &str, limit: Duration) -> Result<String, HostFailure> {
     let mut command = Command::new(DOCKER);
+    for (name, _) in std::env::vars_os() {
+        if name
+            .to_string_lossy()
+            .starts_with(DOCKER_ENVIRONMENT_PREFIX)
+        {
+            command.env_remove(name);
+        }
+    }
+    command.env("DOCKER_HOST", NO_ENGINE_HOST);
     command.args([subcommand, "--help"]);
     stdout_of(&mut command, limit)
 }

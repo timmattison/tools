@@ -202,7 +202,8 @@ image. Write the flag with its value after `=`, as in `--new-flag=value` or
 Run `drun check-flags` after each update of Docker on this computer. It runs
 `docker run --help`, `docker logs --help`, `docker exec --help`,
 `docker cp --help`, and `docker rm --help`, reads the flags from each, and
-compares them with the tables:
+compares them with the tables. It asks docker for the help without an engine,
+so the result does not change with the current context:
 
 ```console
 $ drun check-flags
@@ -224,16 +225,22 @@ reports agreement from help that it did not read.
 To update a table after a difference:
 
 1. Change the table in `src/drun/src/docker_args.rs`. Wrap a flag that docker
-   accepts but does not list in `hidden(...)`, as for `--net` and the flags for
-   Windows only.
+   accepts but does not list in `hidden(...)`, as for `--net`.
 2. Copy the new help into the fixtures, and record the version:
 
    ```sh
    for command in run logs exec cp rm; do
-       docker "$command" --help > "src/drun/tests/fixtures/help/$command.txt"
+       env -i PATH="$PATH" HOME="$HOME" DOCKER_HOST=unix:///dev/null/drun-no-engine.sock \
+           docker "$command" --help < /dev/null > "src/drun/tests/fixtures/help/$command.txt"
    done
    docker --version > src/drun/tests/fixtures/help/VERSION
    ```
+
+   The docker CLI hides the flags that the engine behind the current context
+   does not support, and the flags that `DOCKER_API_VERSION` excludes. `env -i`
+   removes those variables, `DOCKER_HOST` points docker at no engine, and
+   `< /dev/null` keeps the wrap width at 80 columns, the same as
+   `drun check-flags`.
 
 3. Run `cargo test -p drun`. The test
    `every_table_agrees_with_the_committed_help_of_docker` holds each table to

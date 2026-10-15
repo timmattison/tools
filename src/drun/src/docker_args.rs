@@ -24,8 +24,7 @@ pub struct FlagSpec {
     /// True when the flag takes a value, as in `--name web`.
     pub takes_value: bool,
     /// True when `docker <command> --help` lists the flag. Docker accepts a
-    /// flag that it does not list, such as an old alias or a flag for
-    /// Windows only.
+    /// flag that it does not list, such as an old alias.
     pub listed: bool,
 }
 
@@ -125,8 +124,8 @@ const RUN: CommandSpec = CommandSpec {
         long_value("cgroup-parent"),
         long_value("cgroupns"),
         long_value("cidfile"),
-        hidden(long_value("cpu-count")),
-        hidden(long_value("cpu-percent")),
+        long_value("cpu-count"),
+        long_value("cpu-percent"),
         long_value("cpu-period"),
         long_value("cpu-quota"),
         long_value("cpu-rt-period"),
@@ -157,8 +156,8 @@ const RUN: CommandSpec = CommandSpec {
         long_value("health-start-interval"),
         long_value("health-start-period"),
         long_value("health-timeout"),
-        hidden(long_value("io-maxbandwidth")),
-        hidden(long_value("io-maxiops")),
+        long_value("io-maxbandwidth"),
+        long_value("io-maxiops"),
         long_value("ip"),
         long_value("ip6"),
         long_value("ipc"),
