@@ -234,8 +234,7 @@ impl Fixture {
     /// one for each line. The text is empty when the fake has no record of a
     /// call.
     pub fn help_environment(&self, command: &str) -> String {
-        std::fs::read_to_string(self.path().join(format!("help-env-{command}")))
-            .unwrap_or_default()
+        std::fs::read_to_string(self.path().join(format!("help-env-{command}"))).unwrap_or_default()
     }
 
     fn write(&self, name: &str, text: &str) {
