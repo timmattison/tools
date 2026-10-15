@@ -469,7 +469,17 @@ pub(crate) mod tests {
     /// Counting the parts of a split on `-` is wrong here. Some words of the
     /// `names` crate contain `-`, for example `bite-sized` and `good-bye`.
     fn assert_numbered_form(name: &str) {
-        assert_eq!(name.split('-').count(), 3, "{name}");
+        let (words, number) = name
+            .rsplit_once('-')
+            .unwrap_or_else(|| panic!("no number in {name}"));
+        assert!(
+            number.len() == 4 && number.chars().all(|c| c.is_ascii_digit()),
+            "the number is not four ASCII digits in {name}"
+        );
+        assert!(
+            words.contains('-') && !words.starts_with('-') && !words.ends_with('-'),
+            "the adjective and the noun are not both present in {name}"
+        );
     }
 
     #[test]
