@@ -24,6 +24,23 @@ pub trait Opener {
     /// Returns the reason as text when no browser starts. The status line
     /// shows the reason after the address.
     fn open(&self, url: &str) -> Result<(), String>;
+
+    /// Gives the next open that failed after [`Opener::open`] returned, or
+    /// `None` when there is none.
+    ///
+    /// A forwarder can need some seconds to report that the browser did not
+    /// open, and `open` does not wait for it. The event loop thus calls this
+    /// method on each pass.
+    fn late_failure(&self) -> Option<OpenFailure>;
+}
+
+/// An open that failed after [`Opener::open`] returned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenFailure {
+    /// The address that did not open.
+    pub url: String,
+    /// Why it did not open.
+    pub reason: String,
 }
 
 /// A source of terminal events.
@@ -226,10 +243,12 @@ mod tests {
         }
     }
 
-    /// Records each address and can be set to fail.
+    /// Records each address and can be set to fail. Each failure in `late`
+    /// comes back from one call of `late_failure`, in order.
     struct RecordingOpener {
         urls: RefCell<Vec<String>>,
         fails: bool,
+        late: RefCell<VecDeque<OpenFailure>>,
     }
 
     impl Opener for RecordingOpener {
@@ -241,12 +260,17 @@ mod tests {
                 Ok(())
             }
         }
+
+        fn late_failure(&self) -> Option<OpenFailure> {
+            self.late.borrow_mut().pop_front()
+        }
     }
 
     fn opener(fails: bool) -> RecordingOpener {
         RecordingOpener {
             urls: RefCell::new(Vec::new()),
             fails,
+            late: RefCell::new(VecDeque::new()),
         }
     }
 
@@ -460,6 +484,25 @@ mod tests {
         assert!(
             status_line
                 .contains("could not open a browser: https://example.test/runs/1 (no browser)"),
+            "{status_line:?}"
+        );
+    }
+
+    #[test]
+    fn a_failure_after_the_open_shows_the_address_and_the_reason() {
+        let channels = channels();
+        let opener = opener(false);
+        opener.late.borrow_mut().push_back(OpenFailure {
+            url: "https://example.test/runs/1".to_owned(),
+            reason: "mosh-open failed".to_owned(),
+        });
+        let (result, frame) = run_app(&opener, &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        let status_line = frame.last().unwrap();
+        assert!(
+            status_line.contains(
+                "could not open a browser: https://example.test/runs/1 (mosh-open failed)"
+            ),
             "{status_line:?}"
         );
     }

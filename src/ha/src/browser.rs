@@ -19,12 +19,12 @@
 //! - A list of commands with `:` between them is not supported.
 
 use std::ffi::OsString;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
-use crate::app::Opener;
+use crate::app::{OpenFailure, Opener};
 
 /// The environment variable that names the browser command.
 pub const BROWSER_VARIABLE: &str = "BROWSER";
@@ -192,6 +192,21 @@ impl Opener for BrowserOpener {
             Launcher::Unusable(reason) => Err(reason.clone()),
         }
     }
+
+    fn late_failure(&self) -> Option<OpenFailure> {
+        None
+    }
+}
+
+/// Gives the reason to report for the browser command `program`, which
+/// stopped with `exit` after it ran for `ran_for`.
+fn failure_reason(
+    _program: &str,
+    _exit: std::io::Result<ExitStatus>,
+    _ran_for: Duration,
+    _window: Duration,
+) -> Option<String> {
+    None
 }
 
 #[cfg(test)]
@@ -208,21 +223,18 @@ mod tests {
     /// An address with the characters that a shell treats as special.
     const URL: &str = "https://github.com/o/r/actions/runs/1?check_suite_focus=true&page=2";
 
-    /// A time to wait that a short command always stops inside. Thus a test
-    /// that waits for the end of a command never races the clock.
-    const LONG_GRACE: Duration = Duration::from_secs(60);
+    /// A failure window that a short command always stops inside. Thus a
+    /// test that waits for the failure of a command never races the clock.
+    const WINDOW: Duration = Duration::from_secs(60);
 
-    /// A time to wait that ends before a blocked command stops.
-    const SHORT_GRACE: Duration = Duration::from_millis(100);
-
-    /// How long a test waits for a file that a command writes.
-    const FILE_WAIT: Duration = Duration::from_secs(60);
+    /// How long a test waits for a command to write a file or to fail.
+    const WAIT_LIMIT: Duration = Duration::from_secs(60);
 
     /// Builds an opener from the value of `BROWSER`. Its system opener
     /// records each address and never starts a real browser.
     fn opener_for(
         browser: Option<OsString>,
-        exit_grace: Duration,
+        window: Duration,
     ) -> (BrowserOpener, Rc<RefCell<Vec<String>>>) {
         let urls = Rc::new(RefCell::new(Vec::new()));
         let recorded = Rc::clone(&urls);
@@ -230,17 +242,33 @@ mod tests {
             recorded.borrow_mut().push(url.to_owned());
             Ok(())
         });
-        (BrowserOpener::new(browser, system, exit_grace), urls)
+        (BrowserOpener::new(browser, system, window), urls)
     }
 
     /// Builds an opener whose `BROWSER` holds `words`, as [`opener_for`] does.
-    fn opener(words: &str, exit_grace: Duration) -> (BrowserOpener, Rc<RefCell<Vec<String>>>) {
-        opener_for(Some(OsString::from(words)), exit_grace)
+    fn opener(words: &str, window: Duration) -> (BrowserOpener, Rc<RefCell<Vec<String>>>) {
+        opener_for(Some(OsString::from(words)), window)
     }
 
     /// Gives the quoted form of `path` for a shell command line.
     fn quoted(path: &Path) -> String {
         shellquote::shell_quote(&path.to_string_lossy())
+    }
+
+    /// Gives a shell command that writes the output of `producer` into
+    /// `output` in one step.
+    ///
+    /// `open` does not wait for the browser command, so a test reads the file
+    /// while the command can still run. The command writes a file next to
+    /// `output` and then renames it, thus a test that sees `output` sees all
+    /// of it.
+    fn write_whole(producer: &str, output: &Path) -> String {
+        let partial = output.with_extension("partial");
+        format!(
+            "{producer} > {partial} && mv {partial} {output}\n",
+            partial = quoted(&partial),
+            output = quoted(output),
+        )
     }
 
     /// Writes a script into `directory` that writes each of its arguments on
@@ -253,21 +281,51 @@ mod tests {
     fn recorder(directory: &Path) -> (String, std::path::PathBuf) {
         let output = directory.join("args.txt");
         let script = directory.join("record.sh");
-        fs::write(
-            &script,
-            format!("printf '%s\\n' \"$@\" > {}\n", quoted(&output)),
-        )
-        .unwrap();
+        fs::write(&script, write_whole("printf '%s\\n' \"$@\"", &output)).unwrap();
         (format!("/bin/sh {}", quoted(&script)), output)
     }
 
-    /// Reads the arguments that a recorder wrote.
+    /// Waits for the arguments that a recorder writes, and reads them.
     fn recorded_arguments(output: &Path) -> Vec<String> {
+        assert!(wait_for(output), "the browser command did not run");
         fs::read_to_string(output)
             .unwrap()
             .lines()
             .map(str::to_owned)
             .collect()
+    }
+
+    /// Writes a script into `directory` that waits until `release` exists,
+    /// and then runs `last`. Gives the `BROWSER` words that run the script.
+    ///
+    /// The wait stops after 60 s even when the test never writes `release`,
+    /// so a failed test leaves no process that runs forever.
+    fn waiting_command(directory: &Path, release: &Path, last: &str) -> String {
+        let script = directory.join("wait.sh");
+        fs::write(
+            &script,
+            format!(
+                "i=0\n\
+                 while [ ! -e {release} ] && [ \"$i\" -lt 600 ]; do sleep 0.1; i=$((i + 1)); done\n\
+                 {last}\n",
+                release = quoted(release),
+            ),
+        )
+        .unwrap();
+        format!("/bin/sh {}", quoted(&script))
+    }
+
+    /// Waits for the next late failure of `opener`, for at most
+    /// [`WAIT_LIMIT`].
+    fn wait_for_failure(opener: &BrowserOpener) -> Option<OpenFailure> {
+        let deadline = Instant::now() + WAIT_LIMIT;
+        while Instant::now() < deadline {
+            if let Some(failure) = opener.late_failure() {
+                return Some(failure);
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        opener.late_failure()
     }
 
     /// Makes sure that `reason` names `BROWSER` as the cause, and holds
@@ -278,9 +336,9 @@ mod tests {
         assert!(reason.contains(detail), "{reason:?}");
     }
 
-    /// Waits until `path` exists, for at most [`FILE_WAIT`].
+    /// Waits until `path` exists, for at most [`WAIT_LIMIT`].
     fn wait_for(path: &Path) -> bool {
-        let deadline = Instant::now() + FILE_WAIT;
+        let deadline = Instant::now() + WAIT_LIMIT;
         while Instant::now() < deadline {
             if path.exists() {
                 return true;
@@ -290,12 +348,20 @@ mod tests {
         path.exists()
     }
 
+    /// Gives the result of a wait for a command that exited with `code`.
+    #[cfg(unix)]
+    fn exit_with(code: i32) -> std::io::Result<ExitStatus> {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        Ok(ExitStatus::from_raw(code << 8))
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_browser_command_gets_the_address_as_its_last_argument() {
         let directory = tempfile::tempdir().unwrap();
         let (words, output) = recorder(directory.path());
-        let (opener, urls) = opener(&words, LONG_GRACE);
+        let (opener, urls) = opener(&words, WINDOW);
 
         assert_eq!(opener.open(URL), Ok(()));
 
@@ -308,7 +374,7 @@ mod tests {
     fn the_browser_command_is_split_into_words_as_a_shell_splits_it() {
         let directory = tempfile::tempdir().unwrap();
         let (words, output) = recorder(directory.path());
-        let (opener, _) = opener(&format!("{words} --new-window 'two words'"), LONG_GRACE);
+        let (opener, _) = opener(&format!("{words} --new-window 'two words'"), WINDOW);
 
         assert_eq!(opener.open(URL), Ok(()));
 
@@ -323,7 +389,7 @@ mod tests {
     fn a_percent_s_in_the_browser_command_takes_the_address() {
         let directory = tempfile::tempdir().unwrap();
         let (words, output) = recorder(directory.path());
-        let (opener, _) = opener(&format!("{words} --url=%s"), LONG_GRACE);
+        let (opener, _) = opener(&format!("{words} --url=%s"), WINDOW);
 
         assert_eq!(opener.open(URL), Ok(()));
 
@@ -332,19 +398,45 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_browser_command_that_fails_is_an_error() {
-        let (opener, urls) = opener("/bin/sh -c 'exit 3'", LONG_GRACE);
+    fn a_browser_command_that_fails_at_once_is_a_late_failure() {
+        let (opener, urls) = opener("/bin/sh -c 'exit 3'", WINDOW);
 
-        assert!(opener.open(URL).is_err());
+        assert_eq!(opener.open(URL), Ok(()));
 
+        let failure = wait_for_failure(&opener).expect("no failure arrived");
+        assert_eq!(failure.url, URL);
+        assert_names_browser_and(&failure.reason, "exit status: 3");
         assert!(urls.borrow().is_empty(), "the system opener also ran");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_browser_command_that_fails_after_open_returns_is_a_late_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let release = directory.path().join("release");
+        // As the opener of mosh-rs does, the command waits for an answer, and
+        // then it fails.
+        let words = waiting_command(directory.path(), &release, "exit 4");
+        let (opener, _) = opener(&words, WINDOW);
+
+        assert_eq!(opener.open(URL), Ok(()));
+
+        assert_eq!(
+            opener.late_failure(),
+            None,
+            "a failure arrived before the command stopped"
+        );
+        fs::write(&release, "").unwrap();
+        let failure = wait_for_failure(&opener).expect("no failure arrived");
+        assert_eq!(failure.url, URL);
+        assert_names_browser_and(&failure.reason, "exit status: 4");
     }
 
     #[test]
     fn a_browser_command_that_cannot_start_is_an_error() {
         let directory = tempfile::tempdir().unwrap();
         let missing = directory.path().join("no-such-browser");
-        let (opener, urls) = opener(&quoted(&missing), LONG_GRACE);
+        let (opener, urls) = opener(&quoted(&missing), WINDOW);
 
         let reason = opener.open(URL).unwrap_err();
 
@@ -354,7 +446,7 @@ mod tests {
 
     #[test]
     fn a_browser_command_with_an_open_quotation_is_an_error() {
-        let (opener, urls) = opener("/bin/sh 'no closing quote", LONG_GRACE);
+        let (opener, urls) = opener("/bin/sh 'no closing quote", WINDOW);
 
         let reason = opener.open(URL).unwrap_err();
 
@@ -367,7 +459,7 @@ mod tests {
     fn a_browser_variable_that_is_not_utf8_is_an_error() {
         use std::os::unix::ffi::OsStringExt;
 
-        let (opener, urls) = opener_for(Some(OsString::from_vec(vec![b'/', 0xff])), LONG_GRACE);
+        let (opener, urls) = opener_for(Some(OsString::from_vec(vec![b'/', 0xff])), WINDOW);
 
         let reason = opener.open(URL).unwrap_err();
 
@@ -381,21 +473,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let release = directory.path().join("release");
         let finished = directory.path().join("finished");
-        let script = directory.path().join("stay.sh");
-        // The loop stops after 60 s even when the test never releases it, so
-        // a failed test leaves no process that runs forever.
-        fs::write(
-            &script,
-            format!(
-                "i=0\n\
-                 while [ ! -e {release} ] && [ \"$i\" -lt 600 ]; do sleep 0.1; i=$((i + 1)); done\n\
-                 : > {finished}\n",
-                release = quoted(&release),
-                finished = quoted(&finished),
-            ),
-        )
-        .unwrap();
-        let (opener, urls) = opener(&format!("/bin/sh {}", quoted(&script)), SHORT_GRACE);
+        let words = waiting_command(
+            directory.path(),
+            &release,
+            &format!(": > {}", quoted(&finished)),
+        );
+        let (opener, urls) = opener(&words, WINDOW);
 
         assert_eq!(opener.open(URL), Ok(()));
 
@@ -416,13 +499,14 @@ mod tests {
         let script = directory.path().join("group.sh");
         fs::write(
             &script,
-            format!("echo \"$$ $(ps -o pgid= -p $$)\" > {}\n", quoted(&output)),
+            write_whole("echo \"$$ $(ps -o pgid= -p $$)\"", &output),
         )
         .unwrap();
-        let (opener, _) = opener(&format!("/bin/sh {}", quoted(&script)), LONG_GRACE);
+        let (opener, _) = opener(&format!("/bin/sh {}", quoted(&script)), WINDOW);
 
         assert_eq!(opener.open(URL), Ok(()));
 
+        assert!(wait_for(&output), "the browser command did not run");
         let text = fs::read_to_string(&output).unwrap();
         let ids: Vec<&str> = text.split_whitespace().collect();
         assert_eq!(ids.len(), 2, "unexpected output: {text:?}");
@@ -431,7 +515,7 @@ mod tests {
 
     #[test]
     fn no_browser_variable_uses_the_opener_of_the_system() {
-        let (opener, urls) = opener_for(None, LONG_GRACE);
+        let (opener, urls) = opener_for(None, WINDOW);
 
         assert_eq!(opener.open(URL), Ok(()));
 
@@ -441,7 +525,7 @@ mod tests {
     #[test]
     fn an_empty_browser_variable_uses_the_opener_of_the_system() {
         for value in ["", " \t "] {
-            let (opener, urls) = opener(value, LONG_GRACE);
+            let (opener, urls) = opener(value, WINDOW);
 
             assert_eq!(opener.open(URL), Ok(()), "BROWSER={value:?}");
 
@@ -452,8 +536,47 @@ mod tests {
     #[test]
     fn a_failure_of_the_system_opener_is_an_error() {
         let system: SystemOpener = Box::new(|_| Err(std::io::Error::other("no browser")));
-        let opener = BrowserOpener::new(None, system, LONG_GRACE);
+        let opener = BrowserOpener::new(None, system, WINDOW);
 
         assert!(opener.open(URL).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_that_fails_inside_the_window_gives_a_reason() {
+        for ran_for in [Duration::ZERO, WINDOW] {
+            let reason = failure_reason("mosh-open", exit_with(4), ran_for, WINDOW);
+
+            assert_names_browser_and(
+                &reason.expect("no reason"),
+                "mosh-open failed: exit status: 4",
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_that_fails_after_the_window_gives_no_reason() {
+        let late = WINDOW + Duration::from_millis(1);
+
+        assert_eq!(failure_reason("firefox", exit_with(1), late, WINDOW), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_that_succeeds_gives_no_reason() {
+        assert_eq!(
+            failure_reason("mosh-open", exit_with(0), Duration::ZERO, WINDOW),
+            None
+        );
+    }
+
+    #[test]
+    fn a_command_that_ha_cannot_wait_for_gives_a_reason() {
+        let exit = Err(std::io::Error::other("no child process"));
+
+        let reason = failure_reason("mosh-open", exit, Duration::ZERO, WINDOW);
+
+        assert_names_browser_and(&reason.expect("no reason"), "no child process");
     }
 }
