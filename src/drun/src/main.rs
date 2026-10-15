@@ -461,9 +461,10 @@ fn warn_about(parsed: &RunArgs, host: &ContextName) {
     for source in &parsed.bind_sources {
         if Path::new(source).exists() {
             eprintln!(
-                "drun: warning: the bind mount {source} is a path on this computer, but the \
-                 container runs on {host}, so Docker mounts {source} from {host}. To move \
-                 files, use a named volume and docker cp"
+                "drun: warning: the bind mount {source} is a path on this computer, and the \
+                 container runs on {host}. When {host} is another computer, Docker mounts \
+                 {source} from {host} and not from this computer. To move files to or from \
+                 another computer, use a named volume and drun cp"
             );
         }
     }
@@ -587,9 +588,9 @@ Commands:
   in docker, a NAME that starts with / is a name and never an ID.
 
 Files:
-  The container runs on another computer. A bind mount, as in
-  -v ./src:/app, mounts a path on that computer and not on this one. Write
-  the results to a named volume, and get them with drun cp.
+  When the host is another computer, a bind mount, as in -v ./src:/app,
+  mounts a path on that computer and not on this one. Write the results to
+  a named volume, and get them with drun cp.
 
 Names:
   drun gives each container a name that no host uses, unless you give a name
