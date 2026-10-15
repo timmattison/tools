@@ -2095,6 +2095,31 @@ cannot hang the caller. Used by `cwt` and `ha`.
     that comes first on `PATH` runs.
   - To install: `cargo install --git https://github.com/timmattison/tools ha`
 
+- drun (Docker run on the least busy host)
+  - Runs a Docker container on the least busy of your Docker hosts, and finds the container again
+    later. Use it when this computer is short of memory and other computers on the network can
+    run the containers. A host is a Docker context, usually a computer that `docker` connects to
+    through SSH.
+  - `drun run` takes the arguments of `docker run`. It starts a small `busybox` container on each
+    host at the same time, reads the free memory and the load average, and runs the container on
+    the host whose fullest resource is the least full. Without `-d`, the terminal goes to the
+    container, and `drun` exits with the exit status of the container. With `-d`, `drun` prints
+    `<host> <name>`.
+  - `drun` keeps no record of its own. `drun ps`, `drun status`, `drun logs`, `drun wait`,
+    `drun exec`, `drun cp`, and `drun rm` ask every host for its containers and use the one host
+    that has the named container. Each container gets a name that no host uses, and the label
+    `drun.managed=true`.
+  - `drun hosts` shows how busy each host is. `drun pick` prints the host that `drun` chooses,
+    for `docker --context "$(drun pick)" compose up -d`.
+  - Name the hosts in `DRUN_CONTEXTS=box-a,box-b` or in `~/.config/drun/config.toml`.
+    [src/drun/README.md](src/drun/README.md) gives the setup of the hosts, the reuse of SSH
+    connections, and what changes when a container runs on another computer.
+  - Usage: `drun run -d -p 8080:80 nginx`, `drun run --rm alpine uname -a`, `drun ps`,
+    `drun status quirky-otter-4821`, `drun logs -f quirky-otter-4821`,
+    `drun wait quirky-otter-4821`, `drun cp quirky-otter-4821:/out/result.json .`,
+    `drun rm quirky-otter-4821`, `drun hosts`
+  - To install: `cargo install --git https://github.com/timmattison/tools drun`
+
 ## dirhash
 
 Calculate a SHA256 hash of a directory tree that's deterministic based on file contents. Skips hidden files and the files that .gitignore and the other standard ignore files name.
