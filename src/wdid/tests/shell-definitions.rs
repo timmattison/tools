@@ -80,7 +80,11 @@ fn script_lists_aliases_and_functions_with_the_command_of_each_shell() {
     assert!(zsh.contains("alias -L"), "{zsh}");
     assert!(zsh.contains("${(ok)functions}"), "{zsh}");
     assert!(zsh.contains("${functions[$__wdid_function]}"), "{zsh}");
+    let autoload = zsh.find("autoload +X -m '[^_]*'").expect(&zsh);
+    let loop_start = zsh.find("for __wdid_function").expect(&zsh);
+    assert!(autoload < loop_start, "{zsh}");
     let bash = script(ShellKind::Bash, &marker);
+    assert!(!bash.contains("autoload"), "{bash}");
     assert!(bash.contains("alias -p"), "{bash}");
     assert!(bash.contains("compgen -A function"), "{bash}");
     assert!(
@@ -548,6 +552,77 @@ fn a_real_zsh_gives_its_aliases_and_functions() {
         definitions.unparsed_aliases.is_empty(),
         "{:?}",
         definitions.unparsed_aliases
+    );
+}
+
+/// An autoloaded zsh function is a stub until the shell loads it. The script
+/// loads the stubs first, so the body counts. A name that starts with `_` is a
+/// completion function and stays a stub.
+#[test]
+fn an_autoloaded_zsh_function_counts_through_its_body() {
+    let Some(zsh) = find_shell("zsh") else {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    let directory = home.path().join("functions");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(directory.join("wdidfn"), "prcp \"$@\"\n").unwrap();
+    std::fs::write(directory.join("_wdidcomp"), "prhash\n").unwrap();
+    std::fs::write(
+        home.path().join(".zshrc"),
+        format!(
+            "fpath=({} $fpath)\nautoload -Uz wdidfn _wdidcomp\n",
+            shellquote::shell_quote(&directory.to_string_lossy())
+        ),
+    )
+    .unwrap();
+    let definitions = read(
+        real_shell(&zsh, home.path()),
+        ShellKind::Zsh,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    assert_eq!(
+        definitions.functions["wdidfn"],
+        vec![CommandWord::new("prcp", ["\"$@\""])]
+    );
+    assert!(
+        definitions.functions["_wdidcomp"]
+            .iter()
+            .all(|word| word.word != "prhash"),
+        "{:?}",
+        definitions.functions["_wdidcomp"]
+    );
+    assert!(!definitions
+        .unparsed_functions
+        .contains(&"wdidfn".to_string()));
+}
+
+/// `autoload +X` exits non-zero when a stub cannot load. A `.zshrc` with
+/// `ERR_EXIT` must not stop the script because of that.
+#[test]
+fn an_autoload_stub_that_cannot_load_does_not_stop_the_script() {
+    let Some(zsh) = find_shell("zsh") else {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join(".zshrc"),
+        "setopt ERR_EXIT\nalias wtm='wt --main'\nwt() { cwt \"$@\" }\nautoload -Uz wdidmissing\n",
+    )
+    .unwrap();
+    let definitions = read(
+        real_shell(&zsh, home.path()),
+        ShellKind::Zsh,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    assert_eq!(definitions.aliases.get("wtm"), Some("wt --main"));
+    assert_eq!(
+        definitions.functions["wt"],
+        vec![CommandWord::new("cwt", ["\"$@\""])]
     );
 }
 
