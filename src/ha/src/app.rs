@@ -25,15 +25,6 @@ pub trait Opener {
     fn open(&self, url: &str) -> Result<(), String>;
 }
 
-/// The opener that starts the default browser of the system.
-pub struct BrowserOpener;
-
-impl Opener for BrowserOpener {
-    fn open(&self, url: &str) -> Result<(), String> {
-        open::that_detached(url).map_err(|error| error.to_string())
-    }
-}
-
 /// A source of terminal events.
 pub trait Events {
     /// Waits up to `timeout` for one event.

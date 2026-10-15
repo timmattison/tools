@@ -11,8 +11,9 @@ use std::time::Duration;
 
 use chrono::{Local, Utc};
 use clap::{CommandFactory, FromArgMatches, Parser};
-use ha::app::{App, BrowserOpener, TerminalEvents};
+use ha::app::{App, TerminalEvents};
 use ha::board::Board;
+use ha::browser::BrowserOpener;
 use ha::github::GhSource;
 use ha::settings::{self, CommandLine, Settings};
 use ha::status::{RateLimit, Status};
@@ -133,7 +134,7 @@ fn run_view(settings: &Settings, rate: RateLimit, worker: &Worker) -> std::io::R
     let mut app = App::new(
         Board::new(settings.window),
         status,
-        &BrowserOpener,
+        &BrowserOpener::from_environment(),
         worker,
         &Utc::now,
         &tz,

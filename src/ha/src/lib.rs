@@ -10,6 +10,7 @@
 )]
 pub mod app;
 pub mod board;
+pub mod browser;
 pub mod github;
 pub mod render;
 pub mod run;
