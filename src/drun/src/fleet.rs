@@ -458,37 +458,69 @@ pub(crate) mod tests {
         assert!(message.contains("box-c (no answer in 10 s)"), "{message}");
     }
 
+    /// The message of the refusal when `reference` matches more than one
+    /// container.
+    fn ambiguity(inventory: &Inventory, reference: &str) -> String {
+        let error = inventory
+            .locate(reference)
+            .expect_err("the reference matches more than one container");
+        assert!(matches!(error, LocateError::Ambiguous { .. }), "{error:?}");
+        error.to_string()
+    }
+
     #[test]
-    fn a_container_on_two_hosts_is_ambiguous_and_names_both() {
+    fn a_name_on_two_hosts_is_ambiguous_and_each_container_is_named() {
         let inventory = Inventory {
             answers: vec![
                 answer("box-a", vec![container("aaa111", "job-1")]),
                 answer("box-b", vec![container("bbb111", "job-1")]),
             ],
         };
-        let error = inventory.locate("job-1").unwrap_err();
-        assert_eq!(
-            error,
-            LocateError::Ambiguous {
-                reference: "job-1".to_owned(),
-                hosts: vec![
-                    ContextName::parse("box-a").unwrap(),
-                    ContextName::parse("box-b").unwrap()
-                ]
-            }
-        );
-        assert!(error.to_string().contains("box-a, box-b"), "{error}");
+        let message = ambiguity(&inventory, "job-1");
+        assert!(message.contains("job-1 (aaa111) on box-a"), "{message}");
+        assert!(message.contains("job-1 (bbb111) on box-b"), "{message}");
     }
 
     #[test]
-    fn two_containers_on_one_host_are_one_host() {
+    fn the_start_of_two_ids_on_one_host_is_ambiguous() {
         let inventory = Inventory {
             answers: vec![answer(
                 "box-a",
                 vec![container("abc111", "one"), container("abc222", "two")],
             )],
         };
-        assert_eq!(located(&inventory, "abc"), Ok("box-a".to_owned()));
+        let message = ambiguity(&inventory, "abc");
+        assert!(message.contains("one (abc111) on box-a"), "{message}");
+        assert!(message.contains("two (abc222) on box-a"), "{message}");
+    }
+
+    #[test]
+    fn the_start_of_an_id_on_each_of_two_hosts_is_ambiguous() {
+        let inventory = Inventory {
+            answers: vec![
+                answer("box-a", vec![container("abc111", "one")]),
+                answer("box-b", vec![container("abc999", "two")]),
+            ],
+        };
+        let message = ambiguity(&inventory, "abc");
+        assert!(message.contains("one (abc111) on box-a"), "{message}");
+        assert!(message.contains("two (abc999) on box-b"), "{message}");
+    }
+
+    #[test]
+    fn an_ambiguity_shows_the_first_12_characters_of_each_id() {
+        let inventory = Inventory {
+            answers: vec![answer(
+                "box-a",
+                vec![
+                    container("abc111222333444555", "one"),
+                    container("abc999888777666555", "two"),
+                ],
+            )],
+        };
+        let message = ambiguity(&inventory, "abc");
+        assert!(message.contains("one (abc111222333) on box-a"), "{message}");
+        assert!(!message.contains("abc111222333444"), "{message}");
     }
 
     #[test]
