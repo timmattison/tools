@@ -10,12 +10,15 @@
 //! crate runs `/usr/bin/open` by its full path, so a shim early in `PATH`
 //! never gets the address, and the crate ignores `BROWSER`.
 //!
-//! `ha` reads `BROWSER` as `gh` and `xdg-open` do:
+//! `ha` reads `BROWSER` with one rule of `gh` and one rule of `xdg-open`.
+//! Neither tool obeys both rules:
 //!
 //! - The value is one command line, split into words by the rules of a POSIX
-//!   shell. A path that holds a space needs quotes.
-//! - Each `%s` in an argument takes the address. When no argument holds `%s`,
-//!   the address is the last argument.
+//!   shell, as `gh` splits it. A path that holds a space needs quotes.
+//!   `xdg-open` splits the value at white space and has no rules for quotes.
+//! - Each `%s` in an argument takes the address, as in `xdg-open`. `gh` does
+//!   not replace `%s`. When no argument holds `%s`, the address is the last
+//!   argument, as in both tools.
 //! - A list of commands with `:` between them is not supported.
 
 use std::ffi::OsString;
