@@ -489,6 +489,54 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_name_with_one_leading_slash_locates_the_container_as_docker_does() {
+        let inventory = two_hosts();
+        assert_eq!(located(&inventory, "/job-a"), Ok("box-a".to_owned()));
+        assert_eq!(located(&inventory, "/job-b"), Ok("box-b".to_owned()));
+        let multi_byte = Inventory {
+            answers: vec![answer("box-a", vec![container("aaa111", "café-日本語")])],
+        };
+        assert_eq!(located(&multi_byte, "/café-日本語"), Ok("box-a".to_owned()));
+    }
+
+    #[test]
+    fn a_reference_with_a_leading_slash_never_matches_an_id() {
+        let inventory = two_hosts();
+        for reference in ["/bbb", "/bbb111", "/aaa111"] {
+            assert!(
+                matches!(
+                    inventory.locate(reference),
+                    Err(LocateError::NotFound { .. })
+                ),
+                "{reference}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hexadecimal_name_with_a_leading_slash_beats_an_id_that_starts_with_it() {
+        let inventory = Inventory {
+            answers: vec![
+                answer("box-a", vec![container("fff000", "abc")]),
+                answer("box-b", vec![container("abc123", "job-b")]),
+            ],
+        };
+        assert_eq!(located(&inventory, "/abc"), Ok("box-a".to_owned()));
+    }
+
+    #[test]
+    fn a_reference_with_two_leading_slashes_matches_no_name() {
+        let error = two_hosts().locate("//job-a").unwrap_err();
+        assert_eq!(
+            error,
+            LocateError::NotFound {
+                reference: "//job-a".to_owned(),
+                unreachable: Vec::new()
+            }
+        );
+    }
+
+    #[test]
     fn a_container_on_no_host_is_not_found() {
         let error = two_hosts().locate("ghost").unwrap_err();
         assert_eq!(

@@ -145,6 +145,23 @@ fn a_container_is_found_by_the_start_of_its_id() {
 }
 
 #[test]
+fn a_name_with_a_leading_slash_is_found_as_docker_finds_it() {
+    let fixture = fleet();
+    fixture.inspect("box-b", "exited 0\n");
+    let run = fixture.run(&["status", "/job-b"]);
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert_eq!(run.stdout, "box-b exited 0\n");
+}
+
+#[test]
+fn rm_finds_a_name_with_a_leading_slash_and_passes_it_on_as_written() {
+    let fixture = fleet();
+    let run = fixture.run(&["rm", "/job-a"]);
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert_eq!(fixture.calls_of("box-a", "rm"), [words(&["rm", "/job-a"])]);
+}
+
+#[test]
 fn a_name_on_no_host_is_not_found_and_nothing_runs() {
     let fixture = fleet();
     let run = fixture.run(&["logs", "ghost"]);
