@@ -340,6 +340,7 @@ fn a_wrapper_skips_its_options_in_the_getopt_form() {
         ),
         ("sudo -nu root prcp x", words(vec![word("prcp", ["x"])])),
         ("sudo -n -E -u root prcp", words(vec![word("prcp", [])])),
+        ("sudo -s prcp", words(vec![word("prcp", [])])),
         ("sudo -- prcp x", words(vec![word("prcp", ["x"])])),
         ("sudo -- -u", words(vec![word("-u", [])])),
         ("sudo \"-u\" root prcp", words(vec![word("prcp", [])])),
