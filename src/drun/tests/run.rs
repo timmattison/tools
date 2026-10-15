@@ -196,6 +196,44 @@ fn a_name_that_a_host_uses_already_is_refused() {
 }
 
 #[test]
+fn a_name_with_a_leading_slash_that_a_host_uses_already_is_refused() {
+    for spelling in [vec!["--name", "/job-1"], vec!["--name=/job-1"]] {
+        let fixture = two_hosts();
+        fixture.containers(
+            "box-a",
+            &[row("3f2a", "job-1", "alpine", "Up 2 hours", false)],
+        );
+        let mut args = vec!["run"];
+        args.extend(spelling.iter().copied());
+        args.push("alpine");
+        let run = fixture.run(&args);
+        assert_eq!(run.code, Some(125), "{spelling:?}: {}", run.stderr);
+        assert!(
+            run.stderr.contains("already") && run.stderr.contains("box-a"),
+            "{spelling:?}: {}",
+            run.stderr
+        );
+        assert!(fixture.calls_of("box-a", "run").is_empty(), "{spelling:?}");
+        assert!(fixture.calls_of("box-b", "run").is_empty(), "{spelling:?}");
+    }
+}
+
+#[test]
+fn a_detached_run_with_a_leading_slash_name_prints_the_bare_name() {
+    let fixture = two_hosts();
+    let run = fixture.run(&["run", "-d", "--name", "/job-1", "alpine"]);
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert_eq!(run.stdout, "box-b job-1\n");
+    assert!(
+        run.stderr.contains("drun: job-1 runs on box-b"),
+        "{}",
+        run.stderr
+    );
+    let calls = fixture.calls_of("box-b", "run");
+    assert_eq!(value_of(&calls[0], "--name"), Some("/job-1"));
+}
+
+#[test]
 fn rm_with_detach_prints_a_warning_and_still_runs() {
     let fixture = two_hosts();
     let run = fixture.run(&["run", "-d", "--rm", "alpine"]);
