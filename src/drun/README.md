@@ -125,13 +125,19 @@ asks every host each time.
 | `drun wait NAME` | Waits until the container stops, prints its exit status, and exits with it. |
 | `drun exec [options] NAME COMMAND` | Runs `docker exec` on the host of the container. `-it` works. |
 | `drun cp NAME:PATH LOCAL_PATH` | Copies files out of the container. `drun cp LOCAL_PATH NAME:PATH` copies files into it. |
-| `drun rm [options] NAME...` | Removes each container on its own host. It removes nothing when it cannot find one of the containers. |
+| `drun rm [options] NAME...` | Removes each container on its own host. It removes nothing when one of the names matches no container or more than one container. |
 
 `NAME` is the name of the container, its ID, or the start of its ID. A name or
-a full ID that matches wins over the start of an ID. When no host has `NAME`,
-`drun` stops with exit status 125 and names each host that did not answer.
-When two hosts have `NAME`, `drun` stops and names both hosts. To choose one,
-use `docker --context HOST` directly.
+a full ID that matches wins over the start of an ID, also when they are on
+different hosts. `NAME` must match exactly one container on all hosts
+together:
+
+- When no container matches, `drun` stops with exit status 125 and names each
+  host that did not answer.
+- When more than one container matches, on one host or on more than one,
+  `drun` stops with exit status 125 and names each container and its host, as
+  in `one (abc111222333) on box-a, two (abc999888777) on box-b`. Give more of
+  the ID, or use `docker --context HOST` directly.
 
 These commands find any container on the hosts, not only the containers that
 `drun` started. Only `drun ps` limits the list to the label.

@@ -535,7 +535,8 @@ Commands:
           docker --context \"$(drun pick)\" compose up -d
 
   NAME is the name of a container, its ID, or the start of its ID. drun asks
-  every host for its containers, and uses the one host that has NAME.
+  every host for its containers. NAME must match exactly one container on all
+  hosts together, or drun stops and names each container that matches.
 
 Files:
   The container runs on another computer. A bind mount, as in

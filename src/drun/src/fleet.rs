@@ -113,22 +113,35 @@ impl Inventory {
     /// The hosts that have a container named `name`, in the order of the
     /// configuration.
     pub fn hosts_with_name(&self, name: &str) -> Vec<&ContextName> {
-        self.hosts_where(|container| container.names().any(|found| found == name))
+        // Docker makes a name unique on one host, so no host is in the list
+        // two times.
+        self.containers_where(|container| container.names().any(|found| found == name))
+            .into_iter()
+            .map(|(context, _)| context)
+            .collect()
     }
 
-    /// The hosts that answered and have a container that `matches`, in the
-    /// order of the configuration. A host is in the list one time, whatever
-    /// the count of its containers that match.
-    fn hosts_where(&self, matches: impl Fn(&Container) -> bool) -> Vec<&ContextName> {
+    /// Each container that `matches`, with its host, in the order of the
+    /// configuration and then in the order of `docker ps`.
+    fn containers_where(
+        &self,
+        matches: impl Fn(&Container) -> bool,
+    ) -> Vec<(&ContextName, &Container)> {
         self.answers
             .iter()
-            .filter(|answer| {
+            .filter_map(|answer| {
                 answer
                     .result
                     .as_ref()
-                    .is_ok_and(|containers| containers.iter().any(&matches))
+                    .ok()
+                    .map(|containers| (&answer.context, containers))
             })
-            .map(|answer| &answer.context)
+            .flat_map(|(context, containers)| {
+                containers
+                    .iter()
+                    .filter(|container| matches(container))
+                    .map(move |container| (context, container))
+            })
             .collect()
     }
 
@@ -157,18 +170,54 @@ pub enum LocateError {
         /// The hosts that did not answer, and why.
         unreachable: Vec<(ContextName, String)>,
     },
-    /// More than one host has the container.
+    /// More than one container matches, on one host or on more than one.
     #[error(
-        "more than one host has a container named {reference}: {}. Use \
-         docker --context HOST to choose one",
-        join_names(.hosts)
+        "{reference} matches more than one container: {}. Give more of the ID, or use \
+         docker --context HOST",
+        join_matches(.matches)
     )]
     Ambiguous {
         /// The name or the ID that `drun` looked for.
         reference: String,
-        /// The hosts that have it.
-        hosts: Vec<ContextName>,
+        /// Each container that matches, with its host.
+        matches: Vec<Match>,
     },
+}
+
+/// The characters of a container ID that a message shows, as `docker ps`
+/// does.
+const SHORT_ID_LENGTH: usize = 12;
+
+/// One container that a reference matches, for an error message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Match {
+    /// The host that has the container.
+    pub host: ContextName,
+    /// The first name of the container.
+    pub name: String,
+    /// The first 12 characters of the ID of the container.
+    pub short_id: String,
+}
+
+impl Match {
+    /// The match for `container` on `host`.
+    fn new(host: &ContextName, container: &Container) -> Self {
+        Self {
+            host: host.clone(),
+            name: container.names().next().unwrap_or_default().to_owned(),
+            short_id: container.id.chars().take(SHORT_ID_LENGTH).collect(),
+        }
+    }
+}
+
+impl std::fmt::Display for Match {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} ({}) on {}",
+            self.name, self.short_id, self.host
+        )
+    }
 }
 
 /// Words for the hosts that did not answer, for the end of an error message.
@@ -186,35 +235,37 @@ fn describe_unreachable(unreachable: &[(ContextName, String)]) -> String {
     )
 }
 
-/// The names of `hosts`, separated by commas.
-fn join_names(hosts: &[ContextName]) -> String {
-    let names: Vec<&str> = hosts.iter().map(ContextName::as_str).collect();
-    names.join(", ")
+/// The matches, separated by commas.
+fn join_matches(matches: &[Match]) -> String {
+    let words: Vec<String> = matches.iter().map(Match::to_string).collect();
+    words.join(", ")
 }
 
 impl Inventory {
-    /// The one host that has the container `reference`.
+    /// The host of the one container that `reference` names.
     ///
     /// `reference` is a name or an ID, as for docker. A container whose name
     /// or full ID is `reference` matches first. When no container matches
     /// that way, a container whose ID starts with `reference` matches.
+    /// `reference` must match exactly one container on all hosts together,
+    /// so docker never has to choose between two containers on one host.
     ///
     /// # Errors
     ///
-    /// Returns [`LocateError::NotFound`] when no host that answered has the
-    /// container, and [`LocateError::Ambiguous`] when more than one host has
-    /// it.
+    /// Returns [`LocateError::NotFound`] when no container on a host that
+    /// answered matches, and [`LocateError::Ambiguous`] when more than one
+    /// container matches, on one host or on more than one.
     pub fn locate(&self, reference: &str) -> Result<&ContextName, LocateError> {
-        let exact = self.hosts_where(|container| {
+        let exact = self.containers_where(|container| {
             container.id == reference || container.names().any(|name| name == reference)
         });
-        let candidates = if exact.is_empty() && is_id_start(reference) {
-            self.hosts_where(|container| container.id.starts_with(reference))
+        let found = if exact.is_empty() && is_id_start(reference) {
+            self.containers_where(|container| container.id.starts_with(reference))
         } else {
             exact
         };
-        match candidates.as_slice() {
-            [host] => Ok(host),
+        match found.as_slice() {
+            [(host, _)] => Ok(host),
             [] => Err(LocateError::NotFound {
                 reference: reference.to_owned(),
                 unreachable: self
@@ -222,9 +273,12 @@ impl Inventory {
                     .map(|(context, failure)| (context.clone(), failure.to_string()))
                     .collect(),
             }),
-            hosts => Err(LocateError::Ambiguous {
+            many => Err(LocateError::Ambiguous {
                 reference: reference.to_owned(),
-                hosts: hosts.iter().map(|host| (*host).clone()).collect(),
+                matches: many
+                    .iter()
+                    .map(|(host, container)| Match::new(host, container))
+                    .collect(),
             }),
         }
     }
