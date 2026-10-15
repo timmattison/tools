@@ -333,7 +333,7 @@ struct ShellDocument<'a> {
     aliases: usize,
     functions: usize,
     unparsed_functions: &'a [String],
-    unparsed_aliases: usize,
+    unparsed_aliases: &'a [String],
 }
 
 /// One use through an alias or a function, in the JSON document.
@@ -457,7 +457,7 @@ pub fn json(tally: &Tally, window: &Window) -> String {
             aliases: summary.aliases,
             functions: summary.functions,
             unparsed_functions: &summary.unparsed_functions,
-            unparsed_aliases: summary.unparsed_aliases.len(),
+            unparsed_aliases: &summary.unparsed_aliases,
         },
         tools: tally.tools.iter().map(tool_document).collect(),
         never_used_old: names_of(&tools_with(tally, Classification::NeverUsedOld)),
@@ -476,6 +476,9 @@ const ALL_PARSED: &str = "Every command parsed.";
 /// What starts the line of the functions that did not parse.
 const FUNCTIONS_LABEL: &str = "Functions that did not parse: ";
 
+/// What starts the block of the alias lines that did not parse.
+const ALIASES_LABEL: &str = "Alias lines that did not parse:";
+
 /// Gives `command` on one line: a backslash, a newline, a carriage return, and
 /// a tab become `\\`, `\n`, `\r`, and `\t`.
 fn escape(command: &str) -> String {
@@ -493,13 +496,14 @@ fn escape(command: &str) -> String {
 }
 
 /// Gives the commands that did not parse, then the functions that did not
-/// parse.
+/// parse, then the alias lines that did not parse.
 ///
 /// Each command has one line: the number of rows in plain digits, a tab, and
 /// the escaped command. Plain digits let `sort -n` and `awk` read the list. A
 /// blank line and the names of the functions follow, when a function did not
-/// parse. With no command and no function, the text says that every command
-/// parsed.
+/// parse. Another blank line, a label, and the escaped alias lines follow,
+/// each on its own line, when an alias line did not parse. With no command,
+/// no function, and no alias line, the text says that every command parsed.
 #[must_use]
 pub fn unparsed(tally: &Tally) -> String {
     let summary = &tally.summary;
@@ -517,6 +521,14 @@ pub fn unparsed(tally: &Tally) -> String {
             "{FUNCTIONS_LABEL}{}",
             summary.unparsed_functions.join(ENTRY_SEPARATOR)
         ));
+    }
+    if !summary.unparsed_aliases.is_empty() {
+        let lines: Vec<String> = summary
+            .unparsed_aliases
+            .iter()
+            .map(|line| escape(line))
+            .collect();
+        blocks.push(format!("{ALIASES_LABEL}\n{}", lines.join("\n")));
     }
     if blocks.is_empty() {
         blocks.push(ALL_PARSED.to_string());

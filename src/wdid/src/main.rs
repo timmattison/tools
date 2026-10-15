@@ -66,8 +66,9 @@ struct Cli {
     #[arg(long, conflicts_with = "unparsed")]
     json: bool,
 
-    /// Print the commands that wdid could not parse, and the functions that it
-    /// could not parse. Print no report.
+    /// Print the commands that wdid could not parse, the functions that it
+    /// could not parse, and the alias lines that it could not parse. Print no
+    /// report.
     #[arg(long)]
     unparsed: bool,
 

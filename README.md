@@ -4419,7 +4419,7 @@ It does not use `atuin history list`. That command obeys `filter_mode` of your a
 
 - Quoted text. `git commit -m "fix prcp"` does not use `prcp`.
 - A row with exit code 127. The shell did not find the command.
-- A line that does not parse. `wdid` does not guess. The report counts these rows, and `wdid --unparsed` lists them, with the number of rows for each command. It also lists the functions whose body did not parse.
+- A line that does not parse. `wdid` does not guess. The report counts these rows, and `wdid --unparsed` lists them, with the number of rows for each command. It also lists the functions whose body did not parse, and the alias lines that did not parse.
 - Uses by scripts and by agents. atuin records only what you type in an interactive shell. A tool that a script runs for you has no count here.
 
 ### Basic Usage
@@ -4437,7 +4437,7 @@ wdid --repo ~/code/tools --no-shell
 - `--repo <PATH>`: The cargo workspace to report on. Without it, `wdid` uses the git work tree that holds the current directory. The workspace must have a `Cargo.toml`.
 - `--since <YYYY-MM-DD>`: Count only the rows from this date on. A row on this date counts. The report says how many rows it left out.
 - `--json`: Print the whole report as one JSON document. It conflicts with `--unparsed`.
-- `--unparsed`: Print the commands that `wdid` could not parse, one line for each (`<rows>`, a tab, the command), and the functions that it could not parse. Print no report.
+- `--unparsed`: Print the commands that `wdid` could not parse, one line for each (`<rows>`, a tab, the command), the functions that it could not parse, and the alias lines that it could not parse, one line for each. Print no report. In the `--json` document, `shell.unparsed_aliases` is a list of those alias lines.
 - `--no-shell`: Do not start your shell. Aliases and functions then do not count.
 - `--new-days <DAYS>`: A tool that never ran is new when it is younger than this. Defaults to 90.
 - `--idle-days <DAYS>`: A tool is idle when its last use is older than this. Defaults to 180.
