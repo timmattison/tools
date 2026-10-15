@@ -471,9 +471,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - Resume a Claude Code session from wherever you are. Given a session id, `crap` looks the
     session up under `~/.claude/projects`, recovers the directory it originally ran in, `cd`s
     there, and re-launches Claude with `--resume <id>` — through the launcher that you name in
-    `CRAP_LAUNCHER` (for example `export CRAP_LAUNCHER=c`), else through your `clauded` alias or
-    command if you have one, otherwise through plain `claude`. If the original directory no
-    longer exists — or exists but can't be entered from your account — it tells you and stops,
+    `CRAP_LAUNCHER` (for example `export CRAP_LAUNCHER=c`), otherwise through plain `claude`. If
+    the original directory no longer exists — or exists but can't be entered from your account —
+    it tells you and stops,
     pointing you at `crap --here <id>` to fork it where you stand instead; and it refuses to
     resume a session that's already open in another running process (pass `--force` to override)
     so two processes can't corrupt the same session log. With `--here` it brings the session into
@@ -3674,9 +3674,8 @@ If the session's original directory no longer exists, `crap` prints an error and
 
 The `crap` shell function starts Claude through a launcher. Each time it runs, it picks the launcher in this order:
 
-1. `CRAP_LAUNCHER`, when you set it and it is not empty. The value is shell text, and the function evaluates it when it runs. Thus an alias, a shell function, or a command with flags of its own (for example `claude --dangerously-skip-permissions`) works. Claude gets its arguments after the value.
-2. A `clauded` alias, function, or command, when one exists.
-3. Plain `claude`.
+1. `CRAP_LAUNCHER`, when you set it and it is not empty. The value is shell text, and the function evaluates it when it runs. Thus an alias, a shell function, or a command with flags of its own (for example `claude --model opus`) works. Claude gets its arguments after the value.
+2. Plain `claude`.
 
 ```bash
 export CRAP_LAUNCHER=c   # start Claude through your `c` alias
