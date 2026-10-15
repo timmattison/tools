@@ -21,7 +21,7 @@ fn truncate_to_byte_limit(s: &str, max_bytes: usize) -> &str {
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }
-    #[allow(
+    #[expect(
         clippy::string_slice,
         reason = "safe: end is verified to be a char boundary"
     )]

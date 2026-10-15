@@ -1108,7 +1108,7 @@ this platform needs raw socket privileges to send probes.
     /// The round trip time keeps the fraction of a millisecond. A conversion
     /// that read whole milliseconds records `1` here.
     #[test]
-    #[allow(
+    #[expect(
         clippy::float_cmp,
         reason = "1500 microseconds is 1.5 milliseconds, and both numbers are exact in binary, so the conversion gives this one and no other"
     )]

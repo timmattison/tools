@@ -96,6 +96,11 @@ directory is merely missing right now. Used by `grist`, `grind` and `grime`.
 
 See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of guarantees.
 
+### runlimit
+A shared Rust library that runs a child program with a time limit. It drains stdout and stderr on reader threads,
+so a chatty child cannot fill a pipe. It kills and reaps a child that does not finish in time, so a hung child
+cannot hang the caller. Used by `cwt` and `ha`.
+
 ## The tools
 
 - dirhash
@@ -2011,6 +2016,76 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     compressor, and the swap in use over the same sample. `faulte kill` stops the old idle Claude
     Code sessions after a question. It supports macOS only. See below for the full entry.
   - To install: `cargo install --git https://github.com/timmattison/tools faulte`
+
+- ha (hot action)
+  - Shows the GitHub Actions workflow runs of many repositories and owners in one terminal view
+    that refreshes itself. The GitHub web interface and `gh run list` show one repository at a
+    time, and `gh run list` does not refresh.
+  - The top section, "Running", shows the runs that are in progress (`●`) or in the queue (`○`),
+    the oldest first. A run that waits for an approval or for another run also shows with `○`.
+    Each row shows the start time in the local time zone and the elapsed time,
+    which increases each second. A run that is active for too long is often a stuck runner.
+  - The bottom section shows the runs that passed (`✓`, green) or failed (`✗`, red) in the last
+    8 hours, the newest first, with how long each run took and how long ago it finished. A run
+    that timed out or that failed to start counts as failed. A cancelled or skipped run does not
+    show.
+  - Until the first refresh ends, an empty section shows `Loading…` and the section headers
+    show no counts. Thus a board that did not load yet does not look like a board with no runs.
+  - The status line shows how long ago the last refresh ended (`updated 1m 05s ago`), in the
+    units of the time column. While a refresh runs, `refreshing…` shows at the right end of the
+    status line. The other parts of the status line do not move.
+  - Each row shows the repository, the workflow, the branch, and the run title. A long name keeps
+    its start and ends in `…`. The cut is by display width, thus `日本語` and emoji do not break a
+    row. The columns fit the terminal again when its size changes.
+  - Keys: Up and Down move the highlight through both sections. Enter opens the highlighted run in
+    the browser, and `ha` keeps running. When no browser opens, the status line shows the URL and
+    then the reason, for example a `BROWSER` command that this host does not have, for 30 seconds.
+    The message fades out, and a key press removes it sooner. `r` refreshes now. `q`, Esc, or
+    Ctrl-C quits and gives back the terminal.
+  - Enter runs the command that `BROWSER` names when that variable is set and not empty. Thus a
+    forwarder that sets `BROWSER`, for example the opener of mosh-rs, opens the run on your local
+    computer from a mosh-rs session. `ha` splits the value into words as a POSIX shell does, and
+    each `%s` in an argument takes the URL. When no argument holds `%s`, the URL is the last
+    argument. When `BROWSER` is not set, `ha` uses the opener of the system (`/usr/bin/open` on
+    macOS). A command that fails in its first 20 s shows the URL and the reason in the status line.
+    A forwarder can need some seconds to report a failure, and `ha` does not wait for the command,
+    thus the view goes on and a browser that stays open does not stop it.
+  - A target is a repository (`owner/name`) or an owner (`owner`, an organization or a user). An
+    owner target means every repository of that owner that is not archived. `ha` watches up to
+    1,000 repositories of one owner, and when an owner has more, the status line says that the
+    list is cut. A repository that you name and that an owner also holds shows once.
+  - Usage: `ha timmattison/tools Lock-Free-Labs`, or `ha` alone with a configuration file at
+    `<config_dir>/ha/config.toml` (on macOS, `~/Library/Application Support/ha/config.toml`):
+
+    ```toml
+    repos = ["timmattison/tools", "Lock-Free-Labs/nvr-tools"]
+    owners = ["Lock-Free-Labs"]
+    window = "8h"
+    interval = "60s"
+    ```
+
+    Targets on the command line replace all the targets of the file. `--config <PATH>` reads
+    another file, and `--window` and `--interval` replace the values of the file. A duration is a
+    whole number and a unit: `s`, `m`, `h`, or `d`. An unknown key or a bad value stops `ha` with a
+    message that names the key and the file.
+  - `ha` uses the GitHub CLI, `gh`, and its login and host. It does not keep a second token. When
+    `gh` is missing or not logged in, `ha` stops with a message before it draws.
+  - API budget: GitHub gives 5,000 requests each hour. An organization of 200 repositories at a
+    60 s interval asks for 12,000 requests each hour. Thus `ha` sends the `ETag` of each answer
+    back in `If-None-Match`, and GitHub does not count a `304 Not Modified` answer. The lookback
+    of a query starts on the hour, so the request stays the same and its `ETag` can match. The
+    repository list of an owner and the sweep for runs older than the lookback refresh every
+    10 minutes. An owner whose list has not yet succeeded is listed again on each refresh, so `r`
+    tries it again at once. At most 8 `gh` children run at the same time. The status line shows the remaining
+    budget. When less than 10% remains, `ha` waits until the reset of the budget and says so.
+  - A failure for one repository shows in the status line, and the board keeps the last good runs
+    of that repository.
+  - `ha` needs a terminal. When its standard output is not a terminal, it stops with exit
+    status 2. Exit status: 0 success, 1 a failure of `gh` or of the terminal, 2 a usage or
+    configuration error.
+  - The Home Assistant CLI also installs a binary named `ha`. When you have both tools, the one
+    that comes first on `PATH` runs.
+  - To install: `cargo install --git https://github.com/timmattison/tools ha`
 
 ## dirhash
 

@@ -319,7 +319,7 @@ fn read_vm_statistics() -> Result<libc::vm_statistics64, MachineError> {
     // the kernel does not fill reads as zero and never as memory of this
     // process that nobody wrote.
     let mut statistics = MaybeUninit::<libc::vm_statistics64>::zeroed();
-    #[allow(
+    #[expect(
         deprecated,
         reason = "libc asks for the mach2 crate, which this workspace does not take. The call is the one entrance to the counters of the virtual memory system"
     )]

@@ -130,6 +130,11 @@ rodio = { version = "0.20", default-features = false, features = ["wav"] }
 log = "0.4"
 env_logger = "0.11"
 
+# Browser
+open = "5.4"
+# Splits a command line into words by the rules of a POSIX shell.
+shlex = "2"
+
 # Misc
 syn = { version = "2", default-features = false, features = ["full", "parsing", "visit"] }
 proc-macro2 = "1"
@@ -214,6 +219,7 @@ occ = { path = "src/occ" }
 portplz-core = { path = "src/portplz-core" }
 proctree = { path = "src/proctree" }
 repowalker = { path = "src/repowalker" }
+runlimit = { path = "src/runlimit" }
 shellquote = { path = "src/shellquote" }
 shellsetup = { path = "src/shellsetup" }
 termbar = { path = "src/termbar" }
@@ -249,6 +255,8 @@ unseparated_literal_suffix = "warn"
 await_holding_lock = "warn"
 # Prevent suppressing warnings without explanation
 allow_attributes_without_reason = "warn"
+# Make each allowance check itself. An #[expect] warns when its lint stops firing, so a stale allowance fails clippy. Inner #![allow] attributes are not affected.
+allow_attributes = "warn"
 # Catch clones that can be replaced by moves (nursery lint, may have false positives)
 redundant_clone = "warn"
 # Warn on byte-level string indexing (&s[..n]) which can panic on multi-byte UTF-8

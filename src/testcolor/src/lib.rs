@@ -78,7 +78,7 @@ pub fn with_forced_ansi<T>(body: impl FnOnce() -> T) -> T {
 /// would deadlock. Such a test calls `force` instead and holds the lock itself.
 /// No other caller has a reason to use this function.
 fn force<T>(body: impl FnOnce() -> T) -> T {
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "this is the helper the ban points every other caller at; the one call that sets the override lives here"
     )]
@@ -101,7 +101,7 @@ struct Restore;
 
 impl Drop for Restore {
     fn drop(&mut self) {
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this is the helper the ban points every other caller at; the one call that puts the override back lives here"
         )]

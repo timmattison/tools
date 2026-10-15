@@ -1906,12 +1906,6 @@ const COARSE_FADE_AT: f32 = 0.5;
 /// color off the value. `colored` decides whether to emit escapes at all from
 /// process-global state, which other tests in this binary toggle.
 fn colorize_status(line: &str, elapsed: Duration, truecolor: bool) -> ColoredString {
-    // Cast is exact for the values involved: `STATUS_LIFETIME` is a small
-    // constant and `elapsed` is clamped to it by the division below.
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "seconds counts here are far below f32's exact-integer range"
-    )]
     let spent = (elapsed.as_secs_f32() / STATUS_LIFETIME.as_secs_f32()).clamp(0.0, 1.0);
 
     if truecolor {

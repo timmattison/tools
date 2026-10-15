@@ -101,11 +101,14 @@ pub(crate) struct Stats {
     /// Deliberately parsed and retained as part of the modeled payload — it
     /// identifies which sccache produced a snapshot and is asserted on by the
     /// parse/state tests — but no configured metric surfaces it, so production
-    /// code never reads it. The narrow allow documents that this is intentional
+    /// code never reads it. The narrow expectation documents that this is intentional
     /// rather than an oversight.
-    #[allow(
-        dead_code,
-        reason = "modeled sccache payload field, exercised by tests but not surfaced by any metric"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "modeled sccache payload field, exercised by tests but not surfaced by any metric"
+        )
     )]
     #[serde(default, deserialize_with = "null_to_default")]
     pub version: String,

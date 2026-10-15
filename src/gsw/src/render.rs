@@ -3070,7 +3070,7 @@ mod tests {
         // FADE_FLOOR fraction") rather than hardcoding numbers tied to
         // today's choice of LOG_HASH_BASE_RGB. If the base later gains
         // a non-zero blue, the test still checks the right bound.
-        #[allow(
+        #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
             reason = "u8 × FADE_FLOOR ∈ [0, 1] stays in [0, 255]"
@@ -3303,7 +3303,7 @@ mod tests {
         let Some(Color::TrueColor { r, g, b }) = cs.fgcolor else {
             panic!("expected TrueColor under truecolor=true");
         };
-        #[allow(
+        #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
             reason = "u8 × FADE_FLOOR ∈ [0, 1] stays in [0, 255]"
@@ -3571,7 +3571,7 @@ mod tests {
         // conservative upper bound for any column, plus a small slack for
         // rounding. Any row column emitting a channel above this means a
         // colorize_* fn forgot to apply the fade.
-        #[allow(
+        #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
             reason = "255.0 × FADE_FLOOR ∈ [0, 255]"

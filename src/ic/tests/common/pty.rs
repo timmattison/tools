@@ -211,7 +211,7 @@ impl Pty {
         // pointer.
         unsafe {
             command.pre_exec(move || {
-                #[allow(
+                #[expect(
                     clippy::disallowed_methods,
                     reason = "the ban covers the read of a window, and `TIOCSCTTY` reads none. It claims the pseudo-terminal as the controlling terminal of the child, and termsize offers no call for that"
                 )]

@@ -412,7 +412,7 @@ enum Walk {
 /// Fraction of one core git walks may occupy under sustained churn (1%). A walk
 /// costing `D` is followed by a cooldown of `D / BUDGET`, so the duty cycle
 /// settles at `BUDGET`. Hard-coded, not a user dial.
-#[allow(
+#[expect(
     dead_code,
     reason = "Names the 1% duty-cycle target for the docs and spec; `cooldown` \
               applies the exact integer reciprocal (100) to avoid float drift, so \

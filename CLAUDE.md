@@ -213,7 +213,7 @@ manifest bans all four spellings of that call, and `disallowed_methods` is
 
 A tool that decides its own color output at startup is the one legitimate
 caller. It says so at the call site with
-`#[allow(clippy::disallowed_methods, reason = "...")]` - see `gsw` and `seescc`.
+`#[expect(clippy::disallowed_methods, reason = "...")]` - see `gsw` and `seescc`.
 The exemption stays visible in the file it applies to, rather than in a central
 allowlist.
 
@@ -273,6 +273,7 @@ full path, `shellquote::shell_quote(...)`, where the call site sits behind a
 - `crap` - the paths that the tests of the shell function put into the fake
   scripts
 - `gsw` - the command it asks an interactive shell to run
+- `ha` - the paths of the scripts that the browser tests put into `BROWSER`
 - `nwt` - the worktree path and the branch in the cleanup commands it prints
   when it cannot remove a broken sparse worktree
 - `popstop` - the state directory in the stop command that a refusal prints
@@ -554,6 +555,8 @@ A target that legitimately needs a lint relaxed says so at the site, with a reas
 ```
 
 `deny`, `forbid`, `warn`, `allow`, and `expect` all count as declaring a position — **silence is the only violation**. The bar is "mention", not "match the level", so a relaxation stays a visible, reviewable decision in the file it applies to instead of an entry in a central allowlist. A `cfg_attr`-wrapped lint (`#![cfg_attr(not(test), warn(clippy::unwrap_used))]`, as in `src/bm/src/lib.rs`) counts as a mention but does not raise. Because `clippy::allow_attributes_without_reason` is `warn` in the workspace set, every `allow` needs a `reason = "..."`.
+
+An outer allowance is written `#[expect(lint, reason = "...")]`. `clippy::allow_attributes` is `warn` in the workspace set, and an expectation whose lint no longer fires is a warning. A stale allowance thus fails clippy. Inner `#![allow]` attributes are not flagged.
 
 ### Guards Enforcing This
 

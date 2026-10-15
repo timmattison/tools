@@ -1174,7 +1174,7 @@ fn handle_frame_timing(
         // if it ever exceeds that bound.
         let time_behind = expected_video_time - current_time;
         let frames_behind_f = (time_behind * fps).clamp(0.0, f64::from(u32::MAX));
-        #[allow(
+        #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
             reason = "frames_behind_f is clamped to [0, u32::MAX] above"
@@ -1202,7 +1202,7 @@ fn handle_frame_timing(
     }
 }
 
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "frame display needs image, args, timing, and three pieces of mutable per-call state; bundling into a struct just shifts boilerplate"
 )]
@@ -1901,7 +1901,7 @@ fn draw_progress_bar(
         } else {
             // SAFETY of cast: v is finite and in [0.0, u32::MAX), so truncation
             // toward zero produces a representable u32.
-            #[allow(
+            #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
                 reason = "value is bounded to [0, u32::MAX) above"
@@ -2539,13 +2539,13 @@ fn display_image(
         let scale_dim = |dim: u32| -> u32 {
             // Cast u32 -> f32 can lose precision for values above 2^24, but
             // that's fine for image dimensions in this codebase.
-            #[allow(
+            #[expect(
                 clippy::cast_precision_loss,
                 reason = "image dimensions rarely exceed 2^24"
             )]
             let dim_f = dim as f32 * scale_factor;
             // dim_f is finite and in [0.0, dim as f32], so it fits in u32.
-            #[allow(
+            #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
                 reason = "dim_f is non-negative and bounded by the original u32 dimension"

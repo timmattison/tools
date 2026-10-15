@@ -299,7 +299,7 @@ fn main() -> Result<()> {
     );
 
     if cli.no_color {
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this process decides its own color output at startup; the ban covers the tests, which must go through testcolor::with_forced_ansi"
         )]
@@ -308,7 +308,7 @@ fn main() -> Result<()> {
         // A watch-like wrapper (e.g. viddy) is rendering our output inside
         // its own TTY-backed UI. The colored crate would otherwise strip
         // colors because our stdout is a pipe.
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this process decides its own color output at startup; the ban covers the tests, which must go through testcolor::with_forced_ansi"
         )]

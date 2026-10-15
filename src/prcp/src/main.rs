@@ -41,13 +41,13 @@ use tokio::task;
 /// - Only read bytes that have been written to (e.g., by `File::read`)
 /// - Never access uninitialized portions of the buffer
 #[inline]
+#[expect(clippy::uninit_vec, reason = "see the SAFETY note in the body")]
 fn create_uninit_buffer(size: usize) -> Vec<u8> {
     let mut buffer = Vec::with_capacity(size);
     // SAFETY: We're setting length to capacity. The memory is uninitialized,
     // but callers will only access bytes that File::read has written to.
     // File::read returns the number of bytes actually read, so we never
     // access uninitialized memory as long as we respect that count.
-    #[allow(clippy::uninit_vec, reason = "see the SAFETY note above")]
     unsafe {
         buffer.set_len(size);
     }
@@ -132,7 +132,7 @@ impl<'a> PartialFileGuard<'a> {
     ///
     /// # Panics
     /// Panics if called after `defuse()` - this is a programming error.
-    #[allow(
+    #[expect(
         clippy::expect_used,
         reason = "invariant: file is always Some until defuse()"
     )]
@@ -148,7 +148,7 @@ impl<'a> PartialFileGuard<'a> {
     ///
     /// # Panics
     /// Panics if called more than once - this is a programming error.
-    #[allow(
+    #[expect(
         clippy::expect_used,
         reason = "invariant: file is always Some until defuse()"
     )]
@@ -1599,7 +1599,7 @@ fn format_duration(duration: Duration) -> String {
 ///
 /// Handles edge cases including zero duration and potential overflow
 /// when converting from f64 to u64.
-#[allow(
+#[expect(
     clippy::cast_precision_loss,
     reason = "precision loss is acceptable for human-readable display"
 )]
@@ -1611,7 +1611,7 @@ fn format_speed(bytes: u64, duration: Duration) -> String {
     let bytes_per_sec = bytes as f64 / duration.as_secs_f64();
     // Clamp to u64::MAX to prevent overflow when casting from f64.
     // We also handle negative values (which shouldn't occur) by treating them as 0.
-    #[allow(
+    #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "the surrounding branches clamp the value to 0..=u64::MAX before this cast"
@@ -1822,12 +1822,15 @@ fn try_preallocate(file: &File, size: u64) {
     use std::os::unix::io::AsRawFd;
     // posix_fallocate returns 0 on success, error code on failure
     // We ignore the result since this is just an optimization
+    // A size that does not fit in off_t skips the preallocation.
+    let Ok(length) = libc::off_t::try_from(size) else {
+        return;
+    };
     // SAFETY: posix_fallocate is a standard POSIX function. We pass a valid file descriptor
-    // obtained from AsRawFd, offset 0, and the file size. The cast to off_t is safe for
-    // typical file sizes (up to i64::MAX bytes). Errors are ignored as this is an optimization.
-    #[allow(clippy::cast_possible_wrap)]
+    // obtained from AsRawFd, offset 0, and the file size. A size that does not fit in off_t
+    // skips the preallocation. Errors are ignored as this is an optimization.
     unsafe {
-        libc::posix_fallocate(file.as_raw_fd(), 0, size as libc::off_t);
+        libc::posix_fallocate(file.as_raw_fd(), 0, length);
     }
 }
 
@@ -1848,7 +1851,7 @@ fn try_preallocate(file: &File, size: u64) {
         fst_bytesalloc: libc::off_t,
     }
 
-    #[allow(
+    #[expect(
         clippy::cast_possible_wrap,
         reason = "a preallocation size never approaches off_t's signed range"
     )]
@@ -1952,7 +1955,7 @@ fn same_device(_source: &Path, _destination: &Path) -> bool {
 /// - If `force_sequential` is true: always use sequential copy
 /// - If source and destination are on the same device: use sequential copy (avoids HDD head thrashing)
 /// - Otherwise: use parallel copy for better throughput on cross-device transfers
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "all parameters serve distinct purposes for progress/cancellation/resize"
 )]
@@ -2006,7 +2009,7 @@ async fn copy_with_progress(
 ///
 /// Performs read→hash→write in sequence. This is optimal for spinning HDDs
 /// to avoid head thrashing, and is the fallback for non-Unix platforms.
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "all parameters serve distinct purposes for progress/cancellation/resize"
 )]
@@ -2203,7 +2206,7 @@ const PARALLEL_CHANNEL_DEPTH: usize = 4;
 /// - Reader respects pause flag
 /// - When cancelling: set paused=false, drop receiver to disconnect channel
 /// - Reader exits naturally when its send() fails
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "all parameters serve distinct purposes for progress/cancellation/resize"
 )]
@@ -2479,7 +2482,7 @@ async fn copy_parallel(
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
     reason = "tests use unwrap for brevity and clear failure messages"
 )]

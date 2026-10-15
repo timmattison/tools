@@ -396,7 +396,7 @@ fn value_name<T: ValueEnum>(value: &T) -> String {
     args_conflicts_with_subcommands = true,
     subcommand_negates_reqs = true,
 )]
-#[allow(
+#[expect(
     clippy::struct_excessive_bools,
     reason = "each flag of the design is one switch of the command line"
 )]
