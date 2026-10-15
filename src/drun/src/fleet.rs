@@ -460,8 +460,40 @@ pub(crate) mod tests {
             answers: vec![answer("box-a", vec![container("1", "job-1")])],
         };
         let name = inventory.fresh_name().unwrap();
-        assert_eq!(name.split('-').count(), 3, "{name}");
+        assert_numbered_form(&name);
         assert!(inventory.hosts_with_name(&name).is_empty());
+    }
+
+    /// Asserts that `name` has the numbered form of a fresh name.
+    ///
+    /// Counting the parts of a split on `-` is wrong here. Some words of the
+    /// `names` crate contain `-`, for example `bite-sized` and `good-bye`.
+    fn assert_numbered_form(name: &str) {
+        assert_eq!(name.split('-').count(), 3, "{name}");
+    }
+
+    #[test]
+    fn the_numbered_form_allows_a_word_that_contains_a_hyphen() {
+        assert_numbered_form("bite-sized-goose-0042");
+        assert_numbered_form("ancient-good-bye-1234");
+    }
+
+    #[test]
+    #[should_panic(expected = "goose-0042")]
+    fn the_numbered_form_rejects_a_name_without_an_adjective() {
+        assert_numbered_form("goose-0042");
+    }
+
+    #[test]
+    #[should_panic(expected = "bite-sized-goose-42")]
+    fn the_numbered_form_rejects_a_number_of_two_digits() {
+        assert_numbered_form("bite-sized-goose-42");
+    }
+
+    #[test]
+    #[should_panic(expected = "bite-sized-goose-12a4")]
+    fn the_numbered_form_rejects_a_number_with_a_letter() {
+        assert_numbered_form("bite-sized-goose-12a4");
     }
 
     fn two_hosts() -> Inventory {
