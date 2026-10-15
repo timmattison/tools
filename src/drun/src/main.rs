@@ -172,8 +172,9 @@ fn run(environment: &Environment, args: &[OsString]) -> Result<ExitCode, Failure
     report_unchecked(&inventory, &survey);
     let name = match &parsed.name {
         Some(name) => {
+            let name = fleet::bare_name(name);
             refuse_taken(&inventory, name)?;
-            name.clone()
+            name.to_owned()
         }
         None => inventory.fresh_name().ok_or_else(|| {
             Failure::NotStarted("cannot find a container name that no host uses".to_owned())
@@ -582,7 +583,8 @@ Commands:
 
   NAME is the name of a container, its ID, or the start of its ID. drun asks
   every host for its containers. NAME must match exactly one container on all
-  hosts together, or drun stops and names each container that matches.
+  hosts together, or drun stops and names each container that matches. As
+  in docker, a NAME that starts with / is a name and never an ID.
 
 Files:
   The container runs on another computer. A bind mount, as in
@@ -591,8 +593,9 @@ Files:
 
 Names:
   drun gives each container a name that no host uses, unless you give a name
-  with --name. drun refuses a --name that a host uses. Each container gets the
-  label {MANAGED_LABEL}.
+  with --name. drun refuses a --name that a host uses. As in docker, one
+  leading / in the name is not part of it. Each container gets the label
+  {MANAGED_LABEL}.
 
 Hosts:
   A host is a Docker context. drun uses the contexts in {CONTEXTS_VARIABLE},

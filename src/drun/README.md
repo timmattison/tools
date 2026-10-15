@@ -129,7 +129,8 @@ asks every host each time.
 
 `NAME` is the name of the container, its ID, or the start of its ID. A name or
 a full ID that matches wins over the start of an ID, also when they are on
-different hosts. `NAME` must match exactly one container on all hosts
+different hosts. As in docker, a `NAME` that starts with `/` is a name and
+never an ID, and the one `/` is not part of the name. `NAME` must match exactly one container on all hosts
 together:
 
 - When no container matches, `drun` stops with exit status 125 and names each

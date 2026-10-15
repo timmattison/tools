@@ -241,6 +241,16 @@ fn join_matches(matches: &[Match]) -> String {
     words.join(", ")
 }
 
+/// `name` without one leading `/`, and `name` itself when it has none.
+///
+/// Docker accepts one leading `/` in a container name, as in `--name /job-1`,
+/// and records the name without it. `drun` compares and prints the recorded
+/// form.
+#[must_use]
+pub fn bare_name(name: &str) -> &str {
+    name.strip_prefix('/').unwrap_or(name)
+}
+
 impl Inventory {
     /// The host of the one container that `reference` names.
     ///
@@ -250,19 +260,28 @@ impl Inventory {
     /// `reference` must match exactly one container on all hosts together,
     /// so docker never has to choose between two containers on one host.
     ///
+    /// A `reference` that starts with `/` is a name, as for docker. It
+    /// matches the container whose name is `reference` without that one
+    /// slash, and it matches no ID and no start of an ID.
+    ///
     /// # Errors
     ///
     /// Returns [`LocateError::NotFound`] when no container on a host that
     /// answered matches, and [`LocateError::Ambiguous`] when more than one
     /// container matches, on one host or on more than one.
     pub fn locate(&self, reference: &str) -> Result<&ContextName, LocateError> {
-        let exact = self.containers_where(|container| {
-            container.id == reference || container.names().any(|name| name == reference)
-        });
-        let found = if exact.is_empty() && is_id_start(reference) {
-            self.containers_where(|container| container.id.starts_with(reference))
+        let found = if reference.starts_with('/') {
+            let name = bare_name(reference);
+            self.containers_where(|container| container.names().any(|held| held == name))
         } else {
-            exact
+            let exact = self.containers_where(|container| {
+                container.id == reference || container.names().any(|name| name == reference)
+            });
+            if exact.is_empty() && is_id_start(reference) {
+                self.containers_where(|container| container.id.starts_with(reference))
+            } else {
+                exact
+            }
         };
         match found.as_slice() {
             [(host, _)] => Ok(host),
