@@ -12,7 +12,36 @@ const GAP: &str = "  ";
 /// have fewer or more cells than the header. The last cell of a line gets no
 /// padding, so no line ends in spaces.
 pub fn render(header: &[&str], rows: &[Vec<String>]) -> String {
-    todo!("{header:?} {rows:?}")
+    let lines: Vec<Vec<&str>> = std::iter::once(header.to_vec())
+        .chain(
+            rows.iter()
+                .map(|row| row.iter().map(String::as_str).collect()),
+        )
+        .collect();
+    let columns = lines.iter().map(Vec::len).max().unwrap_or_default();
+    let widths: Vec<usize> = (0..columns)
+        .map(|column| {
+            lines
+                .iter()
+                .filter_map(|line| line.get(column))
+                .map(|cell| cell.width())
+                .max()
+                .unwrap_or_default()
+        })
+        .collect();
+    let mut text = String::new();
+    for line in &lines {
+        let last = line.len().saturating_sub(1);
+        for (column, (cell, width)) in line.iter().zip(&widths).enumerate() {
+            text.push_str(cell);
+            if column < last {
+                text.push_str(&" ".repeat(width - cell.width()));
+                text.push_str(GAP);
+            }
+        }
+        text.push('\n');
+    }
+    text
 }
 
 #[cfg(test)]
@@ -34,7 +63,10 @@ mod tests {
 
     #[test]
     fn a_row_with_more_cells_than_the_header_gets_more_columns() {
-        let text = render(&["A", "B"], &[row(&["1", "2", "chosen"]), row(&["10", "20"])]);
+        let text = render(
+            &["A", "B"],
+            &[row(&["1", "2", "chosen"]), row(&["10", "20"])],
+        );
         assert_eq!(text, "A   B\n1   2   chosen\n10  20\n");
     }
 

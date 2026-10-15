@@ -74,7 +74,18 @@ pub fn inventory(config: &Config, scope: Scope) -> Inventory {
 ///
 /// Returns words that say which line is not a container.
 fn parse_rows(text: &str) -> Result<Vec<Container>, String> {
-    todo!("{text}")
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            serde_json::from_str(line).map_err(|error| {
+                format!(
+                    "\"{}\" is not a container: {error}",
+                    host::last_line(line, 80)
+                )
+            })
+        })
+        .collect()
 }
 
 impl Container {
@@ -90,16 +101,28 @@ impl Container {
 impl Inventory {
     /// The hosts that gave no usable answer, and why.
     pub fn failures(&self) -> impl Iterator<Item = (&ContextName, &HostFailure)> {
-        self.answers.iter().filter_map(|answer| match &answer.result {
-            Ok(_) => None,
-            Err(failure) => Some((&answer.context, failure)),
-        })
+        self.answers
+            .iter()
+            .filter_map(|answer| match &answer.result {
+                Ok(_) => None,
+                Err(failure) => Some((&answer.context, failure)),
+            })
     }
 
     /// The hosts that have a container named `name`, in the order of the
     /// configuration.
     pub fn hosts_with_name(&self, name: &str) -> Vec<&ContextName> {
-        todo!("{name}")
+        self.answers
+            .iter()
+            .filter(|answer| {
+                answer.result.as_ref().is_ok_and(|containers| {
+                    containers
+                        .iter()
+                        .any(|container| container.names().any(|found| found == name))
+                })
+            })
+            .map(|answer| &answer.context)
+            .collect()
     }
 
     /// A container name that no host that answered uses, in the form
@@ -117,7 +140,7 @@ fn first_free(
     candidates: impl IntoIterator<Item = String>,
     taken: impl Fn(&str) -> bool,
 ) -> Option<String> {
-    todo!("{}", candidates.into_iter().count() + usize::from(taken("")))
+    candidates.into_iter().find(|candidate| !taken(candidate))
 }
 
 #[cfg(test)]
@@ -180,7 +203,10 @@ pub(crate) mod tests {
     fn a_name_is_found_on_every_host_that_has_it() {
         let inventory = Inventory {
             answers: vec![
-                answer("box-a", vec![container("1", "job-1"), container("2", "web")]),
+                answer(
+                    "box-a",
+                    vec![container("1", "job-1"), container("2", "web")],
+                ),
                 answer("box-b", vec![container("3", "other")]),
                 answer("box-c", vec![container("4", "/legacy,job-1")]),
             ],

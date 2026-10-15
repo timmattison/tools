@@ -34,7 +34,7 @@ const KIB_PER_GIB: f64 = 1_048_576.0;
 pub struct Load {
     memory_total_kib: u64,
     memory_available_kib: u64,
-    load_one_minute: f64,
+    one_minute_average: f64,
     cpus: u32,
 }
 
@@ -80,50 +80,180 @@ impl Load {
     ///
     /// Returns words that say what is missing or wrong in `text`.
     fn parse(text: &str) -> Result<Self, String> {
-        todo!("{text}")
+        let mut sections: Vec<Vec<&str>> = vec![Vec::new()];
+        for line in text.lines() {
+            if line.trim() == SECTION_MARK {
+                sections.push(Vec::new());
+            } else if let Some(section) = sections.last_mut() {
+                section.push(line);
+            }
+        }
+        let [meminfo, loadavg, nproc] = sections.as_slice() else {
+            return Err(format!("the probe printed {} parts, not 3", sections.len()));
+        };
+        let memory_total_kib = meminfo_kib(meminfo, "MemTotal")?;
+        if memory_total_kib == 0 {
+            return Err("MemTotal is 0".to_owned());
+        }
+        let memory_available_kib = meminfo_kib(meminfo, "MemAvailable")?;
+        let load_text = first_word(loadavg).ok_or("the load average is missing")?;
+        let one_minute_average: f64 = load_text
+            .parse()
+            .ok()
+            .filter(|load: &f64| load.is_finite() && *load >= 0.0)
+            .ok_or_else(|| format!("the load average \"{load_text}\" is not a number"))?;
+        let cpus_text = first_word(nproc).ok_or("the count of CPUs is missing")?;
+        let cpus: u32 = cpus_text
+            .parse()
+            .ok()
+            .filter(|cpus| *cpus > 0)
+            .ok_or_else(|| format!("the count of CPUs \"{cpus_text}\" is not a number above 0"))?;
+        Ok(Self {
+            memory_total_kib,
+            memory_available_kib,
+            one_minute_average,
+            cpus,
+        })
     }
 
     /// The fraction of the memory in use, from 0 to 1.
     fn memory_in_use(&self) -> f64 {
-        todo!("{self:?}")
+        (1.0 - float(self.memory_available_kib) / float(self.memory_total_kib)).clamp(0.0, 1.0)
     }
 
     /// The one-minute load average for each CPU. It is more than 1 when more
     /// work waits than the CPUs can do.
     fn cpu_in_use(&self) -> f64 {
-        todo!("{self:?}")
+        self.one_minute_average / f64::from(self.cpus)
     }
 
     /// How busy the host is: the larger of [`Self::memory_in_use`] and
     /// [`Self::cpu_in_use`].
     pub fn busy(&self) -> f64 {
-        todo!("{self:?}")
+        self.memory_in_use().max(self.cpu_in_use())
     }
 
     /// One line that says how busy the host is, for a person to read.
     pub fn summary(&self) -> String {
-        todo!("{self:?}")
+        format!(
+            "{} busy: {} memory free, load {:.2} on {}",
+            self.busy_text(),
+            self.memory_text(),
+            self.one_minute_average,
+            self.cpus_text()
+        )
     }
+
+    /// The busy value as a percentage, as in `25%`.
+    fn busy_text(&self) -> String {
+        format!("{:.0}%", self.busy() * 100.0)
+    }
+
+    /// The free memory and the total memory, as in `11.7 of 15.6 GiB`.
+    fn memory_text(&self) -> String {
+        format!(
+            "{:.1} of {:.1} GiB",
+            float(self.memory_available_kib) / KIB_PER_GIB,
+            float(self.memory_total_kib) / KIB_PER_GIB
+        )
+    }
+
+    /// The count of CPUs with its noun, as in `4 CPUs`.
+    fn cpus_text(&self) -> String {
+        let noun = if self.cpus == 1 { "CPU" } else { "CPUs" };
+        format!("{} {noun}", self.cpus)
+    }
+}
+
+/// `value` as a floating-point number.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "memory in KiB stays far below 2^52, where f64 starts to lose whole numbers"
+)]
+fn float(value: u64) -> f64 {
+    value as f64
+}
+
+/// The value in KiB of the `key` line of `/proc/meminfo`, as in
+/// `MemTotal:       16318592 kB`.
+fn meminfo_kib(lines: &[&str], key: &str) -> Result<u64, String> {
+    let rest = lines
+        .iter()
+        .find_map(|line| line.strip_prefix(key)?.strip_prefix(':'))
+        .ok_or_else(|| format!("{key} is missing"))?;
+    let value = rest
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| format!("{key} has no value"))?;
+    value
+        .parse()
+        .map_err(|_| format!("{key} \"{value}\" is not a number"))
+}
+
+/// The first word of the first line in `lines` that is not empty.
+fn first_word<'a>(lines: &[&'a str]) -> Option<&'a str> {
+    lines.iter().find_map(|line| line.split_whitespace().next())
 }
 
 impl Survey {
     /// The least busy host that answered, or `None` when no host answered.
     pub fn chosen(&self) -> Option<(&ContextName, &Load)> {
-        todo!("{self:?}")
+        self.answers
+            .iter()
+            .filter_map(|answer| {
+                answer
+                    .result
+                    .as_ref()
+                    .ok()
+                    .map(|load| (&answer.context, load))
+            })
+            .min_by(|(_, left), (_, right)| {
+                left.busy()
+                    .total_cmp(&right.busy())
+                    .then_with(|| right.memory_available_kib.cmp(&left.memory_available_kib))
+            })
     }
 
     /// The hosts that gave no usable answer, and why.
     pub fn failures(&self) -> impl Iterator<Item = (&ContextName, &HostFailure)> {
-        self.answers.iter().filter_map(|answer| match &answer.result {
-            Ok(_) => None,
-            Err(failure) => Some((&answer.context, failure)),
-        })
+        self.answers
+            .iter()
+            .filter_map(|answer| match &answer.result {
+                Ok(_) => None,
+                Err(failure) => Some((&answer.context, failure)),
+            })
     }
 
     /// A table of all hosts that shows how busy each is and which one is
     /// chosen.
     pub fn table(&self) -> String {
-        todo!("{}", table::render(&[], &[]))
+        let chosen = self.chosen().map(|(context, _)| context);
+        let rows: Vec<Vec<String>> = self
+            .answers
+            .iter()
+            .map(|answer| match &answer.result {
+                Ok(load) => {
+                    let mut row = vec![
+                        answer.context.to_string(),
+                        load.memory_text(),
+                        format!("{:.2} / {}", load.one_minute_average, load.cpus_text()),
+                        load.busy_text(),
+                    ];
+                    if chosen == Some(&answer.context) {
+                        row.push("chosen".to_owned());
+                    }
+                    row
+                }
+                Err(failure) => vec![
+                    answer.context.to_string(),
+                    "-".to_owned(),
+                    "-".to_owned(),
+                    "-".to_owned(),
+                    failure.to_string(),
+                ],
+            })
+            .collect();
+        table::render(&["HOST", "MEMORY FREE", "LOAD", "BUSY"], &rows)
     }
 }
 
@@ -148,11 +278,11 @@ SwapFree:        2097148 kB";
         format!("{meminfo}\n{SECTION_MARK}\n{loadavg}\n{SECTION_MARK}\n{nproc}\n")
     }
 
-    fn load(total_kib: u64, available_kib: u64, load_one_minute: f64, cpus: u32) -> Load {
+    fn load(total_kib: u64, available_kib: u64, one_minute_average: f64, cpus: u32) -> Load {
         Load {
             memory_total_kib: total_kib,
             memory_available_kib: available_kib,
-            load_one_minute,
+            one_minute_average,
             cpus,
         }
     }
@@ -180,14 +310,18 @@ SwapFree:        2097148 kB";
     #[test]
     fn a_probe_output_without_mem_available_is_refused() {
         let meminfo = "MemTotal:       16318592 kB\nMemFree:         1203364 kB";
-        let error = Load::parse(&probe_output(meminfo, "0.52 0.58 0.59 1/389 12345", "4"))
-            .unwrap_err();
+        let error =
+            Load::parse(&probe_output(meminfo, "0.52 0.58 0.59 1/389 12345", "4")).unwrap_err();
         assert!(error.contains("MemAvailable"), "{error}");
     }
 
     #[test]
     fn a_probe_output_with_a_wrong_number_is_refused() {
-        for (loadavg, nproc) in [("high 0.5 0.5 1/2 3", "4"), ("0.5 0.5 0.5 1/2 3", "0"), ("", "4")] {
+        for (loadavg, nproc) in [
+            ("high 0.5 0.5 1/2 3", "4"),
+            ("0.5 0.5 0.5 1/2 3", "0"),
+            ("", "4"),
+        ] {
             assert!(
                 Load::parse(&probe_output(MEMINFO, loadavg, nproc)).is_err(),
                 "{loadavg:?} {nproc:?} must be refused"
@@ -283,7 +417,9 @@ SwapFree:        2097148 kB";
             summary,
             "25% busy: 11.7 of 15.6 GiB memory free, load 0.52 on 4 CPUs"
         );
-        assert!(load(1_048_576, 524_288, 0.0, 1).summary().ends_with("on 1 CPU"));
+        assert!(load(1_048_576, 524_288, 0.0, 1)
+            .summary()
+            .ends_with("on 1 CPU"));
     }
 
     #[test]
@@ -299,9 +435,15 @@ SwapFree:        2097148 kB";
         let lines: Vec<&str> = table.lines().collect();
         assert_eq!(lines.len(), 4, "{table}");
         assert!(lines[0].starts_with("HOST"), "{table}");
-        assert!(lines[1].starts_with("box-a") && lines[1].contains("90%"), "{table}");
+        assert!(
+            lines[1].starts_with("box-a") && lines[1].contains("90%"),
+            "{table}"
+        );
         assert!(!lines[1].contains("chosen"), "{table}");
-        assert!(lines[2].starts_with("box-b") && lines[2].ends_with("chosen"), "{table}");
+        assert!(
+            lines[2].starts_with("box-b") && lines[2].ends_with("chosen"),
+            "{table}"
+        );
         assert!(
             lines[3].starts_with("box-c") && lines[3].ends_with("no answer in 10 s"),
             "{table}"
