@@ -135,6 +135,88 @@ impl Inventory {
     }
 }
 
+/// The `docker inspect` format that gives the state and the exit status of a
+/// container, as in `exited 0`.
+pub const STATE_FORMAT: &str = "{{.State.Status}} {{.State.ExitCode}}";
+
+/// Why `drun` cannot find the one host that has a container.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum LocateError {
+    /// No host that answered has the container.
+    #[error("no host has a container named {reference}{}", describe_unreachable(.unreachable))]
+    NotFound {
+        /// The name or the ID that `drun` looked for.
+        reference: String,
+        /// The hosts that did not answer, and why.
+        unreachable: Vec<(ContextName, String)>,
+    },
+    /// More than one host has the container.
+    #[error(
+        "more than one host has a container named {reference}: {}. Use \
+         docker --context HOST to choose one",
+        join_names(.hosts)
+    )]
+    Ambiguous {
+        /// The name or the ID that `drun` looked for.
+        reference: String,
+        /// The hosts that have it.
+        hosts: Vec<ContextName>,
+    },
+}
+
+/// Words for the hosts that did not answer, for the end of an error message.
+fn describe_unreachable(unreachable: &[(ContextName, String)]) -> String {
+    if unreachable.is_empty() {
+        return String::new();
+    }
+    let hosts: Vec<String> = unreachable
+        .iter()
+        .map(|(context, why)| format!("{context} ({why})"))
+        .collect();
+    format!(
+        ". These hosts did not answer, so drun cannot tell if they have it: {}",
+        hosts.join(", ")
+    )
+}
+
+/// The names of `hosts`, separated by commas.
+fn join_names(hosts: &[ContextName]) -> String {
+    let names: Vec<&str> = hosts.iter().map(ContextName::as_str).collect();
+    names.join(", ")
+}
+
+impl Inventory {
+    /// The one host that has the container `reference`.
+    ///
+    /// `reference` is a name or an ID, as for docker. A container whose name
+    /// or full ID is `reference` matches first. When no container matches
+    /// that way, a container whose ID starts with `reference` matches.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LocateError::NotFound`] when no host that answered has the
+    /// container, and [`LocateError::Ambiguous`] when more than one host has
+    /// it.
+    pub fn locate(&self, reference: &str) -> Result<&ContextName, LocateError> {
+        todo!("{reference}")
+    }
+
+    /// A table of the containers of every host that answered, with the host
+    /// in the first column.
+    pub fn table(&self) -> String {
+        todo!()
+    }
+}
+
+/// Words for the answer of `docker inspect --format STATE_FORMAT`: the state,
+/// and the exit status when the container stopped, as in `exited 0` or
+/// `running`.
+///
+/// It is `None` when `answer` is not in that form.
+pub fn describe_state(answer: &str) -> Option<String> {
+    todo!("{answer}")
+}
+
 /// The first of `candidates` that `taken` does not refuse.
 fn first_free(
     candidates: impl IntoIterator<Item = String>,
@@ -238,5 +320,143 @@ pub(crate) mod tests {
         let name = inventory.fresh_name().unwrap();
         assert_eq!(name.split('-').count(), 3, "{name}");
         assert!(inventory.hosts_with_name(&name).is_empty());
+    }
+
+    fn two_hosts() -> Inventory {
+        Inventory {
+            answers: vec![
+                answer(
+                    "box-a",
+                    vec![container("aaa111", "job-a"), container("abc999", "web")],
+                ),
+                answer("box-b", vec![container("bbb111", "job-b")]),
+            ],
+        }
+    }
+
+    fn located(inventory: &Inventory, reference: &str) -> Result<String, LocateError> {
+        inventory
+            .locate(reference)
+            .map(|context| context.as_str().to_owned())
+    }
+
+    #[test]
+    fn a_container_is_located_by_its_name() {
+        let inventory = two_hosts();
+        assert_eq!(located(&inventory, "job-a"), Ok("box-a".to_owned()));
+        assert_eq!(located(&inventory, "job-b"), Ok("box-b".to_owned()));
+    }
+
+    #[test]
+    fn a_container_is_located_by_its_id_or_the_start_of_its_id() {
+        let inventory = two_hosts();
+        assert_eq!(located(&inventory, "bbb111"), Ok("box-b".to_owned()));
+        assert_eq!(located(&inventory, "bbb"), Ok("box-b".to_owned()));
+    }
+
+    #[test]
+    fn a_name_wins_over_the_start_of_an_id_on_another_host() {
+        let inventory = Inventory {
+            answers: vec![
+                answer("box-a", vec![container("fff000", "abc")]),
+                answer("box-b", vec![container("abc123", "job-b")]),
+            ],
+        };
+        assert_eq!(located(&inventory, "abc"), Ok("box-a".to_owned()));
+    }
+
+    #[test]
+    fn a_container_on_no_host_is_not_found() {
+        let error = two_hosts().locate("ghost").unwrap_err();
+        assert_eq!(
+            error,
+            LocateError::NotFound {
+                reference: "ghost".to_owned(),
+                unreachable: Vec::new()
+            }
+        );
+        assert_eq!(error.to_string(), "no host has a container named ghost");
+    }
+
+    #[test]
+    fn not_found_names_the_hosts_that_did_not_answer() {
+        let mut inventory = two_hosts();
+        inventory.answers.push(Answer {
+            context: ContextName::parse("box-c").unwrap(),
+            result: Err(HostFailure::TimedOut(std::time::Duration::from_secs(10))),
+        });
+        let message = inventory.locate("ghost").unwrap_err().to_string();
+        assert!(message.contains("box-c (no answer in 10 s)"), "{message}");
+    }
+
+    #[test]
+    fn a_container_on_two_hosts_is_ambiguous_and_names_both() {
+        let inventory = Inventory {
+            answers: vec![
+                answer("box-a", vec![container("aaa111", "job-1")]),
+                answer("box-b", vec![container("bbb111", "job-1")]),
+            ],
+        };
+        let error = inventory.locate("job-1").unwrap_err();
+        assert_eq!(
+            error,
+            LocateError::Ambiguous {
+                reference: "job-1".to_owned(),
+                hosts: vec![
+                    ContextName::parse("box-a").unwrap(),
+                    ContextName::parse("box-b").unwrap()
+                ]
+            }
+        );
+        assert!(error.to_string().contains("box-a, box-b"), "{error}");
+    }
+
+    #[test]
+    fn two_containers_on_one_host_are_one_host() {
+        let inventory = Inventory {
+            answers: vec![answer(
+                "box-a",
+                vec![container("abc111", "one"), container("abc222", "two")],
+            )],
+        };
+        assert_eq!(located(&inventory, "abc"), Ok("box-a".to_owned()));
+    }
+
+    #[test]
+    fn the_table_shows_the_containers_of_every_host_with_the_host() {
+        let mut inventory = two_hosts();
+        inventory.answers.push(Answer {
+            context: ContextName::parse("box-c").unwrap(),
+            result: Err(HostFailure::TimedOut(std::time::Duration::from_secs(10))),
+        });
+        let table = inventory.table();
+        let lines: Vec<&str> = table.lines().collect();
+        assert_eq!(lines.len(), 4, "{table}");
+        assert!(
+            lines[0].starts_with("HOST") && lines[0].contains("NAME"),
+            "{table}"
+        );
+        assert!(
+            lines[1].starts_with("box-a") && lines[1].contains("job-a"),
+            "{table}"
+        );
+        assert!(
+            lines[2].starts_with("box-a") && lines[2].contains("web"),
+            "{table}"
+        );
+        assert!(
+            lines[3].starts_with("box-b") && lines[3].contains("job-b"),
+            "{table}"
+        );
+    }
+
+    #[test]
+    fn the_state_shows_the_exit_status_only_when_the_container_stopped() {
+        assert_eq!(describe_state("exited 0\n"), Some("exited 0".to_owned()));
+        assert_eq!(describe_state("dead 137"), Some("dead 137".to_owned()));
+        assert_eq!(describe_state("running 0"), Some("running".to_owned()));
+        assert_eq!(describe_state("created 0"), Some("created".to_owned()));
+        assert_eq!(describe_state(""), None);
+        assert_eq!(describe_state("exited"), None);
     }
 }

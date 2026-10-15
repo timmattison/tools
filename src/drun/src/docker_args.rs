@@ -189,6 +189,63 @@ const RUN: CommandSpec = CommandSpec {
     ],
 };
 
+/// The flags of `docker logs`, from Docker 29.
+const LOGS: CommandSpec = CommandSpec {
+    name: "logs",
+    interspersed: true,
+    flags: &[
+        switch('f', "follow"),
+        switch('t', "timestamps"),
+        value('n', "tail"),
+        long_switch("details"),
+        long_switch("help"),
+        long_value("since"),
+        long_value("until"),
+    ],
+};
+
+/// The flags of `docker exec`, from Docker 29.
+const EXEC: CommandSpec = CommandSpec {
+    name: "exec",
+    interspersed: false,
+    flags: &[
+        switch('d', "detach"),
+        switch('i', "interactive"),
+        switch('t', "tty"),
+        value('e', "env"),
+        value('u', "user"),
+        value('w', "workdir"),
+        long_switch("help"),
+        long_switch("privileged"),
+        long_value("detach-keys"),
+        long_value("env-file"),
+    ],
+};
+
+/// The flags of `docker cp`, from Docker 29.
+const CP: CommandSpec = CommandSpec {
+    name: "cp",
+    interspersed: true,
+    flags: &[
+        switch('a', "archive"),
+        switch('L', "follow-link"),
+        switch('q', "quiet"),
+        long_switch("help"),
+    ],
+};
+
+/// The flags of `docker rm`, from Docker 29.
+const RM: CommandSpec = CommandSpec {
+    name: "rm",
+    interspersed: true,
+    flags: &[
+        switch('f', "force"),
+        switch('l', "link"),
+        switch('v', "volumes"),
+        long_switch("help"),
+    ],
+};
+
 /// Why `drun` cannot read the arguments.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ArgsError {
@@ -250,6 +307,71 @@ pub struct RunArgs {
     pub name: Option<String>,
     /// The source path of each bind mount, from `-v` and `--mount`.
     pub bind_sources: Vec<String>,
+}
+
+/// The arguments of `docker rm`, divided into the flags and the containers.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RmArgs {
+    /// The flags, as they were written.
+    pub flags: Vec<OsString>,
+    /// The names or IDs of the containers.
+    pub containers: Vec<String>,
+}
+
+/// The container that the arguments of `docker logs` name.
+///
+/// # Errors
+///
+/// Returns an [`ArgsError`] for a flag that `drun` does not know, a flag
+/// without its value, or arguments that do not name exactly one container.
+pub fn parse_logs(args: &[OsString]) -> Result<String, ArgsError> {
+    todo!("{args:?} {LOGS:?}")
+}
+
+/// The container that the arguments of `docker exec` name. The arguments
+/// after the container are the command to run in it.
+///
+/// # Errors
+///
+/// Returns an [`ArgsError`] for a flag that `drun` does not know, a flag
+/// without its value, or arguments without a container and a command.
+pub fn parse_exec(args: &[OsString]) -> Result<String, ArgsError> {
+    todo!("{args:?} {EXEC:?}")
+}
+
+/// The container that the arguments of `docker cp` name, on the side
+/// written as `CONTAINER:PATH`.
+///
+/// The rule is the rule of the docker CLI: an argument that starts with `/`
+/// or `.` is a path on this computer, and so is an argument without `:`.
+///
+/// # Errors
+///
+/// Returns an [`ArgsError`] for a flag that `drun` does not know, or for
+/// arguments that are not one container side and one side on this computer.
+pub fn parse_cp(args: &[OsString]) -> Result<String, ArgsError> {
+    todo!("{args:?} {CP:?}")
+}
+
+/// Divides the arguments of `docker rm` into flags and containers.
+///
+/// # Errors
+///
+/// Returns an [`ArgsError`] for a flag that `drun` does not know, or for
+/// arguments without a container.
+pub fn parse_rm(args: &[OsString]) -> Result<RmArgs, ArgsError> {
+    todo!("{args:?} {RM:?}")
+}
+
+/// The one container name of a `drun` command that takes a name and no
+/// flags, as `drun status` and `drun wait` do.
+///
+/// # Errors
+///
+/// Returns [`ArgsError::Shape`] unless `args` is one argument that does not
+/// start with `-`.
+pub fn parse_name(command: &'static str, args: &[OsString]) -> Result<String, ArgsError> {
+    todo!("{command} {args:?}")
 }
 
 /// Reads the arguments that follow `docker run`.
@@ -710,5 +832,134 @@ mod tests {
                 what: "an image"
             })
         );
+    }
+
+    #[test]
+    fn logs_name_one_container_before_or_after_the_flags() {
+        for words in [
+            &["job"][..],
+            &["-f", "job"],
+            &["job", "-f"],
+            &["--tail", "10", "job"],
+            &["-n", "5", "-ft", "job"],
+            &["--since=1h", "job", "--details"],
+        ] {
+            assert_eq!(parse_logs(&args(words)), Ok("job".to_owned()), "{words:?}");
+        }
+    }
+
+    #[test]
+    fn logs_without_exactly_one_container_are_refused() {
+        let shape = Err(ArgsError::Shape {
+            command: "logs",
+            what: "one container",
+        });
+        assert_eq!(parse_logs(&args(&[])), shape);
+        assert_eq!(parse_logs(&args(&["-f"])), shape);
+        assert_eq!(parse_logs(&args(&["a", "b"])), shape);
+        assert_eq!(
+            parse_logs(&args(&["-x", "job"])),
+            Err(ArgsError::UnknownShort {
+                command: "logs",
+                flag: 'x'
+            })
+        );
+    }
+
+    #[test]
+    fn exec_names_the_container_before_the_command() {
+        assert_eq!(
+            parse_exec(&args(&["-it", "-e", "A=b", "job", "sh", "-c", "echo -d"])),
+            Ok("job".to_owned())
+        );
+        assert_eq!(
+            parse_exec(&args(&["-u", "root", "job", "ls", "-x"])),
+            Ok("job".to_owned())
+        );
+        assert_eq!(
+            parse_exec(&args(&["-u", "job", "ls"])),
+            Err(ArgsError::Shape {
+                command: "exec",
+                what: "a container and a command"
+            }),
+            "job is the value of -u, so ls is the container and there is no command"
+        );
+    }
+
+    #[test]
+    fn cp_finds_the_container_on_either_side() {
+        assert_eq!(
+            parse_cp(&args(&["job:/out/result.json", "./result.json"])),
+            Ok("job".to_owned())
+        );
+        assert_eq!(
+            parse_cp(&args(&["./in.txt", "job:/in.txt"])),
+            Ok("job".to_owned())
+        );
+        assert_eq!(
+            parse_cp(&args(&["-a", "job:/x", "/tmp/x"])),
+            Ok("job".to_owned())
+        );
+        assert_eq!(
+            parse_cp(&args(&["/a:b", "job:/x"])),
+            Ok("job".to_owned()),
+            "an absolute path is on this computer, with or without a colon"
+        );
+        assert_eq!(
+            parse_cp(&args(&["./a:b", "job:/x"])),
+            Ok("job".to_owned()),
+            "a path that starts with a dot is on this computer"
+        );
+        assert_eq!(
+            parse_cp(&args(&["job:/x", "-"])),
+            Ok("job".to_owned()),
+            "- is stdout"
+        );
+    }
+
+    #[test]
+    fn cp_needs_one_container_side_and_one_local_side() {
+        let shape = Err(ArgsError::Shape {
+            command: "cp",
+            what: "CONTAINER:PATH on one side and a path on this computer on the other",
+        });
+        assert_eq!(parse_cp(&args(&["a:/x", "b:/y"])), shape);
+        assert_eq!(parse_cp(&args(&["./a", "./b"])), shape);
+        assert_eq!(parse_cp(&args(&["job:/x"])), shape);
+        assert_eq!(parse_cp(&args(&["job:/x", "./a", "./b"])), shape);
+    }
+
+    #[test]
+    fn rm_divides_the_flags_from_the_containers() {
+        assert_eq!(
+            parse_rm(&args(&["-f", "a", "b", "-v"])),
+            Ok(RmArgs {
+                flags: args(&["-f", "-v"]),
+                containers: vec!["a".to_owned(), "b".to_owned()],
+            })
+        );
+        assert_eq!(
+            parse_rm(&args(&["-f"])),
+            Err(ArgsError::Shape {
+                command: "rm",
+                what: "at least one container"
+            })
+        );
+    }
+
+    #[test]
+    fn a_command_that_takes_one_name_takes_only_one_name() {
+        assert_eq!(parse_name("status", &args(&["job"])), Ok("job".to_owned()));
+        assert_eq!(
+            parse_name("status", &args(&["café-🎉"])),
+            Ok("café-🎉".to_owned())
+        );
+        let shape = Err(ArgsError::Shape {
+            command: "wait",
+            what: "one container name",
+        });
+        assert_eq!(parse_name("wait", &args(&[])), shape);
+        assert_eq!(parse_name("wait", &args(&["a", "b"])), shape);
+        assert_eq!(parse_name("wait", &args(&["-f"])), shape);
     }
 }

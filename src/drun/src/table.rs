@@ -77,6 +77,15 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_last_cell_leaves_no_spaces_at_the_end() {
+        let text = render(
+            &["HOST", "PORTS"],
+            &[row(&["box-a", ""]), row(&["b", "80"])],
+        );
+        assert_eq!(text, "HOST   PORTS\nbox-a\nb      80\n");
+    }
+
+    #[test]
     fn no_rows_gives_the_header_alone() {
         assert_eq!(render(&["HOST", "NAME"], &[]), "HOST  NAME\n");
     }
