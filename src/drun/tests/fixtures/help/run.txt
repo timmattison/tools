@@ -33,6 +33,8 @@ Options:
                                                     default-cgroupns-mode
                                          option on the daemon (default)
       --cidfile string                   Write the container ID to the file
+      --cpu-count int                    CPU count (Windows only)
+      --cpu-percent int                  CPU percent (Windows only)
       --cpu-period int                   Limit CPU CFS (Completely Fair
                                          Scheduler) period
       --cpu-quota int                    Limit CPU CFS (Completely Fair
@@ -95,6 +97,10 @@ Options:
                                          that forwards signals and reaps
                                          processes
   -i, --interactive                      Keep STDIN open even if not attached
+      --io-maxbandwidth bytes            Maximum IO bandwidth limit for
+                                         the system drive (Windows only)
+      --io-maxiops uint                  Maximum IOps limit for the
+                                         system drive (Windows only)
       --ip ip                            IPv4 address (e.g., 172.30.100.104)
       --ip6 ip                           IPv6 address (e.g., 2001:db8::33)
       --ipc string                       IPC mode to use

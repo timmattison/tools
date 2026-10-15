@@ -32,10 +32,13 @@ const DIRECTORY_MARK: &str = "__FIXTURE_DIRECTORY__";
 /// - `exit-<host>`: the exit status of every other call.
 /// - `help-<command>`: the answer to `docker <command> --help`, which has no
 ///   `--context`.
+/// - `help-env-<command>`: written by the fake on each help call. It holds the
+///   `DOCKER_` variables of that call, sorted, one for each line.
 const FAKE_DOCKER: &str = r#"#!/bin/sh
 # A fake docker for the end-to-end tests of drun.
 dir=__FIXTURE_DIRECTORY__
 if [ "$2" = "--help" ]; then
+    env | grep '^DOCKER_' | sort > "$dir/help-env-$1" || true
     if [ -f "$dir/help-$1" ]; then
         cat "$dir/help-$1"
         exit 0
@@ -225,6 +228,14 @@ impl Fixture {
     /// Makes `docker <command> --help` print `text`.
     pub fn help(&self, command: &str, text: &str) {
         self.write(&format!("help-{command}"), text);
+    }
+
+    /// The `DOCKER_` variables that `docker <command> --help` ran with, sorted,
+    /// one for each line. The text is empty when the fake has no record of a
+    /// call.
+    pub fn help_environment(&self, command: &str) -> String {
+        std::fs::read_to_string(self.path().join(format!("help-env-{command}")))
+            .unwrap_or_default()
     }
 
     fn write(&self, name: &str, text: &str) {
