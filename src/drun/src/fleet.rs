@@ -15,6 +15,7 @@ use serde::Deserialize;
 
 use crate::config::Config;
 use crate::host::{self, Answer, ContextName, HostFailure};
+use crate::table;
 
 /// The label of every container that `drun run` starts.
 pub const MANAGED_LABEL: &str = "drun.managed=true";
@@ -112,14 +113,20 @@ impl Inventory {
     /// The hosts that have a container named `name`, in the order of the
     /// configuration.
     pub fn hosts_with_name(&self, name: &str) -> Vec<&ContextName> {
+        self.hosts_where(|container| container.names().any(|found| found == name))
+    }
+
+    /// The hosts that answered and have a container that `matches`, in the
+    /// order of the configuration. A host is in the list one time, whatever
+    /// the count of its containers that match.
+    fn hosts_where(&self, matches: impl Fn(&Container) -> bool) -> Vec<&ContextName> {
         self.answers
             .iter()
             .filter(|answer| {
-                answer.result.as_ref().is_ok_and(|containers| {
-                    containers
-                        .iter()
-                        .any(|container| container.names().any(|found| found == name))
-                })
+                answer
+                    .result
+                    .as_ref()
+                    .is_ok_and(|containers| containers.iter().any(&matches))
             })
             .map(|answer| &answer.context)
             .collect()
@@ -198,14 +205,66 @@ impl Inventory {
     /// container, and [`LocateError::Ambiguous`] when more than one host has
     /// it.
     pub fn locate(&self, reference: &str) -> Result<&ContextName, LocateError> {
-        todo!("{reference}")
+        let exact = self.hosts_where(|container| {
+            container.id == reference || container.names().any(|name| name == reference)
+        });
+        let candidates = if exact.is_empty() && is_id_start(reference) {
+            self.hosts_where(|container| container.id.starts_with(reference))
+        } else {
+            exact
+        };
+        match candidates.as_slice() {
+            [host] => Ok(host),
+            [] => Err(LocateError::NotFound {
+                reference: reference.to_owned(),
+                unreachable: self
+                    .failures()
+                    .map(|(context, failure)| (context.clone(), failure.to_string()))
+                    .collect(),
+            }),
+            hosts => Err(LocateError::Ambiguous {
+                reference: reference.to_owned(),
+                hosts: hosts.iter().map(|host| (*host).clone()).collect(),
+            }),
+        }
     }
 
     /// A table of the containers of every host that answered, with the host
     /// in the first column.
     pub fn table(&self) -> String {
-        todo!()
+        let rows: Vec<Vec<String>> = self
+            .answers
+            .iter()
+            .filter_map(|answer| {
+                answer
+                    .result
+                    .as_ref()
+                    .ok()
+                    .map(|containers| (&answer.context, containers))
+            })
+            .flat_map(|(context, containers)| {
+                containers.iter().map(move |container| {
+                    vec![
+                        context.to_string(),
+                        container.names().next().unwrap_or_default().to_owned(),
+                        container.image.clone(),
+                        container.status.clone(),
+                        container.ports.clone(),
+                    ]
+                })
+            })
+            .collect();
+        table::render(&["HOST", "NAME", "IMAGE", "STATUS", "PORTS"], &rows)
     }
+}
+
+/// True when `reference` can be the start of a container ID, which is
+/// hexadecimal.
+fn is_id_start(reference: &str) -> bool {
+    !reference.is_empty()
+        && reference
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
 }
 
 /// Words for the answer of `docker inspect --format STATE_FORMAT`: the state,
@@ -214,7 +273,17 @@ impl Inventory {
 ///
 /// It is `None` when `answer` is not in that form.
 pub fn describe_state(answer: &str) -> Option<String> {
-    todo!("{answer}")
+    let mut words = answer.split_whitespace();
+    let state = words.next()?;
+    let code = words.next()?;
+    if words.next().is_some() {
+        return None;
+    }
+    if matches!(state, "exited" | "dead") {
+        Some(format!("{state} {code}"))
+    } else {
+        Some(state.to_owned())
+    }
 }
 
 /// The first of `candidates` that `taken` does not refuse.
