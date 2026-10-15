@@ -83,7 +83,7 @@ fn summary() -> Summary {
         aliases: 5,
         functions: 4,
         unparsed_functions: vec!["broken".to_string()],
-        unparsed_aliases: 0,
+        unparsed_aliases: vec![],
     }
 }
 
@@ -436,11 +436,11 @@ fn the_history_line_names_the_rows_before_the_since_date() {
 #[test]
 fn the_shell_line_counts_the_definitions() {
     let with_aliases = summary_lines(Summary {
-        unparsed_aliases: 2,
+        unparsed_aliases: vec!["alias a=".to_string(), "alias b=".to_string()],
         ..summary()
     });
     let one_alias_line = summary_lines(Summary {
-        unparsed_aliases: 1,
+        unparsed_aliases: vec!["alias a=".to_string()],
         ..summary()
     });
     let nothing = summary_lines(Summary {
@@ -607,7 +607,7 @@ fn the_json_history_and_shell_blocks_hold_the_summary() {
             "aliases": 5,
             "functions": 4,
             "unparsed_functions": ["broken"],
-            "unparsed_aliases": 0,
+            "unparsed_aliases": [],
         })
     );
 }
@@ -699,11 +699,22 @@ fn the_json_lists_follow_the_order_of_the_text_report() {
 
 /// Makes a tally that has only the summary lines in the test.
 fn tally_with(unparsed: Vec<Unparsed>, unparsed_functions: Vec<&str>) -> Tally {
+    tally_with_aliases(unparsed, unparsed_functions, vec![])
+}
+
+/// Makes a tally that has only the summary lines in the test, with alias lines
+/// that did not parse.
+fn tally_with_aliases(
+    unparsed: Vec<Unparsed>,
+    unparsed_functions: Vec<&str>,
+    unparsed_aliases: Vec<&str>,
+) -> Tally {
     Tally {
         tools: vec![],
         summary: Summary {
             unparsed,
             unparsed_functions: unparsed_functions.into_iter().map(str::to_string).collect(),
+            unparsed_aliases: unparsed_aliases.into_iter().map(str::to_string).collect(),
             ..summary()
         },
     }
@@ -763,5 +774,64 @@ fn a_run_with_no_unparsed_command_and_no_unparsed_function_says_so() {
     assert_eq!(
         unparsed(&tally_with(vec![], vec![])),
         "Every command parsed.\n"
+    );
+}
+
+/// The alias lines that did not parse come last, under a blank line and a
+/// label. Each line stands on its own line.
+#[test]
+fn the_unparsed_alias_lines_follow_the_functions() {
+    let tally = tally_with_aliases(
+        vec![group("a |", 2)],
+        vec!["alpha"],
+        vec!["alias bad='x", "echo $("],
+    );
+
+    assert_eq!(
+        unparsed(&tally),
+        "2\ta |\n\nFunctions that did not parse: alpha\n\nAlias lines that did not parse:\nalias bad='x\necho $(\n"
+    );
+}
+
+/// With no command and no function, the alias block stands alone.
+#[test]
+fn unparsed_alias_lines_alone_have_no_blank_line_before_them() {
+    let tally = tally_with_aliases(vec![], vec![], vec!["alias bad='x"]);
+
+    assert_eq!(
+        unparsed(&tally),
+        "Alias lines that did not parse:\nalias bad='x\n"
+    );
+}
+
+/// An alias line keeps to one line: a tab and a backslash are escaped.
+#[test]
+fn an_unparsed_alias_line_is_escaped() {
+    let tally = tally_with_aliases(vec![], vec![], vec!["alias a='x\ty\\z"]);
+
+    assert_eq!(
+        unparsed(&tally),
+        "Alias lines that did not parse:\nalias a='x\\ty\\\\z\n"
+    );
+}
+
+/// An alias line that did not parse is an unparsed item, so the text
+/// "Every command parsed." does not show.
+#[test]
+fn an_unparsed_alias_line_alone_is_not_every_command_parsed() {
+    let tally = tally_with_aliases(vec![], vec![], vec!["x"]);
+
+    assert!(!unparsed(&tally).contains("Every command parsed."));
+}
+
+/// The JSON `shell` block lists the alias lines that did not parse.
+#[test]
+fn the_json_shell_block_lists_the_unparsed_alias_lines() {
+    let tally = tally_with_aliases(vec![], vec![], vec!["alias bad='x", "echo $("]);
+    let value = document(&tally, &window());
+
+    assert_eq!(
+        value["shell"]["unparsed_aliases"],
+        serde_json::json!(["alias bad='x", "echo $("])
     );
 }

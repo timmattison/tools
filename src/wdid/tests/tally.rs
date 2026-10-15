@@ -534,7 +534,7 @@ fn the_summary_counts_rows_aliases_and_functions() {
         summary.unparsed_functions,
         vec!["broken".to_string(), "worse".to_string()]
     );
-    assert_eq!(summary.unparsed_aliases, 1);
+    assert_eq!(summary.unparsed_aliases, vec!["alias x=".to_string()]);
 }
 
 #[test]

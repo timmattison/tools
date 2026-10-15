@@ -95,8 +95,8 @@ pub struct Summary {
     pub functions: usize,
     /// The names of the functions whose body did not parse.
     pub unparsed_functions: Vec<String>,
-    /// The number of alias lines that did not parse.
-    pub unparsed_aliases: usize,
+    /// The alias lines that did not parse, in the order of the shell output.
+    pub unparsed_aliases: Vec<String>,
 }
 
 /// The result of the tally.
@@ -301,7 +301,7 @@ pub fn tally(
             aliases: definitions.aliases.len(),
             functions: definitions.functions.len() + definitions.unparsed_functions.len(),
             unparsed_functions: definitions.unparsed_functions.clone(),
-            unparsed_aliases: definitions.unparsed_aliases.len(),
+            unparsed_aliases: definitions.unparsed_aliases.clone(),
         },
     }
 }

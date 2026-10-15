@@ -289,10 +289,10 @@ fn summary_lines(summary: &Summary, window: &Window) -> String {
             number_of(summary.unparsed_functions.len()),
         )
     };
-    if summary.unparsed_aliases > 0 {
+    if !summary.unparsed_aliases.is_empty() {
         shell.push_str(&format!(
             " {} did not parse.",
-            counted(summary.unparsed_aliases, "alias line", "alias lines"),
+            counted(summary.unparsed_aliases.len(), "alias line", "alias lines"),
         ));
     }
     format!("{history}\n{shell}")
@@ -457,7 +457,7 @@ pub fn json(tally: &Tally, window: &Window) -> String {
             aliases: summary.aliases,
             functions: summary.functions,
             unparsed_functions: &summary.unparsed_functions,
-            unparsed_aliases: summary.unparsed_aliases,
+            unparsed_aliases: summary.unparsed_aliases.len(),
         },
         tools: tally.tools.iter().map(tool_document).collect(),
         never_used_old: names_of(&tools_with(tally, Classification::NeverUsedOld)),
