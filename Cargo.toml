@@ -132,6 +132,8 @@ env_logger = "0.11"
 
 # Browser
 open = "5.4"
+# Splits a command line into words by the rules of a POSIX shell.
+shlex = "2"
 
 # Misc
 syn = { version = "2", default-features = false, features = ["full", "parsing", "visit"] }

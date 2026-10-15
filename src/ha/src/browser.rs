@@ -5,8 +5,23 @@
 //! `BROWSER`, so that the address opens on the computer of the user and not on
 //! the host that runs `ha`. When `BROWSER` is not set or is empty, `ha` uses the
 //! opener of the system, which is `/usr/bin/open` on macOS.
+//!
+//! The opener of the system is not sufficient for a forwarder. The `open`
+//! crate runs `/usr/bin/open` by its full path, so a shim early in `PATH`
+//! never gets the address, and the crate ignores `BROWSER`.
+//!
+//! `ha` reads `BROWSER` as `gh` and `xdg-open` do:
+//!
+//! - The value is one command line, split into words by the rules of a POSIX
+//!   shell. A path that holds a space needs quotes.
+//! - Each `%s` in an argument takes the address. When no argument holds `%s`,
+//!   the address is the last argument.
+//! - A list of commands with `:` between them is not supported.
 
 use std::ffi::OsString;
+use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
 use std::time::Duration;
 
 use crate::app::Opener;
@@ -14,7 +29,14 @@ use crate::app::Opener;
 /// The environment variable that names the browser command.
 pub const BROWSER_VARIABLE: &str = "BROWSER";
 
+/// The text in an argument of the browser command that the address replaces.
+const ADDRESS_PLACEHOLDER: &str = "%s";
+
 /// How long [`BrowserOpener::open`] waits for the browser command to stop.
+///
+/// A forwarder stops in a few milliseconds, so its failure shows in the
+/// status line. A browser that stays open does not stop, and the view then
+/// continues after this time.
 const EXIT_GRACE: Duration = Duration::from_millis(500);
 
 /// Opens a web address with the opener of the system.
@@ -23,9 +45,119 @@ type SystemOpener = Box<dyn Fn(&str) -> std::io::Result<()>>;
 /// The opener that runs the command of `BROWSER`, or else the opener of the
 /// system.
 pub struct BrowserOpener {
-    browser: Option<OsString>,
+    launcher: Launcher,
     system: SystemOpener,
     exit_grace: Duration,
+}
+
+/// What the value of `BROWSER` asks for.
+#[derive(Debug)]
+enum Launcher {
+    /// `BROWSER` is not set, or it holds only white space.
+    System,
+    /// The browser command, split into words.
+    Command {
+        program: String,
+        arguments: Vec<String>,
+    },
+    /// `BROWSER` is set, but it is not a command line. The text is the reason.
+    Unusable(String),
+}
+
+impl Launcher {
+    /// Reads the value of `BROWSER`.
+    fn from_browser_variable(value: Option<OsString>) -> Self {
+        let Some(value) = value else {
+            return Launcher::System;
+        };
+        let Ok(text) = value.into_string() else {
+            return Launcher::Unusable(format!("{BROWSER_VARIABLE} is not valid UTF-8"));
+        };
+        let Some(words) = shlex::split(&text) else {
+            return Launcher::Unusable(format!(
+                "{BROWSER_VARIABLE} is not a valid command line: {text}"
+            ));
+        };
+        let mut words = words.into_iter();
+        match words.next() {
+            None => Launcher::System,
+            Some(program) => Launcher::Command {
+                program,
+                arguments: words.collect(),
+            },
+        }
+    }
+}
+
+/// Gives the arguments of the browser command for `url`.
+fn with_address(arguments: &[String], url: &str) -> Vec<String> {
+    if arguments
+        .iter()
+        .any(|argument| argument.contains(ADDRESS_PLACEHOLDER))
+    {
+        arguments
+            .iter()
+            .map(|argument| argument.replace(ADDRESS_PLACEHOLDER, url))
+            .collect()
+    } else {
+        let mut all = arguments.to_vec();
+        all.push(url.to_owned());
+        all
+    }
+}
+
+/// Starts the browser command for `url`, and waits up to `exit_grace` for it
+/// to stop.
+///
+/// The command gets no terminal. Its output goes to the null device, because
+/// text that it writes on the terminal breaks the view.
+///
+/// # Errors
+/// Returns the reason when the command does not start, or when it stops
+/// inside `exit_grace` with a failure.
+fn start(
+    program: &str,
+    arguments: &[String],
+    url: &str,
+    exit_grace: Duration,
+) -> Result<(), String> {
+    let mut command = Command::new(program);
+    command
+        .args(with_address(arguments, url))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // A process group of its own takes the command out of the job of `ha`.
+    // Thus the shell does not send it the hangup signal when the terminal
+    // closes. The `open` crate gets the same result with `setsid` in a double
+    // fork, which needs unsafe code.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("{BROWSER_VARIABLE} command {program} did not start: {error}"))?;
+    let (sender, receiver) = mpsc::channel();
+    // This thread reaps the command also after `start` stops waiting. Thus a
+    // browser that stays open does not become a zombie.
+    thread::spawn(move || {
+        let _ = sender.send(child.wait());
+    });
+    match receiver.recv_timeout(exit_grace) {
+        Ok(Ok(status)) if status.success() => Ok(()),
+        Ok(Ok(status)) => Err(format!(
+            "{BROWSER_VARIABLE} command {program} failed: {status}"
+        )),
+        Ok(Err(error)) => Err(format!(
+            "ha cannot wait for {BROWSER_VARIABLE} command {program}: {error}"
+        )),
+        Err(RecvTimeoutError::Timeout) => Ok(()),
+        Err(RecvTimeoutError::Disconnected) => Err(format!(
+            "ha cannot wait for {BROWSER_VARIABLE} command {program}"
+        )),
+    }
 }
 
 impl BrowserOpener {
@@ -43,7 +175,7 @@ impl BrowserOpener {
     /// system, and the time to wait for the browser command to stop.
     fn new(browser: Option<OsString>, system: SystemOpener, exit_grace: Duration) -> Self {
         BrowserOpener {
-            browser,
+            launcher: Launcher::from_browser_variable(browser),
             system,
             exit_grace,
         }
@@ -52,7 +184,13 @@ impl BrowserOpener {
 
 impl Opener for BrowserOpener {
     fn open(&self, url: &str) -> Result<(), String> {
-        (self.system)(url).map_err(|error| error.to_string())
+        match &self.launcher {
+            Launcher::System => (self.system)(url).map_err(|error| error.to_string()),
+            Launcher::Command { program, arguments } => {
+                start(program, arguments, url, self.exit_grace)
+            }
+            Launcher::Unusable(reason) => Err(reason.clone()),
+        }
     }
 }
 
@@ -80,9 +218,9 @@ mod tests {
     /// How long a test waits for a file that a command writes.
     const FILE_WAIT: Duration = Duration::from_secs(60);
 
-    /// Builds an opener from `browser`. Its system opener records each
-    /// address and never starts a real browser.
-    fn opener(
+    /// Builds an opener from the value of `BROWSER`. Its system opener
+    /// records each address and never starts a real browser.
+    fn opener_for(
         browser: Option<OsString>,
         exit_grace: Duration,
     ) -> (BrowserOpener, Rc<RefCell<Vec<String>>>) {
@@ -95,9 +233,9 @@ mod tests {
         (BrowserOpener::new(browser, system, exit_grace), urls)
     }
 
-    /// Gives the `BROWSER` value of `words`.
-    fn browser(words: &str) -> Option<OsString> {
-        Some(OsString::from(words))
+    /// Builds an opener whose `BROWSER` holds `words`, as [`opener_for`] does.
+    fn opener(words: &str, exit_grace: Duration) -> (BrowserOpener, Rc<RefCell<Vec<String>>>) {
+        opener_for(Some(OsString::from(words)), exit_grace)
     }
 
     /// Gives the quoted form of `path` for a shell command line.
@@ -149,7 +287,7 @@ mod tests {
     fn a_browser_command_gets_the_address_as_its_last_argument() {
         let directory = tempfile::tempdir().unwrap();
         let (words, output) = recorder(directory.path());
-        let (opener, urls) = opener(browser(&words), LONG_GRACE);
+        let (opener, urls) = opener(&words, LONG_GRACE);
 
         assert_eq!(opener.open(URL), Ok(()));
 
@@ -162,10 +300,7 @@ mod tests {
     fn the_browser_command_is_split_into_words_as_a_shell_splits_it() {
         let directory = tempfile::tempdir().unwrap();
         let (words, output) = recorder(directory.path());
-        let (opener, _) = opener(
-            browser(&format!("{words} --new-window 'two words'")),
-            LONG_GRACE,
-        );
+        let (opener, _) = opener(&format!("{words} --new-window 'two words'"), LONG_GRACE);
 
         assert_eq!(opener.open(URL), Ok(()));
 
@@ -180,7 +315,7 @@ mod tests {
     fn a_percent_s_in_the_browser_command_takes_the_address() {
         let directory = tempfile::tempdir().unwrap();
         let (words, output) = recorder(directory.path());
-        let (opener, _) = opener(browser(&format!("{words} --url=%s")), LONG_GRACE);
+        let (opener, _) = opener(&format!("{words} --url=%s"), LONG_GRACE);
 
         assert_eq!(opener.open(URL), Ok(()));
 
@@ -190,7 +325,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_browser_command_that_fails_is_an_error() {
-        let (opener, urls) = opener(browser("/bin/sh -c 'exit 3'"), LONG_GRACE);
+        let (opener, urls) = opener("/bin/sh -c 'exit 3'", LONG_GRACE);
 
         assert!(opener.open(URL).is_err());
 
@@ -201,7 +336,7 @@ mod tests {
     fn a_browser_command_that_cannot_start_is_an_error() {
         let directory = tempfile::tempdir().unwrap();
         let missing = directory.path().join("no-such-browser");
-        let (opener, urls) = opener(browser(&quoted(&missing)), LONG_GRACE);
+        let (opener, urls) = opener(&quoted(&missing), LONG_GRACE);
 
         assert!(opener.open(URL).is_err());
 
@@ -210,7 +345,7 @@ mod tests {
 
     #[test]
     fn a_browser_command_with_an_open_quotation_is_an_error() {
-        let (opener, urls) = opener(browser("/bin/sh 'no closing quote"), LONG_GRACE);
+        let (opener, urls) = opener("/bin/sh 'no closing quote", LONG_GRACE);
 
         assert!(opener.open(URL).is_err());
 
@@ -222,7 +357,7 @@ mod tests {
     fn a_browser_variable_that_is_not_utf8_is_an_error() {
         use std::os::unix::ffi::OsStringExt;
 
-        let (opener, urls) = opener(Some(OsString::from_vec(vec![b'/', 0xff])), LONG_GRACE);
+        let (opener, urls) = opener_for(Some(OsString::from_vec(vec![b'/', 0xff])), LONG_GRACE);
 
         assert!(opener.open(URL).is_err());
 
@@ -249,7 +384,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let (opener, urls) = opener(browser(&format!("/bin/sh {}", quoted(&script))), SHORT_GRACE);
+        let (opener, urls) = opener(&format!("/bin/sh {}", quoted(&script)), SHORT_GRACE);
 
         assert_eq!(opener.open(URL), Ok(()));
 
@@ -273,7 +408,7 @@ mod tests {
             format!("echo \"$$ $(ps -o pgid= -p $$)\" > {}\n", quoted(&output)),
         )
         .unwrap();
-        let (opener, _) = opener(browser(&format!("/bin/sh {}", quoted(&script))), LONG_GRACE);
+        let (opener, _) = opener(&format!("/bin/sh {}", quoted(&script)), LONG_GRACE);
 
         assert_eq!(opener.open(URL), Ok(()));
 
@@ -285,7 +420,7 @@ mod tests {
 
     #[test]
     fn no_browser_variable_uses_the_opener_of_the_system() {
-        let (opener, urls) = opener(None, LONG_GRACE);
+        let (opener, urls) = opener_for(None, LONG_GRACE);
 
         assert_eq!(opener.open(URL), Ok(()));
 
@@ -295,7 +430,7 @@ mod tests {
     #[test]
     fn an_empty_browser_variable_uses_the_opener_of_the_system() {
         for value in ["", " \t "] {
-            let (opener, urls) = opener(browser(value), LONG_GRACE);
+            let (opener, urls) = opener(value, LONG_GRACE);
 
             assert_eq!(opener.open(URL), Ok(()), "BROWSER={value:?}");
 

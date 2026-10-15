@@ -131,10 +131,11 @@ fn run_view(settings: &Settings, rate: RateLimit, worker: &Worker) -> std::io::R
         ..Status::default()
     };
     let tz = Local;
+    let opener = BrowserOpener::from_environment();
     let mut app = App::new(
         Board::new(settings.window),
         status,
-        &BrowserOpener::from_environment(),
+        &opener,
         worker,
         &Utc::now,
         &tz,

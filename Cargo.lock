@@ -3859,6 +3859,8 @@ dependencies = [
  "runlimit",
  "serde",
  "serde_json",
+ "shellquote",
+ "shlex 2.0.1",
  "tempfile",
  "textfit",
  "thiserror 2.0.21",
