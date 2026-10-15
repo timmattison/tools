@@ -3906,18 +3906,12 @@ If you prefer to add it manually, add this to your `~/.bashrc` or `~/.zshrc`:
 
 ```bash
 # Start Claude with the argv in "$@". CRAP_LAUNCHER holds the launcher as shell
-# text: an alias, a function, or a command with flags. Else clauded starts
-# Claude when it exists, else plain claude does. A shell does not expand an
-# alias in a function body that it parsed before the alias existed, and eval
-# parses the text when this function runs.
+# text: an alias, a function, or a command with flags. When it is empty, plain
+# claude starts Claude. A shell does not expand an alias in a function body
+# that it parsed before the alias existed, and eval parses the text when this
+# function runs.
 function __crap_launch() {
-    if [ -n "${CRAP_LAUNCHER:-}" ]; then
-        eval "$CRAP_LAUNCHER"' "$@"'
-    elif command -v clauded >/dev/null 2>&1; then
-        eval 'clauded "$@"'
-    else
-        claude "$@"
-    fi
+    eval "${CRAP_LAUNCHER:-claude}"' "$@"'
 }
 function crap() {
     # These flags make the binary print to stdout and exit 0 without mutating

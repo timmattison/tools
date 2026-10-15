@@ -1633,16 +1633,15 @@ fn format_fork_at_output(
 /// `command crap`, forwarding all arguments (so flags like `--force` and
 /// `--here` work). The helper `__crap_launch` starts Claude, with the same argv
 /// on every path. It starts Claude through the shell text in `CRAP_LAUNCHER`
-/// when that variable is set and not empty, else through `clauded` when that
-/// name exists, else through plain `claude`. The function never guesses at a
-/// generic name such as `c`, because many users give `c` to a command that is
-/// not Claude. The helper evaluates the launcher through `eval`, so an alias is
-/// expanded at call time (shell aliases are otherwise not expanded inside
-/// function bodies), and a launcher with flags of its own works. A launcher
-/// that keeps the session id in its own argv lets a Zellij resurrect resume a
-/// fork, because the fork argv pins the fork id. If the binary exits non-zero
-/// (session not found, already running, …) its message is shown and the
-/// function does nothing further.
+/// when that variable is set and not empty, else through plain `claude`. The
+/// function never guesses at a generic name such as `c`, because many users
+/// give `c` to a command that is not Claude. The helper evaluates the launcher
+/// through `eval`, so an alias is expanded at call time (shell aliases are
+/// otherwise not expanded inside function bodies), and a launcher with flags
+/// of its own works. A launcher that keeps the session id in its own argv lets
+/// a Zellij resurrect resume a fork, because the fork argv pins the fork id. If
+/// the binary exits non-zero (session not found, already running, …) its
+/// message is shown and the function does nothing further.
 ///
 /// The binary speaks one of three output shapes:
 ///
@@ -1678,18 +1677,12 @@ fn format_fork_at_output(
 /// `crap <new-id>` can resume the fork.
 const SHELL_CODE: &str = r#"
 # Start Claude with the argv in "$@". CRAP_LAUNCHER holds the launcher as shell
-# text: an alias, a function, or a command with flags. Else clauded starts
-# Claude when it exists, else plain claude does. A shell does not expand an
-# alias in a function body that it parsed before the alias existed, and eval
-# parses the text when this function runs.
+# text: an alias, a function, or a command with flags. When it is empty, plain
+# claude starts Claude. A shell does not expand an alias in a function body
+# that it parsed before the alias existed, and eval parses the text when this
+# function runs.
 function __crap_launch() {
-    if [ -n "${CRAP_LAUNCHER:-}" ]; then
-        eval "$CRAP_LAUNCHER"' "$@"'
-    elif command -v clauded >/dev/null 2>&1; then
-        eval 'clauded "$@"'
-    else
-        claude "$@"
-    fi
+    eval "${CRAP_LAUNCHER:-claude}"' "$@"'
 }
 function crap() {
     # These flags make the binary print to stdout and exit 0 without mutating
