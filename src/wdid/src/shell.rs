@@ -42,6 +42,15 @@ const END_LABEL: &str = "END";
 /// name that the person uses.
 const LOOP_VARIABLE: &str = "__wdid_function";
 
+/// The pattern of the autoloaded zsh functions that the script loads.
+///
+/// An autoloaded function is only a stub until the shell loads it, and the
+/// stub holds no tool. `autoload +X -m` loads the body and runs no code. The
+/// pattern skips each name that starts with `_`. The completion system
+/// registers those functions, nobody types them, and their bodies do not
+/// parse by the hundred.
+const AUTOLOAD_PATTERN: &str = "[^_]*";
+
 /// The command word of every alias line.
 const ALIAS_COMMAND: &str = "alias";
 
@@ -133,6 +142,11 @@ impl Marker {
 }
 
 /// Gives the text of the `-c` argument for the shell.
+///
+/// The zsh script loads the autoloaded functions first, so a function that
+/// the shell did not load yet counts through its body. This runs no code. The
+/// script skips the functions whose name starts with `_` (see
+/// [`AUTOLOAD_PATTERN`]). Bash has no autoload, so its script does not change.
 #[must_use]
 pub fn script(kind: ShellKind, marker: &Marker) -> String {
     let marker = marker.as_str();
@@ -140,6 +154,7 @@ pub fn script(kind: ShellKind, marker: &Marker) -> String {
         ShellKind::Zsh => format!(
             "print -r -- '{marker} {ALIASES_LABEL}'\n\
              alias -L\n\
+             autoload +X -m '{AUTOLOAD_PATTERN}' 2>/dev/null || :\n\
              for {LOOP_VARIABLE} in ${{(ok)functions}}; do\n\
              \x20 print -r -- \"{marker} {FUNCTION_LABEL} ${LOOP_VARIABLE}\"\n\
              \x20 print -r -- \"${{functions[${LOOP_VARIABLE}]}}\"\n\
