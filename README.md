@@ -4462,6 +4462,8 @@ The date that a tool was added is the date of the oldest commit that touches its
 - `<path> runs first`: another program with the same name comes first in `PATH`, so the tool does not run when you type its name. On one Mac, `/usr/bin/aa` (Apple Archive) comes before `~/.cargo/bin/aa`.
 - `not on PATH`: the tool is installed, but no directory of `PATH` holds it.
 
+`wdid` compares `PATH` with the directory where `cargo install` puts binaries. That directory is `$CARGO_INSTALL_ROOT/bin`, else `$CARGO_HOME/bin`, else `~/.cargo/bin`. `wdid` does not read `install.root` from the cargo config file.
+
 ### Example
 
 An excerpt of a real run on 2026-10-14, against 347,212 rows of history:

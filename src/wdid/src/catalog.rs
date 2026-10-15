@@ -247,7 +247,9 @@ fn run(command: &mut Command, program: &OsStr) -> Result<Output, CatalogError> {
 /// Reads the whole catalog.
 ///
 /// `search_path` is the value of the PATH. `cargo_bin` is the cargo bin
-/// directory.
+/// directory, which [`cargo_bin()`] gives. It is the directory where
+/// `cargo install` puts binaries, so it is also the directory that
+/// `cargo install --list` reads.
 ///
 /// # Errors
 /// Gives the errors of [`binaries`] and the errors of the programs that it
@@ -499,7 +501,7 @@ pub struct InstallLocation<'a> {
 /// Gives the cargo bin directory, which is the directory where `cargo install`
 /// puts binaries.
 ///
-/// The order is the order of cargo. A `install_root` that is set gives
+/// The order is the order of cargo. An `install_root` that is set gives
 /// `<install_root>/bin`. Else a `cargo_home` that is set gives
 /// `<cargo_home>/bin`. Else `home` gives `<home>/.cargo/bin`. Else the result
 /// is `None`.
@@ -508,14 +510,21 @@ pub struct InstallLocation<'a> {
 /// does not know the `--root` flag of a past install.
 #[must_use]
 pub fn cargo_bin(location: &InstallLocation<'_>) -> Option<PathBuf> {
-    match location.cargo_home {
-        Some(cargo_home) if !cargo_home.is_empty() => {
-            Some(Path::new(cargo_home).join(BIN_DIRECTORY))
-        }
-        _ => location
+    match (
+        non_empty(location.install_root),
+        non_empty(location.cargo_home),
+    ) {
+        (Some(install_root), _) => Some(Path::new(install_root).join(BIN_DIRECTORY)),
+        (None, Some(cargo_home)) => Some(Path::new(cargo_home).join(BIN_DIRECTORY)),
+        (None, None) => location
             .home
             .map(|home| home.join(CARGO_DIRECTORY).join(BIN_DIRECTORY)),
     }
+}
+
+/// Gives the value when it is set and not empty.
+fn non_empty(value: Option<&OsStr>) -> Option<&OsStr> {
+    value.filter(|value| !value.is_empty())
 }
 
 /// True when `path` is a file (a symlink is followed) with an execute bit.
