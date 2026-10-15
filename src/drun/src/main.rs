@@ -657,4 +657,23 @@ mod tests {
             }
         }
     }
+
+    /// The `Files:` section states its condition, because the container does
+    /// not always run on another computer.
+    #[test]
+    fn the_files_section_of_the_help_starts_with_its_condition() {
+        let help = usage(&Environment::default());
+        let section: Vec<&str> = help
+            .lines()
+            .skip_while(|line| *line != "Files:")
+            .skip(1)
+            .take_while(|line| line.starts_with("  "))
+            .map(str::trim_start)
+            .collect();
+        let text = section.join(" ");
+        assert!(
+            text.starts_with("When the host is another computer"),
+            "{text}"
+        );
+    }
 }
