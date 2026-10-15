@@ -168,6 +168,29 @@ fn a_use_through_an_alias_of_a_function_counts_for_the_alias() {
 }
 
 #[test]
+fn a_use_through_a_global_alias_counts_for_the_alias() {
+    let mut defs = Definitions::default();
+    defs.aliases.insert_global("PH", "| prhash");
+    let result = run(&[row(0, "ls PH")], &defs, &catalog(&["prhash"]));
+    let prhash = usage(&result, "prhash");
+    assert_eq!(prhash.typed, 0);
+    assert_eq!(prhash.through, through(&[("PH", 1)]));
+    assert_eq!(prhash.uses, 1);
+}
+
+/// A use through a suffix alias counts for the suffix, in the form `*.md`.
+#[test]
+fn a_use_through_a_suffix_alias_counts_for_its_suffix() {
+    let mut defs = Definitions::default();
+    defs.aliases.insert_suffix("md", "prcp --fast");
+    let result = run(&[row(0, "README.md")], &defs, &catalog(&["prcp"]));
+    let prcp = usage(&result, "prcp");
+    assert_eq!(prcp.typed, 0);
+    assert_eq!(prcp.through, through(&[("*.md", 1)]));
+    assert_eq!(prcp.uses, 1);
+}
+
+#[test]
 fn a_function_named_like_a_tool_counts_as_typed_once() {
     let defs = definitions(&[], &[("crap", "command crap \"$@\"")]);
     let result = run(&[row(0, "crap x")], &defs, &catalog(&["crap"]));

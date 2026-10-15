@@ -784,3 +784,259 @@ fn each_alias_expansion_counts_as_one_level_of_the_depth_limit() {
     assert_eq!(inside, vec![word("prcp", []).through("a0")]);
     assert_eq!(command_words("a0", &alias_ladder(65)), Parsed::Unparsed);
 }
+
+/// Makes an alias table with regular aliases, global aliases, and suffix
+/// aliases. Each list holds pairs of a name (a suffix for a suffix alias) and
+/// a value.
+fn kinds<const R: usize, const G: usize, const S: usize>(
+    regular: [(&str, &str); R],
+    global: [(&str, &str); G],
+    suffix: [(&str, &str); S],
+) -> Aliases {
+    let mut aliases = table(regular);
+    for (name, value) in global {
+        aliases.insert_global(name, value);
+    }
+    for (suffix, value) in suffix {
+        aliases.insert_suffix(suffix, value);
+    }
+    aliases
+}
+
+/// zsh expands a global alias in every position, command position included,
+/// and after a wrapper.
+#[test]
+fn a_global_alias_expands_in_every_position() {
+    let aliases = kinds(
+        [],
+        [
+            ("PH", "| prhash"),
+            ("G", "prcp -v"),
+            ("P", "prcp"),
+            ("日本", "| prhash"),
+        ],
+        [],
+    );
+    check_with(
+        &aliases,
+        vec![
+            (
+                "echo hi PH",
+                words(vec![word("echo", ["hi"]), word("prhash", []).through("PH")]),
+            ),
+            ("G x", words(vec![word("prcp", ["-v", "x"]).through("G")])),
+            ("sudo P", words(vec![word("prcp", []).through("P")])),
+            ("command P", words(vec![word("prcp", []).through("P")])),
+            (
+                "echo $(cat x PH)",
+                words(vec![
+                    word("echo", ["$(cat x PH)"]),
+                    word("cat", ["x"]),
+                    word("prhash", []).through("PH"),
+                ]),
+            ),
+            (
+                "echo 🎉 日本",
+                words(vec![
+                    word("echo", ["🎉"]),
+                    word("prhash", []).through("日本"),
+                ]),
+            ),
+            (
+                "P;P",
+                words(vec![
+                    word("prcp", []).through("P"),
+                    word("prcp", []).through("P"),
+                ]),
+            ),
+        ],
+    );
+}
+
+/// The value of a global alias takes the place of one word. It stays apart
+/// from an operator next to that word, as in zsh. Thus `>PH` and `|PH` with a
+/// value that starts with `|` do not parse, as in zsh, and do not become `>|`
+/// and `||`.
+#[test]
+fn a_global_alias_in_a_redirect_target_expands_and_stays_one_word() {
+    let aliases = kinds([], [("PH", "| prhash"), ("O", "out.txt")], []);
+    check_with(
+        &aliases,
+        vec![
+            ("echo hi > PH", Parsed::Unparsed),
+            ("echo hi >PH", Parsed::Unparsed),
+            ("echo hi|PH", Parsed::Unparsed),
+            ("echo hi > O", words(vec![word("echo", ["hi"])])),
+            ("echo hi >O", words(vec![word("echo", ["hi"])])),
+        ],
+    );
+}
+
+/// Only a plain word that is the whole name of a global alias expands. A
+/// quoted word, an escaped word, a longer word, an assignment, and the body
+/// of a here document do not.
+#[test]
+fn only_a_plain_word_that_is_the_whole_name_is_a_global_alias() {
+    let aliases = kinds([], [("PH", "| prhash")], []);
+    check_with(
+        &aliases,
+        vec![
+            (
+                "echo PH",
+                words(vec![word("echo", []), word("prhash", []).through("PH")]),
+            ),
+            ("echo \"PH\"", words(vec![word("echo", ["PH"])])),
+            ("echo 'PH'", words(vec![word("echo", ["PH"])])),
+            ("echo \\PH", words(vec![word("echo", ["PH"])])),
+            ("echo xPH", words(vec![word("echo", ["xPH"])])),
+            ("X=PH prcp", words(vec![word("prcp", [])])),
+            ("cat <<EOF\nPH\nEOF", words(vec![word("cat", [])])),
+        ],
+    );
+}
+
+/// A global alias that the person typed inside a substitution expands, also
+/// when the same alias expands outside the substitution.
+#[test]
+fn a_typed_global_alias_inside_a_substitution_expands_next_to_one_outside() {
+    let aliases = kinds([], [("PH", "| prhash")], []);
+    check_with(
+        &aliases,
+        vec![(
+            "cat PH $(cat PH)",
+            words(vec![
+                word("cat", []),
+                word("prhash", ["$(cat PH)"]).through("PH"),
+                word("cat", []),
+                word("prhash", []).through("PH"),
+            ]),
+        )],
+    );
+}
+
+/// A global alias in the value of a global alias or of a regular alias
+/// expands. The words of the value have the origin of the word that the
+/// person typed.
+#[test]
+fn a_global_alias_in_the_value_of_an_alias_expands() {
+    let aliases = kinds(
+        [("wtm", "wt PH")],
+        [("A", "B x"), ("B", "prcp"), ("PH", "| prhash")],
+        [],
+    );
+    check_with(
+        &aliases,
+        vec![
+            ("A", words(vec![word("prcp", ["x"]).through("A")])),
+            ("echo A", words(vec![word("echo", ["prcp", "x"])])),
+            (
+                "wtm",
+                words(vec![
+                    word("wt", []).through("wtm"),
+                    word("prhash", []).through("wtm"),
+                ]),
+            ),
+        ],
+    );
+}
+
+/// A global alias in its own value is not expanded again, so the cycle ends.
+/// A value that puts the alias into a substitution ends at the depth limit.
+#[test]
+fn a_global_alias_cycle_ends() {
+    let aliases = kinds([], [("G", "G x"), ("S", "$(S)")], []);
+    check_with(
+        &aliases,
+        vec![
+            ("G", words(vec![word("G", ["x"]).through("G")])),
+            ("echo G", words(vec![word("echo", ["G", "x"])])),
+            ("S", Parsed::Unparsed),
+        ],
+    );
+}
+
+/// A later insert of the same name replaces the alias, and its kind with it.
+#[test]
+fn a_later_insert_replaces_the_kind_of_an_alias() {
+    let mut aliases = Aliases::new();
+    aliases.insert("G", "echo");
+    aliases.insert_global("G", "| prhash");
+    aliases.insert_global("H", "| prhash");
+    aliases.insert("H", "prcp");
+    check_with(
+        &aliases,
+        vec![
+            (
+                "x G",
+                words(vec![word("x", []), word("prhash", []).through("G")]),
+            ),
+            ("x H", words(vec![word("x", ["H"])])),
+            ("H", words(vec![word("prcp", []).through("H")])),
+        ],
+    );
+}
+
+/// A suffix alias expands a command word that ends with its suffix. The new
+/// text is the value, then the word, then the rest of the command.
+#[test]
+fn a_suffix_alias_expands_the_command_word() {
+    let aliases = kinds([], [], [("md", "glow"), ("gz", "prgz -d")]);
+    check_with(
+        &aliases,
+        vec![
+            (
+                "README.md",
+                words(vec![word("glow", ["README.md"]).through("*.md")]),
+            ),
+            (
+                "./docs/a.md x",
+                words(vec![word("glow", ["./docs/a.md", "x"]).through("*.md")]),
+            ),
+            (
+                "a.tar.gz",
+                words(vec![word("prgz", ["-d", "a.tar.gz"]).through("*.gz")]),
+            ),
+        ],
+    );
+}
+
+/// A suffix alias needs a plain word in command position, with text before
+/// the last dot. It does not apply after a wrapper.
+#[test]
+fn a_suffix_alias_needs_a_plain_command_word_with_a_stem() {
+    let aliases = kinds([], [], [("md", "glow")]);
+    check_with(
+        &aliases,
+        vec![
+            ("x.md", words(vec![word("glow", ["x.md"]).through("*.md")])),
+            (".md", words(vec![word(".md", [])])),
+            ("\"q.md\"", words(vec![word("q.md", [])])),
+            ("echo x.md", words(vec![word("echo", ["x.md"])])),
+            ("sudo x.md", words(vec![word("x.md", [])])),
+        ],
+    );
+}
+
+/// The value of a suffix alias is read again, so a regular alias in it
+/// expands. A regular alias wins over a suffix alias for the same word. A
+/// suffix alias in its own value is not expanded again.
+#[test]
+fn a_suffix_alias_works_with_the_other_aliases() {
+    let aliases = kinds(
+        [("wtm", "wt --main"), ("x.md", "prcp")],
+        [],
+        [("txt", "wtm"), ("md", "glow"), ("rs", "y.rs")],
+    );
+    check_with(
+        &aliases,
+        vec![
+            (
+                "f.txt",
+                words(vec![word("wt", ["--main", "f.txt"]).through("*.txt")]),
+            ),
+            ("x.md", words(vec![word("prcp", []).through("x.md")])),
+            ("y.md", words(vec![word("glow", ["y.md"]).through("*.md")])),
+            ("a.rs", words(vec![word("y.rs", ["a.rs"]).through("*.rs")])),
+        ],
+    );
+}

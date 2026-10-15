@@ -53,10 +53,29 @@ use brush_parser::word::{self, TildeExpr, WordPiece, WordPieceWithSource};
 use brush_parser::{Parser, ParserOptions};
 
 /// The alias table: the name of each alias and its value, after quote removal.
+///
+/// The table holds three kinds of alias. A regular alias and a global alias
+/// share one namespace of names, as in zsh, where `alias -g` only marks an
+/// alias as global. A suffix alias is in a separate table, by its suffix.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Aliases {
-    values: HashMap<String, String>,
+    /// The regular and the global aliases, by name.
+    values: HashMap<String, Alias>,
+    /// The value of each suffix alias, by its suffix (`md` for `alias -s md=glow`).
+    suffixes: HashMap<String, String>,
 }
+
+/// The value of one regular or global alias, and its kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Alias {
+    /// The value, after quote removal.
+    value: String,
+    /// True for a global alias, false for a regular alias.
+    global: bool,
+}
+
+/// The character that comes before the suffix of a word.
+const SUFFIX_DOT: char = '.';
 
 impl Aliases {
     /// Makes an empty alias table.
@@ -65,36 +84,83 @@ impl Aliases {
         Self::default()
     }
 
-    /// Adds the alias `name` with the value `value`. An alias with the same
-    /// name is replaced.
+    /// Adds the regular alias `name` with the value `value`. A regular or a
+    /// global alias with the same name is replaced.
     pub fn insert(&mut self, name: impl Into<String>, value: impl Into<String>) {
-        self.values.insert(name.into(), value.into());
+        self.put(name.into(), value.into(), false);
     }
 
-    /// Gives the value of the alias `name`, or `None` when there is no such alias.
+    /// Adds the global alias `name` with the value `value`. A regular or a
+    /// global alias with the same name is replaced.
+    pub fn insert_global(&mut self, name: impl Into<String>, value: impl Into<String>) {
+        self.put(name.into(), value.into(), true);
+    }
+
+    /// Adds the suffix alias of the suffix `suffix` with the value `value`.
+    /// `suffix` has no dot (`md`). A suffix alias with the same suffix is
+    /// replaced.
+    pub fn insert_suffix(&mut self, suffix: impl Into<String>, value: impl Into<String>) {
+        self.suffixes.insert(suffix.into(), value.into());
+    }
+
+    /// Puts one regular or global alias into the table.
+    fn put(&mut self, name: String, value: String, global: bool) {
+        self.values.insert(name, Alias { value, global });
+    }
+
+    /// Gives the value of the regular or the global alias `name`, or `None`
+    /// when there is no such alias. Both kinds expand in command position.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.values.get(name).map(String::as_str)
+        self.values.get(name).map(|alias| alias.value.as_str())
     }
 
-    /// Gives the number of aliases.
+    /// Gives the value of the global alias `name`, or `None` when there is no
+    /// such alias or when the alias `name` is regular.
+    #[must_use]
+    pub fn global(&self, name: &str) -> Option<&str> {
+        self.values
+            .get(name)
+            .filter(|alias| alias.global)
+            .map(|alias| alias.value.as_str())
+    }
+
+    /// Gives the suffix of the word `word` and the value of its suffix alias,
+    /// or `None` when there is no such alias. The suffix is the text after the
+    /// last dot, and the text before that dot must not be empty. Thus
+    /// `a.tar.gz` has the suffix `gz`, and `.md` has no suffix.
+    #[must_use]
+    pub fn suffix_of<'w>(&self, word: &'w str) -> Option<(&'w str, &str)> {
+        let (stem, suffix) = word.rsplit_once(SUFFIX_DOT)?;
+        if stem.is_empty() {
+            return None;
+        }
+        self.suffixes
+            .get(suffix)
+            .map(|value| (suffix, value.as_str()))
+    }
+
+    /// Gives the number of aliases of all three kinds.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.values.len()
+        self.values.len() + self.suffixes.len()
     }
 
-    /// True when the table holds no alias.
+    /// True when the table holds no alias of any kind.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.values.is_empty()
+        self.values.is_empty() && self.suffixes.is_empty()
     }
 }
 
+/// Makes a table of regular aliases from pairs of a name and a value.
 impl FromIterator<(String, String)> for Aliases {
     fn from_iter<T: IntoIterator<Item = (String, String)>>(iter: T) -> Self {
-        Self {
-            values: iter.into_iter().collect(),
+        let mut aliases = Self::new();
+        for (name, value) in iter {
+            aliases.insert(name, value);
         }
+        aliases
     }
 }
 

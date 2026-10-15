@@ -77,14 +77,19 @@ fn script_holds_the_three_marker_lines_for_each_shell() {
 fn script_lists_aliases_and_functions_with_the_command_of_each_shell() {
     let marker = Marker::new("M");
     let zsh = script(ShellKind::Zsh, &marker);
-    assert!(zsh.contains("alias -L"), "{zsh}");
     assert!(zsh.contains("${(ok)functions}"), "{zsh}");
     assert!(zsh.contains("${functions[$__wdid_function]}"), "{zsh}");
+    // `alias -L` does not list the suffix aliases, so `alias -sL` follows it.
+    let regular_and_global = zsh.find("alias -L\n").expect(&zsh);
+    let suffix = zsh.find("alias -sL\n").expect(&zsh);
     let autoload = zsh.find("autoload +X -m '[^_]*'").expect(&zsh);
     let loop_start = zsh.find("for __wdid_function").expect(&zsh);
+    assert!(regular_and_global < suffix, "{zsh}");
+    assert!(suffix < autoload, "{zsh}");
     assert!(autoload < loop_start, "{zsh}");
     let bash = script(ShellKind::Bash, &marker);
     assert!(!bash.contains("autoload"), "{bash}");
+    assert!(!bash.contains("alias -s"), "{bash}");
     assert!(bash.contains("alias -p"), "{bash}");
     assert!(bash.contains("compgen -A function"), "{bash}");
     assert!(
@@ -125,13 +130,30 @@ fn an_embedded_single_quote_in_an_alias_value_is_read() {
 }
 
 #[test]
-fn a_global_alias_and_a_suffix_alias_are_skipped() {
+fn a_global_alias_and_a_suffix_alias_are_read_with_their_kind() {
     let definitions = parsed(&framed(
         "alias -g ...=../..\nalias -s txt=less\nalias -gL G='| grep'\nalias ok=prcp\n",
     ));
-    assert_eq!(definitions.aliases.len(), 1);
-    assert_eq!(definitions.aliases.get("ok"), Some("prcp"));
+    let aliases = &definitions.aliases;
+    assert_eq!(aliases.len(), 4);
+    assert_eq!(aliases.global("..."), Some("../.."));
+    assert_eq!(aliases.global("G"), Some("| grep"));
+    assert_eq!(aliases.get("G"), Some("| grep"));
+    assert_eq!(aliases.global("ok"), None);
+    assert_eq!(aliases.get("ok"), Some("prcp"));
+    assert_eq!(aliases.suffix_of("notes.txt"), Some(("txt", "less")));
+    assert_eq!(aliases.get("txt"), None);
     assert!(definitions.unparsed_aliases.is_empty());
+}
+
+#[test]
+fn an_alias_line_that_is_global_and_suffix_is_unparsed() {
+    let definitions = parsed(&framed("alias -gs md=glow\nalias -g -s G=x\n"));
+    assert!(definitions.aliases.is_empty());
+    assert_eq!(
+        definitions.unparsed_aliases,
+        ["alias -gs md=glow", "alias -g -s G=x"]
+    );
 }
 
 #[test]
@@ -548,6 +570,38 @@ fn a_real_zsh_gives_its_aliases_and_functions() {
         Some(&vec![CommandWord::new("gitnuke", ["--safe", "\"$@\""])])
     );
     assert_eq!(definitions.functions["big"].len(), 4000);
+    assert!(
+        definitions.unparsed_aliases.is_empty(),
+        "{:?}",
+        definitions.unparsed_aliases
+    );
+}
+
+/// A real zsh gives its global aliases through `alias -L` and its suffix
+/// aliases through `alias -sL`. Both go into the table with their kind.
+#[test]
+fn a_real_zsh_gives_its_global_and_suffix_aliases() {
+    let Some(zsh) = find_shell("zsh") else {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join(".zshrc"),
+        "alias -g PH='| prhash'\nalias -s md=glow\nalias wtm='wt --main'\n",
+    )
+    .unwrap();
+    let definitions = read(
+        real_shell(&zsh, home.path()),
+        ShellKind::Zsh,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let aliases = &definitions.aliases;
+    assert_eq!(aliases.global("PH"), Some("| prhash"));
+    assert_eq!(aliases.suffix_of("README.md"), Some(("md", "glow")));
+    assert_eq!(aliases.get("wtm"), Some("wt --main"));
+    assert_eq!(aliases.global("wtm"), None);
     assert!(
         definitions.unparsed_aliases.is_empty(),
         "{:?}",
