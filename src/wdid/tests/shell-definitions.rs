@@ -388,9 +388,8 @@ fn the_shell_gets_the_interactive_flag_and_the_script_with_stdin_closed() {
     let dir = tempfile::tempdir().unwrap();
     let record = dir.path().join("record");
     let (_stub_dir, path) = stub(&format!(
-        "printf '%s\\n' \"$1\" \"$2\" \"$#\" > '{}'\nif read -r line; then echo \"stdin: $line\" >&2; fi\nprintf '%s' \"$3\" >> '{}'\nexit 4",
-        record.display(),
-        record.display()
+        "printf '%s\\n' \"$1\" \"$2\" \"$#\" > {quoted}\nif read -r line; then echo \"stdin: $line\" >&2; fi\nprintf '%s' \"$3\" >> {quoted}\nexit 4",
+        quoted = shellquote::shell_quote(&record.to_string_lossy())
     ));
     let result = read(Command::new(&path), ShellKind::Zsh, Duration::from_secs(10));
     match result {

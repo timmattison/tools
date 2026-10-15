@@ -278,6 +278,7 @@ full path, `shellquote::shell_quote(...)`, where the call site sits behind a
 - `popstop` - the state directory in the stop command that a refusal prints
 - `swt` - the path of a `.swt-check` override, and the command lines it prints
   for a person to paste
+- `wdid` - the paths and the history rows that the tests put into stub scripts
 
 ## Spawning Git
 

@@ -9245,6 +9245,7 @@ dependencies = [
  "num-format",
  "serde",
  "serde_json",
+ "shellquote",
  "tempfile",
  "termsize",
  "thiserror 2.0.21",

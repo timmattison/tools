@@ -59,11 +59,6 @@ const fn row(days_ago: i64, command: &'static str) -> Row {
     }
 }
 
-/// Quotes `text` as one word of a POSIX shell script.
-fn sh_quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "'\\''"))
-}
-
 /// Writes an executable script into `dir`.
 fn write_script(dir: &Path, name: &str, body: &str) {
     let path = dir.join(name);
@@ -78,9 +73,9 @@ fn atuin_rows(rows: &[Row]) -> String {
             let time = (Utc::now() - Duration::days(row.days_ago)).format(TIME_FORMAT);
             format!(
                 "printf '%s\\t%s\\thost\\tuser\\t%s\\0' {} {} {}\n",
-                sh_quote(&time.to_string()),
+                shellquote::shell_quote(&time.to_string()),
                 row.exit,
-                sh_quote(row.command)
+                shellquote::shell_quote(row.command)
             )
         })
         .collect()
@@ -192,7 +187,10 @@ impl Setup {
             Atuin::Fails(message) => write_script(
                 stubs.path(),
                 "atuin",
-                &format!("printf '%s\\n' {} >&2\nexit 1\n", sh_quote(message)),
+                &format!(
+                    "printf '%s\\n' {} >&2\nexit 1\n",
+                    shellquote::shell_quote(message)
+                ),
             ),
             Atuin::Missing => {}
         }
@@ -211,7 +209,10 @@ impl Setup {
         write_script(
             stubs.path(),
             "git",
-            &format!("exec {} \"$@\"\n", sh_quote(&real_git().to_string_lossy())),
+            &format!(
+                "exec {} \"$@\"\n",
+                shellquote::shell_quote(&real_git().to_string_lossy())
+            ),
         );
         Self {
             stubs,

@@ -180,8 +180,8 @@ mod read {
         fn new(body: &str) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let script = format!(
-                "#!/bin/sh\nfor argument in \"$@\"; do printf '%s\\n' \"$argument\"; done > '{}'\n{body}\n",
-                dir.path().join("arguments.txt").display()
+                "#!/bin/sh\nfor argument in \"$@\"; do printf '%s\\n' \"$argument\"; done > {}\n{body}\n",
+                shellquote::shell_quote(&dir.path().join("arguments.txt").to_string_lossy())
             );
             let path = dir.path().join("atuin");
             fs::write(&path, script).unwrap();
