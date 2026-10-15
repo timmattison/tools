@@ -279,6 +279,22 @@ fn a_bind_mount_from_this_computer_prints_a_warning() {
 }
 
 #[test]
+fn the_bind_mount_warning_names_its_condition_and_points_at_drun_cp() {
+    let fixture = two_hosts();
+    std::fs::create_dir(fixture.path().join("data")).unwrap();
+    let absolute = fixture.path().join("data").display().to_string();
+    let run = fixture.run(&["run", "-v", &format!("{absolute}:/data"), "alpine"]);
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert!(
+        run.stderr.contains("When box-b is another computer"),
+        "{}",
+        run.stderr
+    );
+    assert!(run.stderr.contains("drun cp"), "{}", run.stderr);
+    assert!(!run.stderr.contains("docker cp"), "{}", run.stderr);
+}
+
+#[test]
 fn a_named_volume_or_a_path_that_is_not_on_this_computer_prints_no_warning() {
     let fixture = two_hosts();
     let run = fixture.run(&[
