@@ -10,7 +10,7 @@ use std::process::Command;
 use chrono::NaiveDate;
 use wdid::catalog::{
     added_dates, binaries, cargo_bin, installed_binaries, path_state, read, workspace_root,
-    CatalogError, PathState, Programs,
+    CatalogError, InstallLocation, PathState, Programs,
 };
 use wdid::tool::ToolName;
 
@@ -302,28 +302,75 @@ fn path_state_compares_plain_paths_when_the_cargo_bin_dir_does_not_exist() {
 
 #[test]
 fn cargo_bin_prefers_cargo_home() {
-    assert_eq!(
-        cargo_bin(Some(OsStr::new("/c/home")), Some(Path::new("/u"))),
-        Some(PathBuf::from("/c/home/bin"))
-    );
+    let location = InstallLocation {
+        cargo_home: Some(OsStr::new("/c/home")),
+        home: Some(Path::new("/u")),
+        ..InstallLocation::default()
+    };
+    assert_eq!(cargo_bin(&location), Some(PathBuf::from("/c/home/bin")));
 }
 
 #[test]
 fn cargo_bin_falls_back_to_the_home_directory() {
-    assert_eq!(
-        cargo_bin(None, Some(Path::new("/u"))),
-        Some(PathBuf::from("/u/.cargo/bin"))
-    );
-    assert_eq!(
-        cargo_bin(Some(OsStr::new("")), Some(Path::new("/u"))),
-        Some(PathBuf::from("/u/.cargo/bin"))
-    );
+    let unset = InstallLocation {
+        home: Some(Path::new("/u")),
+        ..InstallLocation::default()
+    };
+    assert_eq!(cargo_bin(&unset), Some(PathBuf::from("/u/.cargo/bin")));
+    let empty = InstallLocation {
+        cargo_home: Some(OsStr::new("")),
+        ..unset
+    };
+    assert_eq!(cargo_bin(&empty), Some(PathBuf::from("/u/.cargo/bin")));
 }
 
 #[test]
 fn cargo_bin_is_none_without_cargo_home_and_home() {
-    assert_eq!(cargo_bin(None, None), None);
-    assert_eq!(cargo_bin(Some(OsStr::new("")), None), None);
+    assert_eq!(cargo_bin(&InstallLocation::default()), None);
+    let empty = InstallLocation {
+        cargo_home: Some(OsStr::new("")),
+        install_root: Some(OsStr::new("")),
+        home: None,
+    };
+    assert_eq!(cargo_bin(&empty), None);
+}
+
+#[test]
+fn cargo_bin_prefers_the_install_root_to_cargo_home_and_home() {
+    let location = InstallLocation {
+        install_root: Some(OsStr::new("/r")),
+        cargo_home: Some(OsStr::new("/c/home")),
+        home: Some(Path::new("/u")),
+    };
+    assert_eq!(cargo_bin(&location), Some(PathBuf::from("/r/bin")));
+}
+
+#[test]
+fn cargo_bin_uses_the_install_root_alone() {
+    let location = InstallLocation {
+        install_root: Some(OsStr::new("/r")),
+        ..InstallLocation::default()
+    };
+    assert_eq!(cargo_bin(&location), Some(PathBuf::from("/r/bin")));
+}
+
+#[test]
+fn cargo_bin_ignores_an_empty_install_root() {
+    let location = InstallLocation {
+        install_root: Some(OsStr::new("")),
+        cargo_home: Some(OsStr::new("/c/home")),
+        home: Some(Path::new("/u")),
+    };
+    assert_eq!(cargo_bin(&location), Some(PathBuf::from("/c/home/bin")));
+}
+
+#[test]
+fn cargo_bin_keeps_a_multibyte_install_root() {
+    let location = InstallLocation {
+        install_root: Some(OsStr::new("/日本語/🎉")),
+        ..InstallLocation::default()
+    };
+    assert_eq!(cargo_bin(&location), Some(PathBuf::from("/日本語/🎉/bin")));
 }
 
 /// The date of the commit that adds the crate `one`.
@@ -651,6 +698,32 @@ fn read_without_a_path_says_every_installed_tool_is_not_on_path() {
     let catalog = read(fixture.root(), &stub.programs(), None, None).unwrap();
     assert_eq!(catalog.tools[0].path, Some(PathState::NotOnPath));
     assert_eq!(catalog.tools[1].path, None);
+}
+
+/// A tool that sits in the bin directory of `CARGO_INSTALL_ROOT` is installed
+/// by cargo, not shadowed by it.
+#[test]
+fn read_says_cargo_when_the_install_root_bin_dir_comes_first() {
+    let fixture = Fixture::with_history();
+    let stub = StubCargo::new();
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    write_file(&bin, "wdid-fixture-one", 0o755);
+    let location = InstallLocation {
+        install_root: Some(root.path().as_os_str()),
+        ..InstallLocation::default()
+    };
+    let cargo_bin = cargo_bin(&location).unwrap();
+    let path = search_path(&[&bin]);
+    let catalog = read(
+        fixture.root(),
+        &stub.programs(),
+        Some(&path),
+        Some(&cargo_bin),
+    )
+    .unwrap();
+    assert_eq!(catalog.tools[0].path, Some(PathState::Cargo));
 }
 
 #[test]

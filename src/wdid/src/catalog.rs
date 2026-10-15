@@ -482,14 +482,39 @@ pub fn path_state(name: &str, search_path: &OsStr, cargo_bin: &Path) -> PathStat
     PathState::NotOnPath
 }
 
-/// Gives the cargo bin directory: `$CARGO_HOME/bin`, else `<home>/.cargo/bin`.
+/// The values that say where `cargo install` puts binaries.
+///
+/// Each field holds the value that the caller read. A field that is `None`
+/// or empty counts as not set.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InstallLocation<'a> {
+    /// The value of `CARGO_INSTALL_ROOT`.
+    pub install_root: Option<&'a OsStr>,
+    /// The value of `CARGO_HOME`.
+    pub cargo_home: Option<&'a OsStr>,
+    /// The home directory.
+    pub home: Option<&'a Path>,
+}
+
+/// Gives the cargo bin directory, which is the directory where `cargo install`
+/// puts binaries.
+///
+/// The order is the order of cargo. A `install_root` that is set gives
+/// `<install_root>/bin`. Else a `cargo_home` that is set gives
+/// `<cargo_home>/bin`. Else `home` gives `<home>/.cargo/bin`. Else the result
+/// is `None`.
+///
+/// This function does not read `install.root` from the cargo config file. It
+/// does not know the `--root` flag of a past install.
 #[must_use]
-pub fn cargo_bin(cargo_home: Option<&OsStr>, home: Option<&Path>) -> Option<PathBuf> {
-    match cargo_home {
+pub fn cargo_bin(location: &InstallLocation<'_>) -> Option<PathBuf> {
+    match location.cargo_home {
         Some(cargo_home) if !cargo_home.is_empty() => {
             Some(Path::new(cargo_home).join(BIN_DIRECTORY))
         }
-        _ => home.map(|home| home.join(CARGO_DIRECTORY).join(BIN_DIRECTORY)),
+        _ => location
+            .home
+            .map(|home| home.join(CARGO_DIRECTORY).join(BIN_DIRECTORY)),
     }
 }
 

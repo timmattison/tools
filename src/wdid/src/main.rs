@@ -35,6 +35,8 @@ const SHELL_VARIABLE: &str = "SHELL";
 
 /// The variable that names the cargo home directory.
 const CARGO_HOME_VARIABLE: &str = "CARGO_HOME";
+/// The variable that moves the install root of `cargo install`.
+const INSTALL_ROOT_VARIABLE: &str = "CARGO_INSTALL_ROOT";
 
 /// The variable that names the home directory.
 const HOME_VARIABLE: &str = "HOME";
@@ -125,10 +127,13 @@ fn run(cli: &Cli) -> Result<String, Error> {
     let root = catalog::workspace_root(cli.repo.as_deref(), &cwd, &programs)?;
     let search_path = std::env::var_os(PATH_VARIABLE);
     let home = std::env::var_os(HOME_VARIABLE).map(PathBuf::from);
-    let cargo_bin = catalog::cargo_bin(
-        std::env::var_os(CARGO_HOME_VARIABLE).as_deref(),
-        home.as_deref(),
-    );
+    let install_root = std::env::var_os(INSTALL_ROOT_VARIABLE);
+    let cargo_home = std::env::var_os(CARGO_HOME_VARIABLE);
+    let cargo_bin = catalog::cargo_bin(&catalog::InstallLocation {
+        install_root: install_root.as_deref(),
+        cargo_home: cargo_home.as_deref(),
+        home: home.as_deref(),
+    });
     let catalog = catalog::read(
         &root,
         &programs,

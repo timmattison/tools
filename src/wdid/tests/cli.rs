@@ -230,6 +230,7 @@ impl Setup {
             .env("PATH", self.stubs.path())
             .env("HOME", self.home.path())
             .env_remove("CARGO_HOME")
+            .env_remove("CARGO_INSTALL_ROOT")
             .env("COLUMNS", WIDE)
             .env("SHELL", "/bin/zsh")
             .stdin(Stdio::null());
