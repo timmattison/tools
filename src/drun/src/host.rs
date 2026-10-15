@@ -140,15 +140,7 @@ pub struct Answer<T> {
 pub fn ask(context: &ContextName, args: &[&str], limit: Duration) -> Result<String, HostFailure> {
     let mut command = context.docker();
     command.args(args);
-    let output = runlimit::run_with_limit(&mut command, limit)?;
-    if !output.status.success() {
-        return Err(HostFailure::Failed {
-            code: output.status.code(),
-            detail: last_line(&String::from_utf8_lossy(&output.stderr), DETAIL_LIMIT),
-        });
-    }
-    String::from_utf8(output.stdout)
-        .map_err(|_| HostFailure::Unreadable("the output is not UTF-8".to_owned()))
+    stdout_of(&mut command, limit)
 }
 
 /// Runs `docker <subcommand> --help` on this computer, without a context,
@@ -159,7 +151,26 @@ pub fn ask(context: &ContextName, args: &[&str], limit: Duration) -> Result<Stri
 ///
 /// Returns a [`HostFailure`] for the same reasons as [`ask`].
 pub fn docker_help(subcommand: &str, limit: Duration) -> Result<String, HostFailure> {
-    todo!("{subcommand} {limit:?}")
+    let mut command = Command::new(DOCKER);
+    command.args([subcommand, "--help"]);
+    stdout_of(&mut command, limit)
+}
+
+/// Runs `command`, which is a docker command, and gives back its stdout.
+///
+/// # Errors
+///
+/// Returns a [`HostFailure`] for the same reasons as [`ask`].
+fn stdout_of(command: &mut Command, limit: Duration) -> Result<String, HostFailure> {
+    let output = runlimit::run_with_limit(command, limit)?;
+    if !output.status.success() {
+        return Err(HostFailure::Failed {
+            code: output.status.code(),
+            detail: last_line(&String::from_utf8_lossy(&output.stderr), DETAIL_LIMIT),
+        });
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|_| HostFailure::Unreadable("the output is not UTF-8".to_owned()))
 }
 
 /// Asks every host in `contexts` the same `question`, all at the same time.

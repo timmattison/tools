@@ -197,13 +197,56 @@ because it cannot know if the next argument is the value of the flag or the
 image. Write the flag with its value after `=`, as in `--new-flag=value` or
 `--new-switch=true`, and `drun` accepts it.
 
+### Find a table that is out of date
+
+Run `drun check-flags` after each update of Docker on this computer. It runs
+`docker run --help`, `docker logs --help`, `docker exec --help`,
+`docker cp --help`, and `docker rm --help`, reads the flags from each, and
+compares them with the tables:
+
+```console
+$ drun check-flags
+The flag tables of drun agree with the docker CLI on this computer.
+
+$ drun check-flags
+docker run: docker lists --new-flag, a flag that takes a value, but the table of drun does not have it
+drun: the flag tables and docker disagree in 1 places. Update the tables in src/drun/src/docker_args.rs, and copy the new help into src/drun/tests/fixtures/help/
+```
+
+It reports five kinds of difference: a flag that docker lists and the table
+does not have, a flag that the table lists and docker does not, a flag that
+takes a value on one side only, a flag whose one-letter form differs, and a
+flag that the table marks as hidden but docker lists. It exits with status 0
+when the tables agree and 1 when they do not. When docker gives no help, or
+when `drun` cannot read a line of the help, it exits with status 125. It never
+reports agreement from help that it did not read.
+
+To update a table after a difference:
+
+1. Change the table in `src/drun/src/docker_args.rs`. Wrap a flag that docker
+   accepts but does not list in `hidden(...)`, as for `--net` and the flags for
+   Windows only.
+2. Copy the new help into the fixtures, and record the version:
+
+   ```sh
+   for command in run logs exec cp rm; do
+       docker "$command" --help > "src/drun/tests/fixtures/help/$command.txt"
+   done
+   docker --version > src/drun/tests/fixtures/help/VERSION
+   ```
+
+3. Run `cargo test -p drun`. The test
+   `every_table_agrees_with_the_committed_help_of_docker` holds each table to
+   the committed help, without docker.
+
 ## Exit status
 
 | Status | Meaning |
 | --- | --- |
 | the status of docker | The docker command ran. For `drun run` without `-d` and for `drun wait`, it is the exit status of the container. |
+| 1 | `drun check-flags` found a difference between the flag tables and docker. |
 | 2 | The arguments are wrong. |
-| 125 | `drun` stopped before the docker command could run: no hosts are set, no host answered, no host or two hosts have the container, or a host did not answer `drun ps`. `docker run` gives 125 for the same kind of failure. |
+| 125 | `drun` stopped before the docker command could run: no hosts are set, no host answered, a NAME matches no container or more than one, a host did not answer `drun ps`, or `drun check-flags` could not get or read the help of docker. `docker run` gives 125 for the same kind of failure. |
 
 ## Install
 

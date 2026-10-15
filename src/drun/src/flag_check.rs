@@ -150,13 +150,107 @@ impl fmt::Display for Difference {
 /// part, when the part has no flags, or when a line of the part is not a flag
 /// and does not continue a description.
 pub fn parse_help(text: &str) -> Result<Vec<HelpFlag>, String> {
-    todo!("{text} {OPTIONS_HEADING} {MAX_FLAG_INDENT}")
+    let mut lines = text
+        .lines()
+        .skip_while(|line| line.trim_end() != OPTIONS_HEADING);
+    if lines.next().is_none() {
+        return Err(format!("the help has no \"{OPTIONS_HEADING}\" part"));
+    }
+    let mut flags = Vec::new();
+    for line in lines {
+        // An empty line, or a line that does not start with a space, starts
+        // the next part of the help.
+        if line.trim().is_empty() || !line.starts_with(' ') {
+            break;
+        }
+        let content = line.trim_start_matches(' ');
+        if line.len() - content.len() > MAX_FLAG_INDENT {
+            continue;
+        }
+        let flag =
+            parse_flag_line(content).ok_or_else(|| format!("\"{}\" is not a flag", line.trim()))?;
+        flags.push(flag);
+    }
+    if flags.is_empty() {
+        return Err(format!("the \"{OPTIONS_HEADING}\" part lists no flags"));
+    }
+    Ok(flags)
+}
+
+/// Reads one flag line without its indent, as in
+/// `-a, --attach list   Attach to STDIN` or `--rm   Automatically remove`.
+///
+/// It is `None` when the line is not in that form.
+fn parse_flag_line(content: &str) -> Option<HelpFlag> {
+    // Two spaces end the flag and its type, and start the description.
+    let head = content
+        .split_once("  ")
+        .map_or(content, |(head, _)| head)
+        .trim_end();
+    let (short, rest) = if head.starts_with("--") {
+        (None, head)
+    } else {
+        let (letter, rest) = head.strip_prefix('-')?.split_once(", ")?;
+        let mut letters = letter.chars();
+        let short = letters.next().filter(char::is_ascii_alphanumeric)?;
+        if letters.next().is_some() {
+            return None;
+        }
+        (Some(short), rest)
+    };
+    let name_and_type = rest.strip_prefix("--")?;
+    let (long, value_type) = match name_and_type.split_once(' ') {
+        Some((long, value_type)) => (long, Some(value_type)),
+        None => (name_and_type, None),
+    };
+    let long_is_a_name = !long.is_empty()
+        && long
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-');
+    let type_is_a_word =
+        value_type.is_none_or(|value_type| !value_type.is_empty() && !value_type.contains(' '));
+    (long_is_a_name && type_is_a_word).then(|| HelpFlag {
+        short,
+        long: long.to_owned(),
+        takes_value: value_type.is_some(),
+    })
 }
 
 /// The differences between the table `table` and the flags `help` that
 /// docker lists, in the order of the help and then of the table.
 pub fn compare(table: &[FlagSpec], help: &[HelpFlag]) -> Vec<Difference> {
-    todo!("{table:?} {help:?}")
+    let mut differences = Vec::new();
+    for flag in help {
+        let Some(spec) = table.iter().find(|spec| spec.long == flag.long) else {
+            differences.push(Difference::NotInTable {
+                long: flag.long.clone(),
+                takes_value: flag.takes_value,
+            });
+            continue;
+        };
+        if !spec.listed {
+            differences.push(Difference::Listed { long: spec.long });
+        }
+        if spec.takes_value != flag.takes_value {
+            differences.push(Difference::Value {
+                long: spec.long,
+                docker_takes_value: flag.takes_value,
+            });
+        }
+        if spec.short != flag.short {
+            differences.push(Difference::Short {
+                long: spec.long,
+                docker: flag.short,
+                table: spec.short,
+            });
+        }
+    }
+    for spec in table.iter().filter(|spec| spec.listed) {
+        if !help.iter().any(|flag| flag.long == spec.long) {
+            differences.push(Difference::NotInDocker { long: spec.long });
+        }
+    }
+    differences
 }
 
 /// Compares each table of `drun` with the help of the docker CLI on this
@@ -167,11 +261,16 @@ pub fn compare(table: &[FlagSpec], help: &[HelpFlag]) -> Vec<Difference> {
 /// Returns words that say what went wrong when docker cannot give its help,
 /// or when `drun` cannot read the help.
 pub fn check() -> Result<Vec<(&'static str, Vec<Difference>)>, String> {
-    todo!(
-        "{:?} {}",
-        docker_args::tables(),
-        host::docker_help("run", HELP_TIMEOUT).is_ok()
-    )
+    docker_args::tables()
+        .into_iter()
+        .map(|(command, table)| {
+            let text = host::docker_help(command, HELP_TIMEOUT)
+                .map_err(|failure| format!("docker {command} --help: {failure}"))?;
+            let help = parse_help(&text)
+                .map_err(|why| format!("cannot read the help of docker {command}: {why}"))?;
+            Ok((command, compare(table, &help)))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -214,12 +313,14 @@ mod tests {
     fn edit(text: &str, old: &str, new: &str) -> String {
         let changed = text.lines().filter(|line| line.starts_with(old)).count();
         assert_eq!(changed, 1, "{old:?} must start exactly one line");
-        text.lines()
+        let lines: Vec<String> = text
+            .lines()
             .map(|line| match line.strip_prefix(old) {
-                Some(rest) => format!("{new}{rest}\n"),
-                None => format!("{line}\n"),
+                Some(rest) => format!("{new}{rest}"),
+                None => line.to_owned(),
             })
-            .collect()
+            .collect();
+        lines.join("\n")
     }
 
     #[test]
@@ -283,11 +384,11 @@ mod tests {
 
     #[test]
     fn a_flag_that_docker_removes_is_a_difference() {
-        let text: String = committed_help("run")
+        let kept: Vec<&str> = committed_help("run")
             .lines()
             .filter(|line| !line.starts_with("      --rm "))
-            .map(|line| format!("{line}\n"))
             .collect();
+        let text = kept.join("\n");
         assert_eq!(
             compare(table("run"), &parse_help(&text).unwrap()),
             [Difference::NotInDocker { long: "rm" }]
