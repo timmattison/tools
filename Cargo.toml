@@ -166,6 +166,14 @@ tree-sitter-ruby = "0.23"
 tree-sitter-swift = "0.7"
 tree-sitter-elixir = "0.3"
 tree-sitter-zig = "1.1"
+#
+# The shell parser of `wdid`. `wdid` asks which word of a command line is in
+# command position, and that question names a syntactic category, so it needs a
+# parser. Measured on 2026-10-14 against 347,081 rows of a real atuin history:
+# `brush-parser` 0.4.0 refused 27 rows, and `yash-syntax` 0.25.0 refused 185
+# rows (it has no process substitution). `yash-syntax` is also GPL-3.0, and this
+# workspace is MIT.
+brush-parser = "0.4"
 
 # Dev dependencies
 tempfile = "3"
