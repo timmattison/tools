@@ -40,7 +40,20 @@ impl ContextName {
     ///
     /// Returns [`InvalidContextName`] for any other text.
     pub fn parse(text: &str) -> Result<Self, InvalidContextName> {
-        todo!("{text}")
+        let mut characters = text.chars();
+        let starts_well = characters
+            .next()
+            .is_some_and(|first| first.is_ascii_alphanumeric());
+        let rest = characters.as_str();
+        let continues_well = !rest.is_empty()
+            && rest.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '+' | '-')
+            });
+        if starts_well && continues_well {
+            Ok(Self(text.to_owned()))
+        } else {
+            Err(InvalidContextName(text.to_owned()))
+        }
     }
 
     /// The name as text.
@@ -157,7 +170,9 @@ where
             .zip(handles)
             .map(|(context, handle)| Answer {
                 context: context.clone(),
-                result: handle.join().unwrap_or_else(|payload| std::panic::resume_unwind(payload)),
+                result: handle
+                    .join()
+                    .unwrap_or_else(|payload| std::panic::resume_unwind(payload)),
             })
             .collect()
     })
@@ -168,7 +183,20 @@ where
 /// The cut counts characters, not bytes, so a multi-byte character is never
 /// split.
 pub fn last_line(text: &str, max_characters: usize) -> String {
-    todo!("{text} {max_characters}")
+    let line = text
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    if line.chars().count() <= max_characters {
+        return line.to_owned();
+    }
+    let kept: String = line
+        .chars()
+        .take(max_characters.saturating_sub(3))
+        .collect();
+    format!("{kept}...")
 }
 
 #[cfg(test)]
@@ -183,7 +211,18 @@ mod tests {
                 Ok(valid.to_owned())
             );
         }
-        for invalid in ["", "a", "-x", ".x", "_x", "box a", "café", "日本語", "🎉🎉", "a/b"] {
+        for invalid in [
+            "",
+            "a",
+            "-x",
+            ".x",
+            "_x",
+            "box a",
+            "café",
+            "日本語",
+            "🎉🎉",
+            "a/b",
+        ] {
             assert_eq!(
                 ContextName::parse(invalid),
                 Err(InvalidContextName(invalid.to_owned())),

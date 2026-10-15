@@ -122,7 +122,18 @@ impl Environment {
     /// path, as the XDG base directory rules say, and under `~/.config` when
     /// it does not. It is `None` when neither variable gives a directory.
     pub fn config_path(&self) -> Option<PathBuf> {
-        todo!("{self:?}")
+        let xdg = self
+            .xdg_config_home
+            .as_deref()
+            .map(Path::new)
+            .filter(|directory| directory.is_absolute());
+        let base = if let Some(directory) = xdg {
+            directory.to_path_buf()
+        } else {
+            let home = self.home.as_deref().filter(|home| !home.is_empty())?;
+            Path::new(home).join(".config")
+        };
+        Some(base.join("drun").join(CONFIG_FILE_NAME))
     }
 }
 
@@ -135,7 +146,49 @@ impl Config {
     /// Docker context name or is in the list two times, or when the config
     /// file exists and is not correct.
     pub fn load(environment: &Environment) -> Result<Self, LoadError> {
-        todo!("{environment:?}")
+        let path = environment.config_path();
+        let file = match &path {
+            Some(path) => read_file(path)?,
+            None => None,
+        };
+        let names: Vec<String> = match environment
+            .contexts
+            .as_ref()
+            .filter(|value| !value.is_empty())
+        {
+            Some(value) => {
+                let text = value.to_str().ok_or(LoadError::VariableNotUnicode)?;
+                text.split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            }
+            None => file
+                .as_ref()
+                .and_then(|file| file.contexts.clone())
+                .unwrap_or_default(),
+        };
+        if names.is_empty() {
+            return Err(LoadError::NoContexts { path });
+        }
+        let mut contexts: Vec<ContextName> = Vec::with_capacity(names.len());
+        for name in &names {
+            let context = ContextName::parse(name)?;
+            if contexts.contains(&context) {
+                return Err(LoadError::Duplicate(context));
+            }
+            contexts.push(context);
+        }
+        let host_timeout = match (file.and_then(|file| file.host_timeout_secs), path) {
+            (None, _) => DEFAULT_HOST_TIMEOUT,
+            (Some(0), Some(path)) => return Err(LoadError::ZeroTimeout(path)),
+            (Some(seconds), _) => Duration::from_secs(seconds),
+        };
+        Ok(Self {
+            contexts,
+            host_timeout,
+        })
     }
 
     /// The hosts, in the order of the configuration.
@@ -146,6 +199,29 @@ impl Config {
     /// The longest time to wait for one host to answer.
     pub fn host_timeout(&self) -> Duration {
         self.host_timeout
+    }
+}
+
+/// Reads the config file at `path`. A file that does not exist is `None`, so
+/// `DRUN_CONTEXTS` alone is enough.
+///
+/// # Errors
+///
+/// Returns a [`LoadError`] when the file exists and cannot be read, or is not
+/// a correct config file.
+fn read_file(path: &Path) -> Result<Option<File>, LoadError> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => toml::from_str(&text)
+            .map(Some)
+            .map_err(|error| LoadError::Parse {
+                path: path.to_owned(),
+                message: error.message().to_owned(),
+            }),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(LoadError::Read {
+            path: path.to_owned(),
+            message: error.to_string(),
+        }),
     }
 }
 

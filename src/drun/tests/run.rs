@@ -47,10 +47,18 @@ fn help_names_the_commands_and_the_config_file() {
         let run = fixture.run(args);
         assert_eq!(run.code, Some(0), "{args:?}: {}", run.stderr);
         for needle in ["drun run", "drun hosts", "drun pick", "DRUN_CONTEXTS"] {
-            assert!(run.stdout.contains(needle), "{args:?} lacks {needle}: {}", run.stdout);
+            assert!(
+                run.stdout.contains(needle),
+                "{args:?} lacks {needle}: {}",
+                run.stdout
+            );
         }
         let path = fixture.config_path().display().to_string();
-        assert!(run.stdout.contains(&path), "{args:?} lacks {path}: {}", run.stdout);
+        assert!(
+            run.stdout.contains(&path),
+            "{args:?} lacks {path}: {}",
+            run.stdout
+        );
     }
 }
 
@@ -121,7 +129,11 @@ fn run_passes_every_argument_through_unchanged() {
     let calls = fixture.calls_of("box-b", "run");
     let mut expected = vec!["run", "--label", MANAGED];
     expected.extend(given);
-    assert_eq!(calls, [expected], "the -d after the image belongs to the command");
+    assert_eq!(
+        calls,
+        [expected],
+        "the -d after the image belongs to the command"
+    );
 }
 
 #[test]
@@ -158,17 +170,27 @@ fn a_given_name_is_used_and_no_other_name_is_added() {
     assert_eq!(run.code, Some(0), "{}", run.stderr);
     assert_eq!(run.stdout, "box-b job-1\n");
     let calls = fixture.calls_of("box-b", "run");
-    let names = calls[0].iter().filter(|argument| *argument == "--name").count();
+    let names = calls[0]
+        .iter()
+        .filter(|argument| *argument == "--name")
+        .count();
     assert_eq!(names, 1, "{calls:?}");
 }
 
 #[test]
 fn a_name_that_a_host_uses_already_is_refused() {
     let fixture = two_hosts();
-    fixture.containers("box-a", &[row("3f2a", "job-1", "alpine", "Up 2 hours", false)]);
+    fixture.containers(
+        "box-a",
+        &[row("3f2a", "job-1", "alpine", "Up 2 hours", false)],
+    );
     let run = fixture.run(&["run", "--name", "job-1", "alpine"]);
     assert_eq!(run.code, Some(125));
-    assert!(run.stderr.contains("job-1") && run.stderr.contains("box-a"), "{}", run.stderr);
+    assert!(
+        run.stderr.contains("job-1") && run.stderr.contains("box-a"),
+        "{}",
+        run.stderr
+    );
     assert!(fixture.calls_of("box-a", "run").is_empty());
     assert!(fixture.calls_of("box-b", "run").is_empty());
 }
@@ -178,7 +200,11 @@ fn rm_with_detach_prints_a_warning_and_still_runs() {
     let fixture = two_hosts();
     let run = fixture.run(&["run", "-d", "--rm", "alpine"]);
     assert_eq!(run.code, Some(0), "{}", run.stderr);
-    assert!(run.stderr.contains("warning") && run.stderr.contains("--rm"), "{}", run.stderr);
+    assert!(
+        run.stderr.contains("warning") && run.stderr.contains("--rm"),
+        "{}",
+        run.stderr
+    );
     assert_eq!(fixture.calls_of("box-b", "run").len(), 1);
 }
 
@@ -198,7 +224,10 @@ fn a_bind_mount_from_this_computer_prints_a_warning() {
     for mount in [
         vec!["-v".to_owned(), "./data:/data".to_owned()],
         vec!["-v".to_owned(), format!("{absolute}:/data")],
-        vec!["--mount".to_owned(), format!("type=bind,source={absolute},target=/data")],
+        vec![
+            "--mount".to_owned(),
+            format!("type=bind,source={absolute},target=/data"),
+        ],
     ] {
         let mut args = vec!["run".to_owned()];
         args.extend(mount.clone());
@@ -231,7 +260,10 @@ fn a_host_that_fails_the_probe_is_skipped_with_a_warning() {
     let fixture = Fixture::new();
     fixture.hosts(&["box-a", "box-b"]);
     fixture.host("box-a", GIB_16, GIB_16, 0.0, 4);
-    fixture.down("box-a", "Cannot connect to the Docker daemon at unix:///var/run/docker.sock\n");
+    fixture.down(
+        "box-a",
+        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock\n",
+    );
     fixture.host("box-b", GIB_16, GIB_16 / 2, 1.0, 4);
     let run = fixture.run(&["run", "alpine"]);
     assert_eq!(run.code, Some(0), "{}", run.stderr);
@@ -261,8 +293,16 @@ fn when_no_host_answers_nothing_runs() {
     fixture.down("box-b", "Cannot connect to box-b\n");
     let run = fixture.run(&["run", "alpine"]);
     assert_eq!(run.code, Some(125));
-    assert!(run.stderr.contains("Cannot connect to box-a"), "{}", run.stderr);
-    assert!(run.stderr.contains("Cannot connect to box-b"), "{}", run.stderr);
+    assert!(
+        run.stderr.contains("Cannot connect to box-a"),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("Cannot connect to box-b"),
+        "{}",
+        run.stderr
+    );
     assert!(fixture.calls_of("box-a", "run").is_empty());
     assert!(fixture.calls_of("box-b", "run").is_empty());
 }
@@ -276,8 +316,14 @@ fn the_probe_container_removes_itself() {
         let probes = fixture.probes(host);
         assert_eq!(probes.len(), 1, "{host}: {probes:?}");
         assert_eq!(probes[0][0], "run");
-        assert!(probes[0].iter().any(|argument| argument == "--rm"), "{probes:?}");
-        assert!(probes[0].iter().any(|argument| argument == "busybox:1.37"), "{probes:?}");
+        assert!(
+            probes[0].iter().any(|argument| argument == "--rm"),
+            "{probes:?}"
+        );
+        assert!(
+            probes[0].iter().any(|argument| argument == "busybox:1.37"),
+            "{probes:?}"
+        );
     }
 }
 
@@ -300,10 +346,22 @@ fn hosts_shows_every_host_and_marks_the_chosen_one() {
     let lines: Vec<&str> = run.stdout.lines().collect();
     assert_eq!(lines.len(), 4, "{}", run.stdout);
     assert!(lines[0].starts_with("HOST"), "{}", run.stdout);
-    assert!(lines[1].starts_with("box-a") && lines[1].contains("90%"), "{}", run.stdout);
+    assert!(
+        lines[1].starts_with("box-a") && lines[1].contains("90%"),
+        "{}",
+        run.stdout
+    );
     assert!(!lines[1].contains("chosen"), "{}", run.stdout);
-    assert!(lines[2].starts_with("box-b") && lines[2].ends_with("chosen"), "{}", run.stdout);
-    assert!(lines[3].starts_with("box-c") && lines[3].contains("Cannot connect"), "{}", run.stdout);
+    assert!(
+        lines[2].starts_with("box-b") && lines[2].ends_with("chosen"),
+        "{}",
+        run.stdout
+    );
+    assert!(
+        lines[3].starts_with("box-c") && lines[3].contains("Cannot connect"),
+        "{}",
+        run.stdout
+    );
 }
 
 #[test]

@@ -260,7 +260,254 @@ pub struct RunArgs {
 /// without its value, a switch with a value that is not true or false, or
 /// arguments without an image.
 pub fn parse_run(args: &[OsString]) -> Result<RunArgs, ArgsError> {
-    todo!("{args:?} {RUN:?}")
+    let scan = RUN.scan(args)?;
+    if scan.positionals.is_empty() {
+        return Err(ArgsError::Shape {
+            command: RUN.name,
+            what: "an image",
+        });
+    }
+    let mut parsed = RunArgs::default();
+    for found in scan.flags {
+        match (found.long, found.setting) {
+            ("detach", Setting::Switch(on)) => parsed.detach = on,
+            ("rm", Setting::Switch(on)) => parsed.remove = on,
+            ("name", Setting::Value(name)) => parsed.name = Some(name),
+            ("volume", Setting::Value(spec)) => {
+                parsed.bind_sources.extend(volume_bind_source(&spec));
+            }
+            ("mount", Setting::Value(spec)) => {
+                parsed.bind_sources.extend(mount_bind_source(&spec));
+            }
+            _ => {}
+        }
+    }
+    Ok(parsed)
+}
+
+/// The source of the `-v` value `spec` when it is a bind mount.
+///
+/// `SOURCE:TARGET[:OPTIONS]` is a bind mount when `SOURCE` is a path, which
+/// starts with `/` or `.`. Any other `SOURCE` is the name of a volume, and a
+/// value without `:` is a volume without a name.
+fn volume_bind_source(spec: &str) -> Option<String> {
+    let (source, _) = spec.split_once(':')?;
+    (source.starts_with('/') || source.starts_with('.')).then(|| source.to_owned())
+}
+
+/// The source of the `--mount` value `spec` when it is a bind mount, as in
+/// `type=bind,source=/srv,target=/x`. The type is `volume` when the value
+/// does not say.
+fn mount_bind_source(spec: &str) -> Option<String> {
+    let mut kind = "volume";
+    let mut source = None;
+    for field in spec.split(',') {
+        match field.split_once('=') {
+            Some(("type", value)) => kind = value,
+            Some(("source" | "src", value)) => source = Some(value),
+            _ => {}
+        }
+    }
+    if kind == "bind" {
+        source.map(str::to_owned)
+    } else {
+        None
+    }
+}
+
+/// What one flag that the scan found sets.
+#[derive(Debug)]
+enum Setting {
+    /// A switch, on or off.
+    Switch(bool),
+    /// The value of a flag that takes a value.
+    Value(String),
+}
+
+/// One flag that the scan found.
+#[derive(Debug)]
+struct Found {
+    /// The long form of the flag, without the dashes.
+    long: &'static str,
+    /// What the flag sets.
+    setting: Setting,
+}
+
+/// The flags and the positional arguments of one command line.
+#[derive(Debug, Default)]
+struct Scan {
+    /// The flags, in the order of the arguments.
+    flags: Vec<Found>,
+    /// The index of each positional argument.
+    positionals: Vec<usize>,
+}
+
+impl CommandSpec {
+    /// The flag with the one-letter form `letter`.
+    fn by_short(&self, letter: char) -> Option<FlagSpec> {
+        self.flags
+            .iter()
+            .copied()
+            .find(|flag| flag.short == Some(letter))
+    }
+
+    /// The flag with the long form `name`.
+    fn by_long(&self, name: &str) -> Option<FlagSpec> {
+        self.flags.iter().copied().find(|flag| flag.long == name)
+    }
+
+    /// Divides `args` into flags and positional arguments, as the docker CLI
+    /// does.
+    ///
+    /// `--` ends the flags. A long flag can hold its value after `=`. A group
+    /// of one-letter flags, as in `-dit`, can end with a flag that takes a
+    /// value, and the value is the rest of the group or the next argument.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ArgsError`] for a flag that is not in the table, a flag
+    /// without its value, or a switch with a value that is not true or false.
+    fn scan(&self, args: &[OsString]) -> Result<Scan, ArgsError> {
+        let mut scan = Scan::default();
+        let mut index = 0;
+        while index < args.len() {
+            let text = args[index].to_string_lossy();
+            if text == "--" {
+                scan.positionals.extend(index + 1..args.len());
+                break;
+            }
+            if let Some(long) = text.strip_prefix("--") {
+                index = self.scan_long(args, index, long, &mut scan)?;
+            } else if let Some(group) = text.strip_prefix('-').filter(|group| !group.is_empty()) {
+                index = self.scan_short_group(args, index, group, &mut scan)?;
+            } else {
+                scan.positionals.push(index);
+                if !self.interspersed {
+                    scan.positionals.extend(index + 1..args.len());
+                    break;
+                }
+            }
+            index += 1;
+        }
+        Ok(scan)
+    }
+
+    /// Reads the long flag `long` (the text after `--`) at `args[index]`, and
+    /// gives back the index of the last argument that it used.
+    fn scan_long(
+        &self,
+        args: &[OsString],
+        mut index: usize,
+        long: &str,
+        scan: &mut Scan,
+    ) -> Result<usize, ArgsError> {
+        let (name, inline) = match long.split_once('=') {
+            Some((name, value)) => (name, Some(value)),
+            None => (long, None),
+        };
+        let written = format!("--{name}");
+        let Some(spec) = self.by_long(name) else {
+            if inline.is_some() {
+                return Ok(index);
+            }
+            return Err(ArgsError::UnknownLong {
+                command: self.name,
+                flag: name.to_owned(),
+            });
+        };
+        let setting = if spec.takes_value {
+            if let Some(value) = inline {
+                Setting::Value(value.to_owned())
+            } else {
+                index += 1;
+                Setting::Value(self.value_at(args, index, &written)?)
+            }
+        } else {
+            Setting::Switch(self.switch_value(&written, inline)?)
+        };
+        scan.flags.push(Found {
+            long: spec.long,
+            setting,
+        });
+        Ok(index)
+    }
+
+    /// Reads the group of one-letter flags `group` (the text after `-`) at
+    /// `args[index]`, and gives back the index of the last argument that it
+    /// used.
+    fn scan_short_group(
+        &self,
+        args: &[OsString],
+        mut index: usize,
+        group: &str,
+        scan: &mut Scan,
+    ) -> Result<usize, ArgsError> {
+        let mut letters = group.chars();
+        while let Some(letter) = letters.next() {
+            let spec = self.by_short(letter).ok_or(ArgsError::UnknownShort {
+                command: self.name,
+                flag: letter,
+            })?;
+            let written = format!("-{letter}");
+            let rest = letters.as_str();
+            if spec.takes_value {
+                let attached = rest.strip_prefix('=').unwrap_or(rest);
+                let value = if attached.is_empty() {
+                    index += 1;
+                    self.value_at(args, index, &written)?
+                } else {
+                    attached.to_owned()
+                };
+                scan.flags.push(Found {
+                    long: spec.long,
+                    setting: Setting::Value(value),
+                });
+                return Ok(index);
+            }
+            if let Some(value) = rest.strip_prefix('=') {
+                scan.flags.push(Found {
+                    long: spec.long,
+                    setting: Setting::Switch(self.switch_value(&written, Some(value))?),
+                });
+                return Ok(index);
+            }
+            scan.flags.push(Found {
+                long: spec.long,
+                setting: Setting::Switch(true),
+            });
+        }
+        Ok(index)
+    }
+
+    /// The argument at `index`, which is the value of the flag `written`.
+    fn value_at(
+        &self,
+        args: &[OsString],
+        index: usize,
+        written: &str,
+    ) -> Result<String, ArgsError> {
+        args.get(index)
+            .map(|value| value.to_string_lossy().into_owned())
+            .ok_or_else(|| ArgsError::MissingValue {
+                command: self.name,
+                flag: written.to_owned(),
+            })
+    }
+
+    /// The setting of the switch `written` with the value `value`, with the
+    /// words that Go's `strconv.ParseBool` accepts. A switch without a value
+    /// is on.
+    fn switch_value(&self, written: &str, value: Option<&str>) -> Result<bool, ArgsError> {
+        match value {
+            None | Some("1" | "t" | "T" | "true" | "TRUE" | "True") => Ok(true),
+            Some("0" | "f" | "F" | "false" | "FALSE" | "False") => Ok(false),
+            Some(other) => Err(ArgsError::NotABoolean {
+                command: self.name,
+                flag: written.to_owned(),
+                value: other.to_owned(),
+            }),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -312,15 +559,19 @@ mod tests {
 
     #[test]
     fn a_short_flag_can_hold_its_value() {
-        assert!(run(&["-p80:80", "-ePATH=/x", "-e=A=b", "-dp", "80:80", "alpine"])
-            .unwrap()
-            .detach);
+        assert!(
+            run(&["-p80:80", "-ePATH=/x", "-e=A=b", "-dp", "80:80", "alpine"])
+                .unwrap()
+                .detach
+        );
     }
 
     #[test]
     fn the_last_name_wins() {
         assert_eq!(
-            run(&["--name=first", "--name", "second", "alpine"]).unwrap().name,
+            run(&["--name=first", "--name", "second", "alpine"])
+                .unwrap()
+                .name,
             Some("second".to_owned())
         );
     }

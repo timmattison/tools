@@ -7,7 +7,10 @@
 //! so no `DOCKER_*`, `DRUN_*`, or `GIT_*` variable of the person who runs the
 //! tests can change what it does.
 
-#![allow(dead_code, reason = "each test file uses a different part of the fixture")]
+#![allow(
+    dead_code,
+    reason = "each test file uses a different part of the fixture"
+)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -245,7 +248,8 @@ impl Fixture {
     /// Every call that the fake got for `host`, each as its list of
     /// arguments after `--context <host>`.
     pub fn calls(&self, host: &str) -> Vec<Vec<String>> {
-        let Ok(text) = std::fs::read_to_string(self.path().join(format!("calls-{host}.log"))) else {
+        let Ok(text) = std::fs::read_to_string(self.path().join(format!("calls-{host}.log")))
+        else {
             return Vec::new();
         };
         // Each argument ends with the unit separator, so an empty argument
