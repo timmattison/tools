@@ -2044,7 +2044,7 @@ cannot hang the caller. Used by `cwt` and `ha`.
     Ctrl-C quits and gives back the terminal.
   - Enter runs the command that `BROWSER` names when that variable is set and not empty. Thus a
     forwarder that sets `BROWSER`, for example the opener of mosh-rs, opens the run on your local
-    computer over SSH. `ha` splits the value into words as a POSIX shell does, and each `%s` in an
+    computer from a mosh-rs session. `ha` splits the value into words as a POSIX shell does, and each `%s` in an
     argument takes the URL. When no argument holds `%s`, the URL is the last argument. When
     `BROWSER` is not set, `ha` uses the opener of the system (`/usr/bin/open` on macOS). A command
     that fails in its first 20 s shows the URL and the reason in the status line. A forwarder can
