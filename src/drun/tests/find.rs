@@ -181,9 +181,97 @@ fn a_name_on_two_hosts_is_refused_and_both_hosts_are_named() {
     );
     let run = fixture.run(&["logs", "job-a"]);
     assert_eq!(run.code, Some(125));
-    assert!(run.stderr.contains("box-a, box-b"), "{}", run.stderr);
+    assert!(
+        run.stderr.contains("job-a (aaa111) on box-a"),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("job-a (bbb999) on box-b"),
+        "{}",
+        run.stderr
+    );
     assert!(fixture.calls_of("box-a", "logs").is_empty());
     assert!(fixture.calls_of("box-b", "logs").is_empty());
+}
+
+#[test]
+fn the_start_of_two_ids_on_one_host_is_refused_and_each_container_is_named() {
+    let fixture = fleet();
+    let run = fixture.run(&["logs", "aaa"]);
+    assert_eq!(run.code, Some(125), "{}", run.stderr);
+    assert!(
+        run.stderr.contains("job-a (aaa111) on box-a"),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("other (aaa222) on box-a"),
+        "{}",
+        run.stderr
+    );
+    assert!(fixture.calls_of("box-a", "logs").is_empty());
+}
+
+#[test]
+fn the_start_of_an_id_on_each_host_is_refused_and_each_container_is_named() {
+    let fixture = Fixture::new();
+    fixture.hosts(&["box-a", "box-b"]);
+    fixture.containers(
+        "box-a",
+        &[row("abc111", "one", "alpine", "Up 1 minute", true)],
+    );
+    fixture.containers(
+        "box-b",
+        &[row("abc999", "two", "alpine", "Up 1 minute", true)],
+    );
+    let run = fixture.run(&["status", "abc"]);
+    assert_eq!(run.code, Some(125), "{}", run.stderr);
+    assert!(
+        run.stderr.contains("one (abc111) on box-a"),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("two (abc999) on box-b"),
+        "{}",
+        run.stderr
+    );
+    assert!(fixture.calls_of("box-a", "inspect").is_empty());
+    assert!(fixture.calls_of("box-b", "inspect").is_empty());
+}
+
+#[test]
+fn a_name_on_one_host_wins_over_the_start_of_an_id_on_the_other() {
+    let fixture = Fixture::new();
+    fixture.hosts(&["box-a", "box-b"]);
+    fixture.containers(
+        "box-a",
+        &[row("fff000", "abc", "alpine", "Up 1 minute", true)],
+    );
+    fixture.containers(
+        "box-b",
+        &[row("abc123", "job-b", "alpine", "Up 1 minute", true)],
+    );
+    fixture.inspect("box-a", "running 0\n");
+    let run = fixture.run(&["status", "abc"]);
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert_eq!(run.stdout, "box-a running\n");
+    assert!(fixture.calls_of("box-b", "inspect").is_empty());
+}
+
+#[test]
+fn rm_removes_nothing_when_a_name_matches_more_than_one_container() {
+    let fixture = fleet();
+    let run = fixture.run(&["rm", "job-b", "aaa"]);
+    assert_eq!(run.code, Some(125), "{}", run.stderr);
+    assert!(
+        run.stderr.contains("other (aaa222) on box-a"),
+        "{}",
+        run.stderr
+    );
+    assert!(fixture.calls_of("box-a", "rm").is_empty());
+    assert!(fixture.calls_of("box-b", "rm").is_empty());
 }
 
 #[test]
