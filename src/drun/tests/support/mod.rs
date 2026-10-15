@@ -30,9 +30,19 @@ const DIRECTORY_MARK: &str = "__FIXTURE_DIRECTORY__";
 /// - `containers-<host>`: the rows of `docker ps`.
 /// - `inspect-<host>`, `wait-<host>`: the answers to those commands.
 /// - `exit-<host>`: the exit status of every other call.
+/// - `help-<command>`: the answer to `docker <command> --help`, which has no
+///   `--context`.
 const FAKE_DOCKER: &str = r#"#!/bin/sh
 # A fake docker for the end-to-end tests of drun.
 dir=__FIXTURE_DIRECTORY__
+if [ "$2" = "--help" ]; then
+    if [ -f "$dir/help-$1" ]; then
+        cat "$dir/help-$1"
+        exit 0
+    fi
+    echo "fake docker: no help for $1" >&2
+    exit 1
+fi
 if [ "$1" != "--context" ]; then
     echo "fake docker: the first argument is not --context: $*" >&2
     exit 97
@@ -210,6 +220,11 @@ impl Fixture {
     /// Makes `host` answer `docker wait` with `text`.
     pub fn wait_answer(&self, host: &str, text: &str) {
         self.write(&format!("wait-{host}"), text);
+    }
+
+    /// Makes `docker <command> --help` print `text`.
+    pub fn help(&self, command: &str, text: &str) {
+        self.write(&format!("help-{command}"), text);
     }
 
     fn write(&self, name: &str, text: &str) {
