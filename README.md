@@ -2118,6 +2118,8 @@ cannot hang the caller. Used by `cwt` and `ha`.
     `drun status quirky-otter-4821`, `drun logs -f quirky-otter-4821`,
     `drun wait quirky-otter-4821`, `drun cp quirky-otter-4821:/out/result.json .`,
     `drun rm quirky-otter-4821`, `drun hosts`
+  - `drun check-flags` compares the flag tables of `drun` with the help of the docker CLI on this
+    computer. Run it after each update of Docker.
   - To install: `cargo install --git https://github.com/timmattison/tools drun`
 
 ## dirhash
