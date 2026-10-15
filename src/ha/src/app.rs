@@ -133,9 +133,13 @@ where
         }
     }
 
-    /// Applies each update that the worker has sent. A worker that has
-    /// ended sends nothing more, and that is not an error.
+    /// Posts each open that failed late, and applies each update that the
+    /// worker has sent. A worker that has ended sends nothing more, and that
+    /// is not an error.
     fn apply_updates(&mut self) {
+        while let Some(failure) = self.opener.late_failure() {
+            self.status.message = Some(failed_open(&failure.url, &failure.reason, (self.now)()));
+        }
         while let Ok(update) = self.worker.updates.try_recv() {
             match update {
                 Update::Runs { repo, runs } => self.board.replace(repo, runs),

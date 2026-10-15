@@ -20,9 +20,9 @@
 
 use std::ffi::OsString;
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::app::{OpenFailure, Opener};
 
@@ -32,12 +32,14 @@ pub const BROWSER_VARIABLE: &str = "BROWSER";
 /// The text in an argument of the browser command that the address replaces.
 const ADDRESS_PLACEHOLDER: &str = "%s";
 
-/// How long [`BrowserOpener::open`] waits for the browser command to stop.
+/// How long after its start a failure of the browser command still shows in
+/// the status line.
 ///
-/// A forwarder stops in a few milliseconds, so its failure shows in the
-/// status line. A browser that stays open does not stop, and the view then
-/// continues after this time.
-const EXIT_GRACE: Duration = Duration::from_millis(500);
+/// A forwarder can need some seconds to report a failure. `mosh-open` of
+/// mosh-rs waits up to 15 s, its `ANSWER_DEADLINE`, for the answer of the
+/// client, so this window is longer than that. A browser that stays open and
+/// fails later says nothing about the open, so `ha` does not report it.
+const FAILURE_WINDOW: Duration = Duration::from_secs(20);
 
 /// Opens a web address with the opener of the system.
 type SystemOpener = Box<dyn Fn(&str) -> std::io::Result<()>>;
@@ -47,7 +49,11 @@ type SystemOpener = Box<dyn Fn(&str) -> std::io::Result<()>>;
 pub struct BrowserOpener {
     launcher: Launcher,
     system: SystemOpener,
-    exit_grace: Duration,
+    failure_window: Duration,
+    /// The end that each new browser command gets a copy of.
+    failure_sender: Sender<OpenFailure>,
+    /// The failures that the browser commands sent.
+    failures: Receiver<OpenFailure>,
 }
 
 /// What the value of `BROWSER` asks for.
@@ -106,20 +112,22 @@ fn with_address(arguments: &[String], url: &str) -> Vec<String> {
     }
 }
 
-/// Starts the browser command for `url`, and waits up to `exit_grace` for it
+/// Starts the browser command for `url`, and returns without a wait for it
 /// to stop.
 ///
 /// The command gets no terminal. Its output goes to the null device, because
-/// text that it writes on the terminal breaks the view.
+/// text that it writes on the terminal breaks the view. A thread waits for
+/// the command to stop. When the command fails inside `window`, that thread
+/// sends the failure to `failures`.
 ///
 /// # Errors
-/// Returns the reason when the command does not start, or when it stops
-/// inside `exit_grace` with a failure.
+/// Returns the reason when the command does not start.
 fn start(
     program: &str,
     arguments: &[String],
     url: &str,
-    exit_grace: Duration,
+    window: Duration,
+    failures: Sender<OpenFailure>,
 ) -> Result<(), String> {
     let mut command = Command::new(program);
     command
@@ -139,23 +147,42 @@ fn start(
     let mut child = command
         .spawn()
         .map_err(|error| format!("{BROWSER_VARIABLE} command {program} did not start: {error}"))?;
-    let (sender, receiver) = mpsc::channel();
-    // This thread reaps the command also after `start` stops waiting. Thus a
-    // browser that stays open does not become a zombie.
+    let started = Instant::now();
+    let program = program.to_owned();
+    let url = url.to_owned();
+    // This thread also reaps a browser that stays open, so that it does not
+    // become a zombie. A send after the opener is gone has no receiver, and
+    // the failure then has nobody to tell.
     thread::spawn(move || {
-        let _ = sender.send(child.wait());
+        let exit = child.wait();
+        if let Some(reason) = failure_reason(&program, exit, started.elapsed(), window) {
+            let _ = failures.send(OpenFailure { url, reason });
+        }
     });
-    match receiver.recv_timeout(exit_grace) {
-        Ok(Ok(status)) if status.success() => Ok(()),
-        Ok(Ok(status)) => Err(format!(
+    Ok(())
+}
+
+/// Gives the reason to report for the browser command `program`, which
+/// stopped with `exit` after it ran for `ran_for`.
+///
+/// Gives `None` when the command succeeded, and when it ran longer than
+/// `window`, because a later failure says nothing about the open.
+fn failure_reason(
+    program: &str,
+    exit: std::io::Result<ExitStatus>,
+    ran_for: Duration,
+    window: Duration,
+) -> Option<String> {
+    if ran_for > window {
+        return None;
+    }
+    match exit {
+        Ok(status) if status.success() => None,
+        Ok(status) => Some(format!(
             "{BROWSER_VARIABLE} command {program} failed: {status}"
         )),
-        Ok(Err(error)) => Err(format!(
+        Err(error) => Some(format!(
             "ha cannot wait for {BROWSER_VARIABLE} command {program}: {error}"
-        )),
-        Err(RecvTimeoutError::Timeout) => Ok(()),
-        Err(RecvTimeoutError::Disconnected) => Err(format!(
-            "ha cannot wait for {BROWSER_VARIABLE} command {program}"
         )),
     }
 }
@@ -167,17 +194,21 @@ impl BrowserOpener {
         Self::new(
             std::env::var_os(BROWSER_VARIABLE),
             Box::new(|url| open::that_detached(url)),
-            EXIT_GRACE,
+            FAILURE_WINDOW,
         )
     }
 
     /// Builds the opener from the value of `BROWSER`, the opener of the
-    /// system, and the time to wait for the browser command to stop.
-    fn new(browser: Option<OsString>, system: SystemOpener, exit_grace: Duration) -> Self {
+    /// system, and the time after its start in which a failure of the
+    /// browser command is reported.
+    fn new(browser: Option<OsString>, system: SystemOpener, failure_window: Duration) -> Self {
+        let (failure_sender, failures) = mpsc::channel();
         BrowserOpener {
             launcher: Launcher::from_browser_variable(browser),
             system,
-            exit_grace,
+            failure_window,
+            failure_sender,
+            failures,
         }
     }
 }
@@ -186,27 +217,20 @@ impl Opener for BrowserOpener {
     fn open(&self, url: &str) -> Result<(), String> {
         match &self.launcher {
             Launcher::System => (self.system)(url).map_err(|error| error.to_string()),
-            Launcher::Command { program, arguments } => {
-                start(program, arguments, url, self.exit_grace)
-            }
+            Launcher::Command { program, arguments } => start(
+                program,
+                arguments,
+                url,
+                self.failure_window,
+                self.failure_sender.clone(),
+            ),
             Launcher::Unusable(reason) => Err(reason.clone()),
         }
     }
 
     fn late_failure(&self) -> Option<OpenFailure> {
-        None
+        self.failures.try_recv().ok()
     }
-}
-
-/// Gives the reason to report for the browser command `program`, which
-/// stopped with `exit` after it ran for `ran_for`.
-fn failure_reason(
-    _program: &str,
-    _exit: std::io::Result<ExitStatus>,
-    _ran_for: Duration,
-    _window: Duration,
-) -> Option<String> {
-    None
 }
 
 #[cfg(test)]
@@ -348,12 +372,12 @@ mod tests {
         path.exists()
     }
 
-    /// Gives the result of a wait for a command that exited with `code`.
+    /// Gives the status of a command that exited with `code`.
     #[cfg(unix)]
-    fn exit_with(code: i32) -> std::io::Result<ExitStatus> {
+    fn exit_status(code: i32) -> ExitStatus {
         use std::os::unix::process::ExitStatusExt as _;
 
-        Ok(ExitStatus::from_raw(code << 8))
+        ExitStatus::from_raw(code << 8)
     }
 
     #[cfg(unix)]
@@ -545,7 +569,7 @@ mod tests {
     #[test]
     fn a_command_that_fails_inside_the_window_gives_a_reason() {
         for ran_for in [Duration::ZERO, WINDOW] {
-            let reason = failure_reason("mosh-open", exit_with(4), ran_for, WINDOW);
+            let reason = failure_reason("mosh-open", Ok(exit_status(4)), ran_for, WINDOW);
 
             assert_names_browser_and(
                 &reason.expect("no reason"),
@@ -559,14 +583,17 @@ mod tests {
     fn a_command_that_fails_after_the_window_gives_no_reason() {
         let late = WINDOW + Duration::from_millis(1);
 
-        assert_eq!(failure_reason("firefox", exit_with(1), late, WINDOW), None);
+        assert_eq!(
+            failure_reason("firefox", Ok(exit_status(1)), late, WINDOW),
+            None
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn a_command_that_succeeds_gives_no_reason() {
         assert_eq!(
-            failure_reason("mosh-open", exit_with(0), Duration::ZERO, WINDOW),
+            failure_reason("mosh-open", Ok(exit_status(0)), Duration::ZERO, WINDOW),
             None
         );
     }
