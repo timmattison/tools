@@ -18,7 +18,9 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Opens a web address in the browser of the user.
 pub trait Opener {
-    /// Opens `url`.
+    /// Starts to open `url`, and returns without a wait for the browser to
+    /// open. A failure that comes later arrives through
+    /// [`Opener::late_failure`].
     ///
     /// # Errors
     /// Returns the reason as text when no browser starts. The status line
