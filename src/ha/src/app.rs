@@ -436,6 +436,25 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_open_shows_the_reason_of_the_opener_after_the_address() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let opener = opener(true);
+        let (result, frame) = run_app(
+            &opener,
+            &channels,
+            vec![press(KeyCode::Enter), press(KeyCode::Char('q'))],
+        );
+        assert!(result.is_ok(), "{result:?}");
+        let status_line = frame.last().unwrap();
+        assert!(
+            status_line
+                .contains("could not open a browser: https://example.test/runs/1 (no browser)"),
+            "{status_line:?}"
+        );
+    }
+
+    #[test]
     fn a_key_press_clears_the_message_and_the_error_shows() {
         let channels = channels();
         send_runs(&channels, vec![active_run(1, 5)]);

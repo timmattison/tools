@@ -270,6 +270,14 @@ mod tests {
             .collect()
     }
 
+    /// Makes sure that `reason` names `BROWSER` as the cause, and holds
+    /// `detail`. A user who reads the status line then knows which setting
+    /// to change.
+    fn assert_names_browser_and(reason: &str, detail: &str) {
+        assert!(reason.contains(BROWSER_VARIABLE), "{reason:?}");
+        assert!(reason.contains(detail), "{reason:?}");
+    }
+
     /// Waits until `path` exists, for at most [`FILE_WAIT`].
     fn wait_for(path: &Path) -> bool {
         let deadline = Instant::now() + FILE_WAIT;
@@ -338,8 +346,9 @@ mod tests {
         let missing = directory.path().join("no-such-browser");
         let (opener, urls) = opener(&quoted(&missing), LONG_GRACE);
 
-        assert!(opener.open(URL).is_err());
+        let reason = opener.open(URL).unwrap_err();
 
+        assert_names_browser_and(&reason, &missing.to_string_lossy());
         assert!(urls.borrow().is_empty(), "the system opener also ran");
     }
 
@@ -347,8 +356,9 @@ mod tests {
     fn a_browser_command_with_an_open_quotation_is_an_error() {
         let (opener, urls) = opener("/bin/sh 'no closing quote", LONG_GRACE);
 
-        assert!(opener.open(URL).is_err());
+        let reason = opener.open(URL).unwrap_err();
 
+        assert_names_browser_and(&reason, "'no closing quote");
         assert!(urls.borrow().is_empty(), "the system opener also ran");
     }
 
@@ -359,8 +369,9 @@ mod tests {
 
         let (opener, urls) = opener_for(Some(OsString::from_vec(vec![b'/', 0xff])), LONG_GRACE);
 
-        assert!(opener.open(URL).is_err());
+        let reason = opener.open(URL).unwrap_err();
 
+        assert_names_browser_and(&reason, "UTF-8");
         assert!(urls.borrow().is_empty(), "the system opener also ran");
     }
 
