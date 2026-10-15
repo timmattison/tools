@@ -2044,12 +2044,12 @@ cannot hang the caller. Used by `cwt` and `ha`.
     Ctrl-C quits and gives back the terminal.
   - Enter runs the command that `BROWSER` names when that variable is set and not empty. Thus a
     forwarder that sets `BROWSER`, for example the opener of mosh-rs, opens the run on your local
-    computer from a mosh-rs session. `ha` splits the value into words as a POSIX shell does, and each `%s` in an
-    argument takes the URL. When no argument holds `%s`, the URL is the last argument. When
-    `BROWSER` is not set, `ha` uses the opener of the system (`/usr/bin/open` on macOS). A command
-    that fails in its first 20 s shows the URL and the reason in the status line. A forwarder can
-    need some seconds to report a failure, and `ha` does not wait for the command, thus the view
-    goes on and a browser that stays open does not stop it.
+    computer from a mosh-rs session. `ha` splits the value into words as a POSIX shell does, and
+    each `%s` in an argument takes the URL. When no argument holds `%s`, the URL is the last
+    argument. When `BROWSER` is not set, `ha` uses the opener of the system (`/usr/bin/open` on
+    macOS). A command that fails in its first 20 s shows the URL and the reason in the status line.
+    A forwarder can need some seconds to report a failure, and `ha` does not wait for the command,
+    thus the view goes on and a browser that stays open does not stop it.
   - A target is a repository (`owner/name`) or an owner (`owner`, an organization or a user). An
     owner target means every repository of that owner that is not archived. `ha` watches up to
     1,000 repositories of one owner, and when an owner has more, the status line says that the
