@@ -32,13 +32,16 @@ pub fn render(header: &[&str], rows: &[Vec<String>]) -> String {
     let mut text = String::new();
     for line in &lines {
         let last = line.len().saturating_sub(1);
+        let mut laid_out = String::new();
         for (column, (cell, width)) in line.iter().zip(&widths).enumerate() {
-            text.push_str(cell);
+            laid_out.push_str(cell);
             if column < last {
-                text.push_str(&" ".repeat(width - cell.width()));
-                text.push_str(GAP);
+                laid_out.push_str(&" ".repeat(width - cell.width()));
+                laid_out.push_str(GAP);
             }
         }
+        // An empty last cell leaves the padding of the cell before it.
+        text.push_str(laid_out.trim_end());
         text.push('\n');
     }
     text
