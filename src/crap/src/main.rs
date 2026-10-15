@@ -4995,18 +4995,19 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn shell_function_starts_claude_through_clauded_when_crap_launcher_is_unset() {
-        // A user who sets no `CRAP_LAUNCHER` keeps the behavior from before
-        // the variable: a `clauded`, often with flags of its own, starts
-        // Claude. An empty `CRAP_LAUNCHER` is the same as no `CRAP_LAUNCHER`,
-        // and a `c` on `PATH` does not change that.
-        assert_launches_through(Launchers::CLAUDED, "clauded", &[]);
+    fn shell_function_never_starts_clauded() {
+        // `clauded` was a launcher that added `--dangerously-skip-permissions`,
+        // and nothing uses it now (issue #558). A `clauded` that stays on
+        // `PATH` must not start Claude. When `CRAP_LAUNCHER` is unset or
+        // empty, plain `claude` starts, and a `c` on `PATH` does not change
+        // that.
+        assert_launches_through(Launchers::CLAUDED, "claude", &[]);
         let empty = Launchers {
             c: true,
             crap_launcher: Some(""),
             ..Launchers::CLAUDED
         };
-        assert_launches_through(empty, "clauded", &[]);
+        assert_launches_through(empty, "claude", &[]);
     }
 
     #[cfg(unix)]
