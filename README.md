@@ -2038,15 +2038,16 @@ cannot hang the caller. Used by `cwt` and `ha`.
     its start and ends in `…`. The cut is by display width, thus `日本語` and emoji do not break a
     row. The columns fit the terminal again when its size changes.
   - Keys: Up and Down move the highlight through both sections. Enter opens the highlighted run in
-    the browser, and `ha` keeps running. When no browser opens, the status line shows the URL for
-    30 seconds. The URL fades out, and a key press removes it sooner. `r` refreshes now. `q`, Esc,
-    or Ctrl-C quits and gives back the terminal.
+    the browser, and `ha` keeps running. When no browser opens, the status line shows the URL and
+    then the reason, for example a `BROWSER` command that this host does not have, for 30 seconds.
+    The message fades out, and a key press removes it sooner. `r` refreshes now. `q`, Esc, or
+    Ctrl-C quits and gives back the terminal.
   - Enter runs the command that `BROWSER` names when that variable is set and not empty. Thus a
     forwarder that sets `BROWSER`, for example the opener of mosh-rs, opens the run on your local
     computer over SSH. `ha` splits the value into words as a POSIX shell does, and each `%s` in an
     argument takes the URL. When no argument holds `%s`, the URL is the last argument. When
     `BROWSER` is not set, `ha` uses the opener of the system (`/usr/bin/open` on macOS). A command
-    that fails in its first 0.5 s shows the URL in the status line.
+    that fails in its first 0.5 s shows the URL and the reason in the status line.
   - A target is a repository (`owner/name`) or an owner (`owner`, an organization or a user). An
     owner target means every repository of that owner that is not archived. `ha` watches up to
     1,000 repositories of one owner, and when an owner has more, the status line says that the

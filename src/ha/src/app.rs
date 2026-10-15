@@ -21,7 +21,8 @@ pub trait Opener {
     /// Opens `url`.
     ///
     /// # Errors
-    /// Returns the reason as text when no browser starts.
+    /// Returns the reason as text when no browser starts. The status line
+    /// shows the reason after the address.
     fn open(&self, url: &str) -> Result<(), String>;
 }
 
@@ -168,16 +169,25 @@ where
                 if let Some(url) = self.board.selected_url((self.now)()) {
                     self.status.message = match self.opener.open(&url) {
                         Ok(()) => None,
-                        Err(_) => Some(Message {
-                            text: format!("could not open a browser: {url}"),
-                            posted_at: (self.now)(),
-                        }),
+                        Err(reason) => Some(failed_open(&url, &reason, (self.now)())),
                     };
                 }
                 Flow::Continue
             }
             _ => Flow::Continue,
         }
+    }
+}
+
+/// Builds the status message for an open of `url` that failed for `reason`.
+///
+/// The address comes first, because the status line cuts a long line at its
+/// end. Thus a narrow terminal still shows the address, and the user can open
+/// it by hand.
+fn failed_open(url: &str, reason: &str, posted_at: DateTime<Utc>) -> Message {
+    Message {
+        text: format!("could not open a browser: {url} ({reason})"),
+        posted_at,
     }
 }
 
