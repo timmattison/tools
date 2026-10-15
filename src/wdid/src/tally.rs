@@ -54,7 +54,8 @@ pub struct ToolUsage {
     /// The uses where the person typed the name of the tool.
     pub typed: u64,
     /// The uses through an alias or a function, by the name that the person
-    /// typed. The most used name is first. Equal counts sort by name.
+    /// typed. A suffix alias has its marker as its name (`*.md`). The most
+    /// used name is first. Equal counts sort by name.
     pub through: Vec<(String, u64)>,
     /// The runs of a development build of the tool.
     pub development_runs: u64,
@@ -120,7 +121,8 @@ struct Counts {
 
 impl Counts {
     /// Counts one use on `date`. `via` is the name that the person typed when
-    /// the use went through an alias or a function.
+    /// the use went through an alias or a function, or the marker of a suffix
+    /// alias (`*.md`).
     fn record_use(&mut self, via: Option<&str>, date: NaiveDate) {
         match via {
             Some(name) => *self.through.entry(name.to_string()).or_insert(0) += 1,

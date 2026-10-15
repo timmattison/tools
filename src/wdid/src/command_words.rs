@@ -14,13 +14,16 @@
 //! word. A wrapper that is not in the table makes a count too low, never too
 //! high.
 //!
-//! An alias expands as the shell expands it, at command position only.
+//! An alias expands as zsh expands it. zsh has three kinds of alias: regular,
+//! global, and suffix.
 //!
-//! - The command word is an alias when its raw text equals the name of an
-//!   alias. A quote or a backslash in the word stops the expansion. An alias
-//!   that the walk already expanded on the path to the word is not expanded
-//!   again, thus `ls='ls -G'` gives `ls` with the arguments `-G x` for `ls x`
-//!   and an alias cycle ends.
+//! A regular alias expands at command position only.
+//!
+//! - The command word is a regular alias when its raw text equals the name of
+//!   a regular alias. A quote or a backslash in the word stops the expansion.
+//!   An alias that the walk already expanded on the path to the word is not
+//!   expanded again, thus `ls='ls -G'` gives `ls` with the arguments `-G x`
+//!   for `ls x` and an alias cycle ends.
 //! - The new text is the value of the alias, then the raw text of each word of
 //!   the suffix, with one space between them. The walk reads the new text as a
 //!   program. The value can hold a pipe or a substitution, and then it gives
@@ -32,6 +35,34 @@
 //!   expanded, except through this rule.
 //! - The chain of expanded names goes into each substitution. An alias
 //!   expansion counts as one level of nesting, as a substitution does.
+//!
+//! A global alias expands in every position: at command position, in an
+//! argument, after a wrapper, and in the target of a redirect.
+//!
+//! - The walk expands the global aliases of a text before it parses the text,
+//!   as the lexer of zsh does. The value of the alias goes in place of each
+//!   word whose raw text equals the name of the alias.
+//! - A quote, a backslash, or more text in the word stops the expansion. An
+//!   assignment (`X=G`) and the body of a here document do not expand either.
+//! - A global alias in the value expands too. An alias that the same expansion
+//!   holds already is not expanded again, thus a cycle ends.
+//! - The value stays apart from an operator next to the word, as in zsh. Thus
+//!   `>G` with a value that starts with `|` does not become `>|`.
+//! - The walk parses the new text at one level deeper, and it does not expand
+//!   the global aliases of that text again. A substitution in the new text and
+//!   the text of a regular alias are new text, and their global aliases expand.
+//!
+//! A suffix alias expands a command word that ends with a dot and a suffix,
+//! for example `README.md` with `alias -s md=glow`.
+//!
+//! - The command word must be plain (no quote, no backslash, no expansion), and
+//!   it must not be a regular alias. The suffix is the text after the last dot,
+//!   thus `a.tar.gz` uses `gz`. The text before that dot must not be empty.
+//! - The new text is the value, then the raw text of the command word, then the
+//!   raw text of each word of the suffix. The walk reads it as it reads the text
+//!   of a regular alias. A suffix alias does not apply after a wrapper.
+//! - The name of a suffix alias is its marker, `*.` and the suffix (`*.md`).
+//!   The marker goes into the chain, thus a cycle ends.
 //!
 //! Each command word has an origin, which is [`CommandWord::alias`]. A word
 //! that comes from the value of an alias has the origin of the word that the
@@ -50,7 +81,7 @@ use std::ops::Range;
 
 use brush_parser::ast;
 use brush_parser::word::{self, TildeExpr, WordPiece, WordPieceWithSource};
-use brush_parser::{Parser, ParserOptions};
+use brush_parser::{tokenize_str_with_options, Parser, ParserOptions, Token};
 
 /// The alias table: the name of each alias and its value, after quote removal.
 ///
@@ -140,6 +171,32 @@ impl Aliases {
             .map(|value| (suffix, value.as_str()))
     }
 
+    /// Gives the value of the regular alias `name`, or `None` when there is no
+    /// such alias or when the alias `name` is global.
+    fn regular(&self, name: &str) -> Option<&str> {
+        self.values
+            .get(name)
+            .filter(|alias| !alias.global)
+            .map(|alias| alias.value.as_str())
+    }
+
+    /// Gives the name and the value of the global alias `name`, both borrowed
+    /// from the table, or `None` when there is no such alias.
+    fn global_entry(&self, name: &str) -> Option<(&str, &str)> {
+        self.values
+            .get_key_value(name)
+            .filter(|(_, alias)| alias.global)
+            .map(|(name, alias)| (name.as_str(), alias.value.as_str()))
+    }
+
+    /// True when the name of a global alias occurs anywhere in `text`, also
+    /// as a part of a longer word.
+    fn has_global_name_in(&self, text: &str) -> bool {
+        self.values
+            .iter()
+            .any(|(name, alias)| alias.global && text.contains(name.as_str()))
+    }
+
     /// Gives the number of aliases of all three kinds.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -174,7 +231,8 @@ pub struct CommandWord {
     /// expansion) keeps its raw text.
     pub args: Vec<String>,
     /// The alias that the person typed, when this command word came from the
-    /// value of an alias. `None` when the person typed the word.
+    /// value of an alias. For a suffix alias it is the marker, `*.` and the
+    /// suffix (`*.md`). `None` when the person typed the word.
     pub alias: Option<String>,
 }
 
@@ -239,6 +297,9 @@ struct TextContext<'t> {
     parts: Vec<(Range<usize>, Option<String>)>,
     /// The origin of a position that is in no part.
     default_origin: Option<String>,
+    /// True when the global aliases of this text expanded already. The walk
+    /// then parses the text as it is.
+    globals_expanded: bool,
 }
 
 impl<'t> TextContext<'t> {
@@ -250,6 +311,7 @@ impl<'t> TextContext<'t> {
             chain: Vec::new(),
             parts: Vec::new(),
             default_origin: None,
+            globals_expanded: false,
         }
     }
 
@@ -274,6 +336,23 @@ impl<'t> TextContext<'t> {
         self.nested(text, parts, names, self.default_origin.clone())
     }
 
+    /// Makes the context of the text that the expansion of the global aliases
+    /// of this text builds. The text has the parts `parts`. The walk does not
+    /// expand the global aliases of the new text again.
+    ///
+    /// The chain does not change. Thus a global alias that the person typed in
+    /// a substitution expands, also when the same alias expanded outside it.
+    /// Gives `Refused` when the nesting is too deep.
+    fn globals_done<'u>(
+        &self,
+        text: &'u str,
+        parts: Vec<(Range<usize>, Option<String>)>,
+    ) -> Result<TextContext<'u>, Refused> {
+        let mut context = self.nested(text, parts, Vec::new(), self.default_origin.clone())?;
+        context.globals_expanded = true;
+        Ok(context)
+    }
+
     /// Makes the context of a text that one more level holds. The chain of the
     /// new context is the chain of this one plus `names`.
     fn nested<'u>(
@@ -295,6 +374,7 @@ impl<'t> TextContext<'t> {
             chain,
             parts,
             default_origin,
+            globals_expanded: false,
         })
     }
 
@@ -310,6 +390,13 @@ impl<'t> TextContext<'t> {
                     .map(|(_, origin)| origin.clone())
             })
             .unwrap_or_else(|| self.default_origin.clone())
+    }
+
+    /// Gives the origin of the words of a value that replaced the word that
+    /// starts at the character index `start`. That is the origin of the
+    /// replaced word when it has one, and else `name`, the name of the alias.
+    fn replaced_origin(&self, name: &str, start: Option<usize>) -> Option<String> {
+        self.origin_at(start).or_else(|| Some(name.to_owned()))
     }
 
     /// True when the walk already expanded the alias `name` on the path to
@@ -335,18 +422,115 @@ impl ExpandedText {
     /// `origin`. The first piece has no space before it.
     fn push(&mut self, piece: &str, origin: Option<String>) {
         if !self.text.is_empty() {
-            self.text.push(SEPARATOR);
-            self.characters += 1;
+            self.space();
         }
+        self.append(piece, origin);
+    }
+
+    /// Adds `piece` with no space before it, and states that it has the
+    /// origin `origin`.
+    fn append(&mut self, piece: &str, origin: Option<String>) {
         let start = self.characters;
         self.text.push_str(piece);
         self.characters += piece.chars().count();
         self.parts.push((start..self.characters, origin));
     }
+
+    /// Adds one space. The space is in no part, because no word starts there.
+    fn space(&mut self) {
+        self.text.push(SEPARATOR);
+        self.characters += 1;
+    }
+
+    /// Adds `characters`, which are a copy of the characters of a text from
+    /// the character index `start` on. When `context` is the context of that
+    /// text, each copied character keeps the origin that `context` gives it.
+    fn copy(&mut self, characters: &[char], start: usize, context: Option<&TextContext<'_>>) {
+        let offset = self.characters;
+        self.text.extend(characters);
+        self.characters += characters.len();
+        let Some(context) = context else {
+            return;
+        };
+        let end = start + characters.len();
+        for (range, origin) in &context.parts {
+            let from = range.start.max(start);
+            let to = range.end.min(end);
+            if from < to {
+                self.parts
+                    .push((from - start + offset..to - start + offset, origin.clone()));
+            }
+        }
+    }
 }
 
 /// The text that joins the pieces of an expanded alias.
 const SEPARATOR: char = ' ';
+
+/// The characters that end a word. A value in place of a word gets one space
+/// on each side where the next character is not one of these. Thus the value
+/// stays apart from an operator next to the word, as in zsh.
+const WORD_ENDS: [char; 3] = [' ', '\t', NEWLINE];
+
+/// One word of a text that gets the value of a global alias in its place.
+struct Replacement {
+    /// The range of character indexes of the word.
+    range: Range<usize>,
+    /// The text that goes in place of the word.
+    text: String,
+    /// The origin of that text.
+    origin: Option<String>,
+}
+
+/// Builds `text` with the text of each replacement in place of its word. The
+/// replacements are in text order and do not overlap. When `context` is the
+/// context of `text`, each copied character keeps the origin that `context`
+/// gives it.
+fn splice(
+    text: &str,
+    replacements: &[Replacement],
+    context: Option<&TextContext<'_>>,
+) -> ExpandedText {
+    let characters: Vec<char> = text.chars().collect();
+    let ends_a_word = |index: usize| characters.get(index).is_none_or(|c| WORD_ENDS.contains(c));
+    let mut spliced = ExpandedText::default();
+    let mut next = 0;
+    for replacement in replacements {
+        let Range { start, end } = replacement.range;
+        spliced.copy(
+            characters.get(next..start).unwrap_or_default(),
+            next,
+            context,
+        );
+        if start
+            .checked_sub(1)
+            .is_some_and(|before| !ends_a_word(before))
+        {
+            spliced.space();
+        }
+        spliced.append(&replacement.text, replacement.origin.clone());
+        if !ends_a_word(end) {
+            spliced.space();
+        }
+        next = end;
+    }
+    spliced.copy(characters.get(next..).unwrap_or_default(), next, context);
+    spliced
+}
+
+/// One word of a text that is the name of a global alias.
+struct GlobalWord<'a> {
+    /// The range of character indexes of the word.
+    range: Range<usize>,
+    /// The name of the alias.
+    name: &'a str,
+    /// The value of the alias.
+    value: &'a str,
+}
+
+/// The text that comes before the suffix in the marker of a suffix alias, as
+/// in `*.md`.
+const SUFFIX_MARKER: &str = "*.";
 
 /// The characters that make an alias expand the next word too, when the value
 /// of the alias ends with one of them.
@@ -720,10 +904,115 @@ impl<'a> Walker<'a> {
         }
     }
 
-    /// Parses the text of `context` as a program and walks it.
+    /// Parses the text of `context` as a program and walks it. The global
+    /// aliases of the text expand first, unless they expanded already. Then
+    /// the walk reads the new text instead.
     fn walk_text(&mut self, context: &TextContext<'_>) -> Result<(), Refused> {
+        if !context.globals_expanded {
+            if let Some(ExpandedText { text, parts, .. }) = self.expand_globals(context)? {
+                return self.walk_text(&context.globals_done(&text, parts)?);
+            }
+        }
         let program = self.parse_program(context.text)?;
         self.walk_program(&program, context)
+    }
+
+    /// Puts the value of each global alias of the text of `context` in place
+    /// of its word, as the lexer of zsh does. A global alias in the chain is
+    /// not expanded. The text of a value has the origin of the word that it
+    /// replaced. Gives `None` when no word of the text is a global alias.
+    fn expand_globals(&self, context: &TextContext<'_>) -> Result<Option<ExpandedText>, Refused> {
+        let found = self.global_words(context.text, |name| !context.in_chain(name));
+        if found.is_empty() {
+            return Ok(None);
+        }
+        let mut replacements = Vec::with_capacity(found.len());
+        for GlobalWord { range, name, value } in found {
+            replacements.push(Replacement {
+                text: self.global_value(value, &mut vec![name], context)?,
+                origin: context.replaced_origin(name, Some(range.start)),
+                range,
+            });
+        }
+        Ok(Some(splice(context.text, &replacements, Some(context))))
+    }
+
+    /// Gives `value`, the value of a global alias, with the global aliases in
+    /// it expanded. `path` holds the names of the global aliases that hold the
+    /// value. They are not expanded again, thus a cycle ends. Each name on the
+    /// path counts as one level of nesting.
+    /// Gives `Refused` when the nesting is too deep.
+    fn global_value(
+        &self,
+        value: &'a str,
+        path: &mut Vec<&'a str>,
+        context: &TextContext<'_>,
+    ) -> Result<String, Refused> {
+        if context.depth + path.len() > MAX_DEPTH {
+            return Err(Refused);
+        }
+        let found = self.global_words(value, |name| {
+            !context.in_chain(name) && !path.contains(&name)
+        });
+        if found.is_empty() {
+            return Ok(value.to_owned());
+        }
+        let mut replacements = Vec::with_capacity(found.len());
+        for GlobalWord { range, name, value } in found {
+            path.push(name);
+            let text = self.global_value(value, path, context);
+            path.pop();
+            replacements.push(Replacement {
+                range,
+                text: text?,
+                origin: None,
+            });
+        }
+        Ok(splice(value, &replacements, None).text)
+    }
+
+    /// Gives each word of `text` that is the name of a global alias that
+    /// `expands` accepts, in text order.
+    ///
+    /// A word is the name when its raw text equals the name. Thus a quoted
+    /// word, a longer word, and an assignment are not. The text at the range
+    /// of the word must equal the word too. That skips a word of a here
+    /// document, whose range does not fit the text. Gives no word when no name
+    /// occurs in the text, which costs no run of the tokenizer, or when the
+    /// tokenizer refuses the text. The parse then gives its own result.
+    fn global_words(&self, text: &str, expands: impl Fn(&str) -> bool) -> Vec<GlobalWord<'a>> {
+        let aliases: &'a Aliases = self.aliases;
+        if !aliases.has_global_name_in(text) {
+            return Vec::new();
+        }
+        let Ok(tokens) = tokenize_str_with_options(text, &self.options.tokenizer_options()) else {
+            return Vec::new();
+        };
+        let characters: Vec<char> = text.chars().collect();
+        let mut found: Vec<GlobalWord<'a>> =
+            tokens
+                .iter()
+                .filter_map(|token| {
+                    let Token::Word(raw, span) = token else {
+                        return None;
+                    };
+                    let (name, value) = aliases.global_entry(raw)?;
+                    let range = span.start.index..span.end.index;
+                    let at_range = characters.get(range.clone())?;
+                    (expands(name) && at_range.iter().copied().eq(raw.chars()))
+                        .then_some(GlobalWord { range, name, value })
+                })
+                .collect();
+        found.sort_by_key(|word| word.range.start);
+        let mut end = 0;
+        found.retain(|word| {
+            let apart = word.range.start >= end;
+            if apart {
+                end = word.range.end;
+            }
+            apart
+        });
+        found
     }
 
     /// Parses `text` as a program.
@@ -856,8 +1145,8 @@ impl<'a> Walker<'a> {
     /// Walks a simple command: the prefix items, then the command word, then
     /// the suffix items. A command with no command word adds no word. A command
     /// word that holds an expansion has no literal, so it adds no word either.
-    /// An alias at the command word expands first. A wrapper hands the command
-    /// word to the word that it runs.
+    /// A regular alias or a suffix alias at the command word expands first. A
+    /// wrapper hands the command word to the word that it runs.
     fn walk_simple(
         &mut self,
         simple: &ast::SimpleCommand,
@@ -874,7 +1163,15 @@ impl<'a> Walker<'a> {
         }
         if let Some(command) = &command {
             if let Some(value) = self.alias_value(&command.raw, context, &[]) {
-                return self.walk_alias(command, value, &suffix, context);
+                let leading = [(value, context.replaced_origin(&command.raw, command.start))];
+                return self.walk_alias(&leading, vec![command.raw.clone()], &suffix, context);
+            }
+            if let Some((marker, value)) = self.suffix_alias(command, context) {
+                let leading = [
+                    (value, context.replaced_origin(&marker, command.start)),
+                    (command.raw.as_str(), context.origin_at(command.start)),
+                ];
+                return self.walk_alias(&leading, vec![marker], &suffix, context);
             }
             let sequence: Vec<&ReadWord> = std::iter::once(command)
                 .chain(suffix.iter().filter_map(|(_, read)| read.as_ref()))
@@ -897,9 +1194,11 @@ impl<'a> Walker<'a> {
         Ok(())
     }
 
-    /// Gives the value of the alias `name`, when the walk expands it here. An
-    /// alias is not expanded when its name is in the chain of `context`, or
-    /// among the `names` that the current expansion added.
+    /// Gives the value of the regular alias `name`, when the walk expands it
+    /// here. An alias is not expanded when its name is in the chain of
+    /// `context`, or among the `names` that the current expansion added. A
+    /// global alias does not expand here, because the walk expands every
+    /// global alias of a text before it parses the text.
     fn alias_value(
         &self,
         name: &str,
@@ -909,38 +1208,56 @@ impl<'a> Walker<'a> {
         if context.in_chain(name) || names.iter().any(|expanded| expanded == name) {
             return None;
         }
-        self.aliases.get(name)
+        self.aliases.regular(name)
     }
 
-    /// Expands the alias that is the command word `command`, and walks the
-    /// result. The new text is the value, then the raw text of each word of the
-    /// suffix. A value that ends with a blank also expands the next word, when
-    /// that word is an alias. The redirects and the process substitutions of the
-    /// suffix stay outside the new text, and the walk reads them after it.
+    /// Gives the marker and the value of the suffix alias of the command word
+    /// `command`, when the walk expands it here. The word must be plain, and
+    /// the marker (`*.md`) must not be in the chain of `context`.
+    fn suffix_alias(
+        &self,
+        command: &ReadWord,
+        context: &TextContext<'_>,
+    ) -> Option<(String, &'a str)> {
+        if command.literal().as_deref() != Some(command.raw.as_str()) {
+            return None;
+        }
+        let aliases: &'a Aliases = self.aliases;
+        let (suffix, value) = aliases.suffix_of(&command.raw)?;
+        let marker = format!("{SUFFIX_MARKER}{suffix}");
+        (!context.in_chain(&marker)).then_some((marker, value))
+    }
+
+    /// Expands an alias at the command word, and walks the result. The new
+    /// text is each piece of `leading` with its origin, then the raw text of
+    /// each word of the suffix. When the last leading piece ends with a blank,
+    /// the next word expands too, when that word is a regular alias. The chain
+    /// of the new text gets `names`. The redirects and the process
+    /// substitutions of the suffix stay outside the new text, and the walk
+    /// reads them after it.
     fn walk_alias(
         &mut self,
-        command: &ReadWord,
-        value: &str,
+        leading: &[(&str, Option<String>)],
+        mut names: Vec<String>,
         suffix: &[(&ast::CommandPrefixOrSuffixItem, Option<ReadWord>)],
         context: &TextContext<'_>,
     ) -> Result<(), Refused> {
-        let mut names = vec![command.raw.clone()];
         let mut expanded = ExpandedText::default();
-        let replaced_origin = |name: &str, start: Option<usize>| {
-            context.origin_at(start).or_else(|| Some(name.to_owned()))
-        };
-        expanded.push(value, replaced_origin(&command.raw, command.start));
+        let mut last = "";
+        for (piece, origin) in leading {
+            expanded.push(piece, origin.clone());
+            last = piece;
+        }
         let mut rest = suffix
             .iter()
             .filter_map(|(_, read)| read.as_ref())
             .peekable();
-        let mut last = value;
         while last.ends_with(BLANKS) {
             let Some(next) = rest.peek() else { break };
             let Some(next_value) = self.alias_value(&next.raw, context, &names) else {
                 break;
             };
-            expanded.push(next_value, replaced_origin(&next.raw, next.start));
+            expanded.push(next_value, context.replaced_origin(&next.raw, next.start));
             names.push(next.raw.clone());
             last = next_value;
             rest.next();

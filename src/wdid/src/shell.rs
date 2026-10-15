@@ -54,6 +54,9 @@ const AUTOLOAD_PATTERN: &str = "[^_]*";
 /// The command word of every alias line.
 const ALIAS_COMMAND: &str = "alias";
 
+/// The character that starts an option word of `alias`.
+const OPTION_START: char = '-';
+
 /// The option of `alias` that makes a global alias.
 const GLOBAL_OPTION: char = 'g';
 
@@ -143,6 +146,10 @@ impl Marker {
 
 /// Gives the text of the `-c` argument for the shell.
 ///
+/// The zsh script lists the regular and the global aliases with `alias -L`,
+/// and the suffix aliases with `alias -sL`, because `alias -L` does not list
+/// them. Bash has no global or suffix alias.
+///
 /// The zsh script loads the autoloaded functions first, so a function that
 /// the shell did not load yet counts through its body. This runs no code. The
 /// script skips the functions whose name starts with `_` (see
@@ -154,6 +161,7 @@ pub fn script(kind: ShellKind, marker: &Marker) -> String {
         ShellKind::Zsh => format!(
             "print -r -- '{marker} {ALIASES_LABEL}'\n\
              alias -L\n\
+             alias -sL\n\
              autoload +X -m '{AUTOLOAD_PATTERN}' 2>/dev/null || :\n\
              for {LOOP_VARIABLE} in ${{(ok)functions}}; do\n\
              \x20 print -r -- \"{marker} {FUNCTION_LABEL} ${LOOP_VARIABLE}\"\n\
@@ -269,8 +277,9 @@ pub fn parse_output(stdout: &str, marker: &Marker) -> Result<Definitions, ShellE
 
 /// Reads the body of one function into `definitions`.
 ///
-/// The shell expanded the aliases of the body when it read the definition.
-/// Thus the parse of the body uses an empty alias table.
+/// The shell expanded the aliases of the body when it read the definition,
+/// the global and the suffix aliases included. Thus the parse of the body uses
+/// an empty alias table.
 fn read_function(name: &str, body: &str, definitions: &mut Definitions) {
     match command_words(body, &Aliases::new()) {
         Parsed::Words(words) => {
@@ -283,8 +292,10 @@ fn read_function(name: &str, body: &str, definitions: &mut Definitions) {
 /// Reads one line of the alias listing into `definitions`.
 ///
 /// A line that is not exactly one `alias` command goes to
-/// `unparsed_aliases`. A global alias and a suffix alias are skipped, because
-/// the shell does not expand them in command position.
+/// `unparsed_aliases`. An option word that holds `g` makes the aliases of the
+/// line global. An option word that holds `s` makes them suffix aliases, and
+/// the name before `=` is then the suffix. A line with both options goes to
+/// `unparsed_aliases`, because one alias cannot be of both kinds.
 fn read_alias_line(line: &str, definitions: &mut Definitions) {
     if line.trim().is_empty() {
         return;
@@ -302,6 +313,8 @@ fn read_alias_line(line: &str, definitions: &mut Definitions) {
     }
     let mut definitions_in_line = Vec::new();
     let mut options_ended = false;
+    let mut global = false;
+    let mut suffix = false;
     for arg in &args {
         if options_ended || arg.contains('=') {
             if let Some((name, value)) = arg.split_once('=') {
@@ -309,12 +322,24 @@ fn read_alias_line(line: &str, definitions: &mut Definitions) {
             }
         } else if arg == END_OF_OPTIONS {
             options_ended = true;
-        } else if arg.starts_with('-') && arg.contains([GLOBAL_OPTION, SUFFIX_OPTION]) {
-            return;
+        } else if let Some(options) = arg.strip_prefix(OPTION_START) {
+            global |= options.contains(GLOBAL_OPTION);
+            suffix |= options.contains(SUFFIX_OPTION);
         }
     }
+    if global && suffix {
+        definitions.unparsed_aliases.push(line.to_owned());
+        return;
+    }
+    let aliases = &mut definitions.aliases;
     for (name, value) in definitions_in_line {
-        definitions.aliases.insert(name, value);
+        if global {
+            aliases.insert_global(name, value);
+        } else if suffix {
+            aliases.insert_suffix(name, value);
+        } else {
+            aliases.insert(name, value);
+        }
     }
 }
 
