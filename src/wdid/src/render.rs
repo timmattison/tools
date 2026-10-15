@@ -68,6 +68,22 @@ fn number_of(count: usize) -> String {
     count.to_formatted_string(&Locale::en)
 }
 
+/// Gives `count` with its noun: the count with a comma between each group of
+/// three digits, one space, and `singular` when the count is 1 or `plural`
+/// for every other count. English plurals are irregular, so the caller gives
+/// both forms.
+fn counted<T>(count: T, singular: &str, plural: &str) -> String
+where
+    T: ToFormattedString + PartialEq + From<u8>,
+{
+    let noun = if count == T::from(1) {
+        singular
+    } else {
+        plural
+    };
+    format!("{} {noun}", count.to_formatted_string(&Locale::en))
+}
+
 /// Gives `date` as `YYYY-MM-DD`, or `-` when the date is not known.
 fn date_cell(date: Option<NaiveDate>) -> String {
     date.map_or_else(
@@ -214,10 +230,9 @@ fn group_lines(tally: &Tally, window: &Window) -> String {
         .iter()
         .map(|usage| {
             format!(
-                "{} ({} {}, last use {})",
+                "{} ({}, last use {})",
                 usage.tool.name,
-                number(usage.uses),
-                if usage.uses == 1 { "use" } else { "uses" },
+                counted(usage.uses, "use", "uses"),
                 date_cell(usage.last_use),
             )
         })
@@ -232,13 +247,16 @@ fn group_lines(tally: &Tally, window: &Window) -> String {
         ),
         group(
             &format!(
-                "Never used, new (added less than {} days ago)",
-                window.new_days
+                "Never used, new (added less than {} ago)",
+                counted(window.new_days, "day", "days")
             ),
             &new,
         ),
         group(
-            &format!("Idle (no use in the last {} days)", window.idle_days),
+            &format!(
+                "Idle (no use in the last {})",
+                counted(window.idle_days, "day", "days")
+            ),
             &idle,
         ),
     ]
@@ -247,14 +265,14 @@ fn group_lines(tally: &Tally, window: &Window) -> String {
 
 /// Gives the two lines that summarize the history and the shell.
 fn summary_lines(summary: &Summary, window: &Window) -> String {
-    let rows = number(summary.rows);
+    let rows = counted(summary.rows, "row", "rows");
     let history_start = match window.since {
         Some(since) => format!(
-            "History: {rows} rows, {} before {}.",
+            "History: {rows}, {} before {}.",
             number(summary.before_since),
             date_cell(Some(since)),
         ),
-        None => format!("History: {rows} rows."),
+        None => format!("History: {rows}."),
     };
     let history = format!(
         "{history_start} {} not counted (exit 127). {} did not parse (wdid --unparsed prints them).",
@@ -265,21 +283,16 @@ fn summary_lines(summary: &Summary, window: &Window) -> String {
         "Shell: no aliases and no functions (--no-shell, or none defined).".to_string()
     } else {
         format!(
-            "Shell: {} aliases, {} functions ({} did not parse).",
-            number_of(summary.aliases),
-            number_of(summary.functions),
+            "Shell: {}, {} ({} did not parse).",
+            counted(summary.aliases, "alias", "aliases"),
+            counted(summary.functions, "function", "functions"),
             number_of(summary.unparsed_functions.len()),
         )
     };
     if summary.unparsed_aliases > 0 {
         shell.push_str(&format!(
-            " {} alias {} did not parse.",
-            number_of(summary.unparsed_aliases),
-            if summary.unparsed_aliases == 1 {
-                "line"
-            } else {
-                "lines"
-            },
+            " {} did not parse.",
+            counted(summary.unparsed_aliases, "alias line", "alias lines"),
         ));
     }
     format!("{history}\n{shell}")
