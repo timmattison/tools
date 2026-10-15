@@ -124,7 +124,7 @@ asks every host each time.
 | `drun logs [options] NAME` | Runs `docker logs` on the host of the container. `-f` works. |
 | `drun wait NAME` | Waits until the container stops, prints its exit status, and exits with it. |
 | `drun exec [options] NAME COMMAND` | Runs `docker exec` on the host of the container. `-it` works. |
-| `drun cp NAME:PATH LOCAL_PATH` | Copies files out of the container. `drun cp LOCAL_PATH NAME:PATH` copies files into it. |
+| `drun cp [options] NAME:PATH LOCAL_PATH` | Copies files out of the container. `drun cp [options] LOCAL_PATH NAME:PATH` copies files into it. |
 | `drun rm [options] NAME...` | Removes each container on its own host. It removes nothing when one of the names matches no container or more than one container. |
 
 `NAME` is the name of the container, its ID, or the start of its ID. A name or

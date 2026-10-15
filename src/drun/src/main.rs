@@ -547,8 +547,8 @@ Usage:
   drun logs [docker logs options] NAME
   drun wait NAME
   drun exec [docker exec options] NAME COMMAND [ARG...]
-  drun cp NAME:PATH LOCAL_PATH
-  drun cp LOCAL_PATH NAME:PATH
+  drun cp [docker cp options] NAME:PATH LOCAL_PATH
+  drun cp [docker cp options] LOCAL_PATH NAME:PATH
   drun rm [docker rm options] NAME [NAME...]
   drun hosts
   drun pick
