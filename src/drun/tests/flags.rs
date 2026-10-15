@@ -44,6 +44,27 @@ fn check_flags_agrees_with_the_committed_help() {
 }
 
 #[test]
+fn check_flags_asks_docker_for_help_without_an_engine() {
+    let fixture = committed();
+    fixture.run_with(
+        &["check-flags"],
+        &[
+            ("DOCKER_CONTEXT", "box-a"),
+            ("DOCKER_HOST", "tcp://box-a.example:2376"),
+            ("DOCKER_API_VERSION", "1.40"),
+            ("DOCKER_TLS_VERIFY", "1"),
+        ],
+    );
+    for command in COMMANDS {
+        assert_eq!(
+            fixture.help_environment(command),
+            "DOCKER_HOST=unix:///dev/null/drun-no-engine.sock\n",
+            "the environment of docker {command} --help",
+        );
+    }
+}
+
+#[test]
 fn check_flags_needs_no_hosts() {
     let fixture = committed();
     let run = fixture.run_with(&["check-flags"], &[("DRUN_CONTEXTS", "")]);
