@@ -623,3 +623,38 @@ Exit status:
 "
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The lines of the `Usage:` block of the help, without their indent.
+    fn usage_lines(help: &str) -> Vec<&str> {
+        help.lines()
+            .skip_while(|line| *line != "Usage:")
+            .skip(1)
+            .take_while(|line| line.starts_with("  "))
+            .map(str::trim_start)
+            .collect()
+    }
+
+    /// Every usage line of a command that has a flag table shows the docker
+    /// options, so a reader sees that the command takes them.
+    #[test]
+    fn each_usage_line_of_a_docker_command_shows_its_docker_options() {
+        let help = usage(&Environment::default());
+        let lines = usage_lines(&help);
+        for (command, _) in docker_args::tables() {
+            let prefix = format!("drun {command} ");
+            let marker = format!("[docker {command} options]");
+            let own: Vec<&&str> = lines
+                .iter()
+                .filter(|line| line.starts_with(&prefix))
+                .collect();
+            assert!(!own.is_empty(), "no usage line for {command}: {help}");
+            for line in own {
+                assert!(line.contains(&marker), "{line:?} lacks {marker}");
+            }
+        }
+    }
+}
