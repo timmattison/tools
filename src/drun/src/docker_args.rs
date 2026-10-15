@@ -16,49 +16,61 @@ use std::ffi::OsString;
 
 /// One flag of a docker command.
 #[derive(Debug, Clone, Copy)]
-struct FlagSpec {
+pub struct FlagSpec {
     /// The one-letter form, as in `-d`.
-    short: Option<char>,
+    pub short: Option<char>,
     /// The long form without the dashes, as in `detach`.
-    long: &'static str,
+    pub long: &'static str,
     /// True when the flag takes a value, as in `--name web`.
-    takes_value: bool,
+    pub takes_value: bool,
+    /// True when `docker <command> --help` lists the flag. Docker accepts a
+    /// flag that it does not list, such as an old alias or a flag for
+    /// Windows only.
+    pub listed: bool,
 }
 
 /// A flag with a one-letter form that takes a value.
 const fn value(short: char, long: &'static str) -> FlagSpec {
-    FlagSpec {
-        short: Some(short),
-        long,
-        takes_value: true,
-    }
+    flag(Some(short), long, true)
 }
 
 /// A flag with a one-letter form that is on or off.
 const fn switch(short: char, long: &'static str) -> FlagSpec {
-    FlagSpec {
-        short: Some(short),
-        long,
-        takes_value: false,
-    }
+    flag(Some(short), long, false)
 }
 
 /// A flag with only a long form that takes a value.
 const fn long_value(long: &'static str) -> FlagSpec {
-    FlagSpec {
-        short: None,
-        long,
-        takes_value: true,
-    }
+    flag(None, long, true)
 }
 
 /// A flag with only a long form that is on or off.
 const fn long_switch(long: &'static str) -> FlagSpec {
+    flag(None, long, false)
+}
+
+/// A flag that docker lists in its help.
+const fn flag(short: Option<char>, long: &'static str, takes_value: bool) -> FlagSpec {
     FlagSpec {
-        short: None,
+        short,
         long,
-        takes_value: false,
+        takes_value,
+        listed: true,
     }
+}
+
+/// `spec`, for a flag that docker accepts but does not list in its help.
+const fn hidden(spec: FlagSpec) -> FlagSpec {
+    FlagSpec {
+        listed: false,
+        ..spec
+    }
+}
+
+/// The docker commands whose flags `drun` keeps in a table, each with its
+/// table.
+pub fn tables() -> [(&'static str, &'static [FlagSpec]); 5] {
+    [RUN, LOGS, EXEC, CP, RM].map(|spec| (spec.name, spec.flags))
 }
 
 /// The grammar of the arguments of one docker command.
