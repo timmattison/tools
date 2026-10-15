@@ -329,15 +329,17 @@ fn stub(body: &str) -> (tempfile::TempDir, PathBuf) {
 
 #[test]
 fn a_shell_that_runs_too_long_is_timed_out_and_killed() {
-    let (_dir, path) = stub("exec sleep 5");
+    let (_dir, path) = stub("exec sleep 60");
     let started = std::time::Instant::now();
     let result = read(Command::new(&path), ShellKind::Zsh, Duration::from_secs(1));
     assert!(
         matches!(result, Err(ShellError::TimedOut { seconds: 1 })),
         "{result:?}"
     );
+    // A broken kill waits for the 60 s sleep. The bound is half of that, so a
+    // busy machine still passes and a broken kill still fails.
     assert!(
-        started.elapsed() < Duration::from_secs(4),
+        started.elapsed() < Duration::from_secs(30),
         "{:?}",
         started.elapsed()
     );
@@ -492,7 +494,7 @@ fn a_background_process_that_holds_the_pipes_does_not_lose_the_output() {
     let home = tempfile::tempdir().unwrap();
     std::fs::write(
         home.path().join(".zshrc"),
-        "alias wtm='wt --main'\n( sleep 10 & )\n",
+        "alias wtm='wt --main'\n( sleep 60 & )\n",
     )
     .unwrap();
     let started = std::time::Instant::now();
@@ -505,7 +507,9 @@ fn a_background_process_that_holds_the_pipes_does_not_lose_the_output() {
 
     let elapsed = started.elapsed();
     assert_eq!(definitions.unwrap().aliases.get("wtm"), Some("wt --main"));
-    assert!(elapsed < Duration::from_secs(8), "{elapsed:?}");
+    // A broken wait for the pipes lasts 60 s, the life of the sleep. The bound
+    // is half of that, so a busy machine still passes and a broken wait fails.
+    assert!(elapsed < Duration::from_secs(30), "{elapsed:?}");
 }
 
 #[test]
