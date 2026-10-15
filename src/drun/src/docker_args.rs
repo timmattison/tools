@@ -325,7 +325,14 @@ pub struct RmArgs {
 /// Returns an [`ArgsError`] for a flag that `drun` does not know, a flag
 /// without its value, or arguments that do not name exactly one container.
 pub fn parse_logs(args: &[OsString]) -> Result<String, ArgsError> {
-    todo!("{args:?} {LOGS:?}")
+    let scan = LOGS.scan(args)?;
+    match scan.positionals.as_slice() {
+        [container] => Ok(lossy(&args[*container])),
+        _ => Err(ArgsError::Shape {
+            command: LOGS.name,
+            what: "one container",
+        }),
+    }
 }
 
 /// The container that the arguments of `docker exec` name. The arguments
@@ -336,7 +343,14 @@ pub fn parse_logs(args: &[OsString]) -> Result<String, ArgsError> {
 /// Returns an [`ArgsError`] for a flag that `drun` does not know, a flag
 /// without its value, or arguments without a container and a command.
 pub fn parse_exec(args: &[OsString]) -> Result<String, ArgsError> {
-    todo!("{args:?} {EXEC:?}")
+    let scan = EXEC.scan(args)?;
+    match scan.positionals.as_slice() {
+        [container, _command, ..] => Ok(lossy(&args[*container])),
+        _ => Err(ArgsError::Shape {
+            command: EXEC.name,
+            what: "a container and a command",
+        }),
+    }
 }
 
 /// The container that the arguments of `docker cp` name, on the side
@@ -350,7 +364,32 @@ pub fn parse_exec(args: &[OsString]) -> Result<String, ArgsError> {
 /// Returns an [`ArgsError`] for a flag that `drun` does not know, or for
 /// arguments that are not one container side and one side on this computer.
 pub fn parse_cp(args: &[OsString]) -> Result<String, ArgsError> {
-    todo!("{args:?} {CP:?}")
+    let scan = CP.scan(args)?;
+    let shape = ArgsError::Shape {
+        command: CP.name,
+        what: "CONTAINER:PATH on one side and a path on this computer on the other",
+    };
+    let [first, second] = scan.positionals.as_slice() else {
+        return Err(shape);
+    };
+    let containers: Vec<String> = [first, second]
+        .into_iter()
+        .filter_map(|index| cp_container(&lossy(&args[*index])))
+        .collect();
+    match containers.as_slice() {
+        [container] => Ok(container.clone()),
+        _ => Err(shape),
+    }
+}
+
+/// The container of the `docker cp` argument `arg`, by the rule of the docker
+/// CLI. `None` means that `arg` is a path on this computer.
+fn cp_container(arg: &str) -> Option<String> {
+    if arg.starts_with('/') || arg.starts_with('.') {
+        return None;
+    }
+    let (container, _) = arg.split_once(':')?;
+    (!container.is_empty()).then(|| container.to_owned())
 }
 
 /// Divides the arguments of `docker rm` into flags and containers.
@@ -360,7 +399,27 @@ pub fn parse_cp(args: &[OsString]) -> Result<String, ArgsError> {
 /// Returns an [`ArgsError`] for a flag that `drun` does not know, or for
 /// arguments without a container.
 pub fn parse_rm(args: &[OsString]) -> Result<RmArgs, ArgsError> {
-    todo!("{args:?} {RM:?}")
+    let scan = RM.scan(args)?;
+    if scan.positionals.is_empty() {
+        return Err(ArgsError::Shape {
+            command: RM.name,
+            what: "at least one container",
+        });
+    }
+    // Every flag of docker rm is a switch, so each argument that is not a
+    // container is a flag.
+    let flags = args
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !scan.positionals.contains(index))
+        .map(|(_, arg)| arg.clone())
+        .collect();
+    let containers = scan
+        .positionals
+        .iter()
+        .map(|index| lossy(&args[*index]))
+        .collect();
+    Ok(RmArgs { flags, containers })
 }
 
 /// The one container name of a `drun` command that takes a name and no
@@ -371,7 +430,19 @@ pub fn parse_rm(args: &[OsString]) -> Result<RmArgs, ArgsError> {
 /// Returns [`ArgsError::Shape`] unless `args` is one argument that does not
 /// start with `-`.
 pub fn parse_name(command: &'static str, args: &[OsString]) -> Result<String, ArgsError> {
-    todo!("{command} {args:?}")
+    match args {
+        [only] if !only.to_string_lossy().starts_with('-') => Ok(lossy(only)),
+        _ => Err(ArgsError::Shape {
+            command,
+            what: "one container name",
+        }),
+    }
+}
+
+/// `arg` as text. A byte that is not UTF-8 becomes U+FFFD, and a name with
+/// such a byte then matches no container.
+fn lossy(arg: &OsString) -> String {
+    arg.to_string_lossy().into_owned()
 }
 
 /// Reads the arguments that follow `docker run`.

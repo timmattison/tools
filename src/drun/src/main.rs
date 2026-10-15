@@ -25,7 +25,7 @@ use buildinfo::version_string;
 
 use crate::config::{Config, Environment, CONTEXTS_VARIABLE};
 use crate::docker_args::RunArgs;
-use crate::fleet::{Inventory, Scope, MANAGED_LABEL};
+use crate::fleet::{Inventory, Scope, MANAGED_LABEL, STATE_FORMAT};
 use crate::host::ContextName;
 use crate::survey::{Survey, PROBE_IMAGE};
 
@@ -39,7 +39,9 @@ const EXIT_USAGE: u8 = 2;
 const EXIT_NOT_STARTED: u8 = 125;
 
 /// The commands of `drun`, for `drun <command> --help`.
-const COMMANDS: &[&str] = &["run", "hosts", "pick"];
+const COMMANDS: &[&str] = &[
+    "run", "ps", "status", "logs", "wait", "exec", "cp", "rm", "hosts", "pick",
+];
 
 /// Why a command of `drun` stopped before it could hand over to docker.
 #[derive(Debug)]
@@ -99,6 +101,25 @@ fn dispatch(
             Ok(ExitCode::SUCCESS)
         }
         "run" => run(environment, args),
+        "ps" => {
+            no_arguments("ps", args)?;
+            ps(environment)
+        }
+        "status" => status(environment, args),
+        "wait" => wait(environment, args),
+        "logs" => {
+            let container = docker_args::parse_logs(args).map_err(usage_error)?;
+            hand_to_holder(environment, "logs", &container, args)
+        }
+        "exec" => {
+            let container = docker_args::parse_exec(args).map_err(usage_error)?;
+            hand_to_holder(environment, "exec", &container, args)
+        }
+        "cp" => {
+            let container = docker_args::parse_cp(args).map_err(usage_error)?;
+            hand_to_holder(environment, "cp", &container, args)
+        }
+        "rm" => rm(environment, args),
         "hosts" => {
             no_arguments("hosts", args)?;
             hosts(environment)
@@ -116,7 +137,7 @@ fn dispatch(
 
 /// `drun run`: runs a container on the least busy host.
 fn run(environment: &Environment, args: &[OsString]) -> Result<ExitCode, Failure> {
-    let parsed = docker_args::parse_run(args).map_err(|error| Failure::Usage(error.to_string()))?;
+    let parsed = docker_args::parse_run(args).map_err(usage_error)?;
     let config = load(environment)?;
     let (survey, inventory) = thread::scope(|scope| {
         let survey = scope.spawn(|| survey::survey(&config));
@@ -180,9 +201,159 @@ fn pick(environment: &Environment) -> Result<ExitCode, Failure> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// `drun ps`: lists the containers that `drun run` started, on every host.
+fn ps(environment: &Environment) -> Result<ExitCode, Failure> {
+    let config = load(environment)?;
+    let inventory = fleet::inventory(&config, Scope::Managed);
+    print!("{}", inventory.table());
+    let mut complete = true;
+    for (context, failure) in inventory.failures() {
+        eprintln!("drun: {context} did not answer: {failure}");
+        complete = false;
+    }
+    if complete {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Err(Failure::NotStarted(
+            "the list does not show the containers of the hosts that did not answer".to_owned(),
+        ))
+    }
+}
+
+/// `drun status NAME`: prints the host, the state, and the exit status of a
+/// container.
+fn status(environment: &Environment, args: &[OsString]) -> Result<ExitCode, Failure> {
+    let name = docker_args::parse_name("status", args).map_err(usage_error)?;
+    let config = load(environment)?;
+    let host = locate(&config, &name)?;
+    let inspect = [
+        "inspect",
+        "--type",
+        "container",
+        "--format",
+        STATE_FORMAT,
+        name.as_str(),
+    ];
+    let answer = host::ask(&host, &inspect, config.host_timeout())
+        .map_err(|failure| Failure::NotStarted(format!("{host}: {failure}")))?;
+    let state = fleet::describe_state(&answer).ok_or_else(|| {
+        Failure::NotStarted(format!(
+            "{host}: docker inspect printed \"{}\", which is not a state",
+            answer.trim()
+        ))
+    })?;
+    println!("{host} {state}");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `drun wait NAME`: waits until a container stops, prints its exit status,
+/// and exits with it.
+fn wait(environment: &Environment, args: &[OsString]) -> Result<ExitCode, Failure> {
+    let name = docker_args::parse_name("wait", args).map_err(usage_error)?;
+    let config = load(environment)?;
+    let host = locate(&config, &name)?;
+    let output = host
+        .docker()
+        .args(["wait", name.as_str()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .output()
+        .map_err(cannot_start)?;
+    if !output.status.success() {
+        return Ok(exit_code(output.status));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let code: i64 = text.trim().parse().map_err(|_| {
+        Failure::NotStarted(format!(
+            "docker wait printed \"{}\", which is not an exit status",
+            text.trim()
+        ))
+    })?;
+    println!("{code}");
+    Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)))
+}
+
+/// Finds the host that has `container`, and replaces `drun` with
+/// `docker <subcommand> <args>` on that host.
+fn hand_to_holder(
+    environment: &Environment,
+    subcommand: &str,
+    container: &str,
+    args: &[OsString],
+) -> Result<ExitCode, Failure> {
+    let config = load(environment)?;
+    let host = locate(&config, container)?;
+    let mut command = host.docker();
+    command.arg(subcommand).args(args);
+    Ok(hand_over(command))
+}
+
+/// `drun rm NAME...`: removes each container on its own host.
+///
+/// It finds every container before it removes one, so it removes nothing when
+/// it cannot find one of them. It tries every host, and exits with the first
+/// exit status that is not zero.
+fn rm(environment: &Environment, args: &[OsString]) -> Result<ExitCode, Failure> {
+    let parsed = docker_args::parse_rm(args).map_err(usage_error)?;
+    let config = load(environment)?;
+    let inventory = fleet::inventory(&config, Scope::All);
+    let mut plan: Vec<(ContextName, Vec<&str>)> = Vec::new();
+    for container in &parsed.containers {
+        let host = inventory
+            .locate(container)
+            .map_err(|error| Failure::NotStarted(error.to_string()))?;
+        if let Some(index) = plan.iter().position(|(planned, _)| planned == host) {
+            plan[index].1.push(container);
+        } else {
+            plan.push((host.clone(), vec![container]));
+        }
+    }
+    let mut first_failure = None;
+    for (host, containers) in &plan {
+        let status = host
+            .docker()
+            .arg("rm")
+            .args(&parsed.flags)
+            .args(containers)
+            .status()
+            .map_err(cannot_start)?;
+        if !status.success() && first_failure.is_none() {
+            first_failure = Some(status);
+        }
+    }
+    Ok(first_failure.map_or(ExitCode::SUCCESS, exit_code))
+}
+
+/// Finds the one host that has the container `reference`.
+fn locate(config: &Config, reference: &str) -> Result<ContextName, Failure> {
+    fleet::inventory(config, Scope::All)
+        .locate(reference)
+        .cloned()
+        .map_err(|error| Failure::NotStarted(error.to_string()))
+}
+
 /// Reads the configuration.
 fn load(environment: &Environment) -> Result<Config, Failure> {
     Config::load(environment).map_err(|error| Failure::NotStarted(error.to_string()))
+}
+
+/// The failure for arguments that `drun` cannot read.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "map_err hands the error over by value"
+)]
+fn usage_error(error: docker_args::ArgsError) -> Failure {
+    Failure::Usage(error.to_string())
+}
+
+/// The failure when the `docker` program does not start.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "map_err hands the error over by value"
+)]
+fn cannot_start(error: std::io::Error) -> Failure {
+    Failure::NotStarted(format!("cannot start docker: {error}"))
 }
 
 /// Refuses arguments for a command that takes none.
@@ -270,7 +441,7 @@ fn start_detached(
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .output()
-        .map_err(|error| Failure::NotStarted(format!("cannot start docker: {error}")))?;
+        .map_err(cannot_start)?;
     if output.status.success() {
         println!("{host} {name}");
     }
@@ -330,19 +501,46 @@ drun runs a Docker container on the least busy of your Docker hosts.
 
 Usage:
   drun run [docker run options] IMAGE [COMMAND [ARG...]]
+  drun ps
+  drun status NAME
+  drun logs [docker logs options] NAME
+  drun wait NAME
+  drun exec [docker exec options] NAME COMMAND [ARG...]
+  drun cp NAME:PATH LOCAL_PATH
+  drun cp LOCAL_PATH NAME:PATH
+  drun rm [docker rm options] NAME [NAME...]
   drun hosts
   drun pick
   drun --help
   drun --version
 
 Commands:
-  run    Run a container on the least busy host. drun gives the arguments to
-         docker run without a change. Without -d, drun gives the terminal to
-         the container and exits with its exit status. With -d, drun prints
-         \"<host> <name>\" when the container starts.
-  hosts  Show how busy each host is, and which host drun chooses.
-  pick   Print the name of the host that drun chooses, for example for
-         docker --context \"$(drun pick)\" compose up -d
+  run     Run a container on the least busy host. drun gives the arguments
+          to docker run without a change. Without -d, drun gives the
+          terminal to the container and exits with its exit status. With -d,
+          drun prints \"<host> <name>\" when the container starts.
+  ps      List the containers that drun started, on every host.
+  status  Print the host and the state of a container, and its exit status
+          when it stopped, as in \"box-a exited 0\".
+  logs    Show the logs of a container, with docker logs on its host.
+  wait    Wait until a container stops. Print its exit status, and exit
+          with it.
+  exec    Run a command in a running container, with docker exec on its host.
+  cp      Copy files out of a container or into it, with docker cp on its
+          host.
+  rm      Remove containers, with docker rm on the host of each. drun
+          removes nothing when it cannot find one of the containers.
+  hosts   Show how busy each host is, and which host drun chooses.
+  pick    Print the name of the host that drun chooses, for example for
+          docker --context \"$(drun pick)\" compose up -d
+
+  NAME is the name of a container, its ID, or the start of its ID. drun asks
+  every host for its containers, and uses the one host that has NAME.
+
+Files:
+  The container runs on another computer. A bind mount, as in
+  -v ./src:/app, mounts a path on that computer and not on this one. Write
+  the results to a named volume, and get them with drun cp.
 
 Names:
   drun gives each container a name that no host uses, unless you give a name
