@@ -273,6 +273,7 @@ full path, `shellquote::shell_quote(...)`, where the call site sits behind a
 - `crap` - the paths that the tests of the shell function put into the fake
   scripts
 - `gsw` - the command it asks an interactive shell to run
+- `ha` - the paths of the scripts that the browser tests put into `BROWSER`
 - `nwt` - the worktree path and the branch in the cleanup commands it prints
   when it cannot remove a broken sparse worktree
 - `popstop` - the state directory in the stop command that a refusal prints
