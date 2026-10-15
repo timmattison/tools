@@ -464,6 +464,72 @@ fn the_shell_line_counts_the_definitions() {
     );
 }
 
+/// A count of one takes the singular noun in the history line. The plural
+/// stays for every other count.
+#[test]
+fn the_history_line_says_one_row() {
+    let window_since = Window {
+        since: Some(date(2026, 1, 1)),
+        ..window()
+    };
+    let one_row = Tally {
+        summary: Summary {
+            rows: 1,
+            ..summary()
+        },
+        ..fixture()
+    };
+    let one_row_one_before = Tally {
+        summary: Summary {
+            rows: 1,
+            before_since: 1,
+            ..summary()
+        },
+        ..fixture()
+    };
+
+    let plain = text(&one_row, &window(), None);
+    let since = text(&one_row_one_before, &window_since, None);
+
+    assert!(plain.contains("History: 1 row. 12 not counted"));
+    assert!(since.contains("History: 1 row, 1 before 2026-01-01. 12 not counted"));
+}
+
+/// A count of one takes the singular noun in the shell line. The plural stays
+/// for every other count.
+#[test]
+fn the_shell_line_says_one_alias_and_one_function() {
+    let singular = summary_lines(Summary {
+        aliases: 1,
+        functions: 1,
+        unparsed_functions: vec!["broken".to_string()],
+        ..summary()
+    });
+    let plural = summary_lines(summary());
+
+    assert_eq!(singular[1], "Shell: 1 alias, 1 function (1 did not parse).");
+    assert_eq!(
+        plural[1],
+        "Shell: 5 aliases, 4 functions (1 did not parse)."
+    );
+}
+
+/// A limit of one day takes the singular noun in the three group headings.
+#[test]
+fn the_group_headings_say_one_day() {
+    let window = Window {
+        new_days: 1,
+        idle_days: 1,
+        ..window()
+    };
+
+    let report = text(&fixture(), &window, None);
+
+    assert!(report.contains("Never used, old (added 1 or more days ago):"));
+    assert!(report.contains("Never used, new (added less than 1 day ago):"));
+    assert!(report.contains("Idle (no use in the last 1 day):"));
+}
+
 /// Parses the JSON of `tally`. The test fails when the text is not one pretty
 /// JSON document with a final newline.
 fn document(tally: &Tally, window: &Window) -> serde_json::Value {
