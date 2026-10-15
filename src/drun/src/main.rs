@@ -39,9 +39,22 @@ const EXIT_USAGE: u8 = 2;
 /// status of `drun run` the same way.
 const EXIT_NOT_STARTED: u8 = 125;
 
+/// The exit status when `drun check-flags` finds a difference.
+const EXIT_DIFFERENCES: u8 = 1;
+
 /// The commands of `drun`, for `drun <command> --help`.
 const COMMANDS: &[&str] = &[
-    "run", "ps", "status", "logs", "wait", "exec", "cp", "rm", "hosts", "pick",
+    "run",
+    "ps",
+    "status",
+    "logs",
+    "wait",
+    "exec",
+    "cp",
+    "rm",
+    "hosts",
+    "pick",
+    "check-flags",
 ];
 
 /// Why a command of `drun` stopped before it could hand over to docker.
@@ -121,6 +134,10 @@ fn dispatch(
             hand_to_holder(environment, "cp", &container, args)
         }
         "rm" => rm(environment, args),
+        "check-flags" => {
+            no_arguments("check-flags", args)?;
+            check_flags()
+        }
         "hosts" => {
             no_arguments("hosts", args)?;
             hosts(environment)
@@ -326,6 +343,28 @@ fn rm(environment: &Environment, args: &[OsString]) -> Result<ExitCode, Failure>
     Ok(first_failure.map_or(ExitCode::SUCCESS, exit_code))
 }
 
+/// `drun check-flags`: compares the flag tables of `drun` with the help of
+/// the docker CLI on this computer, and prints each difference.
+fn check_flags() -> Result<ExitCode, Failure> {
+    let report = flag_check::check().map_err(Failure::NotStarted)?;
+    let mut count = 0_usize;
+    for (command, differences) in &report {
+        for difference in differences {
+            println!("docker {command}: {difference}");
+            count += 1;
+        }
+    }
+    if count == 0 {
+        println!("The flag tables of drun agree with the docker CLI on this computer.");
+        return Ok(ExitCode::SUCCESS);
+    }
+    eprintln!(
+        "drun: the flag tables and docker disagree in {count} places. Update the tables in \
+         src/drun/src/docker_args.rs, and copy the new help into src/drun/tests/fixtures/help/"
+    );
+    Ok(ExitCode::from(EXIT_DIFFERENCES))
+}
+
 /// Finds the one host that has the container `reference`.
 fn locate(config: &Config, reference: &str) -> Result<ContextName, Failure> {
     fleet::inventory(config, Scope::All)
@@ -512,6 +551,7 @@ Usage:
   drun rm [docker rm options] NAME [NAME...]
   drun hosts
   drun pick
+  drun check-flags
   drun --help
   drun --version
 
@@ -534,6 +574,11 @@ Commands:
   hosts   Show how busy each host is, and which host drun chooses.
   pick    Print the name of the host that drun chooses, for example for
           docker --context \"$(drun pick)\" compose up -d
+  check-flags
+          Compare the flag tables of drun with the help of the docker CLI on
+          this computer. Run it after each update of Docker. drun refuses a
+          docker flag that is not in its tables, unless you write the flag
+          as --flag=VALUE.
 
   NAME is the name of a container, its ID, or the start of its ID. drun asks
   every host for its containers. NAME must match exactly one container on all
@@ -569,8 +614,9 @@ How drun chooses a host:
   host.
 
 Exit status:
-  The exit status of docker, or of the container in the foreground. 2 when
-  the arguments are wrong. 125 when drun stops before docker can run.
+  The exit status of docker, or of the container in the foreground. 1 when
+  drun check-flags finds a difference. 2 when the arguments are wrong. 125
+  when drun stops before docker can run.
 "
     )
 }
