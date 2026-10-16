@@ -329,6 +329,31 @@ pub struct RmArgs {
     pub containers: Vec<String>,
 }
 
+/// What `drun` does with the arguments that follow `docker buildx`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BuildxArgs {
+    /// The arguments create a `docker-container` builder and name no
+    /// endpoint. `drun` adds the least busy host as the endpoint, so BuildKit
+    /// runs on that host.
+    PlaceBuilder {
+        /// The name from `--name`, when there is one.
+        name: Option<String>,
+    },
+    /// Any other arguments. `drun` gives them to docker without a change.
+    Unchanged,
+}
+
+/// Reads the arguments that follow `docker buildx` or `docker builder`.
+///
+/// # Errors
+///
+/// Returns an [`ArgsError`] for a flag that `drun` does not know, or a flag
+/// without its value.
+pub fn parse_buildx(args: &[OsString]) -> Result<BuildxArgs, ArgsError> {
+    let _ = args;
+    Ok(BuildxArgs::Unchanged)
+}
+
 /// The container that the arguments of `docker logs` name.
 ///
 /// # Errors
@@ -1026,6 +1051,121 @@ mod tests {
                 command: "rm",
                 what: "at least one container"
             })
+        );
+    }
+
+    fn buildx(words: &[&str]) -> Result<BuildxArgs, ArgsError> {
+        parse_buildx(&args(words))
+    }
+
+    fn placed(name: Option<&str>) -> Result<BuildxArgs, ArgsError> {
+        Ok(BuildxArgs::PlaceBuilder {
+            name: name.map(str::to_owned),
+        })
+    }
+
+    #[test]
+    fn create_without_an_endpoint_places_the_builder_in_every_spelling() {
+        for words in [
+            &["create"][..],
+            &["create", "--use"],
+            &["create", "--driver", "docker-container"],
+            &["create", "--driver=docker-container", "--bootstrap"],
+            &["create", "--driver="],
+            &["create", "--leave=false"],
+            &["create", "-D", "--platform", "linux/arm64"],
+            &["create", "--driver-opt", "network=host", "--timeout", "30s"],
+            &["create", "--buildkitd-flags", "--debug"],
+            &["--builder", "other", "create"],
+            &["--builder=other", "-D", "create"],
+            &["create", "--"],
+        ] {
+            assert_eq!(buildx(words), placed(None), "{words:?}");
+        }
+    }
+
+    #[test]
+    fn the_last_name_of_the_builder_wins_and_keeps_its_characters() {
+        assert_eq!(
+            buildx(&["create", "--use", "--name", "misc-multiarch"]),
+            placed(Some("misc-multiarch"))
+        );
+        assert_eq!(
+            buildx(&["create", "--name", "first", "--name=café-日本語-🎉"]),
+            placed(Some("café-日本語-🎉"))
+        );
+    }
+
+    #[test]
+    fn create_that_names_an_endpoint_another_driver_or_the_help_is_unchanged() {
+        for words in [
+            &["create", "box-a"][..],
+            &["create", "box-a", "--name", "n"],
+            &["create", "--name", "n", "--", "box-a"],
+            &["create", "--driver", "kubernetes"],
+            &["create", "--driver=remote", "tcp://buildkitd.example:1234"],
+            &["create", "--driver", "cloud", "--name", "c"],
+            &["create", "--leave", "--name", "n", "--node", "n0"],
+            &["create", "--help"],
+            &["create", "-h"],
+            &["--help", "create"],
+            &["-h", "create"],
+        ] {
+            assert_eq!(buildx(words), Ok(BuildxArgs::Unchanged), "{words:?}");
+        }
+    }
+
+    #[test]
+    fn buildx_commands_other_than_create_are_unchanged() {
+        for words in [
+            &[][..],
+            &["--help"],
+            &["ls"],
+            &["inspect", "--bootstrap", "misc-multiarch"],
+            &["build", "--platform", "linux/amd64,linux/arm64", "--push", "."],
+            &["build", "--flag-that-drun-does-not-know", "."],
+            &["imagetools", "create", "--tag", "x", "y"],
+            &["--builder", "create", "ls"],
+            &["-D", "use", "create"],
+        ] {
+            assert_eq!(buildx(words), Ok(BuildxArgs::Unchanged), "{words:?}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_flag_of_buildx_or_of_create_is_refused() {
+        assert_eq!(
+            buildx(&["--frobnicate", "create"]),
+            Err(ArgsError::UnknownLong {
+                command: "buildx",
+                flag: "frobnicate".to_owned()
+            })
+        );
+        assert_eq!(
+            buildx(&["create", "--frobnicate", "x"]),
+            Err(ArgsError::UnknownLong {
+                command: "buildx create",
+                flag: "frobnicate".to_owned()
+            })
+        );
+        assert_eq!(
+            buildx(&["create", "-Z"]),
+            Err(ArgsError::UnknownShort {
+                command: "buildx create",
+                flag: 'Z'
+            })
+        );
+        assert_eq!(
+            buildx(&["create", "--name"]),
+            Err(ArgsError::MissingValue {
+                command: "buildx create",
+                flag: "--name".to_owned()
+            })
+        );
+        assert_eq!(
+            buildx(&["create", "--frobnicate=x"]),
+            placed(None),
+            "a flag that holds its value is accepted"
         );
     }
 
