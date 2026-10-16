@@ -66,14 +66,18 @@ and a user named `you`.
    box-b  12.1 of 15.6 GiB  0.31 / 4 CPUs  22%   chosen
    ```
 
-`drun` uses only the contexts that you name. It never puts a container on a
-context that you did not name, such as `default` or a production server.
+When `drun` chooses a host, it uses only the contexts that you name. It never
+puts a container or a builder on a context that you did not name, such as
+`default` or a production server. A command that `drun` does not know goes to
+the docker of this computer without a change, as
+[Other docker commands](#other-docker-commands) tells.
 
 ## Reuse SSH connections
 
 Each `docker --context` command opens a new SSH connection. `drun run` makes
-two calls to each host before it starts a container, and `drun ps` and each
-command that finds a container make one call to each host. To use one SSH
+two calls to each host before it starts a container. `drun ps`,
+`drun buildx create`, and each command that finds a container make one call
+to each host. To use one SSH
 connection again for ten minutes, add this to `~/.ssh/config`:
 
 ```sshconfig
@@ -177,10 +181,11 @@ host.
   with `drun cp`.
 - **Ports.** `-p 8080:80` opens port 8080 on the host. Connect to
   `box-b:8080`, not to `localhost:8080`.
-- **Images.** Each host gets the image itself. Push an image that you build on
-  this computer to a registry that the hosts can get to. When this computer
-  has Apple silicon and a host is x86, build for both:
-  `docker buildx build --platform linux/amd64,linux/arm64`.
+- **Images.** Each host gets the image itself. Push an image that you build to
+  a registry that the hosts can get to. When this computer has Apple silicon
+  and a host is x86, build for both:
+  `docker buildx build --platform linux/amd64,linux/arm64`. To build on a host
+  and not on this computer, see [Build images on a host](#build-images-on-a-host).
 - **`--rm` with `-d`.** Docker removes the container when it stops, with its
   exit status and its logs, so `drun status`, `drun logs`, and `drun wait`
   find nothing after that. `drun run` writes a warning. Remove the container
@@ -189,21 +194,97 @@ host.
   starts. Two `drun run` commands one after the other can choose the same host,
   because the first container does not show in the figures yet.
 
+## Build images on a host
+
+A buildx builder runs BuildKit on its endpoint, and each build on the builder
+runs there. `docker buildx create` uses the current context when you name no
+endpoint, so the builds run on this computer. `drun buildx create` puts the
+new builder on the least busy host:
+
+```console
+$ drun buildx create --name multiarch --driver docker-container --use
+drun: the builder multiarch runs on box-b (22% busy: 12.1 of 15.6 GiB memory free, load 0.31 on 4 CPUs)
+multiarch
+
+$ docker buildx build --platform linux/amd64,linux/arm64 --tag registry.example/app:1 --push .
+```
+
+`drun` adds the chosen host as the endpoint, and runs
+`docker buildx create --name multiarch --driver docker-container --use box-b`
+on this computer. The docker of this computer keeps the builders. Thus
+`--use` selects the builder for the current context of this computer, and
+`docker buildx build` on this computer finds it. `drun builder create` does
+the same, because docker reads `builder` as `buildx`.
+
+`drun` changes nothing, and asks no host, when one of these is true:
+
+- The arguments name an endpoint, as in `drun buildx create --name x box-a`.
+- The driver is not `docker-container`, as in `--driver remote`. The endpoint
+  of such a driver is not a Docker host. `docker-container` is the default.
+- The arguments remove a node with `--leave`, or ask for the help.
+- The first argument is not `buildx` or `builder`. In `drun -D buildx create`,
+  the first argument is a docker flag, so the command goes to docker without a
+  change.
+
+`drun` chooses the host one time, when it creates the builder. The builder
+stays on that host. To choose again, remove the builder and create it again.
+
+CAUTION: `docker buildx rm NAME` DELETES THE BUILD CACHE OF THE BUILDER.
+
+When a build runs on a host, these things change:
+
+- **The build context.** buildx sends the files of the build context to the
+  host through SSH for each build. Keep the context small with a
+  `.dockerignore` file.
+- **Push.** With `--push`, the host sends the image directly to the registry,
+  so the host must be able to get to the registry. buildx gives BuildKit the
+  credentials of `docker login` on this computer, so log in on this computer.
+- **Load.** With `--load`, the image goes into the Docker of the host, not of
+  this computer.
+- **Other platforms.** The host builds a platform that its CPU cannot run
+  through an emulator in its kernel. On a Debian or Ubuntu host, install one
+  with `sudo apt install qemu-user-static binfmt-support`. It stays after a
+  reboot. `docker buildx inspect --bootstrap NAME` lists the platforms that
+  the builder can build.
+
+## Other docker commands
+
+`drun` gives a command that it does not know to the docker of this computer
+without a change. A docker flag before the command, as in
+`drun --context box-a ps`, goes to docker too. Thus a script can run `drun` in
+place of `docker`, and `drun buildx build`, `drun login --password-stdin`, and
+`drun --context box-a ps` work as they do in docker. `drun` replaces itself
+with docker, so the terminal, stdin, the signals, and the exit status are
+those of docker.
+
+- `drun` asks no host for these commands, and adds no label and no name. A
+  container that `drun container run` or `drun compose up` starts runs on the
+  current context of this computer, and `drun ps` does not show it.
+- `run`, `ps`, `logs`, `wait`, `exec`, `cp`, and `rm` are commands of `drun`
+  and of docker, and `drun` runs its own command. The two are different. For
+  example, `drun ps` takes no flags. For the command of docker, run `docker`.
+- `-h`, `--help`, `help`, `-V`, and `--version` give the help and the version
+  of `drun`.
+
 ## Flags that drun does not know
 
 To find the image in `docker run -h web alpine`, `drun` must know that `-h`
 takes a value. It keeps a table of the flags of `docker run`, `logs`, `exec`,
-`cp`, and `rm`. When a new version of Docker adds a flag, `drun` refuses it,
-because it cannot know if the next argument is the value of the flag or the
-image. Write the flag with its value after `=`, as in `--new-flag=value` or
-`--new-switch=true`, and `drun` accepts it.
+`cp`, and `rm`. It also keeps a table of the flags of `docker buildx` and
+`docker buildx create`, to find the command of buildx and the endpoint. When
+a new version of Docker adds a flag, `drun` refuses it, because it cannot know
+if the next argument is the value of the flag or the image. Write the flag
+with its value after `=`, as in `--new-flag=value` or `--new-switch=true`, and
+`drun` accepts it. `drun` does not read the arguments of a command that it
+gives to docker without a change, so it refuses no flag of such a command.
 
 ### Find a table that is out of date
 
 Run `drun check-flags` after each update of Docker on this computer. It runs
 `docker run --help`, `docker logs --help`, `docker exec --help`,
-`docker cp --help`, and `docker rm --help`, reads the flags from each, and
-compares them with the tables. It asks docker for the help without an engine,
+`docker cp --help`, `docker rm --help`, `docker buildx --help`, and
+`docker buildx create --help`, reads the flags from each, and compares them
+with the tables. It asks docker for the help without an engine,
 so the result does not change with the current context:
 
 ```console
@@ -230,11 +311,16 @@ To update a table after a difference:
 2. Copy the new help into the fixtures, and record the version:
 
    ```sh
-   for command in run logs exec cp rm; do
+   help=src/drun/tests/fixtures/help
+   no_engine() {
        env -i PATH="$PATH" HOME="$HOME" DOCKER_HOST=unix:///dev/null/drun-no-engine.sock \
-           docker "$command" --help < /dev/null > "src/drun/tests/fixtures/help/$command.txt"
+           "$@" < /dev/null
+   }
+   for command in run logs exec cp rm buildx; do
+       no_engine docker "$command" --help > "$help/$command.txt"
    done
-   docker --version > src/drun/tests/fixtures/help/VERSION
+   no_engine docker buildx create --help > "$help/buildx-create.txt"
+   { docker --version; docker buildx version; } > "$help/VERSION"
    ```
 
    The docker CLI hides the flags that the engine behind the current context
@@ -251,10 +337,10 @@ To update a table after a difference:
 
 | Status | Meaning |
 | --- | --- |
-| the status of docker | The docker command ran. For `drun run` without `-d` and for `drun wait`, it is the exit status of the container. |
+| the status of docker | The docker command ran. For `drun run` without `-d` and for `drun wait`, it is the exit status of the container. For a command that `drun` gives to docker without a change, it is always the exit status of docker. |
 | 1 | `drun check-flags` found a difference between the flag tables and docker. |
 | 2 | The arguments are wrong. |
-| 125 | `drun` stopped before the docker command could run: no hosts are set, no host answered, a NAME matches no container or more than one, a host did not answer `drun ps`, or `drun check-flags` could not get or read the help of docker. `docker run` gives 125 for the same kind of failure. |
+| 125 | `drun` stopped before the docker command could run: no hosts are set, no host answered, a NAME matches no container or more than one, a host did not answer `drun ps`, `drun check-flags` could not get or read the help of docker, or the `docker` program did not start. `docker run` gives 125 for the same kind of failure. |
 
 ## Install
 
