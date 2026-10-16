@@ -12306,6 +12306,71 @@ mod watched_tests {
         );
     }
 
+    /// A move to a worktree on another branch, or to a detached worktree, sets
+    /// the flag. A move back to the home worktree clears it.
+    #[test]
+    fn a_move_to_another_branch_sets_the_flag_and_a_move_home_clears_it() {
+        let dir = siblings();
+        let main = dir.path().join(MAIN);
+        let start = start_at(&main);
+        let cfg = walk_config();
+        let (tx, _rx) = mpsc::channel();
+        let watched = RefCell::new(seeded(&main, tx.clone()));
+
+        for (name, expected) in [(LINKED, true), (DETACHED, true), (MAIN, false)] {
+            let snapshot = switch_watched(
+                &watched,
+                &resolved(&dir.path().join(name)),
+                tx.clone(),
+                &cfg,
+                &start,
+                WALK_LOG_LIMIT,
+            )
+            .unwrap_or_else(|reason| panic!("the switch to {name} must work: {reason}"));
+            assert_eq!(
+                snapshot.off_start_branch, expected,
+                "after the move to {name}"
+            );
+        }
+    }
+
+    /// A session that starts on a detached HEAD has no start branch, so the
+    /// flag is never true in it, on a branch or detached.
+    #[test]
+    fn a_session_that_starts_detached_never_sets_the_flag() {
+        let dir = init_repo();
+        let p = dir.path();
+        git(p, &["branch", "topic"]);
+        git(p, &["switch", "-q", "--detach"]);
+        let (tx, _rx) = mpsc::channel();
+        let mut watched = seeded(p, tx);
+        let start = start_at(p);
+        assert!(
+            start.branch.is_none(),
+            "a detached start has no start branch"
+        );
+
+        git(p, &["switch", "-q", "topic"]);
+        assert!(!walked_off_start(&mut watched, &start), "on topic");
+
+        git(p, &["switch", "-q", "--detach"]);
+        assert!(!walked_off_start(&mut watched, &start), "detached again");
+    }
+
+    /// A HEAD that detaches after the start is off the start branch.
+    #[test]
+    fn a_head_that_detaches_later_sets_the_flag() {
+        let dir = init_repo();
+        let p = dir.path();
+        git(p, &["switch", "-q", "-c", "topic"]);
+        let (tx, _rx) = mpsc::channel();
+        let mut watched = seeded(p, tx);
+        let start = start_at(p);
+
+        git(p, &["switch", "-q", "--detach"]);
+        assert!(walked_off_start(&mut watched, &start));
+    }
+
     /// The name of the file that a test changes in a worktree, to learn which
     /// worktree a walk read.
     const CHANGED: &str = "changed.txt";
