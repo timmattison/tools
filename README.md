@@ -2111,13 +2111,19 @@ cannot hang the caller. Used by `cwt`, `drun`, and `ha`.
     `drun.managed=true`.
   - `drun hosts` shows how busy each host is. `drun pick` prints the host that `drun` chooses,
     for `docker --context "$(drun pick)" compose up -d`.
+  - `drun buildx create` puts a new buildx builder on the least busy host, so each build on the
+    builder runs there and not on this computer. `drun builder create` does the same.
+  - A command that `drun` does not know, as `drun buildx build` or `drun login`, goes to the
+    docker of this computer without a change, so a script can run `drun` in place of `docker`.
   - Name the hosts in `DRUN_CONTEXTS=box-a,box-b` or in `~/.config/drun/config.toml`.
     [src/drun/README.md](src/drun/README.md) gives the setup of the hosts, the reuse of SSH
-    connections, and what changes when a container runs on another computer.
+    connections, what changes when a container runs on another computer, and how to build
+    images on a host.
   - Usage: `drun run -d -p 8080:80 nginx`, `drun run --rm alpine uname -a`, `drun ps`,
     `drun status quirky-otter-4821`, `drun logs -f quirky-otter-4821`,
     `drun wait quirky-otter-4821`, `drun cp quirky-otter-4821:/out/result.json .`,
-    `drun rm quirky-otter-4821`, `drun hosts`
+    `drun rm quirky-otter-4821`, `drun hosts`,
+    `drun buildx create --name multiarch --driver docker-container --use`
   - `drun check-flags` compares the flag tables of `drun` with the help of the docker CLI on this
     computer. Run it after each update of Docker.
   - To install: `cargo install --git https://github.com/timmattison/tools drun`
