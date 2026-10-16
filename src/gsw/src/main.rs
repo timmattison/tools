@@ -144,7 +144,9 @@ mod worktrees;
                   they wrap. Down opens a list of the worktrees: Up and Down move the cursor, \
                   Enter goes to the worktree under it, and Esc or q closes the list. While the \
                   repository has more than one worktree, the header shows the position of the \
-                  worktree and marks the home worktree with ⌂. A switch walks the new worktree \
+                  worktree and marks the home worktree with ⌂. The name in the header is red \
+                  while it is not the branch where gsw started, and bold again when it is. A \
+                  rebase of that branch keeps it bold. A switch walks the new worktree \
                   at once and removes every line under the frame. The arrow keys do nothing \
                   while a push runs or while the push question is up. When the worktree on the \
                   screen is removed, gsw goes back to the home worktree. gsw does not change the \

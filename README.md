@@ -839,6 +839,12 @@ cannot hang the caller. Used by `cwt` and `ha`.
       `HEAD@9ba6951` in place of a branch, in the header and in the list. With one worktree, the
       header does not change. The segment shrinks with the rest of the header, and the header
       still never wraps.
+    - The name in the header is red while it is not the branch where you started gsw: after a
+      `git switch` in the watched worktree, after a move to a worktree on another branch, and
+      when HEAD becomes detached. When the header shows that branch again, the name is bold
+      again. Only the name is red. A rebase of the start branch keeps the name bold, so `R` does
+      not make it red, but a rebase of another branch does. A session that starts on a detached
+      HEAD has no start branch, and its name is never red. One-shot mode never paints it red.
     - A switch walks the new worktree at once and starts the refresh clock again. It moves the
       filesystem watcher to the new worktree, and `p`, `G`, and `m` then act on the worktree that
       is on the screen. Every line under the frame goes, because each one described the old
