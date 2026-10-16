@@ -5,6 +5,9 @@
 //! chooses the least busy host, and hands the arguments to
 //! `docker --context <host> run`. The other commands find the host that has a
 //! container, and hand their arguments to the docker command of that host.
+//! `drun` gives a command that it does not know to the docker of this
+//! computer without a change, so a script can run `drun` in place of
+//! `docker`.
 
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
@@ -146,10 +149,11 @@ fn dispatch(
             no_arguments("pick", args)?;
             pick(environment)
         }
-        _ => Err(Failure::Usage(format!(
-            "\"{}\" is not a drun command",
-            command.to_string_lossy()
-        ))),
+        _ => {
+            let mut docker = host::this_computer();
+            docker.arg(command).args(args);
+            Ok(hand_over(docker))
+        }
     }
 }
 
@@ -554,6 +558,7 @@ Usage:
   drun hosts
   drun pick
   drun check-flags
+  drun DOCKER-COMMAND [ARG...]
   drun --help
   drun --version
 
@@ -581,6 +586,12 @@ Commands:
           this computer. Run it after each update of Docker. drun refuses a
           docker flag that is not in its tables, unless you write the flag
           as --flag=VALUE.
+  DOCKER-COMMAND
+          Any other command, or a docker flag before a command. drun gives
+          it to the docker of this computer without a change, as in
+          drun buildx ls or drun --context box-a ps. drun asks no host and
+          adds no label or name, so a container that such a command starts
+          does not show in drun ps.
 
   NAME is the name of a container, its ID, or the start of its ID. drun asks
   every host for its containers. NAME must match exactly one container on all
