@@ -460,8 +460,9 @@ fn compute_path_width(opts: &RenderOptions) -> usize {
 /// `render` paints `lead`, `rest` and `suffix` bold (as the whole header has
 /// always been) and, when present, paints `behind` yellow + bold as a rebase
 /// warning. `behind` is `None` exactly when the branch is up to date with its
-/// base. `lead` + `name` + `rest` + `suffix` concatenate to today's header
-/// byte-for-byte.
+/// base. When `behind` is `None`, `lead` + `name` + `rest` + `suffix`
+/// concatenate to the header byte-for-byte. When `behind` is `Some`, it goes
+/// between `rest` and `suffix`.
 ///
 /// `name` is split out so `render_head` can paint it red + bold when the
 /// snapshot is off its start branch. With the flag clear, `render_head` joins
