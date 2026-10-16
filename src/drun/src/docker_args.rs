@@ -1230,6 +1230,21 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_name_of_the_builder_is_no_name() {
+        for words in [
+            &["create", "--name", ""][..],
+            &["create", "--name="],
+            &["create", "--name", "x", "--name", ""],
+        ] {
+            assert_eq!(buildx(words), Ok(placed(None)), "{words:?}");
+        }
+        assert_eq!(
+            buildx(&["create", "--name", "", "--name", "x"]),
+            Ok(placed(Some("x")))
+        );
+    }
+
+    #[test]
     fn create_that_names_an_endpoint_another_driver_or_the_help_is_unchanged() {
         for words in [
             &["create", "box-a"][..],
