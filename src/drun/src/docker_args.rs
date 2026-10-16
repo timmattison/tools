@@ -1245,6 +1245,20 @@ mod tests {
     }
 
     #[test]
+    fn create_accepts_the_flags_that_docker_hides() {
+        assert_eq!(
+            buildx(&["create", "--config", "./buildkitd.toml", "--name", "b"]),
+            Ok(placed(Some("b")))
+        );
+        assert_eq!(buildx(&["create", "--builder", "x"]), Ok(placed(None)));
+        // --config takes its value, so the endpoint after it is still the endpoint.
+        assert_eq!(
+            buildx(&["create", "--config", "./buildkitd.toml", "tcp://box-a:1234"]),
+            Ok(BuildxArgs::Unchanged)
+        );
+    }
+
+    #[test]
     fn buildx_commands_other_than_create_are_unchanged() {
         for words in [
             &[][..],
