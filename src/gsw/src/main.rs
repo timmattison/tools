@@ -1410,6 +1410,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_one_shot_snapshot_is_never_off_the_start_branch() {
+        // A guard, not red-first: the field is `false` by construction, and
+        // this test keeps it so. One-shot mode draws one frame, so no frame
+        // comes after the start, and the header must not paint the name red.
+        let dir = crate::testrepo::init_repo();
+        let walk = |dir: &std::path::Path| {
+            let repo = gix::open(dir).expect("open the repository");
+            collect_snapshot(&repo, &render_config(), 0).expect("walk the repository")
+        };
+        assert!(!walk(dir.path()).off_start_branch);
+
+        crate::testrepo::git(dir.path(), &["switch", "-q", "-c", "elsewhere"]);
+        let moved = walk(dir.path());
+        assert_eq!(moved.branch, "elsewhere", "the fixture switched branch");
+        assert!(!moved.off_start_branch);
+    }
+
     /// The rows of the list frame, as visible glyphs.
     ///
     /// The frame is painted with the escape codes forced on, and then the
