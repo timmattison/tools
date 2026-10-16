@@ -467,7 +467,11 @@ fn an_empty_name_is_refused_before_any_host_is_asked() {
         let run = fixture.run(&args);
         assert_eq!(run.code, Some(2), "{spelling:?}: {}", run.stderr);
         assert!(run.stdout.is_empty(), "{spelling:?}: {}", run.stdout);
-        assert!(run.stderr.contains("--name"), "{spelling:?}: {}", run.stderr);
+        assert!(
+            run.stderr.contains("--name"),
+            "{spelling:?}: {}",
+            run.stderr
+        );
         assert!(fixture.calls("box-a").is_empty(), "{spelling:?}");
         assert!(fixture.calls("box-b").is_empty(), "{spelling:?}");
     }

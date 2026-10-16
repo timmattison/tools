@@ -341,6 +341,12 @@ pub enum ArgsError {
         /// The value.
         value: String,
     },
+    /// The last `--name` is empty, or is only a leading `/`.
+    #[error("the flag --name of docker {command} needs a container name, not an empty one")]
+    EmptyName {
+        /// The docker command.
+        command: &'static str,
+    },
     /// The arguments that are not flags are not what the command needs.
     #[error("drun {command} needs {what}")]
     Shape {
@@ -578,8 +584,9 @@ fn lossy(arg: &OsString) -> String {
 /// # Errors
 ///
 /// Returns an [`ArgsError`] for a flag that `drun` does not know, a flag
-/// without its value, a switch with a value that is not true or false, or
-/// arguments without an image.
+/// without its value, a switch with a value that is not true or false,
+/// arguments without an image, or a last `--name` that is empty once its
+/// leading `/` is gone.
 pub fn parse_run(args: &[OsString]) -> Result<RunArgs, ArgsError> {
     let scan = RUN.scan(args)?;
     if scan.positionals.is_empty() {
@@ -602,6 +609,14 @@ pub fn parse_run(args: &[OsString]) -> Result<RunArgs, ArgsError> {
             }
             _ => {}
         }
+    }
+    // Docker takes the last `--name`, so only the last one counts.
+    if parsed
+        .name
+        .as_deref()
+        .is_some_and(|name| crate::fleet::bare_name(name).is_empty())
+    {
+        return Err(ArgsError::EmptyName { command: RUN.name });
     }
     Ok(parsed)
 }
@@ -841,6 +856,28 @@ mod tests {
 
     fn run(words: &[&str]) -> Result<RunArgs, ArgsError> {
         parse_run(&args(words))
+    }
+
+    #[test]
+    fn an_empty_name_is_refused_when_it_is_the_last_one() {
+        for words in [
+            &["--name", "", "alpine"][..],
+            &["--name=", "alpine"],
+            &["--name", "/", "alpine"],
+            &["--name", "job-1", "--name", "", "alpine"],
+        ] {
+            assert_eq!(
+                run(words),
+                Err(ArgsError::EmptyName { command: "run" }),
+                "{words:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_name_that_a_later_name_replaces_is_accepted() {
+        let parsed = run(&["--name", "", "--name", "job-1", "alpine"]).unwrap();
+        assert_eq!(parsed.name.as_deref(), Some("job-1"));
     }
 
     #[test]
