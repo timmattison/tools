@@ -17,13 +17,28 @@ use std::path::Path;
 use support::Fixture;
 
 /// The docker commands whose flags `drun` keeps in a table.
-const COMMANDS: [&str; 5] = ["run", "logs", "exec", "cp", "rm"];
+const COMMANDS: [&str; 7] = [
+    "run",
+    "logs",
+    "exec",
+    "cp",
+    "rm",
+    "buildx",
+    "buildx create",
+];
+
+/// The name of the help file of the docker command `command`, as in
+/// `buildx-create` for `buildx create`. The fake docker reads the help from
+/// a file with this name, and the fixtures keep it in `<name>.txt`.
+fn help_name(command: &str) -> String {
+    command.replace(' ', "-")
+}
 
 /// The committed help of the docker command `command`.
 fn committed_help(command: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/help")
-        .join(format!("{command}.txt"));
+        .join(format!("{}.txt", help_name(command)));
     std::fs::read_to_string(&path).expect("the committed help exists")
 }
 
@@ -31,7 +46,7 @@ fn committed_help(command: &str) -> String {
 fn committed() -> Fixture {
     let fixture = Fixture::new();
     for command in COMMANDS {
-        fixture.help(command, &committed_help(command));
+        fixture.help(&help_name(command), &committed_help(command));
     }
     fixture
 }
@@ -57,7 +72,7 @@ fn check_flags_asks_docker_for_help_without_an_engine() {
     );
     for command in COMMANDS {
         assert_eq!(
-            fixture.help_environment(command),
+            fixture.help_environment(&help_name(command)),
             "DOCKER_HOST=unix:///dev/null/drun-no-engine.sock\n",
             "the environment of docker {command} --help",
         );
@@ -89,6 +104,26 @@ fn check_flags_reports_a_flag_that_docker_adds_and_exits_with_1() {
         run.stdout
     );
     assert!(!run.stdout.contains("agree"), "{}", run.stdout);
+}
+
+#[test]
+fn check_flags_reports_a_flag_that_docker_buildx_create_adds() {
+    let fixture = committed();
+    fixture.help(
+        "buildx-create",
+        &format!(
+            "{}      --new-flag string           Do something new\n",
+            committed_help("buildx create")
+        ),
+    );
+    let run = fixture.run(&["check-flags"]);
+    assert_eq!(run.code, Some(1), "{}", run.stderr);
+    assert!(
+        run.stdout
+            .contains("docker buildx create: docker lists --new-flag"),
+        "{}",
+        run.stdout
+    );
 }
 
 #[test]
