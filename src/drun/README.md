@@ -275,8 +275,13 @@ takes a value. It keeps a table of the flags of `docker run`, `logs`, `exec`,
 a new version of Docker adds a flag, `drun` refuses it, because it cannot know
 if the next argument is the value of the flag or the image. Write the flag
 with its value after `=`, as in `--new-flag=value` or `--new-switch=true`, and
-`drun` accepts it. `drun` does not read the arguments of a command that it
-gives to docker without a change, so it refuses no flag of such a command.
+`drun` accepts it. On each buildx command line, `drun` reads the flags of
+`docker buildx` before its command, to find the command, and for `create` it
+reads the flags of `docker buildx create`. It refuses an unknown flag there
+also when it then gives the arguments to docker without a change, as in
+`drun buildx --new-flag x ls`. `drun` reads the arguments of no other command
+that it gives to docker without a change, so it refuses no flag of such a
+command.
 
 ### Find a table that is out of date
 
@@ -337,7 +342,7 @@ To update a table after a difference:
 
 | Status | Meaning |
 | --- | --- |
-| the status of docker | The docker command ran. For `drun run` without `-d` and for `drun wait`, it is the exit status of the container. For a command that `drun` gives to docker without a change, it is always the exit status of docker. |
+| the status of docker | The docker command ran. For `drun run` without `-d` and for `drun wait`, it is the exit status of the container. For a command that `drun` gives to docker without a change, it is the exit status of docker. The one exception is a buildx command line with a flag that `drun` does not know, which gives status 2. |
 | 1 | `drun check-flags` found a difference between the flag tables and docker. |
 | 2 | The arguments are wrong. |
 | 125 | `drun` stopped before the docker command could run: no hosts are set, no host answered, a NAME matches no container or more than one, a host did not answer `drun ps`, `drun check-flags` could not get or read the help of docker, or the `docker` program did not start. `docker run` gives 125 for the same kind of failure. |
