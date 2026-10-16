@@ -650,6 +650,26 @@ mod tests {
             .collect()
     }
 
+    /// The words of the usage line `line` without its `[docker ... options]`
+    /// markers, one space between each two words. The options of
+    /// `docker buildx` come between `buildx` and `create`, so the words of
+    /// that command show only without the markers.
+    fn without_markers(line: &str) -> String {
+        let mut text = line.to_owned();
+        for (command, _) in docker_args::tables() {
+            text = text.replace(&format!("[docker {command} options]"), " ");
+        }
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// True when the usage line `line` is a line of the docker command
+    /// `command`, which can have more than one word.
+    fn is_line_of(line: &str, command: &str) -> bool {
+        let head = format!("drun {command}");
+        let words = without_markers(line);
+        words == head || words.starts_with(&format!("{head} "))
+    }
+
     /// Every usage line of a command that has a flag table shows the docker
     /// options, so a reader sees that the command takes them.
     #[test]
@@ -657,11 +677,10 @@ mod tests {
         let help = usage(&Environment::default());
         let lines = usage_lines(&help);
         for (command, _) in docker_args::tables() {
-            let prefix = format!("drun {command} ");
             let marker = format!("[docker {command} options]");
             let own: Vec<&&str> = lines
                 .iter()
-                .filter(|line| line.starts_with(&prefix))
+                .filter(|line| is_line_of(line, command))
                 .collect();
             assert!(!own.is_empty(), "no usage line for {command}: {help}");
             for line in own {

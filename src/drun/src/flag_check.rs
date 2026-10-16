@@ -286,6 +286,8 @@ mod tests {
             "exec" => include_str!("../tests/fixtures/help/exec.txt"),
             "cp" => include_str!("../tests/fixtures/help/cp.txt"),
             "rm" => include_str!("../tests/fixtures/help/rm.txt"),
+            "buildx" => include_str!("../tests/fixtures/help/buildx.txt"),
+            "buildx create" => include_str!("../tests/fixtures/help/buildx-create.txt"),
             other => panic!("no committed help for docker {other}"),
         }
     }
@@ -345,6 +347,47 @@ mod tests {
         expect("publish-all", Some('P'), false);
         expect("rm", None, false);
         expect("workdir", Some('w'), true);
+    }
+
+    #[test]
+    fn the_help_of_docker_buildx_create_gives_each_flag_and_its_value() {
+        let flags = parse_help(committed_help("buildx create")).unwrap();
+        assert_eq!(flags.len(), 13);
+        let expect = |long: &str, short: Option<char>, takes_value: bool| {
+            assert_eq!(
+                find(&flags, long),
+                &HelpFlag {
+                    short,
+                    long: long.to_owned(),
+                    takes_value
+                }
+            );
+        };
+        expect("debug", Some('D'), false);
+        expect("driver", None, true);
+        expect("driver-opt", None, true);
+        expect("leave", None, false);
+        expect("name", None, true);
+        expect("timeout", None, true);
+        expect("use", None, false);
+    }
+
+    #[test]
+    fn the_help_of_docker_buildx_ends_its_flags_before_the_commands() {
+        let flags = parse_help(committed_help("buildx")).unwrap();
+        let longs: Vec<&str> = flags.iter().map(|flag| flag.long.as_str()).collect();
+        assert_eq!(longs, ["builder", "debug"]);
+    }
+
+    #[test]
+    fn the_tables_cover_the_flags_of_buildx_and_buildx_create() {
+        let commands: Vec<&str> = docker_args::tables()
+            .into_iter()
+            .map(|(command, _)| command)
+            .collect();
+        for command in ["buildx", "buildx create"] {
+            assert!(commands.contains(&command), "{command}: {commands:?}");
+        }
     }
 
     #[test]
