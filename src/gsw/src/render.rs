@@ -1980,6 +1980,89 @@ mod tests {
     }
 
     #[test]
+    fn the_flag_changes_the_color_of_the_header_and_never_its_glyphs() {
+        let long_mix = "日本語/🎉/café/".repeat(6);
+        let names = [
+            "gsv",
+            "日本語",
+            "🎉",
+            "café",
+            long_mix.as_str(),
+            LONG_BRANCH,
+        ];
+        for name in names {
+            for badge in [None, Some(worktree_badge(2, 3, false, name))] {
+                let mut snap = snap_with_overlong_header();
+                snap.branch = name.into();
+                snap.commits_behind = 4;
+                snap.worktree = badge;
+                let mut off = snap.clone();
+                off.off_start_branch = true;
+                for width in 1..=260 {
+                    let plain = strip_ansi(&forced_header_line(&snap, width));
+                    let marked = strip_ansi(&forced_header_line(&off, width));
+                    assert_eq!(plain, marked, "{name:?} at {width} columns");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_hard_cut_into_the_name_keeps_the_rest_of_the_name_red_and_the_mark_plain() {
+        let mut snap = snap_with_everything();
+        snap.off_start_branch = true;
+        // At 20 columns the shaved name `featu…ever` is cut again, after its
+        // seventh character.
+        let got = forced_header_line(&snap, 20);
+        let expected = testcolor::with_forced_ansi(|| {
+            format!(
+                "{}{}{}{}",
+                "gsw ⌂ 1/4 • ".bold(),
+                "featu…e".red().bold(),
+                "…".bold(),
+                "".bold(),
+            )
+        });
+        assert_eq!(got, expected, "header: {got:?}");
+    }
+
+    #[test]
+    fn a_hard_cut_that_removes_the_name_leaves_no_red_in_the_header() {
+        let mut snap = snap_with_everything();
+        snap.off_start_branch = true;
+        for width in 1..=12 {
+            let got = forced_header_line(&snap, width);
+            assert!(!got.contains(RED_FG), "{width} columns: {got:?}");
+        }
+        // The cut at 12 columns ends inside the lead, not at the name.
+        assert_eq!(strip_ansi(&forced_header_line(&snap, 12)), "gsw ⌂ 1/4 •…");
+    }
+
+    #[test]
+    fn the_red_name_and_the_yellow_behind_segment_show_together() {
+        let mut snap = snap_with(vec![]);
+        snap.commits_behind = 4;
+        snap.upstream = Some(UpstreamStatus {
+            name: "origin/gsv".into(),
+            ahead: 2,
+            behind: 1,
+        });
+        snap.off_start_branch = true;
+        let got = forced_header_line(&snap, 80);
+        let expected = testcolor::with_forced_ansi(|| {
+            format!(
+                "{}{}{}{}{}",
+                "gsw • ".bold(),
+                "gsv".red().bold(),
+                " • 3 commits ahead of main".bold(),
+                ", 4 behind".yellow().bold(),
+                " • ↑2 ↓1 origin/gsv".bold(),
+            )
+        });
+        assert_eq!(got, expected, "header: {got:?}");
+    }
+
+    #[test]
     fn the_header_of_the_home_worktree_shows_the_home_mark_and_the_position() {
         // The first line of the example in the issue. The header must say
         // which worktree the frame shows, and whether it is the worktree
