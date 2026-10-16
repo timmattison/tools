@@ -1416,6 +1416,14 @@ impl StartBranch {
         let branch = crate::repo::branch_name(repo);
         (branch != crate::repo::DETACHED_HEAD).then_some(Self(branch))
     }
+
+    /// Whether `snapshot`, which a walk of `repo` collected, shows the start
+    /// branch.
+    ///
+    /// The names of the branches are compared, and never the header labels.
+    fn is_shown_by(&self, snapshot: &Snapshot, _repo: &gix::Repository) -> bool {
+        snapshot.branch == self.0
+    }
 }
 
 /// Where the user started gsw in watch mode: the home worktree and the start
@@ -1434,6 +1442,9 @@ struct StartPoint {
 ///
 /// The seed walk of [`run`] and every walk of a [`Watched`] go through here, so
 /// the first frame and every later frame name the worktree in the same way.
+/// The same place sets `off_start_branch`, which is true when the start branch
+/// exists and the frame does not show it. A session that started on a
+/// detached HEAD has no start branch, so the flag stays false in it.
 ///
 /// The paths come from [`worktree_paths`], which reads no HEAD and opens no
 /// linked worktree. Every walk pays for this call, and the cooldown after a
@@ -1450,6 +1461,10 @@ fn badged(
 ) -> Snapshot {
     snapshot.worktree =
         crate::worktrees::badge(&worktree_paths(repo), path, &start.home, head_label(repo));
+    snapshot.off_start_branch = start
+        .branch
+        .as_ref()
+        .is_some_and(|branch| !branch.is_shown_by(&snapshot, repo));
     snapshot
 }
 
