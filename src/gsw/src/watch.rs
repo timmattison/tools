@@ -12444,6 +12444,73 @@ mod watched_tests {
         assert!(snapshot.off_start_branch);
     }
 
+    /// A session that starts while a rebase of the start branch is stopped
+    /// takes the branch of that rebase as its start branch. Git detaches HEAD
+    /// for the whole rebase, so the name comes from `head-name`. After the
+    /// rebase, a move to another branch sets the flag.
+    #[test]
+    fn a_session_that_starts_in_a_rebase_takes_the_rebased_branch_as_its_start_branch() {
+        let dir = diverged_repo();
+        let p = dir.path();
+        git_allowing_failure(p, &["rebase", "main"]);
+        let (tx, _rx) = mpsc::channel();
+        let mut watched = seeded(p, tx);
+        let start = start_at(p);
+
+        let snapshot = watched
+            .walk(&walk_config(), &start, WALK_LOG_LIMIT)
+            .expect("walk the fixture");
+        assert!(
+            matches!(snapshot.operation, Some(Operation::Rebase { .. })),
+            "the fixture must stop in a rebase, got {:?}",
+            snapshot.operation,
+        );
+        assert!(!snapshot.off_start_branch, "in the rebase of feature");
+
+        git(p, &["rebase", "--abort"]);
+        assert!(
+            !walked_off_start(&mut watched, &start),
+            "back on feature after the abort"
+        );
+
+        git(p, &["switch", "-q", "main"]);
+        assert!(
+            walked_off_start(&mut watched, &start),
+            "on main after a start in a rebase of feature"
+        );
+    }
+
+    /// A start in a rebase that began on a detached HEAD has no start branch,
+    /// because `head-name` names no branch. This test guards the boundary of
+    /// the test above. It is not red-first and passes before the fix.
+    #[test]
+    fn a_session_that_starts_in_a_rebase_of_a_detached_head_has_no_start_branch() {
+        let dir = diverged_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "--detach"]);
+        git_allowing_failure(p, &["rebase", "main"]);
+        let (tx, _rx) = mpsc::channel();
+        let mut watched = seeded(p, tx);
+        let start = start_at(p);
+
+        let snapshot = watched
+            .walk(&walk_config(), &start, WALK_LOG_LIMIT)
+            .expect("walk the fixture");
+        assert!(
+            matches!(snapshot.operation, Some(Operation::Rebase { .. })),
+            "the fixture must stop in a rebase, got {:?}",
+            snapshot.operation,
+        );
+        assert!(
+            start.branch.is_none(),
+            "a rebase of a detached HEAD has no start branch"
+        );
+
+        git(p, &["rebase", "--abort"]);
+        git(p, &["switch", "-q", "main"]);
+        assert!(!walked_off_start(&mut watched, &start), "on main");
+    }
+
     /// A merge in progress leaves HEAD on its branch, so the flag follows the
     /// branch as it does with no operation.
     #[test]
