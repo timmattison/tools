@@ -279,7 +279,9 @@ const BUILDX: CommandSpec = CommandSpec {
     ],
 };
 
-/// The flags of `docker buildx create`, from buildx 0.36.
+/// The flags of `docker buildx create`, from buildx 0.36. create accepts
+/// `--config`, the old name of `--buildkitd-config`, and `--builder`, the flag
+/// of `docker buildx` that create inherits. It does not list either of them.
 const BUILDX_CREATE: CommandSpec = CommandSpec {
     name: "buildx create",
     interspersed: true,
@@ -290,8 +292,10 @@ const BUILDX_CREATE: CommandSpec = CommandSpec {
         long_switch("bootstrap"),
         long_switch("leave"),
         long_switch("use"),
+        hidden(long_value("builder")),
         long_value("buildkitd-config"),
         long_value("buildkitd-flags"),
+        hidden(long_value("config")),
         long_value("driver"),
         long_value("driver-opt"),
         long_value("name"),
