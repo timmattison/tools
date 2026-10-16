@@ -438,9 +438,12 @@ pub fn parse_buildx(args: &[OsString]) -> Result<BuildxArgs, ArgsError> {
 /// True when the flags of `scan` turn on the help. Docker then prints the
 /// help and does nothing else.
 fn asks_for_help(scan: &Scan) -> bool {
-    scan.flags
-        .iter()
-        .any(|found| matches!((found.long, &found.setting), ("help", Setting::Switch(true))))
+    scan.flags.iter().any(|found| {
+        matches!(
+            (found.long, &found.setting),
+            ("help", Setting::Switch(true))
+        )
+    })
 }
 
 /// The container that the arguments of `docker logs` name.
@@ -1211,7 +1214,13 @@ mod tests {
             &["--help"],
             &["ls"],
             &["inspect", "--bootstrap", "misc-multiarch"],
-            &["build", "--platform", "linux/amd64,linux/arm64", "--push", "."],
+            &[
+                "build",
+                "--platform",
+                "linux/amd64,linux/arm64",
+                "--push",
+                ".",
+            ],
             &["build", "--flag-that-drun-does-not-know", "."],
             &["imagetools", "create", "--tag", "x", "y"],
             &["--builder", "create", "ls"],
