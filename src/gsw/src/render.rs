@@ -83,6 +83,12 @@ pub struct Snapshot {
     /// worktrees. It is `None` in one-shot mode, and `None` for a repository
     /// with one worktree, so the header of such a frame stays as it was.
     pub worktree: Option<WorktreeBadge>,
+    /// The header shows a name that is not the branch where the watch started.
+    ///
+    /// Only watch mode sets it, after each walk. `build_snapshot` and one-shot
+    /// mode leave it `false`: one-shot mode draws one frame, so no frame comes
+    /// after the start. The header paints the name red when it is set.
+    pub off_start_branch: bool,
 }
 
 /// State of the local branch relative to its upstream tracking ref.
@@ -1273,6 +1279,7 @@ mod tests {
             operation: None,
             push_remote: None,
             worktree: None,
+            off_start_branch: false,
         }
     }
 
@@ -1876,6 +1883,27 @@ mod tests {
             let got = forced_header_line(&snap, width);
             assert_eq!(got, golden, "{label} at {width} columns:\n  {got:?}");
         }
+    }
+
+    /// The foreground code of red, as `colored` writes it for a bold span.
+    const RED_FG: &str = "31m";
+
+    #[test]
+    fn an_off_start_branch_name_is_painted_red_and_nothing_else_is() {
+        let mut snap = snap_with(vec![]);
+        snap.worktree = Some(worktree_badge(1, 4, true, "gsv"));
+        snap.off_start_branch = true;
+        let got = forced_header_line(&snap, 80);
+        let expected = testcolor::with_forced_ansi(|| {
+            format!(
+                "{}{}{}",
+                "gsw ⌂ 1/4 • ".bold(),
+                "gsv".red().bold(),
+                " • 3 commits ahead of main".bold(),
+            )
+        });
+        assert_eq!(got, expected, "header: {got:?}");
+        assert_eq!(got.matches(RED_FG).count(), 1, "header: {got:?}");
     }
 
     #[test]

@@ -5498,6 +5498,7 @@ mod tests {
             operation: None,
             push_remote: None,
             worktree: None,
+            off_start_branch: false,
         }
     }
 
@@ -8187,6 +8188,7 @@ mod push_loop_tests {
             operation: None,
             push_remote: Some("origin".into()),
             worktree: None,
+            off_start_branch: false,
         }
     }
 

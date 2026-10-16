@@ -1174,6 +1174,7 @@ mod tests {
             operation: Some(Operation::Merge { conflicts: 1 }),
             push_remote: None,
             worktree: None,
+            off_start_branch: false,
         };
         let frame = render_frame(&snap, &cfg, dims, FrameTiming::at_walk(None));
         let lines = frame.output.lines().count();
@@ -1843,6 +1844,7 @@ mod tests {
             operation: None,
             push_remote: None,
             worktree: None,
+            off_start_branch: false,
         }
     }
 
@@ -1971,6 +1973,7 @@ mod tests {
             operation: None,
             push_remote: None,
             worktree: None,
+            off_start_branch: false,
         };
         let cfg = RenderConfig {
             base: None,
