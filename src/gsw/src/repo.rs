@@ -913,6 +913,18 @@ pub fn operation_start(workdir: &std::path::Path, operation: &Operation) -> Oper
     let Ok(repo) = gix::open(workdir) else {
         return OperationStart::default();
     };
+    operation_start_of(&repo, operation)
+}
+
+/// The branch and the commit that `operation` started on, read from a
+/// repository that the caller has already opened.
+///
+/// This is the body of [`operation_start`], and the pair mirrors
+/// [`head_commit`] and [`head_commit_of`]. A caller that holds a
+/// [`gix::Repository`] reads the start without a second open. See
+/// [`operation_start`] for what is read and for how a value that cannot be read
+/// is reported.
+pub fn operation_start_of(repo: &gix::Repository, operation: &Operation) -> OperationStart {
     let (full_name, commit) = match operation {
         Operation::Rebase { .. } => {
             let Some(dir) = REBASE_DIRS
@@ -937,7 +949,7 @@ pub fn operation_start(workdir: &std::path::Path, operation: &Operation) -> Oper
                 .ok()
                 .flatten()
                 .map(|full| full.as_bstr().to_string()),
-            head_commit_of(&repo),
+            head_commit_of(repo),
         ),
     };
     OperationStart {
