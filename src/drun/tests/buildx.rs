@@ -90,6 +90,27 @@ fn builder_create_is_the_same_as_buildx_create() {
 }
 
 #[test]
+fn create_with_an_empty_name_says_the_new_builder() {
+    for name_flags in [&["--name", ""][..], &["--name="]] {
+        let fixture = two_hosts();
+        let mut args = vec!["buildx", "create"];
+        args.extend_from_slice(name_flags);
+        let run = fixture.run(&args);
+        assert_eq!(run.code, Some(0), "{name_flags:?}: {}", run.stderr);
+        assert!(
+            run.stderr.contains("drun: the new builder runs on box-b ("),
+            "{name_flags:?}: {}",
+            run.stderr
+        );
+        assert!(
+            !run.stderr.contains("the builder  runs"),
+            "{name_flags:?}: {}",
+            run.stderr
+        );
+    }
+}
+
+#[test]
 fn create_finds_the_host_after_the_flags_of_buildx() {
     let args = [
         "buildx",
