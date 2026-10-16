@@ -1785,6 +1785,99 @@ mod tests {
             .collect()
     }
 
+    /// The first line of the frame of `snap` in a pane of `width` columns,
+    /// with the escape codes forced on and left in.
+    fn forced_header_line(snap: &Snapshot, width: usize) -> String {
+        testcolor::with_forced_ansi(|| {
+            let mut o = opts();
+            o.terminal_width = width;
+            render(snap, &o)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
+    }
+
+    /// The overlong header with a badge, a behind segment and an upstream,
+    /// so every rung of the ladder has something to cut.
+    fn snap_with_everything() -> Snapshot {
+        let mut snap = snap_with_overlong_header();
+        snap.commits_behind = 4;
+        snap.worktree = Some(worktree_badge(1, 4, true, LONG_BRANCH));
+        snap
+    }
+
+    const GOLDEN_PLAIN: &str = "\x1b[1mgsw • gsv • 3 commits ahead of main\x1b[0m";
+    const GOLDEN_HOME: &str = "\x1b[1mgsw ⌂ 1/4 • gsv • 3 commits ahead of main\x1b[0m";
+    const GOLDEN_AWAY: &str = "\x1b[1mgsw 3/4 • gsv • 3 commits ahead of main\x1b[0m";
+    const GOLDEN_BEHIND: &str =
+        "\x1b[1mgsw • gsv • 3 commits ahead of main\x1b[0m\x1b[1;33m, 4 behind\x1b[0m\x1b[1m\x1b[0m";
+    const GOLDEN_UPSTREAM: &str =
+        "\x1b[1mgsw • gsv • 3 commits ahead of main • ↑2 ↓1 origin/gsv\x1b[0m";
+    const GOLDEN_FULL: &str =
+        "\x1b[1mgsw ⌂ 1/4 • feature/really-long-branch-name-that-goes-on-forever • 3 commits ahead of main\x1b[0m\x1b[1;33m, 4 behind\x1b[0m\x1b[1m • ↑2 ↓0 origin/feature/really-long-branch-name-that-goes-on-forever\x1b[0m";
+    const GOLDEN_COUNTS: &str =
+        "\x1b[1mgsw ⌂ 1/4 • feature/really-long-branch-name-that-goes-on-forever • 3 commits ahead of main\x1b[0m\x1b[1;33m, 4 behind\x1b[0m\x1b[1m • ↑2 ↓0\x1b[0m";
+    const GOLDEN_SHAVED: &str =
+        "\x1b[1mgsw ⌂ 1/4 • feature/really…es-on-forever • 3 commits ahead of main\x1b[0m\x1b[1;33m, 4 behind\x1b[0m\x1b[1m • ↑2 ↓0\x1b[0m";
+    const GOLDEN_BARE: &str = "\x1b[1mgsw ⌂ 1/4 • featu…ever • 3 commits ahead of main\x1b[0m";
+    const GOLDEN_CUT: &str = "\x1b[1mgsw ⌂ 1/4 • featu…ever • 3 commits ahead of…\x1b[0m";
+    const GOLDEN_CUT_LEAD: &str = "\x1b[1mgsw ⌂ 1/4 •…\x1b[0m";
+    const GOLDEN_CUT_NAME: &str = "\x1b[1mgsw ⌂ 1/4 • featu…e…\x1b[0m";
+
+    #[test]
+    fn the_painted_header_bytes_are_locked_at_every_rung_of_the_ladder() {
+        // A guard, not red-first. It passes before and after the name gets its
+        // own color, because a header whose branch is the start branch must be
+        // byte-for-byte what it was. The goldens were recorded from the code
+        // before the change.
+        let mut behind = snap_with_overlong_header();
+        behind.branch = "gsv".into();
+        behind.commits_behind = 4;
+        behind.upstream = None;
+        let mut with_upstream = snap_with_overlong_header();
+        with_upstream.branch = "gsv".into();
+        with_upstream.upstream = Some(UpstreamStatus {
+            name: "origin/gsv".into(),
+            ahead: 2,
+            behind: 1,
+        });
+        let mut away = snap_with(vec![]);
+        away.worktree = Some(worktree_badge(3, 4, false, "gsv"));
+        let mut home = snap_with(vec![]);
+        home.worktree = Some(worktree_badge(1, 4, true, "gsv"));
+
+        let cases: Vec<(&str, Snapshot, usize, &str)> = vec![
+            ("no badge", snap_with(vec![]), 80, GOLDEN_PLAIN),
+            ("home badge", home, 80, GOLDEN_HOME),
+            ("badge elsewhere", away, 80, GOLDEN_AWAY),
+            ("behind", behind, 80, GOLDEN_BEHIND),
+            ("upstream", with_upstream, 80, GOLDEN_UPSTREAM),
+            ("full", snap_with_everything(), 300, GOLDEN_FULL),
+            ("counts only", snap_with_everything(), 164, GOLDEN_COUNTS),
+            ("shaved", snap_with_everything(), 84, GOLDEN_SHAVED),
+            ("bare", snap_with_everything(), 52, GOLDEN_BARE),
+            ("hard cut", snap_with_everything(), 44, GOLDEN_CUT),
+            (
+                "hard cut into the name",
+                snap_with_everything(),
+                20,
+                GOLDEN_CUT_NAME,
+            ),
+            (
+                "hard cut into the lead",
+                snap_with_everything(),
+                12,
+                GOLDEN_CUT_LEAD,
+            ),
+        ];
+        for (label, snap, width, golden) in cases {
+            let got = forced_header_line(&snap, width);
+            assert_eq!(got, golden, "{label} at {width} columns:\n  {got:?}");
+        }
+    }
+
     #[test]
     fn the_header_of_the_home_worktree_shows_the_home_mark_and_the_position() {
         // The first line of the example in the issue. The header must say
