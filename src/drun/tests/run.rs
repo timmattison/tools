@@ -485,3 +485,39 @@ fn run_without_an_image_is_a_usage_error() {
     assert!(run.stderr.contains("needs an image"), "{}", run.stderr);
     assert!(fixture.calls("box-a").is_empty());
 }
+
+#[test]
+fn a_host_whose_containers_cannot_be_read_gives_a_warning_and_the_run_still_starts() {
+    let fixture = two_hosts();
+    fixture.containers("box-b", &["not json".to_owned()]);
+    let run = fixture.run(&["run", "alpine"]);
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert!(
+        run.stderr
+            .contains("drun: warning: cannot read the container names of box-b"),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr
+            .contains("cannot read the container names of box-a"),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(fixture.calls_of("box-b", "run").len(), 1);
+}
+
+#[test]
+fn a_host_that_is_down_is_reported_once_as_skipped() {
+    let fixture = two_hosts();
+    fixture.down("box-a", "Cannot connect to box-a\n");
+    let run = fixture.run(&["run", "alpine"]);
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert!(run.stderr.contains("drun: skipped box-a"), "{}", run.stderr);
+    assert!(
+        !run.stderr.contains("cannot read the container names"),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(fixture.calls_of("box-b", "run").len(), 1);
+}
