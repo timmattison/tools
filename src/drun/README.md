@@ -111,8 +111,11 @@ on the chosen host without a change.
 
 `drun` gives each container a name in the form `adjective-noun-1234` that no
 host uses yet. Give your own name with `--name`. Docker makes a name unique on
-one host only, so `drun` refuses a `--name` that any host uses. Each container
-gets the label `drun.managed=true`, which is how `drun ps` finds it.
+one host only, so `drun` refuses a `--name` that any host uses. `drun run` also
+refuses an empty `--name`, as `--name ""` or `--name /`, because docker then
+gives the container a random name that `drun` cannot report. The refusal gives
+exit status 2. Each container gets the label `drun.managed=true`, which is how
+`drun ps` finds it.
 
 ## Find a container again
 
