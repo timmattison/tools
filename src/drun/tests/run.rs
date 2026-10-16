@@ -453,6 +453,27 @@ fn an_unknown_docker_run_flag_is_refused_before_any_host_is_asked() {
 }
 
 #[test]
+fn an_empty_name_is_refused_before_any_host_is_asked() {
+    for spelling in [
+        vec!["--name", ""],
+        vec!["--name="],
+        vec!["--name", "/"],
+        vec!["--name=/"],
+    ] {
+        let fixture = two_hosts();
+        let mut args = vec!["run", "-d"];
+        args.extend(spelling.iter().copied());
+        args.extend(["alpine", "true"]);
+        let run = fixture.run(&args);
+        assert_eq!(run.code, Some(2), "{spelling:?}: {}", run.stderr);
+        assert!(run.stdout.is_empty(), "{spelling:?}: {}", run.stdout);
+        assert!(run.stderr.contains("--name"), "{spelling:?}: {}", run.stderr);
+        assert!(fixture.calls("box-a").is_empty(), "{spelling:?}");
+        assert!(fixture.calls("box-b").is_empty(), "{spelling:?}");
+    }
+}
+
+#[test]
 fn run_without_an_image_is_a_usage_error() {
     let fixture = two_hosts();
     let run = fixture.run(&["run", "-d"]);
