@@ -145,7 +145,10 @@ fn an_argument_keeps_its_characters() {
 #[test]
 fn drun_stops_with_125_when_docker_is_not_installed() {
     let fixture = Fixture::new();
-    let run = fixture.run_with(&["buildx", "ls"], &[("PATH", "/drun-test-no-such-directory")]);
+    let run = fixture.run_with(
+        &["buildx", "ls"],
+        &[("PATH", "/drun-test-no-such-directory")],
+    );
     assert_eq!(run.code, Some(125), "{}", run.stderr);
     assert!(run.stderr.contains("cannot start docker"), "{}", run.stderr);
 }

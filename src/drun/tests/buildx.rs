@@ -91,7 +91,14 @@ fn builder_create_is_the_same_as_buildx_create() {
 
 #[test]
 fn create_finds_the_host_after_the_flags_of_buildx() {
-    let args = ["buildx", "--builder", "other", "-D", "create", "--bootstrap"];
+    let args = [
+        "buildx",
+        "--builder",
+        "other",
+        "-D",
+        "create",
+        "--bootstrap",
+    ];
     let fixture = two_hosts();
     let run = fixture.run(&args);
     assert_eq!(run.code, Some(0), "{}", run.stderr);
@@ -207,9 +214,8 @@ fn an_unknown_flag_is_refused_before_any_host_is_asked() {
 fn the_help_shows_buildx_create() {
     let run = Fixture::new().run(&["--help"]);
     assert!(
-        run.stdout.contains(
-            "drun buildx [docker buildx options] create [docker buildx create options]"
-        ),
+        run.stdout
+            .contains("drun buildx [docker buildx options] create [docker buildx create options]"),
         "{}",
         run.stdout
     );
