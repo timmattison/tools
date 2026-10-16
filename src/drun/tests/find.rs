@@ -10,7 +10,7 @@
 
 mod support;
 
-use support::{row, Fixture, GIB_16};
+use support::{row, Fixture, GIB_16, LOCAL};
 
 /// The format that `drun status` gives `docker inspect`.
 const STATE_FORMAT: &str = "{{.State.Status}} {{.State.ExitCode}}";
@@ -391,11 +391,7 @@ fn commands_that_take_one_name_refuse_other_arguments() {
     ] {
         let run = fixture.run(args);
         assert_eq!(run.code, Some(2), "{args:?}: {}", run.stderr);
-        assert!(
-            !run.stderr.contains("is not a drun command"),
-            "{args:?}: {}",
-            run.stderr
-        );
+        assert!(fixture.calls(LOCAL).is_empty(), "{args:?}: {}", run.stderr);
     }
 }
 
