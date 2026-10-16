@@ -12118,9 +12118,12 @@ mod watched_tests {
         listed, listed_paths, switch_watched, Event, StartBranch, StartPoint, Watched,
         DIRECTORY_GONE, NOT_A_WORK_TREE,
     };
-    use crate::render::Snapshot;
-    use crate::repo::RepoHandle;
-    use crate::testrepo::{git, git_stdout, init_repo, init_repo_at, init_repo_with_worktree};
+    use crate::render::{Operation, Snapshot};
+    use crate::repo::{RepoHandle, DETACHED_HEAD};
+    use crate::testrepo::{
+        diverged_repo, git, git_allowing_failure, git_stdout, init_repo, init_repo_at,
+        init_repo_with_worktree,
+    };
     use crate::worktrees::{WorktreeBadge, WorktreeEntry, WorktreePath};
 
     /// The main worktree of [`siblings`], on branch `main`. Its path sorts
@@ -12369,6 +12372,82 @@ mod watched_tests {
 
         git(p, &["switch", "-q", "--detach"]);
         assert!(walked_off_start(&mut watched, &start));
+    }
+
+    /// A rebase of the start branch keeps the frame on the start branch,
+    /// although git detaches HEAD for the whole rebase. The `R` key of gsw
+    /// makes such a rebase, so the flag must stay false in it.
+    #[test]
+    fn a_rebase_of_the_start_branch_does_not_set_the_flag() {
+        let dir = diverged_repo();
+        let p = dir.path();
+        let (tx, _rx) = mpsc::channel();
+        let mut watched = seeded(p, tx);
+        let start = start_at(p);
+
+        git_allowing_failure(p, &["rebase", "main"]);
+        let snapshot = watched
+            .walk(&walk_config(), &start, WALK_LOG_LIMIT)
+            .expect("walk the fixture");
+
+        assert!(
+            matches!(snapshot.operation, Some(Operation::Rebase { .. })),
+            "the fixture must stop in a rebase, got {:?}",
+            snapshot.operation,
+        );
+        assert_eq!(
+            snapshot.branch, DETACHED_HEAD,
+            "git detaches HEAD in a rebase"
+        );
+        assert!(!snapshot.off_start_branch);
+    }
+
+    /// A rebase of another branch than the start branch sets the flag.
+    #[test]
+    fn a_rebase_of_another_branch_sets_the_flag() {
+        let dir = diverged_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        let (tx, _rx) = mpsc::channel();
+        let mut watched = seeded(p, tx);
+        let start = start_at(p);
+
+        git(p, &["checkout", "-q", "feature"]);
+        git_allowing_failure(p, &["rebase", "main"]);
+        let snapshot = watched
+            .walk(&walk_config(), &start, WALK_LOG_LIMIT)
+            .expect("walk the fixture");
+
+        assert!(
+            matches!(snapshot.operation, Some(Operation::Rebase { .. })),
+            "the fixture must stop in a rebase, got {:?}",
+            snapshot.operation,
+        );
+        assert!(snapshot.off_start_branch);
+    }
+
+    /// A merge in progress leaves HEAD on its branch, so the flag follows the
+    /// branch as it does with no operation.
+    #[test]
+    fn a_merge_in_progress_keeps_the_start_branch() {
+        let dir = diverged_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        let (tx, _rx) = mpsc::channel();
+        let mut watched = seeded(p, tx);
+        let start = start_at(p);
+
+        git_allowing_failure(p, &["merge", "feature"]);
+        let snapshot = watched
+            .walk(&walk_config(), &start, WALK_LOG_LIMIT)
+            .expect("walk the fixture");
+
+        assert!(
+            matches!(snapshot.operation, Some(Operation::Merge { .. })),
+            "the fixture must stop in a merge, got {:?}",
+            snapshot.operation,
+        );
+        assert!(!snapshot.off_start_branch);
     }
 
     /// The name of the file that a test changes in a worktree, to learn which
