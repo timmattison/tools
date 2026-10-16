@@ -17,15 +17,7 @@ use std::path::Path;
 use support::Fixture;
 
 /// The docker commands whose flags `drun` keeps in a table.
-const COMMANDS: [&str; 7] = [
-    "run",
-    "logs",
-    "exec",
-    "cp",
-    "rm",
-    "buildx",
-    "buildx create",
-];
+const COMMANDS: [&str; 7] = ["run", "logs", "exec", "cp", "rm", "buildx", "buildx create"];
 
 /// The name of the help file of the docker command `command`, as in
 /// `buildx-create` for `buildx create`. The fake docker reads the help from
