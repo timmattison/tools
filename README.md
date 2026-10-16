@@ -99,7 +99,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
 ### runlimit
 A shared Rust library that runs a child program with a time limit. It drains stdout and stderr on reader threads,
 so a chatty child cannot fill a pipe. It kills and reaps a child that does not finish in time, so a hung child
-cannot hang the caller. Used by `cwt` and `ha`.
+cannot hang the caller. Used by `cwt`, `drun`, and `ha`.
 
 ## The tools
 
@@ -2086,6 +2086,39 @@ cannot hang the caller. Used by `cwt` and `ha`.
   - The Home Assistant CLI also installs a binary named `ha`. When you have both tools, the one
     that comes first on `PATH` runs.
   - To install: `cargo install --git https://github.com/timmattison/tools ha`
+
+- drun (Docker run on the least busy host)
+  - Runs a Docker container on the least busy of your Docker hosts, and finds the container again
+    later. Use it when this computer is short of memory and other computers on the network can
+    run the containers. A host is a Docker context, usually a computer that `docker` connects to
+    through SSH.
+  - `drun run` takes the arguments of `docker run`. It starts a small `busybox` container on each
+    host at the same time, reads the free memory and the load average, and runs the container on
+    the host whose fullest resource is the least full. Without `-d`, the terminal goes to the
+    container, and `drun` exits with the exit status of the container. With `-d`, `drun` prints
+    `<host> <name>`.
+  - `drun` keeps no record of its own. `drun ps`, `drun status`, `drun logs`, `drun wait`,
+    `drun exec`, `drun cp`, and `drun rm` ask every host for its containers and use the one host
+    that has the named container. Each container gets a name that no host uses, and the label
+    `drun.managed=true`.
+  - `drun hosts` shows how busy each host is. `drun pick` prints the host that `drun` chooses,
+    for `docker --context "$(drun pick)" compose up -d`.
+  - `drun buildx create` puts a new buildx builder on the least busy host, so each build on the
+    builder runs there and not on this computer. `drun builder create` does the same.
+  - A command that `drun` does not know, as `drun buildx build` or `drun login`, goes to the
+    docker of this computer without a change, so a script can run `drun` in place of `docker`.
+  - Name the hosts in `DRUN_CONTEXTS=box-a,box-b` or in `~/.config/drun/config.toml`.
+    [src/drun/README.md](src/drun/README.md) gives the setup of the hosts, the reuse of SSH
+    connections, what changes when a container runs on another computer, and how to build
+    images on a host.
+  - Usage: `drun run -d -p 8080:80 nginx`, `drun run --rm alpine uname -a`, `drun ps`,
+    `drun status quirky-otter-4821`, `drun logs -f quirky-otter-4821`,
+    `drun wait quirky-otter-4821`, `drun cp quirky-otter-4821:/out/result.json .`,
+    `drun rm quirky-otter-4821`, `drun hosts`,
+    `drun buildx create --name multiarch --driver docker-container --use`
+  - `drun check-flags` compares the flag tables of `drun` with the help of the docker CLI on this
+    computer. Run it after each update of Docker.
+  - To install: `cargo install --git https://github.com/timmattison/tools drun`
 
 ## dirhash
 
