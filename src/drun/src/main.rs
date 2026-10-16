@@ -28,7 +28,7 @@ use std::thread;
 use buildinfo::version_string;
 
 use crate::config::{Config, Environment, CONTEXTS_VARIABLE};
-use crate::docker_args::RunArgs;
+use crate::docker_args::{BuildxArgs, RunArgs};
 use crate::fleet::{Inventory, Scope, MANAGED_LABEL, STATE_FORMAT};
 use crate::host::ContextName;
 use crate::survey::{Survey, PROBE_IMAGE};
@@ -149,6 +149,7 @@ fn dispatch(
             no_arguments("pick", args)?;
             pick(environment)
         }
+        "buildx" | "builder" => buildx(environment, command, args),
         _ => {
             let mut docker = host::this_computer();
             docker.arg(command).args(args);
@@ -198,6 +199,39 @@ fn run(environment: &Environment, args: &[OsString]) -> Result<ExitCode, Failure
     } else {
         Ok(hand_over(command))
     }
+}
+
+/// `drun buildx` and `drun builder`, which docker treats as one command.
+///
+/// `drun` gives the arguments to the docker of this computer, because that
+/// docker keeps the builders. When the arguments create a builder and name
+/// no endpoint, `drun` first adds the least busy host as the endpoint. A
+/// builder runs `BuildKit` on its endpoint, so each build on the new builder
+/// runs on that host and not on this computer.
+fn buildx(
+    environment: &Environment,
+    command: &OsString,
+    args: &[OsString],
+) -> Result<ExitCode, Failure> {
+    let mut docker = host::this_computer();
+    docker.arg(command).args(args);
+    let BuildxArgs::PlaceBuilder { name } = docker_args::parse_buildx(args).map_err(usage_error)?
+    else {
+        return Ok(hand_over(docker));
+    };
+    let config = load(environment)?;
+    let survey = survey::survey(&config);
+    let Some((host, load)) = survey.chosen() else {
+        return Err(no_host_answered(&survey));
+    };
+    report_skipped(&survey);
+    let builder = name.map_or_else(
+        || "the new builder".to_owned(),
+        |name| format!("the builder {name}"),
+    );
+    eprintln!("drun: {builder} runs on {host} ({})", load.summary());
+    docker.arg(host.as_str());
+    Ok(hand_over(docker))
 }
 
 /// `drun hosts`: shows how busy each host is.
@@ -558,6 +592,7 @@ Usage:
   drun hosts
   drun pick
   drun check-flags
+  drun buildx [docker buildx options] create [docker buildx create options]
   drun DOCKER-COMMAND [ARG...]
   drun --help
   drun --version
@@ -586,6 +621,12 @@ Commands:
           this computer. Run it after each update of Docker. drun refuses a
           docker flag that is not in its tables, unless you write the flag
           as --flag=VALUE.
+  buildx create
+          Create a buildx builder on the least busy host. When the arguments
+          name no endpoint and the driver is docker-container, drun adds the
+          host as the endpoint. BuildKit then runs on that host, and so does
+          each build on the builder. drun builder create does the same. The
+          other buildx commands go to docker without a change.
   DOCKER-COMMAND
           Any other command, or a docker flag before a command. drun gives
           it to the docker of this computer without a change, as in

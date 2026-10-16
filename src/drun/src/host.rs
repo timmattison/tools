@@ -160,10 +160,11 @@ pub fn ask(context: &ContextName, args: &[&str], limit: Duration) -> Result<Stri
 }
 
 /// Runs `docker <subcommand> --help` on this computer, without a context,
-/// and gives back its stdout. The docker CLI hides each flag that the engine
-/// or `DOCKER_API_VERSION` does not support. So `drun` removes the `DOCKER_`
-/// environment and points docker at no engine, and docker lists every flag
-/// that the CLI knows.
+/// and gives back its stdout. `subcommand` can have more than one word, as
+/// in `buildx create`, and each word is one argument. The docker CLI hides
+/// each flag that the engine or `DOCKER_API_VERSION` does not support. So
+/// `drun` removes the `DOCKER_` environment and points docker at no engine,
+/// and docker lists every flag that the CLI knows.
 ///
 /// # Errors
 ///
@@ -179,7 +180,7 @@ pub fn docker_help(subcommand: &str, limit: Duration) -> Result<String, HostFail
         }
     }
     command.env("DOCKER_HOST", NO_ENGINE_HOST);
-    command.args([subcommand, "--help"]);
+    command.args(subcommand.split_whitespace()).arg("--help");
     stdout_of(&mut command, limit)
 }
 

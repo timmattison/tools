@@ -5,7 +5,8 @@
 //! container gets, and which bind mounts read from a path. To find those
 //! facts, `drun` must know which flags take a value, as the docker CLI does:
 //! in `docker run -h web alpine`, `web` is the value of `-h` and `alpine` is
-//! the image.
+//! the image. For `docker buildx create`, `drun` must find if the arguments
+//! name an endpoint.
 //!
 //! The tables below list the flags of each docker command. `drun` refuses a
 //! flag that is not in its table, because it cannot know if the next argument
@@ -68,9 +69,17 @@ const fn hidden(spec: FlagSpec) -> FlagSpec {
 
 /// The docker commands whose flags `drun` keeps in a table, each with its
 /// table.
-pub fn tables() -> [(&'static str, &'static [FlagSpec]); 5] {
-    [RUN, LOGS, EXEC, CP, RM].map(|spec| (spec.name, spec.flags))
+pub fn tables() -> [(&'static str, &'static [FlagSpec]); 7] {
+    [RUN, LOGS, EXEC, CP, RM, BUILDX, BUILDX_CREATE].map(|spec| (spec.name, spec.flags))
 }
+
+/// The driver of a builder that runs `BuildKit` in a container on a Docker
+/// endpoint. `docker buildx create` uses it when the arguments name no
+/// driver.
+const CONTAINER_DRIVER: &str = "docker-container";
+
+/// The buildx command that creates a builder.
+const CREATE: &str = "create";
 
 /// The grammar of the arguments of one docker command.
 #[derive(Debug)]
@@ -257,6 +266,41 @@ const RM: CommandSpec = CommandSpec {
     ],
 };
 
+/// The flags of `docker buildx` that come before its command, from buildx
+/// 0.36. buildx accepts `-h`, but it calls `-h` deprecated and does not list
+/// it.
+const BUILDX: CommandSpec = CommandSpec {
+    name: "buildx",
+    interspersed: false,
+    flags: &[
+        switch('D', "debug"),
+        hidden(switch('h', "help")),
+        long_value("builder"),
+    ],
+};
+
+/// The flags of `docker buildx create`, from buildx 0.36.
+const BUILDX_CREATE: CommandSpec = CommandSpec {
+    name: "buildx create",
+    interspersed: true,
+    flags: &[
+        switch('D', "debug"),
+        hidden(switch('h', "help")),
+        long_switch("append"),
+        long_switch("bootstrap"),
+        long_switch("leave"),
+        long_switch("use"),
+        long_value("buildkitd-config"),
+        long_value("buildkitd-flags"),
+        long_value("driver"),
+        long_value("driver-opt"),
+        long_value("name"),
+        long_value("node"),
+        long_value("platform"),
+        long_value("timeout"),
+    ],
+};
+
 /// Why `drun` cannot read the arguments.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ArgsError {
@@ -333,7 +377,7 @@ pub struct RmArgs {
 #[derive(Debug, PartialEq, Eq)]
 pub enum BuildxArgs {
     /// The arguments create a `docker-container` builder and name no
-    /// endpoint. `drun` adds the least busy host as the endpoint, so BuildKit
+    /// endpoint. `drun` adds the least busy host as the endpoint, so `BuildKit`
     /// runs on that host.
     PlaceBuilder {
         /// The name from `--name`, when there is one.
@@ -345,13 +389,58 @@ pub enum BuildxArgs {
 
 /// Reads the arguments that follow `docker buildx` or `docker builder`.
 ///
+/// `drun` places the builder only when all of these are true:
+///
+/// - The command of buildx is `create`.
+/// - The arguments name no endpoint, so docker would use the current context
+///   of this computer.
+/// - The driver is `docker-container`, which is the default. The endpoint of
+///   another driver, as `remote` or `kubernetes`, is not a Docker host.
+/// - The arguments do not ask for the help, and do not remove a node with
+///   `--leave`.
+///
+/// `drun` reads the flags of buildx before the command, to find the command.
+/// It does not read the arguments of any command other than `create`.
+///
 /// # Errors
 ///
 /// Returns an [`ArgsError`] for a flag that `drun` does not know, or a flag
 /// without its value.
 pub fn parse_buildx(args: &[OsString]) -> Result<BuildxArgs, ArgsError> {
-    let _ = args;
-    Ok(BuildxArgs::Unchanged)
+    let root = BUILDX.scan(args)?;
+    let Some(&command) = root.positionals.first() else {
+        return Ok(BuildxArgs::Unchanged);
+    };
+    if args[command] != CREATE || asks_for_help(&root) {
+        return Ok(BuildxArgs::Unchanged);
+    }
+    let create = BUILDX_CREATE.scan(&args[command + 1..])?;
+    if !create.positionals.is_empty() || asks_for_help(&create) {
+        return Ok(BuildxArgs::Unchanged);
+    }
+    let mut name = None;
+    let mut driver = None;
+    for found in create.flags {
+        match (found.long, found.setting) {
+            ("leave", Setting::Switch(true)) => return Ok(BuildxArgs::Unchanged),
+            ("name", Setting::Value(value)) => name = Some(value),
+            ("driver", Setting::Value(value)) => driver = Some(value),
+            _ => {}
+        }
+    }
+    // An empty driver is no driver, so buildx uses the default.
+    if driver.is_some_and(|driver| !driver.is_empty() && driver != CONTAINER_DRIVER) {
+        return Ok(BuildxArgs::Unchanged);
+    }
+    Ok(BuildxArgs::PlaceBuilder { name })
+}
+
+/// True when the flags of `scan` turn on the help. Docker then prints the
+/// help and does nothing else.
+fn asks_for_help(scan: &Scan) -> bool {
+    scan.flags
+        .iter()
+        .any(|found| matches!((found.long, &found.setting), ("help", Setting::Switch(true))))
 }
 
 /// The container that the arguments of `docker logs` name.
@@ -1058,10 +1147,10 @@ mod tests {
         parse_buildx(&args(words))
     }
 
-    fn placed(name: Option<&str>) -> Result<BuildxArgs, ArgsError> {
-        Ok(BuildxArgs::PlaceBuilder {
+    fn placed(name: Option<&str>) -> BuildxArgs {
+        BuildxArgs::PlaceBuilder {
             name: name.map(str::to_owned),
-        })
+        }
     }
 
     #[test]
@@ -1080,7 +1169,7 @@ mod tests {
             &["--builder=other", "-D", "create"],
             &["create", "--"],
         ] {
-            assert_eq!(buildx(words), placed(None), "{words:?}");
+            assert_eq!(buildx(words), Ok(placed(None)), "{words:?}");
         }
     }
 
@@ -1088,11 +1177,11 @@ mod tests {
     fn the_last_name_of_the_builder_wins_and_keeps_its_characters() {
         assert_eq!(
             buildx(&["create", "--use", "--name", "misc-multiarch"]),
-            placed(Some("misc-multiarch"))
+            Ok(placed(Some("misc-multiarch")))
         );
         assert_eq!(
             buildx(&["create", "--name", "first", "--name=café-日本語-🎉"]),
-            placed(Some("café-日本語-🎉"))
+            Ok(placed(Some("café-日本語-🎉")))
         );
     }
 
@@ -1164,7 +1253,7 @@ mod tests {
         );
         assert_eq!(
             buildx(&["create", "--frobnicate=x"]),
-            placed(None),
+            Ok(placed(None)),
             "a flag that holds its value is accepted"
         );
     }
