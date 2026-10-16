@@ -1289,7 +1289,7 @@ mod tests {
     use crate::git::FileStatus;
     use crate::render::{LogEntry, Operation, StepProgress};
     use crate::testrepo::{
-        git, git_allowing_failure, git_stdout, init_repo, init_repo_with_upstream,
+        diverged_repo, git, git_allowing_failure, git_stdout, init_repo, init_repo_with_upstream,
         init_repo_with_worktree,
     };
 
@@ -2641,26 +2641,6 @@ mod tests {
         let dir = init_repo();
         let repo = open_at(dir.path()).unwrap();
         assert_eq!(super::operation_state(&repo, 0), None);
-    }
-
-    /// A repo whose `feature` branch holds two commits, the first of which
-    /// conflicts with `main`'s edit to the same line of `a.txt`. HEAD is left
-    /// on `feature`, so rebasing onto `main` stops on step 1 of 2 with `a.txt`
-    /// unmerged — the shape every in-progress-rebase assertion below needs.
-    fn diverged_repo() -> TempDir {
-        let dir = init_repo();
-        let p = dir.path();
-        git(p, &["checkout", "-q", "-b", "feature"]);
-        std::fs::write(p.join("a.txt"), "from feature\n").expect("write a.txt");
-        git(p, &["commit", "-q", "-am", "feature edit"]);
-        std::fs::write(p.join("b.txt"), "second\n").expect("write b.txt");
-        git(p, &["add", "b.txt"]);
-        git(p, &["commit", "-q", "-m", "feature second"]);
-        git(p, &["checkout", "-q", "main"]);
-        std::fs::write(p.join("a.txt"), "from main\n").expect("write a.txt");
-        git(p, &["commit", "-q", "-am", "main edit"]);
-        git(p, &["checkout", "-q", "feature"]);
-        dir
     }
 
     /// [`diverged_repo`] with `feature`'s conflicting commit turned into a
