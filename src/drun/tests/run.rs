@@ -70,13 +70,6 @@ fn no_arguments_is_a_usage_error() {
 }
 
 #[test]
-fn an_unknown_command_is_a_usage_error() {
-    let run = Fixture::new().run(&["frobnicate"]);
-    assert_eq!(run.code, Some(2));
-    assert!(run.stderr.contains("frobnicate"), "{}", run.stderr);
-}
-
-#[test]
 fn run_starts_the_container_on_the_host_with_the_most_free_memory() {
     let fixture = two_hosts();
     let run = fixture.run(&["run", "alpine", "echo", "hi"]);

@@ -12,8 +12,9 @@
     reason = "each test file uses a different part of the fixture"
 )]
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// The memory of a computer with 16 GiB, in KiB.
@@ -22,7 +23,14 @@ pub const GIB_16: u64 = 16_777_216;
 /// The text that the fake puts in place of the fixture directory.
 const DIRECTORY_MARK: &str = "__FIXTURE_DIRECTORY__";
 
-/// The fake `docker`. It answers from the files that the fixture writes:
+/// The name under which the fake records a call without `--context`, which
+/// goes to the docker of this computer. It is not a Docker context name, so
+/// no host of a test can have it.
+pub const LOCAL: &str = "@local";
+
+/// The fake `docker`. A call with `--context <host>` goes to that host, and a
+/// call without it goes to [`LOCAL`]. It answers from the files that the
+/// fixture writes:
 ///
 /// - `hang-<host>`: the host never answers.
 /// - `down-<host>`: the host fails every call, with the text of the file.
@@ -31,33 +39,57 @@ const DIRECTORY_MARK: &str = "__FIXTURE_DIRECTORY__";
 /// - `inspect-<host>`, `wait-<host>`: the answers to those commands.
 /// - `exit-<host>`: the exit status of every other call.
 /// - `help-<command>`: the answer to `docker <command> --help`, which has no
-///   `--context`.
+///   `--context`. The words of a command of more than one word are joined
+///   with `-`, as in `help-buildx-create`.
 /// - `help-env-<command>`: written by the fake on each help call. It holds the
 ///   `DOCKER_` variables of that call, sorted, one for each line.
+/// - `stdin-<host>`: written by the fake on `docker login --password-stdin`.
+///   It holds what the call read from stdin.
+///
+/// A call to [`LOCAL`] whose command is a command of `drun`, as `run` or
+/// `ps`, stops with exit status 97. `drun` sends those commands to a host,
+/// so such a call is a defect of `drun`.
 const FAKE_DOCKER: &str = r#"#!/bin/sh
 # A fake docker for the end-to-end tests of drun.
 dir=__FIXTURE_DIRECTORY__
-if [ "$2" = "--help" ]; then
-    env | grep '^DOCKER_' | sort > "$dir/help-env-$1" || true
-    if [ -f "$dir/help-$1" ]; then
-        cat "$dir/help-$1"
-        exit 0
-    fi
-    echo "fake docker: no help for $1" >&2
-    exit 1
+if [ "$1" = "--context" ]; then
+    context=$2
+    shift 2
+else
+    context=@local
 fi
-if [ "$1" != "--context" ]; then
-    echo "fake docker: the first argument is not --context: $*" >&2
-    exit 97
-fi
-context=$2
-shift 2
 separator=$(printf '\037')
 line=
+last=
 for argument in "$@"; do
     line="$line$argument$separator"
+    last=$argument
 done
+if [ "$context" = @local ] && [ "$last" = "--help" ]; then
+    name=
+    for argument in "$@"; do
+        if [ "$argument" = "--help" ]; then
+            break
+        fi
+        name="${name:+$name-}$argument"
+    done
+    env | grep '^DOCKER_' | sort > "$dir/help-env-$name" || true
+    if [ -f "$dir/help-$name" ]; then
+        cat "$dir/help-$name"
+        exit 0
+    fi
+    echo "fake docker: no help for $name" >&2
+    exit 1
+fi
 printf '%s\n' "$line" >> "$dir/calls-$context.log"
+if [ "$context" = @local ]; then
+    case "$1" in
+    run|ps|logs|wait|exec|cp|rm)
+        echo "fake docker: drun gave its own command to the docker of this computer: $*" >&2
+        exit 97
+        ;;
+    esac
+fi
 if [ -f "$dir/hang-$context" ]; then
     exec sleep 30
 fi
@@ -97,6 +129,14 @@ inspect)
     ;;
 wait)
     cat "$dir/wait-$context"
+    ;;
+login)
+    for argument in "$@"; do
+        if [ "$argument" = "--password-stdin" ]; then
+            cat > "$dir/stdin-$context"
+        fi
+    done
+    echo "Login Succeeded"
     ;;
 *)
     echo "$1 on $context"
@@ -248,6 +288,23 @@ impl Fixture {
 
     /// Runs `drun` with `args` and the extra environment variables `env`.
     pub fn run_with(&self, args: &[&str], env: &[(&str, &str)]) -> Run {
+        self.run_full(args, env, None)
+    }
+
+    /// Runs `drun` with `args`, and writes `stdin` to its stdin.
+    pub fn run_with_stdin(&self, args: &[&str], stdin: &str) -> Run {
+        self.run_full(args, &[], Some(stdin))
+    }
+
+    /// What `docker login --password-stdin` read from stdin on `host`. The
+    /// text is empty when the fake has no record of such a call.
+    pub fn stdin_of(&self, host: &str) -> String {
+        std::fs::read_to_string(self.path().join(format!("stdin-{host}"))).unwrap_or_default()
+    }
+
+    /// Runs `drun` with `args`, the extra environment variables `env`, and
+    /// `stdin` on its stdin. Without `stdin`, stdin is empty.
+    fn run_full(&self, args: &[&str], env: &[(&str, &str)], stdin: Option<&str>) -> Run {
         let path = format!("{}:/usr/bin:/bin", self.path().join("bin").display());
         let mut command = Command::new(env!("CARGO_BIN_EXE_drun"));
         command
@@ -256,12 +313,23 @@ impl Fixture {
             .env_clear()
             .env("PATH", path)
             .env("HOME", self.path().join("home"))
-            .env("XDG_CONFIG_HOME", self.path().join("config"));
+            .env("XDG_CONFIG_HOME", self.path().join("config"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         for (key, value) in env {
             command.env(key, value);
         }
         let started = Instant::now();
-        let output = command.output().expect("drun starts");
+        let mut child = command.spawn().expect("drun starts");
+        let mut input = child.stdin.take().expect("the stdin of drun");
+        if let Some(text) = stdin {
+            input
+                .write_all(text.as_bytes())
+                .expect("drun takes its stdin");
+        }
+        drop(input);
+        let output = child.wait_with_output().expect("drun stops");
         Run {
             code: output.status.code(),
             stdout: String::from_utf8(output.stdout).expect("stdout is UTF-8"),
