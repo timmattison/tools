@@ -29,7 +29,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::conflicts::ConflictsWorker;
 use crate::push::{PushCommand, PushUi};
-use crate::render::{Operation, Snapshot};
+use crate::render::Snapshot;
 use crate::repo::{LogStart, RepoHandle};
 use crate::worktrees::{
     head_label, list_worktrees, worktree_paths, WorktreeEntry, WorktreeList, WorktreePath,
@@ -42,6 +42,10 @@ use termwindow::{
     effective_terminal_height, effective_terminal_width, DEFAULT_TERMINAL_HEIGHT,
     DEFAULT_TERMINAL_WIDTH,
 };
+
+mod start_branch;
+
+use start_branch::StartBranch;
 
 /// Which rendering mode `gsw` is running in. The mode — not ambient env
 /// detection — decides where terminal dimensions come from (see
@@ -1395,76 +1399,6 @@ impl Watched {
     ) -> Result<Snapshot> {
         let snapshot = walk(&mut self.handle, &self.ignore, cfg, log_limit)?;
         Ok(badged(snapshot, self.handle.repo(), &self.path, start))
-    }
-}
-
-/// The branch that HEAD named when gsw started in watch mode: the start
-/// branch.
-///
-/// **The field is private, and no accessor gives the name out.** The one
-/// question a caller may ask is [`StartBranch::is_shown_by`], so the rule for
-/// "this frame is on the start branch" lives in one place. A caller cannot
-/// compare a name by hand, and so cannot compare a header label by mistake.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StartBranch(String);
-
-impl StartBranch {
-    /// Read the start branch from `repo`. A HEAD that names a branch gives
-    /// that branch. A HEAD that a rebase detached gives the branch that the
-    /// rebase rebases, because a user who starts gsw in a rebase has that
-    /// branch to come back to. Any other detached HEAD names no branch, so
-    /// the result is `None` and the session has no start branch to leave.
-    ///
-    /// The rule is [`StartBranch::branch_of`], which [`StartBranch::is_shown_by`]
-    /// uses too.
-    fn read(repo: &gix::Repository) -> Option<Self> {
-        // The conflict count is 0 here. It does not change the branch.
-        Self::branch_of(
-            &crate::repo::branch_name(repo),
-            crate::repo::operation_state(repo, 0).as_ref(),
-            repo,
-        )
-        .map(Self)
-    }
-
-    /// The branch that a HEAD named `branch` is on, with `operation` in
-    /// progress in `repo`.
-    ///
-    /// A HEAD that names a branch is on that branch. A HEAD that a rebase
-    /// detached is on the branch that the rebase rebases. That name comes from
-    /// `head-name`, through [`crate::repo::operation_start_of`]. Any other
-    /// detached HEAD is on no branch.
-    fn branch_of(
-        branch: &str,
-        operation: Option<&Operation>,
-        repo: &gix::Repository,
-    ) -> Option<String> {
-        if branch != crate::repo::DETACHED_HEAD {
-            return Some(branch.to_string());
-        }
-        match operation {
-            Some(operation @ Operation::Rebase { .. }) => {
-                crate::repo::operation_start_of(repo, operation).branch
-            }
-            _ => None,
-        }
-    }
-
-    /// Whether `snapshot`, which a walk of `repo` collected, shows the start
-    /// branch.
-    ///
-    /// The names of the branches are compared, and never the header labels.
-    ///
-    /// Git detaches HEAD for the whole of a rebase, so the branch of the
-    /// snapshot is then `HEAD`. A rebase of the start branch must still count
-    /// as on it, because the `R` key of gsw makes such a rebase. The rule is
-    /// [`StartBranch::branch_of`], which reads the rebased branch from
-    /// `head-name`. A HEAD that names a branch is compared by that name alone,
-    /// even when a rebase directory exists. A walk with no rebase reads
-    /// nothing extra. A merge keeps HEAD on its branch and needs no rule.
-    fn is_shown_by(&self, snapshot: &Snapshot, repo: &gix::Repository) -> bool {
-        Self::branch_of(&snapshot.branch, snapshot.operation.as_ref(), repo).as_deref()
-            == Some(self.0.as_str())
     }
 }
 
