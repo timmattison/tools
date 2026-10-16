@@ -1409,12 +1409,45 @@ impl Watched {
 struct StartBranch(String);
 
 impl StartBranch {
-    /// Read the start branch from `repo`. Gives `None` when HEAD is detached,
-    /// because a detached HEAD names no branch, and a session that started
-    /// detached has no start branch to leave.
+    /// Read the start branch from `repo`. A HEAD that names a branch gives
+    /// that branch. A HEAD that a rebase detached gives the branch that the
+    /// rebase rebases, because a user who starts gsw in a rebase has that
+    /// branch to come back to. Any other detached HEAD names no branch, so
+    /// the result is `None` and the session has no start branch to leave.
+    ///
+    /// The rule is [`StartBranch::branch_of`], which [`StartBranch::is_shown_by`]
+    /// uses too.
     fn read(repo: &gix::Repository) -> Option<Self> {
-        let branch = crate::repo::branch_name(repo);
-        (branch != crate::repo::DETACHED_HEAD).then_some(Self(branch))
+        // The conflict count is 0 here. It does not change the branch.
+        Self::branch_of(
+            &crate::repo::branch_name(repo),
+            crate::repo::operation_state(repo, 0).as_ref(),
+            repo,
+        )
+        .map(Self)
+    }
+
+    /// The branch that a HEAD named `branch` is on, with `operation` in
+    /// progress in `repo`.
+    ///
+    /// A HEAD that names a branch is on that branch. A HEAD that a rebase
+    /// detached is on the branch that the rebase rebases. That name comes from
+    /// `head-name`, through [`crate::repo::operation_start_of`]. Any other
+    /// detached HEAD is on no branch.
+    fn branch_of(
+        branch: &str,
+        operation: Option<&Operation>,
+        repo: &gix::Repository,
+    ) -> Option<String> {
+        if branch != crate::repo::DETACHED_HEAD {
+            return Some(branch.to_string());
+        }
+        match operation {
+            Some(operation @ Operation::Rebase { .. }) => {
+                crate::repo::operation_start_of(repo, operation).branch
+            }
+            _ => None,
+        }
     }
 
     /// Whether `snapshot`, which a walk of `repo` collected, shows the start
@@ -1424,23 +1457,14 @@ impl StartBranch {
     ///
     /// Git detaches HEAD for the whole of a rebase, so the branch of the
     /// snapshot is then `HEAD`. A rebase of the start branch must still count
-    /// as on it, because the `R` key of gsw makes such a rebase. So for a
-    /// rebase the branch that it rebases is read from `head-name`, through
-    /// [`crate::repo::operation_start_of`]. A walk with no rebase reads
+    /// as on it, because the `R` key of gsw makes such a rebase. The rule is
+    /// [`StartBranch::branch_of`], which reads the rebased branch from
+    /// `head-name`. A HEAD that names a branch is compared by that name alone,
+    /// even when a rebase directory exists. A walk with no rebase reads
     /// nothing extra. A merge keeps HEAD on its branch and needs no rule.
     fn is_shown_by(&self, snapshot: &Snapshot, repo: &gix::Repository) -> bool {
-        if snapshot.branch == self.0 {
-            return true;
-        }
-        match &snapshot.operation {
-            Some(operation @ Operation::Rebase { .. }) => {
-                crate::repo::operation_start_of(repo, operation)
-                    .branch
-                    .as_deref()
-                    == Some(self.0.as_str())
-            }
-            _ => false,
-        }
+        Self::branch_of(&snapshot.branch, snapshot.operation.as_ref(), repo).as_deref()
+            == Some(self.0.as_str())
     }
 }
 
@@ -1451,7 +1475,9 @@ impl StartBranch {
 struct StartPoint {
     /// The worktree where the user started gsw.
     home: WorktreePath,
-    /// The branch of HEAD at the start, or `None` when HEAD was detached.
+    /// The branch of HEAD at the start, or the branch that a rebase at the
+    /// start rebases. `None` when HEAD was detached and no rebase named a
+    /// branch.
     branch: Option<StartBranch>,
 }
 
@@ -1462,7 +1488,8 @@ struct StartPoint {
 /// the first frame and every later frame name the worktree in the same way.
 /// The same place sets `off_start_branch`, which is true when the start branch
 /// exists and the frame does not show it. A session that started on a
-/// detached HEAD has no start branch, so the flag stays false in it.
+/// detached HEAD outside a rebase has no start branch, so the flag stays
+/// false in it.
 ///
 /// The paths come from [`worktree_paths`], which reads no HEAD and opens no
 /// linked worktree. Every walk pays for this call, and the cooldown after a
