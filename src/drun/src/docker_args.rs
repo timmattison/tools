@@ -415,8 +415,8 @@ pub enum BuildxArgs {
 ///
 /// # Errors
 ///
-/// Returns an [`ArgsError`] for a flag that `drun` does not know, or a flag
-/// without its value.
+/// Returns an [`ArgsError`] for a flag that `drun` does not know, a flag
+/// without its value, or a switch whose value is not true or false.
 pub fn parse_buildx(args: &[OsString]) -> Result<BuildxArgs, ArgsError> {
     let root = BUILDX.scan(args)?;
     let Some(&command) = root.positionals.first() else {
