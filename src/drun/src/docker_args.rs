@@ -390,7 +390,8 @@ pub enum BuildxArgs {
     /// endpoint. `drun` adds the least busy host as the endpoint, so `BuildKit`
     /// runs on that host.
     PlaceBuilder {
-        /// The name from `--name`, when there is one.
+        /// The name from `--name`, when there is one. An empty `--name`
+        /// counts as no name, as an empty `--driver` counts as no driver.
         name: Option<String>,
     },
     /// Any other arguments. `drun` gives them to docker without a change.
@@ -433,7 +434,7 @@ pub fn parse_buildx(args: &[OsString]) -> Result<BuildxArgs, ArgsError> {
     for found in create.flags {
         match (found.long, found.setting) {
             ("leave", Setting::Switch(true)) => return Ok(BuildxArgs::Unchanged),
-            ("name", Setting::Value(value)) => name = Some(value),
+            ("name", Setting::Value(value)) => name = (!value.is_empty()).then_some(value),
             ("driver", Setting::Value(value)) => driver = Some(value),
             _ => {}
         }
