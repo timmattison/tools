@@ -29,7 +29,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::conflicts::ConflictsWorker;
 use crate::push::{PushCommand, PushUi};
-use crate::render::Snapshot;
+use crate::render::{Operation, Snapshot};
 use crate::repo::{LogStart, RepoHandle};
 use crate::worktrees::{
     head_label, list_worktrees, worktree_paths, WorktreeEntry, WorktreeList, WorktreePath,
@@ -1421,8 +1421,26 @@ impl StartBranch {
     /// branch.
     ///
     /// The names of the branches are compared, and never the header labels.
-    fn is_shown_by(&self, snapshot: &Snapshot, _repo: &gix::Repository) -> bool {
-        snapshot.branch == self.0
+    ///
+    /// Git detaches HEAD for the whole of a rebase, so the branch of the
+    /// snapshot is then `HEAD`. A rebase of the start branch must still count
+    /// as on it, because the `R` key of gsw makes such a rebase. So for a
+    /// rebase the branch that it rebases is read from `head-name`, through
+    /// [`crate::repo::operation_start_of`]. A walk with no rebase reads
+    /// nothing extra. A merge keeps HEAD on its branch and needs no rule.
+    fn is_shown_by(&self, snapshot: &Snapshot, repo: &gix::Repository) -> bool {
+        if snapshot.branch == self.0 {
+            return true;
+        }
+        match &snapshot.operation {
+            Some(operation @ Operation::Rebase { .. }) => {
+                crate::repo::operation_start_of(repo, operation)
+                    .branch
+                    .as_deref()
+                    == Some(self.0.as_str())
+            }
+            _ => false,
+        }
     }
 }
 
