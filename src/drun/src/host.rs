@@ -84,6 +84,13 @@ impl fmt::Display for ContextName {
     }
 }
 
+/// Starts a `docker` command line for the docker of this computer. It names
+/// no context, so docker uses the current context of this computer, as for a
+/// docker command that a person types.
+pub fn this_computer() -> Command {
+    Command::new(DOCKER)
+}
+
 /// Why a host gave no usable answer.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HostFailure {
