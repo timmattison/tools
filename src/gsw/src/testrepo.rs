@@ -151,6 +151,26 @@ pub(crate) fn init_repo_at(dir: &Path) {
     git(dir, &["commit", "-q", "-m", "initial"]);
 }
 
+/// A repo whose `feature` branch holds two commits, the first of which
+/// conflicts with `main`'s edit to the same line of `a.txt`. HEAD is left
+/// on `feature`, so rebasing onto `main` stops on step 1 of 2 with `a.txt`
+/// unmerged — the shape every in-progress-rebase assertion below needs.
+pub(crate) fn diverged_repo() -> TempDir {
+    let dir = init_repo();
+    let p = dir.path();
+    git(p, &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(p.join("a.txt"), "from feature\n").expect("write a.txt");
+    git(p, &["commit", "-q", "-am", "feature edit"]);
+    std::fs::write(p.join("b.txt"), "second\n").expect("write b.txt");
+    git(p, &["add", "b.txt"]);
+    git(p, &["commit", "-q", "-m", "feature second"]);
+    git(p, &["checkout", "-q", "main"]);
+    std::fs::write(p.join("a.txt"), "from main\n").expect("write a.txt");
+    git(p, &["commit", "-q", "-am", "main edit"]);
+    git(p, &["checkout", "-q", "feature"]);
+    dir
+}
+
 /// Clone [`init_repo`]'s repo so the clone has a real `origin/main` upstream,
 /// returning `(origin, clone)`.
 ///

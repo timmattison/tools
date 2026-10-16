@@ -2320,6 +2320,7 @@ mod ui_tests {
             operation: None,
             push_remote: Some("origin".to_string()),
             worktree: None,
+            off_start_branch: false,
         }
     }
 

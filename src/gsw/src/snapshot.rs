@@ -73,6 +73,7 @@ pub fn build_snapshot(
         // The walk of one worktree cannot know the other worktrees. Watch
         // mode puts the badge on the snapshot after the walk.
         worktree: None,
+        off_start_branch: false,
     }
 }
 

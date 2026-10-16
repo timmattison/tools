@@ -1006,6 +1006,7 @@ mod question_tests {
             operation: None,
             push_remote: None,
             worktree: None,
+            off_start_branch: false,
         }
     }
 

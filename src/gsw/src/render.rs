@@ -83,6 +83,12 @@ pub struct Snapshot {
     /// worktrees. It is `None` in one-shot mode, and `None` for a repository
     /// with one worktree, so the header of such a frame stays as it was.
     pub worktree: Option<WorktreeBadge>,
+    /// The header shows a name that is not the branch where the watch started.
+    ///
+    /// Only watch mode sets it, after each walk. `build_snapshot` and one-shot
+    /// mode leave it `false`: one-shot mode draws one frame, so no frame comes
+    /// after the start. The header paints the name red when it is set.
+    pub off_start_branch: bool,
 }
 
 /// State of the local branch relative to its upstream tracking ref.
@@ -233,23 +239,54 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
 /// Every frame of gsw starts with these lines. One function draws them, so no
 /// two frames draw them differently. The row budget of a frame counts exactly
 /// these lines as its header chrome (`header_chrome` in `main.rs`).
+///
+/// The whole header is bold. The behind segment is also yellow. When
+/// `snapshot.off_start_branch` is set, the name of HEAD is also red, and
+/// nothing else is: not the lead, the separators, the ahead clause, the behind
+/// segment, or the upstream field. A hard cut that removed the name leaves no
+/// red span. With the flag clear, the header is byte-for-byte what it was
+/// before the name had a color of its own.
 pub(crate) fn render_head(
     snapshot: &Snapshot,
     width: usize,
     refresh: Option<&RefreshStatus>,
 ) -> Vec<String> {
     let HeaderSegments {
-        prefix,
+        lead,
+        name,
+        rest,
         behind,
         suffix,
     } = header_segments(snapshot, width);
     // The whole header is bold as before; the optional behind segment is
     // additionally warning-colored (yellow) to flag that the branch needs a
-    // rebase. When `behind` is `None` the prefix+suffix reproduce today's
-    // line byte-for-byte.
-    let header_line = match behind {
-        Some(seg) => format!("{}{}{}", prefix.bold(), seg.yellow().bold(), suffix.bold()),
-        None => format!("{prefix}{suffix}").bold().to_string(),
+    // rebase.
+    let header_line = if snapshot.off_start_branch {
+        // The name is red as well as bold, as the behind segment is yellow as
+        // well as bold. A cut that removed the name leaves it empty, and an
+        // empty name gets no span at all, so the line has no red code.
+        let name = if name.is_empty() {
+            String::new()
+        } else {
+            name.red().bold().to_string()
+        };
+        let behind = behind
+            .map(|seg| seg.yellow().bold().to_string())
+            .unwrap_or_default();
+        format!(
+            "{}{name}{}{behind}{}",
+            lead.bold(),
+            rest.bold(),
+            suffix.bold()
+        )
+    } else {
+        // The name keeps the style of the text around it. When `behind` is
+        // `None` the prefix and the suffix reproduce the line byte-for-byte.
+        let prefix = format!("{lead}{name}{rest}");
+        match behind {
+            Some(seg) => format!("{}{}{}", prefix.bold(), seg.yellow().bold(), suffix.bold()),
+            None => format!("{prefix}{suffix}").bold().to_string(),
+        }
     };
     let mut lines = vec![header_line];
     if let Some(op) = &snapshot.operation {
@@ -420,13 +457,27 @@ fn compute_path_width(opts: &RenderOptions) -> usize {
 
 /// The header split into independently-styleable pieces.
 ///
-/// `render` paints `prefix` and `suffix` bold (as the whole header has always
-/// been) and, when present, paints `behind` yellow + bold as a rebase warning.
-/// `behind` is `None` exactly when the branch is up to date with its base, in
-/// which case `prefix` + `suffix` concatenate to today's header byte-for-byte.
+/// `render` paints `lead`, `rest` and `suffix` bold (as the whole header has
+/// always been) and, when present, paints `behind` yellow + bold as a rebase
+/// warning. `behind` is `None` exactly when the branch is up to date with its
+/// base. When `behind` is `None`, `lead` + `name` + `rest` + `suffix`
+/// concatenate to the header byte-for-byte. When `behind` is `Some`, it goes
+/// between `rest` and `suffix`.
+///
+/// `name` is split out so `render_head` can paint it red + bold when the
+/// snapshot is off its start branch. With the flag clear, `render_head` joins
+/// the three pieces again and paints them as one bold run.
 struct HeaderSegments {
-    /// Up to and including `ahead of {base}`.
-    prefix: String,
+    /// The text before the name, with the ` • ` after the lead, for example
+    /// `gsw ⌂ 1/4 • `.
+    lead: String,
+    /// The name as the header draws it, shaved or whole. Empty when a hard cut
+    /// removed it.
+    name: String,
+    /// The text after the name, up to and including `ahead of {base}`, for
+    /// example ` • 3 commits ahead of main`. A hard cut puts its `…` at the
+    /// end of this piece, so the mark is never red.
+    rest: String,
     /// `, {m} behind` — present only when `commits_behind > 0`.
     behind: Option<String>,
     /// The upstream field. Empty when the branch tracks nothing.
@@ -436,7 +487,9 @@ struct HeaderSegments {
 impl HeaderSegments {
     /// Display width of the assembled line.
     fn width(&self) -> usize {
-        UnicodeWidthStr::width(self.prefix.as_str())
+        UnicodeWidthStr::width(self.lead.as_str())
+            + UnicodeWidthStr::width(self.name.as_str())
+            + UnicodeWidthStr::width(self.rest.as_str())
             + self.behind.as_deref().map_or(0, UnicodeWidthStr::width)
             + UnicodeWidthStr::width(self.suffix.as_str())
     }
@@ -452,11 +505,32 @@ impl HeaderSegments {
     /// clause — because by the time the ladder reaches here it has already
     /// decided the upstream field earns its columns. Only a terminal too
     /// narrow for that field alone cuts into the field itself.
+    ///
+    /// The lead, the name and the rest are cut as one line, so the cut falls
+    /// where it fell before the name was split out. The kept text goes back
+    /// over the three pieces in order. The `…` of the cut goes at the end of
+    /// `rest`, so it keeps the bold style and is never red, even when the cut
+    /// lands inside the name. A cut that removes the name leaves `name` empty.
     fn clamp(self, width: usize) -> Self {
         let suffix = truncate_to_budget(&self.suffix, width);
         let identity_budget = width - UnicodeWidthStr::width(suffix.as_str());
-        let prefix = truncate_to_budget(&self.prefix, identity_budget);
-        let left = identity_budget - UnicodeWidthStr::width(prefix.as_str());
+        let identity = format!("{}{}{}", self.lead, self.name, self.rest);
+        let cut = truncate_to_budget(&identity, identity_budget);
+        let left = identity_budget - UnicodeWidthStr::width(cut.as_str());
+        let (lead, name, rest) = if cut == identity {
+            (self.lead, self.name, self.rest)
+        } else {
+            // A cut line is the kept characters, then one `…` (or nothing for
+            // a budget of zero).
+            let mut kept: Vec<char> = cut.chars().collect();
+            let mark = kept.pop();
+            let mut kept = kept.into_iter();
+            let lead: String = kept.by_ref().take(self.lead.chars().count()).collect();
+            let name: String = kept.by_ref().take(self.name.chars().count()).collect();
+            let mut rest: String = kept.collect();
+            rest.extend(mark);
+            (lead, name, rest)
+        };
         // A cut prefix ends mid-phrase, and `, 87 behind` hanging off an
         // ellipsis reads as nonsense — so the segment survives whole or not
         // at all.
@@ -464,7 +538,9 @@ impl HeaderSegments {
             .behind
             .filter(|seg| UnicodeWidthStr::width(seg.as_str()) <= left);
         Self {
-            prefix,
+            lead,
+            name,
+            rest,
             behind,
             suffix,
         }
@@ -596,16 +672,18 @@ fn compose_header(
             UpstreamDetail::Omitted => String::new(),
         })
         .unwrap_or_default();
-    let prefix = format!(
-        "{lead} • {name} • {n} {word} ahead of {base}",
-        lead = header_lead(snap.worktree.as_ref()),
+    let lead = format!("{} • ", header_lead(snap.worktree.as_ref()));
+    let rest = format!(
+        " • {n} {word} ahead of {base}",
         n = snap.commits_ahead,
         word = commit_word,
     );
     let behind = (snap.commits_behind > 0).then(|| format!(", {} behind", snap.commits_behind));
     let suffix = upstream_field;
     HeaderSegments {
-        prefix,
+        lead,
+        name: name.to_string(),
+        rest,
         behind,
         suffix,
     }
@@ -1273,6 +1351,7 @@ mod tests {
             operation: None,
             push_remote: None,
             worktree: None,
+            off_start_branch: false,
         }
     }
 
@@ -1783,6 +1862,205 @@ mod tests {
             .iter()
             .map(|frame| strip_ansi(frame.lines().next().unwrap_or_default()))
             .collect()
+    }
+
+    /// The first line of the frame of `snap` in a pane of `width` columns,
+    /// with the escape codes forced on and left in.
+    fn forced_header_line(snap: &Snapshot, width: usize) -> String {
+        testcolor::with_forced_ansi(|| {
+            let mut o = opts();
+            o.terminal_width = width;
+            render(snap, &o)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
+    }
+
+    /// The overlong header with a badge, a behind segment and an upstream,
+    /// so every rung of the ladder has something to cut.
+    fn snap_with_everything() -> Snapshot {
+        let mut snap = snap_with_overlong_header();
+        snap.commits_behind = 4;
+        snap.worktree = Some(worktree_badge(1, 4, true, LONG_BRANCH));
+        snap
+    }
+
+    const GOLDEN_PLAIN: &str = "\x1b[1mgsw • gsv • 3 commits ahead of main\x1b[0m";
+    const GOLDEN_HOME: &str = "\x1b[1mgsw ⌂ 1/4 • gsv • 3 commits ahead of main\x1b[0m";
+    const GOLDEN_AWAY: &str = "\x1b[1mgsw 3/4 • gsv • 3 commits ahead of main\x1b[0m";
+    const GOLDEN_BEHIND: &str =
+        "\x1b[1mgsw • gsv • 3 commits ahead of main\x1b[0m\x1b[1;33m, 4 behind\x1b[0m\x1b[1m\x1b[0m";
+    const GOLDEN_UPSTREAM: &str =
+        "\x1b[1mgsw • gsv • 3 commits ahead of main • ↑2 ↓1 origin/gsv\x1b[0m";
+    const GOLDEN_FULL: &str =
+        "\x1b[1mgsw ⌂ 1/4 • feature/really-long-branch-name-that-goes-on-forever • 3 commits ahead of main\x1b[0m\x1b[1;33m, 4 behind\x1b[0m\x1b[1m • ↑2 ↓0 origin/feature/really-long-branch-name-that-goes-on-forever\x1b[0m";
+    const GOLDEN_COUNTS: &str =
+        "\x1b[1mgsw ⌂ 1/4 • feature/really-long-branch-name-that-goes-on-forever • 3 commits ahead of main\x1b[0m\x1b[1;33m, 4 behind\x1b[0m\x1b[1m • ↑2 ↓0\x1b[0m";
+    const GOLDEN_SHAVED: &str =
+        "\x1b[1mgsw ⌂ 1/4 • feature/really…es-on-forever • 3 commits ahead of main\x1b[0m\x1b[1;33m, 4 behind\x1b[0m\x1b[1m • ↑2 ↓0\x1b[0m";
+    const GOLDEN_BARE: &str = "\x1b[1mgsw ⌂ 1/4 • featu…ever • 3 commits ahead of main\x1b[0m";
+    const GOLDEN_CUT: &str = "\x1b[1mgsw ⌂ 1/4 • featu…ever • 3 commits ahead of…\x1b[0m";
+    const GOLDEN_CUT_LEAD: &str = "\x1b[1mgsw ⌂ 1/4 •…\x1b[0m";
+    const GOLDEN_CUT_NAME: &str = "\x1b[1mgsw ⌂ 1/4 • featu…e…\x1b[0m";
+
+    #[test]
+    fn the_painted_header_bytes_are_locked_at_every_rung_of_the_ladder() {
+        // A guard, not red-first. It passes before and after the name gets its
+        // own color, because a header whose branch is the start branch must be
+        // byte-for-byte what it was. The goldens were recorded from the code
+        // before the change.
+        let mut behind = snap_with_overlong_header();
+        behind.branch = "gsv".into();
+        behind.commits_behind = 4;
+        behind.upstream = None;
+        let mut with_upstream = snap_with_overlong_header();
+        with_upstream.branch = "gsv".into();
+        with_upstream.upstream = Some(UpstreamStatus {
+            name: "origin/gsv".into(),
+            ahead: 2,
+            behind: 1,
+        });
+        let mut away = snap_with(vec![]);
+        away.worktree = Some(worktree_badge(3, 4, false, "gsv"));
+        let mut home = snap_with(vec![]);
+        home.worktree = Some(worktree_badge(1, 4, true, "gsv"));
+
+        let cases: Vec<(&str, Snapshot, usize, &str)> = vec![
+            ("no badge", snap_with(vec![]), 80, GOLDEN_PLAIN),
+            ("home badge", home, 80, GOLDEN_HOME),
+            ("badge elsewhere", away, 80, GOLDEN_AWAY),
+            ("behind", behind, 80, GOLDEN_BEHIND),
+            ("upstream", with_upstream, 80, GOLDEN_UPSTREAM),
+            ("full", snap_with_everything(), 300, GOLDEN_FULL),
+            ("counts only", snap_with_everything(), 164, GOLDEN_COUNTS),
+            ("shaved", snap_with_everything(), 84, GOLDEN_SHAVED),
+            ("bare", snap_with_everything(), 52, GOLDEN_BARE),
+            ("hard cut", snap_with_everything(), 44, GOLDEN_CUT),
+            (
+                "hard cut into the name",
+                snap_with_everything(),
+                20,
+                GOLDEN_CUT_NAME,
+            ),
+            (
+                "hard cut into the lead",
+                snap_with_everything(),
+                12,
+                GOLDEN_CUT_LEAD,
+            ),
+        ];
+        for (label, snap, width, golden) in cases {
+            let got = forced_header_line(&snap, width);
+            assert_eq!(got, golden, "{label} at {width} columns:\n  {got:?}");
+        }
+    }
+
+    /// The foreground code of red, as `colored` writes it for a bold span.
+    const RED_FG: &str = "31m";
+
+    #[test]
+    fn an_off_start_branch_name_is_painted_red_and_nothing_else_is() {
+        let mut snap = snap_with(vec![]);
+        snap.worktree = Some(worktree_badge(1, 4, true, "gsv"));
+        snap.off_start_branch = true;
+        let got = forced_header_line(&snap, 80);
+        let expected = testcolor::with_forced_ansi(|| {
+            format!(
+                "{}{}{}{}",
+                "gsw ⌂ 1/4 • ".bold(),
+                "gsv".red().bold(),
+                " • 3 commits ahead of main".bold(),
+                // The empty upstream field is an empty bold span, as before.
+                "".bold(),
+            )
+        });
+        assert_eq!(got, expected, "header: {got:?}");
+        assert_eq!(got.matches(RED_FG).count(), 1, "header: {got:?}");
+    }
+
+    #[test]
+    fn the_flag_changes_the_color_of_the_header_and_never_its_glyphs() {
+        let long_mix = "日本語/🎉/café/".repeat(6);
+        let names = [
+            "gsv",
+            "日本語",
+            "🎉",
+            "café",
+            long_mix.as_str(),
+            LONG_BRANCH,
+        ];
+        for name in names {
+            for badge in [None, Some(worktree_badge(2, 3, false, name))] {
+                let mut snap = snap_with_overlong_header();
+                snap.branch = name.into();
+                snap.commits_behind = 4;
+                snap.worktree = badge;
+                let mut off = snap.clone();
+                off.off_start_branch = true;
+                for width in 1..=260 {
+                    let plain = strip_ansi(&forced_header_line(&snap, width));
+                    let marked = strip_ansi(&forced_header_line(&off, width));
+                    assert_eq!(plain, marked, "{name:?} at {width} columns");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_hard_cut_into_the_name_keeps_the_rest_of_the_name_red_and_the_mark_plain() {
+        let mut snap = snap_with_everything();
+        snap.off_start_branch = true;
+        // At 20 columns the shaved name `featu…ever` is cut again, after its
+        // seventh character.
+        let got = forced_header_line(&snap, 20);
+        let expected = testcolor::with_forced_ansi(|| {
+            format!(
+                "{}{}{}{}",
+                "gsw ⌂ 1/4 • ".bold(),
+                "featu…e".red().bold(),
+                "…".bold(),
+                "".bold(),
+            )
+        });
+        assert_eq!(got, expected, "header: {got:?}");
+    }
+
+    #[test]
+    fn a_hard_cut_that_removes_the_name_leaves_no_red_in_the_header() {
+        let mut snap = snap_with_everything();
+        snap.off_start_branch = true;
+        for width in 1..=12 {
+            let got = forced_header_line(&snap, width);
+            assert!(!got.contains(RED_FG), "{width} columns: {got:?}");
+        }
+        // The cut at 12 columns ends inside the lead, not at the name.
+        assert_eq!(strip_ansi(&forced_header_line(&snap, 12)), "gsw ⌂ 1/4 •…");
+    }
+
+    #[test]
+    fn the_red_name_and_the_yellow_behind_segment_show_together() {
+        let mut snap = snap_with(vec![]);
+        snap.commits_behind = 4;
+        snap.upstream = Some(UpstreamStatus {
+            name: "origin/gsv".into(),
+            ahead: 2,
+            behind: 1,
+        });
+        snap.off_start_branch = true;
+        let got = forced_header_line(&snap, 80);
+        let expected = testcolor::with_forced_ansi(|| {
+            format!(
+                "{}{}{}{}{}",
+                "gsw • ".bold(),
+                "gsv".red().bold(),
+                " • 3 commits ahead of main".bold(),
+                ", 4 behind".yellow().bold(),
+                " • ↑2 ↓1 origin/gsv".bold(),
+            )
+        });
+        assert_eq!(got, expected, "header: {got:?}");
     }
 
     #[test]

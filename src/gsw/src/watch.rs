@@ -43,6 +43,10 @@ use termwindow::{
     DEFAULT_TERMINAL_WIDTH,
 };
 
+mod start_branch;
+
+use start_branch::StartBranch;
+
 /// Which rendering mode `gsw` is running in. The mode — not ambient env
 /// detection — decides where terminal dimensions come from (see
 /// [`resolve_dimensions`]).
@@ -1381,7 +1385,7 @@ impl Watched {
     /// Walk the worktree, and put its badge on the snapshot. [`walk`] re-opens
     /// the repository, rebuilds the ignore matcher, and collects the snapshot.
     /// [`badged`] then reads the badge from the repository that the walk
-    /// re-opened. `home` is the worktree where the user started gsw, and
+    /// re-opened. `start` is where the user started gsw, and
     /// `log_limit` is the number of commits that the walk fetches for the log.
     ///
     /// # Errors
@@ -1390,19 +1394,36 @@ impl Watched {
     fn walk(
         &mut self,
         cfg: &RenderConfig,
-        home: &WorktreePath,
+        start: &StartPoint,
         log_limit: usize,
     ) -> Result<Snapshot> {
         let snapshot = walk(&mut self.handle, &self.ignore, cfg, log_limit)?;
-        Ok(badged(snapshot, self.handle.repo(), &self.path, home))
+        Ok(badged(snapshot, self.handle.repo(), &self.path, start))
     }
 }
 
+/// Where the user started gsw in watch mode: the home worktree and the start
+/// branch. The seed walk of [`run`] and every later walk read it, and nothing
+/// changes it while the watch runs.
+#[derive(Debug, Clone)]
+struct StartPoint {
+    /// The worktree where the user started gsw.
+    home: WorktreePath,
+    /// The branch of HEAD at the start, or the branch that a rebase at the
+    /// start rebases. `None` when HEAD was detached and no rebase named a
+    /// branch.
+    branch: Option<StartBranch>,
+}
+
 /// Put the badge of the worktree at `path` on `snapshot`, which a walk of
-/// `repo` collected. `home` is the worktree where the user started gsw.
+/// `repo` collected. `start` is where the user started gsw.
 ///
 /// The seed walk of [`run`] and every walk of a [`Watched`] go through here, so
 /// the first frame and every later frame name the worktree in the same way.
+/// The same place sets `off_start_branch`, which is true when the start branch
+/// exists and the frame does not show it. A session that started on a
+/// detached HEAD outside a rebase has no start branch, so the flag stays
+/// false in it.
 ///
 /// The paths come from [`worktree_paths`], which reads no HEAD and opens no
 /// linked worktree. Every walk pays for this call, and the cooldown after a
@@ -1415,16 +1436,20 @@ fn badged(
     mut snapshot: Snapshot,
     repo: &gix::Repository,
     path: &WorktreePath,
-    home: &WorktreePath,
+    start: &StartPoint,
 ) -> Snapshot {
     snapshot.worktree =
-        crate::worktrees::badge(&worktree_paths(repo), path, home, head_label(repo));
+        crate::worktrees::badge(&worktree_paths(repo), path, &start.home, head_label(repo));
+    snapshot.off_start_branch = start
+        .branch
+        .as_ref()
+        .is_some_and(|branch| !branch.is_shown_by(&snapshot, repo));
     snapshot
 }
 
 /// Switch the watch to the worktree at `target` as one step, and give the first
 /// frame of that worktree. The watcher of the new worktree sends its events on
-/// `tx`, and `home` is the worktree where the user started gsw. The walk of the
+/// `tx`, and `start` is where the user started gsw. The walk of the
 /// new worktree fetches `log_limit` commits for the log.
 ///
 /// 1. Open a candidate [`Watched`] on `target`. That starts its watcher.
@@ -1448,12 +1473,12 @@ fn switch_watched(
     target: &WorktreePath,
     tx: Sender<Event>,
     cfg: &RenderConfig,
-    home: &WorktreePath,
+    start: &StartPoint,
     log_limit: usize,
 ) -> Result<Snapshot, String> {
     let mut candidate = Watched::open(target, tx)?;
     let snapshot = candidate
-        .walk(cfg, home, log_limit)
+        .walk(cfg, start, log_limit)
         .map_err(|error| format!("{WALK_FAILED}: {}: {error:#}", target.as_path().display()))?;
     // The old worktree goes here, and the drop of its watcher stops its events.
     drop(watched.replace(candidate));
@@ -1517,7 +1542,10 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     // Before the guard takes the screen, so a refusal prints on the screen the
     // user started from, and not on the alternate screen that the guard
     // clears when it goes.
-    let home = resolve_home(&handle)?;
+    let start = StartPoint {
+        home: resolve_home(&handle)?,
+        branch: StartBranch::read(handle.repo()),
+    };
     let _guard = TerminalGuard::enter()?;
 
     // Seed the cache with one git walk and paint the first frame at offset 0,
@@ -1540,8 +1568,8 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     let snapshot = badged(
         collect_snapshot(handle.repo(), cfg, cfg.log.fetch_limit(dims.height))?,
         handle.repo(),
-        &home,
-        &home,
+        &start.home,
+        &start,
     );
     // The seed walk pays into the duty-cycle budget like every walk after it,
     // so its cost is what the schedule's first timed walk is gated on. The seed
@@ -1611,8 +1639,9 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     // second discovery. The hooks below share it, and its drop at the end of
     // this function stops the watcher.
     let switch_tx = tx.clone();
-    let watched =
-        RefCell::new(Watched::from_handle(handle, home.clone(), tx).map_err(anyhow::Error::msg)?);
+    let watched = RefCell::new(
+        Watched::from_handle(handle, start.home.clone(), tx).map_err(anyhow::Error::msg)?,
+    );
 
     let result = event_loop(
         &rx,
@@ -1624,7 +1653,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             schedule,
             ui: PushUi::new(cfg.truecolor),
             session,
-            home: home.clone(),
+            home: start.home.clone(),
             log: cfg.log,
         },
         LoopHooks {
@@ -1644,7 +1673,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                     current, &watched.path,
                     "the loop and the watch must be on the same worktree",
                 );
-                watched.walk(cfg, &home, log_limit)
+                watched.walk(cfg, &start, log_limit)
             },
             // A resize reads the log alone when the pane outgrows the log of
             // the cache, and that log is not complete. The read starts from
@@ -1754,7 +1783,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             // channel of the loop. The first walk of the new worktree fetches
             // as many commits as the loop passes, as `collect` does.
             switch: |target: &WorktreePath, log_limit: usize| {
-                switch_watched(&watched, target, switch_tx.clone(), cfg, &home, log_limit)
+                switch_watched(&watched, target, switch_tx.clone(), cfg, &start, log_limit)
             },
         },
     );
@@ -5498,6 +5527,7 @@ mod tests {
             operation: None,
             push_remote: None,
             worktree: None,
+            off_start_branch: false,
         }
     }
 
@@ -8187,6 +8217,7 @@ mod push_loop_tests {
             operation: None,
             push_remote: Some("origin".into()),
             worktree: None,
+            off_start_branch: false,
         }
     }
 
@@ -12063,11 +12094,15 @@ mod watched_tests {
 
     use super::tests::{walk_config, WALK_LOG_LIMIT};
     use super::{
-        listed, listed_paths, switch_watched, Event, Watched, DIRECTORY_GONE, NOT_A_WORK_TREE,
+        listed, listed_paths, switch_watched, Event, StartBranch, StartPoint, Watched,
+        DIRECTORY_GONE, NOT_A_WORK_TREE,
     };
-    use crate::render::Snapshot;
-    use crate::repo::RepoHandle;
-    use crate::testrepo::{git, git_stdout, init_repo, init_repo_at, init_repo_with_worktree};
+    use crate::render::{Operation, Snapshot};
+    use crate::repo::{RepoHandle, DETACHED_HEAD};
+    use crate::testrepo::{
+        diverged_repo, git, git_allowing_failure, git_stdout, init_repo, init_repo_at,
+        init_repo_with_worktree,
+    };
     use crate::worktrees::{WorktreeBadge, WorktreeEntry, WorktreePath};
 
     /// The main worktree of [`siblings`], on branch `main`. Its path sorts
@@ -12136,6 +12171,18 @@ mod watched_tests {
         Watched::from_handle(handle, resolved(path), tx).expect("watch the fixture")
     }
 
+    /// The [`StartPoint`] of a session that starts in the worktree at `path`:
+    /// that worktree is home, and the branch of its HEAD is the start branch.
+    /// It is built as [`super::run`] builds it, from a handle that is open on
+    /// the worktree.
+    fn start_at(path: &Path) -> StartPoint {
+        let handle = RepoHandle::discover(path).expect("the fixture is a work tree");
+        StartPoint {
+            home: resolved(path),
+            branch: StartBranch::read(handle.repo()),
+        }
+    }
+
     /// A walk puts the badge of its worktree on the snapshot: the position of
     /// the worktree among the worktrees in path order, their count, whether it
     /// is the home worktree, and its label. The label of a detached worktree is
@@ -12147,7 +12194,7 @@ mod watched_tests {
     #[test]
     fn a_walk_puts_the_badge_of_its_worktree_on_the_snapshot() {
         let dir = siblings();
-        let home = resolved(&dir.path().join(LINKED));
+        let home = start_at(&dir.path().join(LINKED));
         let expected = [
             (
                 DETACHED,
@@ -12197,7 +12244,7 @@ mod watched_tests {
     #[test]
     fn a_walk_of_a_repository_with_one_worktree_puts_no_badge_on_the_snapshot() {
         let dir = init_repo();
-        let home = resolved(dir.path());
+        let home = start_at(dir.path());
         let (tx, _rx) = mpsc::channel();
 
         let mut watched = seeded(dir.path(), tx);
@@ -12206,6 +12253,247 @@ mod watched_tests {
             .expect("walk the fixture");
 
         assert_eq!(snapshot.worktree, None);
+    }
+
+    /// Walk `watched` once, with the config and the log limit of the tests.
+    fn walked_off_start(watched: &mut Watched, start: &StartPoint) -> bool {
+        watched
+            .walk(&walk_config(), start, WALK_LOG_LIMIT)
+            .expect("walk the fixture")
+            .off_start_branch
+    }
+
+    /// After each walk, the snapshot says whether the frame is off the start
+    /// branch. A switch to another branch in the watched worktree makes it
+    /// true on the next walk, and a switch back makes it false.
+    #[test]
+    fn a_walk_says_whether_the_worktree_left_the_start_branch() {
+        let dir = init_repo();
+        let p = dir.path();
+        git(p, &["switch", "-q", "-c", "topic"]);
+        let (tx, _rx) = mpsc::channel();
+        let mut watched = seeded(p, tx);
+        let start = start_at(p);
+
+        git(p, &["switch", "-q", "main"]);
+        assert!(
+            walked_off_start(&mut watched, &start),
+            "on main after a start on topic",
+        );
+
+        git(p, &["switch", "-q", "topic"]);
+        assert!(
+            !walked_off_start(&mut watched, &start),
+            "back on topic, the start branch",
+        );
+    }
+
+    /// A move to a worktree on another branch, or to a detached worktree, sets
+    /// the flag. A move back to the home worktree clears it.
+    #[test]
+    fn a_move_to_another_branch_sets_the_flag_and_a_move_home_clears_it() {
+        let dir = siblings();
+        let main = dir.path().join(MAIN);
+        let start = start_at(&main);
+        let cfg = walk_config();
+        let (tx, _rx) = mpsc::channel();
+        let watched = RefCell::new(seeded(&main, tx.clone()));
+
+        for (name, expected) in [(LINKED, true), (DETACHED, true), (MAIN, false)] {
+            let snapshot = switch_watched(
+                &watched,
+                &resolved(&dir.path().join(name)),
+                tx.clone(),
+                &cfg,
+                &start,
+                WALK_LOG_LIMIT,
+            )
+            .unwrap_or_else(|reason| panic!("the switch to {name} must work: {reason}"));
+            assert_eq!(
+                snapshot.off_start_branch, expected,
+                "after the move to {name}"
+            );
+        }
+    }
+
+    /// A session that starts on a detached HEAD has no start branch, so the
+    /// flag is never true in it, on a branch or detached.
+    #[test]
+    fn a_session_that_starts_detached_never_sets_the_flag() {
+        let dir = init_repo();
+        let p = dir.path();
+        git(p, &["branch", "topic"]);
+        git(p, &["switch", "-q", "--detach"]);
+        let (tx, _rx) = mpsc::channel();
+        let mut watched = seeded(p, tx);
+        let start = start_at(p);
+        assert!(
+            start.branch.is_none(),
+            "a detached start has no start branch"
+        );
+
+        git(p, &["switch", "-q", "topic"]);
+        assert!(!walked_off_start(&mut watched, &start), "on topic");
+
+        git(p, &["switch", "-q", "--detach"]);
+        assert!(!walked_off_start(&mut watched, &start), "detached again");
+    }
+
+    /// A HEAD that detaches after the start is off the start branch.
+    #[test]
+    fn a_head_that_detaches_later_sets_the_flag() {
+        let dir = init_repo();
+        let p = dir.path();
+        git(p, &["switch", "-q", "-c", "topic"]);
+        let (tx, _rx) = mpsc::channel();
+        let mut watched = seeded(p, tx);
+        let start = start_at(p);
+
+        git(p, &["switch", "-q", "--detach"]);
+        assert!(walked_off_start(&mut watched, &start));
+    }
+
+    /// A rebase of the start branch keeps the frame on the start branch,
+    /// although git detaches HEAD for the whole rebase. The `R` key of gsw
+    /// makes such a rebase, so the flag must stay false in it.
+    #[test]
+    fn a_rebase_of_the_start_branch_does_not_set_the_flag() {
+        let dir = diverged_repo();
+        let p = dir.path();
+        let (tx, _rx) = mpsc::channel();
+        let mut watched = seeded(p, tx);
+        let start = start_at(p);
+
+        git_allowing_failure(p, &["rebase", "main"]);
+        let snapshot = watched
+            .walk(&walk_config(), &start, WALK_LOG_LIMIT)
+            .expect("walk the fixture");
+
+        assert!(
+            matches!(snapshot.operation, Some(Operation::Rebase { .. })),
+            "the fixture must stop in a rebase, got {:?}",
+            snapshot.operation,
+        );
+        assert_eq!(
+            snapshot.branch, DETACHED_HEAD,
+            "git detaches HEAD in a rebase"
+        );
+        assert!(!snapshot.off_start_branch);
+    }
+
+    /// A rebase of another branch than the start branch sets the flag.
+    #[test]
+    fn a_rebase_of_another_branch_sets_the_flag() {
+        let dir = diverged_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        let (tx, _rx) = mpsc::channel();
+        let mut watched = seeded(p, tx);
+        let start = start_at(p);
+
+        git(p, &["checkout", "-q", "feature"]);
+        git_allowing_failure(p, &["rebase", "main"]);
+        let snapshot = watched
+            .walk(&walk_config(), &start, WALK_LOG_LIMIT)
+            .expect("walk the fixture");
+
+        assert!(
+            matches!(snapshot.operation, Some(Operation::Rebase { .. })),
+            "the fixture must stop in a rebase, got {:?}",
+            snapshot.operation,
+        );
+        assert!(snapshot.off_start_branch);
+    }
+
+    /// A session that starts while a rebase of the start branch is stopped
+    /// takes the branch of that rebase as its start branch. Git detaches HEAD
+    /// for the whole rebase, so the name comes from `head-name`. After the
+    /// rebase, a move to another branch sets the flag.
+    #[test]
+    fn a_session_that_starts_in_a_rebase_takes_the_rebased_branch_as_its_start_branch() {
+        let dir = diverged_repo();
+        let p = dir.path();
+        git_allowing_failure(p, &["rebase", "main"]);
+        let (tx, _rx) = mpsc::channel();
+        let mut watched = seeded(p, tx);
+        let start = start_at(p);
+
+        let snapshot = watched
+            .walk(&walk_config(), &start, WALK_LOG_LIMIT)
+            .expect("walk the fixture");
+        assert!(
+            matches!(snapshot.operation, Some(Operation::Rebase { .. })),
+            "the fixture must stop in a rebase, got {:?}",
+            snapshot.operation,
+        );
+        assert!(!snapshot.off_start_branch, "in the rebase of feature");
+
+        git(p, &["rebase", "--abort"]);
+        assert!(
+            !walked_off_start(&mut watched, &start),
+            "back on feature after the abort"
+        );
+
+        git(p, &["switch", "-q", "main"]);
+        assert!(
+            walked_off_start(&mut watched, &start),
+            "on main after a start in a rebase of feature"
+        );
+    }
+
+    /// A start in a rebase that began on a detached HEAD has no start branch,
+    /// because `head-name` names no branch. This test guards the boundary of
+    /// the test above. It is not red-first and passes before the fix.
+    #[test]
+    fn a_session_that_starts_in_a_rebase_of_a_detached_head_has_no_start_branch() {
+        let dir = diverged_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "--detach"]);
+        git_allowing_failure(p, &["rebase", "main"]);
+        let (tx, _rx) = mpsc::channel();
+        let mut watched = seeded(p, tx);
+        let start = start_at(p);
+
+        let snapshot = watched
+            .walk(&walk_config(), &start, WALK_LOG_LIMIT)
+            .expect("walk the fixture");
+        assert!(
+            matches!(snapshot.operation, Some(Operation::Rebase { .. })),
+            "the fixture must stop in a rebase, got {:?}",
+            snapshot.operation,
+        );
+        assert!(
+            start.branch.is_none(),
+            "a rebase of a detached HEAD has no start branch"
+        );
+
+        git(p, &["rebase", "--abort"]);
+        git(p, &["switch", "-q", "main"]);
+        assert!(!walked_off_start(&mut watched, &start), "on main");
+    }
+
+    /// A merge in progress leaves HEAD on its branch, so the flag follows the
+    /// branch as it does with no operation.
+    #[test]
+    fn a_merge_in_progress_keeps_the_start_branch() {
+        let dir = diverged_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        let (tx, _rx) = mpsc::channel();
+        let mut watched = seeded(p, tx);
+        let start = start_at(p);
+
+        git_allowing_failure(p, &["merge", "feature"]);
+        let snapshot = watched
+            .walk(&walk_config(), &start, WALK_LOG_LIMIT)
+            .expect("walk the fixture");
+
+        assert!(
+            matches!(snapshot.operation, Some(Operation::Merge { .. })),
+            "the fixture must stop in a merge, got {:?}",
+            snapshot.operation,
+        );
+        assert!(!snapshot.off_start_branch);
     }
 
     /// The name of the file that a test changes in a worktree, to learn which
@@ -12236,7 +12524,7 @@ mod watched_tests {
     /// Assert that the watch is still on the worktree at `dir`, on `branch`:
     /// the path of `watched` is `dir`, and a walk reads a file that changes in
     /// `dir`.
-    fn assert_still_on(watched: &RefCell<Watched>, dir: &Path, branch: &str, home: &WorktreePath) {
+    fn assert_still_on(watched: &RefCell<Watched>, dir: &Path, branch: &str, home: &StartPoint) {
         assert_eq!(
             watched.borrow().path,
             resolved(dir),
@@ -12306,7 +12594,7 @@ mod watched_tests {
         let dir = siblings();
         let main = dir.path().join(MAIN);
         let linked = dir.path().join(LINKED);
-        let home = resolved(&main);
+        let home = start_at(&main);
         let cfg = walk_config();
         let (tx, _rx) = mpsc::channel();
         let watched = RefCell::new(seeded(&main, tx.clone()));
@@ -12357,7 +12645,7 @@ mod watched_tests {
         let dir = siblings();
         let main = dir.path().join(MAIN);
         let linked = dir.path().join(LINKED);
-        let home = resolved(&main);
+        let home = start_at(&main);
         let target = resolved(&linked);
         std::fs::remove_dir_all(&linked).expect("delete the directory of the linked worktree");
         let (tx, _rx) = mpsc::channel();
@@ -12393,7 +12681,7 @@ mod watched_tests {
         let dir = siblings();
         let main = dir.path().join(MAIN);
         let linked = dir.path().join(LINKED);
-        let home = resolved(&main);
+        let home = start_at(&main);
         let target = resolved(&linked);
         let index = git_stdout(
             &linked,
@@ -12438,7 +12726,7 @@ mod watched_tests {
         let dir = siblings();
         let main = dir.path().join(MAIN);
         let linked = dir.path().join(LINKED);
-        let home = resolved(&main);
+        let home = start_at(&main);
         let (old_tx, old_rx) = mpsc::channel();
         let watched = RefCell::new(seeded(&main, old_tx));
         let (new_tx, new_rx) = mpsc::channel();
@@ -12533,7 +12821,7 @@ mod watched_tests {
 
         assert_eq!(watched.path, linked);
         let snapshot = watched
-            .walk(&walk_config(), &linked, WALK_LOG_LIMIT)
+            .walk(&walk_config(), &start_at(linked.as_path()), WALK_LOG_LIMIT)
             .expect("walk the linked worktree");
         assert_eq!(snapshot.branch, LINKED);
     }

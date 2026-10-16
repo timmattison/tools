@@ -144,7 +144,9 @@ mod worktrees;
                   they wrap. Down opens a list of the worktrees: Up and Down move the cursor, \
                   Enter goes to the worktree under it, and Esc or q closes the list. While the \
                   repository has more than one worktree, the header shows the position of the \
-                  worktree and marks the home worktree with ⌂. A switch walks the new worktree \
+                  worktree and marks the home worktree with ⌂. The name in the header is red \
+                  while it is not the branch where gsw started, and bold again when it is. A \
+                  rebase of that branch keeps it bold. A switch walks the new worktree \
                   at once and removes every line under the frame. The arrow keys do nothing \
                   while a push runs or while the push question is up. When the worktree on the \
                   screen is removed, gsw goes back to the home worktree. gsw does not change the \
@@ -1174,6 +1176,7 @@ mod tests {
             operation: Some(Operation::Merge { conflicts: 1 }),
             push_remote: None,
             worktree: None,
+            off_start_branch: false,
         };
         let frame = render_frame(&snap, &cfg, dims, FrameTiming::at_walk(None));
         let lines = frame.output.lines().count();
@@ -1407,6 +1410,24 @@ mod tests {
             refresh_interval: None,
             width_offset: 0,
         }
+    }
+
+    #[test]
+    fn a_one_shot_snapshot_is_never_off_the_start_branch() {
+        // A guard, not red-first: the field is `false` by construction, and
+        // this test keeps it so. One-shot mode draws one frame, so no frame
+        // comes after the start, and the header must not paint the name red.
+        let dir = crate::testrepo::init_repo();
+        let walk = |dir: &std::path::Path| {
+            let repo = gix::open(dir).expect("open the repository");
+            collect_snapshot(&repo, &render_config(), 0).expect("walk the repository")
+        };
+        assert!(!walk(dir.path()).off_start_branch);
+
+        crate::testrepo::git(dir.path(), &["switch", "-q", "-c", "elsewhere"]);
+        let moved = walk(dir.path());
+        assert_eq!(moved.branch, "elsewhere", "the fixture switched branch");
+        assert!(!moved.off_start_branch);
     }
 
     /// The rows of the list frame, as visible glyphs.
@@ -1843,6 +1864,7 @@ mod tests {
             operation: None,
             push_remote: None,
             worktree: None,
+            off_start_branch: false,
         }
     }
 
@@ -1971,6 +1993,7 @@ mod tests {
             operation: None,
             push_remote: None,
             worktree: None,
+            off_start_branch: false,
         };
         let cfg = RenderConfig {
             base: None,
