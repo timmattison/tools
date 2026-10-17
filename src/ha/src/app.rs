@@ -1,6 +1,7 @@
 //! The event loop of `ha`: it draws the board, reads keys, and applies the
 //! updates of the worker.
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use chrono::{DateTime, TimeZone, Utc};
@@ -10,7 +11,9 @@ use ratatui::Terminal;
 
 use crate::board::Board;
 use crate::render;
+use crate::run::RunId;
 use crate::status::{Message, Status};
+use crate::target::RepoName;
 use crate::worker::{Command, Update, Worker};
 
 /// How long the loop waits for an event before it draws again.
@@ -79,6 +82,9 @@ pub struct App<'a, O: Opener, Tz: TimeZone> {
     worker: &'a Worker,
     now: &'a dyn Fn() -> DateTime<Utc>,
     tz: &'a Tz,
+    /// The set of the last `Command::WatchJobs` that the app sent. It is
+    /// empty at the start.
+    watched: BTreeSet<(RepoName, RunId)>,
 }
 
 impl<'a, O: Opener, Tz: TimeZone> App<'a, O, Tz>
@@ -103,6 +109,7 @@ where
             worker,
             now,
             tz,
+            watched: BTreeSet::new(),
         }
     }
 
@@ -118,6 +125,7 @@ where
     {
         loop {
             self.apply_updates();
+            self.sync_watch();
             let now = (self.now)();
             terminal
                 .draw(|frame| {
@@ -169,8 +177,26 @@ where
         }
     }
 
+    /// Tells the worker which expanded runs to watch.
+    ///
+    /// It reads the expanded runs from the board. When the set differs from
+    /// the last set that it sent, it sends the whole set in a
+    /// `Command::WatchJobs` and keeps it. When the set is the same, it sends
+    /// nothing. A worker that has ended is not an error.
+    fn sync_watch(&mut self) {
+        let expanded = self.board.expanded((self.now)());
+        if expanded != self.watched {
+            let _ = self
+                .worker
+                .commands
+                .send(Command::WatchJobs(expanded.clone()));
+            self.watched = expanded;
+        }
+    }
+
     /// Acts on one key press. Each key press removes the status message
-    /// first. The `Enter` key can then post a new one.
+    /// first. The `Enter` key can then post a new one. `Right` expands the
+    /// highlighted run and `Left` collapses it.
     fn handle_key(&mut self, key: KeyEvent) -> Flow {
         self.status.message = None;
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -183,6 +209,16 @@ where
             }
             KeyCode::Down => {
                 self.board.select_next((self.now)());
+                Flow::Continue
+            }
+            KeyCode::Right => {
+                self.board.expand((self.now)());
+                self.sync_watch();
+                Flow::Continue
+            }
+            KeyCode::Left => {
+                self.board.collapse((self.now)());
+                self.sync_watch();
                 Flow::Continue
             }
             KeyCode::Char('r') => {
