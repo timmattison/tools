@@ -18,15 +18,19 @@ use crate::status::{Status, MESSAGE_LIFETIME};
 
 /// The width of the marker column.
 const MARKER_WIDTH: usize = 1;
+/// The width of the run column. It fits `#999999`.
+const RUN_WIDTH: usize = 7;
 /// The width of the started column.
 const STARTED_WIDTH: usize = 11;
 /// The width of the time column.
 const TIME_WIDTH: usize = 7;
 /// The width of the finished column.
 const FINISHED_WIDTH: usize = 8;
-/// The columns that the text columns do not share: the marker, the started,
-/// time, and finished columns, and the seven spaces between the columns.
-const FIXED_COLUMNS: usize = MARKER_WIDTH + STARTED_WIDTH + TIME_WIDTH + FINISHED_WIDTH + 7;
+/// The columns that the text columns do not share: the marker, the run,
+/// started, time, and finished columns, and the eight spaces between the
+/// columns.
+const FIXED_COLUMNS: usize =
+    MARKER_WIDTH + RUN_WIDTH + STARTED_WIDTH + TIME_WIDTH + FINISHED_WIDTH + 8;
 /// The lines that are not board rows: the column header and the status line.
 const FIXED_LINES: usize = 2;
 /// The text that stands between two parts of the status line.
@@ -71,11 +75,22 @@ fn fit(text: &str, width: usize) -> String {
     pad_right(&truncate_to_budget(text, width), width)
 }
 
+/// Cuts a text to a column width, then pads it on the left to that width.
+///
+/// The text must be ASCII, for example `#1234`, because the padding counts
+/// characters. The cut uses `textfit` and so is safe for any text.
+fn fit_right(text: &str, width: usize) -> String {
+    let cut = truncate_to_budget(text, width);
+    let padding = width.saturating_sub(cut.chars().count());
+    format!("{}{cut}", " ".repeat(padding))
+}
+
 /// Joins the cells of one row into one line. One space stands between cells.
 fn cells(
     widths: Widths,
     marker: &str,
     texts: [&str; 4],
+    run: &str,
     started: &str,
     time: &str,
     finished: &str,
@@ -85,6 +100,7 @@ fn cells(
         pad_right(marker, MARKER_WIDTH),
         fit(repo, widths.repo),
         fit(workflow, widths.workflow),
+        fit_right(run, RUN_WIDTH),
         fit(branch, widths.branch),
         fit(title, widths.title),
         pad_right(started, STARTED_WIDTH),
@@ -148,6 +164,7 @@ where
             &run.branch,
             &run.title,
         ],
+        &format!("#{}", run.number.0),
         &format_started(run.started_at, now, tz),
         &time,
         &finished,
@@ -392,6 +409,7 @@ pub fn draw<Tz: TimeZone>(
             widths,
             " ",
             ["REPO", "WORKFLOW", "BRANCH", "TITLE"],
+            "RUN",
             "STARTED",
             "TIME",
             "FINISHED",
@@ -1070,11 +1088,11 @@ mod tests {
                 "2026-10-14T11:55:00Z",
             )],
         );
-        let text = lines(&render_with(60, 6, &mut board, &Status::default()));
-        // 60 - 34 = 26 columns for the text: 6, 5, 5, and 10.
+        let text = lines(&render_with(68, 6, &mut board, &Status::default()));
+        // 68 - 42 = 26 columns for the text: 6, 5, 5, and 10.
         assert_eq!(
             text[2],
-            "● timma… Cont… feat… A very lo… 11:55:00    5m 00s"
+            "● timma… Cont…    #101 feat… A very lo… 11:55:00    5m 00s"
         );
     }
 
@@ -1116,21 +1134,21 @@ mod tests {
                 ),
             ],
         );
-        let text = lines(&render_with(60, 7, &mut board, &Status::default()));
+        let text = lines(&render_with(68, 7, &mut board, &Status::default()));
         assert_eq!(
             text[2],
-            "● a/x    CI    日本… t          11:51:00    9m 00s"
+            "● a/x    CI       #101 日本… t          11:51:00    9m 00s"
         );
         assert_eq!(
             text[3],
-            "● a/x    CI    café… t          11:52:00    8m 00s"
+            "● a/x    CI       #102 café… t          11:52:00    8m 00s"
         );
         assert_eq!(
             text[4],
-            "● a/x    CI    🎉🎉… t          11:53:00    7m 00s"
+            "● a/x    CI       #103 🎉🎉… t          11:53:00    7m 00s"
         );
         for line in &text {
-            assert!(display_width(line) <= 60, "{line:?} is too wide");
+            assert!(display_width(line) <= 68, "{line:?} is too wide");
         }
     }
 
