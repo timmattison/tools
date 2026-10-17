@@ -1307,6 +1307,65 @@ mod tests {
     }
 
     #[test]
+    fn an_expanded_run_says_loading_jobs_until_the_answer_comes() {
+        let mut board = four_run_board();
+        board.expand(now());
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert_eq!(text[3], "  └ Loading jobs…");
+        assert!(text[4].starts_with("○ acme/widgets"), "{:?}", text[4]);
+    }
+
+    #[test]
+    fn an_expanded_run_with_no_jobs_says_so() {
+        let mut board = board_with_jobs(Vec::new());
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert_eq!(text[3], "  └ No jobs yet");
+    }
+
+    #[test]
+    fn a_failed_fetch_shows_the_error_below_the_last_good_jobs() {
+        let mut board = board_with_jobs(three_jobs());
+        board.fail_jobs(RunId(1), "HTTP 502".to_owned());
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert!(text[3].starts_with("● ├ test"), "{:?}", text[3]);
+        assert!(text[4].starts_with("✓ ├ build"), "{:?}", text[4]);
+        assert!(text[5].starts_with("✗ ├ lint"), "{:?}", text[5]);
+        assert_eq!(text[6], "  └ ⚠ HTTP 502");
+    }
+
+    #[test]
+    fn a_failed_fetch_before_any_answer_shows_the_error_only() {
+        let mut board = four_run_board();
+        board.expand(now());
+        board.fail_jobs(RunId(1), "HTTP 404".to_owned());
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert_eq!(text[3], "  └ ⚠ HTTP 404");
+    }
+
+    #[test]
+    fn a_long_error_is_cut_by_display_width_to_the_line() {
+        let mut board = four_run_board();
+        board.expand(now());
+        board.fail_jobs(RunId(1), "日本語のエラー".repeat(30));
+        let text = lines(&render_with(40, 14, &mut board, &loaded()));
+        assert!(text[3].starts_with("  └ ⚠ 日本語"), "{:?}", text[3]);
+        assert!(text[3].ends_with('…'), "{:?}", text[3]);
+        assert!(display_width(&text[3]) <= 40, "{:?}", text[3]);
+        assert!(display_width(&text[3]) >= 39, "{:?}", text[3]);
+    }
+
+    #[test]
+    fn a_status_row_is_never_reversed_and_has_no_marker_color() {
+        let mut board = four_run_board();
+        board.expand(now());
+        let buffer = render_with(120, 14, &mut board, &loaded());
+        for x in [0_u16, 5, 60, 119] {
+            assert!(!buffer[(x, 3)].modifier.contains(Modifier::REVERSED), "{x}");
+        }
+        assert_eq!(buffer[(0, 3)].fg, Color::Reset);
+    }
+
+    #[test]
     fn a_clock_that_runs_behind_gives_zero_and_no_panic() {
         let mut board = Board::new(Duration::from_hours(8));
         board.replace(
