@@ -368,8 +368,10 @@ impl Board {
 ///
 /// The offset changes as little as possible to put `selected_row` inside the
 /// view. With a `header_above` the selected row and also that header stay
-/// inside, when the view has two rows or more. The offset never goes past the
-/// last full view. `height` is at least 1.
+/// inside, when the view has two rows or more. Then the offset moves as far as
+/// it can to show the `below` rows of the block of the selected run, and the
+/// top row stays inside. The offset never goes past the last full view.
+/// `height` is at least 1.
 fn scroll(
     offset: usize,
     height: usize,
@@ -378,7 +380,6 @@ fn scroll(
     header_above: bool,
     below: usize,
 ) -> usize {
-    let _ = below;
     let mut offset = offset;
     if let Some(row) = selected_row {
         let top = if header_above && height >= 2 {
@@ -389,6 +390,9 @@ fn scroll(
         offset = offset.min(top);
         if row >= offset + height {
             offset = row + 1 - height;
+        }
+        if row + below >= offset + height {
+            offset = (row + below + 1 - height).min(top);
         }
     }
     offset.min(len.saturating_sub(height))
