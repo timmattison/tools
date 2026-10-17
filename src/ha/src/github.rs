@@ -69,6 +69,7 @@ struct RunsBody {
 #[derive(Deserialize)]
 struct RunJson {
     id: u64,
+    run_number: u64,
     name: Option<String>,
     display_title: Option<String>,
     head_branch: Option<String>,
@@ -94,7 +95,7 @@ fn parse_runs(body: &str, repo: &RepoName) -> Result<Page, SourceError> {
             let status = json.status.unwrap_or_default();
             Run {
                 id: RunId(json.id),
-                number: RunNumber(0),
+                number: RunNumber(json.run_number),
                 repo: repo.clone(),
                 state: RunState::from_github(&status, json.conclusion.as_deref()),
                 title: json.display_title.unwrap_or_else(|| workflow.clone()),
