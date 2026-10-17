@@ -12,6 +12,7 @@ use ratatui::Frame;
 use textfit::{pad_right, truncate_to_budget};
 
 use crate::board::{Board, Row, Section};
+use crate::job::Job;
 use crate::run::{Run, RunState};
 use crate::settings::format_duration_setting;
 use crate::status::{Status, MESSAGE_LIFETIME};
@@ -110,6 +111,31 @@ fn cells(
     .join(" ")
 }
 
+/// Joins the cells of one job row or status row into one line.
+///
+/// One text cell takes the place of the repository, workflow, run, branch, and
+/// title cells. It has the width of those five cells and the four spaces
+/// between them. Thus the started, time, and finished cells stand in the same
+/// columns as those of a run row.
+fn wide_cells(
+    widths: Widths,
+    marker: &str,
+    text: &str,
+    started: &str,
+    time: &str,
+    finished: &str,
+) -> String {
+    let text_width = widths.repo + widths.workflow + RUN_WIDTH + widths.branch + widths.title + 4;
+    [
+        pad_right(marker, MARKER_WIDTH),
+        fit(text, text_width),
+        pad_right(started, STARTED_WIDTH),
+        pad_right(time, TIME_WIDTH),
+        pad_right(finished, FINISHED_WIDTH),
+    ]
+    .join(" ")
+}
+
 /// The marker glyph of a run state.
 fn marker(state: RunState) -> &'static str {
     match state {
@@ -170,6 +196,54 @@ where
         &finished,
     )
 }
+
+/// The line of one job of an expanded run.
+///
+/// The text cell holds the tree glyph (`└` when `last` is true, else `├`), a
+/// space, and the name of the job. The time cells follow the rules of
+/// [`run_line`], with the finish time of the job in place of the update time.
+/// A job with no start time has an empty started cell and an empty time cell.
+fn job_line<Tz: TimeZone>(
+    job: &Job,
+    last: bool,
+    now: DateTime<Utc>,
+    tz: &Tz,
+    widths: Widths,
+) -> String
+where
+    Tz::Offset: Display,
+{
+    let started = job
+        .started_at
+        .map(|started| format_started(started, now, tz))
+        .unwrap_or_default();
+    let time = job.started_at.map_or_else(String::new, |started| {
+        if job.state.is_active() {
+            format_elapsed(span(started, now))
+        } else {
+            job.completed_at
+                .map_or_else(String::new, |done| format_elapsed(span(started, done)))
+        }
+    });
+    let finished = match job.completed_at {
+        Some(done) if !job.state.is_active() => format_ago(span(done, now)),
+        _ => String::new(),
+    };
+    let glyph = if last { TREE_LAST } else { TREE_MIDDLE };
+    wide_cells(
+        widths,
+        marker(job.state),
+        &format!("{glyph} {}", job.name),
+        &started,
+        &time,
+        &finished,
+    )
+}
+
+/// The tree glyph of a job row that is not the last row of its block.
+const TREE_MIDDLE: &str = "├";
+/// The tree glyph of the last row of the block of a run.
+const TREE_LAST: &str = "└";
 
 /// The line that stands in an empty section before the first refresh cycle
 /// ends.
@@ -446,8 +520,16 @@ pub fn draw<Tz: TimeZone>(
                     );
                 }
             }
-            // The next slice of issue #565 draws the job rows.
-            Row::Job { .. } | Row::JobsLoading | Row::NoJobs | Row::JobsError(_) => {}
+            Row::Job { job, last } => {
+                let line = job_line(job, *last, now, tz, widths);
+                let y = put(buffer, index + 1, &line, Style::default());
+                buffer.set_style(
+                    Rect::new(area.x, y, 1, 1),
+                    Style::default().fg(marker_color(job.state)),
+                );
+            }
+            // The next slice of issue #565 draws the status rows.
+            Row::JobsLoading | Row::NoJobs | Row::JobsError(_) => {}
         }
     }
     if usize::from(area.height) >= FIXED_LINES {
