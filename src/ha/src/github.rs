@@ -251,7 +251,7 @@ pub struct GhSource {
     rate: Mutex<Option<RateLimit>>,
 }
 
-/// One page in the `ETag` cache.
+/// One answer in the `ETag` cache.
 ///
 /// The cache key names the repository, the filter family, and the page
 /// number, but not the value of the filter. A created-since filter holds the
@@ -265,8 +265,8 @@ struct Cached {
     path: String,
     /// The `ETag` of that answer.
     etag: String,
-    /// The page that the answer held.
-    page: Page,
+    /// The body of that answer. A `304` parses this text again.
+    body: String,
 }
 
 impl GhSource {
@@ -331,34 +331,50 @@ impl GhSource {
             repo.name()
         );
         let key = format!("{repo}#{family}#{number}");
+        self.cached_get(&key, &path, |body| parse_runs(body, repo))
+    }
+
+    /// Fetches `path` and parses the body, with the `ETag` cache.
+    ///
+    /// The `ETag` goes out only when the cached path is the same as `path`. On
+    /// a `304`, the function parses the cached body. On a `200`, it parses the
+    /// new body, and it stores the body and the `ETag` only after the parse
+    /// succeeds, thus an unreadable body never stays in the cache.
+    fn cached_get<T>(
+        &self,
+        key: &str,
+        path: &str,
+        parse: impl Fn(&str) -> Result<T, SourceError>,
+    ) -> Result<T, SourceError> {
         let etag = self
             .lock_etags()
-            .get(&key)
+            .get(key)
             .filter(|cached| cached.path == path)
             .map(|cached| cached.etag.clone());
-        let response = self.request(&path, etag.as_deref())?;
+        let response = self.request(path, etag.as_deref())?;
         if response.status == 304 {
-            return self
+            let body = self
                 .lock_etags()
-                .get(&key)
+                .get(key)
                 .filter(|cached| cached.path == path)
-                .map(|cached| cached.page.clone())
+                .map(|cached| cached.body.clone())
                 .ok_or_else(|| {
                     SourceError::BadResponse(
                         "GitHub said 304 for a page that ha has not seen".to_owned(),
                     )
-                });
+                })?;
+            return parse(&body);
         }
-        let page = parse_runs(&response.body, repo)?;
+        let parsed = parse(&response.body)?;
         if let Some(etag) = response.header("etag") {
             let cached = Cached {
-                path,
+                path: path.to_owned(),
                 etag: etag.to_owned(),
-                page: page.clone(),
+                body: response.body,
             };
-            self.lock_etags().insert(key, cached);
+            self.lock_etags().insert(key.to_owned(), cached);
         }
-        Ok(page)
+        Ok(parsed)
     }
 
     /// Fetches the page `number` of the jobs of one run.
