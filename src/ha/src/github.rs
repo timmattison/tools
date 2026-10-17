@@ -253,12 +253,16 @@ pub struct GhSource {
 
 /// One answer in the `ETag` cache.
 ///
-/// The cache key names the repository, the filter family, and the page
-/// number, but not the value of the filter. A created-since filter holds the
-/// start of the hour, thus its path changes each hour. With the path as the key,
-/// the cache would keep one stale page for each hour, and a session that runs
-/// for days would grow with no limit. The path is kept here instead, and the
-/// `ETag` goes out only when the path of the request is the same.
+/// The key of a page of runs names the repository, the filter family, and the
+/// page number, but not the value of the filter. A created-since filter holds
+/// the start of the hour, thus its path changes each hour. With the path as the
+/// key, the cache would keep one stale page for each hour, and a session that
+/// runs for days would grow with no limit. The path is kept here instead, and
+/// the `ETag` goes out only when the path of the request is the same.
+///
+/// The key of a page of jobs names the repository, the run, and the page
+/// number. `GhSource::forget_jobs_of` removes those pages when every job of
+/// the run is finished.
 #[derive(Debug, Clone)]
 struct Cached {
     /// The path of the request that gave this page.
