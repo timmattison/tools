@@ -1345,7 +1345,12 @@ mod tests {
 
     /// A page of one active job, so the cache keeps the page of the run.
     fn active_jobs_json() -> String {
-        jobs_json(1, 1, 1, "in_progress", "null")
+        active_jobs_json_from(1)
+    }
+
+    /// A page of one active job with the ID `id`.
+    fn active_jobs_json_from(id: u64) -> String {
+        jobs_json(1, id, 1, "in_progress", "null")
     }
 
     #[test]
@@ -1389,20 +1394,20 @@ mod tests {
     fn the_cache_keeps_the_pages_of_a_run_while_a_job_is_active() {
         let stub = job_pages_stub(2);
         stub.file("page1.out", &ok_output(&done_jobs_json(150, 1, 100)));
-        let mut last = jobs_json(150, 101, 49, "completed", "\"success\"");
-        last = last.replace("]}", &format!(",{}]}}", one_active_job(150)));
-        stub.file("page2.out", &ok_output(&last));
+        // The last page holds 49 finished jobs and then one job in progress.
+        let finished = done_jobs_json(150, 101, 49);
+        let active = active_jobs_json_from(150);
+        let joined = format!(
+            "{},{}]}}",
+            finished.trim_end_matches("]}"),
+            active
+                .split_once('[')
+                .map_or("", |(_, rest)| rest.trim_end_matches("]}"))
+        );
+        stub.file("page2.out", &ok_output(&joined));
         let source = stub.source();
         source.jobs_of(&repo("o/r"), RunId(42)).expect("jobs");
         assert_eq!(cache_keys(&source), ["o/r#jobs/42#1", "o/r#jobs/42#2"]);
-    }
-
-    /// One job JSON object that is in progress.
-    fn one_active_job(id: u64) -> String {
-        let body = jobs_json(1, id, 1, "in_progress", "null");
-        let start = body.find('[').expect("a list") + 1;
-        let end = body.rfind(']').expect("a list");
-        body[start..end].to_owned()
     }
 
     #[test]
