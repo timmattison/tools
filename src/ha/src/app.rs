@@ -829,7 +829,7 @@ mod tests {
             }
             match self.steps.pop_front() {
                 Some(Step::Key(event)) => Ok(Some(event)),
-                Some(Step::Idle) | Some(Step::Send(_)) => Ok(None),
+                Some(Step::Idle | Step::Send(_)) => Ok(None),
                 None => Err(std::io::Error::other("script ended")),
             }
         }
