@@ -1330,4 +1330,132 @@ mod tests {
                 .collect();
         assert_eq!(board.expanded(now()), expected);
     }
+
+    #[test]
+    fn a_failed_fetch_after_an_answer_keeps_the_jobs_and_adds_the_error() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![job(11, RunState::Passed), job(12, RunState::Running)],
+        );
+        board.fail_jobs(RunId(1), "HTTP 500".to_owned());
+        assert_eq!(
+            shape(&board.rows(now()))[1..5],
+            ["Run(1)", "Job(11)", "Job(12)", "JobsError(HTTP 500)"]
+        );
+        board.fail_jobs(RunId(1), "timed out".to_owned());
+        assert_eq!(
+            shape(&board.rows(now()))[1..5],
+            ["Run(1)", "Job(11)", "Job(12)", "JobsError(timed out)"]
+        );
+    }
+
+    #[test]
+    fn a_failed_fetch_before_any_answer_shows_the_error_only() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.fail_jobs(RunId(1), "HTTP 404".to_owned());
+        assert_eq!(
+            shape(&board.rows(now()))[1..3],
+            ["Run(1)", "JobsError(HTTP 404)"]
+        );
+    }
+
+    #[test]
+    fn a_later_answer_clears_the_error() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
+        board.fail_jobs(RunId(1), "HTTP 500".to_owned());
+        board.set_jobs(RunId(1), vec![job(13, RunState::Passed)]);
+        assert_eq!(shape(&board.rows(now()))[1..3], ["Run(1)", "LastJob(13)"]);
+    }
+
+    #[test]
+    fn a_run_that_moves_to_the_recent_section_stays_expanded() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Passed, 30, 1),
+                run(2, "a/x", RunState::Passed, 60, 10),
+            ],
+        );
+        assert_eq!(
+            marked(&board.rows(now())),
+            [
+                "Header(Active,0,0,0)",
+                "Empty(Active)",
+                "Header(Recent,2,2,0)",
+                "Run(1)*",
+                "LastJob(11)",
+                "Run(2)",
+            ]
+        );
+        assert_eq!(board.expanded(now()).len(), 1);
+    }
+
+    #[test]
+    fn a_run_that_replace_drops_loses_its_expansion() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
+        board.replace(repo("a/x"), Vec::new());
+        assert!(board.expanded(now()).is_empty());
+        board.replace(repo("a/x"), vec![run(1, "a/x", RunState::Running, 30, 1)]);
+        assert_eq!(shape(&board.rows(now())).len(), 4);
+    }
+
+    #[test]
+    fn a_repository_that_keep_only_drops_loses_its_expansion() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.keep_only(&BTreeSet::new());
+        assert!(board.expanded(now()).is_empty());
+        board.replace(repo("a/x"), vec![run(1, "a/x", RunState::Running, 30, 1)]);
+        assert_eq!(shape(&board.rows(now())).len(), 4);
+    }
+
+    #[test]
+    fn a_run_that_leaves_the_window_loses_its_expansion() {
+        let mut board = two_run_board();
+        board.select_next(now());
+        board.expand(now());
+        let later = now() + Span::hours(8) + Span::minutes(15);
+        assert!(board.expanded(later).is_empty());
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Active,1,0,0)",
+                "Run(1)",
+                "Header(Recent,1,1,0)",
+                "Run(2)"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_that_becomes_other_loses_its_expansion() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Other, 30, 1),
+                run(2, "a/x", RunState::Passed, 60, 10),
+            ],
+        );
+        assert!(board.expanded(now()).is_empty());
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Passed, 60, 10),
+            ],
+        );
+        assert_eq!(shape(&board.rows(now())).len(), 4);
+    }
 }
