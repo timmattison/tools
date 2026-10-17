@@ -37,7 +37,7 @@ const FIXED_LINES: usize = 2;
 /// The text that stands between two parts of the status line.
 const STATUS_SEPARATOR: &str = "  ·  ";
 /// The key hints at the end of the left part of the status line.
-const KEY_HINTS: &str = "↑↓ select  ⏎ open  r refresh  q quit";
+const KEY_HINTS: &str = "↑↓ select  →← jobs  ⏎ open  r refresh  q quit";
 /// The mark at the right end of the status line while a refresh cycle runs.
 const REFRESH_MARK: &str = "refreshing…";
 /// The least number of columns between the left part of the status line and
@@ -1863,7 +1863,7 @@ mod tests {
         };
         assert_eq!(
             status_line(40, &status),
-            "loading…  ·  ↑↓ select  ⏎ …  refreshing…"
+            "loading…  ·  ↑↓ select  →←…  refreshing…"
         );
     }
 
