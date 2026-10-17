@@ -425,6 +425,7 @@ mod tests {
 
     use super::*;
     use crate::github::{RepoList, RunQuery, SourceError};
+    use crate::job::Job;
     use crate::run::{RunId, RunNumber, RunState};
     use crate::target::Target;
 
@@ -439,6 +440,8 @@ mod tests {
         cut: std::collections::HashSet<OwnerName>,
         created: HashMap<RepoName, Result<Vec<Run>, SourceError>>,
         active: HashMap<RepoName, Result<Vec<Run>, SourceError>>,
+        /// The jobs of each run. A run with no entry has no jobs.
+        jobs: HashMap<RunId, Result<Vec<Job>, SourceError>>,
         calls: Vec<(&'static str, String)>,
         since: Vec<DateTime<Utc>>,
         rate: Option<RateLimit>,
@@ -450,7 +453,7 @@ mod tests {
     #[derive(Default)]
     struct FakeSource {
         script: Mutex<Script>,
-        /// How long each `runs_of` call sleeps.
+        /// How long each `runs_of` and `jobs_of` call sleeps.
         delay: Duration,
     }
 
@@ -488,6 +491,18 @@ mod tests {
                 RunQuery::Active => &script.active,
             };
             let answer = answers.get(repo).cloned().unwrap_or(Ok(Vec::new()));
+            script.in_flight += 1;
+            script.max_in_flight = script.max_in_flight.max(script.in_flight);
+            drop(script);
+            std::thread::sleep(self.delay);
+            self.script().in_flight -= 1;
+            answer
+        }
+
+        fn jobs_of(&self, _repo: &RepoName, run: RunId) -> Result<Vec<Job>, SourceError> {
+            let mut script = self.script();
+            script.calls.push(("jobs", run.0.to_string()));
+            let answer = script.jobs.get(&run).cloned().unwrap_or(Ok(Vec::new()));
             script.in_flight += 1;
             script.max_in_flight = script.max_in_flight.max(script.in_flight);
             drop(script);

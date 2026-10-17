@@ -228,6 +228,14 @@ pub trait Source: Send + Sync {
     /// Returns a [`SourceError`] when a page of runs cannot be fetched.
     fn runs_of(&self, repo: &RepoName, query: RunQuery) -> Result<Vec<Run>, SourceError>;
 
+    /// Lists the jobs of the latest attempt of one workflow run, in the order
+    /// that GitHub gives them.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SourceError`] when a page of jobs cannot be fetched.
+    fn jobs_of(&self, repo: &RepoName, run: RunId) -> Result<Vec<Job>, SourceError>;
+
     /// The rate limit that the last response stated. `None` before any response.
     fn rate_limit(&self) -> Option<RateLimit>;
 }
@@ -473,6 +481,10 @@ impl Source for GhSource {
                 Ok(runs)
             }
         }
+    }
+
+    fn jobs_of(&self, _repo: &RepoName, _run: RunId) -> Result<Vec<Job>, SourceError> {
+        Ok(Vec::new())
     }
 
     fn rate_limit(&self) -> Option<RateLimit> {
@@ -1093,6 +1105,143 @@ mod tests {
         assert_eq!(stub.requests().len(), 10);
         let last = stub.requests().pop().expect("a request");
         assert!(last[2].contains("&page=10&"), "{last:?}");
+    }
+
+    /// A jobs body with `count` jobs numbered from `first_id`, and `total` as the count.
+    /// Each job has the `status` and `conclusion` text that the caller gives.
+    fn jobs_json(total: u64, first_id: u64, count: u64, status: &str, conclusion: &str) -> String {
+        let jobs: Vec<String> = (first_id..first_id + count)
+            .map(|id| {
+                format!(
+                    r#"{{"id":{id},"name":"job {id}","status":"{status}","conclusion":{conclusion},"started_at":"2026-09-24T21:56:49Z","created_at":"2026-09-24T21:56:49Z","completed_at":null,"html_url":"https://github.com/o/r/actions/runs/42/job/{id}"}}"#
+                )
+            })
+            .collect();
+        format!(r#"{{"total_count":{total},"jobs":[{}]}}"#, jobs.join(","))
+    }
+
+    /// A page of finished jobs.
+    fn done_jobs_json(total: u64, first_id: u64, count: u64) -> String {
+        jobs_json(total, first_id, count, "completed", "\"success\"")
+    }
+
+    /// A stub that answers by the page number at the end of the path.
+    fn job_pages_stub(pages: u64) -> Stub {
+        let lines: Vec<String> = (1..=pages)
+            .map(|page| format!("  *'&page={page}') cat \"$dir/page{page}.out\";;"))
+            .collect();
+        Stub::new(&format!("case \"$*\" in\n{} esac", lines.join("\n")))
+    }
+
+    #[test]
+    fn jobs_of_asks_for_the_first_page_of_the_run() {
+        let stub = job_pages_stub(1);
+        stub.file("page1.out", &ok_output(&done_jobs_json(2, 1, 2)));
+        let jobs = stub
+            .source()
+            .jobs_of(&repo("o/r"), RunId(42))
+            .expect("jobs");
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].id, JobId(1));
+        assert_eq!(jobs[0].name, "job 1");
+        assert_eq!(
+            stub.requests(),
+            [[
+                "api",
+                "-i",
+                "repos/o/r/actions/runs/42/jobs?per_page=100&page=1"
+            ]]
+        );
+    }
+
+    #[test]
+    fn a_second_page_of_jobs_is_fetched_while_the_count_is_below_the_total() {
+        let stub = job_pages_stub(2);
+        stub.file("page1.out", &ok_output(&done_jobs_json(150, 1, 100)));
+        stub.file("page2.out", &ok_output(&done_jobs_json(150, 101, 50)));
+        let jobs = stub
+            .source()
+            .jobs_of(&repo("o/r"), RunId(42))
+            .expect("jobs");
+        assert_eq!(jobs.len(), 150);
+        assert_eq!(jobs[149].id, JobId(150));
+        assert_eq!(stub.requests().len(), 2);
+    }
+
+    #[test]
+    fn a_matrix_of_256_jobs_takes_three_pages() {
+        let stub = job_pages_stub(3);
+        stub.file("page1.out", &ok_output(&done_jobs_json(256, 1, 100)));
+        stub.file("page2.out", &ok_output(&done_jobs_json(256, 101, 100)));
+        stub.file("page3.out", &ok_output(&done_jobs_json(256, 201, 56)));
+        let jobs = stub
+            .source()
+            .jobs_of(&repo("o/r"), RunId(42))
+            .expect("jobs");
+        assert_eq!(jobs.len(), 256);
+        assert_eq!(stub.requests().len(), 3);
+        let last = stub.requests().pop().expect("a request");
+        assert!(last[2].ends_with("&page=3"), "{last:?}");
+    }
+
+    #[test]
+    fn a_page_with_fewer_than_100_jobs_ends_the_fetch() {
+        let stub = job_pages_stub(2);
+        stub.file("page1.out", &ok_output(&done_jobs_json(500, 1, 99)));
+        stub.file("page2.out", &ok_output(&done_jobs_json(500, 100, 99)));
+        let jobs = stub
+            .source()
+            .jobs_of(&repo("o/r"), RunId(42))
+            .expect("jobs");
+        assert_eq!(jobs.len(), 99);
+        assert_eq!(stub.requests().len(), 1);
+    }
+
+    #[test]
+    fn the_fetch_of_jobs_ends_at_the_total_count() {
+        let stub = job_pages_stub(2);
+        stub.file("page1.out", &ok_output(&done_jobs_json(100, 1, 100)));
+        stub.file("page2.out", &ok_output(&done_jobs_json(100, 101, 100)));
+        let jobs = stub
+            .source()
+            .jobs_of(&repo("o/r"), RunId(42))
+            .expect("jobs");
+        assert_eq!(jobs.len(), 100);
+        assert_eq!(stub.requests().len(), 1);
+    }
+
+    #[test]
+    fn the_fetch_of_jobs_stops_after_ten_pages() {
+        let stub = job_pages_stub(10);
+        for page in 1..=10_u64 {
+            let first_id = (page - 1) * 100 + 1;
+            stub.file(
+                &format!("page{page}.out"),
+                &ok_output(&done_jobs_json(5000, first_id, 100)),
+            );
+        }
+        let jobs = stub
+            .source()
+            .jobs_of(&repo("o/r"), RunId(42))
+            .expect("jobs");
+        assert_eq!(jobs.len(), 1000);
+        assert_eq!(stub.requests().len(), 10);
+        let last = stub.requests().pop().expect("a request");
+        assert!(last[2].ends_with("&page=10"), "{last:?}");
+    }
+
+    #[test]
+    fn a_job_that_moves_to_the_next_page_shows_once() {
+        let stub = job_pages_stub(2);
+        stub.file("page1.out", &ok_output(&done_jobs_json(150, 1, 100)));
+        stub.file("page2.out", &ok_output(&done_jobs_json(150, 100, 50)));
+        let jobs = stub
+            .source()
+            .jobs_of(&repo("o/r"), RunId(42))
+            .expect("jobs");
+        assert_eq!(jobs.len(), 149);
+        assert_eq!(jobs.iter().filter(|job| job.id == JobId(100)).count(), 1);
+        assert_eq!(stub.requests().len(), 2);
     }
 
     const NOT_MODIFIED: &str = "HTTP/2.0 304 Not Modified\n\
