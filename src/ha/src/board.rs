@@ -488,6 +488,14 @@ mod tests {
         }
     }
 
+    /// Builds a running job with the name `name`.
+    fn named_job(id: u64, name: &str) -> Job {
+        Job {
+            name: name.to_owned(),
+            ..job(id, RunState::Running)
+        }
+    }
+
     fn board() -> Board {
         Board::new(Duration::from_secs(8 * HOUR))
     }
@@ -1230,6 +1238,65 @@ mod tests {
                 "LastJob(13)",
                 "Header(Recent,1,1,0)"
             ]
+        );
+    }
+
+    /// GitHub gives the jobs in the order of their IDs, which has no meaning
+    /// that a person can see. The board sorts them by name, with no difference
+    /// between capital and small letters, and then by ID.
+    #[test]
+    fn set_jobs_sorts_the_jobs_by_name_and_then_by_id() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![
+                named_job(21, "test (stable)"),
+                named_job(22, "build"),
+                named_job(23, "Lint"),
+                named_job(24, "Build"),
+                named_job(25, "deploy"),
+                named_job(26, "test (beta)"),
+            ],
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[2..8],
+            [
+                "Job(22)",
+                "Job(24)",
+                "Job(25)",
+                "Job(23)",
+                "Job(26)",
+                "LastJob(21)"
+            ]
+        );
+    }
+
+    /// A re-run gives a job a new ID. The job keeps its row, because the
+    /// order is by name.
+    #[test]
+    fn a_re_run_job_with_a_new_id_keeps_its_row() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![
+                named_job(31, "build"),
+                named_job(32, "lint"),
+                named_job(33, "test"),
+            ],
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![
+                named_job(31, "build"),
+                named_job(33, "test"),
+                named_job(39, "lint"),
+            ],
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[2..5],
+            ["Job(31)", "Job(39)", "LastJob(33)"]
         );
     }
 

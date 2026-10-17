@@ -1210,9 +1210,9 @@ mod tests {
             text[2..6],
             [
                 "● timmattison/tools   CI                 #101 main            Fix the thing                 11:45:30    14m 30s".to_owned(),
-                format!("● {:<89} 11:50:10    9m 50s", "├ test"),
                 format!("✓ {:<89} 11:45:40    4m 20s  10m ago", "├ build"),
-                format!("✗ {:<89} 11:46:00    45s     13m ago", "└ lint"),
+                format!("✗ {:<89} 11:46:00    45s     13m ago", "├ lint"),
+                format!("● {:<89} 11:50:10    9m 50s", "└ test"),
             ]
             .map(|line| line.trim_end().to_owned())
         );
@@ -1229,7 +1229,7 @@ mod tests {
             .collect();
         assert_eq!(
             marks,
-            [("●", Color::Yellow), ("✓", Color::Green), ("✗", Color::Red)]
+            [("✓", Color::Green), ("✗", Color::Red), ("●", Color::Yellow)]
         );
     }
 
@@ -1288,10 +1288,11 @@ mod tests {
             ),
         ]);
         let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        // The order is by name: "skip" stands above "wait".
         assert_eq!(started_cells(&text, 3), "");
-        assert_eq!(time_cells(&text, 3), (String::new(), String::new()));
+        assert_eq!(time_cells(&text, 3), (String::new(), "5m ago".to_owned()));
         assert_eq!(started_cells(&text, 4), "");
-        assert_eq!(time_cells(&text, 4), (String::new(), "5m ago".to_owned()));
+        assert_eq!(time_cells(&text, 4), (String::new(), String::new()));
     }
 
     #[test]
@@ -1325,13 +1326,14 @@ mod tests {
             display_width(before)
         };
         let run_column = started(&text[2]);
-        for (y, start) in [(3, "├ 日本語"), (4, "├ 🎉🎊🎁"), (5, "└ café-")] {
+        // The order is by name: `c` comes before `日`, and `日` before `🎉`.
+        for (y, start) in [(3, "├ café-"), (4, "├ 日本語"), (5, "└ 🎉🎊🎁")] {
             assert!(text[y].contains(start), "{:?}", text[y]);
             assert!(text[y].contains('…'), "{:?}", text[y]);
             assert_eq!(started(&text[y]), run_column, "line {y}");
             assert!(display_width(&text[y]) <= 120, "{:?}", text[y]);
         }
-        assert!(text[3].contains("… 11:51:00"), "{:?}", text[3]);
+        assert!(text[4].contains("… 11:51:00"), "{:?}", text[4]);
     }
 
     #[test]
@@ -1355,9 +1357,9 @@ mod tests {
         let mut board = board_with_jobs(three_jobs());
         board.fail_jobs(RunId(1), "HTTP 502".to_owned());
         let text = lines(&render_with(120, 14, &mut board, &loaded()));
-        assert!(text[3].starts_with("● ├ test"), "{:?}", text[3]);
-        assert!(text[4].starts_with("✓ ├ build"), "{:?}", text[4]);
-        assert!(text[5].starts_with("✗ ├ lint"), "{:?}", text[5]);
+        assert!(text[3].starts_with("✓ ├ build"), "{:?}", text[3]);
+        assert!(text[4].starts_with("✗ ├ lint"), "{:?}", text[4]);
+        assert!(text[5].starts_with("● ├ test"), "{:?}", text[5]);
         assert_eq!(text[6], "  └ ⚠ HTTP 502");
     }
 
