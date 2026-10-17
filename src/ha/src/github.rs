@@ -144,10 +144,27 @@ struct JobJson {
 }
 
 /// Maps the JSON body of one page of jobs to a [`JobsPage`].
-fn parse_jobs(_body: &str) -> Result<JobsPage, SourceError> {
+fn parse_jobs(body: &str) -> Result<JobsPage, SourceError> {
+    let parsed: JobsBody =
+        serde_json::from_str(body).map_err(|error| SourceError::BadResponse(error.to_string()))?;
+    let jobs = parsed
+        .jobs
+        .into_iter()
+        .map(|json| {
+            let status = json.status.unwrap_or_default();
+            Job {
+                id: JobId(json.id),
+                name: json.name.unwrap_or_default(),
+                state: RunState::from_github(&status, json.conclusion.as_deref()),
+                started_at: json.started_at.or(json.created_at),
+                completed_at: json.completed_at,
+                url: json.html_url.unwrap_or_default(),
+            }
+        })
+        .collect();
     Ok(JobsPage {
-        total_count: 0,
-        jobs: Vec::new(),
+        total_count: parsed.total_count,
+        jobs,
     })
 }
 
