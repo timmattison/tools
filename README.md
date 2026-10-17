@@ -2052,6 +2052,10 @@ cannot hang the caller. Used by `cwt` and `ha`.
     the job, with the glyph and the color of a run, the name of the job, and when it started. An
     active job shows the time since it started, which increases each second. A finished job shows
     how long it took and how long ago it finished. Thus you can find the job that holds a slow run.
+    - The jobs are sorted by name, with no difference between capital and small letters. Thus the
+      order stays the same through each refresh and each re-run, and the jobs of one matrix stay
+      together. GitHub gives the jobs in the order of their IDs, which has no meaning that you can
+      see.
     - `Loading jobs…` shows until the first answer comes, and `No jobs yet` shows when GitHub did
       not make the jobs of the run yet. When a request for the jobs fails, the error shows below
       the last good job rows.
