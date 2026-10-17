@@ -164,7 +164,15 @@ impl Board {
                 row > 0 && matches!(rows.get(row - 1), Some(Row::Header { .. }))
             });
             let len = rows.len();
-            self.offset = scroll(self.offset, height, len, selected_row, header_above);
+            let below = selected_row.map_or(0, |row| {
+                rows[row + 1..]
+                    .iter()
+                    .take_while(|next| {
+                        !matches!(next, Row::Header { .. } | Row::Empty(_) | Row::Run { .. })
+                    })
+                    .count()
+            });
+            self.offset = scroll(self.offset, height, len, selected_row, header_above, below);
         }
         let rows = self
             .build_rows(now)
@@ -368,7 +376,9 @@ fn scroll(
     len: usize,
     selected_row: Option<usize>,
     header_above: bool,
+    below: usize,
 ) -> usize {
+    let _ = below;
     let mut offset = offset;
     if let Some(row) = selected_row {
         let top = if header_above && height >= 2 {
@@ -1457,5 +1467,62 @@ mod tests {
             ],
         );
         assert_eq!(shape(&board.rows(now())).len(), 4);
+    }
+
+    /// Gives run `id` a block of `count` jobs. The run must be selected.
+    fn expand_with_jobs(board: &mut Board, id: u64, count: u64) {
+        board.expand(now());
+        let jobs = (1..=count)
+            .map(|n| job(id * 100 + n, RunState::Passed))
+            .collect();
+        board.set_jobs(RunId(id), jobs);
+    }
+
+    #[test]
+    fn an_expanded_run_at_the_bottom_of_the_view_scrolls_to_show_its_jobs() {
+        let mut board = long_board(6, 0);
+        for _ in 0..5 {
+            board.select_next(now());
+        }
+        expand_with_jobs(&mut board, 6, 2);
+        let view = board.view(now(), 4);
+        assert_eq!(view.first, 5);
+        assert_eq!(
+            marked(&view.rows),
+            ["Run(5)", "Run(6)*", "Job(601)", "LastJob(602)"]
+        );
+    }
+
+    #[test]
+    fn many_jobs_keep_the_run_and_its_header_in_view() {
+        let mut board = long_board(3, 3);
+        for _ in 0..3 {
+            board.select_next(now());
+        }
+        assert_eq!(board.view(now(), 4).first, 2);
+        expand_with_jobs(&mut board, 101, 10);
+        let view = board.view(now(), 4);
+        assert_eq!(view.first, 4);
+        assert_eq!(
+            marked(&view.rows),
+            [
+                "Header(Recent,3,3,0)",
+                "Run(101)*",
+                "Job(10101)",
+                "Job(10102)"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_view_of_one_row_shows_the_run_row_and_not_its_jobs() {
+        let mut board = long_board(3, 3);
+        for _ in 0..3 {
+            board.select_next(now());
+        }
+        expand_with_jobs(&mut board, 101, 10);
+        let view = board.view(now(), 1);
+        assert_eq!(view.first, 5);
+        assert_eq!(marked(&view.rows), ["Run(101)*"]);
     }
 }
