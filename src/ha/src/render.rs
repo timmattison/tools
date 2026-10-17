@@ -240,6 +240,31 @@ where
     )
 }
 
+/// The text of the status row of an expanded run before the first answer.
+const JOBS_LOADING: &str = "└ Loading jobs…";
+/// The text of the status row of an expanded run whose answer holds no job.
+const NO_JOBS: &str = "└ No jobs yet";
+/// The text before the error on the status row of a failed fetch of jobs.
+const JOBS_ERROR_PREFIX: &str = "└ ⚠ ";
+
+/// The line of a status row of an expanded run.
+///
+/// The marker column is empty. The text fills the rest of the line and ends
+/// in `…` when it is too wide. A status row has no time cells.
+fn status_row_line(text: &str, width: usize) -> String {
+    format!(
+        "{} {}",
+        pad_right("", MARKER_WIDTH),
+        fit(text, width.saturating_sub(MARKER_WIDTH + 1))
+    )
+}
+
+/// Writes a status row at row `y` of the buffer, as wide as the buffer.
+fn put_status_row(buffer: &mut Buffer, y: usize, text: &str) {
+    let line = status_row_line(text, usize::from(buffer.area.width));
+    put(buffer, y, &line, Style::default());
+}
+
 /// The tree glyph of a job row that is not the last row of its block.
 const TREE_MIDDLE: &str = "├";
 /// The tree glyph of the last row of the block of a run.
@@ -528,8 +553,11 @@ pub fn draw<Tz: TimeZone>(
                     Style::default().fg(marker_color(job.state)),
                 );
             }
-            // The next slice of issue #565 draws the status rows.
-            Row::JobsLoading | Row::NoJobs | Row::JobsError(_) => {}
+            Row::JobsLoading => put_status_row(buffer, index + 1, JOBS_LOADING),
+            Row::NoJobs => put_status_row(buffer, index + 1, NO_JOBS),
+            Row::JobsError(error) => {
+                put_status_row(buffer, index + 1, &format!("{JOBS_ERROR_PREFIX}{error}"));
+            }
         }
     }
     if usize::from(area.height) >= FIXED_LINES {
