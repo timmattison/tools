@@ -17,6 +17,7 @@ use chrono::{DateTime, Utc};
 use runlimit::{run_with_limit, RunFailure};
 use serde::Deserialize;
 
+use crate::job::{Job, JobId};
 use crate::run::{keep_first_of_each_id, Run, RunId, RunNumber, RunState};
 use crate::status::RateLimit;
 use crate::target::{OwnerName, RepoName};
@@ -110,6 +111,43 @@ fn parse_runs(body: &str, repo: &RepoName) -> Result<Page, SourceError> {
     Ok(Page {
         total_count: parsed.total_count,
         runs,
+    })
+}
+
+/// One page of jobs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JobsPage {
+    /// The `total_count` that GitHub states for the jobs of the run.
+    total_count: u64,
+    /// The jobs of this page.
+    jobs: Vec<Job>,
+}
+
+/// The JSON body of one page of jobs, as GitHub writes it.
+#[derive(Deserialize)]
+struct JobsBody {
+    total_count: u64,
+    jobs: Vec<JobJson>,
+}
+
+/// One element of `jobs`. Only the fields that `ha` reads are here.
+#[derive(Deserialize)]
+struct JobJson {
+    id: u64,
+    name: Option<String>,
+    status: Option<String>,
+    conclusion: Option<String>,
+    started_at: Option<DateTime<Utc>>,
+    created_at: Option<DateTime<Utc>>,
+    completed_at: Option<DateTime<Utc>>,
+    html_url: Option<String>,
+}
+
+/// Maps the JSON body of one page of jobs to a [`JobsPage`].
+fn parse_jobs(_body: &str) -> Result<JobsPage, SourceError> {
+    Ok(JobsPage {
+        total_count: 0,
+        jobs: Vec::new(),
     })
 }
 
@@ -777,6 +815,97 @@ mod tests {
             without_run_number.as_str(),
         ] {
             let result = parse_runs(body, &tools);
+            assert!(
+                matches!(result, Err(SourceError::BadResponse(_))),
+                "{body:?} gave {result:?}"
+            );
+        }
+    }
+
+    /// A jobs body with one job in the given `status` and `conclusion`.
+    fn one_job_json(status: &str, conclusion: &str) -> String {
+        format!(
+            r#"{{"total_count":1,"jobs":[{{"id":9,"name":"build","status":{status},"conclusion":{conclusion},"started_at":null,"created_at":null,"completed_at":null,"html_url":null}}]}}"#
+        )
+    }
+
+    const JOBS_JSON: &str = r#"{"total_count":3,"jobs":[
+        {"id":399444496,"run_id":29679449,"name":"build (ubuntu)","status":"completed","conclusion":"failure",
+         "started_at":"2026-09-24T21:56:49Z","created_at":"2026-09-24T21:55:00Z",
+         "completed_at":"2026-09-24T21:57:56Z",
+         "html_url":"https://github.com/o/r/actions/runs/29679449/job/399444496","steps":[]},
+        {"id":2,"name":"test","status":"in_progress","conclusion":null,
+         "started_at":null,"created_at":"2026-09-25T01:02:03Z","completed_at":null,
+         "html_url":"https://github.com/o/r/actions/runs/29679449/job/2"},
+        {"id":3,"name":null,"status":"queued","conclusion":null,
+         "started_at":null,"created_at":null,"completed_at":null,"html_url":null}]}"#;
+
+    #[test]
+    fn the_jobs_json_maps_to_jobs() {
+        let page = parse_jobs(JOBS_JSON).expect("a page");
+        assert_eq!(page.total_count, 3);
+        assert_eq!(
+            page.jobs,
+            [
+                Job {
+                    id: JobId(399_444_496),
+                    name: "build (ubuntu)".to_owned(),
+                    state: RunState::Failed,
+                    started_at: Some(time("2026-09-24T21:56:49Z")),
+                    completed_at: Some(time("2026-09-24T21:57:56Z")),
+                    url: "https://github.com/o/r/actions/runs/29679449/job/399444496".to_owned(),
+                },
+                Job {
+                    id: JobId(2),
+                    name: "test".to_owned(),
+                    state: RunState::Running,
+                    started_at: Some(time("2026-09-25T01:02:03Z")),
+                    completed_at: None,
+                    url: "https://github.com/o/r/actions/runs/29679449/job/2".to_owned(),
+                },
+                Job {
+                    id: JobId(3),
+                    name: String::new(),
+                    state: RunState::Queued,
+                    started_at: None,
+                    completed_at: None,
+                    url: String::new(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_job_that_has_not_started_takes_its_creation_time_or_none() {
+        let page = parse_jobs(JOBS_JSON).expect("a page");
+        assert_eq!(page.jobs[1].started_at, Some(time("2026-09-25T01:02:03Z")));
+        assert_eq!(page.jobs[2].started_at, None);
+    }
+
+    #[test]
+    fn each_job_status_maps_to_its_state() {
+        let cases = [
+            ("queued", "null", RunState::Queued),
+            ("in_progress", "null", RunState::Running),
+            ("waiting", "null", RunState::Queued),
+            ("pending", "null", RunState::Queued),
+            ("requested", "null", RunState::Queued),
+            ("completed", "\"success\"", RunState::Passed),
+            ("completed", "\"failure\"", RunState::Failed),
+            ("completed", "\"cancelled\"", RunState::Other),
+            ("completed", "\"skipped\"", RunState::Other),
+        ];
+        for (status, conclusion, expected) in cases {
+            let body = one_job_json(&format!("\"{status}\""), conclusion);
+            let page = parse_jobs(&body).expect("a page");
+            assert_eq!(page.jobs[0].state, expected, "{status} {conclusion}");
+        }
+    }
+
+    #[test]
+    fn invalid_jobs_json_is_a_bad_response() {
+        for body in ["", "not json", "{}", "{\"total_count\":1}", "[]"] {
+            let result = parse_jobs(body);
             assert!(
                 matches!(result, Err(SourceError::BadResponse(_))),
                 "{body:?} gave {result:?}"
