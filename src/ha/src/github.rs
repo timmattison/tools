@@ -1328,6 +1328,30 @@ mod tests {
         assert_eq!(requests[1][4], requests[0][2]);
     }
 
+    /// A page of one active job, so the cache keeps the page of the run.
+    fn active_jobs_json() -> String {
+        jobs_json(1, 1, 1, "in_progress", "null")
+    }
+
+    #[test]
+    fn a_second_fetch_of_an_active_run_sends_the_etag_and_reuses_the_jobs_on_304() {
+        let stub = Stub::new(ETAG_CASES);
+        stub.file("page1.out", &ok_output(&active_jobs_json()));
+        stub.file("not-modified.out", NOT_MODIFIED);
+        let source = stub.source();
+        let first = source.jobs_of(&repo("o/r"), RunId(42));
+        assert_eq!(first.as_ref().map(Vec::len), Ok(1));
+        let second = source.jobs_of(&repo("o/r"), RunId(42));
+        assert_eq!(second, first);
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1][..4],
+            ["api", "-i", "-H", "If-None-Match: W/\"4c00158b\""]
+        );
+        assert_eq!(requests[1][4], requests[0][2]);
+    }
+
     #[test]
     fn a_query_for_another_hour_sends_no_etag() {
         let stub = Stub::new(ETAG_CASES);
