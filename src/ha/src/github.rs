@@ -392,6 +392,18 @@ impl GhSource {
         self.cached_get(&key, &path, parse_jobs)
     }
 
+    /// Removes the cache entries of every page of the jobs of one run.
+    ///
+    /// `jobs_of` calls this when a run has jobs and none is active. The worker
+    /// fetches the jobs of a finished run one time only, thus those pages have
+    /// no later use. Without this rule, the cache keeps the pages of every run
+    /// that a person ever expanded. A run with no jobs, or with an active job,
+    /// keeps its pages, so its next fetch can get a `304`.
+    fn forget_jobs_of(&self, repo: &RepoName, run: RunId) {
+        let prefix = format!("{repo}#jobs/{}#", run.0);
+        self.lock_etags().retain(|key, _| !key.starts_with(&prefix));
+    }
+
     /// Fetches every page of the runs of `repo` for `filter`.
     ///
     /// The fetch goes on while the last page was full and the count so far is
@@ -525,6 +537,9 @@ impl Source for GhSource {
             }
         }
         keep_first_job_of_each_id(&mut jobs);
+        if !jobs.is_empty() && jobs.iter().all(|job| !job.state.is_active()) {
+            self.forget_jobs_of(repo, run);
+        }
         Ok(jobs)
     }
 
