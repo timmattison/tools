@@ -815,7 +815,7 @@ mod tests {
                 "✗ acme/widgets        Release            #104 issue-11        Broken build                  10-13 23:50 4h 40m  7h ago",
                 "",
                 "",
-                "updated 30s ago      ·  ↑↓ select  ⏎ open  r refresh  q quit",
+                "updated 30s ago      ·  ↑↓ select  →← jobs  ⏎ open  r refresh  q quit",
             ]
         );
     }
@@ -1599,7 +1599,7 @@ mod tests {
     fn the_status_line_says_loading_before_the_first_refresh() {
         assert_eq!(
             status_line(80, &Status::default()),
-            "loading…  ·  ↑↓ select  ⏎ open  r refresh  q quit"
+            "loading…  ·  ↑↓ select  →← jobs  ⏎ open  r refresh  q quit"
         );
     }
 
@@ -1611,7 +1611,7 @@ mod tests {
         };
         assert_eq!(
             status_line(80, &status),
-            "updated 30s ago      ·  ↑↓ select  ⏎ open  r refresh  q quit"
+            "updated 30s ago      ·  ↑↓ select  →← jobs  ⏎ open  r refresh  q quit"
         );
     }
 
@@ -1624,7 +1624,7 @@ mod tests {
         };
         assert_eq!(
             status_line(100, &status),
-            "updated 30s ago      ·  API 4821/5000  ·  ↑↓ select  ⏎ open  r refresh  q quit"
+            "updated 30s ago      ·  API 4821/5000  ·  ↑↓ select  →← jobs  ⏎ open  r refresh  q quit"
         );
     }
 
@@ -1638,7 +1638,7 @@ mod tests {
         };
         assert_eq!(
             status_line(120, &status),
-            "updated 30s ago      ·  API low 412/5000, next refresh 12:34  ·  ↑↓ select  ⏎ open  r refresh  q quit"
+            "updated 30s ago      ·  API low 412/5000, next refresh 12:34  ·  ↑↓ select  →← jobs  ⏎ open  r refresh  q quit"
         );
     }
 
@@ -1696,7 +1696,7 @@ mod tests {
         text[7].clone()
     }
 
-    const HINTS_TAIL: &str = "loading…  ·  ↑↓ select  ⏎ open  r refresh  q quit";
+    const HINTS_TAIL: &str = "loading…  ·  ↑↓ select  →← jobs  ⏎ open  r refresh  q quit";
 
     /// The mark at the right end of the status line during a refresh.
     const MARK: &str = "refreshing…";
