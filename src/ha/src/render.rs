@@ -528,6 +528,7 @@ mod tests {
 
     use ratatui::Terminal;
 
+    use crate::job::{Job, JobId};
     use crate::run::{Run, RunId, RunNumber, RunState};
     use crate::status::{Message, RateLimit};
     use crate::target::{OwnerName, RepoName};
@@ -1035,6 +1036,192 @@ mod tests {
             time_cells(&text, 4),
             ("3m 07s".to_owned(), "1h ago".to_owned())
         );
+    }
+
+    /// A job with the state `state`. `None` times stand for a job that GitHub
+    /// gives no time for.
+    fn job(
+        id: u64,
+        name: &str,
+        state: RunState,
+        started: Option<&str>,
+        completed: Option<&str>,
+    ) -> Job {
+        Job {
+            id: JobId(id),
+            name: name.to_owned(),
+            state,
+            started_at: started.map(at),
+            completed_at: completed.map(at),
+            url: format!("https://github.com/timmattison/tools/actions/runs/1/job/{id}"),
+        }
+    }
+
+    /// The board of four runs with the first run expanded and `jobs` loaded.
+    fn board_with_jobs(jobs: Vec<Job>) -> Board {
+        let mut board = four_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), jobs);
+        board
+    }
+
+    /// The three jobs of the first run: one running, one passed, one failed.
+    fn three_jobs() -> Vec<Job> {
+        vec![
+            job(
+                11,
+                "test",
+                RunState::Running,
+                Some("2026-10-14T11:50:10Z"),
+                None,
+            ),
+            job(
+                12,
+                "build",
+                RunState::Passed,
+                Some("2026-10-14T11:45:40Z"),
+                Some("2026-10-14T11:50:00Z"),
+            ),
+            job(
+                13,
+                "lint",
+                RunState::Failed,
+                Some("2026-10-14T11:46:00Z"),
+                Some("2026-10-14T11:46:45Z"),
+            ),
+        ]
+    }
+
+    #[test]
+    fn the_jobs_of_an_expanded_run_stand_below_it_in_the_run_columns() {
+        let mut board = board_with_jobs(three_jobs());
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert_eq!(
+            text[2..6],
+            [
+                "● timmattison/tools   CI                 #101 main            Fix the thing                 11:45:30    14m 30s".to_owned(),
+                format!("● {:<89} 11:50:10    9m 50s", "├ test"),
+                format!("✓ {:<89} 11:45:40    4m 20s  10m ago", "├ build"),
+                format!("✗ {:<89} 11:46:00    45s     13m ago", "└ lint"),
+            ]
+            .map(|line| line.trim_end().to_owned())
+        );
+        assert!(text[6].starts_with("○ acme/widgets"), "{:?}", text[6]);
+    }
+
+    #[test]
+    fn each_job_marker_has_the_color_of_its_state() {
+        let mut board = board_with_jobs(three_jobs());
+        let buffer = render_with(120, 14, &mut board, &loaded());
+        let marks: Vec<(&str, Color)> = [3_u16, 4, 5]
+            .iter()
+            .map(|y| (buffer[(0, *y)].symbol(), buffer[(0, *y)].fg))
+            .collect();
+        assert_eq!(
+            marks,
+            [("●", Color::Yellow), ("✓", Color::Green), ("✗", Color::Red)]
+        );
+    }
+
+    #[test]
+    fn no_job_row_is_reversed_when_its_run_is_selected() {
+        let mut board = board_with_jobs(three_jobs());
+        let buffer = render_with(120, 14, &mut board, &loaded());
+        let reversed = |x: u16, y: u16| buffer[(x, y)].modifier.contains(Modifier::REVERSED);
+        assert!(reversed(60, 2), "the selected run row");
+        for y in [3_u16, 4, 5] {
+            for x in [0_u16, 5, 60, 95, 119] {
+                assert!(!reversed(x, y), "line {y} column {x}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_active_job_shows_the_time_since_its_start_and_no_finish() {
+        let mut board = board_with_jobs(vec![job(
+            11,
+            "test",
+            RunState::Running,
+            Some("2026-10-14T10:45:30Z"),
+            None,
+        )]);
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert_eq!(time_cells(&text, 3), ("1h 14m".to_owned(), String::new()));
+    }
+
+    #[test]
+    fn a_finished_job_shows_its_own_duration_and_the_time_since_it_ended() {
+        let mut board = board_with_jobs(vec![job(
+            11,
+            "lint",
+            RunState::Failed,
+            Some("2026-10-14T10:00:00Z"),
+            Some("2026-10-14T10:03:07Z"),
+        )]);
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert_eq!(
+            time_cells(&text, 3),
+            ("3m 07s".to_owned(), "1h ago".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_job_with_no_start_shows_no_started_and_no_time() {
+        let mut board = board_with_jobs(vec![
+            job(11, "wait", RunState::Queued, None, None),
+            job(
+                12,
+                "skip",
+                RunState::Passed,
+                None,
+                Some("2026-10-14T11:55:00Z"),
+            ),
+        ]);
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert_eq!(started_cells(&text, 3), "");
+        assert_eq!(time_cells(&text, 3), (String::new(), String::new()));
+        assert_eq!(started_cells(&text, 4), "");
+        assert_eq!(time_cells(&text, 4), (String::new(), "5m ago".to_owned()));
+    }
+
+    #[test]
+    fn a_job_name_cut_by_display_width_keeps_its_start_and_the_columns() {
+        let mut board = board_with_jobs(vec![
+            job(
+                11,
+                "日本語のとても長いジョブの名前日本語のとても長いジョブの名前日本語のとても長いジョブの名前日本語のとても長いジョブの名前",
+                RunState::Running,
+                Some("2026-10-14T11:51:00Z"),
+                None,
+            ),
+            job(
+                12,
+                &"🎉🎊🎁".repeat(20),
+                RunState::Running,
+                Some("2026-10-14T11:52:00Z"),
+                None,
+            ),
+            job(
+                13,
+                &"café-au-lait-".repeat(10),
+                RunState::Running,
+                Some("2026-10-14T11:53:00Z"),
+                None,
+            ),
+        ]);
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        let started = |line: &str| {
+            let (before, _) = line.split_once("11:5").expect("the line holds a start");
+            display_width(before)
+        };
+        let run_column = started(&text[2]);
+        for (y, start) in [(3, "├ 日本語"), (4, "├ 🎉🎊🎁"), (5, "└ café-")] {
+            assert!(text[y].contains(start), "{:?}", text[y]);
+            assert!(text[y].contains('…'), "{:?}", text[y]);
+            assert_eq!(started(&text[y]), run_column, "line {y}");
+            assert!(display_width(&text[y]) <= 120, "{:?}", text[y]);
+        }
+        assert!(text[3].contains("… 11:51:00"), "{:?}", text[3]);
     }
 
     #[test]
