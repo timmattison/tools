@@ -300,8 +300,17 @@ impl Board {
 
     /// Stores the jobs of `run` when the run is expanded. A late answer for a
     /// run that is not expanded is dropped.
-    pub fn set_jobs(&mut self, run: RunId, jobs: Vec<Job>) {
+    ///
+    /// The jobs are sorted by name, with no difference between capital and
+    /// small letters, and then by ID. GitHub gives the jobs in the order of
+    /// their IDs, and it makes most jobs of a run at the same second, thus
+    /// that order has no meaning that a person can see. A re-run gives new
+    /// IDs, thus a re-run job can also move. The order by name stays the same
+    /// through each refresh and each re-run, and it keeps the jobs of one
+    /// matrix together.
+    pub fn set_jobs(&mut self, run: RunId, mut jobs: Vec<Job>) {
         if let Some(state) = self.expanded.get_mut(&run) {
+            jobs.sort_by_cached_key(|job| (job.name.to_lowercase(), job.id));
             *state = Jobs::Ready(jobs);
         }
     }
