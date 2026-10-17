@@ -1293,7 +1293,7 @@ mod tests {
         ]);
         let text = lines(&render_with(120, 14, &mut board, &loaded()));
         let started = |line: &str| {
-            let (before, _) = line.split_once("11:5").expect("the line holds a start");
+            let (before, _) = line.rsplit_once(" 11:").expect("the line holds a start");
             display_width(before)
         };
         let run_column = started(&text[2]);
