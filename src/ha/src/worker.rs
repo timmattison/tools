@@ -425,7 +425,7 @@ mod tests {
 
     use super::*;
     use crate::github::{RepoList, RunQuery, SourceError};
-    use crate::run::{RunId, RunState};
+    use crate::run::{RunId, RunNumber, RunState};
     use crate::target::Target;
 
     /// The longest a test waits for one update.
@@ -513,6 +513,7 @@ mod tests {
         let at = Utc::now();
         Run {
             id: RunId(id),
+            number: RunNumber(id + 100),
             repo: repo(repo_text),
             workflow: "ci".to_owned(),
             branch: "main".to_owned(),

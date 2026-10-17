@@ -9,9 +9,18 @@ use chrono::{DateTime, Utc};
 
 use crate::target::RepoName;
 
-/// The number that GitHub gives to one workflow run.
+/// The database ID that GitHub gives to one workflow run.
+///
+/// The run URL and the jobs endpoint take this ID. The web interface does not
+/// show it. See [`RunNumber`] for the number that the web interface shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RunId(pub u64);
+
+/// The number that the GitHub web interface and `gh run list` show as `#1234`.
+///
+/// This is not the database ID. See [`RunId`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RunNumber(pub u64);
 
 /// What a run is doing now, or how it ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,8 +73,10 @@ impl RunState {
 /// One workflow run of one repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Run {
-    /// The run number from GitHub.
+    /// The database ID from GitHub. The run URL and the jobs endpoint take it.
     pub id: RunId,
+    /// The number that the web interface shows as `#1234`.
+    pub number: RunNumber,
     /// The repository that holds the run.
     pub repo: RepoName,
     /// The name of the workflow.
@@ -102,6 +113,7 @@ mod tests {
         let time = DateTime::<Utc>::UNIX_EPOCH;
         Run {
             id: RunId(id),
+            number: RunNumber(id + 100),
             repo: RepoName::parse("o/r").expect("a valid repository"),
             workflow: "ci".to_owned(),
             branch: "main".to_owned(),

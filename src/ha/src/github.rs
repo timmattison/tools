@@ -17,7 +17,7 @@ use chrono::{DateTime, Utc};
 use runlimit::{run_with_limit, RunFailure};
 use serde::Deserialize;
 
-use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
+use crate::run::{keep_first_of_each_id, Run, RunId, RunNumber, RunState};
 use crate::status::RateLimit;
 use crate::target::{OwnerName, RepoName};
 
@@ -94,6 +94,7 @@ fn parse_runs(body: &str, repo: &RepoName) -> Result<Page, SourceError> {
             let status = json.status.unwrap_or_default();
             Run {
                 id: RunId(json.id),
+                number: RunNumber(0),
                 repo: repo.clone(),
                 state: RunState::from_github(&status, json.conclusion.as_deref()),
                 title: json.display_title.unwrap_or_else(|| workflow.clone()),
@@ -689,12 +690,12 @@ mod tests {
     }
 
     const RUNS_JSON: &str = r#"{"total_count":2,"workflow_runs":[
-        {"id":36064582280,"name":"CI","display_title":"Fix the thing","head_branch":"main",
+        {"id":36064582280,"run_number":1234,"name":"CI","display_title":"Fix the thing","head_branch":"main",
          "status":"completed","conclusion":"failure","run_started_at":"2026-09-24T21:56:49Z",
          "created_at":"2026-09-24T21:50:00Z","updated_at":"2026-09-24T21:57:56Z",
          "html_url":"https://github.com/timmattison/tools/actions/runs/36064582280",
          "repository":{"full_name":"other/place"}},
-        {"id":7,"name":"Release","display_title":null,"head_branch":null,
+        {"id":7,"run_number":56,"name":"Release","display_title":null,"head_branch":null,
          "status":"in_progress","conclusion":null,"run_started_at":null,
          "created_at":"2026-09-25T01:02:03Z","updated_at":"2026-09-25T01:03:00Z",
          "html_url":"https://github.com/timmattison/tools/actions/runs/7"}]}"#;
@@ -709,6 +710,7 @@ mod tests {
             [
                 Run {
                     id: RunId(36_064_582_280),
+                    number: RunNumber(1234),
                     repo: tools.clone(),
                     workflow: "CI".to_owned(),
                     branch: "main".to_owned(),
@@ -720,6 +722,7 @@ mod tests {
                 },
                 Run {
                     id: RunId(7),
+                    number: RunNumber(56),
                     repo: tools,
                     workflow: "Release".to_owned(),
                     branch: String::new(),
@@ -821,8 +824,9 @@ mod tests {
     fn runs_json(total: u64, first_id: u64, count: u64) -> String {
         let runs: Vec<String> = (first_id..first_id + count)
             .map(|id| {
+                let number = id + 100;
                 format!(
-                    r#"{{"id":{id},"name":"CI","display_title":"t","head_branch":"main","status":"completed","conclusion":"success","run_started_at":"2026-09-24T21:56:49Z","created_at":"2026-09-24T21:56:49Z","updated_at":"2026-09-24T21:57:56Z","html_url":"https://github.com/o/r/actions/runs/{id}"}}"#
+                    r#"{{"id":{id},"run_number":{number},"name":"CI","display_title":"t","head_branch":"main","status":"completed","conclusion":"success","run_started_at":"2026-09-24T21:56:49Z","created_at":"2026-09-24T21:56:49Z","updated_at":"2026-09-24T21:57:56Z","html_url":"https://github.com/o/r/actions/runs/{id}"}}"#
                 )
             })
             .collect();
@@ -1178,7 +1182,7 @@ mod tests {
  esac",
         );
         let waiting = r#"{"total_count":1,"workflow_runs":[
-        {"id":42,"name":"Deploy","display_title":"Ship it","head_branch":"main",
+        {"id":42,"run_number":3,"name":"Deploy","display_title":"Ship it","head_branch":"main",
          "status":"waiting","conclusion":null,"run_started_at":null,
          "created_at":"2026-08-01T01:02:03Z","updated_at":"2026-08-01T01:03:00Z",
          "html_url":"https://github.com/o/r/actions/runs/42"}]}"#;

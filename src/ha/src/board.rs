@@ -306,6 +306,7 @@ fn push_runs<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::run::RunNumber;
     use chrono::{Duration as Span, TimeZone};
 
     const HOUR: u64 = 3600;
@@ -324,6 +325,7 @@ mod tests {
     fn run(id: u64, repo_text: &str, state: RunState, started: i64, updated: i64) -> Run {
         Run {
             id: RunId(id),
+            number: RunNumber(id + 100),
             repo: repo(repo_text),
             workflow: "ci".to_owned(),
             branch: "main".to_owned(),
