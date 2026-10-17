@@ -361,6 +361,21 @@ impl GhSource {
         Ok(page)
     }
 
+    /// Fetches the page `number` of the jobs of one run.
+    ///
+    /// The request has no `filter` parameter. GitHub then gives the jobs of the
+    /// latest attempt only, which is what the board shows.
+    fn jobs_page(&self, repo: &RepoName, run: RunId, number: u32) -> Result<JobsPage, SourceError> {
+        let path = format!(
+            "repos/{}/{}/actions/runs/{}/jobs?per_page={PAGE_SIZE}&page={number}",
+            repo.owner(),
+            repo.name(),
+            run.0
+        );
+        let response = self.request(&path, None)?;
+        parse_jobs(&response.body)
+    }
+
     /// Fetches every page of the runs of `repo` for `filter`.
     ///
     /// The fetch goes on while the last page was full and the count so far is
@@ -483,8 +498,18 @@ impl Source for GhSource {
         }
     }
 
-    fn jobs_of(&self, _repo: &RepoName, _run: RunId) -> Result<Vec<Job>, SourceError> {
-        Ok(Vec::new())
+    fn jobs_of(&self, repo: &RepoName, run: RunId) -> Result<Vec<Job>, SourceError> {
+        let mut jobs = Vec::new();
+        for number in 1..=MAX_PAGES {
+            let page = self.jobs_page(repo, run, number)?;
+            let full = page.jobs.len() >= PAGE_SIZE;
+            jobs.extend(page.jobs);
+            if !full || (jobs.len() as u64) >= page.total_count {
+                break;
+            }
+        }
+        keep_first_job_of_each_id(&mut jobs);
+        Ok(jobs)
     }
 
     fn rate_limit(&self) -> Option<RateLimit> {
@@ -524,6 +549,15 @@ fn rate_of(response: &Response) -> Option<RateLimit> {
         remaining: number("x-ratelimit-remaining")?,
         reset: DateTime::from_timestamp(reset, 0)?,
     })
+}
+
+/// Keeps the first job of each ID and drops the later jobs of the same ID.
+///
+/// The order of the kept jobs does not change. A job can move from one page to
+/// the next between two requests, and then two pages hold it.
+fn keep_first_job_of_each_id(jobs: &mut Vec<Job>) {
+    let mut seen = std::collections::HashSet::new();
+    jobs.retain(|job| seen.insert(job.id));
 }
 
 /// Chooses between the stored rate limit and a new one.
