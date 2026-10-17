@@ -737,6 +737,21 @@ mod tests {
     }
 
     #[test]
+    fn a_page_of_runs_carries_the_run_number_of_each_run() {
+        let page = parse_runs(&runs_json(3, 5, 3), &repo("o/r")).expect("a page");
+        let pairs: Vec<(RunId, RunNumber)> =
+            page.runs.iter().map(|run| (run.id, run.number)).collect();
+        assert_eq!(
+            pairs,
+            [
+                (RunId(5), RunNumber(105)),
+                (RunId(6), RunNumber(106)),
+                (RunId(7), RunNumber(107)),
+            ]
+        );
+    }
+
+    #[test]
     fn a_run_takes_the_repository_that_the_request_named() {
         let asked = repo("Timmattison/Tools");
         let page = parse_runs(RUNS_JSON, &asked).expect("a page");
@@ -750,7 +765,16 @@ mod tests {
     #[test]
     fn invalid_json_is_a_bad_response() {
         let tools = repo("timmattison/tools");
-        for body in ["", "not json", "{}", "{\"total_count\":1}", "[]"] {
+        let without_run_number = runs_json(1, 1, 1).replace("\"run_number\":101,", "");
+        assert!(!without_run_number.contains("run_number"));
+        for body in [
+            "",
+            "not json",
+            "{}",
+            "{\"total_count\":1}",
+            "[]",
+            without_run_number.as_str(),
+        ] {
             let result = parse_runs(body, &tools);
             assert!(
                 matches!(result, Err(SourceError::BadResponse(_))),
