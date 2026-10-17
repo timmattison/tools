@@ -1352,6 +1352,70 @@ mod tests {
         assert_eq!(requests[1][4], requests[0][2]);
     }
 
+    /// The keys of the cache, sorted.
+    fn cache_keys(source: &GhSource) -> Vec<String> {
+        let mut keys: Vec<String> = source.lock_etags().keys().cloned().collect();
+        keys.sort();
+        keys
+    }
+
+    #[test]
+    fn the_cache_drops_the_pages_of_a_run_when_every_job_is_finished() {
+        let stub = job_pages_stub(3);
+        stub.file("page1.out", &ok_output(&done_jobs_json(256, 1, 100)));
+        stub.file("page2.out", &ok_output(&done_jobs_json(256, 101, 100)));
+        stub.file("page3.out", &ok_output(&done_jobs_json(256, 201, 56)));
+        let source = stub.source();
+        source.jobs_of(&repo("o/r"), RunId(42)).expect("jobs");
+        assert_eq!(cache_keys(&source), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_cache_keeps_the_pages_of_a_run_while_a_job_is_active() {
+        let stub = job_pages_stub(2);
+        stub.file("page1.out", &ok_output(&done_jobs_json(150, 1, 100)));
+        let mut last = jobs_json(150, 101, 49, "completed", "\"success\"");
+        last = last.replace("]}", &format!(",{}]}}", one_active_job(150)));
+        stub.file("page2.out", &ok_output(&last));
+        let source = stub.source();
+        source.jobs_of(&repo("o/r"), RunId(42)).expect("jobs");
+        assert_eq!(cache_keys(&source), ["o/r#jobs/42#1", "o/r#jobs/42#2"]);
+    }
+
+    /// One job JSON object that is in progress.
+    fn one_active_job(id: u64) -> String {
+        let body = jobs_json(1, id, 1, "in_progress", "null");
+        let start = body.find('[').expect("a list") + 1;
+        let end = body.rfind(']').expect("a list");
+        body[start..end].to_owned()
+    }
+
+    #[test]
+    fn the_cache_keeps_the_page_of_a_run_with_no_jobs() {
+        let stub = job_pages_stub(1);
+        stub.file("page1.out", &ok_output(&done_jobs_json(0, 1, 0)));
+        let source = stub.source();
+        let jobs = source.jobs_of(&repo("o/r"), RunId(42)).expect("jobs");
+        assert!(jobs.is_empty());
+        assert_eq!(cache_keys(&source), ["o/r#jobs/42#1"]);
+    }
+
+    #[test]
+    fn the_cache_drops_only_the_pages_of_the_run_that_finished() {
+        let stub = Stub::new(
+            "case \"$*\" in
+  *'runs/42/jobs'*) cat \"$dir/done.out\";;
+  *'runs/43/jobs'*) cat \"$dir/active.out\";;
+ esac",
+        );
+        stub.file("done.out", &ok_output(&done_jobs_json(1, 1, 1)));
+        stub.file("active.out", &ok_output(&active_jobs_json()));
+        let source = stub.source();
+        source.jobs_of(&repo("o/r"), RunId(43)).expect("jobs");
+        source.jobs_of(&repo("o/r"), RunId(42)).expect("jobs");
+        assert_eq!(cache_keys(&source), ["o/r#jobs/43#1"]);
+    }
+
     #[test]
     fn a_query_for_another_hour_sends_no_etag() {
         let stub = Stub::new(ETAG_CASES);
