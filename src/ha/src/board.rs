@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
+use crate::job::Job;
 use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
 use crate::target::RepoName;
 
@@ -45,6 +46,36 @@ pub enum Row<'a> {
         /// True for the one row that the selection marks.
         selected: bool,
     },
+    /// One job of an expanded run.
+    Job {
+        /// The job.
+        job: &'a Job,
+        /// True for the last row of the block of its run. The render draws
+        /// `└` for it, and `├` for any other row.
+        last: bool,
+    },
+    /// The row of an expanded run before the first answer: "Loading jobs…".
+    JobsLoading,
+    /// The row of an expanded run whose answer holds no job: "No jobs yet".
+    NoJobs,
+    /// The error of the last failed fetch of the jobs of an expanded run.
+    JobsError(&'a str),
+}
+
+/// The jobs of one expanded run.
+#[derive(Debug)]
+enum Jobs {
+    /// The run is expanded and no answer came yet.
+    Loading,
+    /// The last good answer.
+    Ready(Vec<Job>),
+    /// The last fetch failed.
+    Failed {
+        /// The last good jobs. The list is empty when there is none.
+        jobs: Vec<Job>,
+        /// The error of the last fetch.
+        error: String,
+    },
 }
 
 /// The rows that fit on the screen.
@@ -64,6 +95,7 @@ pub struct Board {
     errors: BTreeMap<RepoName, String>,
     selected: Option<(RunId, usize)>,
     offset: usize,
+    expanded: BTreeMap<RunId, Jobs>,
 }
 
 impl Board {
@@ -76,6 +108,7 @@ impl Board {
             errors: BTreeMap::new(),
             selected: None,
             offset: 0,
+            expanded: BTreeMap::new(),
         }
     }
 
@@ -220,6 +253,38 @@ impl Board {
         rows
     }
 
+    /// Expands the selected run. The run shows a loading row until `set_jobs`
+    /// gives its jobs. A run that is already expanded keeps its jobs. With no
+    /// selection, nothing happens.
+    pub fn expand(&mut self, now: DateTime<Utc>) {
+        let _ = now;
+    }
+
+    /// Collapses the selected run and drops its jobs. A run that is not
+    /// expanded, or no selection, changes nothing.
+    pub fn collapse(&mut self, now: DateTime<Utc>) {
+        let _ = now;
+    }
+
+    /// Stores the jobs of `run` when the run is expanded. A late answer for a
+    /// run that is not expanded is dropped.
+    pub fn set_jobs(&mut self, run: RunId, jobs: Vec<Job>) {
+        let _ = (run, jobs);
+    }
+
+    /// Records the error of a failed fetch for `run` when the run is expanded.
+    /// The last good jobs stay. Nothing happens for a run that is not expanded.
+    pub fn fail_jobs(&mut self, run: RunId, error: String) {
+        let _ = (run, error);
+    }
+
+    /// The repository and the ID of each expanded run that shows at `now`.
+    /// The app sends this set to the worker each time it changes.
+    pub fn expanded(&mut self, now: DateTime<Utc>) -> BTreeSet<(RepoName, RunId)> {
+        let _ = now;
+        BTreeSet::new()
+    }
+
     /// Moves the selection to the next run.
     pub fn select_next(&mut self, now: DateTime<Utc>) {
         self.settle(now);
@@ -306,6 +371,7 @@ fn push_runs<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::job::JobId;
     use crate::run::RunNumber;
     use chrono::{Duration as Span, TimeZone};
 
@@ -337,12 +403,25 @@ mod tests {
         }
     }
 
+    /// Builds a job.
+    fn job(id: u64, state: RunState) -> Job {
+        Job {
+            id: JobId(id),
+            name: format!("job {id}"),
+            state,
+            started_at: None,
+            completed_at: None,
+            url: String::new(),
+        }
+    }
+
     fn board() -> Board {
         Board::new(Duration::from_secs(8 * HOUR))
     }
 
     /// Writes each row as short text: `Header(Active,2,0,0)`, `Empty(Recent)`,
-    /// or `Run(7)`. The selection mark is left out, see `marked`.
+    /// `Run(7)`, `Job(11)`, `LastJob(12)`, `JobsLoading`, `NoJobs`, or
+    /// `JobsError(text)`. The selection mark is left out, see `marked`.
     fn shape(rows: &[Row<'_>]) -> Vec<String> {
         marked(rows)
             .into_iter()
@@ -364,6 +443,12 @@ mod tests {
                 Row::Run { run, selected } => {
                     format!("Run({}){}", run.id.0, if *selected { "*" } else { "" })
                 }
+                Row::Job { job, last } => {
+                    format!("{}({})", if *last { "LastJob" } else { "Job" }, job.id.0)
+                }
+                Row::JobsLoading => "JobsLoading".to_owned(),
+                Row::NoJobs => "NoJobs".to_owned(),
+                Row::JobsError(error) => format!("JobsError({error})"),
             })
             .collect()
     }
@@ -1020,5 +1105,170 @@ mod tests {
         let view = board.view(now(), 4);
         assert_eq!(view.first, 0);
         assert_eq!(view.rows.len(), 4);
+    }
+
+    /// A board with run 1 (running) and run 2 (passed) in repository `a/x`.
+    fn two_run_board() -> Board {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Passed, 60, 10),
+            ],
+        );
+        board
+    }
+
+    #[test]
+    fn expanding_the_selected_run_shows_a_loading_row_below_it() {
+        let mut board = two_run_board();
+        board.expand(now());
+        assert_eq!(
+            marked(&board.rows(now())),
+            [
+                "Header(Active,1,0,0)",
+                "Run(1)*",
+                "JobsLoading",
+                "Header(Recent,1,1,0)",
+                "Run(2)",
+            ]
+        );
+    }
+
+    #[test]
+    fn set_jobs_shows_one_row_per_job_and_marks_the_last() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![
+                job(11, RunState::Passed),
+                job(12, RunState::Running),
+                job(13, RunState::Queued),
+            ],
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[1..6],
+            [
+                "Run(1)",
+                "Job(11)",
+                "Job(12)",
+                "LastJob(13)",
+                "Header(Recent,1,1,0)"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_answer_with_no_job_shows_a_no_jobs_row() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), Vec::new());
+        assert_eq!(shape(&board.rows(now()))[1..3], ["Run(1)", "NoJobs"]);
+    }
+
+    #[test]
+    fn collapse_removes_the_block_and_the_jobs() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
+        board.collapse(now());
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Active,1,0,0)",
+                "Run(1)",
+                "Header(Recent,1,1,0)",
+                "Run(2)"
+            ]
+        );
+        assert!(board.expanded(now()).is_empty());
+        board.expand(now());
+        assert_eq!(shape(&board.rows(now()))[2], "JobsLoading");
+    }
+
+    #[test]
+    fn expanding_a_run_twice_keeps_its_jobs() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
+        board.expand(now());
+        assert_eq!(shape(&board.rows(now()))[1..3], ["Run(1)", "LastJob(11)"]);
+    }
+
+    #[test]
+    fn collapse_of_a_run_that_is_not_expanded_changes_nothing() {
+        let mut board = two_run_board();
+        let before = shape(&board.rows(now()));
+        board.collapse(now());
+        assert_eq!(shape(&board.rows(now())), before);
+        assert!(board.expanded(now()).is_empty());
+    }
+
+    #[test]
+    fn expand_and_collapse_on_an_empty_board_do_nothing() {
+        let mut board = board();
+        board.expand(now());
+        board.collapse(now());
+        assert!(board.expanded(now()).is_empty());
+        assert_eq!(shape(&board.rows(now())).len(), 4);
+    }
+
+    #[test]
+    fn jobs_for_a_run_that_is_not_expanded_are_dropped() {
+        let mut board = two_run_board();
+        board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
+        board.fail_jobs(RunId(1), "HTTP 500".to_owned());
+        board.set_jobs(RunId(99), vec![job(12, RunState::Passed)]);
+        assert_eq!(shape(&board.rows(now())).len(), 5);
+        board.expand(now());
+        assert_eq!(shape(&board.rows(now()))[2], "JobsLoading");
+    }
+
+    #[test]
+    fn more_than_one_run_can_be_expanded() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
+        board.select_next(now());
+        board.expand(now());
+        assert_eq!(
+            marked(&board.rows(now())),
+            [
+                "Header(Active,1,0,0)",
+                "Run(1)",
+                "LastJob(11)",
+                "Header(Recent,1,1,0)",
+                "Run(2)*",
+                "JobsLoading",
+            ]
+        );
+    }
+
+    #[test]
+    fn up_and_down_skip_the_job_rows() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
+        board.select_next(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(2)*"));
+        board.select_previous(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(1)*"));
+    }
+
+    #[test]
+    fn expanded_gives_the_repository_and_the_id_of_each_expanded_run() {
+        let mut board = board();
+        board.replace(repo("a/x"), vec![run(1, "a/x", RunState::Running, 30, 1)]);
+        board.replace(repo("b/y"), vec![run(2, "b/y", RunState::Running, 20, 1)]);
+        board.expand(now());
+        board.select_next(now());
+        board.expand(now());
+        let expected: BTreeSet<(RepoName, RunId)> =
+            [(repo("a/x"), RunId(1)), (repo("b/y"), RunId(2))]
+                .into_iter()
+                .collect();
+        assert_eq!(board.expanded(now()), expected);
     }
 }

@@ -446,6 +446,8 @@ pub fn draw<Tz: TimeZone>(
                     );
                 }
             }
+            // The next slice of issue #565 draws the job rows.
+            Row::Job { .. } | Row::JobsLoading | Row::NoJobs | Row::JobsError(_) => {}
         }
     }
     if usize::from(area.height) >= FIXED_LINES {
