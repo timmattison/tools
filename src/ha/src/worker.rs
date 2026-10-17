@@ -287,37 +287,50 @@ fn fetch_repo<S: Source>(
 }
 
 /// Fetches the runs of every repository with a pool of threads.
-///
-/// The threads take repositories from one shared queue. No thread holds the
-/// queue lock while it waits for the source.
 fn fetch_all<S: Source>(
     source: &S,
     repos: &BTreeSet<RepoName>,
     fetch: &Fetch<'_>,
     updates: &Sender<Update>,
 ) -> Result<(), ReceiverGone> {
-    let queue = Mutex::new(repos.iter().collect::<VecDeque<_>>());
+    let repos: Vec<&RepoName> = repos.iter().collect();
+    run_pool(&repos, updates, |repo| {
+        match fetch_repo(source, repo, fetch) {
+            Ok(runs) => Update::Runs {
+                repo: (*repo).clone(),
+                runs,
+            },
+            Err(error) => Update::Failed {
+                repo: (*repo).clone(),
+                error: error.to_string(),
+            },
+        }
+    })
+}
+
+/// Turns each item into one [`Update`] with a pool of threads, and sends it.
+///
+/// The threads take items from one shared queue. No thread holds the queue
+/// lock while it works. The pool uses [`CONCURRENCY`] threads at most, so every
+/// kind of request shares the same limit. When the receiver of the updates is
+/// gone, the threads stop and the function returns [`ReceiverGone`].
+fn run_pool<T: Sync>(
+    items: &[T],
+    updates: &Sender<Update>,
+    work: impl Fn(&T) -> Update + Sync,
+) -> Result<(), ReceiverGone> {
+    let queue = Mutex::new(items.iter().collect::<VecDeque<_>>());
     let gone = AtomicBool::new(false);
     std::thread::scope(|scope| {
-        for _ in 0..CONCURRENCY.min(repos.len()) {
+        for _ in 0..CONCURRENCY.min(items.len()) {
             scope.spawn(|| {
                 while !gone.load(Ordering::Relaxed) {
                     let next = queue
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
                         .pop_front();
-                    let Some(repo) = next else { break };
-                    let message = match fetch_repo(source, repo, fetch) {
-                        Ok(runs) => Update::Runs {
-                            repo: repo.clone(),
-                            runs,
-                        },
-                        Err(error) => Update::Failed {
-                            repo: repo.clone(),
-                            error: error.to_string(),
-                        },
-                    };
-                    if updates.send(message).is_err() {
+                    let Some(item) = next else { break };
+                    if updates.send(work(item)).is_err() {
                         gone.store(true, Ordering::Relaxed);
                     }
                 }
