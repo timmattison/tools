@@ -146,6 +146,8 @@ where
             match update {
                 Update::Runs { repo, runs } => self.board.replace(repo, runs),
                 Update::Failed { repo, error } => self.board.fail(repo, error),
+                Update::Jobs { run, jobs } => self.board.set_jobs(run, jobs),
+                Update::JobsFailed { run, error } => self.board.fail_jobs(run, error),
                 Update::Repos {
                     repos,
                     owner_errors,

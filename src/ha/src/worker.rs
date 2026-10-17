@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 
 use crate::github::{RunQuery, Source, SourceError};
+use crate::job::Job;
 use crate::run::{Run, RunId};
 use crate::settings::Settings;
 use crate::status::RateLimit;
@@ -50,6 +51,20 @@ pub enum Update {
         /// The error text.
         error: String,
     },
+    /// The jobs of one run that the screen shows expanded.
+    Jobs {
+        /// The run that holds the jobs.
+        run: RunId,
+        /// The jobs of the run.
+        jobs: Vec<Job>,
+    },
+    /// The fetch of the jobs of one run failed.
+    JobsFailed {
+        /// The run whose jobs failed.
+        run: RunId,
+        /// The error text.
+        error: String,
+    },
     /// A cycle ended.
     CycleDone {
         /// When the cycle ended.
@@ -62,10 +77,13 @@ pub enum Update {
 }
 
 /// One message from the screen to the worker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// Start the next cycle now.
     RefreshNow,
+    /// The runs whose jobs the screen shows now. The set is whole: the screen
+    /// sends the full set each time it changes.
+    WatchJobs(BTreeSet<(RepoName, RunId)>),
 }
 
 /// The two ends of the worker thread.
@@ -194,6 +212,7 @@ fn wait_for_next_cycle(commands: &Receiver<Command>, delay: Duration) -> Wake {
     loop {
         match commands.try_recv() {
             Ok(Command::RefreshNow) => requested = true,
+            Ok(Command::WatchJobs(_)) => {}
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => return Wake::Stop,
         }
@@ -201,9 +220,13 @@ fn wait_for_next_cycle(commands: &Receiver<Command>, delay: Duration) -> Wake {
     if requested {
         return Wake::Cycle;
     }
-    match commands.recv_timeout(delay) {
-        Ok(Command::RefreshNow) | Err(RecvTimeoutError::Timeout) => Wake::Cycle,
-        Err(RecvTimeoutError::Disconnected) => Wake::Stop,
+    let deadline = Instant::now() + delay;
+    loop {
+        match commands.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Command::RefreshNow) | Err(RecvTimeoutError::Timeout) => return Wake::Cycle,
+            Ok(Command::WatchJobs(_)) => {}
+            Err(RecvTimeoutError::Disconnected) => return Wake::Stop,
+        }
     }
 }
 
@@ -1122,5 +1145,286 @@ mod tests {
             .map(|(_, name)| name.clone())
             .collect();
         assert_eq!(owner_calls, vec!["acme-a".to_owned()]);
+    }
+
+    fn job(id: u64) -> Job {
+        Job {
+            id: crate::job::JobId(id),
+            name: format!("job {id}"),
+            state: RunState::Passed,
+            started_at: None,
+            completed_at: None,
+            url: String::new(),
+        }
+    }
+
+    /// Sends the whole set of watched runs, all in `acme/a`.
+    fn watch(worker: &Worker, ids: &[u64]) {
+        let set = ids.iter().map(|id| (repo("acme/a"), RunId(*id))).collect();
+        worker
+            .commands
+            .send(Command::WatchJobs(set))
+            .expect("the worker listens");
+    }
+
+    fn refresh(worker: &Worker) {
+        worker
+            .commands
+            .send(Command::RefreshNow)
+            .expect("the worker listens");
+    }
+
+    fn next_update(worker: &Worker) -> Update {
+        worker
+            .updates
+            .recv_timeout(WAIT)
+            .unwrap_or_else(|error| panic!("no update: {error:?}"))
+    }
+
+    fn job_calls(fake: &FakeSource) -> usize {
+        fake.script()
+            .calls
+            .iter()
+            .filter(|(what, _)| *what == "jobs")
+            .count()
+    }
+
+    fn has_jobs(updates: &[Update]) -> bool {
+        updates
+            .iter()
+            .any(|update| matches!(update, Update::Jobs { .. } | Update::JobsFailed { .. }))
+    }
+
+    /// A fake with one repository `acme/a` that holds the given runs.
+    fn fake_with_runs(runs: Vec<Run>) -> Arc<FakeSource> {
+        let fake = Arc::new(FakeSource::default());
+        fake.script().created.insert(repo("acme/a"), Ok(runs));
+        fake
+    }
+
+    #[test]
+    fn a_new_watched_run_gets_its_jobs_at_once_without_a_cycle() {
+        let fake = fake_with_runs(vec![run("acme/a", 5)]);
+        fake.script()
+            .jobs
+            .insert(RunId(5), Ok(vec![job(1), job(2)]));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let _ = one_cycle(&worker);
+
+        watch(&worker, &[5]);
+
+        assert_eq!(
+            next_update(&worker),
+            Update::Jobs {
+                run: RunId(5),
+                jobs: vec![job(1), job(2)]
+            }
+        );
+        assert_eq!(job_calls(&fake), 1);
+    }
+
+    #[test]
+    fn a_failed_job_fetch_gives_jobs_failed_with_the_error_text() {
+        let fake = fake_with_runs(vec![run("acme/a", 5)]);
+        let failure = SourceError::Failed("boom".to_owned());
+        fake.script().jobs.insert(RunId(5), Err(failure.clone()));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let _ = one_cycle(&worker);
+
+        watch(&worker, &[5]);
+
+        assert_eq!(
+            next_update(&worker),
+            Update::JobsFailed {
+                run: RunId(5),
+                error: failure.to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn the_jobs_of_a_finished_run_are_fetched_one_time_only() {
+        let fake = fake_with_runs(vec![run("acme/a", 5)]);
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let _ = one_cycle(&worker);
+        watch(&worker, &[5]);
+        assert!(matches!(next_update(&worker), Update::Jobs { .. }));
+
+        refresh(&worker);
+        let second = one_cycle(&worker);
+
+        assert!(!has_jobs(&second), "{second:?}");
+        assert_eq!(job_calls(&fake), 1);
+    }
+
+    #[test]
+    fn the_jobs_of_an_active_run_are_fetched_on_each_cycle() {
+        let fake = fake_with_runs(vec![active_run("acme/a", 5)]);
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let _ = one_cycle(&worker);
+        watch(&worker, &[5]);
+        assert!(matches!(next_update(&worker), Update::Jobs { .. }));
+
+        for _ in 0..2 {
+            refresh(&worker);
+            let cycle = one_cycle(&worker);
+            let at = cycle
+                .iter()
+                .position(|update| matches!(update, Update::Jobs { run: RunId(5), .. }))
+                .unwrap_or_else(|| panic!("no Jobs in the cycle: {cycle:?}"));
+            assert_eq!(at, cycle.len() - 2, "Jobs comes right before CycleDone");
+        }
+        assert_eq!(job_calls(&fake), 3);
+    }
+
+    #[test]
+    fn a_finished_run_that_changed_gets_its_jobs_again() {
+        let fake = fake_with_runs(vec![run("acme/a", 5)]);
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let _ = one_cycle(&worker);
+        watch(&worker, &[5]);
+        assert!(matches!(next_update(&worker), Update::Jobs { .. }));
+        let mut rerun = run("acme/a", 5);
+        rerun.updated_at += chrono::TimeDelta::minutes(1);
+        fake.script()
+            .created
+            .insert(repo("acme/a"), Ok(vec![rerun]));
+
+        refresh(&worker);
+        let changed = one_cycle(&worker);
+        refresh(&worker);
+        let same = one_cycle(&worker);
+
+        assert!(has_jobs(&changed), "{changed:?}");
+        assert!(!has_jobs(&same), "{same:?}");
+        assert_eq!(job_calls(&fake), 2);
+    }
+
+    #[test]
+    fn a_run_whose_job_fetch_failed_is_fetched_again_on_the_next_cycle() {
+        let fake = fake_with_runs(vec![run("acme/a", 5)]);
+        fake.script()
+            .jobs
+            .insert(RunId(5), Err(SourceError::Failed("boom".to_owned())));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let _ = one_cycle(&worker);
+        watch(&worker, &[5]);
+        assert!(matches!(next_update(&worker), Update::JobsFailed { .. }));
+        fake.script().jobs.insert(RunId(5), Ok(vec![job(9)]));
+
+        refresh(&worker);
+        let cycle = one_cycle(&worker);
+
+        assert!(
+            cycle.contains(&Update::Jobs {
+                run: RunId(5),
+                jobs: vec![job(9)]
+            }),
+            "{cycle:?}"
+        );
+    }
+
+    #[test]
+    fn a_collapsed_run_is_not_fetched_and_an_expanded_again_run_is_fetched_at_once() {
+        let fake = fake_with_runs(vec![active_run("acme/a", 5)]);
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let _ = one_cycle(&worker);
+        watch(&worker, &[5]);
+        assert!(matches!(next_update(&worker), Update::Jobs { .. }));
+
+        watch(&worker, &[]);
+        refresh(&worker);
+        let collapsed = one_cycle(&worker);
+        watch(&worker, &[5]);
+        let again = next_update(&worker);
+
+        assert!(!has_jobs(&collapsed), "{collapsed:?}");
+        assert!(
+            matches!(again, Update::Jobs { run: RunId(5), .. }),
+            "{again:?}"
+        );
+        assert_eq!(job_calls(&fake), 2);
+    }
+
+    #[test]
+    fn a_finished_run_is_fetched_again_after_a_collapse_and_an_expand() {
+        let fake = fake_with_runs(vec![run("acme/a", 5)]);
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let _ = one_cycle(&worker);
+        watch(&worker, &[5]);
+        assert!(matches!(next_update(&worker), Update::Jobs { .. }));
+
+        watch(&worker, &[]);
+        watch(&worker, &[5]);
+
+        assert!(matches!(
+            next_update(&worker),
+            Update::Jobs { run: RunId(5), .. }
+        ));
+        assert_eq!(job_calls(&fake), 2);
+    }
+
+    #[test]
+    fn job_fetches_share_the_concurrency_limit_of_the_run_fetches() {
+        let runs: Vec<Run> = (1..=20).map(|id| active_run("acme/a", id)).collect();
+        let fake = Arc::new(FakeSource {
+            delay: Duration::from_millis(50),
+            ..FakeSource::default()
+        });
+        fake.script().created.insert(repo("acme/a"), Ok(runs));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let _ = one_cycle(&worker);
+        let ids: Vec<u64> = (1..=20).collect();
+
+        fake.script().max_in_flight = 0;
+        watch(&worker, &ids);
+        for _ in 0..20 {
+            assert!(matches!(next_update(&worker), Update::Jobs { .. }));
+        }
+        let at_once = fake.script().max_in_flight;
+        fake.script().max_in_flight = 0;
+        refresh(&worker);
+        let cycle = one_cycle(&worker);
+        let in_cycle = fake.script().max_in_flight;
+
+        assert_eq!(cycle.len(), 1 + 1 + 20 + 1, "Repos is absent: {cycle:?}");
+        for most in [at_once, in_cycle] {
+            assert!(most >= 2, "only {most} call in flight");
+            assert!(most <= CONCURRENCY, "{most} calls in flight at once");
+        }
+    }
+
+    /// A run that is watched during a rate limit backoff gets no request until
+    /// the next cycle. A slow machine can only make this test pass, never fail
+    /// it wrongly, because the test waits for something that must not happen.
+    #[test]
+    fn during_a_backoff_a_new_watched_run_waits_for_the_next_cycle() {
+        let fake = fake_with_runs(vec![run("acme/a", 5)]);
+        let reset = Utc::now() + chrono::TimeDelta::hours(1);
+        fake.script().rate = Some(rate(10, reset));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let first = one_cycle(&worker);
+        assert!(matches!(
+            first.last(),
+            Some(Update::CycleDone {
+                backoff_until: Some(_),
+                ..
+            })
+        ));
+
+        watch(&worker, &[5]);
+        let quiet = worker.updates.recv_timeout(Duration::from_millis(300));
+        let calls_during_backoff = job_calls(&fake);
+        refresh(&worker);
+        let cycle = one_cycle(&worker);
+
+        assert_eq!(quiet, Err(RecvTimeoutError::Timeout));
+        assert_eq!(calls_during_backoff, 0);
+        assert!(
+            cycle
+                .iter()
+                .any(|update| matches!(update, Update::Jobs { run: RunId(5), .. })),
+            "{cycle:?}"
+        );
     }
 }
