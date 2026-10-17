@@ -223,12 +223,16 @@ impl Board {
                 .position(|run| run.id == id)
                 .unwrap_or_else(|| old.min(runs.len().saturating_sub(1))),
         };
-        self.selected = runs.get(position).map(|run| (run.id, position));
+        let selected = runs.get(position).map(|run| (run.id, position));
+        let shown: BTreeSet<RunId> = runs.iter().map(|run| run.id).collect();
+        self.selected = selected;
+        self.expanded.retain(|id, _| shown.contains(id));
     }
 
     /// Builds the full list of rows. The list has two sections.
     ///
-    /// The row of the selected run carries the selection mark.
+    /// The row of the selected run carries the selection mark. The block of
+    /// each expanded run follows the row of that run.
     fn build_rows(&self, now: DateTime<Utc>) -> Vec<Row<'_>> {
         let (active, recent) = self.sections(now);
         let passed = recent
@@ -242,14 +246,28 @@ impl Board {
             failed: 0,
         }];
         let selected = self.selected.map(|(_, index)| index);
-        push_runs(&mut rows, &active, Section::Active, 0, selected);
+        push_runs(
+            &mut rows,
+            &active,
+            Section::Active,
+            0,
+            selected,
+            &self.expanded,
+        );
         rows.push(Row::Header {
             section: Section::Recent,
             count: recent.len(),
             passed,
             failed: recent.len() - passed,
         });
-        push_runs(&mut rows, &recent, Section::Recent, active.len(), selected);
+        push_runs(
+            &mut rows,
+            &recent,
+            Section::Recent,
+            active.len(),
+            selected,
+            &self.expanded,
+        );
         rows
     }
 
@@ -257,32 +275,50 @@ impl Board {
     /// gives its jobs. A run that is already expanded keeps its jobs. With no
     /// selection, nothing happens.
     pub fn expand(&mut self, now: DateTime<Utc>) {
-        let _ = now;
+        self.settle(now);
+        if let Some((id, _)) = self.selected {
+            self.expanded.entry(id).or_insert(Jobs::Loading);
+        }
     }
 
     /// Collapses the selected run and drops its jobs. A run that is not
     /// expanded, or no selection, changes nothing.
     pub fn collapse(&mut self, now: DateTime<Utc>) {
-        let _ = now;
+        self.settle(now);
+        if let Some((id, _)) = self.selected {
+            self.expanded.remove(&id);
+        }
     }
 
     /// Stores the jobs of `run` when the run is expanded. A late answer for a
     /// run that is not expanded is dropped.
     pub fn set_jobs(&mut self, run: RunId, jobs: Vec<Job>) {
-        let _ = (run, jobs);
+        if let Some(state) = self.expanded.get_mut(&run) {
+            *state = Jobs::Ready(jobs);
+        }
     }
 
     /// Records the error of a failed fetch for `run` when the run is expanded.
     /// The last good jobs stay. Nothing happens for a run that is not expanded.
     pub fn fail_jobs(&mut self, run: RunId, error: String) {
-        let _ = (run, error);
+        if let Some(state) = self.expanded.get_mut(&run) {
+            let jobs = match std::mem::replace(state, Jobs::Loading) {
+                Jobs::Loading => Vec::new(),
+                Jobs::Ready(jobs) | Jobs::Failed { jobs, .. } => jobs,
+            };
+            *state = Jobs::Failed { jobs, error };
+        }
     }
 
     /// The repository and the ID of each expanded run that shows at `now`.
     /// The app sends this set to the worker each time it changes.
     pub fn expanded(&mut self, now: DateTime<Utc>) -> BTreeSet<(RepoName, RunId)> {
-        let _ = now;
-        BTreeSet::new()
+        self.settle(now);
+        self.selectable(now)
+            .into_iter()
+            .filter(|run| self.expanded.contains_key(&run.id))
+            .map(|run| (run.repo.clone(), run.id))
+            .collect()
     }
 
     /// Moves the selection to the next run.
@@ -351,21 +387,44 @@ fn scroll(
 /// Adds the runs of one section to `rows`, or the empty row when there is none.
 ///
 /// `first` is the position of the first run of `runs` among all runs. The run
-/// at position `selected` gets the mark.
+/// at position `selected` gets the mark. The block of jobs of each run in
+/// `expanded` follows the row of that run.
 fn push_runs<'a>(
     rows: &mut Vec<Row<'a>>,
     runs: &[&'a Run],
     section: Section,
     first: usize,
     selected: Option<usize>,
+    expanded: &'a BTreeMap<RunId, Jobs>,
 ) {
     if runs.is_empty() {
         rows.push(Row::Empty(section));
     }
-    rows.extend(runs.iter().enumerate().map(|(offset, &run)| Row::Run {
-        run,
-        selected: selected == Some(first + offset),
-    }));
+    for (offset, &run) in runs.iter().enumerate() {
+        rows.push(Row::Run {
+            run,
+            selected: selected == Some(first + offset),
+        });
+        if let Some(jobs) = expanded.get(&run.id) {
+            push_jobs(rows, jobs);
+        }
+    }
+}
+
+/// Adds the block of rows of one expanded run to `rows`.
+fn push_jobs<'a>(rows: &mut Vec<Row<'a>>, jobs: &'a Jobs) {
+    match jobs {
+        Jobs::Loading => rows.push(Row::JobsLoading),
+        Jobs::Ready(list) if list.is_empty() => rows.push(Row::NoJobs),
+        Jobs::Ready(list) => rows.extend(list.iter().enumerate().map(|(index, job)| Row::Job {
+            job,
+            last: index + 1 == list.len(),
+        })),
+        Jobs::Failed { jobs, error } => {
+            rows.extend(jobs.iter().map(|job| Row::Job { job, last: false }));
+            rows.push(Row::JobsError(error));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1221,7 +1280,7 @@ mod tests {
         board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
         board.fail_jobs(RunId(1), "HTTP 500".to_owned());
         board.set_jobs(RunId(99), vec![job(12, RunState::Passed)]);
-        assert_eq!(shape(&board.rows(now())).len(), 5);
+        assert_eq!(shape(&board.rows(now())).len(), 4);
         board.expand(now());
         assert_eq!(shape(&board.rows(now()))[2], "JobsLoading");
     }
