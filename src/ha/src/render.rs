@@ -675,18 +675,62 @@ mod tests {
         assert_eq!(
             lines(&buffer),
             [
-                "  REPO                  WORKFLOW          BRANCH            TITLE                           STARTED     TIME    FINISHED",
+                "  REPO                WORKFLOW            RUN BRANCH          TITLE                         STARTED     TIME    FINISHED",
                 "Running · 2",
-                "● timmattison/tools     CI                main              Fix the thing                   11:45:30    14m 30s",
-                "○ acme/widgets          Release           issue-12          Add release job                 11:58:00    2m 00s",
+                "● timmattison/tools   CI                 #101 main            Fix the thing                 11:45:30    14m 30s",
+                "○ acme/widgets        Release            #102 issue-12        Add release job               11:58:00    2m 00s",
                 "Last 8h · 1 passed · 1 failed",
-                "✓ timmattison/tools     CI                main              Bump deps                       09:00:00    10m 05s 2h ago",
-                "✗ acme/widgets          Release           issue-11          Broken build                    10-13 23:50 4h 40m  7h ago",
+                "✓ timmattison/tools   CI                 #103 main            Bump deps                     09:00:00    10m 05s 2h ago",
+                "✗ acme/widgets        Release            #104 issue-11        Broken build                  10-13 23:50 4h 40m  7h ago",
                 "",
                 "",
                 "updated 30s ago      ·  ↑↓ select  ⏎ open  r refresh  q quit",
             ]
         );
+    }
+
+    /// The characters of a line from column `from`, `count` columns wide.
+    fn columns(line: &str, from: usize, count: usize) -> String {
+        line.chars().skip(from).take(count).collect()
+    }
+
+    /// The first column of the run column in a frame of 120 columns. The
+    /// marker, the repository (19), and the workflow (15) come before it.
+    const RUN_COLUMN: usize = 1 + 1 + 19 + 1 + 15 + 1;
+
+    #[test]
+    fn the_run_column_shows_the_run_number_aligned_to_the_right() {
+        let mut board = four_run_board();
+        let text = lines(&render_with(120, 10, &mut board, &loaded()));
+        assert_eq!(columns(&text[0], RUN_COLUMN, 7), "    RUN");
+        assert_eq!(columns(&text[2], RUN_COLUMN, 7), "   #101");
+        assert_eq!(columns(&text[3], RUN_COLUMN, 7), "   #102");
+        assert_eq!(columns(&text[5], RUN_COLUMN, 7), "   #103");
+        assert_eq!(columns(&text[6], RUN_COLUMN, 7), "   #104");
+    }
+
+    #[test]
+    fn a_run_number_wider_than_the_column_is_cut_and_keeps_the_other_columns() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("acme/widgets"),
+            vec![run(
+                1_234_467,
+                "acme/widgets",
+                "CI",
+                "main",
+                "Wide number",
+                RunState::Running,
+                "2026-10-14T11:45:30Z",
+                "2026-10-14T11:59:00Z",
+            )],
+        );
+        let text = lines(&render_with(120, 10, &mut board, &loaded()));
+        assert_eq!(columns(&text[2], RUN_COLUMN, 7), "#12345…");
+        let started = text[0]
+            .find("STARTED")
+            .expect("the header names the started column");
+        assert_eq!(columns(&text[2], started, 8), "11:45:30");
     }
 
     #[test]
