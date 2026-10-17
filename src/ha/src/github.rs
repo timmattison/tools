@@ -388,8 +388,8 @@ impl GhSource {
             repo.name(),
             run.0
         );
-        let response = self.request(&path, None)?;
-        parse_jobs(&response.body)
+        let key = format!("{repo}#jobs/{}#{number}", run.0);
+        self.cached_get(&key, &path, parse_jobs)
     }
 
     /// Fetches every page of the runs of `repo` for `filter`.
