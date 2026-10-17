@@ -3,6 +3,14 @@
 //! The worker runs on its own thread. It asks the [`Source`] for the runs of
 //! every repository, sends each answer to the screen as an [`Update`], and
 //! then waits for the next cycle. The screen sends [`Command`] values back.
+//!
+//! The screen also tells the worker which runs it shows expanded, with
+//! [`Command::WatchJobs`]. The worker fetches the jobs of those runs. It fetches
+//! the jobs of a new run at once, and it fetches the jobs of a watched run on
+//! each cycle when the run is due. A run is due when it has no good job fetch
+//! yet, when it is active, or when its `updated_at` changed since the last good
+//! fetch. So `ha` fetches the jobs of a finished run one time only. Job requests
+//! and run requests share the [`CONCURRENCY`] limit and the rate limit backoff.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -160,6 +168,27 @@ fn spawn_with<S: Source + 'static>(source: S, settings: &Settings, slow: Duratio
 /// The receiver of the updates is gone, so the thread has no reason to run.
 struct ReceiverGone;
 
+/// A run, named by its repository and its ID.
+type RunKey = (RepoName, RunId);
+
+/// What the worker knows about one run from a list of runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RunFacts {
+    /// True when the run is queued or running.
+    active: bool,
+    /// When GitHub last changed the run. A re-run changes this time.
+    updated_at: DateTime<Utc>,
+}
+
+impl RunFacts {
+    fn of(run: &Run) -> RunFacts {
+        RunFacts {
+            active: run.state.is_active(),
+            updated_at: run.updated_at,
+        }
+    }
+}
+
 /// What the worker keeps from one cycle to the next.
 struct State {
     owner_cadence: Cadence,
@@ -169,6 +198,60 @@ struct State {
     sweep_cadence: Cadence,
     /// The active runs of the last good sweep, for each repository.
     sweeps: Mutex<HashMap<RepoName, Vec<Run>>>,
+    /// The runs whose jobs the screen shows now (the last `WatchJobs`).
+    watched: BTreeSet<RunKey>,
+    /// The facts of each run of the last good answer, for each repository.
+    facts: Mutex<HashMap<RepoName, HashMap<RunId, RunFacts>>>,
+    /// For each watched run, the facts of the run at its last good job fetch.
+    job_marks: Mutex<HashMap<RunKey, RunFacts>>,
+}
+
+impl State {
+    fn new(slow: Duration) -> State {
+        State {
+            owner_cadence: Cadence::new(slow),
+            owner_lists: BTreeMap::new(),
+            owner_errors: BTreeMap::new(),
+            sweep_cadence: Cadence::new(slow),
+            sweeps: Mutex::new(HashMap::new()),
+            watched: BTreeSet::new(),
+            facts: Mutex::new(HashMap::new()),
+            job_marks: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Takes a new set of watched runs. Returns the runs that are new in it.
+    /// A run that leaves the set loses its mark, so a later expand fetches again.
+    fn watch(&mut self, set: BTreeSet<RunKey>) -> Vec<RunKey> {
+        self.job_marks
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|key, _| set.contains(key));
+        let added = set.difference(&self.watched).cloned().collect();
+        self.watched = set;
+        added
+    }
+
+    /// The watched runs whose jobs the next cycle fetches.
+    fn due_jobs(&mut self) -> Vec<RunKey> {
+        let facts = self.facts.get_mut().unwrap_or_else(PoisonError::into_inner);
+        let marks = self
+            .job_marks
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.watched
+            .iter()
+            .filter(|(repo, run)| match marks.get(&(repo.clone(), *run)) {
+                None => true,
+                Some(mark) if mark.active => true,
+                Some(mark) => facts
+                    .get(repo)
+                    .and_then(|runs| runs.get(run))
+                    .is_some_and(|now| now.updated_at != mark.updated_at),
+            })
+            .cloned()
+            .collect()
+    }
 }
 
 fn run_loop<S: Source>(
@@ -178,16 +261,11 @@ fn run_loop<S: Source>(
     updates: &Sender<Update>,
     commands: &Receiver<Command>,
 ) {
-    let mut state = State {
-        owner_cadence: Cadence::new(slow),
-        owner_lists: BTreeMap::new(),
-        owner_errors: BTreeMap::new(),
-        sweep_cadence: Cadence::new(slow),
-        sweeps: Mutex::new(HashMap::new()),
-    };
-    while let Ok(delay) = cycle(source, settings, &mut state, updates) {
-        if wait_for_next_cycle(commands, delay) == Wake::Stop {
-            return;
+    let mut state = State::new(slow);
+    while let Ok((delay, backoff)) = cycle(source, settings, &mut state, updates) {
+        match wait_for_next_cycle(source, &mut state, updates, commands, delay, backoff) {
+            Ok(Wake::Cycle) => {}
+            Ok(Wake::Stop) | Err(ReceiverGone) => return,
         }
     }
 }
@@ -203,41 +281,76 @@ enum Wake {
 
 /// Waits for the next cycle.
 ///
-/// A refresh command that arrived during the last cycle starts the next cycle
-/// at once. Otherwise the wait lasts `delay`, and a refresh command ends it.
-/// A refresh command also ends a wait for a rate limit reset, because the
-/// person asked for it.
-fn wait_for_next_cycle(commands: &Receiver<Command>, delay: Duration) -> Wake {
+/// The wait ends at a deadline, `delay` after the start. The function first
+/// applies each command that arrived during the last cycle, in order. A refresh
+/// command in that backlog starts the next cycle at once. A refresh command
+/// also ends a wait for a rate limit reset, because the person asked for it.
+///
+/// A [`Command::WatchJobs`] changes the watched set. The function fetches the
+/// jobs of each run that is new in the set at once, and it sends the answers.
+/// The wait then goes on until the same deadline. It does not fetch at once
+/// when a refresh is also due, because the cycle fetches the new runs. It does
+/// not fetch at once while `backoff` is true, because job requests share the
+/// rate limit backoff of the run requests. The next cycle fetches those runs.
+fn wait_for_next_cycle<S: Source>(
+    source: &S,
+    state: &mut State,
+    updates: &Sender<Update>,
+    commands: &Receiver<Command>,
+    delay: Duration,
+    backoff: bool,
+) -> Result<Wake, ReceiverGone> {
+    let deadline = Instant::now() + delay;
     let mut requested = false;
+    let mut added: Vec<RunKey> = Vec::new();
     loop {
         match commands.try_recv() {
-            Ok(Command::RefreshNow) => requested = true,
-            Ok(Command::WatchJobs(_)) => {}
+            Ok(command) => apply_command(command, state, &mut requested, &mut added),
             Err(TryRecvError::Empty) => break,
-            Err(TryRecvError::Disconnected) => return Wake::Stop,
+            Err(TryRecvError::Disconnected) => return Ok(Wake::Stop),
         }
     }
-    if requested {
-        return Wake::Cycle;
-    }
-    let deadline = Instant::now() + delay;
     loop {
+        if requested {
+            return Ok(Wake::Cycle);
+        }
+        added.retain(|key| state.watched.contains(key));
+        if !backoff && !added.is_empty() {
+            fetch_jobs(source, state, &added, updates)?;
+        }
+        added.clear();
         match commands.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(Command::RefreshNow) | Err(RecvTimeoutError::Timeout) => return Wake::Cycle,
-            Ok(Command::WatchJobs(_)) => {}
-            Err(RecvTimeoutError::Disconnected) => return Wake::Stop,
+            Ok(command) => apply_command(command, state, &mut requested, &mut added),
+            Err(RecvTimeoutError::Timeout) => return Ok(Wake::Cycle),
+            Err(RecvTimeoutError::Disconnected) => return Ok(Wake::Stop),
         }
     }
 }
 
-/// Runs one cycle: lists the owners that need it, fetches every repository, and
-/// reports the end of the cycle. Returns how long to wait before the next one.
+/// Applies one command. A refresh sets `requested`. A new watched set adds its
+/// new runs to `added`.
+fn apply_command(
+    command: Command,
+    state: &mut State,
+    requested: &mut bool,
+    added: &mut Vec<RunKey>,
+) {
+    match command {
+        Command::RefreshNow => *requested = true,
+        Command::WatchJobs(set) => added.extend(state.watch(set)),
+    }
+}
+
+/// Runs one cycle: lists the owners that need it, fetches every repository,
+/// fetches the jobs of the watched runs that are due, and reports the end of
+/// the cycle. Returns how long to wait before the next one, and whether the
+/// worker waits for a rate limit reset.
 fn cycle<S: Source>(
     source: &S,
     settings: &Settings,
     state: &mut State,
     updates: &Sender<Update>,
-) -> Result<Duration, ReceiverGone> {
+) -> Result<(Duration, bool), ReceiverGone> {
     let repos = refresh_repos(source, settings, state, updates)?;
     let now = Instant::now();
     let sweep_due = state.sweep_cadence.due(now);
@@ -253,8 +366,16 @@ fn cycle<S: Source>(
         since: window_start(settings.window),
         sweep_due,
         sweeps: &state.sweeps,
+        facts: &state.facts,
     };
     fetch_all(source, &repos, &fetch, updates)?;
+    state
+        .facts
+        .get_mut()
+        .unwrap_or_else(PoisonError::into_inner)
+        .retain(|repo, _| repos.contains(repo));
+    let due = state.due_jobs();
+    fetch_jobs(source, state, &due, updates)?;
     let now = Utc::now();
     let rate = source.rate_limit();
     let (delay, backoff_until) = next_delay(settings.interval, rate, now);
@@ -265,7 +386,7 @@ fn cycle<S: Source>(
             backoff_until,
         })
         .map_err(|_| ReceiverGone)?;
-    Ok(delay)
+    Ok((delay, backoff_until.is_some()))
 }
 
 /// What every fetch of one cycle shares.
@@ -276,6 +397,9 @@ struct Fetch<'a> {
     sweep_due: bool,
     /// The stored sweep results. No thread holds this lock during a call.
     sweeps: &'a Mutex<HashMap<RepoName, Vec<Run>>>,
+    /// The facts of the runs of each repository. A good fetch replaces the
+    /// entry of its repository. No thread holds this lock during a call.
+    facts: &'a Mutex<HashMap<RepoName, HashMap<RunId, RunFacts>>>,
 }
 
 /// Fetches the runs of one repository and merges in the last sweep.
@@ -310,6 +434,9 @@ fn fetch_repo<S: Source>(
 }
 
 /// Fetches the runs of every repository with a pool of threads.
+///
+/// After a good fetch the function stores the facts of the runs of that
+/// repository. A failed fetch keeps the old facts.
 fn fetch_all<S: Source>(
     source: &S,
     repos: &BTreeSet<RepoName>,
@@ -319,14 +446,66 @@ fn fetch_all<S: Source>(
     let repos: Vec<&RepoName> = repos.iter().collect();
     run_pool(&repos, updates, |repo| {
         match fetch_repo(source, repo, fetch) {
-            Ok(runs) => Update::Runs {
-                repo: (*repo).clone(),
-                runs,
-            },
+            Ok(runs) => {
+                let facts = runs.iter().map(|run| (run.id, RunFacts::of(run))).collect();
+                fetch
+                    .facts
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert((*repo).clone(), facts);
+                Update::Runs {
+                    repo: (*repo).clone(),
+                    runs,
+                }
+            }
             Err(error) => Update::Failed {
                 repo: (*repo).clone(),
                 error: error.to_string(),
             },
+        }
+    })
+}
+
+/// Fetches the jobs of the given runs with the shared pool of threads.
+///
+/// A good fetch sends [`Update::Jobs`] and marks the run with its current
+/// facts. A run with no facts gets no mark. A failed fetch sends
+/// [`Update::JobsFailed`] and removes the mark, so the next cycle tries again.
+fn fetch_jobs<S: Source>(
+    source: &S,
+    state: &State,
+    runs: &[RunKey],
+    updates: &Sender<Update>,
+) -> Result<(), ReceiverGone> {
+    run_pool(runs, updates, |(repo, run)| {
+        let result = source.jobs_of(repo, *run);
+        let facts = state
+            .facts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(repo)
+            .and_then(|runs| runs.get(run))
+            .copied();
+        let mut marks = state
+            .job_marks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match (result, facts) {
+            (Ok(jobs), Some(facts)) => {
+                marks.insert((repo.clone(), *run), facts);
+                Update::Jobs { run: *run, jobs }
+            }
+            (Ok(jobs), None) => {
+                marks.remove(&(repo.clone(), *run));
+                Update::Jobs { run: *run, jobs }
+            }
+            (Err(error), _) => {
+                marks.remove(&(repo.clone(), *run));
+                Update::JobsFailed {
+                    run: *run,
+                    error: error.to_string(),
+                }
+            }
         }
     })
 }
@@ -1112,8 +1291,7 @@ mod tests {
             owner_cadence: cadence,
             owner_lists: BTreeMap::from([(owner("acme-b"), vec![repo("acme-b/x")])]),
             owner_errors: BTreeMap::from([(owner("acme-b"), "old error".to_owned())]),
-            sweep_cadence: Cadence::new(SLOW_CADENCE),
-            sweeps: Mutex::new(HashMap::new()),
+            ..State::new(SLOW_CADENCE)
         };
         let (updates_tx, updates_rx) = mpsc::channel();
 
@@ -1387,7 +1565,7 @@ mod tests {
         let cycle = one_cycle(&worker);
         let in_cycle = fake.script().max_in_flight;
 
-        assert_eq!(cycle.len(), 1 + 1 + 20 + 1, "Repos is absent: {cycle:?}");
+        assert_eq!(cycle.len(), 22, "Runs, 20 Jobs, CycleDone: {cycle:?}");
         for most in [at_once, in_cycle] {
             assert!(most >= 2, "only {most} call in flight");
             assert!(most <= CONCURRENCY, "{most} calls in flight at once");
