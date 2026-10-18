@@ -1259,6 +1259,21 @@ mod tests {
     }
 
     #[test]
+    fn no_row_shows_how_long_ago_a_run_or_a_job_finished() {
+        let mut board = board_with_jobs(three_jobs());
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert!(
+            !text[0].split_whitespace().any(|word| word == "FINISHED"),
+            "the header names a finished column: {:?}",
+            text[0]
+        );
+        // Line 13 is the status line. It says `updated 30s ago` and stays.
+        for (y, line) in text.iter().enumerate().take(13).skip(1) {
+            assert!(!line.contains("ago"), "line {y} shows an age: {line:?}");
+        }
+    }
+
+    #[test]
     fn each_job_marker_has_the_color_of_its_state() {
         let mut board = board_with_jobs(three_jobs());
         let buffer = render_with(120, 14, &mut board, &loaded());
