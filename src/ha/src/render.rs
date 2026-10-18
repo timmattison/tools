@@ -29,6 +29,11 @@ const TIME_WIDTH: usize = 7;
 /// The columns that the text columns do not share: the marker, the ID part,
 /// started, and time columns, and the seven spaces between the columns.
 const FIXED_COLUMNS: usize = MARKER_WIDTH + ID_WIDTH + STARTED_WIDTH + TIME_WIDTH + 7;
+/// The header word of the workflow column.
+const WORKFLOW_HEADER: &str = "WORKFLOW";
+/// The most columns that the workflow name gets: the width of its header word.
+/// Most workflow names fit, for example `CI`, `Release`, and `CodeQL`.
+const MAX_WORKFLOW_WIDTH: usize = WORKFLOW_HEADER.len();
 /// The lines that are not board rows: the column header and the status line.
 const FIXED_LINES: usize = 2;
 /// The text that stands between two parts of the status line.
@@ -53,13 +58,16 @@ struct Widths {
 impl Widths {
     /// Shares the columns that the fixed columns leave over: 24 percent to the
     /// repository, 19 percent to the workflow name, 21 percent to the branch,
-    /// and the rest to the title. A workflow name is usually short, and a
-    /// person reads the branch and the title to find what runs. A frame that
-    /// is too narrow gives each 0.
+    /// and the rest to the title.
+    ///
+    /// The workflow name never gets more than [`MAX_WORKFLOW_WIDTH`] columns,
+    /// the width of its header word, and the title gets each column that it
+    /// gives up. A workflow name is usually short, and the title is the
+    /// longest text of a row. A frame that is too narrow gives each 0.
     fn for_width(width: usize) -> Widths {
         let room = width.saturating_sub(FIXED_COLUMNS);
         let repo = room * 24 / 100;
-        let workflow = room * 19 / 100;
+        let workflow = (room * 19 / 100).min(MAX_WORKFLOW_WIDTH);
         let branch = room * 21 / 100;
         Widths {
             repo,
@@ -120,7 +128,7 @@ fn header_cells(widths: Widths) -> String {
     [
         pad_right(" ", MARKER_WIDTH),
         fit("REPO", widths.repo),
-        fit("WORKFLOW", widths.workflow + 1 + ID_WIDTH),
+        fit(WORKFLOW_HEADER, widths.workflow + 1 + ID_WIDTH),
         fit("BRANCH", widths.branch),
         fit("TITLE", widths.title),
         pad_right("STARTED", STARTED_WIDTH),
