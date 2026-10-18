@@ -227,6 +227,13 @@ where
     /// first. The `Enter` key can then post a new one. `Right` expands the
     /// run of the highlighted row. `Left` collapses that run, also from a job
     /// row. `Enter` opens the highlighted run or job.
+    ///
+    /// `c` opens a box that asks to cancel the run of the highlighted row.
+    /// On a finished run it posts that there is nothing to cancel instead.
+    /// While the box shows, it takes every key. `y` cancels the run that the
+    /// box names, Ctrl-C quits, and every other key closes the box and does
+    /// nothing more. Thus `q`, `Esc`, and `Enter` do not quit, open, or move
+    /// anything while the box shows.
     fn handle_key(&mut self, key: KeyEvent) -> Flow {
         self.status.message = None;
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -283,9 +290,9 @@ where
         }
     }
 
-    /// Opens the box that asks to cancel the highlighted run. The box keeps a
-    /// copy of what it shows, thus a later refresh does not change the run
-    /// that `y` cancels. On a job row it names the run of the job.
+    /// Opens the box that asks to cancel the highlighted run, or posts that a
+    /// finished run has nothing to cancel. The box keeps a copy of what it
+    /// shows, thus a later refresh does not change the run that `y` cancels. On a job row it names the run of the job.
     fn ask_to_cancel(&mut self) {
         let now = (self.now)();
         let target = self.board.selected_target(now).map(|(run, job)| {
@@ -299,7 +306,7 @@ where
             None => {}
             Some(Ok(confirm)) => self.confirm = Some(confirm),
             Some(Err(id)) => {
-                self.post(format!("run {} finished: there is nothing to cancel", id.0))
+                self.post(format!("run {} finished: there is nothing to cancel", id.0));
             }
         }
     }
