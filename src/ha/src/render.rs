@@ -2308,6 +2308,15 @@ mod tests {
         assert_eq!(status_line(20, &Status::default()), "loading…  ·  ↑↓ sel…");
     }
 
+    #[test]
+    fn the_status_line_names_the_cancel_key_between_open_and_refresh() {
+        let line = status_line(140, &Status::default());
+        assert!(
+            line.ends_with("⏎ open  c cancel  r refresh  q quit"),
+            "{line}"
+        );
+    }
+
     /// The status line of a frame that holds the board `board`.
     fn status_line_of(board: &mut Board, status: &Status) -> String {
         let text = lines(&render_with(140, 8, board, status));
