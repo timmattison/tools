@@ -465,6 +465,17 @@ fn put(buffer: &mut Buffer, y: usize, text: &str, style: Style) -> u16 {
     y
 }
 
+/// Reverses the colors across the full width of buffer row `y` when `selected`
+/// is true. The highlight of a run row and of a job row use this one rule.
+fn reverse_if(selected: bool, buffer: &mut Buffer, area: Rect, y: u16) {
+    if selected {
+        buffer.set_style(
+            Rect::new(area.x, y, area.width, 1),
+            Style::default().add_modifier(Modifier::REVERSED),
+        );
+    }
+}
+
 /// The color of the marker of a run state.
 fn marker_color(state: RunState) -> Color {
     match state {
@@ -538,12 +549,7 @@ pub fn draw<Tz: TimeZone>(
                     Rect::new(area.x, y, 1, 1),
                     Style::default().fg(marker_color(run.state)),
                 );
-                if *selected {
-                    buffer.set_style(
-                        Rect::new(area.x, y, area.width, 1),
-                        Style::default().add_modifier(Modifier::REVERSED),
-                    );
-                }
+                reverse_if(*selected, buffer, area, y);
             }
             Row::Job {
                 job,
@@ -556,12 +562,7 @@ pub fn draw<Tz: TimeZone>(
                     Rect::new(area.x, y, 1, 1),
                     Style::default().fg(marker_color(job.state)),
                 );
-                if *selected {
-                    buffer.set_style(
-                        Rect::new(area.x, y, area.width, 1),
-                        Style::default().add_modifier(Modifier::REVERSED),
-                    );
-                }
+                reverse_if(*selected, buffer, area, y);
             }
             Row::JobsLoading => put_status_row(buffer, index + 1, JOBS_LOADING),
             Row::NoJobs => put_status_row(buffer, index + 1, NO_JOBS),
