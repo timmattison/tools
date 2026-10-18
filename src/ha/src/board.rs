@@ -496,8 +496,12 @@ impl Board {
     /// selected. The value is `None` when the board has no run.
     ///
     /// It calls `settle` first, as `selected_url` does.
-    pub fn selected_target(&mut self, _now: DateTime<Utc>) -> Option<(&Run, Option<&Job>)> {
-        None
+    pub fn selected_target(&mut self, now: DateTime<Utc>) -> Option<(&Run, Option<&Job>)> {
+        self.settle(now);
+        let Selection { run: (id, _), job } = self.selected?;
+        let run = self.shown_runs(now).into_iter().find(|run| run.id == id)?;
+        let job = job.and_then(|(_, index)| self.shown_jobs(id).get(index));
+        Some((run, job))
     }
 
     /// The address of the selected row, or `None` when the board has no run.
