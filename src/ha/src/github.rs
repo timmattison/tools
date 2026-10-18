@@ -152,12 +152,19 @@ fn parse_jobs(body: &str) -> Result<JobsPage, SourceError> {
         .into_iter()
         .map(|json| {
             let status = json.status.unwrap_or_default();
+            let state = RunState::from_github(&status, json.conclusion.as_deref());
+            // A job that waits did not start, whatever start time GitHub gives.
+            let started_at = if state == RunState::Queued {
+                None
+            } else {
+                json.started_at.or(json.created_at)
+            };
             Job {
                 id: JobId(json.id),
                 name: json.name.unwrap_or_default(),
-                state: RunState::from_github(&status, json.conclusion.as_deref()),
+                state,
                 created_at: json.created_at,
-                started_at: json.started_at.or(json.created_at),
+                started_at,
                 completed_at: json.completed_at,
                 url: json.html_url.unwrap_or_default(),
             }
