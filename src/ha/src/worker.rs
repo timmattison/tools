@@ -210,8 +210,9 @@ struct State {
     watched: BTreeSet<RunKey>,
     /// The facts of each run of the last good answer, for each repository.
     facts: Mutex<HashMap<RepoName, HashMap<RunId, RunFacts>>>,
-    /// For each watched run, the facts of the run at its last good job fetch.
-    /// The mark is active when the run or one of its jobs was active.
+    /// For each run with a good job fetch, the facts of the run at that fetch.
+    /// The mark is active when the run or one of its jobs was active. A run
+    /// keeps its mark when it leaves the watched set, so it gets one last fetch.
     job_marks: Mutex<HashMap<RunKey, RunFacts>>,
 }
 
@@ -242,8 +243,10 @@ impl State {
     }
 
     /// The runs whose jobs the next cycle fetches, each one time, in a stable
-    /// order. The function considers the watched runs and every run whose facts
-    /// say it is active. It applies the due rule to each of them.
+    /// order. The function considers three sets: the watched runs, every run
+    /// whose facts say it is active, and every run that has a mark. It applies
+    /// the due rule to each of them. The third set gives a run that is not
+    /// watched its last fetch: its mark is active, so it is due one more time.
     fn due_jobs(&mut self) -> Vec<RunKey> {
         let facts = self.facts.get_mut().unwrap_or_else(PoisonError::into_inner);
         let marks = self
@@ -251,6 +254,7 @@ impl State {
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner);
         let mut considered: BTreeSet<RunKey> = self.watched.clone();
+        considered.extend(marks.keys().cloned());
         for (repo, runs) in facts.iter() {
             considered.extend(
                 runs.iter()
@@ -363,8 +367,10 @@ fn apply_command(
 }
 
 /// Runs one cycle: lists the owners that need it, fetches every repository,
-/// fetches the jobs of the runs that are due (the watched runs and the active
-/// runs), and reports the end of the cycle. Returns how long to wait before the
+/// fetches the jobs of the runs that are due (the watched runs, the active
+/// runs, and the runs with a mark), and reports the end of the cycle. A mark
+/// whose run left the list of runs is removed. A failed repository fetch keeps
+/// its old facts, thus its marks stay. Returns how long to wait before the
 /// next one, and whether the worker waits for a rate limit reset.
 fn cycle<S: Source>(
     source: &S,
@@ -390,11 +396,16 @@ fn cycle<S: Source>(
         facts: &state.facts,
     };
     fetch_all(source, &repos, &fetch, updates)?;
-    state
+    let facts = state
         .facts
         .get_mut()
+        .unwrap_or_else(PoisonError::into_inner);
+    facts.retain(|repo, _| repos.contains(repo));
+    state
+        .job_marks
+        .get_mut()
         .unwrap_or_else(PoisonError::into_inner)
-        .retain(|repo, _| repos.contains(repo));
+        .retain(|(repo, run), _| facts.get(repo).is_some_and(|runs| runs.contains_key(run)));
     let due = state.due_jobs();
     fetch_jobs(source, state, &due, updates)?;
     let now = Utc::now();
