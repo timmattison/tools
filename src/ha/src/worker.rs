@@ -389,8 +389,8 @@ fn apply_command(
 /// reports the end of the cycle. A mark whose run left the list of runs is
 /// removed. The reconcile at the end of the job fetch then tells the source to
 /// forget the pages of each run whose mark went away. A failed repository
-/// fetch keeps its old facts, thus its marks stay. Returns how long to wait before the next one, and whether the worker
-/// waits for a rate limit reset.
+/// fetch keeps its old facts, thus its marks stay. Returns how long to wait
+/// before the next one, and whether the worker waits for a rate limit reset.
 fn cycle<S: Source>(
     source: &S,
     settings: &Settings,
