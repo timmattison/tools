@@ -152,11 +152,19 @@ fn parse_jobs(body: &str) -> Result<JobsPage, SourceError> {
         .into_iter()
         .map(|json| {
             let status = json.status.unwrap_or_default();
+            let state = RunState::from_github(&status, json.conclusion.as_deref());
+            // A job that waits did not start, whatever start time GitHub gives.
+            let started_at = if state == RunState::Queued {
+                None
+            } else {
+                json.started_at.or(json.created_at)
+            };
             Job {
                 id: JobId(json.id),
                 name: json.name.unwrap_or_default(),
-                state: RunState::from_github(&status, json.conclusion.as_deref()),
-                started_at: json.started_at.or(json.created_at),
+                state,
+                created_at: json.created_at,
+                started_at,
                 completed_at: json.completed_at,
                 url: json.html_url.unwrap_or_default(),
             }
@@ -929,7 +937,7 @@ mod tests {
          "started_at":null,"created_at":"2026-09-25T01:02:03Z","completed_at":null,
          "html_url":"https://github.com/o/r/actions/runs/29679449/job/2"},
         {"id":3,"name":null,"status":"queued","conclusion":null,
-         "started_at":null,"created_at":null,"completed_at":null,"html_url":null}]}"#;
+         "started_at":null,"created_at":"2026-09-25T01:04:00Z","completed_at":null,"html_url":null}]}"#;
 
     #[test]
     fn the_jobs_json_maps_to_jobs() {
@@ -942,6 +950,7 @@ mod tests {
                     id: JobId(399_444_496),
                     name: "build (ubuntu)".to_owned(),
                     state: RunState::Failed,
+                    created_at: Some(time("2026-09-24T21:55:00Z")),
                     started_at: Some(time("2026-09-24T21:56:49Z")),
                     completed_at: Some(time("2026-09-24T21:57:56Z")),
                     url: "https://github.com/o/r/actions/runs/29679449/job/399444496".to_owned(),
@@ -950,6 +959,7 @@ mod tests {
                     id: JobId(2),
                     name: "test".to_owned(),
                     state: RunState::Running,
+                    created_at: Some(time("2026-09-25T01:02:03Z")),
                     started_at: Some(time("2026-09-25T01:02:03Z")),
                     completed_at: None,
                     url: "https://github.com/o/r/actions/runs/29679449/job/2".to_owned(),
@@ -958,6 +968,7 @@ mod tests {
                     id: JobId(3),
                     name: String::new(),
                     state: RunState::Queued,
+                    created_at: Some(time("2026-09-25T01:04:00Z")),
                     started_at: None,
                     completed_at: None,
                     url: String::new(),
@@ -967,10 +978,34 @@ mod tests {
     }
 
     #[test]
-    fn a_job_that_has_not_started_takes_its_creation_time_or_none() {
+    fn only_a_job_that_does_not_wait_takes_its_creation_time_as_its_start() {
         let page = parse_jobs(JOBS_JSON).expect("a page");
         assert_eq!(page.jobs[1].started_at, Some(time("2026-09-25T01:02:03Z")));
         assert_eq!(page.jobs[2].started_at, None);
+    }
+
+    #[test]
+    fn a_waiting_job_has_no_start_and_keeps_its_creation_time() {
+        // GitHub can give a start time for a job that still waits. The state of
+        // the job, not the time, tells if the job started.
+        let body = r#"{"total_count":2,"jobs":[
+            {"id":1,"name":"queued","status":"queued","conclusion":null,
+             "started_at":"2026-09-25T01:05:00Z","created_at":"2026-09-25T01:02:03Z",
+             "completed_at":null,"html_url":null},
+            {"id":2,"name":"approval","status":"waiting","conclusion":null,
+             "started_at":"2026-09-25T01:05:00Z","created_at":"2026-09-25T01:02:03Z",
+             "completed_at":null,"html_url":null}]}"#;
+        let page = parse_jobs(body).expect("a page");
+        for job in &page.jobs {
+            assert_eq!(job.state, RunState::Queued, "{}", job.name);
+            assert_eq!(job.started_at, None, "{}", job.name);
+            assert_eq!(
+                job.created_at,
+                Some(time("2026-09-25T01:02:03Z")),
+                "{}",
+                job.name
+            );
+        }
     }
 
     #[test]

@@ -207,9 +207,14 @@ where
 /// The line of one job of an expanded run.
 ///
 /// The text cell holds the tree glyph (`└` when `last` is true, else `├`), a
-/// space, and the name of the job. The time cells follow the rules of
-/// [`run_line`], with the finish time of the job in place of the update time.
-/// A job with no start time has an empty started cell and an empty time cell.
+/// space, and the name of the job.
+///
+/// A job that waits did not start, thus its started cell is empty. Its time
+/// cell shows how long it waited, from its creation until `now`, and is empty
+/// when the job has no creation time. The time cells of each other job follow
+/// the rules of [`run_line`], with the finish time of the job in place of the
+/// update time. Such a job with no start time has an empty started cell and an
+/// empty time cell.
 fn job_line<Tz: TimeZone>(
     job: &Job,
     last: bool,
@@ -220,18 +225,29 @@ fn job_line<Tz: TimeZone>(
 where
     Tz::Offset: Display,
 {
-    let started = job
-        .started_at
-        .map(|started| format_started(started, now, tz))
-        .unwrap_or_default();
-    let time = job.started_at.map_or_else(String::new, |started| {
-        if job.state.is_active() {
-            format_elapsed(span(started, now))
-        } else {
-            job.completed_at
-                .map_or_else(String::new, |done| format_elapsed(span(started, done)))
-        }
-    });
+    let (started, time) = if job.state == RunState::Queued {
+        // A job that waits did not start. Its time is the wait, from its creation.
+        (
+            String::new(),
+            job.created_at
+                .map(|created| format_elapsed(span(created, now)))
+                .unwrap_or_default(),
+        )
+    } else {
+        (
+            job.started_at
+                .map(|started| format_started(started, now, tz))
+                .unwrap_or_default(),
+            job.started_at.map_or_else(String::new, |started| {
+                if job.state.is_active() {
+                    format_elapsed(span(started, now))
+                } else {
+                    job.completed_at
+                        .map_or_else(String::new, |done| format_elapsed(span(started, done)))
+                }
+            }),
+        )
+    };
     let finished = match job.completed_at {
         Some(done) if !job.state.is_active() => format_ago(span(done, now)),
         _ => String::new(),
@@ -1183,6 +1199,7 @@ mod tests {
             id: JobId(id),
             name: name.to_owned(),
             state,
+            created_at: None,
             started_at: started.map(at),
             completed_at: completed.map(at),
             url: format!("https://github.com/timmattison/tools/actions/runs/1/job/{id}"),
@@ -1362,7 +1379,7 @@ mod tests {
     }
 
     #[test]
-    fn a_job_with_no_start_shows_no_started_and_no_time() {
+    fn a_job_with_no_start_and_no_creation_shows_no_started_and_no_time() {
         let mut board = board_with_jobs(vec![
             job(11, "wait", RunState::Queued, None, None),
             job(
@@ -1379,6 +1396,42 @@ mod tests {
         assert_eq!(time_cells(&text, 3), (String::new(), "5m ago".to_owned()));
         assert_eq!(started_cells(&text, 4), "");
         assert_eq!(time_cells(&text, 4), (String::new(), String::new()));
+    }
+
+    #[test]
+    fn a_waiting_job_shows_no_start_and_the_time_since_its_creation() {
+        // The start time is set on purpose: the row must read the state of the
+        // job, not the presence of a start time.
+        let mut board = board_with_jobs(vec![Job {
+            created_at: Some(at("2026-10-14T11:56:00Z")),
+            ..job(
+                11,
+                "wait",
+                RunState::Queued,
+                Some("2026-10-14T11:58:00Z"),
+                None,
+            )
+        }]);
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert_eq!(started_cells(&text, 3), "");
+        assert_eq!(time_cells(&text, 3), ("4m 00s".to_owned(), String::new()));
+    }
+
+    #[test]
+    fn a_running_job_counts_its_time_from_its_start_not_its_creation() {
+        let mut board = board_with_jobs(vec![Job {
+            created_at: Some(at("2026-10-14T11:40:00Z")),
+            ..job(
+                11,
+                "test",
+                RunState::Running,
+                Some("2026-10-14T11:50:00Z"),
+                None,
+            )
+        }]);
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert_eq!(started_cells(&text, 3), "11:50:00");
+        assert_eq!(time_cells(&text, 3), ("10m 00s".to_owned(), String::new()));
     }
 
     #[test]

@@ -886,6 +886,7 @@ mod tests {
             id: crate::job::JobId(id),
             name: name.to_owned(),
             state: RunState::Running,
+            created_at: None,
             started_at: Some(now()),
             completed_at: None,
             url: String::new(),

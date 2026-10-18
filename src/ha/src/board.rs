@@ -664,6 +664,7 @@ mod tests {
             id: JobId(id),
             name: format!("job {id}"),
             state,
+            created_at: None,
             started_at: None,
             completed_at: None,
             url: String::new(),
