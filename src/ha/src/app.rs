@@ -1494,4 +1494,64 @@ mod tests {
         assert_eq!(result.unwrap_err().to_string(), "script ended");
         assert!(canceller.cancels.borrow().is_empty());
     }
+
+    #[test]
+    fn control_c_with_the_box_open_quits_and_cancels_nothing() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let canceller = canceller();
+        let (result, _) = run_app_with(
+            Status::default(),
+            &opener(false),
+            &canceller,
+            &channels,
+            vec![press(KeyCode::Char('c')), ctrl_c()],
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert!(canceller.cancels.borrow().is_empty());
+    }
+
+    /// A finished run, updated inside the window.
+    fn passed_run(id: u64) -> Run {
+        Run {
+            state: RunState::Passed,
+            ..active_run(id, 5)
+        }
+    }
+
+    #[test]
+    fn c_on_a_finished_run_says_there_is_nothing_to_cancel_and_shows_no_box() {
+        let channels = channels();
+        send_runs(&channels, vec![passed_run(4)]);
+        let (result, frame) = run_app_with(
+            Status::default(),
+            &opener(false),
+            &canceller(),
+            &channels,
+            vec![press(KeyCode::Char('c'))],
+        );
+        assert_eq!(result.unwrap_err().to_string(), "script ended");
+        assert!(!shows_box(&frame), "{frame:?}");
+        assert!(
+            frame[11].contains("run 4 finished: there is nothing to cancel"),
+            "{:?}",
+            frame[11]
+        );
+    }
+
+    #[test]
+    fn y_after_c_on_a_finished_run_cancels_nothing() {
+        let channels = channels();
+        send_runs(&channels, vec![passed_run(4)]);
+        let canceller = canceller();
+        let (result, _) = run_app_with(
+            Status::default(),
+            &opener(false),
+            &canceller,
+            &channels,
+            vec![press(KeyCode::Char('c')), press(KeyCode::Char('y'))],
+        );
+        assert_eq!(result.unwrap_err().to_string(), "script ended");
+        assert!(canceller.cancels.borrow().is_empty());
+    }
 }
