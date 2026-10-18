@@ -252,12 +252,15 @@ impl Board {
                 run: (run.id, position),
                 job: None,
             });
-            slots.extend(self.shown_jobs(run.id).iter().enumerate().map(
-                |(index, job)| Selection {
-                    run: (run.id, position),
-                    job: Some((job.id, index)),
-                },
-            ));
+            slots.extend(
+                self.shown_jobs(run.id)
+                    .iter()
+                    .enumerate()
+                    .map(|(index, job)| Selection {
+                        run: (run.id, position),
+                        job: Some((job.id, index)),
+                    }),
+            );
         }
         slots
     }
@@ -330,7 +333,7 @@ impl Board {
             passed: 0,
             failed: 0,
         }];
-                push_runs(
+        push_runs(
             &mut rows,
             &active,
             Section::Active,
@@ -1665,10 +1668,7 @@ mod tests {
         let mut board = two_run_board();
         select_job(&mut board, &[(11, "a"), (12, "b")], 1);
         board.set_jobs(RunId(1), Vec::new());
-        assert_eq!(
-            marked(&board.rows(now()))[1..3],
-            ["Run(1)*", "NoJobs"]
-        );
+        assert_eq!(marked(&board.rows(now()))[1..3], ["Run(1)*", "NoJobs"]);
     }
 
     #[test]
