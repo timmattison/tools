@@ -477,6 +477,11 @@ fn fetch_all<S: Source>(
 /// facts. The mark is active when the run or one of its jobs is active. A run
 /// with no facts gets no mark. A failed fetch sends [`Update::JobsFailed`] and
 /// removes the mark, so the next cycle tries again.
+///
+/// When the mark is not active, the function tells the source to forget the
+/// pages of the jobs of the run, because the worker fetches them again only
+/// after the run changes. In every other case the worker fetches the run again,
+/// and the source keeps its pages.
 fn fetch_jobs<S: Source>(
     source: &S,
     state: &State,
@@ -492,28 +497,38 @@ fn fetch_jobs<S: Source>(
             .get(repo)
             .and_then(|runs| runs.get(run))
             .copied();
-        let mut marks = state
-            .job_marks
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        match (result, facts) {
-            (Ok(jobs), Some(facts)) => {
-                let active = facts.active || jobs.iter().any(|job| job.state.is_active());
-                marks.insert((repo.clone(), *run), RunFacts { active, ..facts });
-                Update::Jobs { run: *run, jobs }
-            }
-            (Ok(jobs), None) => {
-                marks.remove(&(repo.clone(), *run));
-                Update::Jobs { run: *run, jobs }
-            }
-            (Err(error), _) => {
-                marks.remove(&(repo.clone(), *run));
-                Update::JobsFailed {
-                    run: *run,
-                    error: error.to_string(),
+        let (update, forget) = {
+            let mut marks = state
+                .job_marks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            match (result, facts) {
+                (Ok(jobs), Some(facts)) => {
+                    let active = facts.active || jobs.iter().any(|job| job.state.is_active());
+                    marks.insert((repo.clone(), *run), RunFacts { active, ..facts });
+                    (Update::Jobs { run: *run, jobs }, !active)
+                }
+                (Ok(jobs), None) => {
+                    marks.remove(&(repo.clone(), *run));
+                    (Update::Jobs { run: *run, jobs }, false)
+                }
+                (Err(error), _) => {
+                    marks.remove(&(repo.clone(), *run));
+                    (
+                        Update::JobsFailed {
+                            run: *run,
+                            error: error.to_string(),
+                        },
+                        false,
+                    )
                 }
             }
+        };
+        // No thread holds a lock during a call of the source.
+        if forget {
+            source.forget_jobs(repo, *run);
         }
+        update
     })
 }
 

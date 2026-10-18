@@ -271,8 +271,8 @@ pub struct GhSource {
 /// the `ETag` goes out only when the path of the request is the same.
 ///
 /// The key of a page of jobs names the repository, the run, and the page
-/// number. `GhSource::forget_jobs_of` removes those pages when every job of
-/// the run is finished.
+/// number. `Source::forget_jobs` removes those pages when the worker stops
+/// fetching the run.
 #[derive(Debug, Clone)]
 struct Cached {
     /// The path of the request that gave this page.
@@ -539,9 +539,6 @@ impl Source for GhSource {
             }
         }
         keep_first_of_each_id(&mut jobs, |job| job.id);
-        if !jobs.is_empty() && jobs.iter().all(|job| !job.state.is_active()) {
-            self.forget_jobs(repo, run);
-        }
         Ok(jobs)
     }
 
@@ -1412,13 +1409,18 @@ mod tests {
     }
 
     #[test]
-    fn the_cache_drops_the_pages_of_a_run_when_every_job_is_finished() {
+    fn forget_jobs_drops_every_page_of_the_run() {
         let stub = job_pages_stub(3);
         stub.file("page1.out", &ok_output(&done_jobs_json(256, 1, 100)));
         stub.file("page2.out", &ok_output(&done_jobs_json(256, 101, 100)));
         stub.file("page3.out", &ok_output(&done_jobs_json(256, 201, 56)));
         let source = stub.source();
         source.jobs_of(&repo("o/r"), RunId(42)).expect("jobs");
+        assert_eq!(
+            cache_keys(&source),
+            ["o/r#jobs/42#1", "o/r#jobs/42#2", "o/r#jobs/42#3"]
+        );
+        source.forget_jobs(&repo("o/r"), RunId(42));
         assert_eq!(cache_keys(&source), Vec::<String>::new());
     }
 
@@ -1453,7 +1455,7 @@ mod tests {
     }
 
     #[test]
-    fn the_cache_drops_only_the_pages_of_the_run_that_finished() {
+    fn forget_jobs_drops_only_the_pages_of_that_run() {
         let stub = Stub::new(
             "case \"$*\" in
   *'runs/42/jobs'*) cat \"$dir/done.out\";;
@@ -1465,6 +1467,7 @@ mod tests {
         let source = stub.source();
         source.jobs_of(&repo("o/r"), RunId(43)).expect("jobs");
         source.jobs_of(&repo("o/r"), RunId(42)).expect("jobs");
+        source.forget_jobs(&repo("o/r"), RunId(42));
         assert_eq!(cache_keys(&source), ["o/r#jobs/43#1"]);
     }
 
