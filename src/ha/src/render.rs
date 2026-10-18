@@ -1571,6 +1571,180 @@ mod tests {
         unicode_width::UnicodeWidthStr::width(text)
     }
 
+    /// The (branch, title) widths that the board gave before issue #571, at
+    /// each width from 80 to 200 columns. The entry for width `w` is at index
+    /// `w - 80`. A change to the layout must never go below these values.
+    const TODAY_BRANCH_AND_TITLE: [(usize, usize); 121] = [
+        (7, 15),
+        (7, 16),
+        (8, 14),
+        (8, 15),
+        (8, 16),
+        (8, 17),
+        (8, 17),
+        (9, 16),
+        (9, 17),
+        (9, 18),
+        (9, 18),
+        (9, 19),
+        (10, 18),
+        (10, 19),
+        (10, 19),
+        (10, 20),
+        (10, 21),
+        (11, 20),
+        (11, 20),
+        (11, 21),
+        (11, 22),
+        (11, 23),
+        (12, 21),
+        (12, 22),
+        (12, 23),
+        (12, 24),
+        (12, 24),
+        (13, 23),
+        (13, 24),
+        (13, 25),
+        (13, 25),
+        (13, 26),
+        (14, 25),
+        (14, 26),
+        (14, 26),
+        (14, 27),
+        (14, 28),
+        (15, 27),
+        (15, 27),
+        (15, 28),
+        (15, 29),
+        (15, 30),
+        (16, 28),
+        (16, 29),
+        (16, 30),
+        (16, 31),
+        (16, 31),
+        (17, 30),
+        (17, 31),
+        (17, 32),
+        (17, 32),
+        (17, 33),
+        (18, 32),
+        (18, 33),
+        (18, 33),
+        (18, 34),
+        (18, 35),
+        (19, 34),
+        (19, 34),
+        (19, 35),
+        (19, 36),
+        (19, 37),
+        (20, 35),
+        (20, 36),
+        (20, 37),
+        (20, 38),
+        (20, 38),
+        (21, 37),
+        (21, 38),
+        (21, 39),
+        (21, 39),
+        (21, 40),
+        (22, 39),
+        (22, 40),
+        (22, 40),
+        (22, 41),
+        (22, 42),
+        (23, 41),
+        (23, 41),
+        (23, 42),
+        (23, 43),
+        (23, 44),
+        (24, 42),
+        (24, 43),
+        (24, 44),
+        (24, 45),
+        (24, 45),
+        (25, 44),
+        (25, 45),
+        (25, 46),
+        (25, 46),
+        (25, 47),
+        (26, 46),
+        (26, 47),
+        (26, 47),
+        (26, 48),
+        (26, 49),
+        (27, 48),
+        (27, 48),
+        (27, 49),
+        (27, 50),
+        (27, 51),
+        (28, 49),
+        (28, 50),
+        (28, 51),
+        (28, 52),
+        (28, 52),
+        (29, 51),
+        (29, 52),
+        (29, 53),
+        (29, 53),
+        (29, 54),
+        (30, 53),
+        (30, 54),
+        (30, 54),
+        (30, 55),
+        (30, 56),
+        (31, 55),
+        (31, 55),
+        (31, 56),
+        (31, 57),
+    ];
+
+    #[test]
+    fn the_branch_and_the_title_keep_at_least_their_old_widths() {
+        for w in 80_u16..=200 {
+            let mut board = Board::new(Duration::from_hours(8));
+            board.replace(
+                repo("o/r"),
+                vec![run(
+                    1,
+                    "o/r",
+                    "w",
+                    &"B".repeat(400),
+                    &"T".repeat(400),
+                    RunState::Running,
+                    "2026-10-14T11:45:30Z",
+                    "2026-10-14T11:45:30Z",
+                )],
+            );
+            board.expand(now());
+            board.set_jobs(RunId(1), three_jobs());
+            let text = lines(&render_with(w, 14, &mut board, &loaded()));
+
+            // The header names BRANCH and TITLE, so the search skips it.
+            let row = text
+                .iter()
+                .skip(1)
+                .find(|line| line.contains('B'))
+                .expect("the frame holds the run row");
+            let branch = row.chars().filter(|c| *c == 'B').count() + 1;
+            let title = row.chars().filter(|c| *c == 'T').count() + 1;
+            let (old_branch, old_title) = TODAY_BRANCH_AND_TITLE[usize::from(w) - 80];
+            assert!(
+                branch >= old_branch,
+                "width {w}: the branch is {branch} wide, the old width is {old_branch}"
+            );
+            assert!(
+                title >= old_title,
+                "width {w}: the title is {title} wide, the old width is {old_title}"
+            );
+            for line in &text {
+                assert!(
+                    display_width(line) <= usize::from(w),
+                    "width {w}: the line is too wide: {line:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn long_text_keeps_its_start_and_ends_with_an_ellipsis() {
         let mut board = Board::new(Duration::from_hours(8));
