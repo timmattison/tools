@@ -358,8 +358,9 @@ impl Board {
         rows
     }
 
-    /// Expands the selected run. The run shows a loading row until `set_jobs`
-    /// gives its jobs. A run that is already expanded keeps its jobs. With no
+    /// Expands the run of the selection. The run shows a loading row until
+    /// `set_jobs` gives its jobs. A run that is already expanded keeps its jobs.
+    /// On a job row, the run is already expanded, thus nothing changes. With no
     /// selection, nothing happens.
     pub fn expand(&mut self, now: DateTime<Utc>) {
         self.settle(now);
@@ -368,8 +369,9 @@ impl Board {
         }
     }
 
-    /// Collapses the selected run and drops its jobs. A run that is not
-    /// expanded, or no selection, changes nothing.
+    /// Collapses the run of the selection and drops its jobs. On a job row, the
+    /// selection goes to the row of that run. A run that is not expanded, or no
+    /// selection, changes nothing.
     pub fn collapse(&mut self, now: DateTime<Utc>) {
         self.settle(now);
         if let Some(Selection { run: (id, _), .. }) = self.selected {
@@ -1920,5 +1922,37 @@ mod tests {
         let view = board.view(now(), 1);
         assert_eq!(view.first, 5);
         assert_eq!(marked(&view.rows), ["Run(101)*"]);
+    }
+
+    #[test]
+    fn left_on_a_job_row_collapses_its_run_and_selects_the_run_row() {
+        let mut board = two_run_board();
+        select_job(&mut board, &[(11, "a"), (12, "b")], 1);
+        assert_eq!(selected_text(&mut board).as_deref(), Some("LastJob(12)*"));
+        board.collapse(now());
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Active,1,0,0)",
+                "Run(1)",
+                "Header(Recent,1,1,0)",
+                "Run(2)"
+            ]
+        );
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(1)*"));
+        assert!(board.expanded(now()).is_empty());
+    }
+
+    #[test]
+    fn right_on_a_job_row_changes_nothing() {
+        let mut board = two_run_board();
+        select_job(&mut board, &[(11, "a"), (12, "b")], 0);
+        let before = marked(&board.rows(now()));
+        board.expand(now());
+        assert_eq!(marked(&board.rows(now())), before);
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Job(11)*"));
+        let expanded = board.expanded(now());
+        assert_eq!(expanded.len(), 1);
+        assert!(expanded.contains(&(repo("a/x"), RunId(1))));
     }
 }
