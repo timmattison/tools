@@ -1955,4 +1955,41 @@ mod tests {
         assert_eq!(expanded.len(), 1);
         assert!(expanded.contains(&(repo("a/x"), RunId(1))));
     }
+
+    #[test]
+    fn selected_url_on_a_job_row_is_the_url_of_the_job() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![
+                Job {
+                    url: "https://example.test/a/x/runs/1/job/11".to_owned(),
+                    ..named_job(11, "a")
+                },
+                Job {
+                    url: "https://example.test/a/x/runs/1/job/12".to_owned(),
+                    ..named_job(12, "b")
+                },
+            ],
+        );
+        board.select_next(now());
+        board.select_next(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("LastJob(12)*"));
+        assert_eq!(
+            board.selected_url(now()).as_deref(),
+            Some("https://example.test/a/x/runs/1/job/12")
+        );
+    }
+
+    #[test]
+    fn selected_url_on_a_job_row_without_a_url_is_the_url_of_the_run() {
+        let mut board = two_run_board();
+        select_job(&mut board, &[(11, "a")], 0);
+        assert_eq!(selected_text(&mut board).as_deref(), Some("LastJob(11)*"));
+        assert_eq!(
+            board.selected_url(now()).as_deref(),
+            Some("https://example.test/a/x/runs/1")
+        );
+    }
 }
