@@ -1814,6 +1814,33 @@ mod tests {
         assert!(!marks.contains_key(&key), "{marks:?}");
     }
 
+    /// Run 5 stays watched and its jobs are fetched once. Then it leaves the
+    /// list of runs. The board ignores a job answer for such a run, so the
+    /// worker must not fetch its jobs again.
+    #[test]
+    fn a_watched_run_that_leaves_the_list_of_runs_gets_no_job_fetch() {
+        let fake = fake_with_runs(vec![run("acme/a", 5)]);
+        fake.script().jobs.insert(RunId(5), Ok(vec![job(1)]));
+        let mut state = State::new(SLOW_CADENCE);
+        let (updates_tx, updates_rx) = mpsc::channel();
+        let settings = settings(&["acme/a"]);
+        let key = (repo("acme/a"), RunId(5));
+        let _ = state.watch([key].into_iter().collect());
+        assert!(cycle(&fake, &settings, &mut state, &updates_tx).is_ok());
+        assert!(cycle(&fake, &settings, &mut state, &updates_tx).is_ok());
+        assert_eq!(job_calls(&fake), 1);
+        assert_eq!(forget_calls(&fake), vec!["5".to_owned()]);
+        while updates_rx.try_recv().is_ok() {}
+        fake.script().created.insert(repo("acme/a"), Ok(Vec::new()));
+
+        assert!(cycle(&fake, &settings, &mut state, &updates_tx).is_ok());
+
+        let updates: Vec<Update> = updates_rx.try_iter().collect();
+        assert!(!has_jobs(&updates), "{updates:?}");
+        assert_eq!(job_calls(&fake), 1);
+        assert_eq!(forget_calls(&fake), vec!["5".to_owned()]);
+    }
+
     #[test]
     fn a_run_whose_job_fetch_failed_is_fetched_again_on_the_next_cycle() {
         let fake = fake_with_runs(vec![run("acme/a", 5)]);
