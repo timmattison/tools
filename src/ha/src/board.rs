@@ -2005,4 +2005,33 @@ mod tests {
             Some("https://example.test/a/x/runs/1")
         );
     }
+
+    /// A board with run 101 expanded to ten jobs and selected, and a view of
+    /// four rows that shows its header, its row, and its first two jobs.
+    fn board_on_a_long_block() -> Board {
+        let mut board = long_board(3, 3);
+        for _ in 0..3 {
+            board.select_next(now());
+        }
+        expand_with_jobs(&mut board, 101, 10);
+        assert_eq!(board.view(now(), 4).first, 4);
+        board
+    }
+
+    #[test]
+    fn moving_down_through_the_jobs_scrolls_by_one_row_at_the_bottom_of_the_view() {
+        let mut board = board_on_a_long_block();
+        let offsets = offsets_while(&mut board, 4, 5, Board::select_next);
+        assert_eq!(offsets, [4, 4, 5, 6, 7]);
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Job(10105)*"));
+    }
+
+    #[test]
+    fn moving_up_through_the_jobs_scrolls_by_one_row_at_the_top_of_the_view() {
+        let mut board = board_on_a_long_block();
+        offsets_while(&mut board, 4, 5, Board::select_next);
+        let offsets = offsets_while(&mut board, 4, 4, Board::select_previous);
+        assert_eq!(offsets, [7, 7, 7, 6]);
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Job(10101)*"));
+    }
 }
