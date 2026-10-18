@@ -212,8 +212,8 @@ struct State {
     facts: Mutex<HashMap<RepoName, HashMap<RunId, RunFacts>>>,
     /// For each run with a job fetch, the facts of the run at that fetch. The
     /// mark is active when the run or one of its jobs was active, or when the
-    /// fetch failed. A run
-    /// keeps its mark when it leaves the watched set, so it gets one last fetch.
+    /// fetch failed. A run keeps its mark when it leaves the watched set, so it
+    /// gets one last fetch.
     job_marks: Mutex<HashMap<RunKey, RunFacts>>,
 }
 
