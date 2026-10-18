@@ -34,7 +34,7 @@ const FIXED_LINES: usize = 2;
 /// The text that stands between two parts of the status line.
 const STATUS_SEPARATOR: &str = "  ·  ";
 /// The key hints at the end of the left part of the status line.
-const KEY_HINTS: &str = "↑↓ select  →← jobs  ⏎ open  r refresh  q quit";
+const KEY_HINTS: &str = "↑↓ select  →← jobs  ⏎ open  c cancel  r refresh  q quit";
 /// The mark at the right end of the status line while a refresh cycle runs.
 const REFRESH_MARK: &str = "refreshing…";
 /// The least number of columns between the left part of the status line and
@@ -903,7 +903,7 @@ mod tests {
                 "✗ acme/widgets        Release                    4 issue-11          Broken build                    10-13 23:50 4h 40m",
                 "",
                 "",
-                "updated 30s ago      ·  ↑↓ select  →← jobs  ⏎ open  r refresh  q quit",
+                "updated 30s ago      ·  ↑↓ select  →← jobs  ⏎ open  c cancel  r refresh  q quit",
             ]
         );
     }
@@ -2217,7 +2217,7 @@ mod tests {
     fn the_status_line_says_loading_before_the_first_refresh() {
         assert_eq!(
             status_line(80, &Status::default()),
-            "loading…  ·  ↑↓ select  →← jobs  ⏎ open  r refresh  q quit"
+            "loading…  ·  ↑↓ select  →← jobs  ⏎ open  c cancel  r refresh  q quit"
         );
     }
 
@@ -2229,7 +2229,7 @@ mod tests {
         };
         assert_eq!(
             status_line(80, &status),
-            "updated 30s ago      ·  ↑↓ select  →← jobs  ⏎ open  r refresh  q quit"
+            "updated 30s ago      ·  ↑↓ select  →← jobs  ⏎ open  c cancel  r refresh  q quit"
         );
     }
 
@@ -2242,7 +2242,7 @@ mod tests {
         };
         assert_eq!(
             status_line(100, &status),
-            "updated 30s ago      ·  API 4821/5000  ·  ↑↓ select  →← jobs  ⏎ open  r refresh  q quit"
+            "updated 30s ago      ·  API 4821/5000  ·  ↑↓ select  →← jobs  ⏎ open  c cancel  r refresh  q quit"
         );
     }
 
@@ -2256,7 +2256,7 @@ mod tests {
         };
         assert_eq!(
             status_line(120, &status),
-            "updated 30s ago      ·  API low 412/5000, next refresh 12:34  ·  ↑↓ select  →← jobs  ⏎ open  r refresh  q quit"
+            "updated 30s ago      ·  API low 412/5000, next refresh 12:34  ·  ↑↓ select  →← jobs  ⏎ open  c cancel  r refresh  q quit"
         );
     }
 
@@ -2323,7 +2323,7 @@ mod tests {
         text[7].clone()
     }
 
-    const HINTS_TAIL: &str = "loading…  ·  ↑↓ select  →← jobs  ⏎ open  r refresh  q quit";
+    const HINTS_TAIL: &str = "loading…  ·  ↑↓ select  →← jobs  ⏎ open  c cancel  r refresh  q quit";
 
     /// The mark at the right end of the status line during a refresh.
     const MARK: &str = "refreshing…";
