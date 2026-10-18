@@ -109,17 +109,25 @@ fn cells(
     .join(" ")
 }
 
-/// Joins the cells of one job row or status row into one line.
+/// Joins the cells of one job row into one line. One space stands between cells.
 ///
-/// One text cell takes the place of the repository, workflow, ID part, branch,
-/// and title cells. It has the width of those five cells and the four spaces
-/// between them. Thus the started and time cells stand in the same
-/// columns as those of a run row.
-fn wide_cells(widths: Widths, marker: &str, text: &str, started: &str, time: &str) -> String {
-    let text_width = widths.repo + widths.workflow + ID_WIDTH + widths.branch + widths.title + 4;
+/// The text fills the repository cell, one space, and the workflow-name cell.
+/// The job ID stands in the ID part of a run row, right-aligned. The branch and
+/// title columns stay blank. Thus the ID, started, and time cells stand in the
+/// same columns as those of a run row, at every frame width.
+fn job_cells(
+    widths: Widths,
+    marker: &str,
+    text: &str,
+    id: &str,
+    started: &str,
+    time: &str,
+) -> String {
     [
         pad_right(marker, MARKER_WIDTH),
-        fit(text, text_width),
+        fit(text, widths.repo + 1 + widths.workflow),
+        fit_right(id, ID_WIDTH),
+        " ".repeat(widths.branch + 1 + widths.title),
         pad_right(started, STARTED_WIDTH),
         pad_right(time, TIME_WIDTH),
     ]
@@ -193,7 +201,8 @@ where
 /// The line of one job of an expanded run.
 ///
 /// The text cell holds the tree glyph (`└` when `last` is true, else `├`), a
-/// space, and the name of the job.
+/// space, and the name of the job. The job ID follows, in the columns of the
+/// run ID.
 ///
 /// A job that waits did not start, thus its started cell is empty. Its time
 /// cell shows how long it waited, from its creation until `now`, and is empty
@@ -235,10 +244,11 @@ where
         )
     };
     let glyph = if last { TREE_LAST } else { TREE_MIDDLE };
-    wide_cells(
+    job_cells(
         widths,
         marker(job.state),
         &format!("{glyph} {}", job.name),
+        &job.id.0.to_string(),
         &started,
         &time,
     )
@@ -1282,6 +1292,19 @@ mod tests {
         ]
     }
 
+    /// The expected line of a job row at 120 columns. The widths follow the
+    /// shares of the 82 columns of room: 20 repository, 16 workflow name, 16
+    /// branch, and 30 title. The text fills 37 columns, the job ID fills 12, and
+    /// the branch and title columns are 47 blank columns.
+    fn job_golden(marker: &str, text: &str, id: u64, times: &str) -> String {
+        format!(
+            "{marker} {text:<37} {id:>12} {blank:<47} {times}",
+            blank = ""
+        )
+        .trim_end()
+        .to_owned()
+    }
+
     #[test]
     fn the_jobs_of_an_expanded_run_stand_below_it_in_the_run_columns() {
         let mut board = board_with_jobs(three_jobs());
@@ -1290,9 +1313,9 @@ mod tests {
             text[2..6],
             [
                 "● timmattison/tools    CI                          1 main             Fix the thing                  11:45:30    14m 30s".to_owned(),
-                format!("✓ {:<98} 11:45:40    4m 20s", "├ build"),
-                format!("✗ {:<98} 11:46:00    45s", "├ lint"),
-                format!("● {:<98} 11:50:10    9m 50s", "└ test"),
+                job_golden("✓", "├ build", 12, "11:45:40    4m 20s"),
+                job_golden("✗", "├ lint", 13, "11:46:00    45s"),
+                job_golden("●", "└ test", 11, "11:50:10    9m 50s"),
             ]
             .map(|line| line.trim_end().to_owned())
         );
@@ -1593,8 +1616,8 @@ mod tests {
             assert!(display_width(&text[y]) <= 120, "{:?}", text[y]);
         }
         let (name, _) = text[4]
-            .rsplit_once(" 11:51:00")
-            .expect("the line holds the start");
+            .split_once(&format!("{:>ID_WIDTH$}", 11))
+            .expect("the line holds the job ID");
         assert!(name.trim_end().ends_with('…'), "{:?}", text[4]);
     }
 
