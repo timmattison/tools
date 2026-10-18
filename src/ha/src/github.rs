@@ -428,7 +428,7 @@ impl GhSource {
                 break;
             }
         }
-        keep_first_of_each_id(&mut runs);
+        keep_first_of_each_id(&mut runs, |run| run.id);
         Ok(runs)
     }
 
@@ -524,7 +524,7 @@ impl Source for GhSource {
                 }
                 // A run can change state between the requests, and then two
                 // lists hold it. Keep the first one.
-                keep_first_of_each_id(&mut runs);
+                keep_first_of_each_id(&mut runs, |run| run.id);
                 Ok(runs)
             }
         }
@@ -540,7 +540,7 @@ impl Source for GhSource {
                 break;
             }
         }
-        keep_first_job_of_each_id(&mut jobs);
+        keep_first_of_each_id(&mut jobs, |job| job.id);
         if !jobs.is_empty() && jobs.iter().all(|job| !job.state.is_active()) {
             self.forget_jobs_of(repo, run);
         }
@@ -584,15 +584,6 @@ fn rate_of(response: &Response) -> Option<RateLimit> {
         remaining: number("x-ratelimit-remaining")?,
         reset: DateTime::from_timestamp(reset, 0)?,
     })
-}
-
-/// Keeps the first job of each ID and drops the later jobs of the same ID.
-///
-/// The order of the kept jobs does not change. A job can move from one page to
-/// the next between two requests, and then two pages hold it.
-fn keep_first_job_of_each_id(jobs: &mut Vec<Job>) {
-    let mut seen = std::collections::HashSet::new();
-    jobs.retain(|job| seen.insert(job.id));
 }
 
 /// Chooses between the stored rate limit and a new one.

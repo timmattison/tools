@@ -4,6 +4,7 @@
 //! states, thus [`RunState`] folds the GitHub values into those five.
 
 use std::collections::HashSet;
+use std::hash::Hash;
 
 use chrono::{DateTime, Utc};
 
@@ -95,14 +96,15 @@ pub struct Run {
     pub url: String,
 }
 
-/// Keeps the first run of each ID and drops the later runs of the same ID.
+/// Keeps the first item of each ID and drops the later items of the same ID.
 ///
-/// The order of the kept runs does not change. A list can hold one run two
-/// times when the run moves between two requests, and the board needs one row
-/// for each ID.
-pub fn keep_first_of_each_id(runs: &mut Vec<Run>) {
+/// The function takes the ID of an item from `id`. The order of the kept items
+/// does not change. A paged list can hold one item two times when the item
+/// moves from one page to the next between two requests. The board needs one
+/// row for each ID.
+pub fn keep_first_of_each_id<T, K: Eq + Hash>(items: &mut Vec<T>, id: impl Fn(&T) -> K) {
     let mut seen = HashSet::new();
-    runs.retain(|run| seen.insert(run.id));
+    items.retain(|item| seen.insert(id(item)));
 }
 
 #[cfg(test)]
@@ -128,7 +130,7 @@ mod tests {
     #[test]
     fn the_first_run_of_an_id_stays() {
         let mut runs = vec![run_with(5, "first"), run_with(5, "second")];
-        keep_first_of_each_id(&mut runs);
+        keep_first_of_each_id(&mut runs, |run| run.id);
         assert_eq!(runs, [run_with(5, "first")]);
     }
 
@@ -141,7 +143,7 @@ mod tests {
             run_with(9, "d"),
             run_with(3, "e"),
         ];
-        keep_first_of_each_id(&mut runs);
+        keep_first_of_each_id(&mut runs, |run| run.id);
         let ids: Vec<u64> = runs.iter().map(|run| run.id.0).collect();
         assert_eq!(ids, [7, 3, 9]);
     }

@@ -121,7 +121,7 @@ impl Board {
     /// Stores the runs of one repository and clears the error of that repository.
     /// A repeated run ID keeps its first run only.
     pub fn replace(&mut self, repo: RepoName, mut runs: Vec<Run>) {
-        keep_first_of_each_id(&mut runs);
+        keep_first_of_each_id(&mut runs, |run| run.id);
         self.errors.remove(&repo);
         self.runs.insert(repo, runs);
     }
