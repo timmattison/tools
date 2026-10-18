@@ -69,10 +69,10 @@ impl Confirm {
         Confirm {
             repo: run.repo.clone(),
             run: run.id,
-            workflow: String::new(),
-            branch: String::new(),
-            title: String::new(),
-            job: None,
+            workflow: run.workflow.clone(),
+            branch: run.branch.clone(),
+            title: run.title.clone(),
+            job: job.map(|job| job.name.clone()),
         }
     }
 }
