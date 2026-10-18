@@ -231,13 +231,18 @@ impl State {
     }
 
     /// Takes a new set of watched runs. Returns the runs that are new in it.
-    /// A run that leaves the set loses its mark, so a later expand fetches again.
+    /// A run that joins the set loses its mark, so the next cycle fetches it
+    /// even when the fetch at once does not happen. A run that leaves the set
+    /// keeps its mark, so it still gets its last fetch when it finishes.
     fn watch(&mut self, set: BTreeSet<RunKey>) -> Vec<RunKey> {
-        self.job_marks
+        let added: Vec<RunKey> = set.difference(&self.watched).cloned().collect();
+        let marks = self
+            .job_marks
             .get_mut()
-            .unwrap_or_else(PoisonError::into_inner)
-            .retain(|key, _| set.contains(key));
-        let added = set.difference(&self.watched).cloned().collect();
+            .unwrap_or_else(PoisonError::into_inner);
+        for key in &added {
+            marks.remove(key);
+        }
         self.watched = set;
         added
     }
