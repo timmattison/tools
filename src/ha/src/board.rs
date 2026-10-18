@@ -1583,6 +1583,116 @@ mod tests {
         );
     }
 
+    /// Expands run 1, gives it `jobs` as pairs of an ID and a name, and
+    /// selects the job at `index` among them.
+    fn select_job(board: &mut Board, jobs: &[(u64, &str)], index: usize) {
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            jobs.iter().map(|&(id, name)| named_job(id, name)).collect(),
+        );
+        for _ in 0..=index {
+            board.select_next(now());
+        }
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_selected_job_by_its_id() {
+        let mut board = two_run_board();
+        select_job(&mut board, &[(12, "b"), (13, "c")], 1);
+        assert_eq!(selected_text(&mut board).as_deref(), Some("LastJob(13)*"));
+        board.set_jobs(
+            RunId(1),
+            vec![named_job(19, "a"), named_job(12, "b"), named_job(13, "c")],
+        );
+        assert_eq!(
+            marked(&board.rows(now()))[1..5],
+            ["Run(1)", "Job(19)", "Job(12)", "LastJob(13)*"]
+        );
+    }
+
+    #[test]
+    fn a_re_run_that_gives_every_job_a_new_id_keeps_the_highlight_on_the_same_row() {
+        let mut board = two_run_board();
+        select_job(&mut board, &[(11, "a"), (12, "b"), (13, "c")], 1);
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Job(12)*"));
+        board.set_jobs(
+            RunId(1),
+            vec![named_job(21, "a"), named_job(22, "b"), named_job(23, "c")],
+        );
+        assert_eq!(
+            marked(&board.rows(now()))[1..5],
+            ["Run(1)", "Job(21)", "Job(22)*", "LastJob(23)"]
+        );
+    }
+
+    #[test]
+    fn a_shorter_list_selects_the_last_job_when_the_old_position_is_past_the_end() {
+        let mut board = two_run_board();
+        select_job(&mut board, &[(11, "a"), (12, "b"), (13, "c")], 2);
+        assert_eq!(selected_text(&mut board).as_deref(), Some("LastJob(13)*"));
+        board.set_jobs(RunId(1), vec![named_job(21, "a"), named_job(22, "b")]);
+        assert_eq!(
+            marked(&board.rows(now()))[1..4],
+            ["Run(1)", "Job(21)", "LastJob(22)*"]
+        );
+    }
+
+    #[test]
+    fn an_answer_with_no_job_selects_the_run_row() {
+        let mut board = two_run_board();
+        select_job(&mut board, &[(11, "a"), (12, "b")], 1);
+        board.set_jobs(RunId(1), Vec::new());
+        assert_eq!(
+            marked(&board.rows(now()))[1..3],
+            ["Run(1)*", "NoJobs"]
+        );
+    }
+
+    #[test]
+    fn a_failed_fetch_after_an_answer_keeps_the_selected_job() {
+        let mut board = two_run_board();
+        select_job(&mut board, &[(11, "a"), (12, "b")], 1);
+        board.fail_jobs(RunId(1), "HTTP 500".to_owned());
+        assert_eq!(
+            marked(&board.rows(now()))[1..5],
+            ["Run(1)", "Job(11)", "Job(12)*", "JobsError(HTTP 500)"]
+        );
+    }
+
+    #[test]
+    fn a_run_that_leaves_the_board_takes_the_selected_job_with_it() {
+        let mut board = two_run_board();
+        select_job(&mut board, &[(11, "a"), (12, "b")], 1);
+        board.replace(repo("a/x"), vec![run(2, "a/x", RunState::Passed, 60, 10)]);
+        assert_eq!(
+            marked(&board.rows(now())),
+            [
+                "Header(Active,0,0,0)",
+                "Empty(Active)",
+                "Header(Recent,1,1,0)",
+                "Run(2)*",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_that_moves_to_the_recent_section_keeps_its_selected_job() {
+        let mut board = two_run_board();
+        select_job(&mut board, &[(11, "a"), (12, "b")], 1);
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Passed, 30, 1),
+                run(2, "a/x", RunState::Passed, 60, 10),
+            ],
+        );
+        assert_eq!(
+            marked(&board.rows(now()))[3..7],
+            ["Run(1)", "Job(11)", "LastJob(12)*", "Run(2)"]
+        );
+    }
+
     #[test]
     fn expanded_gives_the_repository_and_the_id_of_each_expanded_run() {
         let mut board = board();
