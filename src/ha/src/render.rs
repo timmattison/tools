@@ -34,6 +34,10 @@ const WORKFLOW_HEADER: &str = "WORKFLOW";
 /// The most columns that the workflow name gets: the width of its header word.
 /// Most workflow names fit, for example `CI`, `Release`, and `CodeQL`.
 const MAX_WORKFLOW_WIDTH: usize = WORKFLOW_HEADER.len();
+/// The most columns that the branch gets. A person reads the start of a branch
+/// name, for example `issue-577` or `main`. Past 12 columns, the rest of a name
+/// seldom helps to find a run, and a longer name ends in `…`.
+const MAX_BRANCH_WIDTH: usize = 12;
 /// The lines that are not board rows: the column header and the status line.
 const FIXED_LINES: usize = 2;
 /// The text that stands between two parts of the status line.
@@ -61,14 +65,16 @@ impl Widths {
     /// and the rest to the title.
     ///
     /// The workflow name never gets more than [`MAX_WORKFLOW_WIDTH`] columns,
-    /// the width of its header word, and the title gets each column that it
-    /// gives up. A workflow name is usually short, and the title is the
-    /// longest text of a row. A frame that is too narrow gives each 0.
+    /// the width of its header word, and the branch never gets more than
+    /// [`MAX_BRANCH_WIDTH`] columns. The title gets each column that the two
+    /// give up. A workflow name is usually short, a person reads only the start
+    /// of a branch name, and the title is the longest text of a row. A frame
+    /// that is too narrow gives each 0.
     fn for_width(width: usize) -> Widths {
         let room = width.saturating_sub(FIXED_COLUMNS);
         let repo = room * 24 / 100;
         let workflow = (room * 19 / 100).min(MAX_WORKFLOW_WIDTH);
-        let branch = room * 21 / 100;
+        let branch = (room * 21 / 100).min(MAX_BRANCH_WIDTH);
         Widths {
             repo,
             workflow,
