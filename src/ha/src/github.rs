@@ -399,8 +399,8 @@ impl GhSource {
     /// Removes the cache entries of every page of the jobs of one run.
     ///
     /// `jobs_of` calls this when a run has jobs and none is active. The worker
-    /// fetches the jobs of a finished run one time only, thus those pages have
-    /// no later use. Without this rule, the cache keeps the pages of every run
+    /// fetches the jobs of a run with no active job one time only, thus those
+    /// pages have no later use. Without this rule, the cache keeps the pages of every run
     /// that a person ever expanded. A run with no jobs, or with an active job,
     /// keeps its pages, so its next fetch can get a `304`.
     fn forget_jobs_of(&self, repo: &RepoName, run: RunId) {

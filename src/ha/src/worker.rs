@@ -8,9 +8,10 @@
 //! [`Command::WatchJobs`]. The worker fetches the jobs of those runs. It fetches
 //! the jobs of a new run at once, and it fetches the jobs of a watched run on
 //! each cycle when the run is due. A run is due when it has no good job fetch
-//! yet, when it is active, or when its `updated_at` changed since the last good
-//! fetch. So `ha` fetches the jobs of a finished run one time only. Job requests
-//! and run requests share the [`CONCURRENCY`] limit and the rate limit backoff.
+//! yet, when the run or one of its jobs was active at the last good fetch, or
+//! when its `updated_at` changed since the last good fetch. So `ha` fetches the
+//! jobs of a finished run one time only, when all of its jobs are finished. Job
+//! requests and run requests share the [`CONCURRENCY`] limit and the rate limit backoff.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -203,6 +204,7 @@ struct State {
     /// The facts of each run of the last good answer, for each repository.
     facts: Mutex<HashMap<RepoName, HashMap<RunId, RunFacts>>>,
     /// For each watched run, the facts of the run at its last good job fetch.
+    /// The mark is active when the run or one of its jobs was active.
     job_marks: Mutex<HashMap<RunKey, RunFacts>>,
 }
 
@@ -472,8 +474,9 @@ fn fetch_all<S: Source>(
 /// Fetches the jobs of the given runs with the shared pool of threads.
 ///
 /// A good fetch sends [`Update::Jobs`] and marks the run with its current
-/// facts. A run with no facts gets no mark. A failed fetch sends
-/// [`Update::JobsFailed`] and removes the mark, so the next cycle tries again.
+/// facts. The mark is active when the run or one of its jobs is active. A run
+/// with no facts gets no mark. A failed fetch sends [`Update::JobsFailed`] and
+/// removes the mark, so the next cycle tries again.
 fn fetch_jobs<S: Source>(
     source: &S,
     state: &State,
@@ -495,7 +498,8 @@ fn fetch_jobs<S: Source>(
             .unwrap_or_else(PoisonError::into_inner);
         match (result, facts) {
             (Ok(jobs), Some(facts)) => {
-                marks.insert((repo.clone(), *run), facts);
+                let active = facts.active || jobs.iter().any(|job| job.state.is_active());
+                marks.insert((repo.clone(), *run), RunFacts { active, ..facts });
                 Update::Jobs { run: *run, jobs }
             }
             (Ok(jobs), None) => {

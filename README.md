@@ -2063,7 +2063,9 @@ cannot hang the caller. Used by `cwt` and `ha`.
       and also when it moves from the running section to the finished section. When a run leaves
       the board, its jobs go too.
     - The jobs load at once when you expand a run, and then refresh with the board. The jobs of a
-      finished run load one time only, until a re-run changes the run.
+      finished run load one time only, until a re-run changes the run. If GitHub still shows an
+      active job in a finished run, the jobs of that run refresh with the board until each job
+      finishes.
   - Keys: Up and Down move the highlight through both sections, from one run to the next run, and
     skip the job rows. Right and Left expand and collapse the jobs of the highlighted run. Enter
     opens the highlighted run in the browser, and `ha` keeps running. When no browser opens, the status line shows the URL and
