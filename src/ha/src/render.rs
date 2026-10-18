@@ -2698,6 +2698,46 @@ mod tests {
     }
 
     #[test]
+    fn wrap_line_keeps_a_line_that_fits_exactly_as_it_is() {
+        assert_eq!(wrap_line("a  b", 10), vec!["a  b"]);
+        assert_eq!(wrap_line("", 10), vec![""]);
+    }
+
+    #[test]
+    fn wrap_line_breaks_at_spaces_and_fills_each_line() {
+        assert_eq!(
+            wrap_line("one two three four", 9),
+            vec!["one two", "three", "four"]
+        );
+        assert_eq!(wrap_line("one two", 7), vec!["one two"]);
+    }
+
+    #[test]
+    fn wrap_line_measures_display_width_not_bytes_or_chars() {
+        // Each word is 6 columns wide. Two words and a space need 13.
+        assert_eq!(wrap_line("日本語 日本語", 12), vec!["日本語", "日本語"]);
+        assert_eq!(wrap_line("🎉🎉 🎉🎉", 8), vec!["🎉🎉", "🎉🎉"]);
+        assert_eq!(wrap_line("café café café", 9), vec!["café café", "café"]);
+    }
+
+    #[test]
+    fn wrap_line_cuts_a_word_that_is_wider_than_the_width() {
+        let lines = wrap_line("ab 日本語日本語日本語 cd", 7);
+        assert_eq!(lines.first().map(String::as_str), Some("ab"));
+        assert!(
+            lines.iter().all(|line| display_width(line) <= 7),
+            "{lines:?}"
+        );
+        assert!(lines.iter().any(|line| line.ends_with('…')), "{lines:?}");
+        assert_eq!(lines.last().map(String::as_str), Some("cd"));
+    }
+
+    #[test]
+    fn wrap_line_with_a_zero_width_gives_one_empty_line() {
+        assert_eq!(wrap_line("a b c", 0), vec![""]);
+    }
+
+    #[test]
     fn the_box_never_panics_whatever_the_size_of_the_frame() {
         let long = "x".repeat(300);
         let prompts = [
