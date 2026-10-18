@@ -1299,6 +1299,73 @@ mod tests {
         assert!(text[6].starts_with("○ acme/widgets"), "{:?}", text[6]);
     }
 
+    /// The display column of the last digit of the first `digits` in `line`.
+    fn last_digit_column(line: &str, digits: &str) -> Option<usize> {
+        let (before, _) = line.split_once(digits)?;
+        Some(display_width(before) + display_width(digits) - 1)
+    }
+
+    #[test]
+    fn each_job_id_ends_in_the_column_of_the_run_id() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("timmattison/tools"),
+            vec![run(
+                39_149_840_084,
+                "timmattison/tools",
+                "CI",
+                "main",
+                "Fix the thing",
+                RunState::Running,
+                "2026-10-14T11:45:30Z",
+                "2026-10-14T11:59:00Z",
+            )],
+        );
+        board.expand(now());
+        board.set_jobs(
+            RunId(39_149_840_084),
+            vec![
+                job(
+                    107_851_237_796,
+                    "test",
+                    RunState::Running,
+                    Some("2026-10-14T11:50:10Z"),
+                    None,
+                ),
+                job(
+                    107_851_237_794,
+                    "build",
+                    RunState::Passed,
+                    Some("2026-10-14T11:45:40Z"),
+                    Some("2026-10-14T11:50:00Z"),
+                ),
+                job(
+                    107_851_237_795,
+                    "lint",
+                    RunState::Failed,
+                    Some("2026-10-14T11:46:00Z"),
+                    Some("2026-10-14T11:46:45Z"),
+                ),
+            ],
+        );
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        let run_column = last_digit_column(&text[2], "39149840084")
+            .unwrap_or_else(|| panic!("the run row holds its ID: {:?}", text[2]));
+        for (y, start, id) in [
+            (3, "✓ ├ build", "107851237794"),
+            (4, "✗ ├ lint", "107851237795"),
+            (5, "● └ test", "107851237796"),
+        ] {
+            assert!(text[y].starts_with(start), "job {start}: {:?}", text[y]);
+            assert_eq!(
+                last_digit_column(&text[y], id),
+                Some(run_column),
+                "job {start}: {:?}",
+                text[y]
+            );
+        }
+    }
+
     #[test]
     fn no_row_shows_how_long_ago_a_run_or_a_job_finished() {
         let mut board = board_with_jobs(three_jobs());
