@@ -1,7 +1,8 @@
 //! The board: the runs of all watched repositories, as rows for one screen.
 //!
 //! The board holds the last good runs of each repository, the last error of
-//! each repository, the time window, the selection, and the scroll offset.
+//! each repository, the last job answer of each run, the set of expanded runs,
+//! the time window, the selection, and the scroll offset.
 //! It does no I/O. Every reader takes the current time as an argument, so a
 //! test uses one fixed time and never reads the clock.
 
@@ -68,11 +69,12 @@ pub enum Row<'a> {
     JobsError(&'a str),
 }
 
-/// The jobs of one expanded run.
+/// The last job answer that the board holds for one run.
+///
+/// A run with no entry has no answer yet. If such a run is expanded, it shows
+/// a loading row.
 #[derive(Debug)]
 enum Jobs {
-    /// The run is expanded and no answer came yet.
-    Loading,
     /// The last good answer.
     Ready(Vec<Job>),
     /// The last fetch failed.
@@ -114,7 +116,11 @@ pub struct Board {
     errors: BTreeMap<RepoName, String>,
     selected: Option<Selection>,
     offset: usize,
-    expanded: BTreeMap<RunId, Jobs>,
+    /// The last job answer of each run that the board holds. A run in this map
+    /// can be expanded or collapsed.
+    jobs: BTreeMap<RunId, Jobs>,
+    /// The runs that show their job rows.
+    expanded: BTreeSet<RunId>,
 }
 
 impl Board {
@@ -127,7 +133,8 @@ impl Board {
             errors: BTreeMap::new(),
             selected: None,
             offset: 0,
-            expanded: BTreeMap::new(),
+            jobs: BTreeMap::new(),
+            expanded: BTreeSet::new(),
         }
     }
 
@@ -248,10 +255,18 @@ impl Board {
     /// The jobs of `run` that show as job rows. The list is empty for a run
     /// that is not expanded, and for a run that waits for its first answer.
     fn shown_jobs(&self, run: RunId) -> &[Job] {
-        match self.expanded.get(&run) {
-            Some(Jobs::Ready(jobs) | Jobs::Failed { jobs, .. }) => jobs,
-            Some(Jobs::Loading) | None => &[],
+        if !self.expanded.contains(&run) {
+            return &[];
         }
+        match self.jobs.get(&run) {
+            Some(Jobs::Ready(jobs) | Jobs::Failed { jobs, .. }) => jobs,
+            None => &[],
+        }
+    }
+
+    /// True when some repository list holds a run with the ID `run`.
+    fn holds_run(&self, run: RunId) -> bool {
+        self.runs.values().flatten().any(|held| held.id == run)
     }
 
     /// All rows that the selection can mark at `now`, in the order of the board.
@@ -279,6 +294,9 @@ impl Board {
     }
 
     /// Makes the selection valid for the runs that show at `now`.
+    ///
+    /// A run that does not show at `now` loses its expansion and its job
+    /// answer. This is how the board forgets a run that leaves it.
     ///
     /// The run comes first. The selection follows its run. When the run is
     /// gone, the run at the old position is selected, or the last run when the
@@ -309,7 +327,8 @@ impl Board {
         });
         let shown: BTreeSet<RunId> = runs.iter().map(|run| run.id).collect();
         self.selected = selected;
-        self.expanded.retain(|id, _| shown.contains(id));
+        self.expanded.retain(|id| shown.contains(id));
+        self.jobs.retain(|id, _| shown.contains(id));
     }
 
     /// The job part of the selection for `run`, after `old` was selected.
@@ -352,7 +371,10 @@ impl Board {
             Section::Active,
             0,
             self.selected,
-            &self.expanded,
+            JobStates {
+                jobs: &self.jobs,
+                expanded: &self.expanded,
+            },
         );
         rows.push(Row::Header {
             section: Section::Recent,
@@ -366,24 +388,29 @@ impl Board {
             Section::Recent,
             active.len(),
             self.selected,
-            &self.expanded,
+            JobStates {
+                jobs: &self.jobs,
+                expanded: &self.expanded,
+            },
         );
         rows
     }
 
-    /// Expands the run of the selection. The run shows a loading row until
-    /// `set_jobs` gives its jobs. A run that is already expanded keeps its jobs.
-    /// On a job row, the run is already expanded, thus nothing changes. With no
-    /// selection, nothing happens.
+    /// Expands the run of the selection. The run shows its jobs at once when
+    /// the board holds an answer for it. Else it shows a loading row until
+    /// `set_jobs` gives its jobs. A run that is already expanded changes
+    /// nothing. On a job row, the run is already expanded. With no selection,
+    /// nothing happens.
     pub fn expand(&mut self, now: DateTime<Utc>) {
         self.settle(now);
         if let Some(Selection { run: (id, _), .. }) = self.selected {
-            self.expanded.entry(id).or_insert(Jobs::Loading);
+            self.expanded.insert(id);
         }
     }
 
-    /// Collapses the run of the selection and drops its jobs. On a job row, the
-    /// selection goes to the row of that run. A run that is not expanded, or no
+    /// Collapses the run of the selection. The board keeps the job answer of
+    /// the run, thus the run row keeps its marker. On a job row, the selection
+    /// goes to the row of that run. A run that is not expanded, or no
     /// selection, changes nothing.
     pub fn collapse(&mut self, now: DateTime<Utc>) {
         self.settle(now);
@@ -392,8 +419,8 @@ impl Board {
         }
     }
 
-    /// Stores the jobs of `run` when the run is expanded. A late answer for a
-    /// run that is not expanded is dropped.
+    /// Stores the jobs of `run` when the board holds the run, expanded or not.
+    /// A late answer for a run that the board does not hold is dropped.
     ///
     /// The jobs are sorted by name, with no difference between capital and
     /// small letters, and then by ID. GitHub gives the jobs in the order of
@@ -406,22 +433,23 @@ impl Board {
     /// A repeated job ID keeps its first job only. The sort comes after this
     /// step, thus the first job is the first one that the source gave.
     pub fn set_jobs(&mut self, run: RunId, mut jobs: Vec<Job>) {
-        if let Some(state) = self.expanded.get_mut(&run) {
+        if self.holds_run(run) {
             keep_first_of_each_id(&mut jobs, |job| job.id);
             jobs.sort_by_cached_key(|job| (job.name.to_lowercase(), job.id));
-            *state = Jobs::Ready(jobs);
+            self.jobs.insert(run, Jobs::Ready(jobs));
         }
     }
 
-    /// Records the error of a failed fetch for `run` when the run is expanded.
-    /// The last good jobs stay. Nothing happens for a run that is not expanded.
+    /// Records the error of a failed fetch for `run` when the board holds the
+    /// run, expanded or not. The last good jobs stay, or an empty list when
+    /// there is none. Nothing happens for a run that the board does not hold.
     pub fn fail_jobs(&mut self, run: RunId, error: String) {
-        if let Some(state) = self.expanded.get_mut(&run) {
-            let jobs = match std::mem::replace(state, Jobs::Loading) {
-                Jobs::Loading => Vec::new(),
-                Jobs::Ready(jobs) | Jobs::Failed { jobs, .. } => jobs,
+        if self.holds_run(run) {
+            let jobs = match self.jobs.remove(&run) {
+                None => Vec::new(),
+                Some(Jobs::Ready(jobs) | Jobs::Failed { jobs, .. }) => jobs,
             };
-            *state = Jobs::Failed { jobs, error };
+            self.jobs.insert(run, Jobs::Failed { jobs, error });
         }
     }
 
@@ -431,7 +459,7 @@ impl Board {
         self.settle(now);
         self.shown_runs(now)
             .into_iter()
-            .filter(|run| self.expanded.contains_key(&run.id))
+            .filter(|run| self.expanded.contains(&run.id))
             .map(|run| (run.repo.clone(), run.id))
             .collect()
     }
@@ -519,29 +547,40 @@ fn scroll(
     offset.min(len.saturating_sub(height))
 }
 
+/// The job data that the rows of the board read.
+#[derive(Clone, Copy)]
+struct JobStates<'a> {
+    /// The last job answer of each run that the board holds.
+    jobs: &'a BTreeMap<RunId, Jobs>,
+    /// The runs that show their job rows.
+    expanded: &'a BTreeSet<RunId>,
+}
+
 /// Adds the runs of one section to `rows`, or the empty row when there is none.
 ///
 /// `first` is the position of the first run of `runs` among all runs. The row
 /// of the run at the position of `selected` gets the mark when the selection
 /// has no job part. Otherwise the job row at the selected job position gets
-/// the mark. The block of jobs of each run in `expanded` follows the row of
-/// that run.
+/// the mark. The state of each run row comes from the job answer of the run,
+/// expanded or not. The block of jobs of each run in `states.expanded` follows
+/// the row of that run.
 fn push_runs<'a>(
     rows: &mut Vec<Row<'a>>,
     runs: &[&'a Run],
     section: Section,
     first: usize,
     selected: Option<Selection>,
-    expanded: &'a BTreeMap<RunId, Jobs>,
+    states: JobStates<'a>,
 ) {
     if runs.is_empty() {
         rows.push(Row::Empty(section));
     }
     for (offset, &run) in runs.iter().enumerate() {
         let here = selected.filter(|selection| selection.run.1 == first + offset);
-        let job_states = match expanded.get(&run.id) {
+        let answer = states.jobs.get(&run.id);
+        let job_states = match answer {
             Some(Jobs::Ready(jobs) | Jobs::Failed { jobs, .. }) => jobs.as_slice(),
-            Some(Jobs::Loading) | None => &[],
+            None => &[],
         };
         rows.push(Row::Run {
             run,
@@ -550,26 +589,33 @@ fn push_runs<'a>(
                 .shown_with_jobs(job_states.iter().map(|job| job.state)),
             selected: here.is_some_and(|selection| selection.job.is_none()),
         });
-        if let Some(jobs) = expanded.get(&run.id) {
-            push_jobs(rows, jobs, here.and_then(|selection| selection.job));
+        if states.expanded.contains(&run.id) {
+            push_jobs(rows, answer, here.and_then(|selection| selection.job));
         }
     }
 }
 
 /// Adds the block of rows of one expanded run to `rows`.
 ///
-/// The job row at the position of `selected` gets the mark.
-fn push_jobs<'a>(rows: &mut Vec<Row<'a>>, jobs: &'a Jobs, selected: Option<(JobId, usize)>) {
+/// `answer` is the job answer that the board holds for the run. `None` gives
+/// the loading row. The job row at the position of `selected` gets the mark.
+fn push_jobs<'a>(
+    rows: &mut Vec<Row<'a>>,
+    answer: Option<&'a Jobs>,
+    selected: Option<(JobId, usize)>,
+) {
     let marked = |index: usize| selected.is_some_and(|(_, position)| position == index);
-    match jobs {
-        Jobs::Loading => rows.push(Row::JobsLoading),
-        Jobs::Ready(list) if list.is_empty() => rows.push(Row::NoJobs),
-        Jobs::Ready(list) => rows.extend(list.iter().enumerate().map(|(index, job)| Row::Job {
-            job,
-            last: index + 1 == list.len(),
-            selected: marked(index),
-        })),
-        Jobs::Failed { jobs, error } => {
+    match answer {
+        None => rows.push(Row::JobsLoading),
+        Some(Jobs::Ready(list)) if list.is_empty() => rows.push(Row::NoJobs),
+        Some(Jobs::Ready(list)) => {
+            rows.extend(list.iter().enumerate().map(|(index, job)| Row::Job {
+                job,
+                last: index + 1 == list.len(),
+                selected: marked(index),
+            }));
+        }
+        Some(Jobs::Failed { jobs, error }) => {
             rows.extend(jobs.iter().enumerate().map(|(index, job)| Row::Job {
                 job,
                 last: false,
@@ -1456,7 +1502,7 @@ mod tests {
     }
 
     #[test]
-    fn collapse_removes_the_block_and_the_jobs() {
+    fn collapse_removes_the_job_rows_and_keeps_the_jobs() {
         let mut board = two_run_board();
         board.expand(now());
         board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
@@ -1472,7 +1518,7 @@ mod tests {
         );
         assert!(board.expanded(now()).is_empty());
         board.expand(now());
-        assert_eq!(shape(&board.rows(now()))[2], "JobsLoading");
+        assert_eq!(shape(&board.rows(now()))[2], "LastJob(11)");
     }
 
     /// The state that the row of run `id` shows, or `None` when no row holds it.
@@ -1534,14 +1580,38 @@ mod tests {
     }
 
     #[test]
-    fn jobs_for_a_run_that_is_not_expanded_are_dropped() {
+    fn the_answers_for_a_collapsed_run_show_after_an_expand() {
         let mut board = two_run_board();
         board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
         board.fail_jobs(RunId(1), "HTTP 500".to_owned());
         board.set_jobs(RunId(99), vec![job(12, RunState::Passed)]);
         assert_eq!(shape(&board.rows(now())).len(), 4);
         board.expand(now());
-        assert_eq!(shape(&board.rows(now()))[2], "JobsLoading");
+        assert_eq!(
+            shape(&board.rows(now()))[1..4],
+            ["Run(1)", "Job(11)", "JobsError(HTTP 500)"]
+        );
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(99, "a/x", RunState::Running, 20, 1),
+                run(2, "a/x", RunState::Passed, 60, 10),
+            ],
+        );
+        board.select_next(now());
+        board.select_next(now());
+        board.expand(now());
+        assert_eq!(
+            shape(&board.rows(now()))[1..6],
+            [
+                "Run(1)",
+                "Job(11)",
+                "JobsError(HTTP 500)",
+                "Run(99)",
+                "JobsLoading"
+            ]
+        );
     }
 
     #[test]
