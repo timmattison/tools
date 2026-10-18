@@ -158,12 +158,26 @@ where
         }
     }
 
-    /// Posts each open that failed late, and applies each update that the
-    /// worker has sent. A worker that has ended sends nothing more, and that
+    /// Posts each open that failed late and the result of each cancel, and
+    /// applies each update that the worker has sent. A worker that has ended sends nothing more, and that
     /// is not an error.
     fn apply_updates(&mut self) {
         while let Some(failure) = self.opener.late_failure() {
             self.status.message = Some(failed_open(&failure.url, &failure.reason, (self.now)()));
+        }
+        while let Some(outcome) = self.canceller.finished() {
+            // The run ID comes before the error, because the status line cuts
+            // a long line at its end. Thus a narrow terminal still shows which
+            // run the error is about.
+            match outcome.result {
+                Ok(()) => {
+                    self.post(format!("GitHub is cancelling run {}", outcome.run.0));
+                    self.refresh_now();
+                }
+                Err(error) => {
+                    self.post(format!("could not cancel run {}: {error}", outcome.run.0));
+                }
+            }
         }
         while let Ok(update) = self.worker.updates.try_recv() {
             match update {
