@@ -51,14 +51,16 @@ struct Widths {
 }
 
 impl Widths {
-    /// Shares the columns that the fixed columns leave over: 25 percent to the
-    /// repository, 20 percent to the workflow, 20 percent to the branch, and
-    /// the rest to the title. A frame that is too narrow gives each 0.
+    /// Shares the columns that the fixed columns leave over: 24 percent to the
+    /// repository, 19 percent to the workflow name, 21 percent to the branch,
+    /// and the rest to the title. A workflow name is usually short, and a
+    /// person reads the branch and the title to find what runs. A frame that
+    /// is too narrow gives each 0.
     fn for_width(width: usize) -> Widths {
         let room = width.saturating_sub(FIXED_COLUMNS);
-        let repo = room * 25 / 100;
-        let workflow = room * 20 / 100;
-        let branch = room * 20 / 100;
+        let repo = room * 24 / 100;
+        let workflow = room * 19 / 100;
+        let branch = room * 21 / 100;
         Widths {
             repo,
             workflow,
@@ -886,13 +888,13 @@ mod tests {
         assert_eq!(
             lines(&buffer),
             [
-                "  REPO                 WORKFLOW                      BRANCH           TITLE                          STARTED     TIME",
+                "  REPO                WORKFLOW                     BRANCH            TITLE                           STARTED     TIME",
                 "Running · 2",
-                "● timmattison/tools    CI                          1 main             Fix the thing                  11:45:30    14m 30s",
-                "○ acme/widgets         Release                     2 issue-12         Add release job                11:58:00    2m 00s",
+                "● timmattison/tools   CI                         1 main              Fix the thing                   11:45:30    14m 30s",
+                "○ acme/widgets        Release                    2 issue-12          Add release job                 11:58:00    2m 00s",
                 "Last 8h · 1 passed · 1 failed",
-                "✓ timmattison/tools    CI                          3 main             Bump deps                      09:00:00    10m 05s",
-                "✗ acme/widgets         Release                     4 issue-11         Broken build                   10-13 23:50 4h 40m",
+                "✓ timmattison/tools   CI                         3 main              Bump deps                       09:00:00    10m 05s",
+                "✗ acme/widgets        Release                    4 issue-11          Broken build                    10-13 23:50 4h 40m",
                 "",
                 "",
                 "updated 30s ago      ·  ↑↓ select  →← jobs  ⏎ open  r refresh  q quit",
@@ -954,7 +956,8 @@ mod tests {
                 "width {width}, ID {id}: the header holds a RUN word: {:?}",
                 text[0]
             );
-            let from = header_column(&text, "WORKFLOW");
+            // At 80 columns the workflow cell is 7 wide and cuts its header word.
+            let from = header_column(&text, "WORKF");
             let branch = header_column(&text, "BRANCH");
             let cell = columns(&text[2], from, branch - 1 - from);
             assert!(
@@ -1366,12 +1369,12 @@ mod tests {
     }
 
     /// The expected line of a job row at 120 columns. The widths follow the
-    /// shares of the 82 columns of room: 20 repository, 16 workflow name, 16
-    /// branch, and 30 title. The text fills 37 columns, the job ID fills 12, and
-    /// the branch and title columns are 47 blank columns.
+    /// shares of the 82 columns of room: 19 repository, 15 workflow name, 17
+    /// branch, and 31 title. The text fills 35 columns, the job ID fills 12, and
+    /// the branch and title columns are 49 blank columns.
     fn job_golden(marker: &str, text: &str, id: u64, times: &str) -> String {
         format!(
-            "{marker} {text:<37} {id:>12} {blank:<47} {times}",
+            "{marker} {text:<35} {id:>12} {blank:<49} {times}",
             blank = ""
         )
         .trim_end()
@@ -1385,7 +1388,7 @@ mod tests {
         assert_eq!(
             text[2..6],
             [
-                "● timmattison/tools    CI                          1 main             Fix the thing                  11:45:30    14m 30s".to_owned(),
+                "● timmattison/tools   CI                         1 main              Fix the thing                   11:45:30    14m 30s".to_owned(),
                 job_golden("✓", "├ build", 12, "11:45:40    4m 20s"),
                 job_golden("✗", "├ lint", 13, "11:46:00    45s"),
                 job_golden("●", "└ test", 11, "11:50:10    9m 50s"),
@@ -2051,10 +2054,10 @@ mod tests {
             )],
         );
         let text = lines(&render_with(68, 6, &mut board, &Status::default()));
-        // 68 - 38 = 30 columns for the text: 7, 6, 6, and 11.
+        // 68 - 38 = 30 columns for the text: 7, 5, 6, and 12.
         assert_eq!(
             text[2],
-            "● timmat… Conti…            1 featu… A very lon… 11:55:00    5m 00s"
+            "● timmat… Cont…            1 featu… A very long… 11:55:00    5m 00s"
         );
     }
 
@@ -2099,15 +2102,15 @@ mod tests {
         let text = lines(&render_with(68, 7, &mut board, &Status::default()));
         assert_eq!(
             text[2],
-            "● a/x     CI                1 日本…  t           11:51:00    9m 00s"
+            "● a/x     CI               1 日本…  t            11:51:00    9m 00s"
         );
         assert_eq!(
             text[3],
-            "● a/x     CI                2 café-… t           11:52:00    8m 00s"
+            "● a/x     CI               2 café-… t            11:52:00    8m 00s"
         );
         assert_eq!(
             text[4],
-            "● a/x     CI                3 🎉🎉…  t           11:53:00    7m 00s"
+            "● a/x     CI               3 🎉🎉…  t            11:53:00    7m 00s"
         );
         for line in &text {
             assert!(display_width(line) <= 68, "{line:?} is too wide");
