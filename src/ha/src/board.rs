@@ -264,11 +264,16 @@ impl Board {
 
     /// Makes the selection valid for the runs that show at `now`.
     ///
-    /// The selection follows its run. When the run is gone, the run at the old
-    /// position is selected, or the last run when the old position is past the
-    /// end, and the job part goes away. A board with no run has no selection.
-    /// A new selection is the first run. The job part of a selection stays
-    /// while its run stays.
+    /// The run comes first. The selection follows its run. When the run is
+    /// gone, the run at the old position is selected, or the last run when the
+    /// old position is past the end, and the job part goes away. A board with
+    /// no run has no selection. A new selection is the first run.
+    ///
+    /// The job comes second. The selection follows its job inside the run.
+    /// When the job is gone, the job at the old position is selected, or the
+    /// last job when the old position is past the end. A re-run gives new job
+    /// IDs, thus the highlight then stays on the job of the same name. When
+    /// the run shows no job row, the run row is selected.
     fn settle(&mut self, now: DateTime<Utc>) {
         let runs = self.shown_runs(now);
         let position = match self.selected {
@@ -278,17 +283,34 @@ impl Board {
                 .position(|run| run.id == id)
                 .unwrap_or_else(|| old.min(runs.len().saturating_sub(1))),
         };
-        let kept_job = self
+        let old_job = self
             .selected
             .filter(|old| runs.get(position).is_some_and(|run| run.id == old.run.0))
             .and_then(|old| old.job);
         let selected = runs.get(position).map(|run| Selection {
             run: (run.id, position),
-            job: kept_job,
+            job: self.settled_job(run.id, old_job),
         });
         let shown: BTreeSet<RunId> = runs.iter().map(|run| run.id).collect();
         self.selected = selected;
         self.expanded.retain(|id, _| shown.contains(id));
+    }
+
+    /// The job part of the selection for `run`, after `old` was selected.
+    ///
+    /// The job with the old ID wins. Else the job at the old position wins, or
+    /// the last job when the old position is past the end. `None` means that
+    /// the run row is selected: there was no job selected, or the run shows no
+    /// job row.
+    fn settled_job(&self, run: RunId, old: Option<(JobId, usize)>) -> Option<(JobId, usize)> {
+        let jobs = self.shown_jobs(run);
+        let (id, position) = old?;
+        let last = jobs.len().checked_sub(1)?;
+        let index = jobs
+            .iter()
+            .position(|job| job.id == id)
+            .unwrap_or_else(|| position.min(last));
+        Some((jobs[index].id, index))
     }
 
     /// Builds the full list of rows. The list has two sections.
