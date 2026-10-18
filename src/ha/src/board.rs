@@ -232,11 +232,43 @@ impl Board {
         active.into_iter().chain(recent).collect()
     }
 
+    /// The jobs of `run` that show as job rows. The list is empty for a run
+    /// that is not expanded, and for a run that waits for its first answer.
+    fn shown_jobs(&self, run: RunId) -> &[Job] {
+        match self.expanded.get(&run) {
+            Some(Jobs::Ready(jobs) | Jobs::Failed { jobs, .. }) => jobs,
+            Some(Jobs::Loading) | None => &[],
+        }
+    }
+
+    /// All rows that the selection can mark at `now`, in the order of the board.
+    ///
+    /// Each shown run gives its own slot, and then one slot for each job row
+    /// of that run.
+    fn selectable_rows(&self, now: DateTime<Utc>) -> Vec<Selection> {
+        let mut slots = Vec::new();
+        for (position, run) in self.shown_runs(now).into_iter().enumerate() {
+            slots.push(Selection {
+                run: (run.id, position),
+                job: None,
+            });
+            slots.extend(self.shown_jobs(run.id).iter().enumerate().map(
+                |(index, job)| Selection {
+                    run: (run.id, position),
+                    job: Some((job.id, index)),
+                },
+            ));
+        }
+        slots
+    }
+
     /// Makes the selection valid for the runs that show at `now`.
     ///
     /// The selection follows its run. When the run is gone, the run at the old
     /// position is selected, or the last run when the old position is past the
-    /// end. A board with no run has no selection. A new selection is the first run.
+    /// end, and the job part goes away. A board with no run has no selection.
+    /// A new selection is the first run. The job part of a selection stays
+    /// while its run stays.
     fn settle(&mut self, now: DateTime<Utc>) {
         let runs = self.shown_runs(now);
         let position = match self.selected {
@@ -246,9 +278,13 @@ impl Board {
                 .position(|run| run.id == id)
                 .unwrap_or_else(|| old.min(runs.len().saturating_sub(1))),
         };
+        let kept_job = self
+            .selected
+            .filter(|old| runs.get(position).is_some_and(|run| run.id == old.run.0))
+            .and_then(|old| old.job);
         let selected = runs.get(position).map(|run| Selection {
             run: (run.id, position),
-            job: None,
+            job: kept_job,
         });
         let shown: BTreeSet<RunId> = runs.iter().map(|run| run.id).collect();
         self.selected = selected;
@@ -257,8 +293,9 @@ impl Board {
 
     /// Builds the full list of rows. The list has two sections.
     ///
-    /// The row of the selected run carries the selection mark. The block of
-    /// each expanded run follows the row of that run.
+    /// The selected row carries the selection mark. This is the row of the
+    /// selected run, or the row of its selected job. The block of each
+    /// expanded run follows the row of that run.
     fn build_rows(&self, now: DateTime<Utc>) -> Vec<Row<'_>> {
         let (active, recent) = self.sections(now);
         let passed = recent
@@ -271,13 +308,12 @@ impl Board {
             passed: 0,
             failed: 0,
         }];
-        let selected = self.selected.map(|selection| selection.run.1);
-        push_runs(
+                push_runs(
             &mut rows,
             &active,
             Section::Active,
             0,
-            selected,
+            self.selected,
             &self.expanded,
         );
         rows.push(Row::Header {
@@ -291,7 +327,7 @@ impl Board {
             &recent,
             Section::Recent,
             active.len(),
-            selected,
+            self.selected,
             &self.expanded,
         );
         rows
@@ -356,31 +392,32 @@ impl Board {
             .collect()
     }
 
-    /// Moves the selection to the next run.
+    /// Moves the selection to the next row: a run row or a job row.
     pub fn select_next(&mut self, now: DateTime<Utc>) {
         self.settle(now);
         self.move_selection(now, |index, count| (index + 1).min(count - 1));
     }
 
-    /// Moves the selection to the previous run.
+    /// Moves the selection to the previous row: a run row or a job row.
     pub fn select_previous(&mut self, now: DateTime<Utc>) {
         self.settle(now);
         self.move_selection(now, |index, _| index.saturating_sub(1));
     }
 
-    /// Moves the selection to the run at the position that `target` gives.
+    /// Moves the selection to the row at the position that `target` gives.
     ///
-    /// `target` gets the current position and the number of runs.
+    /// `target` gets the current position and the number of rows that the
+    /// selection can mark. The rows are the run rows and the job rows of the
+    /// expanded runs. When the selection is not among them, it stays.
     fn move_selection(&mut self, now: DateTime<Utc>, target: impl Fn(usize, usize) -> usize) {
-        let runs = self.shown_runs(now);
-        let moved = self.selected.and_then(|Selection { run: (_, index), .. }| {
-            let position = target(index, runs.len());
-            runs.get(position).map(|run| Selection {
-                run: (run.id, position),
-                job: None,
-            })
-        });
-        self.selected = moved;
+        let slots = self.selectable_rows(now);
+        let moved = self
+            .selected
+            .and_then(|current| slots.iter().position(|slot| *slot == current))
+            .and_then(|index| slots.get(target(index, slots.len())).copied());
+        if moved.is_some() {
+            self.selected = moved;
+        }
     }
 
     /// The address of the selected run, or `None` when the board has no run.
@@ -430,46 +467,52 @@ fn scroll(
 
 /// Adds the runs of one section to `rows`, or the empty row when there is none.
 ///
-/// `first` is the position of the first run of `runs` among all runs. The run
-/// at position `selected` gets the mark. The block of jobs of each run in
-/// `expanded` follows the row of that run.
+/// `first` is the position of the first run of `runs` among all runs. The row
+/// of the run at the position of `selected` gets the mark when the selection
+/// has no job part. Otherwise the job row at the selected job position gets
+/// the mark. The block of jobs of each run in `expanded` follows the row of
+/// that run.
 fn push_runs<'a>(
     rows: &mut Vec<Row<'a>>,
     runs: &[&'a Run],
     section: Section,
     first: usize,
-    selected: Option<usize>,
+    selected: Option<Selection>,
     expanded: &'a BTreeMap<RunId, Jobs>,
 ) {
     if runs.is_empty() {
         rows.push(Row::Empty(section));
     }
     for (offset, &run) in runs.iter().enumerate() {
+        let here = selected.filter(|selection| selection.run.1 == first + offset);
         rows.push(Row::Run {
             run,
-            selected: selected == Some(first + offset),
+            selected: here.is_some_and(|selection| selection.job.is_none()),
         });
         if let Some(jobs) = expanded.get(&run.id) {
-            push_jobs(rows, jobs);
+            push_jobs(rows, jobs, here.and_then(|selection| selection.job));
         }
     }
 }
 
 /// Adds the block of rows of one expanded run to `rows`.
-fn push_jobs<'a>(rows: &mut Vec<Row<'a>>, jobs: &'a Jobs) {
+///
+/// The job row at the position of `selected` gets the mark.
+fn push_jobs<'a>(rows: &mut Vec<Row<'a>>, jobs: &'a Jobs, selected: Option<(JobId, usize)>) {
+    let marked = |index: usize| selected.is_some_and(|(_, position)| position == index);
     match jobs {
         Jobs::Loading => rows.push(Row::JobsLoading),
         Jobs::Ready(list) if list.is_empty() => rows.push(Row::NoJobs),
         Jobs::Ready(list) => rows.extend(list.iter().enumerate().map(|(index, job)| Row::Job {
             job,
             last: index + 1 == list.len(),
-            selected: false,
+            selected: marked(index),
         })),
         Jobs::Failed { jobs, error } => {
-            rows.extend(jobs.iter().map(|job| Row::Job {
+            rows.extend(jobs.iter().enumerate().map(|(index, job)| Row::Job {
                 job,
                 last: false,
-                selected: false,
+                selected: marked(index),
             }));
             rows.push(Row::JobsError(error));
         }
@@ -1414,6 +1457,7 @@ mod tests {
         let mut board = two_run_board();
         board.expand(now());
         board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
+        board.select_next(now());
         board.select_next(now());
         board.expand(now());
         assert_eq!(
