@@ -217,11 +217,15 @@ where
         self.status.message = None;
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         if let Some(confirm) = self.confirm.take() {
-            if let KeyCode::Char('y' | 'Y') = key.code {
-                self.canceller.cancel(&confirm.repo, confirm.run);
-                self.post(format!("cancelling run {}…", confirm.run.0));
-            }
-            return Flow::Continue;
+            return match key.code {
+                KeyCode::Char('c') if control => Flow::Quit,
+                KeyCode::Char('y' | 'Y') if !control => {
+                    self.canceller.cancel(&confirm.repo, confirm.run);
+                    self.post(format!("cancelling run {}…", confirm.run.0));
+                    Flow::Continue
+                }
+                _ => Flow::Continue,
+            };
         }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => Flow::Quit,
@@ -270,11 +274,20 @@ where
     /// that `y` cancels. On a job row it names the run of the job.
     fn ask_to_cancel(&mut self) {
         let now = (self.now)();
-        let confirm = self
-            .board
-            .selected_target(now)
-            .map(|(run, job)| Confirm::new(run, job));
-        self.confirm = confirm;
+        let target = self.board.selected_target(now).map(|(run, job)| {
+            if run.state.is_active() {
+                Ok(Confirm::new(run, job))
+            } else {
+                Err(run.id)
+            }
+        });
+        match target {
+            None => {}
+            Some(Ok(confirm)) => self.confirm = Some(confirm),
+            Some(Err(id)) => {
+                self.post(format!("run {} finished: there is nothing to cancel", id.0))
+            }
+        }
     }
 
     /// Asks the worker for one refresh now and shows `refreshing…`. A worker
