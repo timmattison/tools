@@ -858,6 +858,52 @@ mod tests {
     }
 
     #[test]
+    fn the_workflow_cell_ends_in_the_whole_run_id() {
+        for (width, id) in [
+            (120_u16, 39_149_840_084_u64),
+            (80, 391_498_400_841),
+            (200, 391_498_400_841),
+        ] {
+            let mut board = Board::new(Duration::from_hours(8));
+            board.replace(
+                repo("timmattison/tools"),
+                vec![run(
+                    id,
+                    "timmattison/tools",
+                    "CI",
+                    "main",
+                    "Fix the thing",
+                    RunState::Running,
+                    "2026-10-14T11:45:30Z",
+                    "2026-10-14T11:59:00Z",
+                )],
+            );
+            let text = lines(&render_with(width, 8, &mut board, &loaded()));
+            assert!(
+                !text[0].split_whitespace().any(|word| word == "RUN"),
+                "width {width}, ID {id}: the header holds a RUN word: {:?}",
+                text[0]
+            );
+            let from = header_column(&text, "WORKFLOW");
+            let branch = header_column(&text, "BRANCH");
+            let cell = columns(&text[2], from, branch - 1 - from);
+            assert!(
+                cell.starts_with("CI"),
+                "width {width}, ID {id}: the cell does not start with the name: {cell:?}"
+            );
+            assert!(
+                cell.ends_with(&id.to_string()),
+                "width {width}, ID {id}: the cell does not end in the whole ID: {cell:?}"
+            );
+            assert_eq!(
+                columns(&text[2], branch - 1, 1),
+                " ",
+                "width {width}, ID {id}: no space stands before the branch cell"
+            );
+        }
+    }
+
+    #[test]
     fn each_empty_section_says_loading_before_the_first_refresh_ends() {
         let mut board = Board::new(Duration::from_hours(8));
         let text = lines(&render_with(60, 8, &mut board, &Status::default()));
