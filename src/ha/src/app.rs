@@ -216,9 +216,20 @@ where
     fn handle_key(&mut self, key: KeyEvent) -> Flow {
         self.status.message = None;
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        if let Some(confirm) = self.confirm.take() {
+            if let KeyCode::Char('y' | 'Y') = key.code {
+                self.canceller.cancel(&confirm.repo, confirm.run);
+                self.post(format!("cancelling run {}…", confirm.run.0));
+            }
+            return Flow::Continue;
+        }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => Flow::Quit,
             KeyCode::Char('c') if control => Flow::Quit,
+            KeyCode::Char('c') => {
+                self.ask_to_cancel();
+                Flow::Continue
+            }
             KeyCode::Up => {
                 self.board.select_previous((self.now)());
                 Flow::Continue
@@ -238,8 +249,7 @@ where
                 Flow::Continue
             }
             KeyCode::Char('r') => {
-                let _ = self.worker.commands.send(Command::RefreshNow);
-                self.status.refreshing = true;
+                self.refresh_now();
                 Flow::Continue
             }
             KeyCode::Enter => {
@@ -253,6 +263,33 @@ where
             }
             _ => Flow::Continue,
         }
+    }
+
+    /// Opens the box that asks to cancel the highlighted run. The box keeps a
+    /// copy of what it shows, thus a later refresh does not change the run
+    /// that `y` cancels. On a job row it names the run of the job.
+    fn ask_to_cancel(&mut self) {
+        let now = (self.now)();
+        let confirm = self
+            .board
+            .selected_target(now)
+            .map(|(run, job)| Confirm::new(run, job));
+        self.confirm = confirm;
+    }
+
+    /// Asks the worker for one refresh now and shows `refreshing…`. A worker
+    /// that has ended is not an error.
+    fn refresh_now(&mut self) {
+        let _ = self.worker.commands.send(Command::RefreshNow);
+        self.status.refreshing = true;
+    }
+
+    /// Shows `text` on the status line, stamped with the current time.
+    fn post(&mut self, text: String) {
+        self.status.message = Some(Message {
+            text,
+            posted_at: (self.now)(),
+        });
     }
 }
 
