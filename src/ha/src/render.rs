@@ -220,18 +220,29 @@ fn job_line<Tz: TimeZone>(
 where
     Tz::Offset: Display,
 {
-    let started = job
-        .started_at
-        .map(|started| format_started(started, now, tz))
-        .unwrap_or_default();
-    let time = job.started_at.map_or_else(String::new, |started| {
-        if job.state.is_active() {
-            format_elapsed(span(started, now))
-        } else {
-            job.completed_at
-                .map_or_else(String::new, |done| format_elapsed(span(started, done)))
-        }
-    });
+    let (started, time) = if job.state == RunState::Queued {
+        // A job that waits did not start. Its time is the wait, from its creation.
+        (
+            String::new(),
+            job.created_at
+                .map(|created| format_elapsed(span(created, now)))
+                .unwrap_or_default(),
+        )
+    } else {
+        (
+            job.started_at
+                .map(|started| format_started(started, now, tz))
+                .unwrap_or_default(),
+            job.started_at.map_or_else(String::new, |started| {
+                if job.state.is_active() {
+                    format_elapsed(span(started, now))
+                } else {
+                    job.completed_at
+                        .map_or_else(String::new, |done| format_elapsed(span(started, done)))
+                }
+            }),
+        )
+    };
     let finished = match job.completed_at {
         Some(done) if !job.state.is_active() => format_ago(span(done, now)),
         _ => String::new(),
