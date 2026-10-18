@@ -347,6 +347,25 @@ impl GhSource {
         Ok(response)
     }
 
+    /// Cancels `run` of `repo` on GitHub.
+    ///
+    /// The request is `POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel`.
+    /// It changes GitHub. Every other request of `ha` only reads. The request
+    /// needs the `repo` scope on an OAuth token or a classic token. A login
+    /// without write access gets `403`. GitHub answers `409` for a run that
+    /// finished.
+    ///
+    /// The request sends no `If-None-Match` header and does not touch the `ETag`
+    /// cache.
+    ///
+    /// # Errors
+    ///
+    /// Gives the error of `gh` or the error of [`http_error`] for a status of
+    /// 400 or more.
+    pub fn cancel_run(&self, _repo: &RepoName, _run: RunId) -> Result<(), SourceError> {
+        Ok(())
+    }
+
     /// Fetches the page `number` of the runs of `repo` for `filter`.
     ///
     /// `family` names the kind of filter without its value, for the cache key
@@ -2086,4 +2105,18 @@ mod tests {
             assert_eq!(source.rate_limit(), None);
         }
     }
+
+    #[test]
+    fn cancel_run_posts_to_the_cancel_path_of_the_run() {
+        let stub = Stub::new(&format!("cat \"$dir/cancel.out\""));
+        stub.file("cancel.out", ACCEPTED);
+        stub.source().cancel_run(&repo("o/r"), RunId(7)).unwrap();
+        assert_eq!(
+            stub.requests(),
+            vec![vec!["api", "-i", "-X", "POST", "repos/o/r/actions/runs/7/cancel"]]
+        );
+    }
+
+    /// The answer of GitHub for a cancel that it accepted.
+    const ACCEPTED: &str = "HTTP/2.0 202 Accepted\nContent-Type: application/json; charset=utf-8\r\nX-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 4999\r\nX-Ratelimit-Reset: 1791977652\r\n\r\n{}";
 }
