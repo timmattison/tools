@@ -1413,6 +1413,23 @@ mod tests {
     }
 
     #[test]
+    fn a_running_job_counts_its_time_from_its_start_not_its_creation() {
+        let mut board = board_with_jobs(vec![Job {
+            created_at: Some(at("2026-10-14T11:40:00Z")),
+            ..job(
+                11,
+                "test",
+                RunState::Running,
+                Some("2026-10-14T11:50:00Z"),
+                None,
+            )
+        }]);
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert_eq!(started_cells(&text, 3), "11:50:00");
+        assert_eq!(time_cells(&text, 3), ("10m 00s".to_owned(), String::new()));
+    }
+
+    #[test]
     fn a_job_name_cut_by_display_width_keeps_its_start_and_the_columns() {
         let mut board = board_with_jobs(vec![
             job(
