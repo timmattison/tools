@@ -805,6 +805,80 @@ mod tests {
         }
     }
 
+    /// These lines are the target example of issue #571, with the two section
+    /// headers added.
+    #[test]
+    fn a_frame_of_120_columns_has_the_target_layout_of_issue_571() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("timmattison/tools"),
+            vec![run(
+                39_149_840_084,
+                "timmattison/tools",
+                "CI",
+                "main",
+                "Fix the thing",
+                RunState::Running,
+                "2026-10-14T11:45:30Z",
+                "2026-10-14T11:59:00Z",
+            )],
+        );
+        board.replace(
+            repo("acme/widgets"),
+            vec![run(
+                39_149_711_502,
+                "acme/widgets",
+                "Release",
+                "issue-11",
+                "Bump deps",
+                RunState::Passed,
+                "2026-10-14T09:00:00Z",
+                "2026-10-14T09:10:05Z",
+            )],
+        );
+        board.expand(now());
+        board.set_jobs(
+            RunId(39_149_840_084),
+            vec![
+                job(
+                    107_851_237_794,
+                    "build",
+                    RunState::Passed,
+                    Some("2026-10-14T11:45:40Z"),
+                    Some("2026-10-14T11:50:00Z"),
+                ),
+                job(
+                    107_851_237_795,
+                    "lint",
+                    RunState::Failed,
+                    Some("2026-10-14T11:46:00Z"),
+                    Some("2026-10-14T11:46:45Z"),
+                ),
+                job(
+                    107_851_237_796,
+                    "test",
+                    RunState::Running,
+                    Some("2026-10-14T11:50:10Z"),
+                    None,
+                ),
+            ],
+        );
+        let text = lines(&render_with(120, 10, &mut board, &loaded()));
+        assert_eq!(
+            text[0..8],
+            [
+                "  REPO                WORKFLOW                     BRANCH            TITLE                           STARTED     TIME",
+                "Running · 1",
+                "● timmattison/tools   CI               39149840084 main              Fix the thing                   11:45:30    14m 30s",
+                "✓ ├ build                             107851237794                                                   11:45:40    4m 20s",
+                "✗ ├ lint                              107851237795                                                   11:46:00    45s",
+                "● └ test                              107851237796                                                   11:50:10    9m 50s",
+                "Last 8h · 1 passed · 0 failed",
+                "✓ acme/widgets        Release          39149711502 issue-11          Bump deps                       09:00:00    10m 05s",
+            ]
+        );
+    }
+
     #[test]
     fn the_frame_holds_the_header_the_rows_and_the_status_line() {
         let mut board = four_run_board();
