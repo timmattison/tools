@@ -196,7 +196,8 @@ where
 
     /// Acts on one key press. Each key press removes the status message
     /// first. The `Enter` key can then post a new one. `Right` expands the
-    /// highlighted run and `Left` collapses it.
+    /// run of the highlighted row. `Left` collapses that run, also from a job
+    /// row. `Enter` opens the highlighted run or job.
     fn handle_key(&mut self, key: KeyEvent) -> Flow {
         self.status.message = None;
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -838,14 +839,23 @@ mod tests {
     /// Runs the loop on the steps and returns the text of the last frame and
     /// each command that the app sent to the worker.
     fn run_steps(channels: &Channels, steps: Vec<Step>) -> (Vec<String>, Vec<Command>) {
+        run_steps_with(channels, &opener(false), steps)
+    }
+
+    /// Does the work of `run_steps` with an opener that the caller keeps, so
+    /// the caller can read the addresses that the app opened.
+    fn run_steps_with(
+        channels: &Channels,
+        opener: &RecordingOpener,
+        steps: Vec<Step>,
+    ) -> (Vec<String>, Vec<Command>) {
         let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
         let tz = FixedOffset::east_opt(0).unwrap();
         let clock = now;
-        let opener = opener(false);
         let mut app = App::new(
             Board::new(Duration::from_hours(8)),
             Status::default(),
-            &opener,
+            opener,
             &channels.worker,
             &clock,
             &tz,
@@ -970,7 +980,7 @@ mod tests {
     }
 
     #[test]
-    fn up_and_down_move_between_runs_with_a_run_expanded() {
+    fn down_skips_the_loading_row_of_an_expanded_run() {
         let channels = channels();
         send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
         let opener = opener(false);
@@ -986,6 +996,60 @@ mod tests {
         );
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(*opener.urls.borrow(), ["https://example.test/runs/1"]);
+    }
+
+    /// A job that has an address of its own.
+    fn job_with_url(id: u64, name: &str) -> crate::job::Job {
+        crate::job::Job {
+            url: format!("https://example.test/runs/1/job/{id}"),
+            ..job(id, name)
+        }
+    }
+
+    #[test]
+    fn right_the_jobs_down_and_enter_open_the_job_page() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let steps = vec![
+            key(KeyCode::Right),
+            Step::Send(Update::Jobs {
+                run: RunId(1),
+                jobs: vec![job_with_url(10, "build")],
+            }),
+            Step::Idle,
+            key(KeyCode::Down),
+            key(KeyCode::Enter),
+            key(KeyCode::Char('q')),
+        ];
+        let opener = opener(false);
+        run_steps_with(&channels, &opener, steps);
+        assert_eq!(
+            *opener.urls.borrow(),
+            ["https://example.test/runs/1/job/10"]
+        );
+    }
+
+    #[test]
+    fn left_on_a_job_row_stops_the_watch_of_its_run() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let steps = vec![
+            key(KeyCode::Right),
+            Step::Send(Update::Jobs {
+                run: RunId(1),
+                jobs: vec![job_with_url(10, "zebra-job")],
+            }),
+            Step::Idle,
+            key(KeyCode::Down),
+            key(KeyCode::Left),
+            key(KeyCode::Char('q')),
+        ];
+        let (frame, commands) = run_steps(&channels, steps);
+        assert_eq!(commands, [watch(&[1]), watch(&[])]);
+        assert!(
+            frame.iter().all(|line| !line.contains("zebra-job")),
+            "{frame:?}"
+        );
     }
 
     #[test]
