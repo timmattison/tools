@@ -545,13 +545,19 @@ pub fn draw<Tz: TimeZone>(
                     );
                 }
             }
-            Row::Job { job, last, .. } => {
+            Row::Job { job, last, selected } => {
                 let line = job_line(job, *last, now, tz, widths);
                 let y = put(buffer, index + 1, &line, Style::default());
                 buffer.set_style(
                     Rect::new(area.x, y, 1, 1),
                     Style::default().fg(marker_color(job.state)),
                 );
+                if *selected {
+                    buffer.set_style(
+                        Rect::new(area.x, y, area.width, 1),
+                        Style::default().add_modifier(Modifier::REVERSED),
+                    );
+                }
             }
             Row::JobsLoading => put_status_row(buffer, index + 1, JOBS_LOADING),
             Row::NoJobs => put_status_row(buffer, index + 1, NO_JOBS),
