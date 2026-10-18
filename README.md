@@ -2038,28 +2038,29 @@ cannot hang the caller. Used by `cwt` and `ha`.
     its GitHub state. Each row shows the start time in the local time zone and the elapsed time,
     which increases each second. A run that is active for too long is often a stuck runner.
   - The bottom section shows the runs that passed (`✓`, green) or failed (`✗`, red) in the last
-    8 hours, the newest first, with how long each run took and how long ago it finished. A run
-    that timed out or that failed to start counts as failed. A cancelled or skipped run does not
-    show.
+    8 hours, the newest first, with how long each run took. A run that timed out or that failed
+    to start counts as failed. A cancelled or skipped run does not show.
   - Until the first refresh ends, an empty section shows `Loading…` and the section headers
     show no counts. Thus a board that did not load yet does not look like a board with no runs.
   - The status line shows how long ago the last refresh ended (`updated 1m 05s ago`), in the
     units of the time column. While a refresh runs, `refreshing…` shows at the right end of the
     status line. The other parts of the status line do not move.
-  - Each row shows the repository, the workflow, the run number, the branch, and the run title.
-    The `RUN` column shows the number that the GitHub web interface and `gh run list` show, for
-    example `#1234`, thus you can match a row to a run there. A long name keeps its start and ends
-    in `…`. The cut is by display width, thus `日本語` and emoji do not break a row. The columns
-    fit the terminal again when its size changes.
+  - Each row shows the repository, the workflow, the run ID, the branch, and the run title. The
+    run ID stands at the right end of the `WORKFLOW` cell, for example `39149840084`. It is the
+    number in the URL of the run page (`/actions/runs/39149840084`), and the `gh run` commands
+    take it. Thus you can find the row of a run that a URL or a message names. A long name keeps
+    its start and ends in `…`, and the ID stays whole. The cut is by display width, thus `日本語`
+    and emoji do not break a row. The columns fit the terminal again when its size changes.
   - Right expands the highlighted run, and Left collapses it again. An expanded run shows one row
     for each job of its latest attempt, below the run row. Each job row shows the state marker of
-    the job, with the glyph and the color of a run, the name of the job, and when it started, if it
-    started. The time column of an active job has two meanings. A job that waits for a runner or for
-    an approval (`○`) did not start, thus its started column is empty, and its time column shows how
-    long it waited, from its creation until now. A running job (`●`) shows the time since a runner
-    started it, without the wait before that start. Both times increase each second. A finished job
-    shows how long it took and how long ago it finished. Thus you can find the job that holds a slow
-    run.
+    the job, with the glyph and the color of a run, the name of the job, its job ID, and when it
+    started, if it started. The job ID is the number in the URL of the job page
+    (`/job/107851237794`). It stands in the columns of the run ID, thus all IDs on the board end in
+    one column. The time column of an active job has two meanings. A job that waits for a runner or
+    for an approval (`○`) did not start, thus its started column is empty, and its time column
+    shows how long it waited, from its creation until now. A running job (`●`) shows the time since
+    a runner started it, without the wait before that start. Both times increase each second. A
+    finished job shows how long it took. Thus you can find the job that holds a slow run.
     - The jobs are sorted by name, with no difference between capital and small letters. Thus the
       order stays the same through each refresh and each re-run, and the jobs of one matrix stay
       together. GitHub gives the jobs in the order of their IDs, which has no meaning that you can
