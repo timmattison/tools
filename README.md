@@ -2029,9 +2029,13 @@ cannot hang the caller. Used by `cwt` and `ha`.
   - Shows the GitHub Actions workflow runs of many repositories and owners in one terminal view
     that refreshes itself. The GitHub web interface and `gh run list` show one repository at a
     time, and `gh run list` does not refresh.
-  - The top section, "Running", shows the runs that are in progress (`●`) or in the queue (`○`),
-    the oldest first. A run that waits for an approval or for another run also shows with `○`.
-    Each row shows the start time in the local time zone and the elapsed time,
+  - The top section, "Running", shows the active runs, the oldest first. `●` (yellow) is a run
+    that has a job in progress. `○` (blue) is a run that waits and has no job in progress: its
+    jobs wait for a runner, for an approval, or for another run. GitHub reports a run as queued
+    while one of its jobs waits for a runner, also when other jobs of the run are in progress.
+    Thus `ha` reads the jobs of each active run to choose the marker, and the marker is the same
+    when the run is expanded and when it is collapsed. A finished run always shows the marker of
+    its GitHub state. Each row shows the start time in the local time zone and the elapsed time,
     which increases each second. A run that is active for too long is often a stuck runner.
   - The bottom section shows the runs that passed (`✓`, green) or failed (`✗`, red) in the last
     8 hours, the newest first, with how long each run took and how long ago it finished. A run
@@ -2062,10 +2066,11 @@ cannot hang the caller. Used by `cwt` and `ha`.
     - More than one run can be expanded at one time. A run stays expanded through each refresh,
       and also when it moves from the top section to the bottom section. When a run leaves
       the board, its jobs go too.
-    - The jobs load at once when you expand a run, and then refresh with the board. The jobs of a
-      finished run load one time only, until a re-run changes the run. If GitHub still shows an
-      active job in a finished run, the jobs of that run refresh with the board until each job
-      finishes.
+    - The jobs load at once when you expand a run, and then refresh with the board. The jobs of an
+      active run refresh with the board also while the run is collapsed, thus Right shows them at
+      once. The jobs of a finished run load one time only, until a re-run changes the run. If
+      GitHub still shows an active job in a finished run, the jobs of that run refresh with the
+      board until each job finishes. Left removes the job rows, and the board keeps the jobs.
   - Keys: Up and Down move the highlight through the run rows and through the job rows of the
     expanded runs. They skip the `Loading jobs…`, `No jobs yet`, and error rows. Right expands the
     jobs of the highlighted run. Left collapses them, also from a job row, and the highlight goes
@@ -2111,7 +2116,11 @@ cannot hang the caller. Used by `cwt` and `ha`.
     of a query starts on the hour, so the request stays the same and its `ETag` can match. The
     repository list of an owner and the sweep for runs older than the lookback refresh every
     10 minutes. An owner whose list has not yet succeeded is listed again on each refresh, so `r`
-    tries it again at once. The requests for the jobs of an expanded run also send the `ETag`.
+    tries it again at once. On each refresh, `ha` also asks for the jobs of each active run, one
+    request for each page of 100 jobs, also when the run is collapsed. The requests for jobs also
+    send the `ETag`, thus an answer that did not change costs nothing. With 8 active runs at a
+    60 s interval, the worst case is 480 more requests each hour. A finished run gets one more
+    request for its jobs, and then no more until a re-run changes it.
     At most 8 `gh` children run at the same time, for runs and jobs together. The status line
     shows the remaining budget. When less than 10% remains, `ha` waits until the reset of the budget and says so.
   - A failure for one repository shows in the status line, and the board keeps the last good runs
