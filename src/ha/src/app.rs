@@ -10,6 +10,7 @@ use ratatui::backend::Backend;
 use ratatui::Terminal;
 
 use crate::board::Board;
+use crate::cancel::{Canceller, Confirm};
 use crate::render;
 use crate::run::RunId;
 use crate::status::{Message, Status};
@@ -73,21 +74,25 @@ impl Events for TerminalEvents {
 }
 
 /// The state of one run of the event loop.
-pub struct App<'a, O: Opener, Tz: TimeZone> {
+pub struct App<'a, O: Opener, C: Canceller, Tz: TimeZone> {
     /// The runs to show.
     pub board: Board,
     /// The text for the status line.
     pub status: Status,
     opener: &'a O,
+    canceller: &'a C,
     worker: &'a Worker,
     now: &'a dyn Fn() -> DateTime<Utc>,
     tz: &'a Tz,
     /// The set of the last `Command::WatchJobs` that the app sent. It is
     /// empty at the start.
     watched: BTreeSet<(RepoName, RunId)>,
+    /// The box that asks the user to cancel a run. It is `None` when no box
+    /// shows.
+    confirm: Option<Confirm>,
 }
 
-impl<'a, O: Opener, Tz: TimeZone> App<'a, O, Tz>
+impl<'a, O: Opener, C: Canceller, Tz: TimeZone> App<'a, O, C, Tz>
 where
     Tz::Offset: std::fmt::Display,
 {
@@ -98,6 +103,7 @@ where
         board: Board,
         status: Status,
         opener: &'a O,
+        canceller: &'a C,
         worker: &'a Worker,
         now: &'a dyn Fn() -> DateTime<Utc>,
         tz: &'a Tz,
@@ -106,10 +112,12 @@ where
             board,
             status,
             opener,
+            canceller,
             worker,
             now,
             tz,
             watched: BTreeSet::new(),
+            confirm: None,
         }
     }
 
@@ -129,7 +137,14 @@ where
             let now = (self.now)();
             terminal
                 .draw(|frame| {
-                    render::draw(frame, &mut self.board, &self.status, now, self.tz, None);
+                    render::draw(
+                        frame,
+                        &mut self.board,
+                        &self.status,
+                        now,
+                        self.tz,
+                        self.confirm.as_ref(),
+                    );
                 })
                 .map_err(std::io::Error::other)?;
             let Some(event) = events.next(POLL_INTERVAL)? else {
@@ -272,6 +287,8 @@ mod tests {
     use ratatui::buffer::Buffer;
 
     use super::*;
+    use crate::cancel::CancelOutcome;
+    use crate::github::SourceError;
     use crate::run::{Run, RunId, RunState};
     use crate::target::{OwnerName, RepoName};
     use crate::worker::{Command, Update};
@@ -308,6 +325,30 @@ mod tests {
 
         fn late_failure(&self) -> Option<OpenFailure> {
             self.late.borrow_mut().pop_front()
+        }
+    }
+
+    /// Records each cancel. Each outcome in `outcomes` comes back from one
+    /// call of `finished`, in order.
+    struct RecordingCanceller {
+        cancels: RefCell<Vec<(RepoName, RunId)>>,
+        outcomes: RefCell<VecDeque<CancelOutcome>>,
+    }
+
+    impl Canceller for RecordingCanceller {
+        fn cancel(&self, repo: &RepoName, run: RunId) {
+            self.cancels.borrow_mut().push((repo.clone(), run));
+        }
+
+        fn finished(&self) -> Option<CancelOutcome> {
+            self.outcomes.borrow_mut().pop_front()
+        }
+    }
+
+    fn canceller() -> RecordingCanceller {
+        RecordingCanceller {
+            cancels: RefCell::new(Vec::new()),
+            outcomes: RefCell::new(VecDeque::new()),
         }
     }
 
@@ -424,6 +465,18 @@ mod tests {
         channels: &Channels,
         events: Vec<Event>,
     ) -> (std::io::Result<()>, Vec<String>) {
+        run_app_with(status, opener, &canceller(), channels, events)
+    }
+
+    /// Does the work of `run_app_from` with a canceller that the caller
+    /// keeps, so the caller can read the cancels that the app sent.
+    fn run_app_with(
+        status: Status,
+        opener: &RecordingOpener,
+        canceller: &RecordingCanceller,
+        channels: &Channels,
+        events: Vec<Event>,
+    ) -> (std::io::Result<()>, Vec<String>) {
         let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
         let tz = FixedOffset::east_opt(0).unwrap();
         let clock = now;
@@ -431,6 +484,7 @@ mod tests {
             Board::new(Duration::from_hours(8)),
             status,
             opener,
+            canceller,
             &channels.worker,
             &clock,
             &tz,
@@ -762,10 +816,12 @@ mod tests {
         let tz = FixedOffset::east_opt(0).unwrap();
         let clock = now;
         let opener = opener(false);
+        let canceller = canceller();
         let mut app = App::new(
             Board::new(Duration::from_hours(8)),
             Status::default(),
             &opener,
+            &canceller,
             &channels.worker,
             &clock,
             &tz,
@@ -848,6 +904,26 @@ mod tests {
         opener: &RecordingOpener,
         steps: Vec<Step>,
     ) -> (Vec<String>, Vec<Command>) {
+        run_steps_all(channels, opener, &canceller(), steps)
+    }
+
+    /// Does the work of `run_steps` with a canceller that the caller keeps,
+    /// so the caller can read the cancels that the app sent.
+    fn run_steps_cancelling(
+        channels: &Channels,
+        canceller: &RecordingCanceller,
+        steps: Vec<Step>,
+    ) -> (Vec<String>, Vec<Command>) {
+        run_steps_all(channels, &opener(false), canceller, steps)
+    }
+
+    /// Runs the steps with an opener and a canceller that the caller keeps.
+    fn run_steps_all(
+        channels: &Channels,
+        opener: &RecordingOpener,
+        canceller: &RecordingCanceller,
+        steps: Vec<Step>,
+    ) -> (Vec<String>, Vec<Command>) {
         let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
         let tz = FixedOffset::east_opt(0).unwrap();
         let clock = now;
@@ -855,6 +931,7 @@ mod tests {
             Board::new(Duration::from_hours(8)),
             Status::default(),
             opener,
+            canceller,
             &channels.worker,
             &clock,
             &tz,
@@ -1154,5 +1231,29 @@ mod tests {
         ];
         let (_, commands) = run_steps(&channels, steps);
         assert_eq!(commands, [watch(&[1]), watch(&[])]);
+    }
+
+    #[test]
+    fn c_and_then_y_cancel_the_highlighted_run_and_show_cancelling() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let canceller = canceller();
+        let (frame, _) = run_steps_cancelling(
+            &channels,
+            &canceller,
+            vec![
+                Step::Idle,
+                key(KeyCode::Char('c')),
+                key(KeyCode::Char('y')),
+                Step::Idle,
+                key(KeyCode::Char('q')),
+            ],
+        );
+        assert_eq!(
+            *canceller.cancels.borrow(),
+            vec![(repo(), RunId(1))],
+            "{frame:?}"
+        );
+        assert!(frame[11].contains("cancelling run 1…"), "{:?}", frame[11]);
     }
 }
