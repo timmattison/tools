@@ -978,6 +978,30 @@ mod tests {
     }
 
     #[test]
+    fn a_waiting_job_has_no_start_and_keeps_its_creation_time() {
+        // GitHub can give a start time for a job that still waits. The state of
+        // the job, not the time, tells if the job started.
+        let body = r#"{"total_count":2,"jobs":[
+            {"id":1,"name":"queued","status":"queued","conclusion":null,
+             "started_at":"2026-09-25T01:05:00Z","created_at":"2026-09-25T01:02:03Z",
+             "completed_at":null,"html_url":null},
+            {"id":2,"name":"approval","status":"waiting","conclusion":null,
+             "started_at":"2026-09-25T01:05:00Z","created_at":"2026-09-25T01:02:03Z",
+             "completed_at":null,"html_url":null}]}"#;
+        let page = parse_jobs(body).expect("a page");
+        for job in &page.jobs {
+            assert_eq!(job.state, RunState::Queued, "{}", job.name);
+            assert_eq!(job.started_at, None, "{}", job.name);
+            assert_eq!(
+                job.created_at,
+                Some(time("2026-09-25T01:02:03Z")),
+                "{}",
+                job.name
+            );
+        }
+    }
+
+    #[test]
     fn each_job_status_maps_to_its_state() {
         let cases = [
             ("queued", "null", RunState::Queued),
