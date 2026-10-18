@@ -646,7 +646,7 @@ mod tests {
     use ratatui::Terminal;
 
     use crate::job::{Job, JobId};
-    use crate::run::{Run, RunId, RunNumber, RunState};
+    use crate::run::{Run, RunId, RunState};
     use crate::status::{Message, RateLimit};
     use crate::target::{OwnerName, RepoName};
 
@@ -684,7 +684,6 @@ mod tests {
     ) -> Run {
         Run {
             id: RunId(id),
-            number: RunNumber(id + 100),
             repo: repo(repo_text),
             workflow: workflow.to_owned(),
             branch: branch.to_owned(),
