@@ -88,7 +88,7 @@ fn fit_right(text: &str, width: usize) -> String {
 /// Joins the cells of one row into one line. One space stands between cells.
 ///
 /// The ID part stands after the workflow cell, and `id` is right-aligned in it.
-/// Thus the header word `WORKFLOW` heads the workflow name and the ID.
+/// The header line does not come from this function. `header_cells` builds it.
 fn cells(
     widths: Widths,
     marker: &str,
@@ -107,6 +107,24 @@ fn cells(
         fit(title, widths.title),
         pad_right(started, STARTED_WIDTH),
         pad_right(time, TIME_WIDTH),
+    ]
+    .join(" ")
+}
+
+/// Joins the cells of the header line. One space stands between cells.
+///
+/// The word `WORKFLOW` fills the workflow cell, one space, and the ID part. Thus the
+/// whole word shows at every frame width, and it heads the workflow name and the ID.
+/// The other cells stand in the same columns as those of a run row.
+fn header_cells(widths: Widths) -> String {
+    [
+        pad_right(" ", MARKER_WIDTH),
+        fit("REPO", widths.repo),
+        fit("WORKFLOW", widths.workflow + 1 + ID_WIDTH),
+        fit("BRANCH", widths.branch),
+        fit("TITLE", widths.title),
+        pad_right("STARTED", STARTED_WIDTH),
+        pad_right("TIME", TIME_WIDTH),
     ]
     .join(" ")
 }
@@ -528,19 +546,7 @@ pub fn draw<Tz: TimeZone>(
     let loaded = status.last_refresh.is_some();
     let bold = Style::default().add_modifier(Modifier::BOLD);
     let buffer = frame.buffer_mut();
-    put(
-        buffer,
-        0,
-        &cells(
-            widths,
-            " ",
-            ["REPO", "WORKFLOW", "BRANCH", "TITLE"],
-            "",
-            "STARTED",
-            "TIME",
-        ),
-        bold,
-    );
+    put(buffer, 0, &header_cells(widths), bold);
     let view = board.view(now, height);
     for (index, row) in view.rows.iter().enumerate() {
         match row {
@@ -993,8 +999,7 @@ mod tests {
                 "width {width}, ID {id}: the header holds a RUN word: {:?}",
                 text[0]
             );
-            // At 80 columns the workflow cell is 7 wide and cuts its header word.
-            let from = header_column(&text, "WORKF");
+            let from = header_column(&text, "WORKFLOW");
             let branch = header_column(&text, "BRANCH");
             let cell = columns(&text[2], from, branch - 1 - from);
             assert!(
