@@ -1553,48 +1553,39 @@ mod tests {
         assert_eq!(job_calls(&fake), 2);
     }
 
-    /// The three commands arrive during the first cycle, thus the backlog adds
-    /// run 5 two times. The run must still get one request and one answer. The
-    /// first answer proves that the fetch started. The test then drops the
-    /// command sender. The worker ends its fetch, sees the drop, and stops, so
-    /// the test counts everything that the worker sent. Each wait has a bound.
+    /// The three commands are in the queue before the call. The backlog drain
+    /// sees all of them, thus it adds run 5 two times. The run must still get
+    /// one request and one answer. The test uses no thread and no delay, thus
+    /// no timing can change the result.
     #[test]
     fn a_run_that_the_backlog_adds_two_times_is_fetched_one_time() {
-        let fake = Arc::new(FakeSource {
-            delay: Duration::from_millis(300),
-            ..FakeSource::default()
-        });
-        fake.script()
-            .created
-            .insert(repo("acme/a"), Ok(vec![run("acme/a", 5)]));
-        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
-        watch(&worker, &[5]);
-        watch(&worker, &[]);
-        watch(&worker, &[5]);
-        let mut answers = 0;
-        loop {
-            match worker.updates.recv_timeout(WAIT) {
-                Ok(Update::Jobs { run: RunId(5), .. }) => {
-                    answers += 1;
-                    break;
-                }
-                Ok(_) => {}
-                Err(error) => panic!("no Jobs update: {error:?}"),
-            }
-        }
-        let Worker { updates, commands } = worker;
-        drop(commands);
-        loop {
-            match updates.recv_timeout(WAIT) {
-                Ok(Update::Jobs { run: RunId(5), .. }) => answers += 1,
-                Ok(_) => {}
-                Err(RecvTimeoutError::Disconnected) => break,
-                Err(RecvTimeoutError::Timeout) => panic!("the worker did not stop in {WAIT:?}"),
-            }
+        let fake = Arc::new(FakeSource::default());
+        let (updates_tx, updates_rx) = mpsc::channel();
+        let (commands_tx, commands_rx) = mpsc::channel();
+        let run_5: BTreeSet<RunKey> = [(repo("acme/a"), RunId(5))].into_iter().collect();
+        for set in [run_5.clone(), BTreeSet::new(), run_5] {
+            commands_tx
+                .send(Command::WatchJobs(set))
+                .expect("the receiver is alive");
         }
 
+        let wake = wait_for_next_cycle(
+            &fake,
+            &mut State::new(SLOW_CADENCE),
+            &updates_tx,
+            &commands_rx,
+            Duration::ZERO,
+            false,
+        );
+
+        assert!(matches!(wake, Ok(Wake::Cycle)));
+        let answers = updates_rx
+            .try_iter()
+            .filter(|update| matches!(update, Update::Jobs { run: RunId(5), .. }))
+            .count();
         assert_eq!(job_calls(&fake), 1, "requests for the jobs of run 5");
         assert_eq!(answers, 1, "Jobs updates for run 5");
+        drop(commands_tx);
     }
 
     #[test]
