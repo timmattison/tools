@@ -1383,6 +1383,25 @@ mod tests {
     }
 
     #[test]
+    fn a_waiting_job_shows_no_start_and_the_time_since_its_creation() {
+        // The start time is set on purpose: the row must read the state of the
+        // job, not the presence of a start time.
+        let mut board = board_with_jobs(vec![Job {
+            created_at: Some(at("2026-10-14T11:56:00Z")),
+            ..job(
+                11,
+                "wait",
+                RunState::Queued,
+                Some("2026-10-14T11:58:00Z"),
+                None,
+            )
+        }]);
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert_eq!(started_cells(&text, 3), "");
+        assert_eq!(time_cells(&text, 3), ("4m 00s".to_owned(), String::new()));
+    }
+
+    #[test]
     fn a_job_name_cut_by_display_width_keeps_its_start_and_the_columns() {
         let mut board = board_with_jobs(vec![
             job(
