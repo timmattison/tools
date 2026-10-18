@@ -1247,6 +1247,21 @@ mod tests {
     }
 
     #[test]
+    fn the_selected_job_row_is_reversed_across_the_full_width() {
+        let mut board = board_with_jobs(three_jobs());
+        board.select_next(now());
+        let buffer = render_with(120, 14, &mut board, &loaded());
+        let reversed = |x: u16, y: u16| buffer[(x, y)].modifier.contains(Modifier::REVERSED);
+        for x in [0_u16, 5, 60, 95, 119] {
+            assert!(reversed(x, 3), "the selected job row, column {x}");
+            assert!(!reversed(x, 2), "the run row, column {x}");
+            for y in [4_u16, 5] {
+                assert!(!reversed(x, y), "line {y} column {x}");
+            }
+        }
+    }
+
+    #[test]
     fn an_active_job_shows_the_time_since_its_start_and_no_finish() {
         let mut board = board_with_jobs(vec![job(
             11,
