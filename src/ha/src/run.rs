@@ -81,7 +81,12 @@ impl RunState {
     /// is the GitHub state.
     #[must_use]
     pub fn shown_with_jobs(self, jobs: impl IntoIterator<Item = RunState>) -> RunState {
-        self
+        match self {
+            RunState::Queued if jobs.into_iter().any(|job| job == RunState::Running) => {
+                RunState::Running
+            }
+            _ => self,
+        }
     }
 }
 
