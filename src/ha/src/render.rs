@@ -207,9 +207,14 @@ where
 /// The line of one job of an expanded run.
 ///
 /// The text cell holds the tree glyph (`└` when `last` is true, else `├`), a
-/// space, and the name of the job. The time cells follow the rules of
-/// [`run_line`], with the finish time of the job in place of the update time.
-/// A job with no start time has an empty started cell and an empty time cell.
+/// space, and the name of the job.
+///
+/// A job that waits did not start, thus its started cell is empty. Its time
+/// cell shows how long it waited, from its creation until `now`, and is empty
+/// when the job has no creation time. The time cells of each other job follow
+/// the rules of [`run_line`], with the finish time of the job in place of the
+/// update time. Such a job with no start time has an empty started cell and an
+/// empty time cell.
 fn job_line<Tz: TimeZone>(
     job: &Job,
     last: bool,

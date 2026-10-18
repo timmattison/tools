@@ -23,8 +23,10 @@ pub struct Job {
     /// When GitHub created the job. A job that waits, waits from this time.
     /// The value is `None` when GitHub gives none.
     pub created_at: Option<DateTime<Utc>>,
-    /// When the job started. The creation time is the fallback. The value is
-    /// `None` when GitHub gives neither time.
+    /// When a runner started the job. The value is `None` while the job waits,
+    /// also when GitHub gives a start time for it. A job that does not wait and
+    /// has no start time takes its creation time. The value is `None` when
+    /// GitHub gives neither time.
     pub started_at: Option<DateTime<Utc>>,
     /// When the job finished. The value is `None` while the job is active.
     pub completed_at: Option<DateTime<Utc>>,

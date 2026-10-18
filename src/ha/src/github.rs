@@ -978,7 +978,7 @@ mod tests {
     }
 
     #[test]
-    fn a_job_that_has_not_started_takes_its_creation_time_or_none() {
+    fn only_a_job_that_does_not_wait_takes_its_creation_time_as_its_start() {
         let page = parse_jobs(JOBS_JSON).expect("a page");
         assert_eq!(page.jobs[1].started_at, Some(time("2026-09-25T01:02:03Z")));
         assert_eq!(page.jobs[2].started_at, None);
