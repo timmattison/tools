@@ -891,6 +891,65 @@ mod tests {
     }
 
     #[test]
+    fn a_long_workflow_name_is_cut_and_the_run_id_stays_whole() {
+        let long_name = "日本語のワークフロー🎉".repeat(4);
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("timmattison/tools"),
+            vec![
+                run(
+                    39_149_840_084,
+                    "timmattison/tools",
+                    "CI",
+                    "feature-x",
+                    "Short",
+                    RunState::Running,
+                    "2026-10-14T11:45:30Z",
+                    "2026-10-14T11:59:00Z",
+                ),
+                run(
+                    39_149_840_085,
+                    "timmattison/tools",
+                    &long_name,
+                    "feature-x",
+                    "Long",
+                    RunState::Running,
+                    "2026-10-14T11:46:30Z",
+                    "2026-10-14T11:59:00Z",
+                ),
+            ],
+        );
+        let text = lines(&render_with(120, 8, &mut board, &loaded()));
+        let (short, long) = (&text[2], &text[3]);
+        assert!(long.contains("日本語"), "the name lost its start: {long:?}");
+        let (before_id, _) = long
+            .split_once("39149840085")
+            .unwrap_or_else(|| panic!("the whole ID is missing: {long:?}"));
+        assert!(
+            before_id.trim_end().ends_with('…'),
+            "the name does not end in an ellipsis before the ID: {long:?}"
+        );
+        let end_of = |line: &str, id: &str| {
+            let (before, _) = line
+                .split_once(id)
+                .unwrap_or_else(|| panic!("{id} is missing: {line:?}"));
+            display_width(before) + display_width(id)
+        };
+        assert_eq!(
+            end_of(long, "39149840085"),
+            end_of(short, "39149840084"),
+            "the IDs end in different columns"
+        );
+        let branch_at = |line: &str| {
+            let (before, _) = line
+                .split_once("feature-x")
+                .unwrap_or_else(|| panic!("the branch is missing: {line:?}"));
+            display_width(before)
+        };
+        assert_eq!(branch_at(long), branch_at(short), "the branches move");
+    }
+
+    #[test]
     fn each_empty_section_says_loading_before_the_first_refresh_ends() {
         let mut board = Board::new(Duration::from_hours(8));
         let text = lines(&render_with(60, 8, &mut board, &Status::default()));
