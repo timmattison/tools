@@ -168,12 +168,19 @@ where
     }
 }
 
-/// The line of one run.
-fn run_line<Tz: TimeZone>(run: &Run, now: DateTime<Utc>, tz: &Tz, widths: Widths) -> String
+/// The line of one run. `state` is the state that the row shows, not the state
+/// that GitHub reports. It sets the marker and the time cells.
+fn run_line<Tz: TimeZone>(
+    run: &Run,
+    state: RunState,
+    now: DateTime<Utc>,
+    tz: &Tz,
+    widths: Widths,
+) -> String
 where
     Tz::Offset: Display,
 {
-    let (time, finished) = if run.state.is_active() {
+    let (time, finished) = if state.is_active() {
         (format_elapsed(span(run.started_at, now)), String::new())
     } else {
         (
@@ -183,7 +190,7 @@ where
     };
     cells(
         widths,
-        marker(run.state),
+        marker(state),
         [
             &run.repo.to_string(),
             &run.workflow,
@@ -542,12 +549,16 @@ pub fn draw<Tz: TimeZone>(
                 let line = empty_line(*section, window, loaded);
                 put(buffer, index + 1, &line, Style::default());
             }
-            Row::Run { run, selected } => {
-                let line = run_line(run, now, tz, widths);
+            Row::Run {
+                run,
+                state,
+                selected,
+            } => {
+                let line = run_line(run, *state, now, tz, widths);
                 let y = put(buffer, index + 1, &line, Style::default());
                 buffer.set_style(
                     Rect::new(area.x, y, 1, 1),
-                    Style::default().fg(marker_color(run.state)),
+                    Style::default().fg(marker_color(*state)),
                 );
                 reverse_if(*selected, buffer, area, y);
             }

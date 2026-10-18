@@ -43,6 +43,10 @@ pub enum Row<'a> {
     Run {
         /// The run.
         run: &'a Run,
+        /// The state that the row shows. It comes from
+        /// `RunState::shown_with_jobs` on the state of the run and the job
+        /// states that the board holds for it.
+        state: RunState,
         /// True for the one row that the selection marks.
         selected: bool,
     },
@@ -535,8 +539,15 @@ fn push_runs<'a>(
     }
     for (offset, &run) in runs.iter().enumerate() {
         let here = selected.filter(|selection| selection.run.1 == first + offset);
+        let job_states = match expanded.get(&run.id) {
+            Some(Jobs::Ready(jobs) | Jobs::Failed { jobs, .. }) => jobs.as_slice(),
+            Some(Jobs::Loading) | None => &[],
+        };
         rows.push(Row::Run {
             run,
+            state: run
+                .state
+                .shown_with_jobs(job_states.iter().map(|job| job.state)),
             selected: here.is_some_and(|selection| selection.job.is_none()),
         });
         if let Some(jobs) = expanded.get(&run.id) {
@@ -650,7 +661,7 @@ mod tests {
                     failed,
                 } => format!("Header({section:?},{count},{passed},{failed})"),
                 Row::Empty(section) => format!("Empty({section:?})"),
-                Row::Run { run, selected } => {
+                Row::Run { run, selected, .. } => {
                     format!("Run({}){}", run.id.0, if *selected { "*" } else { "" })
                 }
                 Row::Job {
