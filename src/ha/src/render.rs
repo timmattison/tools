@@ -1544,15 +1544,23 @@ mod tests {
                     Some("2026-10-14T11:52:00Z"),
                     None,
                 ),
+                job(
+                    107_851_237_796,
+                    &"café-au-lait-".repeat(10),
+                    RunState::Running,
+                    Some("2026-10-14T11:53:00Z"),
+                    None,
+                ),
             ],
         );
         let text = lines(&render_with(120, 14, &mut board, &loaded()));
         let run_column = last_digit_column(&text[2], "39149840084")
             .unwrap_or_else(|| panic!("the run row holds its ID: {:?}", text[2]));
-        // The order is by name: `日` comes before `🎉`.
+        // The order is by name: `c` comes before `日`, and `日` before `🎉`.
         for (y, start, id, started, time) in [
-            (3, "├ 日本語", "107851237794", "11:51:00", "9m 00s"),
-            (4, "└ 🎉🎊🎁", "107851237795", "11:52:00", "8m 00s"),
+            (3, "├ café-", "107851237796", "11:53:00", "7m 00s"),
+            (4, "├ 日本語", "107851237794", "11:51:00", "9m 00s"),
+            (5, "└ 🎉🎊🎁", "107851237795", "11:52:00", "8m 00s"),
         ] {
             let line = &text[y];
             assert!(line.contains(start), "line {y}: {line:?}");
@@ -1766,50 +1774,6 @@ mod tests {
         let text = lines(&render_with(120, 14, &mut board, &loaded()));
         assert_eq!(started_cells(&text, 3), "11:50:00");
         assert_eq!(time_cells(&text, 3), "10m 00s");
-    }
-
-    #[test]
-    fn a_job_name_cut_by_display_width_keeps_its_start_and_the_columns() {
-        let mut board = board_with_jobs(vec![
-            job(
-                11,
-                "日本語のとても長いジョブの名前日本語のとても長いジョブの名前日本語のとても長いジョブの名前日本語のとても長いジョブの名前",
-                RunState::Running,
-                Some("2026-10-14T11:51:00Z"),
-                None,
-            ),
-            job(
-                12,
-                &"🎉🎊🎁".repeat(20),
-                RunState::Running,
-                Some("2026-10-14T11:52:00Z"),
-                None,
-            ),
-            job(
-                13,
-                &"café-au-lait-".repeat(10),
-                RunState::Running,
-                Some("2026-10-14T11:53:00Z"),
-                None,
-            ),
-        ]);
-        let text = lines(&render_with(120, 14, &mut board, &loaded()));
-        let started = |line: &str| {
-            let (before, _) = line.rsplit_once(" 11:").expect("the line holds a start");
-            display_width(before)
-        };
-        let run_column = started(&text[2]);
-        // The order is by name: `c` comes before `日`, and `日` before `🎉`.
-        for (y, start) in [(3, "├ café-"), (4, "├ 日本語"), (5, "└ 🎉🎊🎁")] {
-            assert!(text[y].contains(start), "{:?}", text[y]);
-            assert!(text[y].contains('…'), "{:?}", text[y]);
-            assert_eq!(started(&text[y]), run_column, "line {y}");
-            assert!(display_width(&text[y]) <= 120, "{:?}", text[y]);
-        }
-        let (name, _) = text[4]
-            .split_once(&format!("{:>ID_WIDTH$}", 11))
-            .expect("the line holds the job ID");
-        assert!(name.trim_end().ends_with('…'), "{:?}", text[4]);
     }
 
     #[test]
