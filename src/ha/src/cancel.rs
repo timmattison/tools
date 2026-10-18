@@ -14,7 +14,8 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::github::{GhSource, SourceError};
-use crate::run::RunId;
+use crate::job::Job;
+use crate::run::{Run, RunId};
 use crate::target::RepoName;
 
 /// The name of the thread that sends one cancel.
@@ -38,6 +39,42 @@ pub trait Canceller {
 
     /// Gives the next result that arrived, or `None`.
     fn finished(&self) -> Option<CancelOutcome>;
+}
+
+/// A cancel that waits for the answer of the user.
+///
+/// It keeps what the box shows, copied from the board at the time of `c`.
+/// A later refresh or a later move of the highlight does not change it, thus
+/// `y` cancels the run that the box names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Confirm {
+    /// The repository that holds the run.
+    pub repo: RepoName,
+    /// The run to cancel.
+    pub run: RunId,
+    /// The name of the workflow.
+    pub workflow: String,
+    /// The head branch. The text is empty when GitHub gives none.
+    pub branch: String,
+    /// The display title of the run.
+    pub title: String,
+    /// The name of the job of the selected job row. `None` for a run row.
+    pub job: Option<String>,
+}
+
+impl Confirm {
+    /// Copies the fields that the box shows from `run`, and the name of `job`.
+    #[must_use]
+    pub fn new(run: &Run, job: Option<&Job>) -> Confirm {
+        Confirm {
+            repo: run.repo.clone(),
+            run: run.id,
+            workflow: String::new(),
+            branch: String::new(),
+            title: String::new(),
+            job: None,
+        }
+    }
 }
 
 /// The canceller that sends each cancel through `gh`.
@@ -159,6 +196,40 @@ mod tests {
             "i=0\nwhile [ ! -e '{}' ] && [ \"$i\" -lt 600 ]; do sleep 0.1; i=$((i + 1)); done\ncat \"$(dirname \"$0\")/answer.out\"",
             release.display()
         )
+    }
+
+    #[test]
+    fn a_confirm_copies_what_the_box_shows_from_the_run_and_the_job() {
+        let time = chrono::DateTime::<chrono::Utc>::UNIX_EPOCH;
+        let run = Run {
+            id: RunId(39_149_840_084),
+            repo: repo("timmattison/tools"),
+            workflow: "CI".to_owned(),
+            branch: "main".to_owned(),
+            title: "fix(ha): show the run ID".to_owned(),
+            state: crate::run::RunState::Running,
+            started_at: time,
+            updated_at: time,
+            url: String::new(),
+        };
+        let job = Job {
+            id: crate::job::JobId(5),
+            name: "build (ubuntu-latest)".to_owned(),
+            state: crate::run::RunState::Running,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+            url: String::new(),
+        };
+
+        let with_job = Confirm::new(&run, Some(&job));
+        assert_eq!(with_job.repo, repo("timmattison/tools"));
+        assert_eq!(with_job.run, RunId(39_149_840_084));
+        assert_eq!(with_job.workflow, "CI");
+        assert_eq!(with_job.branch, "main");
+        assert_eq!(with_job.title, "fix(ha): show the run ID");
+        assert_eq!(with_job.job.as_deref(), Some("build (ubuntu-latest)"));
+        assert_eq!(Confirm::new(&run, None).job, None);
     }
 
     #[test]
