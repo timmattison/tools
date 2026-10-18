@@ -1238,6 +1238,20 @@ mod tests {
     }
 
     #[test]
+    fn jobs_of_keeps_the_first_job_of_each_id_across_two_pages() {
+        let stub = job_pages_stub(2);
+        stub.file("page1.out", &ok_output(&done_jobs_json(199, 1, 100)));
+        stub.file("page2.out", &ok_output(&done_jobs_json(199, 100, 100)));
+        let jobs = stub
+            .source()
+            .jobs_of(&repo("o/r"), RunId(42))
+            .expect("jobs");
+        let ids: Vec<u64> = jobs.iter().map(|job| job.id.0).collect();
+        assert_eq!(ids, (1..=199).collect::<Vec<u64>>());
+        assert_eq!(stub.requests().len(), 2);
+    }
+
+    #[test]
     fn a_matrix_of_256_jobs_takes_three_pages() {
         let stub = job_pages_stub(3);
         stub.file("page1.out", &ok_output(&done_jobs_json(256, 1, 100)));
