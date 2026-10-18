@@ -236,6 +236,16 @@ pub trait Source: Send + Sync {
     /// Returns a [`SourceError`] when a page of jobs cannot be fetched.
     fn jobs_of(&self, repo: &RepoName, run: RunId) -> Result<Vec<Job>, SourceError>;
 
+    /// Tells the source that the worker stops fetching the jobs of a run.
+    ///
+    /// The worker calls this when the run is finished and no job of it is
+    /// active. The worker fetches those jobs again only after the run changes
+    /// (for example a re-run), and then the old pages are stale. A source that
+    /// keeps a cache removes the pages of the jobs of that run. Without this
+    /// call, the cache keeps the pages of every run that a person ever
+    /// expanded.
+    fn forget_jobs(&self, repo: &RepoName, run: RunId);
+
     /// The rate limit that the last response stated. `None` before any response.
     fn rate_limit(&self) -> Option<RateLimit>;
 }
@@ -396,18 +406,6 @@ impl GhSource {
         self.cached_get(&key, &path, parse_jobs)
     }
 
-    /// Removes the cache entries of every page of the jobs of one run.
-    ///
-    /// `jobs_of` calls this when a run has jobs and none is active. The worker
-    /// fetches the jobs of a run with no active job one time only, thus those
-    /// pages have no later use. Without this rule, the cache keeps the pages of every run
-    /// that a person ever expanded. A run with no jobs, or with an active job,
-    /// keeps its pages, so its next fetch can get a `304`.
-    fn forget_jobs_of(&self, repo: &RepoName, run: RunId) {
-        let prefix = format!("{repo}#jobs/{}#", run.0);
-        self.lock_etags().retain(|key, _| !key.starts_with(&prefix));
-    }
-
     /// Fetches every page of the runs of `repo` for `filter`.
     ///
     /// The fetch goes on while the last page was full and the count so far is
@@ -542,9 +540,14 @@ impl Source for GhSource {
         }
         keep_first_of_each_id(&mut jobs, |job| job.id);
         if !jobs.is_empty() && jobs.iter().all(|job| !job.state.is_active()) {
-            self.forget_jobs_of(repo, run);
+            self.forget_jobs(repo, run);
         }
         Ok(jobs)
+    }
+
+    fn forget_jobs(&self, repo: &RepoName, run: RunId) {
+        let prefix = format!("{repo}#jobs/{}#", run.0);
+        self.lock_etags().retain(|key, _| !key.starts_with(&prefix));
     }
 
     fn rate_limit(&self) -> Option<RateLimit> {
@@ -1386,6 +1389,26 @@ mod tests {
         let mut keys: Vec<String> = source.lock_etags().keys().cloned().collect();
         keys.sort();
         keys
+    }
+
+    #[test]
+    fn jobs_of_sends_the_etag_again_when_every_job_is_finished() {
+        let stub = Stub::new(ETAG_CASES);
+        stub.file("page1.out", &ok_output(&done_jobs_json(1, 1, 1)));
+        stub.file("not-modified.out", NOT_MODIFIED);
+        let source = stub.source();
+        let first = source.jobs_of(&repo("o/r"), RunId(42));
+        assert_eq!(first.as_ref().map(Vec::len), Ok(1));
+        let second = source.jobs_of(&repo("o/r"), RunId(42));
+        assert_eq!(second, first);
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 2);
+        let header = "If-None-Match: W/\"4c00158b\"".to_owned();
+        assert!(
+            requests[1].contains(&header),
+            "the second request sends the ETag: {:?}",
+            requests[1]
+        );
     }
 
     #[test]

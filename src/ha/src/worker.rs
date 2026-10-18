@@ -733,6 +733,10 @@ mod tests {
             answer
         }
 
+        fn forget_jobs(&self, _repo: &RepoName, run: RunId) {
+            self.script().calls.push(("forget", run.0.to_string()));
+        }
+
         fn rate_limit(&self) -> Option<RateLimit> {
             self.script().rate
         }
@@ -1372,6 +1376,65 @@ mod tests {
             .iter()
             .filter(|(what, _)| *what == "jobs")
             .count()
+    }
+
+    /// The runs that the worker told the source to forget, in order.
+    fn forget_calls(fake: &FakeSource) -> Vec<String> {
+        fake.script()
+            .calls
+            .iter()
+            .filter(|(what, _)| *what == "forget")
+            .map(|(_, run)| run.clone())
+            .collect()
+    }
+
+    /// Runs one `fetch_jobs` for run 5 of `acme/a`. The facts of the run are
+    /// those of `the_run`, or none. The source answers with `jobs`.
+    fn fetch_run_5(the_run: Option<&Run>, jobs: Vec<Job>) -> Arc<FakeSource> {
+        let fake = Arc::new(FakeSource::default());
+        fake.script().jobs.insert(RunId(5), Ok(jobs));
+        let state = State::new(SLOW_CADENCE);
+        if let Some(the_run) = the_run {
+            state
+                .facts
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(repo("acme/a"))
+                .or_default()
+                .insert(the_run.id, RunFacts::of(the_run));
+        }
+        let (updates_tx, _updates_rx) = mpsc::channel();
+        let sent = fetch_jobs(&fake, &state, &[(repo("acme/a"), RunId(5))], &updates_tx);
+        assert!(sent.is_ok(), "the receiver lives");
+        fake
+    }
+
+    #[test]
+    fn a_finished_run_with_no_active_job_tells_the_source_to_forget_its_jobs() {
+        let fake = fetch_run_5(Some(&run("acme/a", 5)), vec![job(1)]);
+        assert_eq!(forget_calls(&fake), vec!["5".to_owned()]);
+    }
+
+    #[test]
+    fn an_active_run_whose_jobs_are_all_finished_keeps_its_cached_jobs() {
+        let fake = fetch_run_5(Some(&active_run("acme/a", 5)), vec![job(1)]);
+        assert_eq!(forget_calls(&fake), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_finished_run_with_an_active_job_keeps_its_cached_jobs() {
+        let running = Job {
+            state: RunState::Running,
+            ..job(1)
+        };
+        let fake = fetch_run_5(Some(&run("acme/a", 5)), vec![running]);
+        assert_eq!(forget_calls(&fake), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_run_with_no_facts_keeps_its_cached_jobs() {
+        let fake = fetch_run_5(None, vec![job(1)]);
+        assert_eq!(forget_calls(&fake), Vec::<String>::new());
     }
 
     fn has_jobs(updates: &[Update]) -> bool {
