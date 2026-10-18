@@ -11,6 +11,7 @@
 pub mod app;
 pub mod board;
 pub mod browser;
+pub mod cancel;
 pub mod github;
 pub mod job;
 pub mod render;
