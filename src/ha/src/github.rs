@@ -890,6 +890,17 @@ mod tests {
     }
 
     #[test]
+    fn a_page_of_runs_without_run_numbers_gives_the_runs() {
+        let body = (5..8).fold(runs_json(3, 5, 3), |text, id| {
+            text.replace(&format!("\"run_number\":{},", id + 100), "")
+        });
+        assert!(!body.contains("run_number"));
+        let page = parse_runs(&body, &repo("o/r")).expect("a page of runs without run numbers");
+        let ids: Vec<RunId> = page.runs.iter().map(|run| run.id).collect();
+        assert_eq!(ids, [RunId(5), RunId(6), RunId(7)]);
+    }
+
+    #[test]
     fn a_run_takes_the_repository_that_the_request_named() {
         let asked = repo("Timmattison/Tools");
         let page = parse_runs(RUNS_JSON, &asked).expect("a page");
