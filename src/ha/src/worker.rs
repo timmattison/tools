@@ -1731,6 +1731,75 @@ mod tests {
         assert!(!has_jobs(&after), "{after:?}");
     }
 
+    /// The state has no thread here. A run that joins the watched set loses its
+    /// mark, so the next cycle fetches it, also when the fetch at once fails to
+    /// happen. The mark says the run is finished and unchanged, thus only the
+    /// removal at the join can make the run due.
+    #[test]
+    fn a_run_that_joins_the_watched_set_again_is_due() {
+        let finished = run("acme/a", 5);
+        let key = (repo("acme/a"), RunId(5));
+        let mut state = State::new(SLOW_CADENCE);
+        let facts = RunFacts::of(&finished);
+        state
+            .facts
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(repo("acme/a"))
+            .or_default()
+            .insert(finished.id, facts);
+        state
+            .job_marks
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                key.clone(),
+                RunFacts {
+                    active: false,
+                    ..facts
+                },
+            );
+
+        let _ = state.watch([key.clone()].into_iter().collect());
+        let _ = state.watch(BTreeSet::new());
+        let _ = state.watch([key.clone()].into_iter().collect());
+
+        assert_eq!(state.due_jobs(), vec![key]);
+    }
+
+    /// The fake lists run 5 in the first cycle and no run in the second cycle.
+    /// The mark of run 5 must go with the run.
+    #[test]
+    fn the_mark_of_a_run_that_leaves_the_list_of_runs_is_removed() {
+        let fake = fake_with_runs(vec![run("acme/a", 5)]);
+        let mut state = State::new(SLOW_CADENCE);
+        let (updates_tx, _updates_rx) = mpsc::channel();
+        let settings = settings(&["acme/a"]);
+        assert!(cycle(&fake, &settings, &mut state, &updates_tx).is_ok());
+        let key = (repo("acme/a"), RunId(5));
+        let facts = RunFacts::of(&run("acme/a", 5));
+        state
+            .job_marks
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                key.clone(),
+                RunFacts {
+                    active: false,
+                    ..facts
+                },
+            );
+        fake.script().created.insert(repo("acme/a"), Ok(Vec::new()));
+
+        assert!(cycle(&fake, &settings, &mut state, &updates_tx).is_ok());
+
+        let marks = state
+            .job_marks
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
+        assert!(!marks.contains_key(&key), "{marks:?}");
+    }
+
     #[test]
     fn a_run_whose_job_fetch_failed_is_fetched_again_on_the_next_cycle() {
         let fake = fake_with_runs(vec![run("acme/a", 5)]);
