@@ -1415,12 +1415,12 @@ mod tests {
     }
 
     /// The expected line of a job row at 120 columns. The widths follow the
-    /// shares of the 82 columns of room: 19 repository, 15 workflow name, 17
-    /// branch, and 31 title. The text fills 35 columns, the job ID fills 12, and
-    /// the branch and title columns are 49 blank columns.
+    /// shares of the 82 columns of room: 19 repository, 8 workflow name, 17
+    /// branch, and 38 title. The text fills 28 columns, the job ID fills 12, and
+    /// the branch and title columns are 56 blank columns.
     fn job_golden(marker: &str, text: &str, id: u64, times: &str) -> String {
         format!(
-            "{marker} {text:<35} {id:>ID_WIDTH$} {blank:<49} {times}",
+            "{marker} {text:<28} {id:>ID_WIDTH$} {blank:<56} {times}",
             blank = ""
         )
         .trim_end()
@@ -1434,7 +1434,7 @@ mod tests {
         assert_eq!(
             text[2..6],
             [
-                "● timmattison/tools   CI                         1 main              Fix the thing                   11:45:30    14m 30s".to_owned(),
+                "● timmattison/tools   CI                  1 main              Fix the thing                          11:45:30    14m 30s".to_owned(),
                 job_golden("✓", "├ build", 12, "11:45:40    4m 20s"),
                 job_golden("✗", "├ lint", 13, "11:46:00    45s"),
                 job_golden("●", "└ test", 11, "11:50:10    9m 50s"),
