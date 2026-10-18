@@ -2132,4 +2132,80 @@ mod tests {
 
     /// The answer of GitHub for a cancel that it accepted.
     const ACCEPTED: &str = "HTTP/2.0 202 Accepted\nContent-Type: application/json; charset=utf-8\r\nX-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 4999\r\nX-Ratelimit-Reset: 1791977652\r\n\r\n{}";
+
+    /// Runs `cancel_run` against a stub that prints `answer` and exits with `exit`.
+    fn cancel_with(answer: &str, exit: u8) -> Result<(), SourceError> {
+        let stub = Stub::new(&format!("cat \"$dir/cancel.out\"; exit {exit}"));
+        stub.file("cancel.out", answer);
+        stub.source().cancel_run(&repo("o/r"), RunId(7))
+    }
+
+    #[test]
+    fn cancel_run_gives_ok_for_202_accepted() {
+        assert_eq!(cancel_with(ACCEPTED, 0), Ok(()));
+    }
+
+    #[test]
+    fn cancel_run_gives_the_message_of_github_for_409() {
+        let body = r#"{"message":"Cannot cancel a workflow run that is completed.","documentation_url":"https://docs.github.com/rest/actions/workflow-runs#cancel-a-workflow-run","status":"409"}"#;
+        let error = cancel_with(&http_output("HTTP/2.0 409 Conflict", body), 1).unwrap_err();
+        assert_eq!(
+            error,
+            SourceError::Http {
+                status: 409,
+                message: "Cannot cancel a workflow run that is completed.".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn cancel_run_gives_the_message_of_github_for_403() {
+        let body = r#"{"message":"Resource not accessible by integration","status":"403"}"#;
+        let error = cancel_with(&http_output("HTTP/2.0 403 Forbidden", body), 1).unwrap_err();
+        assert_eq!(
+            error,
+            SourceError::Http {
+                status: 403,
+                message: "Resource not accessible by integration".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn cancel_run_is_not_logged_in_for_401() {
+        let body = r#"{"message":"Bad credentials"}"#;
+        let error = cancel_with(&http_output("HTTP/2.0 401 Unauthorized", body), 1).unwrap_err();
+        assert_eq!(
+            error,
+            SourceError::NotLoggedIn("Bad credentials".to_owned())
+        );
+    }
+
+    #[test]
+    fn cancel_run_does_not_change_the_etag_cache() {
+        let stub = Stub::new(
+            "case \"$*\" in
+  *cancel*) cat \"$dir/cancel.out\";;
+  *If-None-Match*) cat \"$dir/not-modified.out\"; echo 'gh: HTTP 304' >&2; exit 1;;
+  *) cat \"$dir/page1.out\";;
+ esac",
+        );
+        stub.file("page1.out", &ok_output(RUNS_JSON));
+        stub.file("not-modified.out", NOT_MODIFIED);
+        stub.file("cancel.out", ACCEPTED);
+        let source = stub.source();
+        let tools = repo("timmattison/tools");
+        source.runs_of(&tools, since_query()).unwrap();
+        let keys = cache_keys(&source);
+        source.cancel_run(&tools, RunId(7)).unwrap();
+        assert_eq!(cache_keys(&source), keys);
+        source.runs_of(&tools, since_query()).unwrap();
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[2][1], "-i");
+        assert!(requests[2].contains(&"-H".to_owned()));
+        assert!(requests[2]
+            .iter()
+            .any(|arg| arg.starts_with("If-None-Match: ")));
+    }
 }
