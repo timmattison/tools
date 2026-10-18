@@ -738,6 +738,10 @@ mod tests {
         rate: Option<RateLimit>,
         in_flight: usize,
         max_in_flight: usize,
+        /// The runs whose job pages the fake holds. Each `jobs_of` call adds
+        /// its run, whatever the result, because a call can leave pages whether
+        /// it fails or not. Each `forget_jobs` call removes its run.
+        held: BTreeSet<(RepoName, RunId)>,
     }
 
     /// A [`Source`] that answers from a script and logs each call.
@@ -790,9 +794,10 @@ mod tests {
             answer
         }
 
-        fn jobs_of(&self, _repo: &RepoName, run: RunId) -> Result<Vec<Job>, SourceError> {
+        fn jobs_of(&self, repo: &RepoName, run: RunId) -> Result<Vec<Job>, SourceError> {
             let mut script = self.script();
             script.calls.push(("jobs", run.0.to_string()));
+            script.held.insert((repo.clone(), run));
             let answer = script.jobs.get(&run).cloned().unwrap_or(Ok(Vec::new()));
             script.in_flight += 1;
             script.max_in_flight = script.max_in_flight.max(script.in_flight);
@@ -802,8 +807,10 @@ mod tests {
             answer
         }
 
-        fn forget_jobs(&self, _repo: &RepoName, run: RunId) {
-            self.script().calls.push(("forget", run.0.to_string()));
+        fn forget_jobs(&self, repo: &RepoName, run: RunId) {
+            let mut script = self.script();
+            script.calls.push(("forget", run.0.to_string()));
+            script.held.remove(&(repo.clone(), run));
         }
 
         fn rate_limit(&self) -> Option<RateLimit> {
@@ -1458,10 +1465,13 @@ mod tests {
     }
 
     /// Runs one `fetch_jobs` for run 5 of `acme/a`. The facts of the run are
-    /// those of `the_run`, or none. The source answers with `jobs`.
-    fn fetch_run_5(the_run: Option<&Run>, jobs: Vec<Job>) -> Arc<FakeSource> {
+    /// those of `the_run`, or none. The source gives `answer`.
+    fn fetch_run_5(
+        the_run: Option<&Run>,
+        answer: Result<Vec<Job>, SourceError>,
+    ) -> Arc<FakeSource> {
         let fake = Arc::new(FakeSource::default());
-        fake.script().jobs.insert(RunId(5), Ok(jobs));
+        fake.script().jobs.insert(RunId(5), answer);
         let state = State::new(SLOW_CADENCE);
         if let Some(the_run) = the_run {
             state
@@ -1480,13 +1490,13 @@ mod tests {
 
     #[test]
     fn a_finished_run_with_no_active_job_tells_the_source_to_forget_its_jobs() {
-        let fake = fetch_run_5(Some(&run("acme/a", 5)), vec![job(1)]);
+        let fake = fetch_run_5(Some(&run("acme/a", 5)), Ok(vec![job(1)]));
         assert_eq!(forget_calls(&fake), vec!["5".to_owned()]);
     }
 
     #[test]
     fn an_active_run_whose_jobs_are_all_finished_keeps_its_cached_jobs() {
-        let fake = fetch_run_5(Some(&active_run("acme/a", 5)), vec![job(1)]);
+        let fake = fetch_run_5(Some(&active_run("acme/a", 5)), Ok(vec![job(1)]));
         assert_eq!(forget_calls(&fake), Vec::<String>::new());
     }
 
@@ -1496,14 +1506,20 @@ mod tests {
             state: RunState::Running,
             ..job(1)
         };
-        let fake = fetch_run_5(Some(&run("acme/a", 5)), vec![running]);
+        let fake = fetch_run_5(Some(&run("acme/a", 5)), Ok(vec![running]));
         assert_eq!(forget_calls(&fake), Vec::<String>::new());
     }
 
     #[test]
-    fn a_run_with_no_facts_keeps_its_cached_jobs() {
-        let fake = fetch_run_5(None, vec![job(1)]);
-        assert_eq!(forget_calls(&fake), Vec::<String>::new());
+    fn a_run_with_no_facts_forgets_its_cached_jobs() {
+        let fake = fetch_run_5(None, Ok(vec![job(1)]));
+        assert_eq!(forget_calls(&fake), vec!["5".to_owned()]);
+    }
+
+    #[test]
+    fn a_run_with_no_facts_whose_job_fetch_failed_forgets_its_cached_jobs() {
+        let fake = fetch_run_5(None, Err(SourceError::Failed("boom".to_owned())));
+        assert_eq!(forget_calls(&fake), vec!["5".to_owned()]);
     }
 
     fn has_jobs(updates: &[Update]) -> bool {
@@ -2025,6 +2041,124 @@ mod tests {
             assert!(most >= 2, "only {most} call in flight");
             assert!(most <= CONCURRENCY, "{most} calls in flight at once");
         }
+    }
+
+    /// At the end of each cycle, the source holds the job pages of a run only
+    /// while the run has an active mark. Only an active mark makes the worker
+    /// fetch the run again, so no other run can use its pages.
+    fn assert_held_pages_have_active_marks(fake: &FakeSource, state: &State) {
+        let held = fake.script().held.clone();
+        let marks = state
+            .job_marks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for key in &held {
+            assert!(
+                marks.get(key).is_some_and(|mark| mark.active),
+                "the source holds {key:?} with no active mark: held {held:?}, marks {marks:?}"
+            );
+        }
+    }
+
+    /// Run 5 is active and not watched. Its jobs are fetched in the first
+    /// cycle. Then it leaves the list of runs. The worker never fetches it
+    /// again, so it must tell the source to forget its pages.
+    #[test]
+    fn an_active_run_that_is_not_watched_and_leaves_the_list_of_runs_is_forgotten() {
+        let fake = fake_with_runs(vec![active_run("acme/a", 5)]);
+        let mut state = State::new(SLOW_CADENCE);
+        let (updates_tx, _updates_rx) = mpsc::channel();
+        let settings = settings(&["acme/a"]);
+        assert!(cycle(&fake, &settings, &mut state, &updates_tx).is_ok());
+        assert!(fake.script().held.contains(&(repo("acme/a"), RunId(5))));
+        fake.script().created.insert(repo("acme/a"), Ok(Vec::new()));
+
+        assert!(cycle(&fake, &settings, &mut state, &updates_tx).is_ok());
+
+        assert_held_pages_have_active_marks(&fake, &state);
+        assert_eq!(forget_calls(&fake), vec!["5".to_owned()]);
+    }
+
+    /// Run 5 is finished and watched. Its job fetch fails, so it gets an
+    /// active mark. Then it leaves the list of runs. The failed fetch can leave
+    /// pages, so the worker must tell the source to forget them.
+    #[test]
+    fn a_run_whose_last_job_fetch_failed_and_that_leaves_the_list_of_runs_is_forgotten() {
+        let fake = fake_with_runs(vec![run("acme/a", 5)]);
+        fake.script()
+            .jobs
+            .insert(RunId(5), Err(SourceError::Failed("boom".to_owned())));
+        let mut state = State::new(SLOW_CADENCE);
+        let (updates_tx, _updates_rx) = mpsc::channel();
+        let settings = settings(&["acme/a"]);
+        let _ = state.watch([(repo("acme/a"), RunId(5))].into_iter().collect());
+        assert!(cycle(&fake, &settings, &mut state, &updates_tx).is_ok());
+        assert!(fake.script().held.contains(&(repo("acme/a"), RunId(5))));
+        fake.script().created.insert(repo("acme/a"), Ok(Vec::new()));
+
+        assert!(cycle(&fake, &settings, &mut state, &updates_tx).is_ok());
+
+        assert_held_pages_have_active_marks(&fake, &state);
+        assert_eq!(forget_calls(&fake), vec!["5".to_owned()]);
+    }
+
+    /// Run 5 is active. Its repository comes from an owner list. Then the
+    /// owner lists no repository, so the run has no facts and is never due.
+    #[test]
+    fn an_active_run_whose_repository_leaves_the_repository_set_is_forgotten() {
+        let fake = fake_with_runs(vec![active_run("acme/a", 5)]);
+        fake.script()
+            .owners
+            .insert(owner("acme"), Ok(vec![repo("acme/a")]));
+        let mut state = State::new(Duration::ZERO);
+        let (updates_tx, _updates_rx) = mpsc::channel();
+        let settings = settings(&["acme"]);
+        assert!(cycle(&fake, &settings, &mut state, &updates_tx).is_ok());
+        assert!(fake.script().held.contains(&(repo("acme/a"), RunId(5))));
+        fake.script().owners.insert(owner("acme"), Ok(Vec::new()));
+
+        assert!(cycle(&fake, &settings, &mut state, &updates_tx).is_ok());
+
+        assert_held_pages_have_active_marks(&fake, &state);
+        assert_eq!(forget_calls(&fake), vec!["5".to_owned()]);
+    }
+
+    /// Run 5 is active and not watched. A watch command during a backoff
+    /// removes its mark and fetches nothing. Then the run leaves the list of
+    /// runs. It has no mark for the cycle to see, but the source holds pages.
+    #[test]
+    fn a_run_that_joins_the_watched_set_during_a_backoff_and_leaves_the_list_of_runs_is_forgotten()
+    {
+        let fake = fake_with_runs(vec![active_run("acme/a", 5)]);
+        let mut state = State::new(SLOW_CADENCE);
+        let (updates_tx, _updates_rx) = mpsc::channel();
+        let (commands_tx, commands_rx) = mpsc::channel();
+        let settings = settings(&["acme/a"]);
+        assert!(cycle(&fake, &settings, &mut state, &updates_tx).is_ok());
+        assert!(fake.script().held.contains(&(repo("acme/a"), RunId(5))));
+        let calls_before = job_calls(&fake);
+        commands_tx
+            .send(Command::WatchJobs(
+                [(repo("acme/a"), RunId(5))].into_iter().collect(),
+            ))
+            .expect("the receiver lives");
+        let woke = wait_for_next_cycle(
+            &fake,
+            &mut state,
+            &updates_tx,
+            &commands_rx,
+            Duration::ZERO,
+            true,
+        );
+        assert!(woke.is_ok());
+        assert_eq!(job_calls(&fake), calls_before);
+        fake.script().created.insert(repo("acme/a"), Ok(Vec::new()));
+
+        assert!(cycle(&fake, &settings, &mut state, &updates_tx).is_ok());
+
+        assert_held_pages_have_active_marks(&fake, &state);
+        assert_eq!(forget_calls(&fake), vec!["5".to_owned()]);
+        drop(commands_tx);
     }
 
     /// A run that is watched during a rate limit backoff gets no request until
