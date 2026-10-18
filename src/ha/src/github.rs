@@ -937,7 +937,7 @@ mod tests {
          "started_at":null,"created_at":"2026-09-25T01:02:03Z","completed_at":null,
          "html_url":"https://github.com/o/r/actions/runs/29679449/job/2"},
         {"id":3,"name":null,"status":"queued","conclusion":null,
-         "started_at":null,"created_at":null,"completed_at":null,"html_url":null}]}"#;
+         "started_at":null,"created_at":"2026-09-25T01:04:00Z","completed_at":null,"html_url":null}]}"#;
 
     #[test]
     fn the_jobs_json_maps_to_jobs() {
@@ -968,7 +968,7 @@ mod tests {
                     id: JobId(3),
                     name: String::new(),
                     state: RunState::Queued,
-                    created_at: None,
+                    created_at: Some(time("2026-09-25T01:04:00Z")),
                     started_at: None,
                     completed_at: None,
                     url: String::new(),
