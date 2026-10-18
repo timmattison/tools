@@ -5,13 +5,19 @@
 //! then waits for the next cycle. The screen sends [`Command`] values back.
 //!
 //! The screen also tells the worker which runs it shows expanded, with
-//! [`Command::WatchJobs`]. The worker fetches the jobs of those runs. It fetches
-//! the jobs of a new run at once, and it fetches the jobs of a watched run on
-//! each cycle when the run is due. A run is due when it has no good job fetch
-//! yet, when the run or one of its jobs was active at the last good fetch, or
-//! when its `updated_at` changed since the last good fetch. So `ha` fetches the
-//! jobs of a finished run one time only, when all of its jobs are finished. Job
-//! requests and run requests share the [`CONCURRENCY`] limit and the rate limit backoff.
+//! [`Command::WatchJobs`]. The worker fetches the jobs of those watched runs,
+//! and it fetches the jobs of every active run (queued or running), also when
+//! the screen shows the run collapsed. GitHub reports a run as queued while one
+//! job waits for a runner, also when other jobs run, so the screen needs the
+//! job states of a collapsed run to draw the right marker. The worker fetches
+//! the jobs of a new watched run at once, and it fetches the jobs of the other
+//! runs on each cycle when the run is due. A run is due when it has no good job
+//! fetch yet, when the run or one of its jobs was active at the last good fetch,
+//! or when its `updated_at` changed since the last good fetch. So `ha` fetches
+//! the jobs of a finished run one time only, when all of its jobs are finished.
+//! Each active run costs one more jobs request on each cycle. An `ETag` 304
+//! answer makes that request free. Job requests and run requests share the
+//! [`CONCURRENCY`] limit and the rate limit backoff.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -60,7 +66,8 @@ pub enum Update {
         /// The error text.
         error: String,
     },
-    /// The jobs of one run that the screen shows expanded.
+    /// The jobs of one run. The worker sends them for a run that the screen
+    /// shows expanded and for every active run.
     Jobs {
         /// The run that holds the jobs.
         run: RunId,
@@ -234,15 +241,25 @@ impl State {
         added
     }
 
-    /// The watched runs whose jobs the next cycle fetches.
+    /// The runs whose jobs the next cycle fetches, each one time, in a stable
+    /// order. The function considers the watched runs and every run whose facts
+    /// say it is active. It applies the due rule to each of them.
     fn due_jobs(&mut self) -> Vec<RunKey> {
         let facts = self.facts.get_mut().unwrap_or_else(PoisonError::into_inner);
         let marks = self
             .job_marks
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner);
-        self.watched
-            .iter()
+        let mut considered: BTreeSet<RunKey> = self.watched.clone();
+        for (repo, runs) in facts.iter() {
+            considered.extend(
+                runs.iter()
+                    .filter(|(_, run_facts)| run_facts.active)
+                    .map(|(run, _)| (repo.clone(), *run)),
+            );
+        }
+        considered
+            .into_iter()
             .filter(|(repo, run)| match marks.get(&(repo.clone(), *run)) {
                 None => true,
                 Some(mark) if mark.active => true,
@@ -251,7 +268,6 @@ impl State {
                     .and_then(|runs| runs.get(run))
                     .is_some_and(|now| now.updated_at != mark.updated_at),
             })
-            .cloned()
             .collect()
     }
 }
@@ -347,9 +363,9 @@ fn apply_command(
 }
 
 /// Runs one cycle: lists the owners that need it, fetches every repository,
-/// fetches the jobs of the watched runs that are due, and reports the end of
-/// the cycle. Returns how long to wait before the next one, and whether the
-/// worker waits for a rate limit reset.
+/// fetches the jobs of the runs that are due (the watched runs and the active
+/// runs), and reports the end of the cycle. Returns how long to wait before the
+/// next one, and whether the worker waits for a rate limit reset.
 fn cycle<S: Source>(
     source: &S,
     settings: &Settings,
@@ -1537,7 +1553,9 @@ mod tests {
                 .unwrap_or_else(|| panic!("no Jobs in the cycle: {cycle:?}"));
             assert_eq!(at, cycle.len() - 2, "Jobs comes right before CycleDone");
         }
-        assert_eq!(job_calls(&fake), 3);
+        // Four requests: the first cycle, the fetch at once after the watch,
+        // and the two refresh cycles.
+        assert_eq!(job_calls(&fake), 4);
     }
 
     /// The runs answer says that run 5 finished. The jobs answer shows a job
@@ -1644,8 +1662,8 @@ mod tests {
     }
 
     #[test]
-    fn a_collapsed_run_is_not_fetched_and_an_expanded_again_run_is_fetched_at_once() {
-        let fake = fake_with_runs(vec![active_run("acme/a", 5)]);
+    fn a_collapsed_finished_run_is_not_fetched_and_an_expanded_again_run_is_fetched_at_once() {
+        let fake = fake_with_runs(vec![run("acme/a", 5)]);
         let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
         let _ = one_cycle(&worker);
         watch(&worker, &[5]);
