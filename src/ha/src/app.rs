@@ -1621,4 +1621,30 @@ mod tests {
             frame[11]
         );
     }
+
+    #[test]
+    fn a_refused_cancel_posts_the_run_and_the_error() {
+        let channels = channels();
+        let canceller = canceller();
+        canceller
+            .outcomes
+            .borrow_mut()
+            .push_back(outcome(Err(SourceError::Http {
+                status: 409,
+                message: "Cannot cancel a workflow run that is completed.".to_owned(),
+            })));
+        let (frame, commands) = run_steps_cancelling(
+            &channels,
+            &canceller,
+            vec![Step::Idle, key(KeyCode::Char('q'))],
+        );
+        assert!(
+            frame[11].contains(
+                "could not cancel run 7: GitHub answered 409: Cannot cancel a workflow run that is completed."
+            ),
+            "{:?}",
+            frame[11]
+        );
+        assert!(!commands.contains(&Command::RefreshNow), "{commands:?}");
+    }
 }
