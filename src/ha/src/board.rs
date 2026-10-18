@@ -1429,15 +1429,114 @@ mod tests {
         );
     }
 
+    /// Reads the text of the selected row, then moves with `step` `moves`
+    /// times and reads the text again after each move.
+    fn walk(board: &mut Board, moves: usize, step: fn(&mut Board, DateTime<Utc>)) -> Vec<String> {
+        let mut seen = vec![selected_text(board).expect("a selection")];
+        for _ in 0..moves {
+            step(board, now());
+            seen.push(selected_text(board).expect("a selection"));
+        }
+        seen
+    }
+
     #[test]
-    fn up_and_down_skip_the_job_rows() {
+    fn up_and_down_move_through_the_job_rows_of_an_expanded_run() {
         let mut board = two_run_board();
         board.expand(now());
-        board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
+        board.set_jobs(
+            RunId(1),
+            vec![job(11, RunState::Passed), job(12, RunState::Running)],
+        );
+        assert_eq!(
+            walk(&mut board, 4, Board::select_next),
+            ["Run(1)*", "Job(11)*", "LastJob(12)*", "Run(2)*", "Run(2)*"]
+        );
+        assert_eq!(
+            walk(&mut board, 4, Board::select_previous),
+            ["Run(2)*", "LastJob(12)*", "Job(11)*", "Run(1)*", "Run(1)*"]
+        );
+    }
+
+    #[test]
+    fn a_selected_job_row_is_the_only_marked_row() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![job(11, RunState::Passed), job(12, RunState::Running)],
+        );
         board.select_next(now());
-        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(2)*"));
+        assert_eq!(
+            marked(&board.rows(now())),
+            [
+                "Header(Active,1,0,0)",
+                "Run(1)",
+                "Job(11)*",
+                "LastJob(12)",
+                "Header(Recent,1,1,0)",
+                "Run(2)",
+            ]
+        );
+    }
+
+    #[test]
+    fn up_and_down_skip_the_loading_the_no_jobs_and_the_error_rows() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Running, 20, 1),
+                run(3, "a/x", RunState::Running, 10, 1),
+                run(4, "a/x", RunState::Running, 5, 1),
+            ],
+        );
+        board.expand(now());
+        board.select_next(now());
+        board.expand(now());
+        board.set_jobs(RunId(2), Vec::new());
+        board.select_next(now());
+        board.expand(now());
+        board.fail_jobs(RunId(3), "HTTP 500".to_owned());
+        assert_eq!(
+            shape(&board.rows(now()))[1..8],
+            [
+                "Run(1)",
+                "JobsLoading",
+                "Run(2)",
+                "NoJobs",
+                "Run(3)",
+                "JobsError(HTTP 500)",
+                "Run(4)"
+            ]
+        );
         board.select_previous(now());
-        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(1)*"));
+        board.select_previous(now());
+        board.select_previous(now());
+        assert_eq!(
+            walk(&mut board, 3, Board::select_next),
+            ["Run(1)*", "Run(2)*", "Run(3)*", "Run(4)*"]
+        );
+        assert_eq!(
+            walk(&mut board, 3, Board::select_previous),
+            ["Run(4)*", "Run(3)*", "Run(2)*", "Run(1)*"]
+        );
+    }
+
+    #[test]
+    fn the_job_rows_above_an_error_row_are_selectable() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![job(11, RunState::Passed), job(12, RunState::Running)],
+        );
+        board.fail_jobs(RunId(1), "HTTP 500".to_owned());
+        assert_eq!(
+            walk(&mut board, 3, Board::select_next),
+            ["Run(1)*", "Job(11)*", "Job(12)*", "Run(2)*"]
+        );
     }
 
     #[test]
