@@ -362,7 +362,14 @@ impl GhSource {
     ///
     /// Gives the error of `gh` or the error of [`http_error`] for a status of
     /// 400 or more.
-    pub fn cancel_run(&self, _repo: &RepoName, _run: RunId) -> Result<(), SourceError> {
+    pub fn cancel_run(&self, repo: &RepoName, run: RunId) -> Result<(), SourceError> {
+        let path = format!(
+            "repos/{}/{}/actions/runs/{}/cancel",
+            repo.owner(),
+            repo.name(),
+            run.0
+        );
+        self.send(&["api", "-i", "-X", "POST", &path])?;
         Ok(())
     }
 
@@ -2108,12 +2115,18 @@ mod tests {
 
     #[test]
     fn cancel_run_posts_to_the_cancel_path_of_the_run() {
-        let stub = Stub::new(&format!("cat \"$dir/cancel.out\""));
+        let stub = Stub::new("cat \"$dir/cancel.out\"");
         stub.file("cancel.out", ACCEPTED);
         stub.source().cancel_run(&repo("o/r"), RunId(7)).unwrap();
         assert_eq!(
             stub.requests(),
-            vec![vec!["api", "-i", "-X", "POST", "repos/o/r/actions/runs/7/cancel"]]
+            vec![vec![
+                "api",
+                "-i",
+                "-X",
+                "POST",
+                "repos/o/r/actions/runs/7/cancel"
+            ]]
         );
     }
 
