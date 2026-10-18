@@ -2441,7 +2441,7 @@ mod tests {
             (1, 40),
             (200, 1),
         ] {
-            let mut board = four_run_board();
+            let mut board = board_with_jobs(three_jobs());
             board.fail(repo("owner/x"), "HTTP 404".to_owned());
             let status = Status {
                 refreshing: true,
