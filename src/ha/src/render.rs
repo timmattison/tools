@@ -25,13 +25,9 @@ const RUN_WIDTH: usize = 7;
 const STARTED_WIDTH: usize = 11;
 /// The width of the time column.
 const TIME_WIDTH: usize = 7;
-/// The width of the finished column.
-const FINISHED_WIDTH: usize = 8;
 /// The columns that the text columns do not share: the marker, the run,
-/// started, time, and finished columns, and the eight spaces between the
-/// columns.
-const FIXED_COLUMNS: usize =
-    MARKER_WIDTH + RUN_WIDTH + STARTED_WIDTH + TIME_WIDTH + FINISHED_WIDTH + 8;
+/// started, and time columns, and the seven spaces between the columns.
+const FIXED_COLUMNS: usize = MARKER_WIDTH + RUN_WIDTH + STARTED_WIDTH + TIME_WIDTH + 7;
 /// The lines that are not board rows: the column header and the status line.
 const FIXED_LINES: usize = 2;
 /// The text that stands between two parts of the status line.
@@ -94,7 +90,6 @@ fn cells(
     run: &str,
     started: &str,
     time: &str,
-    finished: &str,
 ) -> String {
     let [repo, workflow, branch, title] = texts;
     [
@@ -106,7 +101,6 @@ fn cells(
         fit(title, widths.title),
         pad_right(started, STARTED_WIDTH),
         pad_right(time, TIME_WIDTH),
-        pad_right(finished, FINISHED_WIDTH),
     ]
     .join(" ")
 }
@@ -115,23 +109,15 @@ fn cells(
 ///
 /// One text cell takes the place of the repository, workflow, run, branch, and
 /// title cells. It has the width of those five cells and the four spaces
-/// between them. Thus the started, time, and finished cells stand in the same
+/// between them. Thus the started and time cells stand in the same
 /// columns as those of a run row.
-fn wide_cells(
-    widths: Widths,
-    marker: &str,
-    text: &str,
-    started: &str,
-    time: &str,
-    finished: &str,
-) -> String {
+fn wide_cells(widths: Widths, marker: &str, text: &str, started: &str, time: &str) -> String {
     let text_width = widths.repo + widths.workflow + RUN_WIDTH + widths.branch + widths.title + 4;
     [
         pad_right(marker, MARKER_WIDTH),
         fit(text, text_width),
         pad_right(started, STARTED_WIDTH),
         pad_right(time, TIME_WIDTH),
-        pad_right(finished, FINISHED_WIDTH),
     ]
     .join(" ")
 }
@@ -180,13 +166,10 @@ fn run_line<Tz: TimeZone>(
 where
     Tz::Offset: Display,
 {
-    let (time, finished) = if state.is_active() {
-        (format_elapsed(span(run.started_at, now)), String::new())
+    let time = if state.is_active() {
+        format_elapsed(span(run.started_at, now))
     } else {
-        (
-            format_elapsed(span(run.started_at, run.updated_at)),
-            format_ago(span(run.updated_at, now)),
-        )
+        format_elapsed(span(run.started_at, run.updated_at))
     };
     cells(
         widths,
@@ -200,7 +183,6 @@ where
         &format!("#{}", run.number.0),
         &format_started(run.started_at, now, tz),
         &time,
-        &finished,
     )
 }
 
@@ -248,10 +230,6 @@ where
             }),
         )
     };
-    let finished = match job.completed_at {
-        Some(done) if !job.state.is_active() => format_ago(span(done, now)),
-        _ => String::new(),
-    };
     let glyph = if last { TREE_LAST } else { TREE_MIDDLE };
     wide_cells(
         widths,
@@ -259,7 +237,6 @@ where
         &format!("{glyph} {}", job.name),
         &started,
         &time,
-        &finished,
     )
 }
 
@@ -545,7 +522,6 @@ pub fn draw<Tz: TimeZone>(
             "RUN",
             "STARTED",
             "TIME",
-            "FINISHED",
         ),
         bold,
     );
@@ -641,27 +617,6 @@ pub fn format_elapsed(d: Duration) -> String {
         format!("{}d {:02}h", total / day, total % day / hour)
     } else {
         ">99d".to_owned()
-    }
-}
-
-/// Writes how long ago a run finished, with one unit.
-///
-/// Examples are `45s ago`, `12m ago`, `2h ago`, and `3d ago`. A duration of
-/// 100 days or more gives `>99d ago`.
-#[must_use]
-pub fn format_ago(d: Duration) -> String {
-    let total = d.as_secs();
-    let (minute, hour, day) = (60, 3_600, 86_400);
-    if total < minute {
-        format!("{total}s ago")
-    } else if total < hour {
-        format!("{}m ago", total / minute)
-    } else if total < day {
-        format!("{}h ago", total / hour)
-    } else if total < 100 * day {
-        format!("{}d ago", total / day)
-    } else {
-        ">99d ago".to_owned()
     }
 }
 
@@ -844,13 +799,13 @@ mod tests {
         assert_eq!(
             lines(&buffer),
             [
-                "  REPO                WORKFLOW            RUN BRANCH          TITLE                         STARTED     TIME    FINISHED",
+                "  REPO                  WORKFLOW              RUN BRANCH            TITLE                            STARTED     TIME",
                 "Running · 2",
-                "● timmattison/tools   CI                 #101 main            Fix the thing                 11:45:30    14m 30s",
-                "○ acme/widgets        Release            #102 issue-12        Add release job               11:58:00    2m 00s",
+                "● timmattison/tools     CI                   #101 main              Fix the thing                    11:45:30    14m 30s",
+                "○ acme/widgets          Release              #102 issue-12          Add release job                  11:58:00    2m 00s",
                 "Last 8h · 1 passed · 1 failed",
-                "✓ timmattison/tools   CI                 #103 main            Bump deps                     09:00:00    10m 05s 2h ago",
-                "✗ acme/widgets        Release            #104 issue-11        Broken build                  10-13 23:50 4h 40m  7h ago",
+                "✓ timmattison/tools     CI                   #103 main              Bump deps                        09:00:00    10m 05s",
+                "✗ acme/widgets          Release              #104 issue-11          Broken build                     10-13 23:50 4h 40m",
                 "",
                 "",
                 "updated 30s ago      ·  ↑↓ select  →← jobs  ⏎ open  r refresh  q quit",
@@ -864,8 +819,8 @@ mod tests {
     }
 
     /// The first column of the run column in a frame of 120 columns. The
-    /// marker, the repository (19), and the workflow (15) come before it.
-    const RUN_COLUMN: usize = 1 + 1 + 19 + 1 + 15 + 1;
+    /// marker, the repository (21), and the workflow (17) come before it.
+    const RUN_COLUMN: usize = 1 + 1 + 21 + 1 + 17 + 1;
 
     #[test]
     fn the_run_column_shows_the_run_number_aligned_to_the_right() {
@@ -979,23 +934,6 @@ mod tests {
     }
 
     #[test]
-    fn format_ago_writes_one_unit_and_a_cap() {
-        let cases: [(u64, &str); 8] = [
-            (0, "0s ago"),
-            (45, "45s ago"),
-            (12 * 60 + 30, "12m ago"),
-            (2 * 3_600 + 59, "2h ago"),
-            (3 * 86_400 + 5, "3d ago"),
-            (99 * 86_400 + 86_399, "99d ago"),
-            (100 * 86_400, ">99d ago"),
-            (u64::MAX, ">99d ago"),
-        ];
-        for (seconds, expected) in cases {
-            assert_eq!(format_ago(Duration::from_secs(seconds)), expected);
-        }
-    }
-
-    #[test]
     fn each_marker_has_the_color_of_its_state() {
         let mut board = four_run_board();
         let buffer = render_with(120, 10, &mut board, &Status::default());
@@ -1063,12 +1001,22 @@ mod tests {
         assert!(!buffer[(2, 2)].modifier.contains(Modifier::BOLD));
     }
 
+    /// The first column of the first word `word` in the header line of a frame.
+    /// The header is ASCII, but the count is in characters.
+    fn header_column(text: &[String], word: &str) -> usize {
+        let (before, _) = text[0]
+            .split_once(word)
+            .expect("the header names the column");
+        before.chars().count()
+    }
+
+    /// The text of the started column of line `y`. The column stands where
+    /// the header of the same frame puts `STARTED`.
     fn started_cells(text: &[String], y: usize) -> String {
-        // The started column starts after 1 + 21 + 17 + 17 + 31 + 5 spaces.
         text[y]
             .chars()
-            .skip(92)
-            .take(11)
+            .skip(header_column(text, "STARTED"))
+            .take(STARTED_WIDTH)
             .collect::<String>()
             .trim_end()
             .to_owned()
@@ -1135,16 +1083,20 @@ mod tests {
         assert_eq!(started_cells(&text, 2), "01:00:00");
     }
 
-    /// The text of the time and finished columns of line `y`.
-    fn time_cells(text: &[String], y: usize) -> (String, String) {
-        // After the started column: 1 + 21 + 17 + 17 + 31 + 11 + 6 spaces.
-        let time: String = text[y].chars().skip(104).take(7).collect();
-        let finished: String = text[y].chars().skip(112).take(8).collect();
-        (time.trim_end().to_owned(), finished.trim_end().to_owned())
+    /// The text of the time column of line `y`. The column stands where the
+    /// header of the same frame puts `TIME`.
+    fn time_cells(text: &[String], y: usize) -> String {
+        text[y]
+            .chars()
+            .skip(header_column(text, "TIME"))
+            .take(TIME_WIDTH)
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
     }
 
     #[test]
-    fn an_active_run_shows_the_time_since_the_start_and_no_finish() {
+    fn an_active_run_shows_the_time_since_the_start() {
         let mut board = Board::new(Duration::from_hours(8));
         board.replace(
             repo("a/x"),
@@ -1160,11 +1112,11 @@ mod tests {
             )],
         );
         let text = lines(&render_with(120, 8, &mut board, &Status::default()));
-        assert_eq!(time_cells(&text, 2), ("1h 14m".to_owned(), String::new()));
+        assert_eq!(time_cells(&text, 2), "1h 14m");
     }
 
     #[test]
-    fn a_finished_run_shows_its_own_duration_and_the_time_since_it_ended() {
+    fn a_finished_run_shows_its_own_duration() {
         let mut board = Board::new(Duration::from_hours(8));
         board.replace(
             repo("a/x"),
@@ -1180,10 +1132,7 @@ mod tests {
             )],
         );
         let text = lines(&render_with(120, 8, &mut board, &Status::default()));
-        assert_eq!(
-            time_cells(&text, 4),
-            ("3m 07s".to_owned(), "1h ago".to_owned())
-        );
+        assert_eq!(time_cells(&text, 4), "3m 07s");
     }
 
     /// A job with the state `state`. `None` times stand for a job that GitHub
@@ -1248,10 +1197,10 @@ mod tests {
         assert_eq!(
             text[2..6],
             [
-                "● timmattison/tools   CI                 #101 main            Fix the thing                 11:45:30    14m 30s".to_owned(),
-                format!("✓ {:<89} 11:45:40    4m 20s  10m ago", "├ build"),
-                format!("✗ {:<89} 11:46:00    45s     13m ago", "├ lint"),
-                format!("● {:<89} 11:50:10    9m 50s", "└ test"),
+                "● timmattison/tools     CI                   #101 main              Fix the thing                    11:45:30    14m 30s".to_owned(),
+                format!("✓ {:<98} 11:45:40    4m 20s", "├ build"),
+                format!("✗ {:<98} 11:46:00    45s", "├ lint"),
+                format!("● {:<98} 11:50:10    9m 50s", "└ test"),
             ]
             .map(|line| line.trim_end().to_owned())
         );
@@ -1365,7 +1314,7 @@ mod tests {
     }
 
     #[test]
-    fn an_active_job_shows_the_time_since_its_start_and_no_finish() {
+    fn an_active_job_shows_the_time_since_its_start() {
         let mut board = board_with_jobs(vec![job(
             11,
             "test",
@@ -1374,11 +1323,11 @@ mod tests {
             None,
         )]);
         let text = lines(&render_with(120, 14, &mut board, &loaded()));
-        assert_eq!(time_cells(&text, 3), ("1h 14m".to_owned(), String::new()));
+        assert_eq!(time_cells(&text, 3), "1h 14m");
     }
 
     #[test]
-    fn a_finished_job_shows_its_own_duration_and_the_time_since_it_ended() {
+    fn a_finished_job_shows_its_own_duration() {
         let mut board = board_with_jobs(vec![job(
             11,
             "lint",
@@ -1387,10 +1336,7 @@ mod tests {
             Some("2026-10-14T10:03:07Z"),
         )]);
         let text = lines(&render_with(120, 14, &mut board, &loaded()));
-        assert_eq!(
-            time_cells(&text, 3),
-            ("3m 07s".to_owned(), "1h ago".to_owned())
-        );
+        assert_eq!(time_cells(&text, 3), "3m 07s");
     }
 
     #[test]
@@ -1408,9 +1354,9 @@ mod tests {
         let text = lines(&render_with(120, 14, &mut board, &loaded()));
         // The order is by name: "skip" stands above "wait".
         assert_eq!(started_cells(&text, 3), "");
-        assert_eq!(time_cells(&text, 3), (String::new(), "5m ago".to_owned()));
+        assert_eq!(time_cells(&text, 3), "");
         assert_eq!(started_cells(&text, 4), "");
-        assert_eq!(time_cells(&text, 4), (String::new(), String::new()));
+        assert_eq!(time_cells(&text, 4), "");
     }
 
     #[test]
@@ -1429,7 +1375,7 @@ mod tests {
         }]);
         let text = lines(&render_with(120, 14, &mut board, &loaded()));
         assert_eq!(started_cells(&text, 3), "");
-        assert_eq!(time_cells(&text, 3), ("4m 00s".to_owned(), String::new()));
+        assert_eq!(time_cells(&text, 3), "4m 00s");
     }
 
     #[test]
@@ -1446,7 +1392,7 @@ mod tests {
         }]);
         let text = lines(&render_with(120, 14, &mut board, &loaded()));
         assert_eq!(started_cells(&text, 3), "11:50:00");
-        assert_eq!(time_cells(&text, 3), ("10m 00s".to_owned(), String::new()));
+        assert_eq!(time_cells(&text, 3), "10m 00s");
     }
 
     #[test]
@@ -1487,7 +1433,10 @@ mod tests {
             assert_eq!(started(&text[y]), run_column, "line {y}");
             assert!(display_width(&text[y]) <= 120, "{:?}", text[y]);
         }
-        assert!(text[4].contains("… 11:51:00"), "{:?}", text[4]);
+        let (name, _) = text[4]
+            .rsplit_once(" 11:51:00")
+            .expect("the line holds the start");
+        assert!(name.trim_end().ends_with('…'), "{:?}", text[4]);
     }
 
     #[test]
@@ -1578,8 +1527,8 @@ mod tests {
             ],
         );
         let text = lines(&render_with(120, 8, &mut board, &Status::default()));
-        assert_eq!(time_cells(&text, 2), ("0s".to_owned(), String::new()));
-        assert_eq!(time_cells(&text, 4), ("0s".to_owned(), "0s ago".to_owned()));
+        assert_eq!(time_cells(&text, 2), "0s");
+        assert_eq!(time_cells(&text, 4), "0s");
     }
 
     fn display_width(text: &str) -> usize {
@@ -1777,10 +1726,10 @@ mod tests {
             )],
         );
         let text = lines(&render_with(68, 6, &mut board, &Status::default()));
-        // 68 - 42 = 26 columns for the text: 6, 5, 5, and 10.
+        // 68 - 33 = 35 columns for the text: 8, 7, 7, and 13.
         assert_eq!(
             text[2],
-            "● timma… Cont…    #101 feat… A very lo… 11:55:00    5m 00s"
+            "● timmatt… Contin…    #101 featur… A very long … 11:55:00    5m 00s"
         );
     }
 
@@ -1825,15 +1774,15 @@ mod tests {
         let text = lines(&render_with(68, 7, &mut board, &Status::default()));
         assert_eq!(
             text[2],
-            "● a/x    CI       #101 日本… t          11:51:00    9m 00s"
+            "● a/x      CI         #101 日本語… t             11:51:00    9m 00s"
         );
         assert_eq!(
             text[3],
-            "● a/x    CI       #102 café… t          11:52:00    8m 00s"
+            "● a/x      CI         #102 café-a… t             11:52:00    8m 00s"
         );
         assert_eq!(
             text[4],
-            "● a/x    CI       #103 🎉🎉… t          11:53:00    7m 00s"
+            "● a/x      CI         #103 🎉🎉🎉… t             11:53:00    7m 00s"
         );
         for line in &text {
             assert!(display_width(line) <= 68, "{line:?} is too wide");
@@ -1859,8 +1808,10 @@ mod tests {
         );
         let narrow = lines(&render_with(80, 6, &mut board, &Status::default()));
         let wide = lines(&render_with(160, 6, &mut board, &Status::default()));
-        assert_eq!(display_width(&narrow[0]), 80, "the header fills 80 columns");
-        assert_eq!(display_width(&wide[0]), 160, "the header fills 160 columns");
+        // The header ends with `TIME`, which is 3 columns short of its cell.
+        let short = TIME_WIDTH - "TIME".len();
+        assert_eq!(display_width(&narrow[0]), 80 - short, "the header fills 80");
+        assert_eq!(display_width(&wide[0]), 160 - short, "the header fills 160");
         for line in &narrow {
             assert!(display_width(line) <= 80, "{line:?} is too wide");
         }
