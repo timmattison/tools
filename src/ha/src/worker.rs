@@ -1524,6 +1524,50 @@ mod tests {
         assert_eq!(job_calls(&fake), 2);
     }
 
+    /// The three commands arrive during the first cycle, thus the backlog adds
+    /// run 5 two times. The run must still get one request and one answer. The
+    /// first answer proves that the fetch started. The test then drops the
+    /// command sender. The worker ends its fetch, sees the drop, and stops, so
+    /// the test counts everything that the worker sent. Each wait has a bound.
+    #[test]
+    fn a_run_that_the_backlog_adds_two_times_is_fetched_one_time() {
+        let fake = Arc::new(FakeSource {
+            delay: Duration::from_millis(300),
+            ..FakeSource::default()
+        });
+        fake.script()
+            .created
+            .insert(repo("acme/a"), Ok(vec![run("acme/a", 5)]));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        watch(&worker, &[5]);
+        watch(&worker, &[]);
+        watch(&worker, &[5]);
+        let mut answers = 0;
+        loop {
+            match worker.updates.recv_timeout(WAIT) {
+                Ok(Update::Jobs { run: RunId(5), .. }) => {
+                    answers += 1;
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) => panic!("no Jobs update: {error:?}"),
+            }
+        }
+        let Worker { updates, commands } = worker;
+        drop(commands);
+        loop {
+            match updates.recv_timeout(WAIT) {
+                Ok(Update::Jobs { run: RunId(5), .. }) => answers += 1,
+                Ok(_) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => panic!("the worker did not stop in {WAIT:?}"),
+            }
+        }
+
+        assert_eq!(job_calls(&fake), 1, "requests for the jobs of run 5");
+        assert_eq!(answers, 1, "Jobs updates for run 5");
+    }
+
     #[test]
     fn a_finished_run_is_fetched_again_after_a_collapse_and_an_expand() {
         let fake = fake_with_runs(vec![run("acme/a", 5)]);
