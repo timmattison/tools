@@ -17,7 +17,8 @@ use chrono::{DateTime, Utc};
 use runlimit::{run_with_limit, RunFailure};
 use serde::Deserialize;
 
-use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
+use crate::job::{Job, JobId};
+use crate::run::{keep_first_of_each_id, Run, RunId, RunNumber, RunState};
 use crate::status::RateLimit;
 use crate::target::{OwnerName, RepoName};
 
@@ -69,6 +70,7 @@ struct RunsBody {
 #[derive(Deserialize)]
 struct RunJson {
     id: u64,
+    run_number: u64,
     name: Option<String>,
     display_title: Option<String>,
     head_branch: Option<String>,
@@ -94,6 +96,7 @@ fn parse_runs(body: &str, repo: &RepoName) -> Result<Page, SourceError> {
             let status = json.status.unwrap_or_default();
             Run {
                 id: RunId(json.id),
+                number: RunNumber(json.run_number),
                 repo: repo.clone(),
                 state: RunState::from_github(&status, json.conclusion.as_deref()),
                 title: json.display_title.unwrap_or_else(|| workflow.clone()),
@@ -108,6 +111,60 @@ fn parse_runs(body: &str, repo: &RepoName) -> Result<Page, SourceError> {
     Ok(Page {
         total_count: parsed.total_count,
         runs,
+    })
+}
+
+/// One page of jobs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JobsPage {
+    /// The `total_count` that GitHub states for the jobs of the run.
+    total_count: u64,
+    /// The jobs of this page.
+    jobs: Vec<Job>,
+}
+
+/// The JSON body of one page of jobs, as GitHub writes it.
+#[derive(Deserialize)]
+struct JobsBody {
+    total_count: u64,
+    jobs: Vec<JobJson>,
+}
+
+/// One element of `jobs`. Only the fields that `ha` reads are here.
+#[derive(Deserialize)]
+struct JobJson {
+    id: u64,
+    name: Option<String>,
+    status: Option<String>,
+    conclusion: Option<String>,
+    started_at: Option<DateTime<Utc>>,
+    created_at: Option<DateTime<Utc>>,
+    completed_at: Option<DateTime<Utc>>,
+    html_url: Option<String>,
+}
+
+/// Maps the JSON body of one page of jobs to a [`JobsPage`].
+fn parse_jobs(body: &str) -> Result<JobsPage, SourceError> {
+    let parsed: JobsBody =
+        serde_json::from_str(body).map_err(|error| SourceError::BadResponse(error.to_string()))?;
+    let jobs = parsed
+        .jobs
+        .into_iter()
+        .map(|json| {
+            let status = json.status.unwrap_or_default();
+            Job {
+                id: JobId(json.id),
+                name: json.name.unwrap_or_default(),
+                state: RunState::from_github(&status, json.conclusion.as_deref()),
+                started_at: json.started_at.or(json.created_at),
+                completed_at: json.completed_at,
+                url: json.html_url.unwrap_or_default(),
+            }
+        })
+        .collect();
+    Ok(JobsPage {
+        total_count: parsed.total_count,
+        jobs,
     })
 }
 
@@ -171,6 +228,24 @@ pub trait Source: Send + Sync {
     /// Returns a [`SourceError`] when a page of runs cannot be fetched.
     fn runs_of(&self, repo: &RepoName, query: RunQuery) -> Result<Vec<Run>, SourceError>;
 
+    /// Lists the jobs of the latest attempt of one workflow run, in the order
+    /// that GitHub gives them.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SourceError`] when a page of jobs cannot be fetched.
+    fn jobs_of(&self, repo: &RepoName, run: RunId) -> Result<Vec<Job>, SourceError>;
+
+    /// Tells the source that the worker stops fetching the jobs of a run.
+    ///
+    /// The worker calls this when the run is finished and no job of it is
+    /// active. The worker fetches those jobs again only after the run changes
+    /// (for example a re-run), and then the old pages are stale. A source that
+    /// keeps a cache removes the pages of the jobs of that run. Without this
+    /// call, the cache keeps the pages of every run that a person ever
+    /// expanded.
+    fn forget_jobs(&self, repo: &RepoName, run: RunId);
+
     /// The rate limit that the last response stated. `None` before any response.
     fn rate_limit(&self) -> Option<RateLimit>;
 }
@@ -186,22 +261,26 @@ pub struct GhSource {
     rate: Mutex<Option<RateLimit>>,
 }
 
-/// One page in the `ETag` cache.
+/// One answer in the `ETag` cache.
 ///
-/// The cache key names the repository, the filter family, and the page
-/// number, but not the value of the filter. A created-since filter holds the
-/// start of the hour, thus its path changes each hour. With the path as the key,
-/// the cache would keep one stale page for each hour, and a session that runs
-/// for days would grow with no limit. The path is kept here instead, and the
-/// `ETag` goes out only when the path of the request is the same.
+/// The key of a page of runs names the repository, the filter family, and the
+/// page number, but not the value of the filter. A created-since filter holds
+/// the start of the hour, thus its path changes each hour. With the path as the
+/// key, the cache would keep one stale page for each hour, and a session that
+/// runs for days would grow with no limit. The path is kept here instead, and
+/// the `ETag` goes out only when the path of the request is the same.
+///
+/// The key of a page of jobs names the repository, the run, and the page
+/// number. `Source::forget_jobs` removes those pages when the worker stops
+/// fetching the run.
 #[derive(Debug, Clone)]
 struct Cached {
     /// The path of the request that gave this page.
     path: String,
     /// The `ETag` of that answer.
     etag: String,
-    /// The page that the answer held.
-    page: Page,
+    /// The body of that answer. A `304` parses this text again.
+    body: String,
 }
 
 impl GhSource {
@@ -266,34 +345,65 @@ impl GhSource {
             repo.name()
         );
         let key = format!("{repo}#{family}#{number}");
+        self.cached_get(&key, &path, |body| parse_runs(body, repo))
+    }
+
+    /// Fetches `path` and parses the body, with the `ETag` cache.
+    ///
+    /// The `ETag` goes out only when the cached path is the same as `path`. On
+    /// a `304`, the function parses the cached body. On a `200`, it parses the
+    /// new body, and it stores the body and the `ETag` only after the parse
+    /// succeeds, thus an unreadable body never stays in the cache.
+    fn cached_get<T>(
+        &self,
+        key: &str,
+        path: &str,
+        parse: impl Fn(&str) -> Result<T, SourceError>,
+    ) -> Result<T, SourceError> {
         let etag = self
             .lock_etags()
-            .get(&key)
+            .get(key)
             .filter(|cached| cached.path == path)
             .map(|cached| cached.etag.clone());
-        let response = self.request(&path, etag.as_deref())?;
+        let response = self.request(path, etag.as_deref())?;
         if response.status == 304 {
-            return self
+            let body = self
                 .lock_etags()
-                .get(&key)
+                .get(key)
                 .filter(|cached| cached.path == path)
-                .map(|cached| cached.page.clone())
+                .map(|cached| cached.body.clone())
                 .ok_or_else(|| {
                     SourceError::BadResponse(
                         "GitHub said 304 for a page that ha has not seen".to_owned(),
                     )
-                });
+                })?;
+            return parse(&body);
         }
-        let page = parse_runs(&response.body, repo)?;
+        let parsed = parse(&response.body)?;
         if let Some(etag) = response.header("etag") {
             let cached = Cached {
-                path,
+                path: path.to_owned(),
                 etag: etag.to_owned(),
-                page: page.clone(),
+                body: response.body,
             };
-            self.lock_etags().insert(key, cached);
+            self.lock_etags().insert(key.to_owned(), cached);
         }
-        Ok(page)
+        Ok(parsed)
+    }
+
+    /// Fetches the page `number` of the jobs of one run.
+    ///
+    /// The request has no `filter` parameter. GitHub then gives the jobs of the
+    /// latest attempt only, which is what the board shows.
+    fn jobs_page(&self, repo: &RepoName, run: RunId, number: u32) -> Result<JobsPage, SourceError> {
+        let path = format!(
+            "repos/{}/{}/actions/runs/{}/jobs?per_page={PAGE_SIZE}&page={number}",
+            repo.owner(),
+            repo.name(),
+            run.0
+        );
+        let key = format!("{repo}#jobs/{}#{number}", run.0);
+        self.cached_get(&key, &path, parse_jobs)
     }
 
     /// Fetches every page of the runs of `repo` for `filter`.
@@ -316,7 +426,7 @@ impl GhSource {
                 break;
             }
         }
-        keep_first_of_each_id(&mut runs);
+        keep_first_of_each_id(&mut runs, |run| run.id);
         Ok(runs)
     }
 
@@ -412,10 +522,29 @@ impl Source for GhSource {
                 }
                 // A run can change state between the requests, and then two
                 // lists hold it. Keep the first one.
-                keep_first_of_each_id(&mut runs);
+                keep_first_of_each_id(&mut runs, |run| run.id);
                 Ok(runs)
             }
         }
+    }
+
+    fn jobs_of(&self, repo: &RepoName, run: RunId) -> Result<Vec<Job>, SourceError> {
+        let mut jobs = Vec::new();
+        for number in 1..=MAX_PAGES {
+            let page = self.jobs_page(repo, run, number)?;
+            let full = page.jobs.len() >= PAGE_SIZE;
+            jobs.extend(page.jobs);
+            if !full || (jobs.len() as u64) >= page.total_count {
+                break;
+            }
+        }
+        keep_first_of_each_id(&mut jobs, |job| job.id);
+        Ok(jobs)
+    }
+
+    fn forget_jobs(&self, repo: &RepoName, run: RunId) {
+        let prefix = format!("{repo}#jobs/{}#", run.0);
+        self.lock_etags().retain(|key, _| !key.starts_with(&prefix));
     }
 
     fn rate_limit(&self) -> Option<RateLimit> {
@@ -689,12 +818,12 @@ mod tests {
     }
 
     const RUNS_JSON: &str = r#"{"total_count":2,"workflow_runs":[
-        {"id":36064582280,"name":"CI","display_title":"Fix the thing","head_branch":"main",
+        {"id":36064582280,"run_number":1234,"name":"CI","display_title":"Fix the thing","head_branch":"main",
          "status":"completed","conclusion":"failure","run_started_at":"2026-09-24T21:56:49Z",
          "created_at":"2026-09-24T21:50:00Z","updated_at":"2026-09-24T21:57:56Z",
          "html_url":"https://github.com/timmattison/tools/actions/runs/36064582280",
          "repository":{"full_name":"other/place"}},
-        {"id":7,"name":"Release","display_title":null,"head_branch":null,
+        {"id":7,"run_number":56,"name":"Release","display_title":null,"head_branch":null,
          "status":"in_progress","conclusion":null,"run_started_at":null,
          "created_at":"2026-09-25T01:02:03Z","updated_at":"2026-09-25T01:03:00Z",
          "html_url":"https://github.com/timmattison/tools/actions/runs/7"}]}"#;
@@ -709,6 +838,7 @@ mod tests {
             [
                 Run {
                     id: RunId(36_064_582_280),
+                    number: RunNumber(1234),
                     repo: tools.clone(),
                     workflow: "CI".to_owned(),
                     branch: "main".to_owned(),
@@ -720,6 +850,7 @@ mod tests {
                 },
                 Run {
                     id: RunId(7),
+                    number: RunNumber(56),
                     repo: tools,
                     workflow: "Release".to_owned(),
                     branch: String::new(),
@@ -729,6 +860,21 @@ mod tests {
                     updated_at: time("2026-09-25T01:03:00Z"),
                     url: "https://github.com/timmattison/tools/actions/runs/7".to_owned(),
                 },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_page_of_runs_carries_the_run_number_of_each_run() {
+        let page = parse_runs(&runs_json(3, 5, 3), &repo("o/r")).expect("a page");
+        let pairs: Vec<(RunId, RunNumber)> =
+            page.runs.iter().map(|run| (run.id, run.number)).collect();
+        assert_eq!(
+            pairs,
+            [
+                (RunId(5), RunNumber(105)),
+                (RunId(6), RunNumber(106)),
+                (RunId(7), RunNumber(107)),
             ]
         );
     }
@@ -747,8 +893,108 @@ mod tests {
     #[test]
     fn invalid_json_is_a_bad_response() {
         let tools = repo("timmattison/tools");
-        for body in ["", "not json", "{}", "{\"total_count\":1}", "[]"] {
+        let without_run_number = runs_json(1, 1, 1).replace("\"run_number\":101,", "");
+        assert!(!without_run_number.contains("run_number"));
+        for body in [
+            "",
+            "not json",
+            "{}",
+            "{\"total_count\":1}",
+            "[]",
+            without_run_number.as_str(),
+        ] {
             let result = parse_runs(body, &tools);
+            assert!(
+                matches!(result, Err(SourceError::BadResponse(_))),
+                "{body:?} gave {result:?}"
+            );
+        }
+    }
+
+    /// A jobs body with one job in the given `status` and `conclusion`.
+    fn one_job_json(status: &str, conclusion: &str) -> String {
+        format!(
+            r#"{{"total_count":1,"jobs":[{{"id":9,"name":"build","status":{status},"conclusion":{conclusion},"started_at":null,"created_at":null,"completed_at":null,"html_url":null}}]}}"#
+        )
+    }
+
+    const JOBS_JSON: &str = r#"{"total_count":3,"jobs":[
+        {"id":399444496,"run_id":29679449,"name":"build (ubuntu)","status":"completed","conclusion":"failure",
+         "started_at":"2026-09-24T21:56:49Z","created_at":"2026-09-24T21:55:00Z",
+         "completed_at":"2026-09-24T21:57:56Z",
+         "html_url":"https://github.com/o/r/actions/runs/29679449/job/399444496","steps":[]},
+        {"id":2,"name":"test","status":"in_progress","conclusion":null,
+         "started_at":null,"created_at":"2026-09-25T01:02:03Z","completed_at":null,
+         "html_url":"https://github.com/o/r/actions/runs/29679449/job/2"},
+        {"id":3,"name":null,"status":"queued","conclusion":null,
+         "started_at":null,"created_at":null,"completed_at":null,"html_url":null}]}"#;
+
+    #[test]
+    fn the_jobs_json_maps_to_jobs() {
+        let page = parse_jobs(JOBS_JSON).expect("a page");
+        assert_eq!(page.total_count, 3);
+        assert_eq!(
+            page.jobs,
+            [
+                Job {
+                    id: JobId(399_444_496),
+                    name: "build (ubuntu)".to_owned(),
+                    state: RunState::Failed,
+                    started_at: Some(time("2026-09-24T21:56:49Z")),
+                    completed_at: Some(time("2026-09-24T21:57:56Z")),
+                    url: "https://github.com/o/r/actions/runs/29679449/job/399444496".to_owned(),
+                },
+                Job {
+                    id: JobId(2),
+                    name: "test".to_owned(),
+                    state: RunState::Running,
+                    started_at: Some(time("2026-09-25T01:02:03Z")),
+                    completed_at: None,
+                    url: "https://github.com/o/r/actions/runs/29679449/job/2".to_owned(),
+                },
+                Job {
+                    id: JobId(3),
+                    name: String::new(),
+                    state: RunState::Queued,
+                    started_at: None,
+                    completed_at: None,
+                    url: String::new(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_job_that_has_not_started_takes_its_creation_time_or_none() {
+        let page = parse_jobs(JOBS_JSON).expect("a page");
+        assert_eq!(page.jobs[1].started_at, Some(time("2026-09-25T01:02:03Z")));
+        assert_eq!(page.jobs[2].started_at, None);
+    }
+
+    #[test]
+    fn each_job_status_maps_to_its_state() {
+        let cases = [
+            ("queued", "null", RunState::Queued),
+            ("in_progress", "null", RunState::Running),
+            ("waiting", "null", RunState::Queued),
+            ("pending", "null", RunState::Queued),
+            ("requested", "null", RunState::Queued),
+            ("completed", "\"success\"", RunState::Passed),
+            ("completed", "\"failure\"", RunState::Failed),
+            ("completed", "\"cancelled\"", RunState::Other),
+            ("completed", "\"skipped\"", RunState::Other),
+        ];
+        for (status, conclusion, expected) in cases {
+            let body = one_job_json(&format!("\"{status}\""), conclusion);
+            let page = parse_jobs(&body).expect("a page");
+            assert_eq!(page.jobs[0].state, expected, "{status} {conclusion}");
+        }
+    }
+
+    #[test]
+    fn invalid_jobs_json_is_a_bad_response() {
+        for body in ["", "not json", "{}", "{\"total_count\":1}", "[]"] {
+            let result = parse_jobs(body);
             assert!(
                 matches!(result, Err(SourceError::BadResponse(_))),
                 "{body:?} gave {result:?}"
@@ -821,8 +1067,9 @@ mod tests {
     fn runs_json(total: u64, first_id: u64, count: u64) -> String {
         let runs: Vec<String> = (first_id..first_id + count)
             .map(|id| {
+                let number = id + 100;
                 format!(
-                    r#"{{"id":{id},"name":"CI","display_title":"t","head_branch":"main","status":"completed","conclusion":"success","run_started_at":"2026-09-24T21:56:49Z","created_at":"2026-09-24T21:56:49Z","updated_at":"2026-09-24T21:57:56Z","html_url":"https://github.com/o/r/actions/runs/{id}"}}"#
+                    r#"{{"id":{id},"run_number":{number},"name":"CI","display_title":"t","head_branch":"main","status":"completed","conclusion":"success","run_started_at":"2026-09-24T21:56:49Z","created_at":"2026-09-24T21:56:49Z","updated_at":"2026-09-24T21:57:56Z","html_url":"https://github.com/o/r/actions/runs/{id}"}}"#
                 )
             })
             .collect();
@@ -920,6 +1167,157 @@ mod tests {
         assert!(last[2].contains("&page=10&"), "{last:?}");
     }
 
+    /// A jobs body with `count` jobs numbered from `first_id`, and `total` as the count.
+    /// Each job has the `status` and `conclusion` text that the caller gives.
+    fn jobs_json(total: u64, first_id: u64, count: u64, status: &str, conclusion: &str) -> String {
+        let jobs: Vec<String> = (first_id..first_id + count)
+            .map(|id| {
+                format!(
+                    r#"{{"id":{id},"name":"job {id}","status":"{status}","conclusion":{conclusion},"started_at":"2026-09-24T21:56:49Z","created_at":"2026-09-24T21:56:49Z","completed_at":null,"html_url":"https://github.com/o/r/actions/runs/42/job/{id}"}}"#
+                )
+            })
+            .collect();
+        format!(r#"{{"total_count":{total},"jobs":[{}]}}"#, jobs.join(","))
+    }
+
+    /// A page of finished jobs.
+    fn done_jobs_json(total: u64, first_id: u64, count: u64) -> String {
+        jobs_json(total, first_id, count, "completed", "\"success\"")
+    }
+
+    /// A stub that answers by the page number at the end of the path.
+    fn job_pages_stub(pages: u64) -> Stub {
+        let lines: Vec<String> = (1..=pages)
+            .map(|page| format!("  *'&page={page}') cat \"$dir/page{page}.out\";;"))
+            .collect();
+        Stub::new(&format!("case \"$*\" in\n{} esac", lines.join("\n")))
+    }
+
+    #[test]
+    fn jobs_of_asks_for_the_first_page_of_the_run() {
+        let stub = job_pages_stub(1);
+        stub.file("page1.out", &ok_output(&done_jobs_json(2, 1, 2)));
+        let jobs = stub
+            .source()
+            .jobs_of(&repo("o/r"), RunId(42))
+            .expect("jobs");
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].id, JobId(1));
+        assert_eq!(jobs[0].name, "job 1");
+        assert_eq!(
+            stub.requests(),
+            [[
+                "api",
+                "-i",
+                "repos/o/r/actions/runs/42/jobs?per_page=100&page=1"
+            ]]
+        );
+    }
+
+    #[test]
+    fn a_second_page_of_jobs_is_fetched_while_the_count_is_below_the_total() {
+        let stub = job_pages_stub(2);
+        stub.file("page1.out", &ok_output(&done_jobs_json(150, 1, 100)));
+        stub.file("page2.out", &ok_output(&done_jobs_json(150, 101, 50)));
+        let jobs = stub
+            .source()
+            .jobs_of(&repo("o/r"), RunId(42))
+            .expect("jobs");
+        assert_eq!(jobs.len(), 150);
+        assert_eq!(jobs[149].id, JobId(150));
+        assert_eq!(stub.requests().len(), 2);
+    }
+
+    #[test]
+    fn jobs_of_keeps_the_first_job_of_each_id_across_two_pages() {
+        let stub = job_pages_stub(2);
+        stub.file("page1.out", &ok_output(&done_jobs_json(199, 1, 100)));
+        stub.file("page2.out", &ok_output(&done_jobs_json(199, 100, 100)));
+        let jobs = stub
+            .source()
+            .jobs_of(&repo("o/r"), RunId(42))
+            .expect("jobs");
+        let ids: Vec<u64> = jobs.iter().map(|job| job.id.0).collect();
+        assert_eq!(ids, (1..=199).collect::<Vec<u64>>());
+        assert_eq!(stub.requests().len(), 2);
+    }
+
+    #[test]
+    fn a_matrix_of_256_jobs_takes_three_pages() {
+        let stub = job_pages_stub(3);
+        stub.file("page1.out", &ok_output(&done_jobs_json(256, 1, 100)));
+        stub.file("page2.out", &ok_output(&done_jobs_json(256, 101, 100)));
+        stub.file("page3.out", &ok_output(&done_jobs_json(256, 201, 56)));
+        let jobs = stub
+            .source()
+            .jobs_of(&repo("o/r"), RunId(42))
+            .expect("jobs");
+        assert_eq!(jobs.len(), 256);
+        assert_eq!(stub.requests().len(), 3);
+        let last = stub.requests().pop().expect("a request");
+        assert!(last[2].ends_with("&page=3"), "{last:?}");
+    }
+
+    #[test]
+    fn a_page_with_fewer_than_100_jobs_ends_the_fetch() {
+        let stub = job_pages_stub(2);
+        stub.file("page1.out", &ok_output(&done_jobs_json(500, 1, 99)));
+        stub.file("page2.out", &ok_output(&done_jobs_json(500, 100, 99)));
+        let jobs = stub
+            .source()
+            .jobs_of(&repo("o/r"), RunId(42))
+            .expect("jobs");
+        assert_eq!(jobs.len(), 99);
+        assert_eq!(stub.requests().len(), 1);
+    }
+
+    #[test]
+    fn the_fetch_of_jobs_ends_at_the_total_count() {
+        let stub = job_pages_stub(2);
+        stub.file("page1.out", &ok_output(&done_jobs_json(100, 1, 100)));
+        stub.file("page2.out", &ok_output(&done_jobs_json(100, 101, 100)));
+        let jobs = stub
+            .source()
+            .jobs_of(&repo("o/r"), RunId(42))
+            .expect("jobs");
+        assert_eq!(jobs.len(), 100);
+        assert_eq!(stub.requests().len(), 1);
+    }
+
+    #[test]
+    fn the_fetch_of_jobs_stops_after_ten_pages() {
+        let stub = job_pages_stub(10);
+        for page in 1..=10_u64 {
+            let first_id = (page - 1) * 100 + 1;
+            stub.file(
+                &format!("page{page}.out"),
+                &ok_output(&done_jobs_json(5000, first_id, 100)),
+            );
+        }
+        let jobs = stub
+            .source()
+            .jobs_of(&repo("o/r"), RunId(42))
+            .expect("jobs");
+        assert_eq!(jobs.len(), 1000);
+        assert_eq!(stub.requests().len(), 10);
+        let last = stub.requests().pop().expect("a request");
+        assert!(last[2].ends_with("&page=10"), "{last:?}");
+    }
+
+    #[test]
+    fn a_job_that_moves_to_the_next_page_shows_once() {
+        let stub = job_pages_stub(2);
+        stub.file("page1.out", &ok_output(&done_jobs_json(150, 1, 100)));
+        stub.file("page2.out", &ok_output(&done_jobs_json(150, 100, 50)));
+        let jobs = stub
+            .source()
+            .jobs_of(&repo("o/r"), RunId(42))
+            .expect("jobs");
+        assert_eq!(jobs.len(), 149);
+        assert_eq!(jobs.iter().filter(|job| job.id == JobId(100)).count(), 1);
+        assert_eq!(stub.requests().len(), 2);
+    }
+
     const NOT_MODIFIED: &str = "HTTP/2.0 304 Not Modified\n\
          Etag: \"4c00158b\"\r\n\
          X-Ratelimit-Limit: 5000\r\n\
@@ -952,6 +1350,125 @@ mod tests {
             ["api", "-i", "-H", "If-None-Match: W/\"4c00158b\""]
         );
         assert_eq!(requests[1][4], requests[0][2]);
+    }
+
+    /// A page of one active job, so the cache keeps the page of the run.
+    fn active_jobs_json() -> String {
+        active_jobs_json_from(1)
+    }
+
+    /// A page of one active job with the ID `id`.
+    fn active_jobs_json_from(id: u64) -> String {
+        jobs_json(1, id, 1, "in_progress", "null")
+    }
+
+    #[test]
+    fn a_second_fetch_of_an_active_run_sends_the_etag_and_reuses_the_jobs_on_304() {
+        let stub = Stub::new(ETAG_CASES);
+        stub.file("page1.out", &ok_output(&active_jobs_json()));
+        stub.file("not-modified.out", NOT_MODIFIED);
+        let source = stub.source();
+        let first = source.jobs_of(&repo("o/r"), RunId(42));
+        assert_eq!(first.as_ref().map(Vec::len), Ok(1));
+        let second = source.jobs_of(&repo("o/r"), RunId(42));
+        assert_eq!(second, first);
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1][..4],
+            ["api", "-i", "-H", "If-None-Match: W/\"4c00158b\""]
+        );
+        assert_eq!(requests[1][4], requests[0][2]);
+    }
+
+    /// The keys of the cache, sorted.
+    fn cache_keys(source: &GhSource) -> Vec<String> {
+        let mut keys: Vec<String> = source.lock_etags().keys().cloned().collect();
+        keys.sort();
+        keys
+    }
+
+    #[test]
+    fn jobs_of_sends_the_etag_again_when_every_job_is_finished() {
+        let stub = Stub::new(ETAG_CASES);
+        stub.file("page1.out", &ok_output(&done_jobs_json(1, 1, 1)));
+        stub.file("not-modified.out", NOT_MODIFIED);
+        let source = stub.source();
+        let first = source.jobs_of(&repo("o/r"), RunId(42));
+        assert_eq!(first.as_ref().map(Vec::len), Ok(1));
+        let second = source.jobs_of(&repo("o/r"), RunId(42));
+        assert_eq!(second, first);
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 2);
+        let header = "If-None-Match: W/\"4c00158b\"".to_owned();
+        assert!(
+            requests[1].contains(&header),
+            "the second request sends the ETag: {:?}",
+            requests[1]
+        );
+    }
+
+    #[test]
+    fn forget_jobs_drops_every_page_of_the_run() {
+        let stub = job_pages_stub(3);
+        stub.file("page1.out", &ok_output(&done_jobs_json(256, 1, 100)));
+        stub.file("page2.out", &ok_output(&done_jobs_json(256, 101, 100)));
+        stub.file("page3.out", &ok_output(&done_jobs_json(256, 201, 56)));
+        let source = stub.source();
+        source.jobs_of(&repo("o/r"), RunId(42)).expect("jobs");
+        assert_eq!(
+            cache_keys(&source),
+            ["o/r#jobs/42#1", "o/r#jobs/42#2", "o/r#jobs/42#3"]
+        );
+        source.forget_jobs(&repo("o/r"), RunId(42));
+        assert_eq!(cache_keys(&source), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_cache_keeps_the_pages_of_a_run_while_a_job_is_active() {
+        let stub = job_pages_stub(2);
+        stub.file("page1.out", &ok_output(&done_jobs_json(150, 1, 100)));
+        // The last page holds 49 finished jobs and then one job in progress.
+        let finished = done_jobs_json(150, 101, 49);
+        let active = active_jobs_json_from(150);
+        let joined = format!(
+            "{},{}]}}",
+            finished.trim_end_matches("]}"),
+            active
+                .split_once('[')
+                .map_or("", |(_, rest)| rest.trim_end_matches("]}"))
+        );
+        stub.file("page2.out", &ok_output(&joined));
+        let source = stub.source();
+        source.jobs_of(&repo("o/r"), RunId(42)).expect("jobs");
+        assert_eq!(cache_keys(&source), ["o/r#jobs/42#1", "o/r#jobs/42#2"]);
+    }
+
+    #[test]
+    fn the_cache_keeps_the_page_of_a_run_with_no_jobs() {
+        let stub = job_pages_stub(1);
+        stub.file("page1.out", &ok_output(&done_jobs_json(0, 1, 0)));
+        let source = stub.source();
+        let jobs = source.jobs_of(&repo("o/r"), RunId(42)).expect("jobs");
+        assert!(jobs.is_empty());
+        assert_eq!(cache_keys(&source), ["o/r#jobs/42#1"]);
+    }
+
+    #[test]
+    fn forget_jobs_drops_only_the_pages_of_that_run() {
+        let stub = Stub::new(
+            "case \"$*\" in
+  *'runs/42/jobs'*) cat \"$dir/done.out\";;
+  *'runs/43/jobs'*) cat \"$dir/active.out\";;
+ esac",
+        );
+        stub.file("done.out", &ok_output(&done_jobs_json(1, 1, 1)));
+        stub.file("active.out", &ok_output(&active_jobs_json()));
+        let source = stub.source();
+        source.jobs_of(&repo("o/r"), RunId(43)).expect("jobs");
+        source.jobs_of(&repo("o/r"), RunId(42)).expect("jobs");
+        source.forget_jobs(&repo("o/r"), RunId(42));
+        assert_eq!(cache_keys(&source), ["o/r#jobs/43#1"]);
     }
 
     #[test]
@@ -1178,7 +1695,7 @@ mod tests {
  esac",
         );
         let waiting = r#"{"total_count":1,"workflow_runs":[
-        {"id":42,"name":"Deploy","display_title":"Ship it","head_branch":"main",
+        {"id":42,"run_number":3,"name":"Deploy","display_title":"Ship it","head_branch":"main",
          "status":"waiting","conclusion":null,"run_started_at":null,
          "created_at":"2026-08-01T01:02:03Z","updated_at":"2026-08-01T01:03:00Z",
          "html_url":"https://github.com/o/r/actions/runs/42"}]}"#;

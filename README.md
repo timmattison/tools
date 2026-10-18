@@ -2042,11 +2042,33 @@ cannot hang the caller. Used by `cwt` and `ha`.
   - The status line shows how long ago the last refresh ended (`updated 1m 05s ago`), in the
     units of the time column. While a refresh runs, `refreshing…` shows at the right end of the
     status line. The other parts of the status line do not move.
-  - Each row shows the repository, the workflow, the branch, and the run title. A long name keeps
-    its start and ends in `…`. The cut is by display width, thus `日本語` and emoji do not break a
-    row. The columns fit the terminal again when its size changes.
-  - Keys: Up and Down move the highlight through both sections. Enter opens the highlighted run in
-    the browser, and `ha` keeps running. When no browser opens, the status line shows the URL and
+  - Each row shows the repository, the workflow, the run number, the branch, and the run title.
+    The `RUN` column shows the number that the GitHub web interface and `gh run list` show, for
+    example `#1234`, thus you can match a row to a run there. A long name keeps its start and ends
+    in `…`. The cut is by display width, thus `日本語` and emoji do not break a row. The columns
+    fit the terminal again when its size changes.
+  - Right expands the highlighted run, and Left collapses it again. An expanded run shows one row
+    for each job of its latest attempt, below the run row. Each job row shows the state marker of
+    the job, with the glyph and the color of a run, the name of the job, and when it started. An
+    active job shows the time since it started, which increases each second. A finished job shows
+    how long it took and how long ago it finished. Thus you can find the job that holds a slow run.
+    - The jobs are sorted by name, with no difference between capital and small letters. Thus the
+      order stays the same through each refresh and each re-run, and the jobs of one matrix stay
+      together. GitHub gives the jobs in the order of their IDs, which has no meaning that you can
+      see.
+    - `Loading jobs…` shows until the first answer comes, and `No jobs yet` shows when GitHub did
+      not make the jobs of the run yet. When a request for the jobs fails, the error shows below
+      the last good job rows.
+    - More than one run can be expanded at one time. A run stays expanded through each refresh,
+      and also when it moves from the top section to the bottom section. When a run leaves
+      the board, its jobs go too.
+    - The jobs load at once when you expand a run, and then refresh with the board. The jobs of a
+      finished run load one time only, until a re-run changes the run. If GitHub still shows an
+      active job in a finished run, the jobs of that run refresh with the board until each job
+      finishes.
+  - Keys: Up and Down move the highlight through both sections, from one run to the next run, and
+    skip the job rows. Right and Left expand and collapse the jobs of the highlighted run. Enter
+    opens the highlighted run in the browser, and `ha` keeps running. When no browser opens, the status line shows the URL and
     then the reason, for example a `BROWSER` command that this host does not have, for 30 seconds.
     The message fades out, and a key press removes it sooner. `r` refreshes now. `q`, Esc, or
     Ctrl-C quits and gives back the terminal.
@@ -2084,8 +2106,9 @@ cannot hang the caller. Used by `cwt` and `ha`.
     of a query starts on the hour, so the request stays the same and its `ETag` can match. The
     repository list of an owner and the sweep for runs older than the lookback refresh every
     10 minutes. An owner whose list has not yet succeeded is listed again on each refresh, so `r`
-    tries it again at once. At most 8 `gh` children run at the same time. The status line shows the remaining
-    budget. When less than 10% remains, `ha` waits until the reset of the budget and says so.
+    tries it again at once. The requests for the jobs of an expanded run also send the `ETag`.
+    At most 8 `gh` children run at the same time, for runs and jobs together. The status line
+    shows the remaining budget. When less than 10% remains, `ha` waits until the reset of the budget and says so.
   - A failure for one repository shows in the status line, and the board keeps the last good runs
     of that repository.
   - `ha` needs a terminal. When its standard output is not a terminal, it stops with exit

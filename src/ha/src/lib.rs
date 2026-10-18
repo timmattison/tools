@@ -12,6 +12,7 @@ pub mod app;
 pub mod board;
 pub mod browser;
 pub mod github;
+pub mod job;
 pub mod render;
 pub mod run;
 pub mod settings;

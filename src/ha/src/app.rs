@@ -1,6 +1,7 @@
 //! The event loop of `ha`: it draws the board, reads keys, and applies the
 //! updates of the worker.
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use chrono::{DateTime, TimeZone, Utc};
@@ -10,7 +11,9 @@ use ratatui::Terminal;
 
 use crate::board::Board;
 use crate::render;
+use crate::run::RunId;
 use crate::status::{Message, Status};
+use crate::target::RepoName;
 use crate::worker::{Command, Update, Worker};
 
 /// How long the loop waits for an event before it draws again.
@@ -79,6 +82,9 @@ pub struct App<'a, O: Opener, Tz: TimeZone> {
     worker: &'a Worker,
     now: &'a dyn Fn() -> DateTime<Utc>,
     tz: &'a Tz,
+    /// The set of the last `Command::WatchJobs` that the app sent. It is
+    /// empty at the start.
+    watched: BTreeSet<(RepoName, RunId)>,
 }
 
 impl<'a, O: Opener, Tz: TimeZone> App<'a, O, Tz>
@@ -103,6 +109,7 @@ where
             worker,
             now,
             tz,
+            watched: BTreeSet::new(),
         }
     }
 
@@ -118,6 +125,7 @@ where
     {
         loop {
             self.apply_updates();
+            self.sync_watch();
             let now = (self.now)();
             terminal
                 .draw(|frame| {
@@ -146,6 +154,8 @@ where
             match update {
                 Update::Runs { repo, runs } => self.board.replace(repo, runs),
                 Update::Failed { repo, error } => self.board.fail(repo, error),
+                Update::Jobs { run, jobs } => self.board.set_jobs(run, jobs),
+                Update::JobsFailed { run, error } => self.board.fail_jobs(run, error),
                 Update::Repos {
                     repos,
                     owner_errors,
@@ -167,8 +177,26 @@ where
         }
     }
 
+    /// Tells the worker which expanded runs to watch.
+    ///
+    /// It reads the expanded runs from the board. When the set differs from
+    /// the last set that it sent, it sends the whole set in a
+    /// `Command::WatchJobs` and keeps it. When the set is the same, it sends
+    /// nothing. A worker that has ended is not an error.
+    fn sync_watch(&mut self) {
+        let expanded = self.board.expanded((self.now)());
+        if expanded != self.watched {
+            let _ = self
+                .worker
+                .commands
+                .send(Command::WatchJobs(expanded.clone()));
+            self.watched = expanded;
+        }
+    }
+
     /// Acts on one key press. Each key press removes the status message
-    /// first. The `Enter` key can then post a new one.
+    /// first. The `Enter` key can then post a new one. `Right` expands the
+    /// highlighted run and `Left` collapses it.
     fn handle_key(&mut self, key: KeyEvent) -> Flow {
         self.status.message = None;
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -181,6 +209,16 @@ where
             }
             KeyCode::Down => {
                 self.board.select_next((self.now)());
+                Flow::Continue
+            }
+            KeyCode::Right => {
+                self.board.expand((self.now)());
+                self.sync_watch();
+                Flow::Continue
+            }
+            KeyCode::Left => {
+                self.board.collapse((self.now)());
+                self.sync_watch();
                 Flow::Continue
             }
             KeyCode::Char('r') => {
@@ -233,7 +271,7 @@ mod tests {
     use ratatui::buffer::Buffer;
 
     use super::*;
-    use crate::run::{Run, RunId, RunState};
+    use crate::run::{Run, RunId, RunNumber, RunState};
     use crate::target::{OwnerName, RepoName};
     use crate::worker::{Command, Update};
 
@@ -330,6 +368,7 @@ mod tests {
     fn active_run(id: u64, started: i64) -> Run {
         Run {
             id: RunId(id),
+            number: RunNumber(id + 100),
             repo: repo(),
             workflow: "ci".to_owned(),
             branch: "main".to_owned(),
@@ -761,5 +800,268 @@ mod tests {
             vec![press(KeyCode::Char('r')), press(KeyCode::Char('q'))],
         );
         assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// One step of a `StepEvents` script.
+    enum Step {
+        /// A key or other event for the loop.
+        Key(Event),
+        /// A pass with no event.
+        Idle,
+        /// An update that the worker sends before the next pass.
+        Send(Update),
+    }
+
+    /// Gives the steps of a script. Each leading `Send` step goes to the
+    /// loop first, so an update can arrive after a key. When the steps end,
+    /// it gives an error, so a loop that does not stop fails and never hangs.
+    struct StepEvents {
+        steps: VecDeque<Step>,
+        updates: Sender<Update>,
+    }
+
+    impl Events for StepEvents {
+        fn next(&mut self, _timeout: Duration) -> std::io::Result<Option<Event>> {
+            while let Some(Step::Send(_)) = self.steps.front() {
+                if let Some(Step::Send(update)) = self.steps.pop_front() {
+                    self.updates.send(update).unwrap();
+                }
+            }
+            match self.steps.pop_front() {
+                Some(Step::Key(event)) => Ok(Some(event)),
+                Some(Step::Idle | Step::Send(_)) => Ok(None),
+                None => Err(std::io::Error::other("script ended")),
+            }
+        }
+    }
+
+    /// Runs the loop on the steps and returns the text of the last frame and
+    /// each command that the app sent to the worker.
+    fn run_steps(channels: &Channels, steps: Vec<Step>) -> (Vec<String>, Vec<Command>) {
+        let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
+        let tz = FixedOffset::east_opt(0).unwrap();
+        let clock = now;
+        let opener = opener(false);
+        let mut app = App::new(
+            Board::new(Duration::from_hours(8)),
+            Status::default(),
+            &opener,
+            &channels.worker,
+            &clock,
+            &tz,
+        );
+        let mut events = StepEvents {
+            steps: steps.into(),
+            updates: channels.updates.clone(),
+        };
+        let result = app.run(&mut terminal, &mut events);
+        assert!(result.is_ok(), "{result:?}");
+        (
+            lines(terminal.backend().buffer()),
+            channels.commands.try_iter().collect::<Vec<_>>(),
+        )
+    }
+
+    fn key(code: KeyCode) -> Step {
+        Step::Key(press(code))
+    }
+
+    /// The set that `Command::WatchJobs` carries for runs with these IDs.
+    fn watch(ids: &[u64]) -> Command {
+        Command::WatchJobs(ids.iter().map(|id| (repo(), RunId(*id))).collect())
+    }
+
+    fn job(id: u64, name: &str) -> crate::job::Job {
+        crate::job::Job {
+            id: crate::job::JobId(id),
+            name: name.to_owned(),
+            state: RunState::Running,
+            started_at: Some(now()),
+            completed_at: None,
+            url: String::new(),
+        }
+    }
+
+    fn row_of(frame: &[String], needle: &str) -> usize {
+        frame
+            .iter()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("no line with {needle:?} in {frame:?}"))
+    }
+
+    #[test]
+    fn right_watches_the_highlighted_run_and_shows_loading() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let (frame, commands) = run_steps(
+            &channels,
+            vec![key(KeyCode::Right), key(KeyCode::Char('q'))],
+        );
+        assert_eq!(commands, [watch(&[1])]);
+        assert_eq!(
+            row_of(&frame, "└ Loading jobs…"),
+            row_of(&frame, "run 1") + 1,
+            "{frame:?}"
+        );
+    }
+
+    #[test]
+    fn right_on_an_expanded_run_sends_no_second_command() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let steps = vec![
+            key(KeyCode::Right),
+            key(KeyCode::Right),
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps(&channels, steps);
+        assert_eq!(commands, [watch(&[1])]);
+    }
+
+    #[test]
+    fn left_after_right_stops_the_watch_and_removes_the_job_block() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let steps = vec![
+            key(KeyCode::Right),
+            key(KeyCode::Left),
+            key(KeyCode::Char('q')),
+        ];
+        let (frame, commands) = run_steps(&channels, steps);
+        assert_eq!(commands, [watch(&[1]), watch(&[])]);
+        assert!(
+            frame.iter().all(|line| !line.contains("Loading jobs")),
+            "{frame:?}"
+        );
+    }
+
+    #[test]
+    fn left_on_a_collapsed_run_sends_no_command() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let (_, commands) = run_steps(&channels, vec![key(KeyCode::Left), key(KeyCode::Char('q'))]);
+        assert!(commands.is_empty(), "{commands:?}");
+    }
+
+    #[test]
+    fn right_and_left_on_an_empty_board_send_no_command() {
+        let channels = channels();
+        let steps = vec![
+            key(KeyCode::Right),
+            key(KeyCode::Left),
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps(&channels, steps);
+        assert!(commands.is_empty(), "{commands:?}");
+    }
+
+    #[test]
+    fn two_runs_can_be_expanded_at_one_time() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
+        let steps = vec![
+            key(KeyCode::Right),
+            key(KeyCode::Down),
+            key(KeyCode::Right),
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps(&channels, steps);
+        assert_eq!(commands, [watch(&[2]), watch(&[1, 2])]);
+    }
+
+    #[test]
+    fn up_and_down_move_between_runs_with_a_run_expanded() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
+        let opener = opener(false);
+        let (result, _) = run_app(
+            &opener,
+            &channels,
+            vec![
+                press(KeyCode::Right),
+                press(KeyCode::Down),
+                press(KeyCode::Enter),
+                press(KeyCode::Char('q')),
+            ],
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(*opener.urls.borrow(), ["https://example.test/runs/1"]);
+    }
+
+    #[test]
+    fn jobs_that_arrive_after_right_show_below_the_run() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let steps = vec![
+            key(KeyCode::Right),
+            Step::Send(Update::Jobs {
+                run: RunId(1),
+                jobs: vec![job(10, "build"), job(11, "lint")],
+            }),
+            Step::Idle,
+            key(KeyCode::Char('q')),
+        ];
+        let (frame, _) = run_steps(&channels, steps);
+        let run_row = row_of(&frame, "run 1");
+        assert!(frame[run_row + 1].contains("├ build"), "{frame:?}");
+        assert!(frame[run_row + 2].contains("└ lint"), "{frame:?}");
+    }
+
+    #[test]
+    fn a_failed_fetch_after_jobs_shows_the_last_jobs_and_the_error() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let steps = vec![
+            key(KeyCode::Right),
+            Step::Send(Update::Jobs {
+                run: RunId(1),
+                jobs: vec![job(10, "build")],
+            }),
+            Step::Idle,
+            Step::Send(Update::JobsFailed {
+                run: RunId(1),
+                error: "rate limited".to_owned(),
+            }),
+            Step::Idle,
+            key(KeyCode::Char('q')),
+        ];
+        let (frame, _) = run_steps(&channels, steps);
+        let run_row = row_of(&frame, "run 1");
+        assert!(frame[run_row + 1].contains("build"), "{frame:?}");
+        assert!(frame[run_row + 2].contains("└ ⚠ rate limited"), "{frame:?}");
+    }
+
+    #[test]
+    fn a_run_that_leaves_its_repository_answer_stops_the_watch() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let steps = vec![
+            key(KeyCode::Right),
+            Step::Send(Update::Runs {
+                repo: repo(),
+                runs: vec![active_run(2, 5)],
+            }),
+            Step::Idle,
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps(&channels, steps);
+        assert_eq!(commands, [watch(&[1]), watch(&[])]);
+    }
+
+    #[test]
+    fn a_repository_list_without_the_repository_stops_the_watch() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let steps = vec![
+            key(KeyCode::Right),
+            Step::Send(Update::Repos {
+                repos: std::collections::BTreeSet::new(),
+                owner_errors: Vec::new(),
+            }),
+            Step::Idle,
+            key(KeyCode::Char('q')),
+        ];
+        let (_, commands) = run_steps(&channels, steps);
+        assert_eq!(commands, [watch(&[1]), watch(&[])]);
     }
 }

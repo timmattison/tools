@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
+use crate::job::Job;
 use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
 use crate::target::RepoName;
 
@@ -45,6 +46,36 @@ pub enum Row<'a> {
         /// True for the one row that the selection marks.
         selected: bool,
     },
+    /// One job of an expanded run.
+    Job {
+        /// The job.
+        job: &'a Job,
+        /// True for the last row of the block of its run. The render draws
+        /// `└` for it, and `├` for any other row.
+        last: bool,
+    },
+    /// The row of an expanded run before the first answer: "Loading jobs…".
+    JobsLoading,
+    /// The row of an expanded run whose answer holds no job: "No jobs yet".
+    NoJobs,
+    /// The error of the last failed fetch of the jobs of an expanded run.
+    JobsError(&'a str),
+}
+
+/// The jobs of one expanded run.
+#[derive(Debug)]
+enum Jobs {
+    /// The run is expanded and no answer came yet.
+    Loading,
+    /// The last good answer.
+    Ready(Vec<Job>),
+    /// The last fetch failed.
+    Failed {
+        /// The last good jobs. The list is empty when there is none.
+        jobs: Vec<Job>,
+        /// The error of the last fetch.
+        error: String,
+    },
 }
 
 /// The rows that fit on the screen.
@@ -64,6 +95,7 @@ pub struct Board {
     errors: BTreeMap<RepoName, String>,
     selected: Option<(RunId, usize)>,
     offset: usize,
+    expanded: BTreeMap<RunId, Jobs>,
 }
 
 impl Board {
@@ -76,6 +108,7 @@ impl Board {
             errors: BTreeMap::new(),
             selected: None,
             offset: 0,
+            expanded: BTreeMap::new(),
         }
     }
 
@@ -88,7 +121,7 @@ impl Board {
     /// Stores the runs of one repository and clears the error of that repository.
     /// A repeated run ID keeps its first run only.
     pub fn replace(&mut self, repo: RepoName, mut runs: Vec<Run>) {
-        keep_first_of_each_id(&mut runs);
+        keep_first_of_each_id(&mut runs, |run| run.id);
         self.errors.remove(&repo);
         self.runs.insert(repo, runs);
     }
@@ -131,7 +164,15 @@ impl Board {
                 row > 0 && matches!(rows.get(row - 1), Some(Row::Header { .. }))
             });
             let len = rows.len();
-            self.offset = scroll(self.offset, height, len, selected_row, header_above);
+            let below = selected_row.map_or(0, |row| {
+                rows[row + 1..]
+                    .iter()
+                    .take_while(|next| {
+                        !matches!(next, Row::Header { .. } | Row::Empty(_) | Row::Run { .. })
+                    })
+                    .count()
+            });
+            self.offset = scroll(self.offset, height, len, selected_row, header_above, below);
         }
         let rows = self
             .build_rows(now)
@@ -190,12 +231,16 @@ impl Board {
                 .position(|run| run.id == id)
                 .unwrap_or_else(|| old.min(runs.len().saturating_sub(1))),
         };
-        self.selected = runs.get(position).map(|run| (run.id, position));
+        let selected = runs.get(position).map(|run| (run.id, position));
+        let shown: BTreeSet<RunId> = runs.iter().map(|run| run.id).collect();
+        self.selected = selected;
+        self.expanded.retain(|id, _| shown.contains(id));
     }
 
     /// Builds the full list of rows. The list has two sections.
     ///
-    /// The row of the selected run carries the selection mark.
+    /// The row of the selected run carries the selection mark. The block of
+    /// each expanded run follows the row of that run.
     fn build_rows(&self, now: DateTime<Utc>) -> Vec<Row<'_>> {
         let (active, recent) = self.sections(now);
         let passed = recent
@@ -209,15 +254,88 @@ impl Board {
             failed: 0,
         }];
         let selected = self.selected.map(|(_, index)| index);
-        push_runs(&mut rows, &active, Section::Active, 0, selected);
+        push_runs(
+            &mut rows,
+            &active,
+            Section::Active,
+            0,
+            selected,
+            &self.expanded,
+        );
         rows.push(Row::Header {
             section: Section::Recent,
             count: recent.len(),
             passed,
             failed: recent.len() - passed,
         });
-        push_runs(&mut rows, &recent, Section::Recent, active.len(), selected);
+        push_runs(
+            &mut rows,
+            &recent,
+            Section::Recent,
+            active.len(),
+            selected,
+            &self.expanded,
+        );
         rows
+    }
+
+    /// Expands the selected run. The run shows a loading row until `set_jobs`
+    /// gives its jobs. A run that is already expanded keeps its jobs. With no
+    /// selection, nothing happens.
+    pub fn expand(&mut self, now: DateTime<Utc>) {
+        self.settle(now);
+        if let Some((id, _)) = self.selected {
+            self.expanded.entry(id).or_insert(Jobs::Loading);
+        }
+    }
+
+    /// Collapses the selected run and drops its jobs. A run that is not
+    /// expanded, or no selection, changes nothing.
+    pub fn collapse(&mut self, now: DateTime<Utc>) {
+        self.settle(now);
+        if let Some((id, _)) = self.selected {
+            self.expanded.remove(&id);
+        }
+    }
+
+    /// Stores the jobs of `run` when the run is expanded. A late answer for a
+    /// run that is not expanded is dropped.
+    ///
+    /// The jobs are sorted by name, with no difference between capital and
+    /// small letters, and then by ID. GitHub gives the jobs in the order of
+    /// their IDs, and it makes most jobs of a run at the same second, thus
+    /// that order has no meaning that a person can see. A re-run gives new
+    /// IDs, thus a re-run job can also move. The order by name stays the same
+    /// through each refresh and each re-run, and it keeps the jobs of one
+    /// matrix together.
+    pub fn set_jobs(&mut self, run: RunId, mut jobs: Vec<Job>) {
+        if let Some(state) = self.expanded.get_mut(&run) {
+            jobs.sort_by_cached_key(|job| (job.name.to_lowercase(), job.id));
+            *state = Jobs::Ready(jobs);
+        }
+    }
+
+    /// Records the error of a failed fetch for `run` when the run is expanded.
+    /// The last good jobs stay. Nothing happens for a run that is not expanded.
+    pub fn fail_jobs(&mut self, run: RunId, error: String) {
+        if let Some(state) = self.expanded.get_mut(&run) {
+            let jobs = match std::mem::replace(state, Jobs::Loading) {
+                Jobs::Loading => Vec::new(),
+                Jobs::Ready(jobs) | Jobs::Failed { jobs, .. } => jobs,
+            };
+            *state = Jobs::Failed { jobs, error };
+        }
+    }
+
+    /// The repository and the ID of each expanded run that shows at `now`.
+    /// The app sends this set to the worker each time it changes.
+    pub fn expanded(&mut self, now: DateTime<Utc>) -> BTreeSet<(RepoName, RunId)> {
+        self.settle(now);
+        self.selectable(now)
+            .into_iter()
+            .filter(|run| self.expanded.contains_key(&run.id))
+            .map(|run| (run.repo.clone(), run.id))
+            .collect()
     }
 
     /// Moves the selection to the next run.
@@ -259,14 +377,17 @@ impl Board {
 ///
 /// The offset changes as little as possible to put `selected_row` inside the
 /// view. With a `header_above` the selected row and also that header stay
-/// inside, when the view has two rows or more. The offset never goes past the
-/// last full view. `height` is at least 1.
+/// inside, when the view has two rows or more. Then the offset moves as far as
+/// it can to show the `below` rows of the block of the selected run, and the
+/// top row stays inside. The offset never goes past the last full view.
+/// `height` is at least 1.
 fn scroll(
     offset: usize,
     height: usize,
     len: usize,
     selected_row: Option<usize>,
     header_above: bool,
+    below: usize,
 ) -> usize {
     let mut offset = offset;
     if let Some(row) = selected_row {
@@ -279,6 +400,9 @@ fn scroll(
         if row >= offset + height {
             offset = row + 1 - height;
         }
+        if row + below >= offset + height {
+            offset = (row + below + 1 - height).min(top);
+        }
     }
     offset.min(len.saturating_sub(height))
 }
@@ -286,26 +410,51 @@ fn scroll(
 /// Adds the runs of one section to `rows`, or the empty row when there is none.
 ///
 /// `first` is the position of the first run of `runs` among all runs. The run
-/// at position `selected` gets the mark.
+/// at position `selected` gets the mark. The block of jobs of each run in
+/// `expanded` follows the row of that run.
 fn push_runs<'a>(
     rows: &mut Vec<Row<'a>>,
     runs: &[&'a Run],
     section: Section,
     first: usize,
     selected: Option<usize>,
+    expanded: &'a BTreeMap<RunId, Jobs>,
 ) {
     if runs.is_empty() {
         rows.push(Row::Empty(section));
     }
-    rows.extend(runs.iter().enumerate().map(|(offset, &run)| Row::Run {
-        run,
-        selected: selected == Some(first + offset),
-    }));
+    for (offset, &run) in runs.iter().enumerate() {
+        rows.push(Row::Run {
+            run,
+            selected: selected == Some(first + offset),
+        });
+        if let Some(jobs) = expanded.get(&run.id) {
+            push_jobs(rows, jobs);
+        }
+    }
+}
+
+/// Adds the block of rows of one expanded run to `rows`.
+fn push_jobs<'a>(rows: &mut Vec<Row<'a>>, jobs: &'a Jobs) {
+    match jobs {
+        Jobs::Loading => rows.push(Row::JobsLoading),
+        Jobs::Ready(list) if list.is_empty() => rows.push(Row::NoJobs),
+        Jobs::Ready(list) => rows.extend(list.iter().enumerate().map(|(index, job)| Row::Job {
+            job,
+            last: index + 1 == list.len(),
+        })),
+        Jobs::Failed { jobs, error } => {
+            rows.extend(jobs.iter().map(|job| Row::Job { job, last: false }));
+            rows.push(Row::JobsError(error));
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::job::JobId;
+    use crate::run::RunNumber;
     use chrono::{Duration as Span, TimeZone};
 
     const HOUR: u64 = 3600;
@@ -324,6 +473,7 @@ mod tests {
     fn run(id: u64, repo_text: &str, state: RunState, started: i64, updated: i64) -> Run {
         Run {
             id: RunId(id),
+            number: RunNumber(id + 100),
             repo: repo(repo_text),
             workflow: "ci".to_owned(),
             branch: "main".to_owned(),
@@ -335,12 +485,33 @@ mod tests {
         }
     }
 
+    /// Builds a job.
+    fn job(id: u64, state: RunState) -> Job {
+        Job {
+            id: JobId(id),
+            name: format!("job {id}"),
+            state,
+            started_at: None,
+            completed_at: None,
+            url: String::new(),
+        }
+    }
+
+    /// Builds a running job with the name `name`.
+    fn named_job(id: u64, name: &str) -> Job {
+        Job {
+            name: name.to_owned(),
+            ..job(id, RunState::Running)
+        }
+    }
+
     fn board() -> Board {
         Board::new(Duration::from_secs(8 * HOUR))
     }
 
     /// Writes each row as short text: `Header(Active,2,0,0)`, `Empty(Recent)`,
-    /// or `Run(7)`. The selection mark is left out, see `marked`.
+    /// `Run(7)`, `Job(11)`, `LastJob(12)`, `JobsLoading`, `NoJobs`, or
+    /// `JobsError(text)`. The selection mark is left out, see `marked`.
     fn shape(rows: &[Row<'_>]) -> Vec<String> {
         marked(rows)
             .into_iter()
@@ -362,6 +533,12 @@ mod tests {
                 Row::Run { run, selected } => {
                     format!("Run({}){}", run.id.0, if *selected { "*" } else { "" })
                 }
+                Row::Job { job, last } => {
+                    format!("{}({})", if *last { "LastJob" } else { "Job" }, job.id.0)
+                }
+                Row::JobsLoading => "JobsLoading".to_owned(),
+                Row::NoJobs => "NoJobs".to_owned(),
+                Row::JobsError(error) => format!("JobsError({error})"),
             })
             .collect()
     }
@@ -1018,5 +1195,414 @@ mod tests {
         let view = board.view(now(), 4);
         assert_eq!(view.first, 0);
         assert_eq!(view.rows.len(), 4);
+    }
+
+    /// A board with run 1 (running) and run 2 (passed) in repository `a/x`.
+    fn two_run_board() -> Board {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Passed, 60, 10),
+            ],
+        );
+        board
+    }
+
+    #[test]
+    fn expanding_the_selected_run_shows_a_loading_row_below_it() {
+        let mut board = two_run_board();
+        board.expand(now());
+        assert_eq!(
+            marked(&board.rows(now())),
+            [
+                "Header(Active,1,0,0)",
+                "Run(1)*",
+                "JobsLoading",
+                "Header(Recent,1,1,0)",
+                "Run(2)",
+            ]
+        );
+    }
+
+    #[test]
+    fn set_jobs_shows_one_row_per_job_and_marks_the_last() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![
+                job(11, RunState::Passed),
+                job(12, RunState::Running),
+                job(13, RunState::Queued),
+            ],
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[1..6],
+            [
+                "Run(1)",
+                "Job(11)",
+                "Job(12)",
+                "LastJob(13)",
+                "Header(Recent,1,1,0)"
+            ]
+        );
+    }
+
+    /// GitHub gives the jobs in the order of their IDs, which has no meaning
+    /// that a person can see. The board sorts them by name, with no difference
+    /// between capital and small letters, and then by ID.
+    #[test]
+    fn set_jobs_sorts_the_jobs_by_name_and_then_by_id() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![
+                named_job(21, "test (stable)"),
+                named_job(22, "build"),
+                named_job(23, "Lint"),
+                named_job(24, "Build"),
+                named_job(25, "deploy"),
+                named_job(26, "test (beta)"),
+            ],
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[2..8],
+            [
+                "Job(22)",
+                "Job(24)",
+                "Job(25)",
+                "Job(23)",
+                "Job(26)",
+                "LastJob(21)"
+            ]
+        );
+    }
+
+    /// A re-run gives a job a new ID. The job keeps its row, because the
+    /// order is by name.
+    #[test]
+    fn a_re_run_job_with_a_new_id_keeps_its_row() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![
+                named_job(31, "build"),
+                named_job(32, "lint"),
+                named_job(33, "test"),
+            ],
+        );
+        board.set_jobs(
+            RunId(1),
+            vec![
+                named_job(31, "build"),
+                named_job(33, "test"),
+                named_job(39, "lint"),
+            ],
+        );
+        assert_eq!(
+            shape(&board.rows(now()))[2..5],
+            ["Job(31)", "Job(39)", "LastJob(33)"]
+        );
+    }
+
+    #[test]
+    fn an_answer_with_no_job_shows_a_no_jobs_row() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), Vec::new());
+        assert_eq!(shape(&board.rows(now()))[1..3], ["Run(1)", "NoJobs"]);
+    }
+
+    #[test]
+    fn collapse_removes_the_block_and_the_jobs() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
+        board.collapse(now());
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Active,1,0,0)",
+                "Run(1)",
+                "Header(Recent,1,1,0)",
+                "Run(2)"
+            ]
+        );
+        assert!(board.expanded(now()).is_empty());
+        board.expand(now());
+        assert_eq!(shape(&board.rows(now()))[2], "JobsLoading");
+    }
+
+    #[test]
+    fn expanding_a_run_twice_keeps_its_jobs() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
+        board.expand(now());
+        assert_eq!(shape(&board.rows(now()))[1..3], ["Run(1)", "LastJob(11)"]);
+    }
+
+    #[test]
+    fn collapse_of_a_run_that_is_not_expanded_changes_nothing() {
+        let mut board = two_run_board();
+        let before = shape(&board.rows(now()));
+        board.collapse(now());
+        assert_eq!(shape(&board.rows(now())), before);
+        assert!(board.expanded(now()).is_empty());
+    }
+
+    #[test]
+    fn expand_and_collapse_on_an_empty_board_do_nothing() {
+        let mut board = board();
+        board.expand(now());
+        board.collapse(now());
+        assert!(board.expanded(now()).is_empty());
+        assert_eq!(shape(&board.rows(now())).len(), 4);
+    }
+
+    #[test]
+    fn jobs_for_a_run_that_is_not_expanded_are_dropped() {
+        let mut board = two_run_board();
+        board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
+        board.fail_jobs(RunId(1), "HTTP 500".to_owned());
+        board.set_jobs(RunId(99), vec![job(12, RunState::Passed)]);
+        assert_eq!(shape(&board.rows(now())).len(), 4);
+        board.expand(now());
+        assert_eq!(shape(&board.rows(now()))[2], "JobsLoading");
+    }
+
+    #[test]
+    fn more_than_one_run_can_be_expanded() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
+        board.select_next(now());
+        board.expand(now());
+        assert_eq!(
+            marked(&board.rows(now())),
+            [
+                "Header(Active,1,0,0)",
+                "Run(1)",
+                "LastJob(11)",
+                "Header(Recent,1,1,0)",
+                "Run(2)*",
+                "JobsLoading",
+            ]
+        );
+    }
+
+    #[test]
+    fn up_and_down_skip_the_job_rows() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
+        board.select_next(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(2)*"));
+        board.select_previous(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Run(1)*"));
+    }
+
+    #[test]
+    fn expanded_gives_the_repository_and_the_id_of_each_expanded_run() {
+        let mut board = board();
+        board.replace(repo("a/x"), vec![run(1, "a/x", RunState::Running, 30, 1)]);
+        board.replace(repo("b/y"), vec![run(2, "b/y", RunState::Running, 20, 1)]);
+        board.expand(now());
+        board.select_next(now());
+        board.expand(now());
+        let expected: BTreeSet<(RepoName, RunId)> =
+            [(repo("a/x"), RunId(1)), (repo("b/y"), RunId(2))]
+                .into_iter()
+                .collect();
+        assert_eq!(board.expanded(now()), expected);
+    }
+
+    #[test]
+    fn a_failed_fetch_after_an_answer_keeps_the_jobs_and_adds_the_error() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![job(11, RunState::Passed), job(12, RunState::Running)],
+        );
+        board.fail_jobs(RunId(1), "HTTP 500".to_owned());
+        assert_eq!(
+            shape(&board.rows(now()))[1..5],
+            ["Run(1)", "Job(11)", "Job(12)", "JobsError(HTTP 500)"]
+        );
+        board.fail_jobs(RunId(1), "timed out".to_owned());
+        assert_eq!(
+            shape(&board.rows(now()))[1..5],
+            ["Run(1)", "Job(11)", "Job(12)", "JobsError(timed out)"]
+        );
+    }
+
+    #[test]
+    fn a_failed_fetch_before_any_answer_shows_the_error_only() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.fail_jobs(RunId(1), "HTTP 404".to_owned());
+        assert_eq!(
+            shape(&board.rows(now()))[1..3],
+            ["Run(1)", "JobsError(HTTP 404)"]
+        );
+    }
+
+    #[test]
+    fn a_later_answer_clears_the_error() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
+        board.fail_jobs(RunId(1), "HTTP 500".to_owned());
+        board.set_jobs(RunId(1), vec![job(13, RunState::Passed)]);
+        assert_eq!(shape(&board.rows(now()))[1..3], ["Run(1)", "LastJob(13)"]);
+    }
+
+    #[test]
+    fn a_run_that_moves_to_the_recent_section_stays_expanded() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Passed, 30, 1),
+                run(2, "a/x", RunState::Passed, 60, 10),
+            ],
+        );
+        assert_eq!(
+            marked(&board.rows(now())),
+            [
+                "Header(Active,0,0,0)",
+                "Empty(Active)",
+                "Header(Recent,2,2,0)",
+                "Run(1)*",
+                "LastJob(11)",
+                "Run(2)",
+            ]
+        );
+        assert_eq!(board.expanded(now()).len(), 1);
+    }
+
+    #[test]
+    fn a_run_that_replace_drops_loses_its_expansion() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
+        board.replace(repo("a/x"), Vec::new());
+        assert!(board.expanded(now()).is_empty());
+        board.replace(repo("a/x"), vec![run(1, "a/x", RunState::Running, 30, 1)]);
+        assert_eq!(shape(&board.rows(now())).len(), 4);
+    }
+
+    #[test]
+    fn a_repository_that_keep_only_drops_loses_its_expansion() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.keep_only(&BTreeSet::new());
+        assert!(board.expanded(now()).is_empty());
+        board.replace(repo("a/x"), vec![run(1, "a/x", RunState::Running, 30, 1)]);
+        assert_eq!(shape(&board.rows(now())).len(), 4);
+    }
+
+    #[test]
+    fn a_run_that_leaves_the_window_loses_its_expansion() {
+        let mut board = two_run_board();
+        board.select_next(now());
+        board.expand(now());
+        let later = now() + Span::hours(8) + Span::minutes(15);
+        assert!(board.expanded(later).is_empty());
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Active,1,0,0)",
+                "Run(1)",
+                "Header(Recent,1,1,0)",
+                "Run(2)"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_that_becomes_other_loses_its_expansion() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Other, 30, 1),
+                run(2, "a/x", RunState::Passed, 60, 10),
+            ],
+        );
+        assert!(board.expanded(now()).is_empty());
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Passed, 60, 10),
+            ],
+        );
+        assert_eq!(shape(&board.rows(now())).len(), 4);
+    }
+
+    /// Gives run `id` a block of `count` jobs. The run must be selected.
+    fn expand_with_jobs(board: &mut Board, id: u64, count: u64) {
+        board.expand(now());
+        let jobs = (1..=count)
+            .map(|n| job(id * 100 + n, RunState::Passed))
+            .collect();
+        board.set_jobs(RunId(id), jobs);
+    }
+
+    #[test]
+    fn an_expanded_run_at_the_bottom_of_the_view_scrolls_to_show_its_jobs() {
+        let mut board = long_board(6, 0);
+        for _ in 0..5 {
+            board.select_next(now());
+        }
+        expand_with_jobs(&mut board, 6, 2);
+        let view = board.view(now(), 4);
+        assert_eq!(view.first, 5);
+        assert_eq!(
+            marked(&view.rows),
+            ["Run(5)", "Run(6)*", "Job(601)", "LastJob(602)"]
+        );
+    }
+
+    #[test]
+    fn many_jobs_keep_the_run_and_its_header_in_view() {
+        let mut board = long_board(3, 3);
+        for _ in 0..3 {
+            board.select_next(now());
+        }
+        assert_eq!(board.view(now(), 4).first, 2);
+        expand_with_jobs(&mut board, 101, 10);
+        let view = board.view(now(), 4);
+        assert_eq!(view.first, 4);
+        assert_eq!(
+            marked(&view.rows),
+            [
+                "Header(Recent,3,3,0)",
+                "Run(101)*",
+                "Job(10101)",
+                "Job(10102)"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_view_of_one_row_shows_the_run_row_and_not_its_jobs() {
+        let mut board = long_board(3, 3);
+        for _ in 0..3 {
+            board.select_next(now());
+        }
+        expand_with_jobs(&mut board, 101, 10);
+        let view = board.view(now(), 1);
+        assert_eq!(view.first, 5);
+        assert_eq!(marked(&view.rows), ["Run(101)*"]);
     }
 }

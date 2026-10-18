@@ -12,27 +12,32 @@ use ratatui::Frame;
 use textfit::{pad_right, truncate_to_budget};
 
 use crate::board::{Board, Row, Section};
+use crate::job::Job;
 use crate::run::{Run, RunState};
 use crate::settings::format_duration_setting;
 use crate::status::{Status, MESSAGE_LIFETIME};
 
 /// The width of the marker column.
 const MARKER_WIDTH: usize = 1;
+/// The width of the run column. It fits `#999999`.
+const RUN_WIDTH: usize = 7;
 /// The width of the started column.
 const STARTED_WIDTH: usize = 11;
 /// The width of the time column.
 const TIME_WIDTH: usize = 7;
 /// The width of the finished column.
 const FINISHED_WIDTH: usize = 8;
-/// The columns that the text columns do not share: the marker, the started,
-/// time, and finished columns, and the seven spaces between the columns.
-const FIXED_COLUMNS: usize = MARKER_WIDTH + STARTED_WIDTH + TIME_WIDTH + FINISHED_WIDTH + 7;
+/// The columns that the text columns do not share: the marker, the run,
+/// started, time, and finished columns, and the eight spaces between the
+/// columns.
+const FIXED_COLUMNS: usize =
+    MARKER_WIDTH + RUN_WIDTH + STARTED_WIDTH + TIME_WIDTH + FINISHED_WIDTH + 8;
 /// The lines that are not board rows: the column header and the status line.
 const FIXED_LINES: usize = 2;
 /// The text that stands between two parts of the status line.
 const STATUS_SEPARATOR: &str = "  ·  ";
 /// The key hints at the end of the left part of the status line.
-const KEY_HINTS: &str = "↑↓ select  ⏎ open  r refresh  q quit";
+const KEY_HINTS: &str = "↑↓ select  →← jobs  ⏎ open  r refresh  q quit";
 /// The mark at the right end of the status line while a refresh cycle runs.
 const REFRESH_MARK: &str = "refreshing…";
 /// The least number of columns between the left part of the status line and
@@ -71,11 +76,22 @@ fn fit(text: &str, width: usize) -> String {
     pad_right(&truncate_to_budget(text, width), width)
 }
 
+/// Cuts a text to a column width, then pads it on the left to that width.
+///
+/// The text must be ASCII, for example `#1234`, because the padding counts
+/// characters. The cut uses `textfit` and so is safe for any text.
+fn fit_right(text: &str, width: usize) -> String {
+    let cut = truncate_to_budget(text, width);
+    let padding = width.saturating_sub(cut.chars().count());
+    format!("{}{cut}", " ".repeat(padding))
+}
+
 /// Joins the cells of one row into one line. One space stands between cells.
 fn cells(
     widths: Widths,
     marker: &str,
     texts: [&str; 4],
+    run: &str,
     started: &str,
     time: &str,
     finished: &str,
@@ -85,8 +101,34 @@ fn cells(
         pad_right(marker, MARKER_WIDTH),
         fit(repo, widths.repo),
         fit(workflow, widths.workflow),
+        fit_right(run, RUN_WIDTH),
         fit(branch, widths.branch),
         fit(title, widths.title),
+        pad_right(started, STARTED_WIDTH),
+        pad_right(time, TIME_WIDTH),
+        pad_right(finished, FINISHED_WIDTH),
+    ]
+    .join(" ")
+}
+
+/// Joins the cells of one job row or status row into one line.
+///
+/// One text cell takes the place of the repository, workflow, run, branch, and
+/// title cells. It has the width of those five cells and the four spaces
+/// between them. Thus the started, time, and finished cells stand in the same
+/// columns as those of a run row.
+fn wide_cells(
+    widths: Widths,
+    marker: &str,
+    text: &str,
+    started: &str,
+    time: &str,
+    finished: &str,
+) -> String {
+    let text_width = widths.repo + widths.workflow + RUN_WIDTH + widths.branch + widths.title + 4;
+    [
+        pad_right(marker, MARKER_WIDTH),
+        fit(text, text_width),
         pad_right(started, STARTED_WIDTH),
         pad_right(time, TIME_WIDTH),
         pad_right(finished, FINISHED_WIDTH),
@@ -148,11 +190,85 @@ where
             &run.branch,
             &run.title,
         ],
+        &format!("#{}", run.number.0),
         &format_started(run.started_at, now, tz),
         &time,
         &finished,
     )
 }
+
+/// The line of one job of an expanded run.
+///
+/// The text cell holds the tree glyph (`└` when `last` is true, else `├`), a
+/// space, and the name of the job. The time cells follow the rules of
+/// [`run_line`], with the finish time of the job in place of the update time.
+/// A job with no start time has an empty started cell and an empty time cell.
+fn job_line<Tz: TimeZone>(
+    job: &Job,
+    last: bool,
+    now: DateTime<Utc>,
+    tz: &Tz,
+    widths: Widths,
+) -> String
+where
+    Tz::Offset: Display,
+{
+    let started = job
+        .started_at
+        .map(|started| format_started(started, now, tz))
+        .unwrap_or_default();
+    let time = job.started_at.map_or_else(String::new, |started| {
+        if job.state.is_active() {
+            format_elapsed(span(started, now))
+        } else {
+            job.completed_at
+                .map_or_else(String::new, |done| format_elapsed(span(started, done)))
+        }
+    });
+    let finished = match job.completed_at {
+        Some(done) if !job.state.is_active() => format_ago(span(done, now)),
+        _ => String::new(),
+    };
+    let glyph = if last { TREE_LAST } else { TREE_MIDDLE };
+    wide_cells(
+        widths,
+        marker(job.state),
+        &format!("{glyph} {}", job.name),
+        &started,
+        &time,
+        &finished,
+    )
+}
+
+/// The text of the status row of an expanded run before the first answer.
+const JOBS_LOADING: &str = "└ Loading jobs…";
+/// The text of the status row of an expanded run whose answer holds no job.
+const NO_JOBS: &str = "└ No jobs yet";
+/// The text before the error on the status row of a failed fetch of jobs.
+const JOBS_ERROR_PREFIX: &str = "└ ⚠ ";
+
+/// The line of a status row of an expanded run.
+///
+/// The marker column is empty. The text fills the rest of the line and ends
+/// in `…` when it is too wide. A status row has no time cells.
+fn status_row_line(text: &str, width: usize) -> String {
+    format!(
+        "{} {}",
+        pad_right("", MARKER_WIDTH),
+        fit(text, width.saturating_sub(MARKER_WIDTH + 1))
+    )
+}
+
+/// Writes a status row at row `y` of the buffer, as wide as the buffer.
+fn put_status_row(buffer: &mut Buffer, y: usize, text: &str) {
+    let line = status_row_line(text, usize::from(buffer.area.width));
+    put(buffer, y, &line, Style::default());
+}
+
+/// The tree glyph of a job row that is not the last row of its block.
+const TREE_MIDDLE: &str = "├";
+/// The tree glyph of the last row of the block of a run.
+const TREE_LAST: &str = "└";
 
 /// The line that stands in an empty section before the first refresh cycle
 /// ends.
@@ -392,6 +508,7 @@ pub fn draw<Tz: TimeZone>(
             widths,
             " ",
             ["REPO", "WORKFLOW", "BRANCH", "TITLE"],
+            "RUN",
             "STARTED",
             "TIME",
             "FINISHED",
@@ -427,6 +544,19 @@ pub fn draw<Tz: TimeZone>(
                         Style::default().add_modifier(Modifier::REVERSED),
                     );
                 }
+            }
+            Row::Job { job, last } => {
+                let line = job_line(job, *last, now, tz, widths);
+                let y = put(buffer, index + 1, &line, Style::default());
+                buffer.set_style(
+                    Rect::new(area.x, y, 1, 1),
+                    Style::default().fg(marker_color(job.state)),
+                );
+            }
+            Row::JobsLoading => put_status_row(buffer, index + 1, JOBS_LOADING),
+            Row::NoJobs => put_status_row(buffer, index + 1, NO_JOBS),
+            Row::JobsError(error) => {
+                put_status_row(buffer, index + 1, &format!("{JOBS_ERROR_PREFIX}{error}"));
             }
         }
     }
@@ -508,7 +638,8 @@ mod tests {
 
     use ratatui::Terminal;
 
-    use crate::run::{Run, RunId, RunState};
+    use crate::job::{Job, JobId};
+    use crate::run::{Run, RunId, RunNumber, RunState};
     use crate::status::{Message, RateLimit};
     use crate::target::{OwnerName, RepoName};
 
@@ -546,6 +677,7 @@ mod tests {
     ) -> Run {
         Run {
             id: RunId(id),
+            number: RunNumber(id + 100),
             repo: repo(repo_text),
             workflow: workflow.to_owned(),
             branch: branch.to_owned(),
@@ -674,18 +806,62 @@ mod tests {
         assert_eq!(
             lines(&buffer),
             [
-                "  REPO                  WORKFLOW          BRANCH            TITLE                           STARTED     TIME    FINISHED",
+                "  REPO                WORKFLOW            RUN BRANCH          TITLE                         STARTED     TIME    FINISHED",
                 "Running · 2",
-                "● timmattison/tools     CI                main              Fix the thing                   11:45:30    14m 30s",
-                "○ acme/widgets          Release           issue-12          Add release job                 11:58:00    2m 00s",
+                "● timmattison/tools   CI                 #101 main            Fix the thing                 11:45:30    14m 30s",
+                "○ acme/widgets        Release            #102 issue-12        Add release job               11:58:00    2m 00s",
                 "Last 8h · 1 passed · 1 failed",
-                "✓ timmattison/tools     CI                main              Bump deps                       09:00:00    10m 05s 2h ago",
-                "✗ acme/widgets          Release           issue-11          Broken build                    10-13 23:50 4h 40m  7h ago",
+                "✓ timmattison/tools   CI                 #103 main            Bump deps                     09:00:00    10m 05s 2h ago",
+                "✗ acme/widgets        Release            #104 issue-11        Broken build                  10-13 23:50 4h 40m  7h ago",
                 "",
                 "",
-                "updated 30s ago      ·  ↑↓ select  ⏎ open  r refresh  q quit",
+                "updated 30s ago      ·  ↑↓ select  →← jobs  ⏎ open  r refresh  q quit",
             ]
         );
+    }
+
+    /// The characters of a line from column `from`, `count` columns wide.
+    fn columns(line: &str, from: usize, count: usize) -> String {
+        line.chars().skip(from).take(count).collect()
+    }
+
+    /// The first column of the run column in a frame of 120 columns. The
+    /// marker, the repository (19), and the workflow (15) come before it.
+    const RUN_COLUMN: usize = 1 + 1 + 19 + 1 + 15 + 1;
+
+    #[test]
+    fn the_run_column_shows_the_run_number_aligned_to_the_right() {
+        let mut board = four_run_board();
+        let text = lines(&render_with(120, 10, &mut board, &loaded()));
+        assert_eq!(columns(&text[0], RUN_COLUMN, 7), "    RUN");
+        assert_eq!(columns(&text[2], RUN_COLUMN, 7), "   #101");
+        assert_eq!(columns(&text[3], RUN_COLUMN, 7), "   #102");
+        assert_eq!(columns(&text[5], RUN_COLUMN, 7), "   #103");
+        assert_eq!(columns(&text[6], RUN_COLUMN, 7), "   #104");
+    }
+
+    #[test]
+    fn a_run_number_wider_than_the_column_is_cut_and_keeps_the_other_columns() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("acme/widgets"),
+            vec![run(
+                1_234_467,
+                "acme/widgets",
+                "CI",
+                "main",
+                "Wide number",
+                RunState::Running,
+                "2026-10-14T11:45:30Z",
+                "2026-10-14T11:59:00Z",
+            )],
+        );
+        let text = lines(&render_with(120, 10, &mut board, &loaded()));
+        assert_eq!(columns(&text[2], RUN_COLUMN, 7), "#12345…");
+        let started = text[0]
+            .find("STARTED")
+            .expect("the header names the started column");
+        assert_eq!(columns(&text[2], started, 8), "11:45:30");
     }
 
     #[test]
@@ -972,6 +1148,253 @@ mod tests {
         );
     }
 
+    /// A job with the state `state`. `None` times stand for a job that GitHub
+    /// gives no time for.
+    fn job(
+        id: u64,
+        name: &str,
+        state: RunState,
+        started: Option<&str>,
+        completed: Option<&str>,
+    ) -> Job {
+        Job {
+            id: JobId(id),
+            name: name.to_owned(),
+            state,
+            started_at: started.map(at),
+            completed_at: completed.map(at),
+            url: format!("https://github.com/timmattison/tools/actions/runs/1/job/{id}"),
+        }
+    }
+
+    /// The board of four runs with the first run expanded and `jobs` loaded.
+    fn board_with_jobs(jobs: Vec<Job>) -> Board {
+        let mut board = four_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), jobs);
+        board
+    }
+
+    /// The three jobs of the first run: one running, one passed, one failed.
+    fn three_jobs() -> Vec<Job> {
+        vec![
+            job(
+                11,
+                "test",
+                RunState::Running,
+                Some("2026-10-14T11:50:10Z"),
+                None,
+            ),
+            job(
+                12,
+                "build",
+                RunState::Passed,
+                Some("2026-10-14T11:45:40Z"),
+                Some("2026-10-14T11:50:00Z"),
+            ),
+            job(
+                13,
+                "lint",
+                RunState::Failed,
+                Some("2026-10-14T11:46:00Z"),
+                Some("2026-10-14T11:46:45Z"),
+            ),
+        ]
+    }
+
+    #[test]
+    fn the_jobs_of_an_expanded_run_stand_below_it_in_the_run_columns() {
+        let mut board = board_with_jobs(three_jobs());
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert_eq!(
+            text[2..6],
+            [
+                "● timmattison/tools   CI                 #101 main            Fix the thing                 11:45:30    14m 30s".to_owned(),
+                format!("✓ {:<89} 11:45:40    4m 20s  10m ago", "├ build"),
+                format!("✗ {:<89} 11:46:00    45s     13m ago", "├ lint"),
+                format!("● {:<89} 11:50:10    9m 50s", "└ test"),
+            ]
+            .map(|line| line.trim_end().to_owned())
+        );
+        assert!(text[6].starts_with("○ acme/widgets"), "{:?}", text[6]);
+    }
+
+    #[test]
+    fn each_job_marker_has_the_color_of_its_state() {
+        let mut board = board_with_jobs(three_jobs());
+        let buffer = render_with(120, 14, &mut board, &loaded());
+        let marks: Vec<(&str, Color)> = [3_u16, 4, 5]
+            .iter()
+            .map(|y| (buffer[(0, *y)].symbol(), buffer[(0, *y)].fg))
+            .collect();
+        assert_eq!(
+            marks,
+            [("✓", Color::Green), ("✗", Color::Red), ("●", Color::Yellow)]
+        );
+    }
+
+    #[test]
+    fn no_job_row_is_reversed_when_its_run_is_selected() {
+        let mut board = board_with_jobs(three_jobs());
+        let buffer = render_with(120, 14, &mut board, &loaded());
+        let reversed = |x: u16, y: u16| buffer[(x, y)].modifier.contains(Modifier::REVERSED);
+        assert!(reversed(60, 2), "the selected run row");
+        for y in [3_u16, 4, 5] {
+            for x in [0_u16, 5, 60, 95, 119] {
+                assert!(!reversed(x, y), "line {y} column {x}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_active_job_shows_the_time_since_its_start_and_no_finish() {
+        let mut board = board_with_jobs(vec![job(
+            11,
+            "test",
+            RunState::Running,
+            Some("2026-10-14T10:45:30Z"),
+            None,
+        )]);
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert_eq!(time_cells(&text, 3), ("1h 14m".to_owned(), String::new()));
+    }
+
+    #[test]
+    fn a_finished_job_shows_its_own_duration_and_the_time_since_it_ended() {
+        let mut board = board_with_jobs(vec![job(
+            11,
+            "lint",
+            RunState::Failed,
+            Some("2026-10-14T10:00:00Z"),
+            Some("2026-10-14T10:03:07Z"),
+        )]);
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert_eq!(
+            time_cells(&text, 3),
+            ("3m 07s".to_owned(), "1h ago".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_job_with_no_start_shows_no_started_and_no_time() {
+        let mut board = board_with_jobs(vec![
+            job(11, "wait", RunState::Queued, None, None),
+            job(
+                12,
+                "skip",
+                RunState::Passed,
+                None,
+                Some("2026-10-14T11:55:00Z"),
+            ),
+        ]);
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        // The order is by name: "skip" stands above "wait".
+        assert_eq!(started_cells(&text, 3), "");
+        assert_eq!(time_cells(&text, 3), (String::new(), "5m ago".to_owned()));
+        assert_eq!(started_cells(&text, 4), "");
+        assert_eq!(time_cells(&text, 4), (String::new(), String::new()));
+    }
+
+    #[test]
+    fn a_job_name_cut_by_display_width_keeps_its_start_and_the_columns() {
+        let mut board = board_with_jobs(vec![
+            job(
+                11,
+                "日本語のとても長いジョブの名前日本語のとても長いジョブの名前日本語のとても長いジョブの名前日本語のとても長いジョブの名前",
+                RunState::Running,
+                Some("2026-10-14T11:51:00Z"),
+                None,
+            ),
+            job(
+                12,
+                &"🎉🎊🎁".repeat(20),
+                RunState::Running,
+                Some("2026-10-14T11:52:00Z"),
+                None,
+            ),
+            job(
+                13,
+                &"café-au-lait-".repeat(10),
+                RunState::Running,
+                Some("2026-10-14T11:53:00Z"),
+                None,
+            ),
+        ]);
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        let started = |line: &str| {
+            let (before, _) = line.rsplit_once(" 11:").expect("the line holds a start");
+            display_width(before)
+        };
+        let run_column = started(&text[2]);
+        // The order is by name: `c` comes before `日`, and `日` before `🎉`.
+        for (y, start) in [(3, "├ café-"), (4, "├ 日本語"), (5, "└ 🎉🎊🎁")] {
+            assert!(text[y].contains(start), "{:?}", text[y]);
+            assert!(text[y].contains('…'), "{:?}", text[y]);
+            assert_eq!(started(&text[y]), run_column, "line {y}");
+            assert!(display_width(&text[y]) <= 120, "{:?}", text[y]);
+        }
+        assert!(text[4].contains("… 11:51:00"), "{:?}", text[4]);
+    }
+
+    #[test]
+    fn an_expanded_run_says_loading_jobs_until_the_answer_comes() {
+        let mut board = four_run_board();
+        board.expand(now());
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert_eq!(text[3], "  └ Loading jobs…");
+        assert!(text[4].starts_with("○ acme/widgets"), "{:?}", text[4]);
+    }
+
+    #[test]
+    fn an_expanded_run_with_no_jobs_says_so() {
+        let mut board = board_with_jobs(Vec::new());
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert_eq!(text[3], "  └ No jobs yet");
+    }
+
+    #[test]
+    fn a_failed_fetch_shows_the_error_below_the_last_good_jobs() {
+        let mut board = board_with_jobs(three_jobs());
+        board.fail_jobs(RunId(1), "HTTP 502".to_owned());
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert!(text[3].starts_with("✓ ├ build"), "{:?}", text[3]);
+        assert!(text[4].starts_with("✗ ├ lint"), "{:?}", text[4]);
+        assert!(text[5].starts_with("● ├ test"), "{:?}", text[5]);
+        assert_eq!(text[6], "  └ ⚠ HTTP 502");
+    }
+
+    #[test]
+    fn a_failed_fetch_before_any_answer_shows_the_error_only() {
+        let mut board = four_run_board();
+        board.expand(now());
+        board.fail_jobs(RunId(1), "HTTP 404".to_owned());
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert_eq!(text[3], "  └ ⚠ HTTP 404");
+    }
+
+    #[test]
+    fn a_long_error_is_cut_by_display_width_to_the_line() {
+        let mut board = four_run_board();
+        board.expand(now());
+        board.fail_jobs(RunId(1), "日本語のエラー".repeat(30));
+        let text = lines(&render_with(40, 14, &mut board, &loaded()));
+        assert!(text[3].starts_with("  └ ⚠ 日本語"), "{:?}", text[3]);
+        assert!(text[3].ends_with('…'), "{:?}", text[3]);
+        assert!(display_width(&text[3]) <= 40, "{:?}", text[3]);
+        assert!(display_width(&text[3]) >= 39, "{:?}", text[3]);
+    }
+
+    #[test]
+    fn a_status_row_is_never_reversed_and_has_no_marker_color() {
+        let mut board = four_run_board();
+        board.expand(now());
+        let buffer = render_with(120, 14, &mut board, &loaded());
+        for x in [0_u16, 5, 60, 119] {
+            assert!(!buffer[(x, 3)].modifier.contains(Modifier::REVERSED), "{x}");
+        }
+        assert_eq!(buffer[(0, 3)].fg, Color::Reset);
+    }
+
     #[test]
     fn a_clock_that_runs_behind_gives_zero_and_no_panic() {
         let mut board = Board::new(Duration::from_hours(8));
@@ -1025,11 +1448,11 @@ mod tests {
                 "2026-10-14T11:55:00Z",
             )],
         );
-        let text = lines(&render_with(60, 6, &mut board, &Status::default()));
-        // 60 - 34 = 26 columns for the text: 6, 5, 5, and 10.
+        let text = lines(&render_with(68, 6, &mut board, &Status::default()));
+        // 68 - 42 = 26 columns for the text: 6, 5, 5, and 10.
         assert_eq!(
             text[2],
-            "● timma… Cont… feat… A very lo… 11:55:00    5m 00s"
+            "● timma… Cont…    #101 feat… A very lo… 11:55:00    5m 00s"
         );
     }
 
@@ -1071,21 +1494,21 @@ mod tests {
                 ),
             ],
         );
-        let text = lines(&render_with(60, 7, &mut board, &Status::default()));
+        let text = lines(&render_with(68, 7, &mut board, &Status::default()));
         assert_eq!(
             text[2],
-            "● a/x    CI    日本… t          11:51:00    9m 00s"
+            "● a/x    CI       #101 日本… t          11:51:00    9m 00s"
         );
         assert_eq!(
             text[3],
-            "● a/x    CI    café… t          11:52:00    8m 00s"
+            "● a/x    CI       #102 café… t          11:52:00    8m 00s"
         );
         assert_eq!(
             text[4],
-            "● a/x    CI    🎉🎉… t          11:53:00    7m 00s"
+            "● a/x    CI       #103 🎉🎉… t          11:53:00    7m 00s"
         );
         for line in &text {
-            assert!(display_width(line) <= 60, "{line:?} is too wide");
+            assert!(display_width(line) <= 68, "{line:?} is too wide");
         }
     }
 
@@ -1178,7 +1601,7 @@ mod tests {
     fn the_status_line_says_loading_before_the_first_refresh() {
         assert_eq!(
             status_line(80, &Status::default()),
-            "loading…  ·  ↑↓ select  ⏎ open  r refresh  q quit"
+            "loading…  ·  ↑↓ select  →← jobs  ⏎ open  r refresh  q quit"
         );
     }
 
@@ -1190,7 +1613,7 @@ mod tests {
         };
         assert_eq!(
             status_line(80, &status),
-            "updated 30s ago      ·  ↑↓ select  ⏎ open  r refresh  q quit"
+            "updated 30s ago      ·  ↑↓ select  →← jobs  ⏎ open  r refresh  q quit"
         );
     }
 
@@ -1203,7 +1626,7 @@ mod tests {
         };
         assert_eq!(
             status_line(100, &status),
-            "updated 30s ago      ·  API 4821/5000  ·  ↑↓ select  ⏎ open  r refresh  q quit"
+            "updated 30s ago      ·  API 4821/5000  ·  ↑↓ select  →← jobs  ⏎ open  r refresh  q quit"
         );
     }
 
@@ -1217,7 +1640,7 @@ mod tests {
         };
         assert_eq!(
             status_line(120, &status),
-            "updated 30s ago      ·  API low 412/5000, next refresh 12:34  ·  ↑↓ select  ⏎ open  r refresh  q quit"
+            "updated 30s ago      ·  API low 412/5000, next refresh 12:34  ·  ↑↓ select  →← jobs  ⏎ open  r refresh  q quit"
         );
     }
 
@@ -1275,7 +1698,7 @@ mod tests {
         text[7].clone()
     }
 
-    const HINTS_TAIL: &str = "loading…  ·  ↑↓ select  ⏎ open  r refresh  q quit";
+    const HINTS_TAIL: &str = "loading…  ·  ↑↓ select  →← jobs  ⏎ open  r refresh  q quit";
 
     /// The mark at the right end of the status line during a refresh.
     const MARK: &str = "refreshing…";
@@ -1442,7 +1865,7 @@ mod tests {
         };
         assert_eq!(
             status_line(40, &status),
-            "loading…  ·  ↑↓ select  ⏎ …  refreshing…"
+            "loading…  ·  ↑↓ select  →←…  refreshing…"
         );
     }
 
