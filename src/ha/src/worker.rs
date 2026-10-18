@@ -1824,6 +1824,55 @@ mod tests {
         );
     }
 
+    /// Run 5 is never watched. It finishes and its last job fetch fails. The
+    /// next cycle must fetch it again and forget its pages when it is good.
+    #[test]
+    fn a_collapsed_run_whose_last_fetch_failed_is_fetched_again_and_forgotten() {
+        let fake = fake_with_runs(vec![active_run("acme/a", 5)]);
+        let running = Job {
+            state: RunState::Running,
+            ..job(1)
+        };
+        fake.script().jobs.insert(RunId(5), Ok(vec![running]));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let first = one_cycle(&worker);
+        assert!(has_jobs(&first), "{first:?}");
+        let mut finished = run("acme/a", 5);
+        finished.updated_at += chrono::TimeDelta::minutes(1);
+        fake.script()
+            .created
+            .insert(repo("acme/a"), Ok(vec![finished]));
+        fake.script()
+            .jobs
+            .insert(RunId(5), Err(SourceError::Failed("boom".to_owned())));
+
+        refresh(&worker);
+        let second = one_cycle(&worker);
+        fake.script().jobs.insert(RunId(5), Ok(vec![job(1)]));
+        refresh(&worker);
+        let third = one_cycle(&worker);
+        let forgotten = forget_calls(&fake);
+        refresh(&worker);
+        let fourth = one_cycle(&worker);
+
+        assert!(
+            second
+                .iter()
+                .any(|update| matches!(update, Update::JobsFailed { run: RunId(5), .. })),
+            "{second:?}"
+        );
+        assert!(
+            third.contains(&Update::Jobs {
+                run: RunId(5),
+                jobs: vec![job(1)]
+            }),
+            "{third:?}"
+        );
+        assert_eq!(forgotten, vec!["5".to_owned()]);
+        assert!(!has_jobs(&fourth), "{fourth:?}");
+        assert_eq!(job_calls(&fake), 3);
+    }
+
     #[test]
     fn a_collapsed_finished_run_is_not_fetched_and_an_expanded_again_run_is_fetched_at_once() {
         let fake = fake_with_runs(vec![run("acme/a", 5)]);
