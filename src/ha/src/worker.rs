@@ -1458,6 +1458,28 @@ mod tests {
         assert_eq!(job_calls(&fake), 3);
     }
 
+    /// The runs answer says that run 5 finished. The jobs answer shows a job
+    /// that still runs. The `updated_at` of the run stays the same in each
+    /// cycle, so only the active job can make the run due again.
+    #[test]
+    fn a_finished_run_with_an_active_job_gets_its_jobs_again() {
+        let fake = fake_with_runs(vec![run("acme/a", 5)]);
+        let running = Job {
+            state: RunState::Running,
+            ..job(1)
+        };
+        fake.script().jobs.insert(RunId(5), Ok(vec![running]));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let _ = one_cycle(&worker);
+        watch(&worker, &[5]);
+        assert!(matches!(next_update(&worker), Update::Jobs { .. }));
+
+        refresh(&worker);
+        let _ = one_cycle(&worker);
+
+        assert_eq!(job_calls(&fake), 2, "requests for the jobs of run 5");
+    }
+
     #[test]
     fn a_finished_run_that_changed_gets_its_jobs_again() {
         let fake = fake_with_runs(vec![run("acme/a", 5)]);
