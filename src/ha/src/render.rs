@@ -8,6 +8,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
+use ratatui::widgets::{Block, Clear, Widget};
 use ratatui::Frame;
 use textfit::{pad_right, truncate_to_budget};
 
@@ -36,6 +37,23 @@ const FIXED_LINES: usize = 2;
 const STATUS_SEPARATOR: &str = "  ·  ";
 /// The key hints at the end of the left part of the status line.
 const KEY_HINTS: &str = "↑↓ select  →← jobs  ⏎ open  c cancel  r refresh  q quit";
+/// The title in the top border of the box of the cancel prompt.
+const PROMPT_TITLE: &str = " Cancel run? ";
+/// The widest outer width of the box of the cancel prompt.
+const PROMPT_WIDTH: usize = 44;
+/// The columns of the box that hold no text: a border column and a space of
+/// padding on each side.
+const PROMPT_FRAME_COLUMNS: usize = 4;
+/// The rows of the box that hold no text: the top border and the bottom border.
+const PROMPT_BORDER_ROWS: usize = 2;
+/// The note that the box shows when a job row is selected.
+const PROMPT_JOB_NOTE: &str = "GitHub cannot cancel one job. y cancels every job of this run.";
+/// The key that cancels the run.
+const PROMPT_KEY_CANCEL: &str = "y cancel the run";
+/// The text for each other key.
+const PROMPT_KEY_KEEP: &str = "any other key: keep";
+/// The text between the two keys when they share one line.
+const PROMPT_KEY_GAP: &str = "   ";
 /// The mark at the right end of the status line while a refresh cycle runs.
 const REFRESH_MARK: &str = "refreshing…";
 /// The least number of columns between the left part of the status line and
@@ -525,15 +543,16 @@ fn marker_color(state: RunState) -> Color {
 /// Draws one frame: the column header, the board rows, and the status line.
 ///
 /// The board rows come from [`Board::view`] with the frame height minus the
-/// two fixed lines. Times show in the time zone `tz`. This function never
-/// panics, whatever the size of the frame.
+/// two fixed lines. Times show in the time zone `tz`. With a `prompt`, the box
+/// of the cancel prompt draws last, over the rows (see [`draw_prompt`]). This
+/// function never panics, whatever the size of the frame.
 pub fn draw<Tz: TimeZone>(
     frame: &mut Frame,
     board: &mut Board,
     status: &Status,
     now: DateTime<Utc>,
     tz: &Tz,
-    _prompt: Option<&Confirm>,
+    prompt: Option<&Confirm>,
 ) where
     Tz::Offset: Display,
 {
@@ -620,6 +639,188 @@ pub fn draw<Tz: TimeZone>(
                 Style::default().fg(message_color(span(message.posted_at, now))),
             );
         }
+    }
+    if let Some(prompt) = prompt {
+        draw_prompt(buffer, area, prompt);
+    }
+}
+
+/// The part of the box of the cancel prompt, in the order of the box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptPart {
+    /// The repository.
+    Repo,
+    /// The workflow, the run ID, and the branch.
+    Run,
+    /// The title of the run.
+    Title,
+    /// The name of the job.
+    Job,
+    /// The note that GitHub cannot cancel one job.
+    Note,
+    /// The empty line above the keys.
+    Blank,
+}
+
+/// The order in which a low frame removes the parts of the box. The key lines
+/// never go.
+const PROMPT_DROP_ORDER: [PromptPart; 6] = [
+    PromptPart::Title,
+    PromptPart::Blank,
+    PromptPart::Note,
+    PromptPart::Job,
+    PromptPart::Run,
+    PromptPart::Repo,
+];
+
+/// Breaks `text` into lines of at most `width` columns.
+///
+/// A text that fits stays as it is. Else the break comes at spaces, and each
+/// line takes as many words as fit. A word wider than `width` is cut with
+/// [`truncate_to_budget`] and ends in `…`. The width is the display width, thus
+/// a wide glyph never crosses the end of a line. The result holds at least one
+/// line.
+fn wrap_line(text: &str, width: usize) -> Vec<String> {
+    if Span::raw(text).width() <= width {
+        return vec![text.to_owned()];
+    }
+    let mut wrapped = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0;
+    for word in text.split_whitespace() {
+        let word = if Span::raw(word).width() > width {
+            truncate_to_budget(word, width)
+        } else {
+            word.to_owned()
+        };
+        let word_width = Span::raw(word.as_str()).width();
+        if current.is_empty() {
+            current = word;
+            current_width = word_width;
+        } else if current_width + 1 + word_width <= width {
+            current.push(' ');
+            current.push_str(&word);
+            current_width += 1 + word_width;
+        } else {
+            wrapped.push(std::mem::replace(&mut current, word));
+            current_width = word_width;
+        }
+    }
+    wrapped.push(current);
+    wrapped
+}
+
+/// The key lines of the box for a text `width`: one line when both keys fit,
+/// else two lines.
+fn prompt_key_lines(width: usize) -> Vec<String> {
+    let joined = format!("{PROMPT_KEY_CANCEL}{PROMPT_KEY_GAP}{PROMPT_KEY_KEEP}");
+    if Span::raw(joined.as_str()).width() <= width {
+        return vec![joined];
+    }
+    [PROMPT_KEY_CANCEL, PROMPT_KEY_KEEP]
+        .into_iter()
+        .flat_map(|key| wrap_line(key, width))
+        .collect()
+}
+
+/// The parts of the box above the key lines, each one wrapped to `width`.
+fn prompt_parts(prompt: &Confirm, width: usize) -> Vec<(PromptPart, Vec<String>)> {
+    let mut run_line = format!("{} {}", prompt.workflow, prompt.run.0);
+    if !prompt.branch.is_empty() {
+        run_line.push_str(" on ");
+        run_line.push_str(&prompt.branch);
+    }
+    let mut parts = vec![
+        (PromptPart::Repo, prompt.repo.to_string()),
+        (PromptPart::Run, run_line),
+        (PromptPart::Title, prompt.title.clone()),
+    ];
+    if let Some(job) = &prompt.job {
+        parts.push((PromptPart::Job, format!("job: {job}")));
+        parts.push((PromptPart::Note, PROMPT_JOB_NOTE.to_owned()));
+    }
+    parts.push((PromptPart::Blank, String::new()));
+    parts
+        .into_iter()
+        .map(|(part, text)| (part, wrap_line(&text, width)))
+        .collect()
+}
+
+/// Converts a row or column count to `u16`. A count past the range of `u16`
+/// gives the largest value, and the caller clamps it to the frame.
+fn to_u16(count: usize) -> u16 {
+    u16::try_from(count).unwrap_or(u16::MAX)
+}
+
+/// Draws the box of the cancel prompt over the frame.
+///
+/// The box is at most 44 columns wide and sits in the middle of the columns.
+/// It sits in the middle of the board rows, between the column header and the
+/// status line. Its lines are the repository, the run, the title, the job and
+/// a note (for a job row only), an empty line, and the keys. Each line wraps
+/// at spaces to the text width, which is the outer width minus 4.
+///
+/// A frame that is too low drops whole parts, in this order: the title, the
+/// empty line, the note, the job, the run, the repository. The key lines
+/// stay. When the board rows cannot hold the border and the key lines, the box
+/// uses all rows of the frame. When even the frame cannot hold them, the box
+/// has no border and shows the key lines from the first row, as many as fit.
+fn draw_prompt(buffer: &mut Buffer, area: Rect, prompt: &Confirm) {
+    let outer = area.width.min(to_u16(PROMPT_WIDTH));
+    let x = area.x + (area.width - outer) / 2;
+    let height = usize::from(area.height);
+    let text_width = usize::from(outer).saturating_sub(PROMPT_FRAME_COLUMNS);
+    let keys = prompt_key_lines(text_width);
+    let board_rows = height.saturating_sub(FIXED_LINES);
+    let (first_row, rows) = if board_rows >= keys.len() + PROMPT_BORDER_ROWS {
+        (1, board_rows)
+    } else {
+        (0, height)
+    };
+    if rows < keys.len() + PROMPT_BORDER_ROWS {
+        let keys = prompt_key_lines(usize::from(outer));
+        let used = keys.len().min(height);
+        Clear.render(Rect::new(x, area.y, outer, to_u16(used)), buffer);
+        for (index, line) in keys.iter().take(used).enumerate() {
+            buffer.set_stringn(
+                x,
+                area.y + to_u16(index),
+                line,
+                usize::from(outer),
+                Style::default(),
+            );
+        }
+        return;
+    }
+    let mut parts = prompt_parts(prompt, text_width);
+    let room = rows - PROMPT_BORDER_ROWS;
+    let total = |parts: &[(PromptPart, Vec<String>)]| {
+        keys.len() + parts.iter().map(|(_, lines)| lines.len()).sum::<usize>()
+    };
+    for dropped in PROMPT_DROP_ORDER {
+        if total(&parts) <= room {
+            break;
+        }
+        parts.retain(|(part, _)| *part != dropped);
+    }
+    let text: Vec<&String> = parts
+        .iter()
+        .flat_map(|(_, lines)| lines)
+        .chain(&keys)
+        .collect();
+    let box_height = text.len() + PROMPT_BORDER_ROWS;
+    let y = area.y + to_u16(first_row + (rows - box_height) / 2);
+    let rect = Rect::new(x, y, outer, to_u16(box_height));
+    Clear.render(rect, buffer);
+    Block::bordered().title(PROMPT_TITLE).render(rect, buffer);
+    for (index, line) in text.into_iter().enumerate() {
+        buffer.set_stringn(
+            x + 2,
+            y + 1 + to_u16(index),
+            line,
+            text_width,
+            Style::default(),
+        );
     }
 }
 
@@ -2409,7 +2610,7 @@ mod tests {
         prompt.branch = String::new();
         let buffer = render_prompt(80, 16, &prompt);
         assert_eq!(
-            box_rows(&buffer, 18, 44, 5, 1),
+            box_rows(&buffer, 18, 44, 6, 1),
             vec!["│ CI 39149840084                           │"]
         );
     }
@@ -2468,11 +2669,12 @@ mod tests {
     fn a_frame_too_low_for_a_border_shows_the_key_line_alone() {
         let prompt = confirm("fix(ha): show the run ID", Some("build"));
         let key_line = "y cancel the run   any other key: keep";
-        let two = lines(&render_prompt(80, 2, &prompt));
-        assert_eq!(two[0].trim(), key_line);
-        assert!(two[1].starts_with("updated 30s ago"), "{:?}", two[1]);
-        let one = lines(&render_prompt(80, 1, &prompt));
-        assert_eq!(one[0].trim(), key_line);
+        let two = render_prompt(80, 2, &prompt);
+        // The box clears 44 columns of row 0. The status line stays on row 1.
+        assert_eq!(box_rows(&two, 18, 44, 0, 1)[0].trim_end(), key_line);
+        assert!(lines(&two)[1].starts_with("updated 30s ago"));
+        let one = render_prompt(80, 1, &prompt);
+        assert_eq!(box_rows(&one, 18, 44, 0, 1)[0].trim_end(), key_line);
     }
 
     #[test]
