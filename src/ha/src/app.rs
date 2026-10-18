@@ -1467,19 +1467,31 @@ mod tests {
 
     #[test]
     fn c_on_an_empty_board_does_nothing() {
-        let channels = channels();
-        let canceller = canceller();
+        // A key press clears the message, thus read the frame after `c` alone.
         let (result, frame) = run_app_with(
             Status::default(),
             &opener(false),
-            &canceller,
-            &channels,
-            vec![press(KeyCode::Char('c')), press(KeyCode::Char('y'))],
+            &canceller(),
+            &channels(),
+            vec![press(KeyCode::Char('c'))],
         );
         assert_eq!(result.unwrap_err().to_string(), "script ended");
         assert!(!shows_box(&frame), "{frame:?}");
-        assert!(canceller.cancels.borrow().is_empty());
         assert!(!frame[11].contains("cancelling"), "{:?}", frame[11]);
         assert!(!frame[11].contains("nothing to cancel"), "{:?}", frame[11]);
+    }
+
+    #[test]
+    fn y_after_c_on_an_empty_board_cancels_nothing() {
+        let canceller = canceller();
+        let (result, _) = run_app_with(
+            Status::default(),
+            &opener(false),
+            &canceller,
+            &channels(),
+            vec![press(KeyCode::Char('c')), press(KeyCode::Char('y'))],
+        );
+        assert_eq!(result.unwrap_err().to_string(), "script ended");
+        assert!(canceller.cancels.borrow().is_empty());
     }
 }
