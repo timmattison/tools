@@ -930,6 +930,43 @@ mod tests {
     }
 
     #[test]
+    fn the_header_names_the_workflow_column_with_the_whole_word() {
+        for width in [80_u16, 120, 200] {
+            let mut board = Board::new(Duration::from_hours(8));
+            board.replace(
+                repo("timmattison/tools"),
+                vec![run(
+                    391_498_400_841,
+                    "timmattison/tools",
+                    "CI",
+                    "main",
+                    "Fix the thing",
+                    RunState::Running,
+                    "2026-10-14T11:45:30Z",
+                    "2026-10-14T11:59:00Z",
+                )],
+            );
+            let text = lines(&render_with(width, 8, &mut board, &loaded()));
+            assert!(
+                text[0].split_whitespace().any(|word| word == "WORKFLOW"),
+                "width {width}: the header does not hold the whole word: {:?}",
+                text[0]
+            );
+            let name_column = text[2]
+                .split_once("CI")
+                .expect("the run row holds the workflow name")
+                .0
+                .chars()
+                .count();
+            assert_eq!(
+                header_column(&text, "WORKFLOW"),
+                name_column,
+                "width {width}: the header word and the workflow name start in different columns"
+            );
+        }
+    }
+
+    #[test]
     fn the_workflow_cell_ends_in_the_whole_run_id() {
         for (width, id) in [
             (120_u16, 39_149_840_084_u64),
