@@ -238,9 +238,11 @@ pub trait Source: Send + Sync {
 
     /// Tells the source that the worker stops fetching the jobs of a run.
     ///
-    /// The worker calls this when the run is finished and no job of it is
-    /// active. The worker fetches those jobs again only after the run changes
-    /// (for example a re-run), and then the old pages are stale. A source that
+    /// The worker calls this when the run has no active mark after a job
+    /// fetch. Then the run and its jobs are finished, or the run left the list
+    /// of runs, or its repository left the repository set. The worker fetches
+    /// those jobs again only after the run changes (for example a re-run), and
+    /// then the old pages are stale. A source that
     /// keeps a cache removes the pages of the jobs of that run. Without this
     /// call, the cache keeps the pages of every run whose jobs the worker ever
     /// fetched, which includes each run that was active.

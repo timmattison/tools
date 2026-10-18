@@ -216,6 +216,9 @@ struct State {
     /// fetch failed. A run keeps its mark when it leaves the watched set, so it
     /// gets one last fetch.
     job_marks: Mutex<HashMap<RunKey, RunFacts>>,
+    /// The runs whose job pages the source can still hold. It is each run that
+    /// the worker fetched since it last told the source to forget that run.
+    held_jobs: Mutex<BTreeSet<RunKey>>,
 }
 
 impl State {
@@ -229,6 +232,7 @@ impl State {
             watched: BTreeSet::new(),
             facts: Mutex::new(HashMap::new()),
             job_marks: Mutex::new(HashMap::new()),
+            held_jobs: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -383,8 +387,9 @@ fn apply_command(
 /// fetches the jobs of the runs that are due (the watched runs, the active
 /// runs, and the runs with a mark, when the list of runs holds the run), and
 /// reports the end of the cycle. A mark whose run left the list of runs is
-/// removed. A failed repository fetch keeps its old facts, thus its marks
-/// stay. Returns how long to wait before the next one, and whether the worker
+/// removed. The reconcile at the end of the job fetch then tells the source to
+/// forget the pages of each run whose mark went away. A failed repository
+/// fetch keeps its old facts, thus its marks stay. Returns how long to wait before the next one, and whether the worker
 /// waits for a rate limit reset.
 fn cycle<S: Source>(
     source: &S,
@@ -521,11 +526,12 @@ fn fetch_all<S: Source>(
 /// when the run is not watched and not active. A run with no facts loses its
 /// mark.
 ///
-/// When the mark is not active, the function tells the source to forget the
-/// pages of the jobs of the run, because the worker fetches them again only
-/// after the run changes. In every other case the source keeps its pages. An
-/// active mark makes the run due again on the next cycle. A run with no facts
-/// is not due again until a list of runs holds it.
+/// Each call of the source can leave pages in its cache, also a failed call.
+/// Thus the function records each fetched run in `held_jobs`. After the
+/// fetches, it tells the source to forget the pages of each held run that has
+/// no active mark. An active mark makes the run due again on the next cycle.
+/// A run with no mark is not due again until a change makes it due, so its
+/// pages have no use. This one step covers every way that a mark goes away.
 fn fetch_jobs<S: Source>(
     source: &S,
     state: &State,
@@ -534,6 +540,11 @@ fn fetch_jobs<S: Source>(
 ) -> Result<(), ReceiverGone> {
     run_pool(runs, updates, |(repo, run)| {
         let result = source.jobs_of(repo, *run);
+        state
+            .held_jobs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert((repo.clone(), *run));
         let facts = state
             .facts
             .lock()
@@ -541,49 +552,73 @@ fn fetch_jobs<S: Source>(
             .get(repo)
             .and_then(|runs| runs.get(run))
             .copied();
-        let (update, forget) = {
-            let mut marks = state
-                .job_marks
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            match (result, facts) {
-                (Ok(jobs), Some(facts)) => {
-                    let active = facts.active || jobs.iter().any(|job| job.state.is_active());
-                    marks.insert((repo.clone(), *run), RunFacts { active, ..facts });
-                    (Update::Jobs { run: *run, jobs }, !active)
-                }
-                (Ok(jobs), None) => {
-                    marks.remove(&(repo.clone(), *run));
-                    (Update::Jobs { run: *run, jobs }, false)
-                }
-                (Err(error), facts) => {
-                    let key = (repo.clone(), *run);
-                    match facts {
-                        Some(facts) => marks.insert(
-                            key,
-                            RunFacts {
-                                active: true,
-                                ..facts
-                            },
-                        ),
-                        None => marks.remove(&key),
-                    };
-                    (
-                        Update::JobsFailed {
-                            run: *run,
-                            error: error.to_string(),
+        let mut marks = state
+            .job_marks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match (result, facts) {
+            (Ok(jobs), Some(facts)) => {
+                let active = facts.active || jobs.iter().any(|job| job.state.is_active());
+                marks.insert((repo.clone(), *run), RunFacts { active, ..facts });
+                Update::Jobs { run: *run, jobs }
+            }
+            (Ok(jobs), None) => {
+                marks.remove(&(repo.clone(), *run));
+                Update::Jobs { run: *run, jobs }
+            }
+            (Err(error), facts) => {
+                let key = (repo.clone(), *run);
+                match facts {
+                    Some(facts) => marks.insert(
+                        key,
+                        RunFacts {
+                            active: true,
+                            ..facts
                         },
-                        false,
-                    )
+                    ),
+                    None => marks.remove(&key),
+                };
+                Update::JobsFailed {
+                    run: *run,
+                    error: error.to_string(),
                 }
             }
-        };
-        // No thread holds a lock during a call of the source.
-        if forget {
-            source.forget_jobs(repo, *run);
         }
-        update
-    })
+    })?;
+    forget_jobs_with_no_active_mark(source, state);
+    Ok(())
+}
+
+/// Tells the source to forget the pages of each held run with no active mark.
+///
+/// Only an active mark makes the worker fetch a run again. A held run with no
+/// mark, or with an inactive mark, is thus a run that the worker stops fetching.
+/// The function takes the runs in order and removes them from `held_jobs`. It
+/// drops both locks before the first call of the source.
+fn forget_jobs_with_no_active_mark<S: Source>(source: &S, state: &State) {
+    let stopped: Vec<RunKey> = {
+        let marks = state
+            .job_marks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut held = state
+            .held_jobs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let stopped: Vec<RunKey> = held
+            .iter()
+            .filter(|key| !marks.get(*key).is_some_and(|mark| mark.active))
+            .cloned()
+            .collect();
+        for key in &stopped {
+            held.remove(key);
+        }
+        stopped
+    };
+    // No thread holds a lock during a call of the source.
+    for (repo, run) in &stopped {
+        source.forget_jobs(repo, *run);
+    }
 }
 
 /// Turns each item into one [`Update`] with a pool of threads, and sends it.
