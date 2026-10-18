@@ -447,10 +447,23 @@ impl Board {
         }
     }
 
-    /// The address of the selected run, or `None` when the board has no run.
+    /// The address of the selected row, or `None` when the board has no run.
+    ///
+    /// On a run row, this is the address of the run. On a job row, this is the
+    /// address of the job, and the address of the run when the job has none.
     pub fn selected_url(&mut self, now: DateTime<Utc>) -> Option<String> {
         self.settle(now);
-        let Selection { run: (id, _), .. } = self.selected?;
+        let Selection {
+            run: (id, _),
+            job,
+        } = self.selected?;
+        let job_url = job
+            .and_then(|(_, index)| self.shown_jobs(id).get(index))
+            .map(|job| job.url.as_str())
+            .filter(|url| !url.is_empty());
+        if let Some(url) = job_url {
+            return Some(url.to_owned());
+        }
         self.shown_runs(now)
             .into_iter()
             .find(|run| run.id == id)
