@@ -4,6 +4,9 @@
 //! token of its own. This module starts `gh`, reads what it prints, and maps
 //! the answer to the types of the rest of the crate.
 //!
+//! The cancel of a run is the only request that changes something on GitHub.
+//! Every other request only reads.
+//!
 //! The bounded run of the `gh` child comes from the `runlimit` crate. Its
 //! `run_with_limit` starts a program and kills it when the time limit ends.
 
@@ -324,7 +327,15 @@ impl GhSource {
             args.extend(["-H", condition]);
         }
         args.push(path);
-        let output = self.run_gh(&args)?;
+        self.send(&args)
+    }
+
+    /// Runs `gh` with `args` and reads the answer of `gh api -i`.
+    ///
+    /// The rate limit headers go to the budget. A status of 400 or more gives
+    /// the error of [`http_error`].
+    fn send(&self, args: &[&str]) -> Result<Response, SourceError> {
+        let output = self.run_gh(args)?;
         let text = String::from_utf8_lossy(&output.stdout);
         let Some(response) = parse_response(&text) else {
             return Err(no_answer_error(&output));
