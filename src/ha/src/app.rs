@@ -1293,4 +1293,193 @@ mod tests {
         );
         assert!(frame[11].contains("cancelling run 1…"), "{:?}", frame[11]);
     }
+
+    /// The title that the box shows in the top border.
+    const BOX_TITLE: &str = " Cancel run? ";
+
+    fn shows_box(frame: &[String]) -> bool {
+        frame.iter().any(|line| line.contains(BOX_TITLE))
+    }
+
+    fn ctrl_c() -> Event {
+        key_event(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        )
+    }
+
+    #[test]
+    fn c_shows_the_box_with_the_repository_and_the_run() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let (_, frame) = run_app_with(
+            Status::default(),
+            &opener(false),
+            &canceller(),
+            &channels,
+            vec![press(KeyCode::Char('c'))],
+        );
+        assert!(shows_box(&frame), "{frame:?}");
+        assert!(
+            frame.iter().any(|l| l.contains("acme/widgets")),
+            "{frame:?}"
+        );
+        assert!(
+            frame.iter().any(|l| l.contains("ci 1 on main")),
+            "{frame:?}"
+        );
+    }
+
+    #[test]
+    fn c_on_a_job_row_shows_the_name_of_the_job_in_the_box() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let steps = vec![
+            key(KeyCode::Right),
+            Step::Send(Update::Jobs {
+                run: RunId(1),
+                jobs: vec![job(10, "build")],
+            }),
+            Step::Idle,
+            key(KeyCode::Down),
+            key(KeyCode::Char('c')),
+            Step::Idle,
+        ];
+        let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
+        let tz = FixedOffset::east_opt(0).unwrap();
+        let clock = now;
+        let canceller = canceller();
+        let opener = opener(false);
+        let mut app = App::new(
+            Board::new(Duration::from_hours(8)),
+            Status::default(),
+            &opener,
+            &canceller,
+            &channels.worker,
+            &clock,
+            &tz,
+        );
+        let mut events = StepEvents {
+            steps: steps.into(),
+            updates: channels.updates.clone(),
+        };
+        let result = app.run(&mut terminal, &mut events);
+        assert_eq!(result.unwrap_err().to_string(), "script ended");
+        let frame = lines(terminal.backend().buffer());
+        assert!(shows_box(&frame), "{frame:?}");
+        assert!(frame.iter().any(|l| l.contains("job: build")), "{frame:?}");
+    }
+
+    #[test]
+    fn c_and_y_on_a_job_row_cancel_the_run_of_the_job() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let canceller = canceller();
+        run_steps_cancelling(
+            &channels,
+            &canceller,
+            vec![
+                key(KeyCode::Right),
+                Step::Send(Update::Jobs {
+                    run: RunId(1),
+                    jobs: vec![job(10, "build")],
+                }),
+                Step::Idle,
+                key(KeyCode::Down),
+                key(KeyCode::Char('c')),
+                key(KeyCode::Char('y')),
+                key(KeyCode::Char('q')),
+            ],
+        );
+        assert_eq!(*canceller.cancels.borrow(), vec![(repo(), RunId(1))]);
+    }
+
+    /// Runs the keys `c` and then `other` on a board of two runs, and returns
+    /// the result, the last frame, the cancels, and the addresses opened.
+    fn answer_the_box_with(other: Event) -> (std::io::Result<()>, Vec<String>, usize, Vec<String>) {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
+        let canceller = canceller();
+        let opener = opener(false);
+        let (result, frame) = run_app_with(
+            Status::default(),
+            &opener,
+            &canceller,
+            &channels,
+            vec![press(KeyCode::Char('c')), other, press(KeyCode::Enter)],
+        );
+        let cancels = canceller.cancels.borrow().len();
+        let urls = opener.urls.borrow().clone();
+        (result, frame, cancels, urls)
+    }
+
+    #[test]
+    fn every_key_but_y_closes_the_box_and_cancels_nothing() {
+        let others = [
+            press(KeyCode::Char('n')),
+            press(KeyCode::Esc),
+            press(KeyCode::Char('q')),
+            press(KeyCode::Enter),
+            press(KeyCode::Down),
+        ];
+        for other in others {
+            let (result, frame, cancels, _) = answer_the_box_with(other.clone());
+            // The loop did not quit: it read the last key, then the script ended.
+            assert_eq!(result.unwrap_err().to_string(), "script ended", "{other:?}");
+            assert_eq!(cancels, 0, "{other:?}");
+            assert!(!shows_box(&frame), "{other:?} {frame:?}");
+        }
+    }
+
+    #[test]
+    fn enter_with_the_box_open_opens_nothing_and_down_does_not_move_the_highlight() {
+        // After `c` and Enter, the Enter that follows opens the first row.
+        let (_, _, _, urls) = answer_the_box_with(press(KeyCode::Enter));
+        assert_eq!(urls, ["https://example.test/runs/2"]);
+        // After `c` and Down, the Enter that follows opens the first row too.
+        let (_, _, _, urls) = answer_the_box_with(press(KeyCode::Down));
+        assert_eq!(urls, ["https://example.test/runs/2"]);
+    }
+
+    #[test]
+    fn a_run_that_moves_the_highlight_does_not_change_the_run_that_y_cancels() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
+        let canceller = canceller();
+        run_steps_cancelling(
+            &channels,
+            &canceller,
+            vec![
+                Step::Idle,
+                key(KeyCode::Char('c')),
+                Step::Send(Update::Runs {
+                    repo: repo(),
+                    runs: vec![active_run(1, 5), active_run(3, 60)],
+                }),
+                Step::Idle,
+                key(KeyCode::Char('y')),
+                key(KeyCode::Char('q')),
+            ],
+        );
+        assert_eq!(*canceller.cancels.borrow(), vec![(repo(), RunId(2))]);
+    }
+
+    #[test]
+    fn c_on_an_empty_board_does_nothing() {
+        let channels = channels();
+        let canceller = canceller();
+        let (result, frame) = run_app_with(
+            Status::default(),
+            &opener(false),
+            &canceller,
+            &channels,
+            vec![press(KeyCode::Char('c')), press(KeyCode::Char('y'))],
+        );
+        assert_eq!(result.unwrap_err().to_string(), "script ended");
+        assert!(!shows_box(&frame), "{frame:?}");
+        assert!(canceller.cancels.borrow().is_empty());
+        assert!(!frame[11].contains("cancelling"), "{:?}", frame[11]);
+        assert!(!frame[11].contains("nothing to cancel"), "{:?}", frame[11]);
+    }
 }
