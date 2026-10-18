@@ -272,7 +272,7 @@ mod tests {
     use ratatui::buffer::Buffer;
 
     use super::*;
-    use crate::run::{Run, RunId, RunNumber, RunState};
+    use crate::run::{Run, RunId, RunState};
     use crate::target::{OwnerName, RepoName};
     use crate::worker::{Command, Update};
 
@@ -369,7 +369,6 @@ mod tests {
     fn active_run(id: u64, started: i64) -> Run {
         Run {
             id: RunId(id),
-            number: RunNumber(id + 100),
             repo: repo(),
             workflow: "ci".to_owned(),
             branch: "main".to_owned(),

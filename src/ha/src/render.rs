@@ -19,19 +19,16 @@ use crate::status::{Status, MESSAGE_LIFETIME};
 
 /// The width of the marker column.
 const MARKER_WIDTH: usize = 1;
-/// The width of the run column. It fits `#999999`.
-const RUN_WIDTH: usize = 7;
+/// The width of the ID part. It fits an ID of 12 digits. On 2026-10-18, run
+/// IDs have 11 digits and job IDs have 12 digits.
+const ID_WIDTH: usize = 12;
 /// The width of the started column.
 const STARTED_WIDTH: usize = 11;
 /// The width of the time column.
 const TIME_WIDTH: usize = 7;
-/// The width of the finished column.
-const FINISHED_WIDTH: usize = 8;
-/// The columns that the text columns do not share: the marker, the run,
-/// started, time, and finished columns, and the eight spaces between the
-/// columns.
-const FIXED_COLUMNS: usize =
-    MARKER_WIDTH + RUN_WIDTH + STARTED_WIDTH + TIME_WIDTH + FINISHED_WIDTH + 8;
+/// The columns that the text columns do not share: the marker, the ID part,
+/// started, and time columns, and the seven spaces between the columns.
+const FIXED_COLUMNS: usize = MARKER_WIDTH + ID_WIDTH + STARTED_WIDTH + TIME_WIDTH + 7;
 /// The lines that are not board rows: the column header and the status line.
 const FIXED_LINES: usize = 2;
 /// The text that stands between two parts of the status line.
@@ -54,14 +51,16 @@ struct Widths {
 }
 
 impl Widths {
-    /// Shares the columns that the fixed columns leave over: 25 percent to the
-    /// repository, 20 percent to the workflow, 20 percent to the branch, and
-    /// the rest to the title. A frame that is too narrow gives each 0.
+    /// Shares the columns that the fixed columns leave over: 24 percent to the
+    /// repository, 19 percent to the workflow name, 21 percent to the branch,
+    /// and the rest to the title. A workflow name is usually short, and a
+    /// person reads the branch and the title to find what runs. A frame that
+    /// is too narrow gives each 0.
     fn for_width(width: usize) -> Widths {
         let room = width.saturating_sub(FIXED_COLUMNS);
-        let repo = room * 25 / 100;
-        let workflow = room * 20 / 100;
-        let branch = room * 20 / 100;
+        let repo = room * 24 / 100;
+        let workflow = room * 19 / 100;
+        let branch = room * 21 / 100;
         Widths {
             repo,
             workflow,
@@ -78,7 +77,7 @@ fn fit(text: &str, width: usize) -> String {
 
 /// Cuts a text to a column width, then pads it on the left to that width.
 ///
-/// The text must be ASCII, for example `#1234`, because the padding counts
+/// The text must be ASCII, for example the ID `39149840084`, because the padding counts
 /// characters. The cut uses `textfit` and so is safe for any text.
 fn fit_right(text: &str, width: usize) -> String {
     let cut = truncate_to_budget(text, width);
@@ -87,51 +86,70 @@ fn fit_right(text: &str, width: usize) -> String {
 }
 
 /// Joins the cells of one row into one line. One space stands between cells.
+///
+/// The ID part stands after the workflow cell, and `id` is right-aligned in it.
+/// The header line does not come from this function. `header_cells` builds it.
 fn cells(
     widths: Widths,
     marker: &str,
     texts: [&str; 4],
-    run: &str,
+    id: &str,
     started: &str,
     time: &str,
-    finished: &str,
 ) -> String {
     let [repo, workflow, branch, title] = texts;
     [
         pad_right(marker, MARKER_WIDTH),
         fit(repo, widths.repo),
         fit(workflow, widths.workflow),
-        fit_right(run, RUN_WIDTH),
+        fit_right(id, ID_WIDTH),
         fit(branch, widths.branch),
         fit(title, widths.title),
         pad_right(started, STARTED_WIDTH),
         pad_right(time, TIME_WIDTH),
-        pad_right(finished, FINISHED_WIDTH),
     ]
     .join(" ")
 }
 
-/// Joins the cells of one job row or status row into one line.
+/// Joins the cells of the header line. One space stands between cells.
 ///
-/// One text cell takes the place of the repository, workflow, run, branch, and
-/// title cells. It has the width of those five cells and the four spaces
-/// between them. Thus the started, time, and finished cells stand in the same
-/// columns as those of a run row.
-fn wide_cells(
+/// The word `WORKFLOW` fills the workflow cell, one space, and the ID part. Thus the
+/// whole word shows at every frame width, and it heads the workflow name and the ID.
+/// The other cells stand in the same columns as those of a run row.
+fn header_cells(widths: Widths) -> String {
+    [
+        pad_right(" ", MARKER_WIDTH),
+        fit("REPO", widths.repo),
+        fit("WORKFLOW", widths.workflow + 1 + ID_WIDTH),
+        fit("BRANCH", widths.branch),
+        fit("TITLE", widths.title),
+        pad_right("STARTED", STARTED_WIDTH),
+        pad_right("TIME", TIME_WIDTH),
+    ]
+    .join(" ")
+}
+
+/// Joins the cells of one job row into one line. One space stands between cells.
+///
+/// The text fills the repository cell, one space, and the workflow-name cell.
+/// The job ID stands in the ID part of a run row, right-aligned. The branch and
+/// title columns stay blank. Thus the ID, started, and time cells stand in the
+/// same columns as those of a run row, at every frame width.
+fn job_cells(
     widths: Widths,
     marker: &str,
     text: &str,
+    id: &str,
     started: &str,
     time: &str,
-    finished: &str,
 ) -> String {
-    let text_width = widths.repo + widths.workflow + RUN_WIDTH + widths.branch + widths.title + 4;
     [
         pad_right(marker, MARKER_WIDTH),
-        fit(text, text_width),
+        fit(text, widths.repo + 1 + widths.workflow),
+        fit_right(id, ID_WIDTH),
+        " ".repeat(widths.branch + 1 + widths.title),
         pad_right(started, STARTED_WIDTH),
         pad_right(time, TIME_WIDTH),
-        pad_right(finished, FINISHED_WIDTH),
     ]
     .join(" ")
 }
@@ -180,13 +198,10 @@ fn run_line<Tz: TimeZone>(
 where
     Tz::Offset: Display,
 {
-    let (time, finished) = if state.is_active() {
-        (format_elapsed(span(run.started_at, now)), String::new())
+    let time = if state.is_active() {
+        format_elapsed(span(run.started_at, now))
     } else {
-        (
-            format_elapsed(span(run.started_at, run.updated_at)),
-            format_ago(span(run.updated_at, now)),
-        )
+        format_elapsed(span(run.started_at, run.updated_at))
     };
     cells(
         widths,
@@ -197,17 +212,17 @@ where
             &run.branch,
             &run.title,
         ],
-        &format!("#{}", run.number.0),
+        &run.id.0.to_string(),
         &format_started(run.started_at, now, tz),
         &time,
-        &finished,
     )
 }
 
 /// The line of one job of an expanded run.
 ///
 /// The text cell holds the tree glyph (`└` when `last` is true, else `├`), a
-/// space, and the name of the job.
+/// space, and the name of the job. The job ID follows, in the columns of the
+/// run ID.
 ///
 /// A job that waits did not start, thus its started cell is empty. Its time
 /// cell shows how long it waited, from its creation until `now`, and is empty
@@ -248,18 +263,14 @@ where
             }),
         )
     };
-    let finished = match job.completed_at {
-        Some(done) if !job.state.is_active() => format_ago(span(done, now)),
-        _ => String::new(),
-    };
     let glyph = if last { TREE_LAST } else { TREE_MIDDLE };
-    wide_cells(
+    job_cells(
         widths,
         marker(job.state),
         &format!("{glyph} {}", job.name),
+        &job.id.0.to_string(),
         &started,
         &time,
-        &finished,
     )
 }
 
@@ -535,20 +546,7 @@ pub fn draw<Tz: TimeZone>(
     let loaded = status.last_refresh.is_some();
     let bold = Style::default().add_modifier(Modifier::BOLD);
     let buffer = frame.buffer_mut();
-    put(
-        buffer,
-        0,
-        &cells(
-            widths,
-            " ",
-            ["REPO", "WORKFLOW", "BRANCH", "TITLE"],
-            "RUN",
-            "STARTED",
-            "TIME",
-            "FINISHED",
-        ),
-        bold,
-    );
+    put(buffer, 0, &header_cells(widths), bold);
     let view = board.view(now, height);
     for (index, row) in view.rows.iter().enumerate() {
         match row {
@@ -644,27 +642,6 @@ pub fn format_elapsed(d: Duration) -> String {
     }
 }
 
-/// Writes how long ago a run finished, with one unit.
-///
-/// Examples are `45s ago`, `12m ago`, `2h ago`, and `3d ago`. A duration of
-/// 100 days or more gives `>99d ago`.
-#[must_use]
-pub fn format_ago(d: Duration) -> String {
-    let total = d.as_secs();
-    let (minute, hour, day) = (60, 3_600, 86_400);
-    if total < minute {
-        format!("{total}s ago")
-    } else if total < hour {
-        format!("{}m ago", total / minute)
-    } else if total < day {
-        format!("{}h ago", total / hour)
-    } else if total < 100 * day {
-        format!("{}d ago", total / day)
-    } else {
-        ">99d ago".to_owned()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -677,7 +654,7 @@ mod tests {
     use ratatui::Terminal;
 
     use crate::job::{Job, JobId};
-    use crate::run::{Run, RunId, RunNumber, RunState};
+    use crate::run::{Run, RunId, RunState};
     use crate::status::{Message, RateLimit};
     use crate::target::{OwnerName, RepoName};
 
@@ -715,7 +692,6 @@ mod tests {
     ) -> Run {
         Run {
             id: RunId(id),
-            number: RunNumber(id + 100),
             repo: repo(repo_text),
             workflow: workflow.to_owned(),
             branch: branch.to_owned(),
@@ -837,6 +813,80 @@ mod tests {
         }
     }
 
+    /// These lines are the target example of issue #571, with the two section
+    /// headers added.
+    #[test]
+    fn a_frame_of_120_columns_has_the_target_layout_of_issue_571() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("timmattison/tools"),
+            vec![run(
+                39_149_840_084,
+                "timmattison/tools",
+                "CI",
+                "main",
+                "Fix the thing",
+                RunState::Running,
+                "2026-10-14T11:45:30Z",
+                "2026-10-14T11:59:00Z",
+            )],
+        );
+        board.replace(
+            repo("acme/widgets"),
+            vec![run(
+                39_149_711_502,
+                "acme/widgets",
+                "Release",
+                "issue-11",
+                "Bump deps",
+                RunState::Passed,
+                "2026-10-14T09:00:00Z",
+                "2026-10-14T09:10:05Z",
+            )],
+        );
+        board.expand(now());
+        board.set_jobs(
+            RunId(39_149_840_084),
+            vec![
+                job(
+                    107_851_237_794,
+                    "build",
+                    RunState::Passed,
+                    Some("2026-10-14T11:45:40Z"),
+                    Some("2026-10-14T11:50:00Z"),
+                ),
+                job(
+                    107_851_237_795,
+                    "lint",
+                    RunState::Failed,
+                    Some("2026-10-14T11:46:00Z"),
+                    Some("2026-10-14T11:46:45Z"),
+                ),
+                job(
+                    107_851_237_796,
+                    "test",
+                    RunState::Running,
+                    Some("2026-10-14T11:50:10Z"),
+                    None,
+                ),
+            ],
+        );
+        let text = lines(&render_with(120, 10, &mut board, &loaded()));
+        assert_eq!(
+            text[0..8],
+            [
+                "  REPO                WORKFLOW                     BRANCH            TITLE                           STARTED     TIME",
+                "Running · 1",
+                "● timmattison/tools   CI               39149840084 main              Fix the thing                   11:45:30    14m 30s",
+                "✓ ├ build                             107851237794                                                   11:45:40    4m 20s",
+                "✗ ├ lint                              107851237795                                                   11:46:00    45s",
+                "● └ test                              107851237796                                                   11:50:10    9m 50s",
+                "Last 8h · 1 passed · 0 failed",
+                "✓ acme/widgets        Release          39149711502 issue-11          Bump deps                       09:00:00    10m 05s",
+            ]
+        );
+    }
+
     #[test]
     fn the_frame_holds_the_header_the_rows_and_the_status_line() {
         let mut board = four_run_board();
@@ -844,13 +894,13 @@ mod tests {
         assert_eq!(
             lines(&buffer),
             [
-                "  REPO                WORKFLOW            RUN BRANCH          TITLE                         STARTED     TIME    FINISHED",
+                "  REPO                WORKFLOW                     BRANCH            TITLE                           STARTED     TIME",
                 "Running · 2",
-                "● timmattison/tools   CI                 #101 main            Fix the thing                 11:45:30    14m 30s",
-                "○ acme/widgets        Release            #102 issue-12        Add release job               11:58:00    2m 00s",
+                "● timmattison/tools   CI                         1 main              Fix the thing                   11:45:30    14m 30s",
+                "○ acme/widgets        Release                    2 issue-12          Add release job                 11:58:00    2m 00s",
                 "Last 8h · 1 passed · 1 failed",
-                "✓ timmattison/tools   CI                 #103 main            Bump deps                     09:00:00    10m 05s 2h ago",
-                "✗ acme/widgets        Release            #104 issue-11        Broken build                  10-13 23:50 4h 40m  7h ago",
+                "✓ timmattison/tools   CI                         3 main              Bump deps                       09:00:00    10m 05s",
+                "✗ acme/widgets        Release                    4 issue-11          Broken build                    10-13 23:50 4h 40m",
                 "",
                 "",
                 "updated 30s ago      ·  ↑↓ select  →← jobs  ⏎ open  r refresh  q quit",
@@ -863,43 +913,171 @@ mod tests {
         line.chars().skip(from).take(count).collect()
     }
 
-    /// The first column of the run column in a frame of 120 columns. The
-    /// marker, the repository (19), and the workflow (15) come before it.
-    const RUN_COLUMN: usize = 1 + 1 + 19 + 1 + 15 + 1;
-
     #[test]
-    fn the_run_column_shows_the_run_number_aligned_to_the_right() {
-        let mut board = four_run_board();
-        let text = lines(&render_with(120, 10, &mut board, &loaded()));
-        assert_eq!(columns(&text[0], RUN_COLUMN, 7), "    RUN");
-        assert_eq!(columns(&text[2], RUN_COLUMN, 7), "   #101");
-        assert_eq!(columns(&text[3], RUN_COLUMN, 7), "   #102");
-        assert_eq!(columns(&text[5], RUN_COLUMN, 7), "   #103");
-        assert_eq!(columns(&text[6], RUN_COLUMN, 7), "   #104");
-    }
-
-    #[test]
-    fn a_run_number_wider_than_the_column_is_cut_and_keeps_the_other_columns() {
+    fn a_run_id_wider_than_the_id_part_is_cut_and_keeps_the_other_columns() {
         let mut board = Board::new(Duration::from_hours(8));
         board.replace(
             repo("acme/widgets"),
             vec![run(
-                1_234_467,
+                1_234_567_890_123,
                 "acme/widgets",
                 "CI",
                 "main",
-                "Wide number",
+                "Wide ID",
                 RunState::Running,
                 "2026-10-14T11:45:30Z",
                 "2026-10-14T11:59:00Z",
             )],
         );
         let text = lines(&render_with(120, 10, &mut board, &loaded()));
-        assert_eq!(columns(&text[2], RUN_COLUMN, 7), "#12345…");
-        let started = text[0]
-            .find("STARTED")
-            .expect("the header names the started column");
-        assert_eq!(columns(&text[2], started, 8), "11:45:30");
+        let branch = header_column(&text, "BRANCH");
+        assert_eq!(
+            columns(&text[2], branch - 1 - ID_WIDTH, ID_WIDTH),
+            "12345678901…"
+        );
+        assert_eq!(started_cells(&text, 2), "11:45:30");
+    }
+
+    #[test]
+    fn the_header_names_the_workflow_column_with_the_whole_word() {
+        for width in [80_u16, 120, 200] {
+            let mut board = Board::new(Duration::from_hours(8));
+            board.replace(
+                repo("timmattison/tools"),
+                vec![run(
+                    391_498_400_841,
+                    "timmattison/tools",
+                    "CI",
+                    "main",
+                    "Fix the thing",
+                    RunState::Running,
+                    "2026-10-14T11:45:30Z",
+                    "2026-10-14T11:59:00Z",
+                )],
+            );
+            let text = lines(&render_with(width, 8, &mut board, &loaded()));
+            assert!(
+                text[0].split_whitespace().any(|word| word == "WORKFLOW"),
+                "width {width}: the header does not hold the whole word: {:?}",
+                text[0]
+            );
+            let name_column = text[2]
+                .split_once("CI")
+                .expect("the run row holds the workflow name")
+                .0
+                .chars()
+                .count();
+            assert_eq!(
+                header_column(&text, "WORKFLOW"),
+                name_column,
+                "width {width}: the header word and the workflow name start in different columns"
+            );
+        }
+    }
+
+    #[test]
+    fn the_workflow_cell_ends_in_the_whole_run_id() {
+        for (width, id) in [
+            (120_u16, 39_149_840_084_u64),
+            (80, 391_498_400_841),
+            (200, 391_498_400_841),
+        ] {
+            let mut board = Board::new(Duration::from_hours(8));
+            board.replace(
+                repo("timmattison/tools"),
+                vec![run(
+                    id,
+                    "timmattison/tools",
+                    "CI",
+                    "main",
+                    "Fix the thing",
+                    RunState::Running,
+                    "2026-10-14T11:45:30Z",
+                    "2026-10-14T11:59:00Z",
+                )],
+            );
+            let text = lines(&render_with(width, 8, &mut board, &loaded()));
+            assert!(
+                !text[0].split_whitespace().any(|word| word == "RUN"),
+                "width {width}, ID {id}: the header holds a RUN word: {:?}",
+                text[0]
+            );
+            let from = header_column(&text, "WORKFLOW");
+            let branch = header_column(&text, "BRANCH");
+            let cell = columns(&text[2], from, branch - 1 - from);
+            assert!(
+                cell.starts_with("CI"),
+                "width {width}, ID {id}: the cell does not start with the name: {cell:?}"
+            );
+            assert!(
+                cell.ends_with(&id.to_string()),
+                "width {width}, ID {id}: the cell does not end in the whole ID: {cell:?}"
+            );
+            assert_eq!(
+                columns(&text[2], branch - 1, 1),
+                " ",
+                "width {width}, ID {id}: no space stands before the branch cell"
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_workflow_name_is_cut_and_the_run_id_stays_whole() {
+        let long_name = "日本語のワークフロー🎉".repeat(4);
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("timmattison/tools"),
+            vec![
+                run(
+                    39_149_840_084,
+                    "timmattison/tools",
+                    "CI",
+                    "feature-x",
+                    "Short",
+                    RunState::Running,
+                    "2026-10-14T11:45:30Z",
+                    "2026-10-14T11:59:00Z",
+                ),
+                run(
+                    39_149_840_085,
+                    "timmattison/tools",
+                    &long_name,
+                    "feature-x",
+                    "Long",
+                    RunState::Running,
+                    "2026-10-14T11:46:30Z",
+                    "2026-10-14T11:59:00Z",
+                ),
+            ],
+        );
+        let text = lines(&render_with(120, 8, &mut board, &loaded()));
+        let (short, long) = (&text[2], &text[3]);
+        assert!(long.contains("日本語"), "the name lost its start: {long:?}");
+        let (before_id, _) = long
+            .split_once("39149840085")
+            .unwrap_or_else(|| panic!("the whole ID is missing: {long:?}"));
+        assert!(
+            before_id.trim_end().ends_with('…'),
+            "the name does not end in an ellipsis before the ID: {long:?}"
+        );
+        let end_of = |line: &str, id: &str| {
+            let (before, _) = line
+                .split_once(id)
+                .unwrap_or_else(|| panic!("{id} is missing: {line:?}"));
+            display_width(before) + display_width(id)
+        };
+        assert_eq!(
+            end_of(long, "39149840085"),
+            end_of(short, "39149840084"),
+            "the IDs end in different columns"
+        );
+        let branch_at = |line: &str| {
+            let (before, _) = line
+                .split_once("feature-x")
+                .unwrap_or_else(|| panic!("the branch is missing: {line:?}"));
+            display_width(before)
+        };
+        assert_eq!(branch_at(long), branch_at(short), "the branches move");
     }
 
     #[test]
@@ -979,23 +1157,6 @@ mod tests {
     }
 
     #[test]
-    fn format_ago_writes_one_unit_and_a_cap() {
-        let cases: [(u64, &str); 8] = [
-            (0, "0s ago"),
-            (45, "45s ago"),
-            (12 * 60 + 30, "12m ago"),
-            (2 * 3_600 + 59, "2h ago"),
-            (3 * 86_400 + 5, "3d ago"),
-            (99 * 86_400 + 86_399, "99d ago"),
-            (100 * 86_400, ">99d ago"),
-            (u64::MAX, ">99d ago"),
-        ];
-        for (seconds, expected) in cases {
-            assert_eq!(format_ago(Duration::from_secs(seconds)), expected);
-        }
-    }
-
-    #[test]
     fn each_marker_has_the_color_of_its_state() {
         let mut board = four_run_board();
         let buffer = render_with(120, 10, &mut board, &Status::default());
@@ -1063,12 +1224,22 @@ mod tests {
         assert!(!buffer[(2, 2)].modifier.contains(Modifier::BOLD));
     }
 
+    /// The first column of the first word `word` in the header line of a frame.
+    /// The header is ASCII, but the count is in characters.
+    fn header_column(text: &[String], word: &str) -> usize {
+        let (before, _) = text[0]
+            .split_once(word)
+            .expect("the header names the column");
+        before.chars().count()
+    }
+
+    /// The text of the started column of line `y`. The column stands where
+    /// the header of the same frame puts `STARTED`.
     fn started_cells(text: &[String], y: usize) -> String {
-        // The started column starts after 1 + 21 + 17 + 17 + 31 + 5 spaces.
         text[y]
             .chars()
-            .skip(92)
-            .take(11)
+            .skip(header_column(text, "STARTED"))
+            .take(STARTED_WIDTH)
             .collect::<String>()
             .trim_end()
             .to_owned()
@@ -1135,16 +1306,20 @@ mod tests {
         assert_eq!(started_cells(&text, 2), "01:00:00");
     }
 
-    /// The text of the time and finished columns of line `y`.
-    fn time_cells(text: &[String], y: usize) -> (String, String) {
-        // After the started column: 1 + 21 + 17 + 17 + 31 + 11 + 6 spaces.
-        let time: String = text[y].chars().skip(104).take(7).collect();
-        let finished: String = text[y].chars().skip(112).take(8).collect();
-        (time.trim_end().to_owned(), finished.trim_end().to_owned())
+    /// The text of the time column of line `y`. The column stands where the
+    /// header of the same frame puts `TIME`.
+    fn time_cells(text: &[String], y: usize) -> String {
+        text[y]
+            .chars()
+            .skip(header_column(text, "TIME"))
+            .take(TIME_WIDTH)
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
     }
 
     #[test]
-    fn an_active_run_shows_the_time_since_the_start_and_no_finish() {
+    fn an_active_run_shows_the_time_since_the_start() {
         let mut board = Board::new(Duration::from_hours(8));
         board.replace(
             repo("a/x"),
@@ -1160,11 +1335,11 @@ mod tests {
             )],
         );
         let text = lines(&render_with(120, 8, &mut board, &Status::default()));
-        assert_eq!(time_cells(&text, 2), ("1h 14m".to_owned(), String::new()));
+        assert_eq!(time_cells(&text, 2), "1h 14m");
     }
 
     #[test]
-    fn a_finished_run_shows_its_own_duration_and_the_time_since_it_ended() {
+    fn a_finished_run_shows_its_own_duration() {
         let mut board = Board::new(Duration::from_hours(8));
         board.replace(
             repo("a/x"),
@@ -1180,10 +1355,7 @@ mod tests {
             )],
         );
         let text = lines(&render_with(120, 8, &mut board, &Status::default()));
-        assert_eq!(
-            time_cells(&text, 4),
-            ("3m 07s".to_owned(), "1h ago".to_owned())
-        );
+        assert_eq!(time_cells(&text, 4), "3m 07s");
     }
 
     /// A job with the state `state`. `None` times stand for a job that GitHub
@@ -1241,6 +1413,19 @@ mod tests {
         ]
     }
 
+    /// The expected line of a job row at 120 columns. The widths follow the
+    /// shares of the 82 columns of room: 19 repository, 15 workflow name, 17
+    /// branch, and 31 title. The text fills 35 columns, the job ID fills 12, and
+    /// the branch and title columns are 49 blank columns.
+    fn job_golden(marker: &str, text: &str, id: u64, times: &str) -> String {
+        format!(
+            "{marker} {text:<35} {id:>ID_WIDTH$} {blank:<49} {times}",
+            blank = ""
+        )
+        .trim_end()
+        .to_owned()
+    }
+
     #[test]
     fn the_jobs_of_an_expanded_run_stand_below_it_in_the_run_columns() {
         let mut board = board_with_jobs(three_jobs());
@@ -1248,14 +1433,174 @@ mod tests {
         assert_eq!(
             text[2..6],
             [
-                "● timmattison/tools   CI                 #101 main            Fix the thing                 11:45:30    14m 30s".to_owned(),
-                format!("✓ {:<89} 11:45:40    4m 20s  10m ago", "├ build"),
-                format!("✗ {:<89} 11:46:00    45s     13m ago", "├ lint"),
-                format!("● {:<89} 11:50:10    9m 50s", "└ test"),
+                "● timmattison/tools   CI                         1 main              Fix the thing                   11:45:30    14m 30s".to_owned(),
+                job_golden("✓", "├ build", 12, "11:45:40    4m 20s"),
+                job_golden("✗", "├ lint", 13, "11:46:00    45s"),
+                job_golden("●", "└ test", 11, "11:50:10    9m 50s"),
             ]
             .map(|line| line.trim_end().to_owned())
         );
         assert!(text[6].starts_with("○ acme/widgets"), "{:?}", text[6]);
+    }
+
+    /// The display column of the last digit of the first `digits` in `line`.
+    fn last_digit_column(line: &str, digits: &str) -> Option<usize> {
+        let (before, _) = line.split_once(digits)?;
+        Some(display_width(before) + display_width(digits) - 1)
+    }
+
+    #[test]
+    fn each_job_id_ends_in_the_column_of_the_run_id() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("timmattison/tools"),
+            vec![run(
+                39_149_840_084,
+                "timmattison/tools",
+                "CI",
+                "main",
+                "Fix the thing",
+                RunState::Running,
+                "2026-10-14T11:45:30Z",
+                "2026-10-14T11:59:00Z",
+            )],
+        );
+        board.expand(now());
+        board.set_jobs(
+            RunId(39_149_840_084),
+            vec![
+                job(
+                    107_851_237_796,
+                    "test",
+                    RunState::Running,
+                    Some("2026-10-14T11:50:10Z"),
+                    None,
+                ),
+                job(
+                    107_851_237_794,
+                    "build",
+                    RunState::Passed,
+                    Some("2026-10-14T11:45:40Z"),
+                    Some("2026-10-14T11:50:00Z"),
+                ),
+                job(
+                    107_851_237_795,
+                    "lint",
+                    RunState::Failed,
+                    Some("2026-10-14T11:46:00Z"),
+                    Some("2026-10-14T11:46:45Z"),
+                ),
+            ],
+        );
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        let run_column = last_digit_column(&text[2], "39149840084")
+            .unwrap_or_else(|| panic!("the run row holds its ID: {:?}", text[2]));
+        for (y, start, id) in [
+            (3, "✓ ├ build", "107851237794"),
+            (4, "✗ ├ lint", "107851237795"),
+            (5, "● └ test", "107851237796"),
+        ] {
+            assert!(text[y].starts_with(start), "job {start}: {:?}", text[y]);
+            assert_eq!(
+                last_digit_column(&text[y], id),
+                Some(run_column),
+                "job {start}: {:?}",
+                text[y]
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_job_name_is_cut_and_keeps_the_job_id_and_the_time_columns() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("timmattison/tools"),
+            vec![run(
+                39_149_840_084,
+                "timmattison/tools",
+                "CI",
+                "main",
+                "Fix the thing",
+                RunState::Running,
+                "2026-10-14T11:45:30Z",
+                "2026-10-14T11:59:00Z",
+            )],
+        );
+        board.expand(now());
+        board.set_jobs(
+            RunId(39_149_840_084),
+            vec![
+                job(
+                    107_851_237_794,
+                    &"日本語のとても長いジョブの名前".repeat(4),
+                    RunState::Running,
+                    Some("2026-10-14T11:51:00Z"),
+                    None,
+                ),
+                job(
+                    107_851_237_795,
+                    &"🎉🎊🎁".repeat(20),
+                    RunState::Running,
+                    Some("2026-10-14T11:52:00Z"),
+                    None,
+                ),
+                job(
+                    107_851_237_796,
+                    &"café-au-lait-".repeat(10),
+                    RunState::Running,
+                    Some("2026-10-14T11:53:00Z"),
+                    None,
+                ),
+            ],
+        );
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        let run_column = last_digit_column(&text[2], "39149840084")
+            .unwrap_or_else(|| panic!("the run row holds its ID: {:?}", text[2]));
+        // The order is by name: `c` comes before `日`, and `日` before `🎉`.
+        for (y, start, id, started, time) in [
+            (3, "├ café-", "107851237796", "11:53:00", "7m 00s"),
+            (4, "├ 日本語", "107851237794", "11:51:00", "9m 00s"),
+            (5, "└ 🎉🎊🎁", "107851237795", "11:52:00", "8m 00s"),
+        ] {
+            let line = &text[y];
+            assert!(line.contains(start), "line {y}: {line:?}");
+            let (name, _) = line
+                .split_once(id)
+                .unwrap_or_else(|| panic!("line {y} holds its job ID: {line:?}"));
+            assert!(name.trim_end().ends_with('…'), "line {y}: {line:?}");
+            assert_eq!(
+                last_digit_column(line, id),
+                Some(run_column),
+                "line {y}: {line:?}"
+            );
+            // The header is ASCII, thus its character count is its display column.
+            for (word, cell) in [("STARTED", started), ("TIME", time)] {
+                let (before, _) = line
+                    .rsplit_once(cell)
+                    .unwrap_or_else(|| panic!("line {y} holds {cell:?}: {line:?}"));
+                assert_eq!(
+                    display_width(before),
+                    header_column(&text, word),
+                    "line {y}: {line:?}"
+                );
+            }
+            assert!(display_width(line) <= 120, "line {y}: {line:?}");
+        }
+    }
+
+    #[test]
+    fn no_row_shows_how_long_ago_a_run_or_a_job_finished() {
+        let mut board = board_with_jobs(three_jobs());
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        assert!(
+            !text[0].split_whitespace().any(|word| word == "FINISHED"),
+            "the header names a finished column: {:?}",
+            text[0]
+        );
+        // Line 13 is the status line. It says `updated 30s ago` and stays.
+        for (y, line) in text.iter().enumerate().take(13).skip(1) {
+            assert!(!line.contains("ago"), "line {y} shows an age: {line:?}");
+        }
     }
 
     #[test]
@@ -1350,7 +1695,7 @@ mod tests {
     }
 
     #[test]
-    fn an_active_job_shows_the_time_since_its_start_and_no_finish() {
+    fn an_active_job_shows_the_time_since_its_start() {
         let mut board = board_with_jobs(vec![job(
             11,
             "test",
@@ -1359,11 +1704,11 @@ mod tests {
             None,
         )]);
         let text = lines(&render_with(120, 14, &mut board, &loaded()));
-        assert_eq!(time_cells(&text, 3), ("1h 14m".to_owned(), String::new()));
+        assert_eq!(time_cells(&text, 3), "1h 14m");
     }
 
     #[test]
-    fn a_finished_job_shows_its_own_duration_and_the_time_since_it_ended() {
+    fn a_finished_job_shows_its_own_duration() {
         let mut board = board_with_jobs(vec![job(
             11,
             "lint",
@@ -1372,10 +1717,7 @@ mod tests {
             Some("2026-10-14T10:03:07Z"),
         )]);
         let text = lines(&render_with(120, 14, &mut board, &loaded()));
-        assert_eq!(
-            time_cells(&text, 3),
-            ("3m 07s".to_owned(), "1h ago".to_owned())
-        );
+        assert_eq!(time_cells(&text, 3), "3m 07s");
     }
 
     #[test]
@@ -1393,9 +1735,9 @@ mod tests {
         let text = lines(&render_with(120, 14, &mut board, &loaded()));
         // The order is by name: "skip" stands above "wait".
         assert_eq!(started_cells(&text, 3), "");
-        assert_eq!(time_cells(&text, 3), (String::new(), "5m ago".to_owned()));
+        assert_eq!(time_cells(&text, 3), "");
         assert_eq!(started_cells(&text, 4), "");
-        assert_eq!(time_cells(&text, 4), (String::new(), String::new()));
+        assert_eq!(time_cells(&text, 4), "");
     }
 
     #[test]
@@ -1414,7 +1756,7 @@ mod tests {
         }]);
         let text = lines(&render_with(120, 14, &mut board, &loaded()));
         assert_eq!(started_cells(&text, 3), "");
-        assert_eq!(time_cells(&text, 3), ("4m 00s".to_owned(), String::new()));
+        assert_eq!(time_cells(&text, 3), "4m 00s");
     }
 
     #[test]
@@ -1431,48 +1773,7 @@ mod tests {
         }]);
         let text = lines(&render_with(120, 14, &mut board, &loaded()));
         assert_eq!(started_cells(&text, 3), "11:50:00");
-        assert_eq!(time_cells(&text, 3), ("10m 00s".to_owned(), String::new()));
-    }
-
-    #[test]
-    fn a_job_name_cut_by_display_width_keeps_its_start_and_the_columns() {
-        let mut board = board_with_jobs(vec![
-            job(
-                11,
-                "日本語のとても長いジョブの名前日本語のとても長いジョブの名前日本語のとても長いジョブの名前日本語のとても長いジョブの名前",
-                RunState::Running,
-                Some("2026-10-14T11:51:00Z"),
-                None,
-            ),
-            job(
-                12,
-                &"🎉🎊🎁".repeat(20),
-                RunState::Running,
-                Some("2026-10-14T11:52:00Z"),
-                None,
-            ),
-            job(
-                13,
-                &"café-au-lait-".repeat(10),
-                RunState::Running,
-                Some("2026-10-14T11:53:00Z"),
-                None,
-            ),
-        ]);
-        let text = lines(&render_with(120, 14, &mut board, &loaded()));
-        let started = |line: &str| {
-            let (before, _) = line.rsplit_once(" 11:").expect("the line holds a start");
-            display_width(before)
-        };
-        let run_column = started(&text[2]);
-        // The order is by name: `c` comes before `日`, and `日` before `🎉`.
-        for (y, start) in [(3, "├ café-"), (4, "├ 日本語"), (5, "└ 🎉🎊🎁")] {
-            assert!(text[y].contains(start), "{:?}", text[y]);
-            assert!(text[y].contains('…'), "{:?}", text[y]);
-            assert_eq!(started(&text[y]), run_column, "line {y}");
-            assert!(display_width(&text[y]) <= 120, "{:?}", text[y]);
-        }
-        assert!(text[4].contains("… 11:51:00"), "{:?}", text[4]);
+        assert_eq!(time_cells(&text, 3), "10m 00s");
     }
 
     #[test]
@@ -1563,12 +1864,186 @@ mod tests {
             ],
         );
         let text = lines(&render_with(120, 8, &mut board, &Status::default()));
-        assert_eq!(time_cells(&text, 2), ("0s".to_owned(), String::new()));
-        assert_eq!(time_cells(&text, 4), ("0s".to_owned(), "0s ago".to_owned()));
+        assert_eq!(time_cells(&text, 2), "0s");
+        assert_eq!(time_cells(&text, 4), "0s");
     }
 
     fn display_width(text: &str) -> usize {
         unicode_width::UnicodeWidthStr::width(text)
+    }
+
+    /// The (branch, title) widths that the board gave before issue #571, at
+    /// each width from 80 to 200 columns. The entry for width `w` is at index
+    /// `w - 80`. A change to the layout must never go below these values.
+    const TODAY_BRANCH_AND_TITLE: [(usize, usize); 121] = [
+        (7, 15),
+        (7, 16),
+        (8, 14),
+        (8, 15),
+        (8, 16),
+        (8, 17),
+        (8, 17),
+        (9, 16),
+        (9, 17),
+        (9, 18),
+        (9, 18),
+        (9, 19),
+        (10, 18),
+        (10, 19),
+        (10, 19),
+        (10, 20),
+        (10, 21),
+        (11, 20),
+        (11, 20),
+        (11, 21),
+        (11, 22),
+        (11, 23),
+        (12, 21),
+        (12, 22),
+        (12, 23),
+        (12, 24),
+        (12, 24),
+        (13, 23),
+        (13, 24),
+        (13, 25),
+        (13, 25),
+        (13, 26),
+        (14, 25),
+        (14, 26),
+        (14, 26),
+        (14, 27),
+        (14, 28),
+        (15, 27),
+        (15, 27),
+        (15, 28),
+        (15, 29),
+        (15, 30),
+        (16, 28),
+        (16, 29),
+        (16, 30),
+        (16, 31),
+        (16, 31),
+        (17, 30),
+        (17, 31),
+        (17, 32),
+        (17, 32),
+        (17, 33),
+        (18, 32),
+        (18, 33),
+        (18, 33),
+        (18, 34),
+        (18, 35),
+        (19, 34),
+        (19, 34),
+        (19, 35),
+        (19, 36),
+        (19, 37),
+        (20, 35),
+        (20, 36),
+        (20, 37),
+        (20, 38),
+        (20, 38),
+        (21, 37),
+        (21, 38),
+        (21, 39),
+        (21, 39),
+        (21, 40),
+        (22, 39),
+        (22, 40),
+        (22, 40),
+        (22, 41),
+        (22, 42),
+        (23, 41),
+        (23, 41),
+        (23, 42),
+        (23, 43),
+        (23, 44),
+        (24, 42),
+        (24, 43),
+        (24, 44),
+        (24, 45),
+        (24, 45),
+        (25, 44),
+        (25, 45),
+        (25, 46),
+        (25, 46),
+        (25, 47),
+        (26, 46),
+        (26, 47),
+        (26, 47),
+        (26, 48),
+        (26, 49),
+        (27, 48),
+        (27, 48),
+        (27, 49),
+        (27, 50),
+        (27, 51),
+        (28, 49),
+        (28, 50),
+        (28, 51),
+        (28, 52),
+        (28, 52),
+        (29, 51),
+        (29, 52),
+        (29, 53),
+        (29, 53),
+        (29, 54),
+        (30, 53),
+        (30, 54),
+        (30, 54),
+        (30, 55),
+        (30, 56),
+        (31, 55),
+        (31, 55),
+        (31, 56),
+        (31, 57),
+    ];
+
+    #[test]
+    fn the_branch_and_the_title_keep_at_least_their_old_widths() {
+        for w in 80_u16..=200 {
+            let mut board = Board::new(Duration::from_hours(8));
+            board.replace(
+                repo("o/r"),
+                vec![run(
+                    1,
+                    "o/r",
+                    "w",
+                    &"B".repeat(400),
+                    &"T".repeat(400),
+                    RunState::Running,
+                    "2026-10-14T11:45:30Z",
+                    "2026-10-14T11:45:30Z",
+                )],
+            );
+            board.expand(now());
+            board.set_jobs(RunId(1), three_jobs());
+            let text = lines(&render_with(w, 14, &mut board, &loaded()));
+
+            // The header names BRANCH and TITLE, so the search skips it.
+            let row = text
+                .iter()
+                .skip(1)
+                .find(|line| line.contains('B'))
+                .expect("the frame holds the run row");
+            let branch = row.chars().filter(|c| *c == 'B').count() + 1;
+            let title = row.chars().filter(|c| *c == 'T').count() + 1;
+            let (old_branch, old_title) = TODAY_BRANCH_AND_TITLE[usize::from(w) - 80];
+            assert!(
+                branch >= old_branch,
+                "width {w}: the branch is {branch} wide, the old width is {old_branch}"
+            );
+            assert!(
+                title >= old_title,
+                "width {w}: the title is {title} wide, the old width is {old_title}"
+            );
+            for line in &text {
+                assert!(
+                    display_width(line) <= usize::from(w),
+                    "width {w}: the line is too wide: {line:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1588,10 +2063,10 @@ mod tests {
             )],
         );
         let text = lines(&render_with(68, 6, &mut board, &Status::default()));
-        // 68 - 42 = 26 columns for the text: 6, 5, 5, and 10.
+        // 68 - 38 = 30 columns for the text: 7, 5, 6, and 12.
         assert_eq!(
             text[2],
-            "● timma… Cont…    #101 feat… A very lo… 11:55:00    5m 00s"
+            "● timmat… Cont…            1 featu… A very long… 11:55:00    5m 00s"
         );
     }
 
@@ -1636,15 +2111,15 @@ mod tests {
         let text = lines(&render_with(68, 7, &mut board, &Status::default()));
         assert_eq!(
             text[2],
-            "● a/x    CI       #101 日本… t          11:51:00    9m 00s"
+            "● a/x     CI               1 日本…  t            11:51:00    9m 00s"
         );
         assert_eq!(
             text[3],
-            "● a/x    CI       #102 café… t          11:52:00    8m 00s"
+            "● a/x     CI               2 café-… t            11:52:00    8m 00s"
         );
         assert_eq!(
             text[4],
-            "● a/x    CI       #103 🎉🎉… t          11:53:00    7m 00s"
+            "● a/x     CI               3 🎉🎉…  t            11:53:00    7m 00s"
         );
         for line in &text {
             assert!(display_width(line) <= 68, "{line:?} is too wide");
@@ -1670,8 +2145,10 @@ mod tests {
         );
         let narrow = lines(&render_with(80, 6, &mut board, &Status::default()));
         let wide = lines(&render_with(160, 6, &mut board, &Status::default()));
-        assert_eq!(display_width(&narrow[0]), 80, "the header fills 80 columns");
-        assert_eq!(display_width(&wide[0]), 160, "the header fills 160 columns");
+        // The header ends with `TIME`, which is 3 columns short of its cell.
+        let short = TIME_WIDTH - "TIME".len();
+        assert_eq!(display_width(&narrow[0]), 80 - short, "the header fills 80");
+        assert_eq!(display_width(&wide[0]), 160 - short, "the header fills 160");
         for line in &narrow {
             assert!(display_width(line) <= 80, "{line:?} is too wide");
         }
@@ -2049,7 +2526,7 @@ mod tests {
             (1, 40),
             (200, 1),
         ] {
-            let mut board = four_run_board();
+            let mut board = board_with_jobs(three_jobs());
             board.fail(repo("owner/x"), "HTTP 404".to_owned());
             let status = Status {
                 refreshing: true,

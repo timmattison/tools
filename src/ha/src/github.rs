@@ -18,7 +18,7 @@ use runlimit::{run_with_limit, RunFailure};
 use serde::Deserialize;
 
 use crate::job::{Job, JobId};
-use crate::run::{keep_first_of_each_id, Run, RunId, RunNumber, RunState};
+use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
 use crate::status::RateLimit;
 use crate::target::{OwnerName, RepoName};
 
@@ -70,7 +70,6 @@ struct RunsBody {
 #[derive(Deserialize)]
 struct RunJson {
     id: u64,
-    run_number: u64,
     name: Option<String>,
     display_title: Option<String>,
     head_branch: Option<String>,
@@ -96,7 +95,6 @@ fn parse_runs(body: &str, repo: &RepoName) -> Result<Page, SourceError> {
             let status = json.status.unwrap_or_default();
             Run {
                 id: RunId(json.id),
-                number: RunNumber(json.run_number),
                 repo: repo.clone(),
                 state: RunState::from_github(&status, json.conclusion.as_deref()),
                 title: json.display_title.unwrap_or_else(|| workflow.clone()),
@@ -848,7 +846,6 @@ mod tests {
             [
                 Run {
                     id: RunId(36_064_582_280),
-                    number: RunNumber(1234),
                     repo: tools.clone(),
                     workflow: "CI".to_owned(),
                     branch: "main".to_owned(),
@@ -860,7 +857,6 @@ mod tests {
                 },
                 Run {
                     id: RunId(7),
-                    number: RunNumber(56),
                     repo: tools,
                     workflow: "Release".to_owned(),
                     branch: String::new(),
@@ -875,18 +871,14 @@ mod tests {
     }
 
     #[test]
-    fn a_page_of_runs_carries_the_run_number_of_each_run() {
-        let page = parse_runs(&runs_json(3, 5, 3), &repo("o/r")).expect("a page");
-        let pairs: Vec<(RunId, RunNumber)> =
-            page.runs.iter().map(|run| (run.id, run.number)).collect();
-        assert_eq!(
-            pairs,
-            [
-                (RunId(5), RunNumber(105)),
-                (RunId(6), RunNumber(106)),
-                (RunId(7), RunNumber(107)),
-            ]
-        );
+    fn a_page_of_runs_without_run_numbers_gives_the_runs() {
+        let body = (5..8).fold(runs_json(3, 5, 3), |text, id| {
+            text.replace(&format!("\"run_number\":{},", id + 100), "")
+        });
+        assert!(!body.contains("run_number"));
+        let page = parse_runs(&body, &repo("o/r")).expect("a page of runs without run numbers");
+        let ids: Vec<RunId> = page.runs.iter().map(|run| run.id).collect();
+        assert_eq!(ids, [RunId(5), RunId(6), RunId(7)]);
     }
 
     #[test]
@@ -903,16 +895,7 @@ mod tests {
     #[test]
     fn invalid_json_is_a_bad_response() {
         let tools = repo("timmattison/tools");
-        let without_run_number = runs_json(1, 1, 1).replace("\"run_number\":101,", "");
-        assert!(!without_run_number.contains("run_number"));
-        for body in [
-            "",
-            "not json",
-            "{}",
-            "{\"total_count\":1}",
-            "[]",
-            without_run_number.as_str(),
-        ] {
+        for body in ["", "not json", "{}", "{\"total_count\":1}", "[]"] {
             let result = parse_runs(body, &tools);
             assert!(
                 matches!(result, Err(SourceError::BadResponse(_))),
