@@ -1475,6 +1475,37 @@ mod tests {
         assert_eq!(shape(&board.rows(now()))[2], "JobsLoading");
     }
 
+    /// The state that the row of run `id` shows, or `None` when no row holds it.
+    fn run_state(rows: &[Row<'_>], id: u64) -> Option<RunState> {
+        rows.iter().find_map(|row| match row {
+            Row::Run { run, state, .. } if run.id == RunId(id) => Some(*state),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_collapsed_run_keeps_the_running_marker_of_its_jobs() {
+        let mut board = board();
+        board.replace(repo("a/x"), vec![run(1, "a/x", RunState::Queued, 30, 1)]);
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![job(11, RunState::Running), job(12, RunState::Queued)],
+        );
+        board.collapse(now());
+        let rows = board.rows(now());
+        assert_eq!(
+            shape(&rows),
+            [
+                "Header(Active,1,0,0)",
+                "Run(1)",
+                "Header(Recent,0,0,0)",
+                "Empty(Recent)"
+            ]
+        );
+        assert_eq!(run_state(&rows, 1), Some(RunState::Running));
+    }
+
     #[test]
     fn expanding_a_run_twice_keeps_its_jobs() {
         let mut board = two_run_board();
