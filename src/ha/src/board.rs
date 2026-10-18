@@ -168,18 +168,27 @@ impl Board {
     }
 
     /// The rows that fit in `height` lines, with the selected row inside.
+    ///
+    /// The selected row is a run row or a job row. A run row also keeps its
+    /// header and the start of its block in view. A job row keeps only itself.
     pub fn view(&mut self, now: DateTime<Utc>, height: usize) -> View<'_> {
         self.settle(now);
         if height > 0 {
             let rows = self.build_rows(now);
-            let selected_row = rows
-                .iter()
-                .position(|row| matches!(row, Row::Run { selected: true, .. }));
-            let header_above = selected_row.is_some_and(|row| {
-                row > 0 && matches!(rows.get(row - 1), Some(Row::Header { .. }))
+            let selected_row = rows.iter().position(|row| {
+                matches!(
+                    row,
+                    Row::Run { selected: true, .. } | Row::Job { selected: true, .. }
+                )
             });
+            let on_run_row =
+                selected_row.is_some_and(|row| matches!(rows.get(row), Some(Row::Run { .. })));
+            let header_above = on_run_row
+                && selected_row.is_some_and(|row| {
+                    row > 0 && matches!(rows.get(row - 1), Some(Row::Header { .. }))
+                });
             let len = rows.len();
-            let below = selected_row.map_or(0, |row| {
+            let below = selected_row.filter(|_| on_run_row).map_or(0, |row| {
                 rows[row + 1..]
                     .iter()
                     .take_while(|next| {
@@ -453,10 +462,7 @@ impl Board {
     /// address of the job, and the address of the run when the job has none.
     pub fn selected_url(&mut self, now: DateTime<Utc>) -> Option<String> {
         self.settle(now);
-        let Selection {
-            run: (id, _),
-            job,
-        } = self.selected?;
+        let Selection { run: (id, _), job } = self.selected?;
         let job_url = job
             .and_then(|(_, index)| self.shown_jobs(id).get(index))
             .map(|job| job.url.as_str())
