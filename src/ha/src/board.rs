@@ -1643,6 +1643,39 @@ mod tests {
     }
 
     #[test]
+    fn a_repeated_job_id_shows_one_row() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![named_job(5, "b"), named_job(5, "a"), named_job(6, "c")],
+        );
+        let rows = board.rows(now());
+        assert_eq!(marked(&rows)[1..4], ["Run(1)*", "Job(5)", "LastJob(6)"]);
+        let names: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Job { job, .. } => Some(job.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["b", "c"]);
+    }
+
+    #[test]
+    fn down_moves_past_a_repeated_job_id_to_the_next_run() {
+        let mut board = two_run_board();
+        board.expand(now());
+        board.set_jobs(RunId(1), vec![named_job(5, "a"), named_job(5, "b")]);
+        let mut seen = vec![selected_text(&mut board).expect("a selection")];
+        for _ in 0..2 {
+            board.select_next(now());
+            seen.push(selected_text(&mut board).expect("a selection"));
+        }
+        assert_eq!(seen, ["Run(1)*", "LastJob(5)*", "Run(2)*"]);
+    }
+
+    #[test]
     fn a_refresh_keeps_the_selected_job_by_its_id() {
         let mut board = two_run_board();
         select_job(&mut board, &[(12, "b"), (13, "c")], 1);
