@@ -814,7 +814,8 @@ mod tests {
     }
 
     /// These lines are the target example of issue #571, with the two section
-    /// headers added.
+    /// headers added. The workflow name is 8 columns wide (issue #577), thus the
+    /// title has 7 columns more than in that example.
     #[test]
     fn a_frame_of_120_columns_has_the_target_layout_of_issue_571() {
         let mut board = Board::new(Duration::from_hours(8));
@@ -875,14 +876,14 @@ mod tests {
         assert_eq!(
             text[0..8],
             [
-                "  REPO                WORKFLOW                     BRANCH            TITLE                           STARTED     TIME",
+                "  REPO                WORKFLOW              BRANCH            TITLE                                  STARTED     TIME",
                 "Running · 1",
-                "● timmattison/tools   CI               39149840084 main              Fix the thing                   11:45:30    14m 30s",
-                "✓ ├ build                             107851237794                                                   11:45:40    4m 20s",
-                "✗ ├ lint                              107851237795                                                   11:46:00    45s",
-                "● └ test                              107851237796                                                   11:50:10    9m 50s",
+                "● timmattison/tools   CI        39149840084 main              Fix the thing                          11:45:30    14m 30s",
+                "✓ ├ build                      107851237794                                                          11:45:40    4m 20s",
+                "✗ ├ lint                       107851237795                                                          11:46:00    45s",
+                "● └ test                       107851237796                                                          11:50:10    9m 50s",
                 "Last 8h · 1 passed · 0 failed",
-                "✓ acme/widgets        Release          39149711502 issue-11          Bump deps                       09:00:00    10m 05s",
+                "✓ acme/widgets        Release   39149711502 issue-11          Bump deps                              09:00:00    10m 05s",
             ]
         );
     }
@@ -894,13 +895,13 @@ mod tests {
         assert_eq!(
             lines(&buffer),
             [
-                "  REPO                WORKFLOW                     BRANCH            TITLE                           STARTED     TIME",
+                "  REPO                WORKFLOW              BRANCH            TITLE                                  STARTED     TIME",
                 "Running · 2",
-                "● timmattison/tools   CI                         1 main              Fix the thing                   11:45:30    14m 30s",
-                "○ acme/widgets        Release                    2 issue-12          Add release job                 11:58:00    2m 00s",
+                "● timmattison/tools   CI                  1 main              Fix the thing                          11:45:30    14m 30s",
+                "○ acme/widgets        Release             2 issue-12          Add release job                        11:58:00    2m 00s",
                 "Last 8h · 1 passed · 1 failed",
-                "✓ timmattison/tools   CI                         3 main              Bump deps                       09:00:00    10m 05s",
-                "✗ acme/widgets        Release                    4 issue-11          Broken build                    10-13 23:50 4h 40m",
+                "✓ timmattison/tools   CI                  3 main              Bump deps                              09:00:00    10m 05s",
+                "✗ acme/widgets        Release             4 issue-11          Broken build                           10-13 23:50 4h 40m",
                 "",
                 "",
                 "updated 30s ago      ·  ↑↓ select  →← jobs  ⏎ open  r refresh  q quit",
@@ -2043,6 +2044,172 @@ mod tests {
                     "width {w}: the line is too wide: {line:?}"
                 );
             }
+        }
+    }
+
+    /// The (repository, workflow, branch, title) widths at each frame width
+    /// from 80 to 200 columns. The entry for width `w` is at index `w - 80`.
+    /// The workflow name has the share that it had before issue #577, but it
+    /// is never wider than the header `WORKFLOW`, which is 8 columns. The
+    /// title gets each column that the workflow gives up.
+    const TEXT_WIDTHS: [(usize, usize, usize, usize); 121] = [
+        (10, 7, 8, 17),
+        (10, 8, 9, 16),
+        (10, 8, 9, 17),
+        (10, 8, 9, 18),
+        (11, 8, 9, 18),
+        (11, 8, 9, 19),
+        (11, 8, 10, 19),
+        (11, 8, 10, 20),
+        (12, 8, 10, 20),
+        (12, 8, 10, 21),
+        (12, 8, 10, 22),
+        (12, 8, 11, 22),
+        (12, 8, 11, 23),
+        (13, 8, 11, 23),
+        (13, 8, 11, 24),
+        (13, 8, 11, 25),
+        (13, 8, 12, 25),
+        (14, 8, 12, 25),
+        (14, 8, 12, 26),
+        (14, 8, 12, 27),
+        (14, 8, 13, 27),
+        (15, 8, 13, 27),
+        (15, 8, 13, 28),
+        (15, 8, 13, 29),
+        (15, 8, 13, 30),
+        (16, 8, 14, 29),
+        (16, 8, 14, 30),
+        (16, 8, 14, 31),
+        (16, 8, 14, 32),
+        (17, 8, 14, 32),
+        (17, 8, 15, 32),
+        (17, 8, 15, 33),
+        (17, 8, 15, 34),
+        (18, 8, 15, 34),
+        (18, 8, 15, 35),
+        (18, 8, 16, 35),
+        (18, 8, 16, 36),
+        (18, 8, 16, 37),
+        (19, 8, 16, 37),
+        (19, 8, 17, 37),
+        (19, 8, 17, 38),
+        (19, 8, 17, 39),
+        (20, 8, 17, 39),
+        (20, 8, 17, 40),
+        (20, 8, 18, 40),
+        (20, 8, 18, 41),
+        (21, 8, 18, 41),
+        (21, 8, 18, 42),
+        (21, 8, 18, 43),
+        (21, 8, 19, 43),
+        (22, 8, 19, 43),
+        (22, 8, 19, 44),
+        (22, 8, 19, 45),
+        (22, 8, 19, 46),
+        (23, 8, 20, 45),
+        (23, 8, 20, 46),
+        (23, 8, 20, 47),
+        (23, 8, 20, 48),
+        (24, 8, 21, 47),
+        (24, 8, 21, 48),
+        (24, 8, 21, 49),
+        (24, 8, 21, 50),
+        (24, 8, 21, 51),
+        (25, 8, 22, 50),
+        (25, 8, 22, 51),
+        (25, 8, 22, 52),
+        (25, 8, 22, 53),
+        (26, 8, 22, 53),
+        (26, 8, 23, 53),
+        (26, 8, 23, 54),
+        (26, 8, 23, 55),
+        (27, 8, 23, 55),
+        (27, 8, 23, 56),
+        (27, 8, 24, 56),
+        (27, 8, 24, 57),
+        (28, 8, 24, 57),
+        (28, 8, 24, 58),
+        (28, 8, 24, 59),
+        (28, 8, 25, 59),
+        (29, 8, 25, 59),
+        (29, 8, 25, 60),
+        (29, 8, 25, 61),
+        (29, 8, 26, 61),
+        (30, 8, 26, 61),
+        (30, 8, 26, 62),
+        (30, 8, 26, 63),
+        (30, 8, 26, 64),
+        (30, 8, 27, 64),
+        (31, 8, 27, 64),
+        (31, 8, 27, 65),
+        (31, 8, 27, 66),
+        (31, 8, 27, 67),
+        (32, 8, 28, 66),
+        (32, 8, 28, 67),
+        (32, 8, 28, 68),
+        (32, 8, 28, 69),
+        (33, 8, 28, 69),
+        (33, 8, 29, 69),
+        (33, 8, 29, 70),
+        (33, 8, 29, 71),
+        (34, 8, 29, 71),
+        (34, 8, 30, 71),
+        (34, 8, 30, 72),
+        (34, 8, 30, 73),
+        (35, 8, 30, 73),
+        (35, 8, 30, 74),
+        (35, 8, 31, 74),
+        (35, 8, 31, 75),
+        (36, 8, 31, 75),
+        (36, 8, 31, 76),
+        (36, 8, 31, 77),
+        (36, 8, 32, 77),
+        (36, 8, 32, 78),
+        (37, 8, 32, 78),
+        (37, 8, 32, 79),
+        (37, 8, 32, 80),
+        (37, 8, 33, 80),
+        (38, 8, 33, 80),
+        (38, 8, 33, 81),
+        (38, 8, 33, 82),
+        (38, 8, 34, 82),
+    ];
+
+    #[test]
+    fn the_workflow_name_is_at_most_eight_columns_and_the_title_gets_the_rest() {
+        for w in 80_u16..=200 {
+            let repo_text = format!("Q/{}", "Q".repeat(400));
+            let mut board = Board::new(Duration::from_hours(8));
+            board.replace(
+                repo(&repo_text),
+                vec![run(
+                    1,
+                    &repo_text,
+                    &"W".repeat(400),
+                    &"B".repeat(400),
+                    &"T".repeat(400),
+                    RunState::Running,
+                    "2026-10-14T11:45:30Z",
+                    "2026-10-14T11:45:30Z",
+                )],
+            );
+            let text = lines(&render_with(w, 6, &mut board, &loaded()));
+            let row = &text[2];
+            assert!(
+                row.starts_with('●'),
+                "width {w}: line 2 is not the run row: {row:?}"
+            );
+            // Each text is too long for its cell, thus the cell holds the letters and `…`.
+            let letters = |letter: char| row.chars().filter(|c| *c == letter).count();
+            // The repository cell also holds the slash.
+            let widths = (
+                letters('Q') + 2,
+                letters('W') + 1,
+                letters('B') + 1,
+                letters('T') + 1,
+            );
+            assert_eq!(widths, TEXT_WIDTHS[usize::from(w) - 80], "width {w}");
         }
     }
 
