@@ -1687,6 +1687,45 @@ mod tests {
         assert_eq!(job_calls(&fake), 2);
     }
 
+    /// A person collapses run 5 while it is active. The run then finishes. The
+    /// run keeps its mark, so the worker still fetches its jobs one last time.
+    #[test]
+    fn a_run_that_finishes_after_a_collapse_gets_one_last_fetch() {
+        let fake = fake_with_runs(vec![active_run("acme/a", 5)]);
+        let running = Job {
+            state: RunState::Running,
+            ..job(1)
+        };
+        fake.script().jobs.insert(RunId(5), Ok(vec![running]));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let _ = one_cycle(&worker);
+        watch(&worker, &[5]);
+        assert!(matches!(next_update(&worker), Update::Jobs { .. }));
+        let mut finished = run("acme/a", 5);
+        finished.updated_at += chrono::TimeDelta::minutes(1);
+        fake.script()
+            .created
+            .insert(repo("acme/a"), Ok(vec![finished]));
+        fake.script().jobs.insert(RunId(5), Ok(vec![job(1)]));
+
+        watch(&worker, &[]);
+        refresh(&worker);
+        let last = one_cycle(&worker);
+        let forgotten = forget_calls(&fake);
+        refresh(&worker);
+        let after = one_cycle(&worker);
+
+        assert!(
+            last.contains(&Update::Jobs {
+                run: RunId(5),
+                jobs: vec![job(1)]
+            }),
+            "{last:?}"
+        );
+        assert_eq!(forgotten, vec!["5".to_owned()]);
+        assert!(!has_jobs(&after), "{after:?}");
+    }
+
     #[test]
     fn a_run_whose_job_fetch_failed_is_fetched_again_on_the_next_cycle() {
         let fake = fake_with_runs(vec![run("acme/a", 5)]);
