@@ -1686,6 +1686,11 @@ mod tests {
     fn a_run_that_leaves_the_board_takes_the_selected_job_with_it() {
         let mut board = two_run_board();
         select_job(&mut board, &[(11, "a"), (12, "b")], 1);
+        board.select_next(now());
+        board.expand(now());
+        board.set_jobs(RunId(2), vec![named_job(21, "c"), named_job(22, "d")]);
+        board.select_previous(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("LastJob(12)*"));
         board.replace(repo("a/x"), vec![run(2, "a/x", RunState::Passed, 60, 10)]);
         assert_eq!(
             marked(&board.rows(now())),
@@ -1694,6 +1699,8 @@ mod tests {
                 "Empty(Active)",
                 "Header(Recent,1,1,0)",
                 "Run(2)*",
+                "Job(21)",
+                "LastJob(22)",
             ]
         );
     }
