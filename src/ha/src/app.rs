@@ -1567,4 +1567,44 @@ mod tests {
         assert_eq!(result.unwrap_err().to_string(), "script ended");
         assert!(canceller.cancels.borrow().is_empty());
     }
+
+    /// An outcome for run 7 that the canceller of a test gives to the loop.
+    fn outcome(result: Result<(), SourceError>) -> CancelOutcome {
+        CancelOutcome {
+            repo: repo(),
+            run: RunId(7),
+            result,
+        }
+    }
+
+    #[test]
+    fn an_accepted_cancel_says_so_and_asks_for_a_refresh_now() {
+        let channels = channels();
+        let canceller = canceller();
+        canceller.outcomes.borrow_mut().push_back(outcome(Ok(())));
+        let (frame, commands) = run_steps_cancelling(
+            &channels,
+            &canceller,
+            vec![Step::Idle, key(KeyCode::Char('q'))],
+        );
+        assert!(commands.contains(&Command::RefreshNow), "{commands:?}");
+        assert!(frame[11].contains("refreshing…"), "{:?}", frame[11]);
+    }
+
+    #[test]
+    fn an_accepted_cancel_posts_that_github_is_cancelling_the_run() {
+        let channels = channels();
+        let canceller = canceller();
+        canceller.outcomes.borrow_mut().push_back(outcome(Ok(())));
+        let (frame, _) = run_steps_cancelling(
+            &channels,
+            &canceller,
+            vec![Step::Idle, key(KeyCode::Char('q'))],
+        );
+        assert!(
+            frame[11].contains("GitHub is cancelling run 7"),
+            "{:?}",
+            frame[11]
+        );
+    }
 }
