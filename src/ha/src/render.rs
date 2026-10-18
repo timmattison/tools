@@ -1089,6 +1089,63 @@ mod tests {
         assert_eq!(branch_at(long), branch_at(short), "the branches move");
     }
 
+    /// The name is 15 columns wide. It fits whole in the share that the
+    /// workflow had before issue #577 at 120 columns, thus this test fails
+    /// without the cap.
+    #[test]
+    fn a_workflow_name_wider_than_its_header_is_cut_and_the_branch_stays() {
+        for width in 80_u16..=200 {
+            let mut board = Board::new(Duration::from_hours(8));
+            board.replace(
+                repo("timmattison/tools"),
+                vec![
+                    run(
+                        39_149_840_084,
+                        "timmattison/tools",
+                        "CI",
+                        "main",
+                        "Short",
+                        RunState::Running,
+                        "2026-10-14T11:45:30Z",
+                        "2026-10-14T11:59:00Z",
+                    ),
+                    run(
+                        39_149_840_085,
+                        "timmattison/tools",
+                        "🎉日本語 deploy",
+                        "main",
+                        "Long",
+                        RunState::Running,
+                        "2026-10-14T11:46:30Z",
+                        "2026-10-14T11:59:00Z",
+                    ),
+                ],
+            );
+            let text = lines(&render_with(width, 8, &mut board, &loaded()));
+            let (short, long) = (&text[2], &text[3]);
+            let (before_id, _) = long
+                .split_once("39149840085")
+                .unwrap_or_else(|| panic!("width {width}: the whole ID is missing: {long:?}"));
+            // The cell is 8 columns wide, and 7 at a frame of 80 columns. `語`
+            // needs columns 7 and 8 of the name, thus `…` stands in column 7.
+            assert!(
+                before_id.trim_end().ends_with(" 🎉日本…"),
+                "width {width}: the name does not keep its start and end in `…`: {long:?}"
+            );
+            let branch_at = |line: &str| {
+                let (before, _) = line
+                    .split_once("main")
+                    .unwrap_or_else(|| panic!("width {width}: the branch is missing: {line:?}"));
+                display_width(before)
+            };
+            assert_eq!(
+                branch_at(long),
+                branch_at(short),
+                "width {width}: the branches move"
+            );
+        }
+    }
+
     #[test]
     fn each_empty_section_says_loading_before_the_first_refresh_ends() {
         let mut board = Board::new(Duration::from_hours(8));
