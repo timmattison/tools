@@ -1452,6 +1452,7 @@ mod tests {
             id: crate::job::JobId(id),
             name: format!("job {id}"),
             state: RunState::Passed,
+            created_at: None,
             started_at: None,
             completed_at: None,
             url: String::new(),

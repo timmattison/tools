@@ -1183,6 +1183,7 @@ mod tests {
             id: JobId(id),
             name: name.to_owned(),
             state,
+            created_at: None,
             started_at: started.map(at),
             completed_at: completed.map(at),
             url: format!("https://github.com/timmattison/tools/actions/runs/1/job/{id}"),

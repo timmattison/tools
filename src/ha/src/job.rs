@@ -20,6 +20,9 @@ pub struct Job {
     pub name: String,
     /// What the job is doing now, or how it ended.
     pub state: RunState,
+    /// When GitHub created the job. A job that waits, waits from this time.
+    /// The value is `None` when GitHub gives none.
+    pub created_at: Option<DateTime<Utc>>,
     /// When the job started. The creation time is the fallback. The value is
     /// `None` when GitHub gives neither time.
     pub started_at: Option<DateTime<Utc>>,
