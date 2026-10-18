@@ -1585,6 +1585,40 @@ mod tests {
         assert_eq!(job_calls(&fake), 2);
     }
 
+    /// GitHub reports a run as queued while one job waits for a runner, also
+    /// when another job runs. The screen needs the jobs of a collapsed run to
+    /// show it as running, thus the worker fetches the jobs of every active run.
+    #[test]
+    fn a_collapsed_queued_run_gets_its_job_states_in_one_cycle() {
+        let queued = Run {
+            state: RunState::Queued,
+            ..run("acme/a", 5)
+        };
+        let fake = fake_with_runs(vec![queued]);
+        let jobs = vec![
+            Job {
+                state: RunState::Running,
+                ..job(1)
+            },
+            Job {
+                state: RunState::Queued,
+                ..job(2)
+            },
+        ];
+        fake.script().jobs.insert(RunId(5), Ok(jobs.clone()));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+
+        let cycle = one_cycle(&worker);
+
+        assert!(
+            cycle.contains(&Update::Jobs {
+                run: RunId(5),
+                jobs
+            }),
+            "{cycle:?}"
+        );
+    }
+
     #[test]
     fn a_run_whose_job_fetch_failed_is_fetched_again_on_the_next_cycle() {
         let fake = fake_with_runs(vec![run("acme/a", 5)]);
