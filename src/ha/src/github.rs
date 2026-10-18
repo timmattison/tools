@@ -242,8 +242,8 @@ pub trait Source: Send + Sync {
     /// active. The worker fetches those jobs again only after the run changes
     /// (for example a re-run), and then the old pages are stale. A source that
     /// keeps a cache removes the pages of the jobs of that run. Without this
-    /// call, the cache keeps the pages of every run that a person ever
-    /// expanded.
+    /// call, the cache keeps the pages of every run whose jobs the worker ever
+    /// fetched, which includes each run that was active.
     fn forget_jobs(&self, repo: &RepoName, run: RunId);
 
     /// The rate limit that the last response stated. `None` before any response.
