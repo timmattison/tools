@@ -465,6 +465,17 @@ fn put(buffer: &mut Buffer, y: usize, text: &str, style: Style) -> u16 {
     y
 }
 
+/// Reverses the colors across the full width of buffer row `y` when `selected`
+/// is true. The highlight of a run row and of a job row use this one rule.
+fn reverse_if(selected: bool, buffer: &mut Buffer, area: Rect, y: u16) {
+    if selected {
+        buffer.set_style(
+            Rect::new(area.x, y, area.width, 1),
+            Style::default().add_modifier(Modifier::REVERSED),
+        );
+    }
+}
+
 /// The color of the marker of a run state.
 fn marker_color(state: RunState) -> Color {
     match state {
@@ -538,20 +549,20 @@ pub fn draw<Tz: TimeZone>(
                     Rect::new(area.x, y, 1, 1),
                     Style::default().fg(marker_color(run.state)),
                 );
-                if *selected {
-                    buffer.set_style(
-                        Rect::new(area.x, y, area.width, 1),
-                        Style::default().add_modifier(Modifier::REVERSED),
-                    );
-                }
+                reverse_if(*selected, buffer, area, y);
             }
-            Row::Job { job, last } => {
+            Row::Job {
+                job,
+                last,
+                selected,
+            } => {
                 let line = job_line(job, *last, now, tz, widths);
                 let y = put(buffer, index + 1, &line, Style::default());
                 buffer.set_style(
                     Rect::new(area.x, y, 1, 1),
                     Style::default().fg(marker_color(job.state)),
                 );
+                reverse_if(*selected, buffer, area, y);
             }
             Row::JobsLoading => put_status_row(buffer, index + 1, JOBS_LOADING),
             Row::NoJobs => put_status_row(buffer, index + 1, NO_JOBS),
@@ -1241,6 +1252,21 @@ mod tests {
         assert!(reversed(60, 2), "the selected run row");
         for y in [3_u16, 4, 5] {
             for x in [0_u16, 5, 60, 95, 119] {
+                assert!(!reversed(x, y), "line {y} column {x}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_selected_job_row_is_reversed_across_the_full_width() {
+        let mut board = board_with_jobs(three_jobs());
+        board.select_next(now());
+        let buffer = render_with(120, 14, &mut board, &loaded());
+        let reversed = |x: u16, y: u16| buffer[(x, y)].modifier.contains(Modifier::REVERSED);
+        for x in [0_u16, 5, 60, 95, 119] {
+            assert!(reversed(x, 3), "the selected job row, column {x}");
+            assert!(!reversed(x, 2), "the run row, column {x}");
+            for y in [4_u16, 5] {
                 assert!(!reversed(x, y), "line {y} column {x}");
             }
         }

@@ -2066,14 +2066,19 @@ cannot hang the caller. Used by `cwt` and `ha`.
       finished run load one time only, until a re-run changes the run. If GitHub still shows an
       active job in a finished run, the jobs of that run refresh with the board until each job
       finishes.
-  - Keys: Up and Down move the highlight through both sections, from one run to the next run, and
-    skip the job rows. Right and Left expand and collapse the jobs of the highlighted run. Enter
-    opens the highlighted run in the browser, and `ha` keeps running. When no browser opens, the status line shows the URL and
-    then the reason, for example a `BROWSER` command that this host does not have, for 30 seconds.
-    The message fades out, and a key press removes it sooner. `r` refreshes now. `q`, Esc, or
-    Ctrl-C quits and gives back the terminal.
+  - Keys: Up and Down move the highlight through the run rows and through the job rows of the
+    expanded runs. They skip the `Loading jobs…`, `No jobs yet`, and error rows. Right expands the
+    jobs of the highlighted run. Left collapses them, also from a job row, and the highlight goes
+    back to the run row. Right on a job row does nothing. Enter opens the highlighted run or job
+    in the browser, and `ha` keeps running. The page of a job shows its log. A job that has no
+    address opens the page of its run. The highlight stays on the same job through each refresh.
+    When a re-run gives the jobs new IDs, the highlight stays at the same position, thus on the
+    job of the same name in most re-runs. When no browser opens, the status line shows the URL
+    and then the reason, for example a `BROWSER` command that this host does not have, for 30
+    seconds. The message fades out, and a key press removes it sooner. `r` refreshes now. `q`,
+    Esc, or Ctrl-C quits and gives back the terminal.
   - Enter runs the command that `BROWSER` names when that variable is set and not empty. Thus a
-    forwarder that sets `BROWSER`, for example the opener of mosh-rs, opens the run on your local
+    forwarder that sets `BROWSER`, for example the opener of mosh-rs, opens the page on your local
     computer from a mosh-rs session. `ha` splits the value into words as a POSIX shell does, and
     each `%s` in an argument takes the URL. When no argument holds `%s`, the URL is the last
     argument. When `BROWSER` is not set, `ha` uses the opener of the system (`/usr/bin/open` on
