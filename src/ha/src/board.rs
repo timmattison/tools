@@ -371,7 +371,7 @@ impl Board {
             Section::Active,
             0,
             self.selected,
-            JobStates {
+            JobView {
                 jobs: &self.jobs,
                 expanded: &self.expanded,
             },
@@ -388,7 +388,7 @@ impl Board {
             Section::Recent,
             active.len(),
             self.selected,
-            JobStates {
+            JobView {
                 jobs: &self.jobs,
                 expanded: &self.expanded,
             },
@@ -549,7 +549,7 @@ fn scroll(
 
 /// The job data that the rows of the board read.
 #[derive(Clone, Copy)]
-struct JobStates<'a> {
+struct JobView<'a> {
     /// The last job answer of each run that the board holds.
     jobs: &'a BTreeMap<RunId, Jobs>,
     /// The runs that show their job rows.
@@ -562,7 +562,7 @@ struct JobStates<'a> {
 /// of the run at the position of `selected` gets the mark when the selection
 /// has no job part. Otherwise the job row at the selected job position gets
 /// the mark. The state of each run row comes from the job answer of the run,
-/// expanded or not. The block of jobs of each run in `states.expanded` follows
+/// expanded or not. The block of jobs of each run in `view.expanded` follows
 /// the row of that run.
 fn push_runs<'a>(
     rows: &mut Vec<Row<'a>>,
@@ -570,26 +570,24 @@ fn push_runs<'a>(
     section: Section,
     first: usize,
     selected: Option<Selection>,
-    states: JobStates<'a>,
+    view: JobView<'a>,
 ) {
     if runs.is_empty() {
         rows.push(Row::Empty(section));
     }
     for (offset, &run) in runs.iter().enumerate() {
         let here = selected.filter(|selection| selection.run.1 == first + offset);
-        let answer = states.jobs.get(&run.id);
-        let job_states = match answer {
+        let answer = view.jobs.get(&run.id);
+        let jobs = match answer {
             Some(Jobs::Ready(jobs) | Jobs::Failed { jobs, .. }) => jobs.as_slice(),
             None => &[],
         };
         rows.push(Row::Run {
             run,
-            state: run
-                .state
-                .shown_with_jobs(job_states.iter().map(|job| job.state)),
+            state: run.state.shown_with_jobs(jobs.iter().map(|job| job.state)),
             selected: here.is_some_and(|selection| selection.job.is_none()),
         });
-        if states.expanded.contains(&run.id) {
+        if view.expanded.contains(&run.id) {
             push_jobs(rows, answer, here.and_then(|selection| selection.job));
         }
     }
