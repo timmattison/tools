@@ -2062,7 +2062,7 @@ cannot hang the caller. Used by `cwt` and `ha`.
       see.
     - `Loading jobs…` shows until the first answer comes, and `No jobs yet` shows when GitHub did
       not make the jobs of the run yet. When a request for the jobs fails, the error shows below
-      the last good job rows.
+      the last good job rows. The next refresh asks for the jobs again.
     - More than one run can be expanded at one time. A run stays expanded through each refresh,
       and also when it moves from the top section to the bottom section. When a run leaves
       the board, its jobs go too.

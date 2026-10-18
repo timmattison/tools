@@ -210,8 +210,9 @@ struct State {
     watched: BTreeSet<RunKey>,
     /// The facts of each run of the last good answer, for each repository.
     facts: Mutex<HashMap<RepoName, HashMap<RunId, RunFacts>>>,
-    /// For each run with a good job fetch, the facts of the run at that fetch.
-    /// The mark is active when the run or one of its jobs was active. A run
+    /// For each run with a job fetch, the facts of the run at that fetch. The
+    /// mark is active when the run or one of its jobs was active, or when the
+    /// fetch failed. A run
     /// keeps its mark when it leaves the watched set, so it gets one last fetch.
     job_marks: Mutex<HashMap<RunKey, RunFacts>>,
 }
@@ -252,6 +253,7 @@ impl State {
     /// whose facts say it is active, and every run that has a mark. It applies
     /// the due rule to each of them. The third set gives a run that is not
     /// watched its last fetch: its mark is active, so it is due one more time.
+    /// A run whose fetch failed is due again through its active mark.
     fn due_jobs(&mut self) -> Vec<RunKey> {
         let facts = self.facts.get_mut().unwrap_or_else(PoisonError::into_inner);
         let marks = self
@@ -507,8 +509,10 @@ fn fetch_all<S: Source>(
 ///
 /// A good fetch sends [`Update::Jobs`] and marks the run with its current
 /// facts. The mark is active when the run or one of its jobs is active. A run
-/// with no facts gets no mark. A failed fetch sends [`Update::JobsFailed`] and
-/// removes the mark, so the next cycle tries again.
+/// with no facts gets no mark. A failed fetch sends [`Update::JobsFailed`]. A
+/// run with facts then gets an active mark, so the next cycle tries again, also
+/// when the run is not watched and not active. A run with no facts loses its
+/// mark.
 ///
 /// When the mark is not active, the function tells the source to forget the
 /// pages of the jobs of the run, because the worker fetches them again only
@@ -544,8 +548,18 @@ fn fetch_jobs<S: Source>(
                     marks.remove(&(repo.clone(), *run));
                     (Update::Jobs { run: *run, jobs }, false)
                 }
-                (Err(error), _) => {
-                    marks.remove(&(repo.clone(), *run));
+                (Err(error), facts) => {
+                    let key = (repo.clone(), *run);
+                    match facts {
+                        Some(facts) => marks.insert(
+                            key,
+                            RunFacts {
+                                active: true,
+                                ..facts
+                            },
+                        ),
+                        None => marks.remove(&key),
+                    };
                     (
                         Update::JobsFailed {
                             run: *run,
