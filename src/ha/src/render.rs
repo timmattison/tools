@@ -1390,6 +1390,76 @@ mod tests {
     }
 
     #[test]
+    fn a_long_job_name_is_cut_and_keeps_the_job_id_and_the_time_columns() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("timmattison/tools"),
+            vec![run(
+                39_149_840_084,
+                "timmattison/tools",
+                "CI",
+                "main",
+                "Fix the thing",
+                RunState::Running,
+                "2026-10-14T11:45:30Z",
+                "2026-10-14T11:59:00Z",
+            )],
+        );
+        board.expand(now());
+        board.set_jobs(
+            RunId(39_149_840_084),
+            vec![
+                job(
+                    107_851_237_794,
+                    &"日本語のとても長いジョブの名前".repeat(4),
+                    RunState::Running,
+                    Some("2026-10-14T11:51:00Z"),
+                    None,
+                ),
+                job(
+                    107_851_237_795,
+                    &"🎉🎊🎁".repeat(20),
+                    RunState::Running,
+                    Some("2026-10-14T11:52:00Z"),
+                    None,
+                ),
+            ],
+        );
+        let text = lines(&render_with(120, 14, &mut board, &loaded()));
+        let run_column = last_digit_column(&text[2], "39149840084")
+            .unwrap_or_else(|| panic!("the run row holds its ID: {:?}", text[2]));
+        // The order is by name: `日` comes before `🎉`.
+        for (y, start, id, started, time) in [
+            (3, "├ 日本語", "107851237794", "11:51:00", "9m 00s"),
+            (4, "└ 🎉🎊🎁", "107851237795", "11:52:00", "8m 00s"),
+        ] {
+            let line = &text[y];
+            assert!(line.contains(start), "line {y}: {line:?}");
+            let (name, _) = line
+                .split_once(id)
+                .unwrap_or_else(|| panic!("line {y} holds its job ID: {line:?}"));
+            assert!(name.trim_end().ends_with('…'), "line {y}: {line:?}");
+            assert_eq!(
+                last_digit_column(line, id),
+                Some(run_column),
+                "line {y}: {line:?}"
+            );
+            // The header is ASCII, thus its character count is its display column.
+            for (word, cell) in [("STARTED", started), ("TIME", time)] {
+                let (before, _) = line
+                    .rsplit_once(cell)
+                    .unwrap_or_else(|| panic!("line {y} holds {cell:?}: {line:?}"));
+                assert_eq!(
+                    display_width(before),
+                    header_column(&text, word),
+                    "line {y}: {line:?}"
+                );
+            }
+            assert!(display_width(line) <= 120, "line {y}: {line:?}");
+        }
+    }
+
+    #[test]
     fn no_row_shows_how_long_ago_a_run_or_a_job_finished() {
         let mut board = board_with_jobs(three_jobs());
         let text = lines(&render_with(120, 14, &mut board, &loaded()));
