@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
-use crate::job::Job;
+use crate::job::{Job, JobId};
 use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
 use crate::target::RepoName;
 
@@ -53,6 +53,8 @@ pub enum Row<'a> {
         /// True for the last row of the block of its run. The render draws
         /// `└` for it, and `├` for any other row.
         last: bool,
+        /// True for the one row that the selection marks.
+        selected: bool,
     },
     /// The row of an expanded run before the first answer: "Loading jobs…".
     JobsLoading,
@@ -78,6 +80,19 @@ enum Jobs {
     },
 }
 
+/// The selected row: one run, and as an option one job of that run.
+///
+/// Each level keeps its position. When its ID goes away, `settle` falls back
+/// to the row at that position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Selection {
+    /// The ID of the run, and its position among the runs that show.
+    run: (RunId, usize),
+    /// The ID of the job, and its position among the job rows of its run.
+    /// `None` when the run row itself is selected.
+    job: Option<(JobId, usize)>,
+}
+
 /// The rows that fit on the screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct View<'a> {
@@ -93,7 +108,7 @@ pub struct Board {
     window: Duration,
     runs: BTreeMap<RepoName, Vec<Run>>,
     errors: BTreeMap<RepoName, String>,
-    selected: Option<(RunId, usize)>,
+    selected: Option<Selection>,
     offset: usize,
     expanded: BTreeMap<RunId, Jobs>,
 }
@@ -212,7 +227,7 @@ impl Board {
     }
 
     /// All runs that show at `now`, in the order of the board: active, then recent.
-    fn selectable(&self, now: DateTime<Utc>) -> Vec<&Run> {
+    fn shown_runs(&self, now: DateTime<Utc>) -> Vec<&Run> {
         let (active, recent) = self.sections(now);
         active.into_iter().chain(recent).collect()
     }
@@ -223,15 +238,18 @@ impl Board {
     /// position is selected, or the last run when the old position is past the
     /// end. A board with no run has no selection. A new selection is the first run.
     fn settle(&mut self, now: DateTime<Utc>) {
-        let runs = self.selectable(now);
+        let runs = self.shown_runs(now);
         let position = match self.selected {
             None => 0,
-            Some((id, old)) => runs
+            Some(Selection { run: (id, old), .. }) => runs
                 .iter()
                 .position(|run| run.id == id)
                 .unwrap_or_else(|| old.min(runs.len().saturating_sub(1))),
         };
-        let selected = runs.get(position).map(|run| (run.id, position));
+        let selected = runs.get(position).map(|run| Selection {
+            run: (run.id, position),
+            job: None,
+        });
         let shown: BTreeSet<RunId> = runs.iter().map(|run| run.id).collect();
         self.selected = selected;
         self.expanded.retain(|id, _| shown.contains(id));
@@ -253,7 +271,7 @@ impl Board {
             passed: 0,
             failed: 0,
         }];
-        let selected = self.selected.map(|(_, index)| index);
+        let selected = self.selected.map(|selection| selection.run.1);
         push_runs(
             &mut rows,
             &active,
@@ -284,7 +302,7 @@ impl Board {
     /// selection, nothing happens.
     pub fn expand(&mut self, now: DateTime<Utc>) {
         self.settle(now);
-        if let Some((id, _)) = self.selected {
+        if let Some(Selection { run: (id, _), .. }) = self.selected {
             self.expanded.entry(id).or_insert(Jobs::Loading);
         }
     }
@@ -293,7 +311,7 @@ impl Board {
     /// expanded, or no selection, changes nothing.
     pub fn collapse(&mut self, now: DateTime<Utc>) {
         self.settle(now);
-        if let Some((id, _)) = self.selected {
+        if let Some(Selection { run: (id, _), .. }) = self.selected {
             self.expanded.remove(&id);
         }
     }
@@ -331,7 +349,7 @@ impl Board {
     /// The app sends this set to the worker each time it changes.
     pub fn expanded(&mut self, now: DateTime<Utc>) -> BTreeSet<(RepoName, RunId)> {
         self.settle(now);
-        self.selectable(now)
+        self.shown_runs(now)
             .into_iter()
             .filter(|run| self.expanded.contains_key(&run.id))
             .map(|run| (run.repo.clone(), run.id))
@@ -354,10 +372,13 @@ impl Board {
     ///
     /// `target` gets the current position and the number of runs.
     fn move_selection(&mut self, now: DateTime<Utc>, target: impl Fn(usize, usize) -> usize) {
-        let runs = self.selectable(now);
-        let moved = self.selected.and_then(|(_, index)| {
+        let runs = self.shown_runs(now);
+        let moved = self.selected.and_then(|Selection { run: (_, index), .. }| {
             let position = target(index, runs.len());
-            runs.get(position).map(|run| (run.id, position))
+            runs.get(position).map(|run| Selection {
+                run: (run.id, position),
+                job: None,
+            })
         });
         self.selected = moved;
     }
@@ -365,8 +386,8 @@ impl Board {
     /// The address of the selected run, or `None` when the board has no run.
     pub fn selected_url(&mut self, now: DateTime<Utc>) -> Option<String> {
         self.settle(now);
-        let (id, _) = self.selected?;
-        self.selectable(now)
+        let Selection { run: (id, _), .. } = self.selected?;
+        self.shown_runs(now)
             .into_iter()
             .find(|run| run.id == id)
             .map(|run| run.url.clone())
@@ -442,9 +463,14 @@ fn push_jobs<'a>(rows: &mut Vec<Row<'a>>, jobs: &'a Jobs) {
         Jobs::Ready(list) => rows.extend(list.iter().enumerate().map(|(index, job)| Row::Job {
             job,
             last: index + 1 == list.len(),
+            selected: false,
         })),
         Jobs::Failed { jobs, error } => {
-            rows.extend(jobs.iter().map(|job| Row::Job { job, last: false }));
+            rows.extend(jobs.iter().map(|job| Row::Job {
+                job,
+                last: false,
+                selected: false,
+            }));
             rows.push(Row::JobsError(error));
         }
     }
@@ -453,7 +479,6 @@ fn push_jobs<'a>(rows: &mut Vec<Row<'a>>, jobs: &'a Jobs) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::job::JobId;
     use crate::run::RunNumber;
     use chrono::{Duration as Span, TimeZone};
 
@@ -511,7 +536,8 @@ mod tests {
 
     /// Writes each row as short text: `Header(Active,2,0,0)`, `Empty(Recent)`,
     /// `Run(7)`, `Job(11)`, `LastJob(12)`, `JobsLoading`, `NoJobs`, or
-    /// `JobsError(text)`. The selection mark is left out, see `marked`.
+    /// `JobsError(text)`. The selection mark of a run or a job is left out, see
+    /// `marked`.
     fn shape(rows: &[Row<'_>]) -> Vec<String> {
         marked(rows)
             .into_iter()
@@ -519,7 +545,8 @@ mod tests {
             .collect()
     }
 
-    /// Like `shape`, and a selected run reads `Run(7)*`.
+    /// Like `shape`, and a selected row reads `Run(7)*`, `Job(11)*`, or
+    /// `LastJob(12)*`.
     fn marked(rows: &[Row<'_>]) -> Vec<String> {
         rows.iter()
             .map(|row| match row {
@@ -533,9 +560,16 @@ mod tests {
                 Row::Run { run, selected } => {
                     format!("Run({}){}", run.id.0, if *selected { "*" } else { "" })
                 }
-                Row::Job { job, last } => {
-                    format!("{}({})", if *last { "LastJob" } else { "Job" }, job.id.0)
-                }
+                Row::Job {
+                    job,
+                    last,
+                    selected,
+                } => format!(
+                    "{}({}){}",
+                    if *last { "LastJob" } else { "Job" },
+                    job.id.0,
+                    if *selected { "*" } else { "" }
+                ),
                 Row::JobsLoading => "JobsLoading".to_owned(),
                 Row::NoJobs => "NoJobs".to_owned(),
                 Row::JobsError(error) => format!("JobsError({error})"),

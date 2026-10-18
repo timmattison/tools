@@ -545,7 +545,7 @@ pub fn draw<Tz: TimeZone>(
                     );
                 }
             }
-            Row::Job { job, last } => {
+            Row::Job { job, last, .. } => {
                 let line = job_line(job, *last, now, tz, widths);
                 let y = put(buffer, index + 1, &line, Style::default());
                 buffer.set_style(
