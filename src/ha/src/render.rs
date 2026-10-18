@@ -931,7 +931,10 @@ mod tests {
         );
         let text = lines(&render_with(120, 10, &mut board, &loaded()));
         let branch = header_column(&text, "BRANCH");
-        assert_eq!(columns(&text[2], branch - 1 - 12, 12), "12345678901…");
+        assert_eq!(
+            columns(&text[2], branch - 1 - ID_WIDTH, ID_WIDTH),
+            "12345678901…"
+        );
         assert_eq!(started_cells(&text, 2), "11:45:30");
     }
 
@@ -1416,7 +1419,7 @@ mod tests {
     /// the branch and title columns are 49 blank columns.
     fn job_golden(marker: &str, text: &str, id: u64, times: &str) -> String {
         format!(
-            "{marker} {text:<35} {id:>12} {blank:<49} {times}",
+            "{marker} {text:<35} {id:>ID_WIDTH$} {blank:<49} {times}",
             blank = ""
         )
         .trim_end()
