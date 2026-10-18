@@ -69,6 +69,25 @@ impl RunState {
     pub fn is_finished(self) -> bool {
         matches!(self, RunState::Passed | RunState::Failed)
     }
+
+    /// Returns the state that the board shows for a run with this GitHub
+    /// state and the states of its jobs.
+    ///
+    /// GitHub reports a run as queued while any job of the run waits for a
+    /// runner, also when other jobs of the run are in progress. A queued run
+    /// with at least one running job thus shows as [`RunState::Running`].
+    /// A run that GitHub reports as finished keeps its state, because old job
+    /// data never changes a finished run. In every other case the shown state
+    /// is the GitHub state.
+    #[must_use]
+    pub fn shown_with_jobs(self, jobs: impl IntoIterator<Item = RunState>) -> RunState {
+        match self {
+            RunState::Queued if jobs.into_iter().any(|job| job == RunState::Running) => {
+                RunState::Running
+            }
+            _ => self,
+        }
+    }
 }
 
 /// One workflow run of one repository.
@@ -215,5 +234,47 @@ mod tests {
         assert!(!RunState::Queued.is_finished());
         assert!(!RunState::Running.is_finished());
         assert!(!RunState::Other.is_finished());
+    }
+
+    #[test]
+    fn the_shown_state_of_a_run_comes_from_its_state_and_its_jobs() {
+        use RunState::{Failed, Other, Passed, Queued, Running};
+        let rows: [(&str, RunState, Vec<RunState>, RunState); 7] = [
+            (
+                "queued run, a job runs",
+                Queued,
+                vec![Running, Queued],
+                Running,
+            ),
+            (
+                "queued run, no job runs",
+                Queued,
+                vec![Queued, Passed],
+                Queued,
+            ),
+            ("queued run, no job data yet", Queued, vec![], Queued),
+            (
+                "running run, a job waits",
+                Running,
+                vec![Passed, Queued],
+                Running,
+            ),
+            (
+                "passed run, stale running job",
+                Passed,
+                vec![Running],
+                Passed,
+            ),
+            (
+                "failed run, stale running job",
+                Failed,
+                vec![Running],
+                Failed,
+            ),
+            ("other run, stale running job", Other, vec![Running], Other),
+        ];
+        for (name, state, jobs, expected) in rows {
+            assert_eq!(state.shown_with_jobs(jobs), expected, "{name}");
+        }
     }
 }

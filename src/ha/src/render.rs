@@ -168,12 +168,19 @@ where
     }
 }
 
-/// The line of one run.
-fn run_line<Tz: TimeZone>(run: &Run, now: DateTime<Utc>, tz: &Tz, widths: Widths) -> String
+/// The line of one run. `state` is the state that the row shows, not the state
+/// that GitHub reports. It sets the marker and the time cells.
+fn run_line<Tz: TimeZone>(
+    run: &Run,
+    state: RunState,
+    now: DateTime<Utc>,
+    tz: &Tz,
+    widths: Widths,
+) -> String
 where
     Tz::Offset: Display,
 {
-    let (time, finished) = if run.state.is_active() {
+    let (time, finished) = if state.is_active() {
         (format_elapsed(span(run.started_at, now)), String::new())
     } else {
         (
@@ -183,7 +190,7 @@ where
     };
     cells(
         widths,
-        marker(run.state),
+        marker(state),
         [
             &run.repo.to_string(),
             &run.workflow,
@@ -542,12 +549,16 @@ pub fn draw<Tz: TimeZone>(
                 let line = empty_line(*section, window, loaded);
                 put(buffer, index + 1, &line, Style::default());
             }
-            Row::Run { run, selected } => {
-                let line = run_line(run, now, tz, widths);
+            Row::Run {
+                run,
+                state,
+                selected,
+            } => {
+                let line = run_line(run, *state, now, tz, widths);
                 let y = put(buffer, index + 1, &line, Style::default());
                 buffer.set_style(
                     Rect::new(area.x, y, 1, 1),
-                    Style::default().fg(marker_color(run.state)),
+                    Style::default().fg(marker_color(*state)),
                 );
                 reverse_if(*selected, buffer, area, y);
             }
@@ -1242,6 +1253,55 @@ mod tests {
             marks,
             [("✓", Color::Green), ("✗", Color::Red), ("●", Color::Yellow)]
         );
+    }
+
+    #[test]
+    fn a_queued_run_with_a_job_in_progress_shows_the_running_marker() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("timmattison/tools"),
+            vec![run(
+                1,
+                "timmattison/tools",
+                "CI",
+                "main",
+                "Fix the thing",
+                RunState::Queued,
+                "2026-10-14T11:45:30Z",
+                "2026-10-14T11:59:00Z",
+            )],
+        );
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![
+                job(
+                    11,
+                    "test",
+                    RunState::Running,
+                    Some("2026-10-14T11:50:10Z"),
+                    None,
+                ),
+                job(12, "build", RunState::Queued, None, None),
+            ],
+        );
+        let buffer = render_with(120, 14, &mut board, &loaded());
+        let text = lines(&buffer);
+        let row_of = |needle: &str| {
+            let found = text.iter().position(|line| line.contains(needle));
+            u16::try_from(found.unwrap_or_else(|| panic!("no row holds {needle:?}: {text:?}")))
+                .expect("a row index fits in u16")
+        };
+        for (name, y) in [
+            ("the run row", row_of("Fix the thing")),
+            ("the running job row", row_of("test")),
+        ] {
+            assert_eq!(
+                (buffer[(0, y)].symbol(), buffer[(0, y)].fg),
+                ("●", Color::Yellow),
+                "{name}"
+            );
+        }
     }
 
     #[test]
