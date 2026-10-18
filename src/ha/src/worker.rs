@@ -292,6 +292,7 @@ enum Wake {
 /// when a refresh is also due, because the cycle fetches the new runs. It does
 /// not fetch at once while `backoff` is true, because job requests share the
 /// rate limit backoff of the run requests. The next cycle fetches those runs.
+/// A run gets one fetch, even when the backlog adds it more than one time.
 fn wait_for_next_cycle<S: Source>(
     source: &S,
     state: &mut State,
@@ -302,7 +303,7 @@ fn wait_for_next_cycle<S: Source>(
 ) -> Result<Wake, ReceiverGone> {
     let deadline = Instant::now() + delay;
     let mut requested = false;
-    let mut added: Vec<RunKey> = Vec::new();
+    let mut added: BTreeSet<RunKey> = BTreeSet::new();
     loop {
         match commands.try_recv() {
             Ok(command) => apply_command(command, state, &mut requested, &mut added),
@@ -316,7 +317,8 @@ fn wait_for_next_cycle<S: Source>(
         }
         added.retain(|key| state.watched.contains(key));
         if !backoff && !added.is_empty() {
-            fetch_jobs(source, state, &added, updates)?;
+            let fetch_now: Vec<RunKey> = added.iter().cloned().collect();
+            fetch_jobs(source, state, &fetch_now, updates)?;
         }
         added.clear();
         match commands.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
@@ -328,12 +330,13 @@ fn wait_for_next_cycle<S: Source>(
 }
 
 /// Applies one command. A refresh sets `requested`. A new watched set adds its
-/// new runs to `added`.
+/// new runs to `added`. The set holds a run one time, even when two commands
+/// add it.
 fn apply_command(
     command: Command,
     state: &mut State,
     requested: &mut bool,
-    added: &mut Vec<RunKey>,
+    added: &mut BTreeSet<RunKey>,
 ) {
     match command {
         Command::RefreshNow => *requested = true,
