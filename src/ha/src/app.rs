@@ -129,7 +129,7 @@ where
             let now = (self.now)();
             terminal
                 .draw(|frame| {
-                    render::draw(frame, &mut self.board, &self.status, now, self.tz);
+                    render::draw(frame, &mut self.board, &self.status, now, self.tz, None);
                 })
                 .map_err(std::io::Error::other)?;
             let Some(event) = events.next(POLL_INTERVAL)? else {

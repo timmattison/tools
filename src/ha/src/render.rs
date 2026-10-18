@@ -12,6 +12,7 @@ use ratatui::Frame;
 use textfit::{pad_right, truncate_to_budget};
 
 use crate::board::{Board, Row, Section};
+use crate::cancel::Confirm;
 use crate::job::Job;
 use crate::run::{Run, RunState};
 use crate::settings::format_duration_setting;
@@ -532,6 +533,7 @@ pub fn draw<Tz: TimeZone>(
     status: &Status,
     now: DateTime<Utc>,
     tz: &Tz,
+    _prompt: Option<&Confirm>,
 ) where
     Tz::Offset: Display,
 {
@@ -773,7 +775,7 @@ mod tests {
         let mut terminal =
             Terminal::new(TestBackend::new(width, height)).expect("a test terminal opens");
         terminal
-            .draw(|frame| draw(frame, board, status, now(), tz))
+            .draw(|frame| draw(frame, board, status, now(), tz, None))
             .expect("a test frame draws");
         terminal.backend().buffer().clone()
     }
@@ -2315,6 +2317,205 @@ mod tests {
             line.ends_with("⏎ open  c cancel  r refresh  q quit"),
             "{line}"
         );
+    }
+
+    /// A cancel that waits, as `c` makes it over the run `run_id`.
+    fn confirm(title: &str, job: Option<&str>) -> Confirm {
+        Confirm {
+            repo: repo("timmattison/tools"),
+            run: RunId(39_149_840_084),
+            workflow: "CI".to_owned(),
+            branch: "main".to_owned(),
+            title: title.to_owned(),
+            job: job.map(str::to_owned),
+        }
+    }
+
+    /// The confirm of the mock of issue 578: a job row is selected.
+    fn job_confirm() -> Confirm {
+        confirm("fix(ha): show the run ID", Some("build (ubuntu-latest)"))
+    }
+
+    /// Draws one frame in UTC with the prompt `prompt` over a loaded board.
+    fn render_prompt(width: u16, height: u16, prompt: &Confirm) -> Buffer {
+        let mut board = four_run_board();
+        let mut terminal =
+            Terminal::new(TestBackend::new(width, height)).expect("a test terminal opens");
+        terminal
+            .draw(|frame| draw(frame, &mut board, &loaded(), now(), &utc(), Some(prompt)))
+            .expect("a test frame draws");
+        terminal.backend().buffer().clone()
+    }
+
+    /// The `count` columns from column `x` of the rows `first..first + rows`.
+    /// The text holds no wide glyph.
+    fn box_rows(buffer: &Buffer, x: usize, count: usize, first: usize, rows: usize) -> Vec<String> {
+        lines(buffer)
+            .into_iter()
+            .skip(first)
+            .take(rows)
+            .map(|line| line.chars().skip(x).take(count).collect())
+            .collect()
+    }
+
+    #[test]
+    fn the_box_over_a_job_row_matches_the_mock_of_issue_578() {
+        let buffer = render_prompt(80, 16, &job_confirm());
+        // 10 rows, centered in the rows 1 to 14: the top row is row 3.
+        assert_eq!(
+            box_rows(&buffer, 18, 44, 3, 10),
+            vec![
+                "┌ Cancel run? ─────────────────────────────┐",
+                "│ timmattison/tools                        │",
+                "│ CI 39149840084 on main                   │",
+                "│ fix(ha): show the run ID                 │",
+                "│ job: build (ubuntu-latest)               │",
+                "│ GitHub cannot cancel one job. y cancels  │",
+                "│ every job of this run.                   │",
+                "│                                          │",
+                "│ y cancel the run   any other key: keep   │",
+                "└──────────────────────────────────────────┘",
+            ]
+        );
+        let all = lines(&buffer);
+        assert!(!all[2].contains('┌'), "{:?}", all[2]);
+        assert!(!all[13].contains('└'), "{:?}", all[13]);
+    }
+
+    #[test]
+    fn the_box_over_a_run_row_has_no_job_line_and_no_note() {
+        let buffer = render_prompt(80, 16, &confirm("fix(ha): show the run ID", None));
+        // 7 rows, centered in the rows 1 to 14: the top row is row 4.
+        assert_eq!(
+            box_rows(&buffer, 18, 44, 4, 7),
+            vec![
+                "┌ Cancel run? ─────────────────────────────┐",
+                "│ timmattison/tools                        │",
+                "│ CI 39149840084 on main                   │",
+                "│ fix(ha): show the run ID                 │",
+                "│                                          │",
+                "│ y cancel the run   any other key: keep   │",
+                "└──────────────────────────────────────────┘",
+            ]
+        );
+        let text = lines(&buffer).join("\n");
+        assert!(!text.contains("job:"));
+        assert!(!text.contains("GitHub cannot cancel one job"));
+    }
+
+    #[test]
+    fn a_branch_that_is_empty_leaves_the_branch_out_of_the_run_line() {
+        let mut prompt = confirm("title", None);
+        prompt.branch = String::new();
+        let buffer = render_prompt(80, 16, &prompt);
+        assert_eq!(
+            box_rows(&buffer, 18, 44, 5, 1),
+            vec!["│ CI 39149840084                           │"]
+        );
+    }
+
+    /// The glyph of the cell at (`x`, `y`).
+    fn cell(buffer: &Buffer, x: u16, y: u16) -> String {
+        buffer[(x, y)].symbol().to_owned()
+    }
+
+    #[test]
+    fn wide_glyphs_at_the_wrap_edge_do_not_break_the_border() {
+        let title = "日本語日本語日本語日本語日本語日本語日本語日本語日本語日本語日本語 \
+                     🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉 café café café café café café café \
+                     日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 🎉";
+        let buffer = render_prompt(80, 24, &confirm(title, Some("日本語 🎉 café")));
+        let tops: Vec<u16> = (0..24).filter(|&y| cell(&buffer, 18, y) == "┌").collect();
+        let bottoms: Vec<u16> = (0..24).filter(|&y| cell(&buffer, 18, y) == "└").collect();
+        assert_eq!((tops.len(), bottoms.len()), (1, 1));
+        let (top, bottom) = (tops[0], bottoms[0]);
+        assert!(bottom - top >= 8, "the title wraps onto several rows");
+        assert_eq!(
+            (cell(&buffer, 61, top), cell(&buffer, 61, bottom)),
+            ("┐".to_owned(), "┘".to_owned())
+        );
+        for y in top + 1..bottom {
+            assert_eq!(cell(&buffer, 18, y), "│", "left border, row {y}");
+            assert_eq!(cell(&buffer, 61, y), "│", "right border, row {y}");
+        }
+    }
+
+    #[test]
+    fn a_low_terminal_drops_the_parts_and_keeps_the_key_line() {
+        let prompt = confirm("fix(ha): show the run ID", None);
+        // 4 board rows: the title, the blank line, and the run line go.
+        assert_eq!(
+            box_rows(&render_prompt(80, 6, &prompt), 18, 44, 1, 4),
+            vec![
+                "┌ Cancel run? ─────────────────────────────┐",
+                "│ timmattison/tools                        │",
+                "│ y cancel the run   any other key: keep   │",
+                "└──────────────────────────────────────────┘",
+            ]
+        );
+        // 1 board row: the box takes all 3 rows of the frame.
+        assert_eq!(
+            box_rows(&render_prompt(80, 3, &prompt), 18, 44, 0, 3),
+            vec![
+                "┌ Cancel run? ─────────────────────────────┐",
+                "│ y cancel the run   any other key: keep   │",
+                "└──────────────────────────────────────────┘",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_frame_too_low_for_a_border_shows_the_key_line_alone() {
+        let prompt = confirm("fix(ha): show the run ID", Some("build"));
+        let key_line = "y cancel the run   any other key: keep";
+        let two = lines(&render_prompt(80, 2, &prompt));
+        assert_eq!(two[0].trim(), key_line);
+        assert!(two[1].starts_with("updated 30s ago"), "{:?}", two[1]);
+        let one = lines(&render_prompt(80, 1, &prompt));
+        assert_eq!(one[0].trim(), key_line);
+    }
+
+    #[test]
+    fn a_narrow_frame_puts_the_two_keys_on_two_lines() {
+        let buffer = render_prompt(30, 10, &confirm("fix(ha): show the run ID", None));
+        let text = lines(&buffer);
+        let first = text
+            .iter()
+            .position(|line| line.contains("y cancel the run"))
+            .expect("the first key line shows");
+        assert!(
+            text[first].starts_with("│ y cancel the run "),
+            "{:?}",
+            text[first]
+        );
+        assert!(
+            text[first + 1].starts_with("│ any other key: keep "),
+            "{:?}",
+            text[first + 1]
+        );
+    }
+
+    #[test]
+    fn the_box_never_panics_whatever_the_size_of_the_frame() {
+        let long = "x".repeat(300);
+        let prompts = [
+            job_confirm(),
+            confirm(&long, Some(&long)),
+            confirm("", None),
+        ];
+        for prompt in &prompts {
+            for (width, height) in [
+                (1, 1),
+                (3, 3),
+                (10, 2),
+                (44, 4),
+                (200, 60),
+                (5, 40),
+                (80, 0),
+            ] {
+                let _ = render_prompt(width, height, prompt);
+            }
+        }
     }
 
     /// The status line of a frame that holds the board `board`.
