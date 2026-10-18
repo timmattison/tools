@@ -1245,6 +1245,55 @@ mod tests {
     }
 
     #[test]
+    fn a_queued_run_with_a_job_in_progress_shows_the_running_marker() {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("timmattison/tools"),
+            vec![run(
+                1,
+                "timmattison/tools",
+                "CI",
+                "main",
+                "Fix the thing",
+                RunState::Queued,
+                "2026-10-14T11:45:30Z",
+                "2026-10-14T11:59:00Z",
+            )],
+        );
+        board.expand(now());
+        board.set_jobs(
+            RunId(1),
+            vec![
+                job(
+                    11,
+                    "test",
+                    RunState::Running,
+                    Some("2026-10-14T11:50:10Z"),
+                    None,
+                ),
+                job(12, "build", RunState::Queued, None, None),
+            ],
+        );
+        let buffer = render_with(120, 14, &mut board, &loaded());
+        let text = lines(&buffer);
+        let row_of = |needle: &str| {
+            let found = text.iter().position(|line| line.contains(needle));
+            u16::try_from(found.unwrap_or_else(|| panic!("no row holds {needle:?}: {text:?}")))
+                .expect("a row index fits in u16")
+        };
+        for (name, y) in [
+            ("the run row", row_of("Fix the thing")),
+            ("the running job row", row_of("test")),
+        ] {
+            assert_eq!(
+                (buffer[(0, y)].symbol(), buffer[(0, y)].fg),
+                ("●", Color::Yellow),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn no_job_row_is_reversed_when_its_run_is_selected() {
         let mut board = board_with_jobs(three_jobs());
         let buffer = render_with(120, 14, &mut board, &loaded());
