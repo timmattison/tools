@@ -2060,7 +2060,7 @@ cannot hang the caller. Used by `cwt` and `ha`.
       not make the jobs of the run yet. When a request for the jobs fails, the error shows below
       the last good job rows.
     - More than one run can be expanded at one time. A run stays expanded through each refresh,
-      and also when it moves from the running section to the finished section. When a run leaves
+      and also when it moves from the top section to the bottom section. When a run leaves
       the board, its jobs go too.
     - The jobs load at once when you expand a run, and then refresh with the board. The jobs of a
       finished run load one time only, until a re-run changes the run. If GitHub still shows an
