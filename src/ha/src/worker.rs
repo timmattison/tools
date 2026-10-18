@@ -11,9 +11,10 @@
 //! job waits for a runner, also when other jobs run, so the screen needs the
 //! job states of a collapsed run to draw the right marker. The worker fetches
 //! the jobs of a new watched run at once, and it fetches the jobs of the other
-//! runs on each cycle when the run is due. A run is due when it has no good job
-//! fetch yet, when the run or one of its jobs was active at the last good fetch,
-//! or when its `updated_at` changed since the last good fetch. So `ha` fetches
+//! runs on each cycle when the run is due. A run is due only while the list of
+//! runs holds it. Then it is due when it has no good job fetch yet, when the
+//! run or one of its jobs was active at the last good fetch, or when its
+//! `updated_at` changed since the last good fetch. So `ha` fetches
 //! the jobs of a finished run one time only, when all of its jobs are finished.
 //! Each active run costs one more jobs request on each cycle. An `ETag` 304
 //! answer makes that request free. Job requests and run requests share the
@@ -254,6 +255,10 @@ impl State {
     /// the due rule to each of them. The third set gives a run that is not
     /// watched its last fetch: its mark is active, so it is due one more time.
     /// A run whose fetch failed is due again through its active mark.
+    ///
+    /// A run with no facts is never due. It left the list of runs, or its
+    /// repository left the repository set. The board ignores a job answer for
+    /// a run that it does not hold, so a fetch of such a run is wasted.
     fn due_jobs(&mut self) -> Vec<RunKey> {
         let facts = self.facts.get_mut().unwrap_or_else(PoisonError::into_inner);
         let marks = self
@@ -271,13 +276,14 @@ impl State {
         }
         considered
             .into_iter()
-            .filter(|(repo, run)| match marks.get(&(repo.clone(), *run)) {
-                None => true,
-                Some(mark) if mark.active => true,
-                Some(mark) => facts
-                    .get(repo)
-                    .and_then(|runs| runs.get(run))
-                    .is_some_and(|now| now.updated_at != mark.updated_at),
+            .filter(|(repo, run)| {
+                let Some(now) = facts.get(repo).and_then(|runs| runs.get(run)) else {
+                    return false;
+                };
+                match marks.get(&(repo.clone(), *run)) {
+                    None => true,
+                    Some(mark) => mark.active || now.updated_at != mark.updated_at,
+                }
             })
             .collect()
     }
@@ -375,10 +381,11 @@ fn apply_command(
 
 /// Runs one cycle: lists the owners that need it, fetches every repository,
 /// fetches the jobs of the runs that are due (the watched runs, the active
-/// runs, and the runs with a mark), and reports the end of the cycle. A mark
-/// whose run left the list of runs is removed. A failed repository fetch keeps
-/// its old facts, thus its marks stay. Returns how long to wait before the
-/// next one, and whether the worker waits for a rate limit reset.
+/// runs, and the runs with a mark, when the list of runs holds the run), and
+/// reports the end of the cycle. A mark whose run left the list of runs is
+/// removed. A failed repository fetch keeps its old facts, thus its marks
+/// stay. Returns how long to wait before the next one, and whether the worker
+/// waits for a rate limit reset.
 fn cycle<S: Source>(
     source: &S,
     settings: &Settings,
@@ -516,8 +523,9 @@ fn fetch_all<S: Source>(
 ///
 /// When the mark is not active, the function tells the source to forget the
 /// pages of the jobs of the run, because the worker fetches them again only
-/// after the run changes. In every other case the worker fetches the run again,
-/// and the source keeps its pages.
+/// after the run changes. In every other case the source keeps its pages. An
+/// active mark makes the run due again on the next cycle. A run with no facts
+/// is not due again until a list of runs holds it.
 fn fetch_jobs<S: Source>(
     source: &S,
     state: &State,
