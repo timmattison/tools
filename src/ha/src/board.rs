@@ -398,8 +398,12 @@ impl Board {
     /// IDs, thus a re-run job can also move. The order by name stays the same
     /// through each refresh and each re-run, and it keeps the jobs of one
     /// matrix together.
+    ///
+    /// A repeated job ID keeps its first job only. The sort comes after this
+    /// step, thus the first job is the first one that the source gave.
     pub fn set_jobs(&mut self, run: RunId, mut jobs: Vec<Job>) {
         if let Some(state) = self.expanded.get_mut(&run) {
+            keep_first_of_each_id(&mut jobs, |job| job.id);
             jobs.sort_by_cached_key(|job| (job.name.to_lowercase(), job.id));
             *state = Jobs::Ready(jobs);
         }
