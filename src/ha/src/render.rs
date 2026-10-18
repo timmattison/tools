@@ -1379,7 +1379,7 @@ mod tests {
     }
 
     #[test]
-    fn a_job_with_no_start_shows_no_started_and_no_time() {
+    fn a_job_with_no_start_and_no_creation_shows_no_started_and_no_time() {
         let mut board = board_with_jobs(vec![
             job(11, "wait", RunState::Queued, None, None),
             job(
