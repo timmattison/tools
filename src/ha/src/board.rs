@@ -1553,6 +1553,36 @@ mod tests {
     }
 
     #[test]
+    fn a_run_that_never_was_expanded_shows_the_running_marker_of_its_jobs() {
+        let mut board = board();
+        board.replace(repo("a/x"), vec![run(1, "a/x", RunState::Queued, 30, 1)]);
+        board.set_jobs(RunId(1), vec![job(11, RunState::Running)]);
+        let rows = board.rows(now());
+        assert_eq!(
+            shape(&rows),
+            [
+                "Header(Active,1,0,0)",
+                "Run(1)",
+                "Header(Recent,0,0,0)",
+                "Empty(Recent)"
+            ]
+        );
+        assert_eq!(run_state(&rows, 1), Some(RunState::Running));
+    }
+
+    #[test]
+    fn a_run_that_leaves_the_board_loses_its_job_states() {
+        let mut board = board();
+        board.replace(repo("a/x"), vec![run(1, "a/x", RunState::Queued, 30, 1)]);
+        board.set_jobs(RunId(1), vec![job(11, RunState::Running)]);
+        board.replace(repo("a/x"), Vec::new());
+        board.rows(now());
+        board.replace(repo("a/x"), vec![run(1, "a/x", RunState::Queued, 30, 1)]);
+        let rows = board.rows(now());
+        assert_eq!(run_state(&rows, 1), Some(RunState::Queued));
+    }
+
+    #[test]
     fn expanding_a_run_twice_keeps_its_jobs() {
         let mut board = two_run_board();
         board.expand(now());

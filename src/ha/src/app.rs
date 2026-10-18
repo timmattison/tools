@@ -1072,6 +1072,33 @@ mod tests {
     }
 
     #[test]
+    fn the_jobs_of_a_collapsed_queued_run_show_the_running_marker() {
+        let channels = channels();
+        send_runs(
+            &channels,
+            vec![Run {
+                state: RunState::Queued,
+                ..active_run(1, 5)
+            }],
+        );
+        let steps = vec![
+            Step::Send(Update::Jobs {
+                run: RunId(1),
+                jobs: vec![job(10, "build")],
+            }),
+            Step::Idle,
+            key(KeyCode::Char('q')),
+        ];
+        let (frame, _) = run_steps(&channels, steps);
+        let run_row = row_of(&frame, "run 1");
+        assert!(frame[run_row].trim_start().starts_with('●'), "{frame:?}");
+        assert!(
+            !frame[run_row + 1].contains('└') && !frame[run_row + 1].contains('├'),
+            "{frame:?}"
+        );
+    }
+
+    #[test]
     fn a_failed_fetch_after_jobs_shows_the_last_jobs_and_the_error() {
         let channels = channels();
         send_runs(&channels, vec![active_run(1, 5)]);
