@@ -292,7 +292,8 @@ where
 
     /// Opens the box that asks to cancel the highlighted run, or posts that a
     /// finished run has nothing to cancel. The box keeps a copy of what it
-    /// shows, thus a later refresh does not change the run that `y` cancels. On a job row it names the run of the job.
+    /// shows, thus a later refresh does not change the run that `y` cancels.
+    /// On a job row it names the run of the job.
     fn ask_to_cancel(&mut self) {
         let now = (self.now)();
         let target = self.board.selected_target(now).map(|(run, job)| {
