@@ -822,8 +822,9 @@ mod tests {
     }
 
     /// These lines are the target example of issue #571, with the two section
-    /// headers added. The workflow name is 8 columns wide (issue #577), thus the
-    /// title has 7 columns more than in that example.
+    /// headers added. The workflow name is 8 columns wide and the branch is 12
+    /// columns wide (issue #577), thus the title has 12 columns more than in
+    /// that example.
     #[test]
     fn a_frame_of_120_columns_has_the_target_layout_of_issue_571() {
         let mut board = Board::new(Duration::from_hours(8));
@@ -884,14 +885,14 @@ mod tests {
         assert_eq!(
             text[0..8],
             [
-                "  REPO                WORKFLOW              BRANCH            TITLE                                  STARTED     TIME",
+                "  REPO                WORKFLOW              BRANCH       TITLE                                       STARTED     TIME",
                 "Running · 1",
-                "● timmattison/tools   CI        39149840084 main              Fix the thing                          11:45:30    14m 30s",
+                "● timmattison/tools   CI        39149840084 main         Fix the thing                               11:45:30    14m 30s",
                 "✓ ├ build                      107851237794                                                          11:45:40    4m 20s",
                 "✗ ├ lint                       107851237795                                                          11:46:00    45s",
                 "● └ test                       107851237796                                                          11:50:10    9m 50s",
                 "Last 8h · 1 passed · 0 failed",
-                "✓ acme/widgets        Release   39149711502 issue-11          Bump deps                              09:00:00    10m 05s",
+                "✓ acme/widgets        Release   39149711502 issue-11     Bump deps                                   09:00:00    10m 05s",
             ]
         );
     }
@@ -903,13 +904,13 @@ mod tests {
         assert_eq!(
             lines(&buffer),
             [
-                "  REPO                WORKFLOW              BRANCH            TITLE                                  STARTED     TIME",
+                "  REPO                WORKFLOW              BRANCH       TITLE                                       STARTED     TIME",
                 "Running · 2",
-                "● timmattison/tools   CI                  1 main              Fix the thing                          11:45:30    14m 30s",
-                "○ acme/widgets        Release             2 issue-12          Add release job                        11:58:00    2m 00s",
+                "● timmattison/tools   CI                  1 main         Fix the thing                               11:45:30    14m 30s",
+                "○ acme/widgets        Release             2 issue-12     Add release job                             11:58:00    2m 00s",
                 "Last 8h · 1 passed · 1 failed",
-                "✓ timmattison/tools   CI                  3 main              Bump deps                              09:00:00    10m 05s",
-                "✗ acme/widgets        Release             4 issue-11          Broken build                           10-13 23:50 4h 40m",
+                "✓ timmattison/tools   CI                  3 main         Bump deps                                   09:00:00    10m 05s",
+                "✗ acme/widgets        Release             4 issue-11     Broken build                                10-13 23:50 4h 40m",
                 "",
                 "",
                 "updated 30s ago      ·  ↑↓ select  →← jobs  ⏎ open  r refresh  q quit",
@@ -1142,6 +1143,72 @@ mod tests {
                 branch_at(long),
                 branch_at(short),
                 "width {width}: the branches move"
+            );
+        }
+    }
+
+    /// The branch is 19 columns wide. Without the cap, it fits whole in the
+    /// share of the branch from 129 columns, and its cell is wider than 12
+    /// columns from 100 columns. Thus this test fails without the cap.
+    #[test]
+    fn a_branch_wider_than_twelve_columns_is_cut_and_the_title_stays() {
+        for width in 80_u16..=200 {
+            let mut board = Board::new(Duration::from_hours(8));
+            board.replace(
+                repo("timmattison/tools"),
+                vec![
+                    run(
+                        39_149_840_084,
+                        "timmattison/tools",
+                        "CI",
+                        "main",
+                        "Short",
+                        RunState::Running,
+                        "2026-10-14T11:45:30Z",
+                        "2026-10-14T11:59:00Z",
+                    ),
+                    run(
+                        39_149_840_085,
+                        "timmattison/tools",
+                        "CI",
+                        "issue-577-日本語-🎉",
+                        "Short",
+                        RunState::Running,
+                        "2026-10-14T11:46:30Z",
+                        "2026-10-14T11:59:00Z",
+                    ),
+                ],
+            );
+            let text = lines(&render_with(width, 8, &mut board, &loaded()));
+            let (short, long) = (&text[2], &text[3]);
+            let (_, after_id) = long
+                .split_once("39149840085 ")
+                .unwrap_or_else(|| panic!("width {width}: the whole ID is missing: {long:?}"));
+            let (branch, _) = after_id
+                .split_once(" Short")
+                .unwrap_or_else(|| panic!("width {width}: the title is missing: {long:?}"));
+            assert!(
+                branch.starts_with("issue-"),
+                "width {width}: the branch lost its start: {long:?}"
+            );
+            assert!(
+                branch.trim_end().ends_with('…'),
+                "width {width}: the branch does not end in `…`: {long:?}"
+            );
+            assert!(
+                display_width(branch) <= 12,
+                "width {width}: the branch cell is wider than 12 columns: {long:?}"
+            );
+            let title_at = |line: &str| {
+                let (before, _) = line
+                    .split_once("Short")
+                    .unwrap_or_else(|| panic!("width {width}: the title is missing: {line:?}"));
+                display_width(before)
+            };
+            assert_eq!(
+                title_at(long),
+                title_at(short),
+                "width {width}: the titles move"
             );
         }
     }
@@ -1480,8 +1547,8 @@ mod tests {
     }
 
     /// The expected line of a job row at 120 columns. The widths follow the
-    /// shares of the 82 columns of room: 19 repository, 8 workflow name, 17
-    /// branch, and 38 title. The text fills 28 columns, the job ID fills 12, and
+    /// shares of the 82 columns of room: 19 repository, 8 workflow name, 12
+    /// branch, and 43 title. The text fills 28 columns, the job ID fills 12, and
     /// the branch and title columns are 56 blank columns.
     fn job_golden(marker: &str, text: &str, id: u64, times: &str) -> String {
         format!(
@@ -1499,7 +1566,7 @@ mod tests {
         assert_eq!(
             text[2..6],
             [
-                "● timmattison/tools   CI                  1 main              Fix the thing                          11:45:30    14m 30s".to_owned(),
+                "● timmattison/tools   CI                  1 main         Fix the thing                               11:45:30    14m 30s".to_owned(),
                 job_golden("✓", "├ build", 12, "11:45:40    4m 20s"),
                 job_golden("✗", "├ lint", 13, "11:46:00    45s"),
                 job_golden("●", "└ test", 11, "11:50:10    9m 50s"),
@@ -1940,7 +2007,8 @@ mod tests {
 
     /// The (branch, title) widths that the board gave before issue #571, at
     /// each width from 80 to 200 columns. The entry for width `w` is at index
-    /// `w - 80`. A change to the layout must never go below these values.
+    /// `w - 80`. A change to the layout must never go below these values,
+    /// except that the branch gets at most 12 columns (issue #577).
     const TODAY_BRANCH_AND_TITLE: [(usize, usize); 121] = [
         (7, 15),
         (7, 16),
@@ -2066,7 +2134,7 @@ mod tests {
     ];
 
     #[test]
-    fn the_branch_and_the_title_keep_at_least_their_old_widths() {
+    fn the_title_keeps_its_old_width_and_the_branch_keeps_it_up_to_twelve_columns() {
         for w in 80_u16..=200 {
             let mut board = Board::new(Duration::from_hours(8));
             board.replace(
@@ -2096,8 +2164,12 @@ mod tests {
             let title = row.chars().filter(|c| *c == 'T').count() + 1;
             let (old_branch, old_title) = TODAY_BRANCH_AND_TITLE[usize::from(w) - 80];
             assert!(
-                branch >= old_branch,
+                branch >= old_branch.min(12),
                 "width {w}: the branch is {branch} wide, the old width is {old_branch}"
+            );
+            assert!(
+                branch <= 12,
+                "width {w}: the branch is {branch} wide, more than 12 columns"
             );
             assert!(
                 title >= old_title,
@@ -2114,9 +2186,10 @@ mod tests {
 
     /// The (repository, workflow, branch, title) widths at each frame width
     /// from 80 to 200 columns. The entry for width `w` is at index `w - 80`.
-    /// The workflow name has the share that it had before issue #577, but it
-    /// is never wider than the header `WORKFLOW`, which is 8 columns. The
-    /// title gets each column that the workflow gives up.
+    /// The workflow name and the branch have the shares that they had before
+    /// issue #577, but the workflow name is never wider than the header
+    /// `WORKFLOW`, which is 8 columns, and the branch is never wider than 12
+    /// columns. The title gets each column that the two give up.
     const TEXT_WIDTHS: [(usize, usize, usize, usize); 121] = [
         (10, 7, 8, 17),
         (10, 8, 9, 16),
@@ -2138,111 +2211,111 @@ mod tests {
         (14, 8, 12, 25),
         (14, 8, 12, 26),
         (14, 8, 12, 27),
-        (14, 8, 13, 27),
-        (15, 8, 13, 27),
-        (15, 8, 13, 28),
-        (15, 8, 13, 29),
-        (15, 8, 13, 30),
-        (16, 8, 14, 29),
-        (16, 8, 14, 30),
-        (16, 8, 14, 31),
-        (16, 8, 14, 32),
-        (17, 8, 14, 32),
-        (17, 8, 15, 32),
-        (17, 8, 15, 33),
-        (17, 8, 15, 34),
-        (18, 8, 15, 34),
-        (18, 8, 15, 35),
-        (18, 8, 16, 35),
-        (18, 8, 16, 36),
-        (18, 8, 16, 37),
-        (19, 8, 16, 37),
-        (19, 8, 17, 37),
-        (19, 8, 17, 38),
-        (19, 8, 17, 39),
-        (20, 8, 17, 39),
-        (20, 8, 17, 40),
-        (20, 8, 18, 40),
-        (20, 8, 18, 41),
-        (21, 8, 18, 41),
-        (21, 8, 18, 42),
-        (21, 8, 18, 43),
-        (21, 8, 19, 43),
-        (22, 8, 19, 43),
-        (22, 8, 19, 44),
-        (22, 8, 19, 45),
-        (22, 8, 19, 46),
-        (23, 8, 20, 45),
-        (23, 8, 20, 46),
-        (23, 8, 20, 47),
-        (23, 8, 20, 48),
-        (24, 8, 21, 47),
-        (24, 8, 21, 48),
-        (24, 8, 21, 49),
-        (24, 8, 21, 50),
-        (24, 8, 21, 51),
-        (25, 8, 22, 50),
-        (25, 8, 22, 51),
-        (25, 8, 22, 52),
-        (25, 8, 22, 53),
-        (26, 8, 22, 53),
-        (26, 8, 23, 53),
-        (26, 8, 23, 54),
-        (26, 8, 23, 55),
-        (27, 8, 23, 55),
-        (27, 8, 23, 56),
-        (27, 8, 24, 56),
-        (27, 8, 24, 57),
-        (28, 8, 24, 57),
-        (28, 8, 24, 58),
-        (28, 8, 24, 59),
-        (28, 8, 25, 59),
-        (29, 8, 25, 59),
-        (29, 8, 25, 60),
-        (29, 8, 25, 61),
-        (29, 8, 26, 61),
-        (30, 8, 26, 61),
-        (30, 8, 26, 62),
-        (30, 8, 26, 63),
-        (30, 8, 26, 64),
-        (30, 8, 27, 64),
-        (31, 8, 27, 64),
-        (31, 8, 27, 65),
-        (31, 8, 27, 66),
-        (31, 8, 27, 67),
-        (32, 8, 28, 66),
-        (32, 8, 28, 67),
-        (32, 8, 28, 68),
-        (32, 8, 28, 69),
-        (33, 8, 28, 69),
-        (33, 8, 29, 69),
-        (33, 8, 29, 70),
-        (33, 8, 29, 71),
-        (34, 8, 29, 71),
-        (34, 8, 30, 71),
-        (34, 8, 30, 72),
-        (34, 8, 30, 73),
-        (35, 8, 30, 73),
-        (35, 8, 30, 74),
-        (35, 8, 31, 74),
-        (35, 8, 31, 75),
-        (36, 8, 31, 75),
-        (36, 8, 31, 76),
-        (36, 8, 31, 77),
-        (36, 8, 32, 77),
-        (36, 8, 32, 78),
-        (37, 8, 32, 78),
-        (37, 8, 32, 79),
-        (37, 8, 32, 80),
-        (37, 8, 33, 80),
-        (38, 8, 33, 80),
-        (38, 8, 33, 81),
-        (38, 8, 33, 82),
-        (38, 8, 34, 82),
+        (14, 8, 12, 28),
+        (15, 8, 12, 28),
+        (15, 8, 12, 29),
+        (15, 8, 12, 30),
+        (15, 8, 12, 31),
+        (16, 8, 12, 31),
+        (16, 8, 12, 32),
+        (16, 8, 12, 33),
+        (16, 8, 12, 34),
+        (17, 8, 12, 34),
+        (17, 8, 12, 35),
+        (17, 8, 12, 36),
+        (17, 8, 12, 37),
+        (18, 8, 12, 37),
+        (18, 8, 12, 38),
+        (18, 8, 12, 39),
+        (18, 8, 12, 40),
+        (18, 8, 12, 41),
+        (19, 8, 12, 41),
+        (19, 8, 12, 42),
+        (19, 8, 12, 43),
+        (19, 8, 12, 44),
+        (20, 8, 12, 44),
+        (20, 8, 12, 45),
+        (20, 8, 12, 46),
+        (20, 8, 12, 47),
+        (21, 8, 12, 47),
+        (21, 8, 12, 48),
+        (21, 8, 12, 49),
+        (21, 8, 12, 50),
+        (22, 8, 12, 50),
+        (22, 8, 12, 51),
+        (22, 8, 12, 52),
+        (22, 8, 12, 53),
+        (23, 8, 12, 53),
+        (23, 8, 12, 54),
+        (23, 8, 12, 55),
+        (23, 8, 12, 56),
+        (24, 8, 12, 56),
+        (24, 8, 12, 57),
+        (24, 8, 12, 58),
+        (24, 8, 12, 59),
+        (24, 8, 12, 60),
+        (25, 8, 12, 60),
+        (25, 8, 12, 61),
+        (25, 8, 12, 62),
+        (25, 8, 12, 63),
+        (26, 8, 12, 63),
+        (26, 8, 12, 64),
+        (26, 8, 12, 65),
+        (26, 8, 12, 66),
+        (27, 8, 12, 66),
+        (27, 8, 12, 67),
+        (27, 8, 12, 68),
+        (27, 8, 12, 69),
+        (28, 8, 12, 69),
+        (28, 8, 12, 70),
+        (28, 8, 12, 71),
+        (28, 8, 12, 72),
+        (29, 8, 12, 72),
+        (29, 8, 12, 73),
+        (29, 8, 12, 74),
+        (29, 8, 12, 75),
+        (30, 8, 12, 75),
+        (30, 8, 12, 76),
+        (30, 8, 12, 77),
+        (30, 8, 12, 78),
+        (30, 8, 12, 79),
+        (31, 8, 12, 79),
+        (31, 8, 12, 80),
+        (31, 8, 12, 81),
+        (31, 8, 12, 82),
+        (32, 8, 12, 82),
+        (32, 8, 12, 83),
+        (32, 8, 12, 84),
+        (32, 8, 12, 85),
+        (33, 8, 12, 85),
+        (33, 8, 12, 86),
+        (33, 8, 12, 87),
+        (33, 8, 12, 88),
+        (34, 8, 12, 88),
+        (34, 8, 12, 89),
+        (34, 8, 12, 90),
+        (34, 8, 12, 91),
+        (35, 8, 12, 91),
+        (35, 8, 12, 92),
+        (35, 8, 12, 93),
+        (35, 8, 12, 94),
+        (36, 8, 12, 94),
+        (36, 8, 12, 95),
+        (36, 8, 12, 96),
+        (36, 8, 12, 97),
+        (36, 8, 12, 98),
+        (37, 8, 12, 98),
+        (37, 8, 12, 99),
+        (37, 8, 12, 100),
+        (37, 8, 12, 101),
+        (38, 8, 12, 101),
+        (38, 8, 12, 102),
+        (38, 8, 12, 103),
+        (38, 8, 12, 104),
     ];
 
     #[test]
-    fn the_workflow_name_is_at_most_eight_columns_and_the_title_gets_the_rest() {
+    fn the_workflow_and_the_branch_are_capped_and_the_title_gets_the_rest() {
         for w in 80_u16..=200 {
             let repo_text = format!("Q/{}", "Q".repeat(400));
             let mut board = Board::new(Duration::from_hours(8));
