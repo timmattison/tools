@@ -19,15 +19,16 @@ use crate::status::{Status, MESSAGE_LIFETIME};
 
 /// The width of the marker column.
 const MARKER_WIDTH: usize = 1;
-/// The width of the run column. It fits `#999999`.
-const RUN_WIDTH: usize = 7;
+/// The width of the ID part. It fits an ID of 12 digits. On 2026-10-18, run
+/// IDs have 11 digits and job IDs have 12 digits.
+const ID_WIDTH: usize = 12;
 /// The width of the started column.
 const STARTED_WIDTH: usize = 11;
 /// The width of the time column.
 const TIME_WIDTH: usize = 7;
-/// The columns that the text columns do not share: the marker, the run,
+/// The columns that the text columns do not share: the marker, the ID part,
 /// started, and time columns, and the seven spaces between the columns.
-const FIXED_COLUMNS: usize = MARKER_WIDTH + RUN_WIDTH + STARTED_WIDTH + TIME_WIDTH + 7;
+const FIXED_COLUMNS: usize = MARKER_WIDTH + ID_WIDTH + STARTED_WIDTH + TIME_WIDTH + 7;
 /// The lines that are not board rows: the column header and the status line.
 const FIXED_LINES: usize = 2;
 /// The text that stands between two parts of the status line.
@@ -74,7 +75,7 @@ fn fit(text: &str, width: usize) -> String {
 
 /// Cuts a text to a column width, then pads it on the left to that width.
 ///
-/// The text must be ASCII, for example `#1234`, because the padding counts
+/// The text must be ASCII, for example the ID `39149840084`, because the padding counts
 /// characters. The cut uses `textfit` and so is safe for any text.
 fn fit_right(text: &str, width: usize) -> String {
     let cut = truncate_to_budget(text, width);
@@ -83,11 +84,14 @@ fn fit_right(text: &str, width: usize) -> String {
 }
 
 /// Joins the cells of one row into one line. One space stands between cells.
+///
+/// The ID part stands after the workflow cell, and `id` is right-aligned in it.
+/// Thus the header word `WORKFLOW` heads the workflow name and the ID.
 fn cells(
     widths: Widths,
     marker: &str,
     texts: [&str; 4],
-    run: &str,
+    id: &str,
     started: &str,
     time: &str,
 ) -> String {
@@ -96,7 +100,7 @@ fn cells(
         pad_right(marker, MARKER_WIDTH),
         fit(repo, widths.repo),
         fit(workflow, widths.workflow),
-        fit_right(run, RUN_WIDTH),
+        fit_right(id, ID_WIDTH),
         fit(branch, widths.branch),
         fit(title, widths.title),
         pad_right(started, STARTED_WIDTH),
@@ -107,12 +111,12 @@ fn cells(
 
 /// Joins the cells of one job row or status row into one line.
 ///
-/// One text cell takes the place of the repository, workflow, run, branch, and
-/// title cells. It has the width of those five cells and the four spaces
+/// One text cell takes the place of the repository, workflow, ID part, branch,
+/// and title cells. It has the width of those five cells and the four spaces
 /// between them. Thus the started and time cells stand in the same
 /// columns as those of a run row.
 fn wide_cells(widths: Widths, marker: &str, text: &str, started: &str, time: &str) -> String {
-    let text_width = widths.repo + widths.workflow + RUN_WIDTH + widths.branch + widths.title + 4;
+    let text_width = widths.repo + widths.workflow + ID_WIDTH + widths.branch + widths.title + 4;
     [
         pad_right(marker, MARKER_WIDTH),
         fit(text, text_width),
@@ -180,7 +184,7 @@ where
             &run.branch,
             &run.title,
         ],
-        &format!("#{}", run.number.0),
+        &run.id.0.to_string(),
         &format_started(run.started_at, now, tz),
         &time,
     )
@@ -519,7 +523,7 @@ pub fn draw<Tz: TimeZone>(
             widths,
             " ",
             ["REPO", "WORKFLOW", "BRANCH", "TITLE"],
-            "RUN",
+            "",
             "STARTED",
             "TIME",
         ),
@@ -799,13 +803,13 @@ mod tests {
         assert_eq!(
             lines(&buffer),
             [
-                "  REPO                  WORKFLOW              RUN BRANCH            TITLE                            STARTED     TIME",
+                "  REPO                 WORKFLOW                      BRANCH           TITLE                          STARTED     TIME",
                 "Running · 2",
-                "● timmattison/tools     CI                   #101 main              Fix the thing                    11:45:30    14m 30s",
-                "○ acme/widgets          Release              #102 issue-12          Add release job                  11:58:00    2m 00s",
+                "● timmattison/tools    CI                          1 main             Fix the thing                  11:45:30    14m 30s",
+                "○ acme/widgets         Release                     2 issue-12         Add release job                11:58:00    2m 00s",
                 "Last 8h · 1 passed · 1 failed",
-                "✓ timmattison/tools     CI                   #103 main              Bump deps                        09:00:00    10m 05s",
-                "✗ acme/widgets          Release              #104 issue-11          Broken build                     10-13 23:50 4h 40m",
+                "✓ timmattison/tools    CI                          3 main             Bump deps                      09:00:00    10m 05s",
+                "✗ acme/widgets         Release                     4 issue-11         Broken build                   10-13 23:50 4h 40m",
                 "",
                 "",
                 "updated 30s ago      ·  ↑↓ select  →← jobs  ⏎ open  r refresh  q quit",
@@ -818,43 +822,26 @@ mod tests {
         line.chars().skip(from).take(count).collect()
     }
 
-    /// The first column of the run column in a frame of 120 columns. The
-    /// marker, the repository (21), and the workflow (17) come before it.
-    const RUN_COLUMN: usize = 1 + 1 + 21 + 1 + 17 + 1;
-
     #[test]
-    fn the_run_column_shows_the_run_number_aligned_to_the_right() {
-        let mut board = four_run_board();
-        let text = lines(&render_with(120, 10, &mut board, &loaded()));
-        assert_eq!(columns(&text[0], RUN_COLUMN, 7), "    RUN");
-        assert_eq!(columns(&text[2], RUN_COLUMN, 7), "   #101");
-        assert_eq!(columns(&text[3], RUN_COLUMN, 7), "   #102");
-        assert_eq!(columns(&text[5], RUN_COLUMN, 7), "   #103");
-        assert_eq!(columns(&text[6], RUN_COLUMN, 7), "   #104");
-    }
-
-    #[test]
-    fn a_run_number_wider_than_the_column_is_cut_and_keeps_the_other_columns() {
+    fn a_run_id_wider_than_the_id_part_is_cut_and_keeps_the_other_columns() {
         let mut board = Board::new(Duration::from_hours(8));
         board.replace(
             repo("acme/widgets"),
             vec![run(
-                1_234_467,
+                1_234_567_890_123,
                 "acme/widgets",
                 "CI",
                 "main",
-                "Wide number",
+                "Wide ID",
                 RunState::Running,
                 "2026-10-14T11:45:30Z",
                 "2026-10-14T11:59:00Z",
             )],
         );
         let text = lines(&render_with(120, 10, &mut board, &loaded()));
-        assert_eq!(columns(&text[2], RUN_COLUMN, 7), "#12345…");
-        let started = text[0]
-            .find("STARTED")
-            .expect("the header names the started column");
-        assert_eq!(columns(&text[2], started, 8), "11:45:30");
+        let branch = header_column(&text, "BRANCH");
+        assert_eq!(columns(&text[2], branch - 1 - 12, 12), "12345678901…");
+        assert_eq!(started_cells(&text, 2), "11:45:30");
     }
 
     #[test]
@@ -1243,7 +1230,7 @@ mod tests {
         assert_eq!(
             text[2..6],
             [
-                "● timmattison/tools     CI                   #101 main              Fix the thing                    11:45:30    14m 30s".to_owned(),
+                "● timmattison/tools    CI                          1 main             Fix the thing                  11:45:30    14m 30s".to_owned(),
                 format!("✓ {:<98} 11:45:40    4m 20s", "├ build"),
                 format!("✗ {:<98} 11:46:00    45s", "├ lint"),
                 format!("● {:<98} 11:50:10    9m 50s", "└ test"),
@@ -1772,10 +1759,10 @@ mod tests {
             )],
         );
         let text = lines(&render_with(68, 6, &mut board, &Status::default()));
-        // 68 - 33 = 35 columns for the text: 8, 7, 7, and 13.
+        // 68 - 38 = 30 columns for the text: 7, 6, 6, and 11.
         assert_eq!(
             text[2],
-            "● timmatt… Contin…    #101 featur… A very long … 11:55:00    5m 00s"
+            "● timmat… Conti…            1 featu… A very lon… 11:55:00    5m 00s"
         );
     }
 
@@ -1820,15 +1807,15 @@ mod tests {
         let text = lines(&render_with(68, 7, &mut board, &Status::default()));
         assert_eq!(
             text[2],
-            "● a/x      CI         #101 日本語… t             11:51:00    9m 00s"
+            "● a/x     CI                1 日本…  t           11:51:00    9m 00s"
         );
         assert_eq!(
             text[3],
-            "● a/x      CI         #102 café-a… t             11:52:00    8m 00s"
+            "● a/x     CI                2 café-… t           11:52:00    8m 00s"
         );
         assert_eq!(
             text[4],
-            "● a/x      CI         #103 🎉🎉🎉… t             11:53:00    7m 00s"
+            "● a/x     CI                3 🎉🎉…  t           11:53:00    7m 00s"
         );
         for line in &text {
             assert!(display_width(line) <= 68, "{line:?} is too wide");
