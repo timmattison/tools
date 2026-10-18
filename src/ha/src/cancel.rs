@@ -11,10 +11,14 @@
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
+use std::thread;
 
 use crate::github::{GhSource, SourceError};
 use crate::run::RunId;
 use crate::target::RepoName;
+
+/// The name of the thread that sends one cancel.
+const THREAD_NAME: &str = "ha-cancel";
 
 /// The result of one cancel request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,12 +67,34 @@ impl GhCanceller {
 }
 
 impl Canceller for GhCanceller {
-    fn cancel(&self, _repo: &RepoName, _run: RunId) {
-        let _ = (&self.source, &self.sender);
+    fn cancel(&self, repo: &RepoName, run: RunId) {
+        let source = Arc::clone(&self.source);
+        let sender = self.sender.clone();
+        let thread_repo = repo.clone();
+        let spawned = thread::Builder::new()
+            .name(THREAD_NAME.to_owned())
+            .spawn(move || {
+                let result = source.cancel_run(&thread_repo, run);
+                // The receiver is gone when `ha` ends. Nobody reads the outcome then.
+                let _ = sender.send(CancelOutcome {
+                    repo: thread_repo,
+                    run,
+                    result,
+                });
+            });
+        if let Err(error) = spawned {
+            let _ = self.sender.send(CancelOutcome {
+                repo: repo.clone(),
+                run,
+                result: Err(SourceError::Failed(format!(
+                    "cannot start a thread: {error}"
+                ))),
+            });
+        }
     }
 
     fn finished(&self) -> Option<CancelOutcome> {
-        None
+        self.outcomes.try_recv().ok()
     }
 }
 
