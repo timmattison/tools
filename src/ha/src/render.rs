@@ -195,7 +195,7 @@ fn marker(state: RunState) -> &'static str {
         RunState::Queued => "○",
         RunState::Passed => "✓",
         RunState::Failed => "✗",
-        RunState::Other => " ",
+        RunState::Cancelled | RunState::Other => " ",
     }
 }
 
@@ -562,7 +562,7 @@ fn marker_color(state: RunState) -> Color {
         RunState::Queued => Color::Blue,
         RunState::Passed => Color::Green,
         RunState::Failed => Color::Red,
-        RunState::Other => Color::Reset,
+        RunState::Cancelled | RunState::Other => Color::Reset,
     }
 }
 
