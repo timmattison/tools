@@ -344,6 +344,9 @@ const SECTION_LOADING: &str = "  Loading…";
 
 /// The line of a section header.
 ///
+/// A loaded recent header names the counts of passed, failed, and cancelled
+/// runs. Each count shows also when it is 0.
+///
 /// Before the first refresh cycle ends (`loaded` is false), the header gives
 /// no counts. The board then holds only the repositories that the worker
 /// fetched so far, thus a count is too low.
@@ -352,6 +355,7 @@ fn header_line(
     count: usize,
     passed: usize,
     failed: usize,
+    cancelled: usize,
     window: Duration,
     loaded: bool,
 ) -> String {
@@ -360,7 +364,9 @@ fn header_line(
         (Section::Active, false) => "Running".to_owned(),
         (Section::Active, true) => format!("Running · {count}"),
         (Section::Recent, false) => format!("Last {window}"),
-        (Section::Recent, true) => format!("Last {window} · {passed} passed · {failed} failed"),
+        (Section::Recent, true) => {
+            format!("Last {window} · {passed} passed · {failed} failed · {cancelled} cancelled")
+        }
     }
 }
 
@@ -603,9 +609,11 @@ pub fn draw<Tz: TimeZone>(
                 count,
                 passed,
                 failed,
-                ..
+                cancelled,
             } => {
-                let line = header_line(*section, *count, *passed, *failed, window, loaded);
+                let line = header_line(
+                    *section, *count, *passed, *failed, *cancelled, window, loaded,
+                );
                 put(buffer, index + 1, &line, bold);
             }
             Row::Empty(section) => {
