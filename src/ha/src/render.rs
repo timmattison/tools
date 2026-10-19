@@ -19,8 +19,9 @@ use crate::run::{Run, RunState};
 use crate::settings::format_duration_setting;
 use crate::status::{Status, MESSAGE_LIFETIME};
 
-/// The width of the marker column.
-const MARKER_WIDTH: usize = 1;
+/// The width of the marker column. Each marker is one emoji of 2 columns, or a
+/// blank of 2 columns.
+const MARKER_WIDTH: usize = 2;
 /// The width of the ID part. It fits an ID of 12 digits. On 2026-10-18, run
 /// IDs have 11 digits and job IDs have 12 digits.
 const ID_WIDTH: usize = 12;
@@ -188,14 +189,20 @@ fn job_cells(
     .join(" ")
 }
 
-/// The marker glyph of a run state.
+/// The marker of a run state: one emoji, or a blank for the state `Other`.
+///
+/// Each emoji is a single code point of East Asian Width `W`, with no variation
+/// selector and no joiner. Thus all terminals agree that it is
+/// [`MARKER_WIDTH`] columns wide. A terminal draws an emoji in its own colors,
+/// thus the marker has no foreground color.
 fn marker(state: RunState) -> &'static str {
     match state {
-        RunState::Running => "●",
-        RunState::Queued => "○",
-        RunState::Passed => "✓",
-        RunState::Failed => "✗",
-        RunState::Cancelled | RunState::Other => " ",
+        RunState::Running => "🏃",
+        RunState::Queued => "⏳",
+        RunState::Cancelled => "🪦",
+        RunState::Passed => "✅",
+        RunState::Failed => "❌",
+        RunState::Other => " ",
     }
 }
 
@@ -561,17 +568,6 @@ fn reverse_if(selected: bool, buffer: &mut Buffer, area: Rect, y: u16) {
     }
 }
 
-/// The color of the marker of a run state.
-fn marker_color(state: RunState) -> Color {
-    match state {
-        RunState::Running => Color::Yellow,
-        RunState::Queued => Color::Blue,
-        RunState::Passed => Color::Green,
-        RunState::Failed => Color::Red,
-        RunState::Cancelled | RunState::Other => Color::Reset,
-    }
-}
-
 /// Draws one frame: the column header, the board rows, and the status line.
 ///
 /// The board rows come from [`Board::view`] with the frame height minus the
@@ -627,10 +623,6 @@ pub fn draw<Tz: TimeZone>(
             } => {
                 let line = run_line(run, *state, now, tz, widths);
                 let y = put(buffer, index + 1, &line, Style::default());
-                buffer.set_style(
-                    Rect::new(area.x, y, 1, 1),
-                    Style::default().fg(marker_color(*state)),
-                );
                 reverse_if(*selected, buffer, area, y);
             }
             Row::Job {
@@ -640,10 +632,6 @@ pub fn draw<Tz: TimeZone>(
             } => {
                 let line = job_line(job, *last, now, tz, widths);
                 let y = put(buffer, index + 1, &line, Style::default());
-                buffer.set_style(
-                    Rect::new(area.x, y, 1, 1),
-                    Style::default().fg(marker_color(job.state)),
-                );
                 reverse_if(*selected, buffer, area, y);
             }
             Row::JobsLoading => put_status_row(buffer, index + 1, JOBS_LOADING),
@@ -2917,13 +2905,14 @@ mod tests {
     }
 
     /// The `count` columns from column `x` of the rows `first..first + rows`.
-    /// The text holds no wide glyph.
+    /// The box holds no wide glyph. A row below the box can hold one in
+    /// the columns before `x`, thus the columns count as display columns.
     fn box_rows(buffer: &Buffer, x: usize, count: usize, first: usize, rows: usize) -> Vec<String> {
         lines(buffer)
             .into_iter()
             .skip(first)
             .take(rows)
-            .map(|line| line.chars().skip(x).take(count).collect())
+            .map(|line| columns(&line, x, count))
             .collect()
     }
 
@@ -3531,69 +3520,39 @@ mod tests {
     /// A board with a run in each of the five shown states. The first run is
     /// expanded and holds a job in each of the six states.
     fn marker_board() -> Board {
-        let [running, queued, passed, failed, cancelled] = MARKER_RUN_IDS;
+        let runs = [
+            (RunState::Running, "11:00:00", "11:59:00"),
+            (RunState::Queued, "11:10:00", "11:10:00"),
+            (RunState::Passed, "10:00:00", "10:05:00"),
+            (RunState::Failed, "10:10:00", "10:20:00"),
+            (RunState::Cancelled, "10:30:00", "10:42:00"),
+        ];
         let mut board = Board::new(Duration::from_hours(8));
         board.replace(
             repo("a/x"),
-            vec![
-                run(
-                    running,
-                    "a/x",
-                    "CI",
-                    "main",
-                    "title-1",
-                    RunState::Running,
-                    "2026-10-14T11:00:00Z",
-                    "2026-10-14T11:59:00Z",
-                ),
-                run(
-                    queued,
-                    "a/x",
-                    "CI",
-                    "main",
-                    "title-2",
-                    RunState::Queued,
-                    "2026-10-14T11:10:00Z",
-                    "2026-10-14T11:10:00Z",
-                ),
-                run(
-                    passed,
-                    "a/x",
-                    "CI",
-                    "main",
-                    "title-3",
-                    RunState::Passed,
-                    "2026-10-14T10:00:00Z",
-                    "2026-10-14T10:05:00Z",
-                ),
-                run(
-                    failed,
-                    "a/x",
-                    "CI",
-                    "main",
-                    "title-4",
-                    RunState::Failed,
-                    "2026-10-14T10:10:00Z",
-                    "2026-10-14T10:20:00Z",
-                ),
-                run(
-                    cancelled,
-                    "a/x",
-                    "CI",
-                    "main",
-                    "title-5",
-                    RunState::Cancelled,
-                    "2026-10-14T10:30:00Z",
-                    "2026-10-14T10:42:00Z",
-                ),
-            ],
+            MARKER_RUN_IDS
+                .into_iter()
+                .zip(runs)
+                .map(|(id, (state, started, updated))| {
+                    run(
+                        id,
+                        "a/x",
+                        "CI",
+                        "main",
+                        &format!("title-{}", id % 10),
+                        state,
+                        &format!("2026-10-14T{started}Z"),
+                        &format!("2026-10-14T{updated}Z"),
+                    )
+                })
+                .collect(),
         );
         board.expand(now());
         // The order is by name, thus the names state the order of the rows.
         let [queued_job, running_job, passed_job, failed_job, cancelled_job, other_job] =
             MARKER_JOB_STATES;
         board.set_jobs(
-            RunId(running),
+            RunId(MARKER_RUN_IDS[0]),
             vec![
                 job(queued_job.0, "a-queued", queued_job.1, None, None),
                 job(
