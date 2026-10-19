@@ -776,6 +776,25 @@ fn to_u16(count: usize) -> u16 {
     u16::try_from(count).unwrap_or(u16::MAX)
 }
 
+/// Clears `rect` for an overlay and keeps the buffer well formed at its left
+/// edge.
+///
+/// A glyph that starts left of `rect` and reaches into it is blanked. The
+/// terminal diff of `Buffer` assumes that no wide glyph is followed by a cell
+/// that is not blank, and it skips the cell after a wide glyph. Without the
+/// blank, the first cell of the overlay in that row never reaches the terminal.
+fn clear_overlay(buffer: &mut Buffer, rect: Rect) {
+    Clear.render(rect, buffer);
+    for y in rect.top()..rect.bottom() {
+        for column in buffer.area.left()..rect.left() {
+            let reach = usize::from(column) + Span::raw(buffer[(column, y)].symbol()).width();
+            if reach > usize::from(rect.left()) {
+                buffer[(column, y)].reset();
+            }
+        }
+    }
+}
+
 /// Draws the box of the cancel prompt over the frame.
 ///
 /// The box is at most 44 columns wide and sits in the middle of the columns.
@@ -789,6 +808,10 @@ fn to_u16(count: usize) -> u16 {
 /// stay. When the board rows cannot hold the border and the key lines, the box
 /// uses all rows of the frame. When even the frame cannot hold them, the box
 /// has no border and shows the key lines from the first row, as many as fit.
+///
+/// The box also blanks a wide glyph that its left edge cuts. The terminal diff
+/// skips the cell after a wide glyph, so the border would not reach the
+/// terminal there.
 fn draw_prompt(buffer: &mut Buffer, area: Rect, prompt: &Confirm) {
     let outer = area.width.min(to_u16(PROMPT_WIDTH));
     let x = area.x + (area.width - outer) / 2;
@@ -804,7 +827,7 @@ fn draw_prompt(buffer: &mut Buffer, area: Rect, prompt: &Confirm) {
     if rows < keys.len() + PROMPT_BORDER_ROWS {
         let keys = prompt_key_lines(usize::from(outer));
         let used = keys.len().min(height);
-        Clear.render(Rect::new(x, area.y, outer, to_u16(used)), buffer);
+        clear_overlay(buffer, Rect::new(x, area.y, outer, to_u16(used)));
         for (index, line) in keys.iter().take(used).enumerate() {
             buffer.set_stringn(
                 x,
@@ -835,7 +858,7 @@ fn draw_prompt(buffer: &mut Buffer, area: Rect, prompt: &Confirm) {
     let box_height = text.len() + PROMPT_BORDER_ROWS;
     let y = area.y + to_u16(first_row + (rows - box_height) / 2);
     let rect = Rect::new(x, y, outer, to_u16(box_height));
-    Clear.render(rect, buffer);
+    clear_overlay(buffer, rect);
     Block::bordered().title(PROMPT_TITLE).render(rect, buffer);
     for (index, line) in text.into_iter().enumerate() {
         buffer.set_stringn(
@@ -3023,10 +3046,10 @@ mod tests {
     fn the_box_without_a_border_keeps_its_first_column_over_a_wide_glyph() {
         for width in [46, 47] {
             let mut terminal =
-                Terminal::new(TestBackend::new(width, 3)).expect("a test terminal opens");
+                Terminal::new(TestBackend::new(width, 2)).expect("a test terminal opens");
             terminal
                 .draw(|frame| {
-                    for y in 0..3 {
+                    for y in 0..2 {
                         frame.buffer_mut().set_string(0, y, "🏃", Style::default());
                     }
                     let area = frame.area();
