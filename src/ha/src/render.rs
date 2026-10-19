@@ -603,6 +603,7 @@ pub fn draw<Tz: TimeZone>(
                 count,
                 passed,
                 failed,
+                ..
             } => {
                 let line = header_line(*section, *count, *passed, *failed, window, loaded);
                 put(buffer, index + 1, &line, bold);
