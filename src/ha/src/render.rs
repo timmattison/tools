@@ -557,8 +557,8 @@ fn marker_color(state: RunState) -> Color {
 /// The board rows come from [`Board::view`] with the frame height minus the
 /// two fixed lines. Times show in the time zone `tz`. With a `prompt`, the box
 /// of the cancel prompt draws last, over the rows (see [`draw_prompt`]). While
-/// the box shows, the status line has no key hints. This
-/// function never panics, whatever the size of the frame.
+/// the box shows, the status line has no key hints. This function never
+/// panics, whatever the size of the frame.
 pub fn draw<Tz: TimeZone>(
     frame: &mut Frame,
     board: &mut Board,

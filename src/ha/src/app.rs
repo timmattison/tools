@@ -159,8 +159,8 @@ where
     }
 
     /// Posts each open that failed late and the result of each cancel, and
-    /// applies each update that the worker has sent. A worker that has ended sends nothing more, and that
-    /// is not an error.
+    /// applies each update that the worker has sent. A worker that has ended
+    /// sends nothing more, and that is not an error.
     fn apply_updates(&mut self) {
         while let Some(failure) = self.opener.late_failure() {
             self.status.message = Some(failed_open(&failure.url, &failure.reason, (self.now)()));
