@@ -2977,6 +2977,70 @@ mod tests {
         buffer[(x, y)].symbol().to_owned()
     }
 
+    /// The left border symbol of each box row of the prompt `prompt` at the
+    /// frame size `width` by `height`, read from the cell at the box column.
+    /// The box is 44 columns wide. `lines` is no help here: it skips the cell
+    /// after a wide glyph, and that is the cell this reads.
+    fn left_edge(width: u16, height: u16, prompt: &Confirm) -> Vec<String> {
+        let buffer = render_prompt(width, height, prompt);
+        let x = (width - 44) / 2;
+        let all = lines(&buffer);
+        let top = all
+            .iter()
+            .position(|line| line.contains(" Cancel run? "))
+            .expect("the box has a title row");
+        let bottom = all
+            .iter()
+            .position(|line| line.contains('┘'))
+            .expect("the box has a bottom row");
+        (top..=bottom)
+            .map(|y| cell(&buffer, x, u16::try_from(y).expect("a row fits u16")))
+            .collect()
+    }
+
+    /// The border symbols that the left edge of a box of `rows` rows holds.
+    fn expected_left_edge(rows: usize) -> Vec<String> {
+        let mut edge = vec!["│".to_owned(); rows];
+        edge[0] = "┌".to_owned();
+        edge[rows - 1] = "└".to_owned();
+        edge
+    }
+
+    #[test]
+    fn the_box_keeps_its_left_border_over_a_wide_marker() {
+        // At these widths the left edge of the box is column 1, which is the
+        // second cell of the 2 column marker of a run or a job.
+        for width in [46, 47, 48] {
+            assert_eq!(
+                left_edge(width, 16, &job_confirm()),
+                expected_left_edge(10),
+                "frame width {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_box_without_a_border_keeps_its_first_column_over_a_wide_glyph() {
+        for width in [46, 47] {
+            let mut terminal =
+                Terminal::new(TestBackend::new(width, 3)).expect("a test terminal opens");
+            terminal
+                .draw(|frame| {
+                    for y in 0..3 {
+                        frame.buffer_mut().set_string(0, y, "🏃", Style::default());
+                    }
+                    let area = frame.area();
+                    draw_prompt(frame.buffer_mut(), area, &job_confirm());
+                })
+                .expect("a test frame draws");
+            let buffer = terminal.backend().buffer().clone();
+            let x = (width - 44) / 2;
+            // The 44 columns hold both keys, thus the box shows one key line.
+            let shown = cell(&buffer, x, 0);
+            assert_eq!(shown, "y", "frame width {width}");
+        }
+    }
+
     #[test]
     fn wide_glyphs_at_the_wrap_edge_do_not_break_the_border() {
         let title = "日本語日本語日本語日本語日本語日本語日本語日本語日本語日本語日本語 \
