@@ -2666,6 +2666,23 @@ mod tests {
     }
 
     #[test]
+    fn a_box_one_row_too_tall_drops_the_empty_line_and_keeps_the_title() {
+        let prompt = confirm("fix(ha): show the run ID", None);
+        // 6 board rows: room for 4 text lines, and the box needs 5. The empty line goes.
+        assert_eq!(
+            box_rows(&render_prompt(80, 8, &prompt), 18, 44, 1, 6),
+            vec![
+                "┌ Cancel run? ─────────────────────────────┐",
+                "│ timmattison/tools                        │",
+                "│ CI 39149840084 on main                   │",
+                "│ fix(ha): show the run ID                 │",
+                "│ y cancel the run   any other key: keep   │",
+                "└──────────────────────────────────────────┘",
+            ]
+        );
+    }
+
+    #[test]
     fn a_frame_too_low_for_a_border_shows_the_key_line_alone() {
         let prompt = confirm("fix(ha): show the run ID", Some("build"));
         let key_line = "y cancel the run   any other key: keep";
