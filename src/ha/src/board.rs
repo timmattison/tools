@@ -37,6 +37,8 @@ pub enum Row<'a> {
         passed: usize,
         /// The number of failed runs. This is 0 for the active section.
         failed: usize,
+        /// The number of cancelled runs. This is 0 for the active section.
+        cancelled: usize,
     },
     /// The row that shows an empty section.
     Empty(Section),
@@ -355,15 +357,13 @@ impl Board {
     /// expanded run follows the row of that run.
     fn build_rows(&self, now: DateTime<Utc>) -> Vec<Row<'_>> {
         let (active, recent) = self.sections(now);
-        let passed = recent
-            .iter()
-            .filter(|run| run.state == RunState::Passed)
-            .count();
+        let count_of = |state: RunState| recent.iter().filter(|run| run.state == state).count();
         let mut rows = vec![Row::Header {
             section: Section::Active,
             count: active.len(),
             passed: 0,
             failed: 0,
+            cancelled: 0,
         }];
         push_runs(
             &mut rows,
@@ -379,8 +379,9 @@ impl Board {
         rows.push(Row::Header {
             section: Section::Recent,
             count: recent.len(),
-            passed,
-            failed: recent.len() - passed,
+            passed: count_of(RunState::Passed),
+            failed: count_of(RunState::Failed),
+            cancelled: count_of(RunState::Cancelled),
         });
         push_runs(
             &mut rows,
@@ -685,7 +686,7 @@ mod tests {
         Board::new(Duration::from_secs(8 * HOUR))
     }
 
-    /// Writes each row as short text: `Header(Active,2,0,0)`, `Empty(Recent)`,
+    /// Writes each row as short text: `Header(Active,2,0,0,0)`, `Empty(Recent)`,
     /// `Run(7)`, `Job(11)`, `LastJob(12)`, `JobsLoading`, `NoJobs`, or
     /// `JobsError(text)`. The selection mark of a run or a job is left out, see
     /// `marked`.
@@ -696,7 +697,8 @@ mod tests {
             .collect()
     }
 
-    /// Like `shape`, and a selected row reads `Run(7)*`, `Job(11)*`, or
+    /// Like `shape`, and a header ends in the counts of passed, failed, and
+    /// cancelled runs. A selected row reads `Run(7)*`, `Job(11)*`, or
     /// `LastJob(12)*`.
     fn marked(rows: &[Row<'_>]) -> Vec<String> {
         rows.iter()
@@ -706,7 +708,8 @@ mod tests {
                     count,
                     passed,
                     failed,
-                } => format!("Header({section:?},{count},{passed},{failed})"),
+                    cancelled,
+                } => format!("Header({section:?},{count},{passed},{failed},{cancelled})"),
                 Row::Empty(section) => format!("Empty({section:?})"),
                 Row::Run { run, selected, .. } => {
                     format!("Run({}){}", run.id.0, if *selected { "*" } else { "" })
@@ -734,9 +737,9 @@ mod tests {
         assert_eq!(
             shape(&board.rows(now())),
             [
-                "Header(Active,0,0,0)",
+                "Header(Active,0,0,0,0)",
                 "Empty(Active)",
-                "Header(Recent,0,0,0)",
+                "Header(Recent,0,0,0,0)",
                 "Empty(Recent)"
             ]
         );
@@ -758,9 +761,9 @@ mod tests {
         assert_eq!(
             shape(&rows),
             [
-                "Header(Active,1,0,0)",
+                "Header(Active,1,0,0,0)",
                 "Run(1)",
-                "Header(Recent,3,2,1)",
+                "Header(Recent,3,2,1,0)",
                 "Run(3)",
                 "Run(4)",
                 "Run(2)",
@@ -773,12 +776,18 @@ mod tests {
         let mut only_active = board();
         only_active.replace(repo("a/x"), vec![run(1, "a/x", RunState::Running, 5, 1)]);
         let rows = only_active.rows(now());
-        assert_eq!(shape(&rows)[2..], ["Header(Recent,0,0,0)", "Empty(Recent)"]);
+        assert_eq!(
+            shape(&rows)[2..],
+            ["Header(Recent,0,0,0,0)", "Empty(Recent)"]
+        );
 
         let mut only_recent = board();
         only_recent.replace(repo("a/x"), vec![run(2, "a/x", RunState::Passed, 30, 20)]);
         let rows = only_recent.rows(now());
-        assert_eq!(shape(&rows)[..2], ["Header(Active,0,0,0)", "Empty(Active)"]);
+        assert_eq!(
+            shape(&rows)[..2],
+            ["Header(Active,0,0,0,0)", "Empty(Active)"]
+        );
     }
 
     #[test]
@@ -796,10 +805,10 @@ mod tests {
         assert_eq!(
             shape(&board.rows(now())),
             [
-                "Header(Active,2,0,0)",
+                "Header(Active,2,0,0,0)",
                 "Run(1)",
                 "Run(2)",
-                "Header(Recent,1,1,0)",
+                "Header(Recent,1,1,0,0)",
                 "Run(4)",
             ]
         );
@@ -837,6 +846,192 @@ mod tests {
         assert_eq!(shape(&rows)[3..], ["Run(2)", "Run(4)", "Run(3)", "Run(1)"]);
     }
 
+    #[test]
+    fn a_cancelled_run_shows_in_the_recent_section_with_the_finished_runs() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 5, 1),
+                run(2, "a/x", RunState::Passed, 50, 30),
+                run(3, "a/x", RunState::Cancelled, 50, 10),
+                run(4, "a/x", RunState::Failed, 50, 20),
+                run(5, "a/x", RunState::Cancelled, 50, 40),
+                run(6, "a/x", RunState::Other, 50, 15),
+            ],
+        );
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Active,1,0,0,0)",
+                "Run(1)",
+                "Header(Recent,4,1,1,2)",
+                "Run(3)",
+                "Run(4)",
+                "Run(2)",
+                "Run(5)",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_recent_header_counts_add_up_to_the_rows_of_the_section() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Passed, 50, 10),
+                run(2, "a/x", RunState::Passed, 50, 11),
+                run(3, "a/x", RunState::Failed, 50, 12),
+                run(4, "a/x", RunState::Cancelled, 50, 13),
+                run(5, "a/x", RunState::Other, 50, 14),
+            ],
+        );
+        board.replace(
+            repo("b/y"),
+            vec![
+                run(6, "b/y", RunState::Passed, 50, 15),
+                run(7, "b/y", RunState::Cancelled, 50, 16),
+                run(8, "b/y", RunState::Cancelled, 50, 17),
+                run(9, "b/y", RunState::Failed, 50, 18),
+                run(10, "b/y", RunState::Running, 50, 1),
+            ],
+        );
+        let rows = board.rows(now());
+        let position = rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row,
+                    Row::Header {
+                        section: Section::Recent,
+                        ..
+                    }
+                )
+            })
+            .expect("a recent header");
+        let Row::Header {
+            count,
+            passed,
+            failed,
+            cancelled,
+            ..
+        } = rows[position]
+        else {
+            panic!("the row is a header");
+        };
+        let run_rows = rows[position + 1..]
+            .iter()
+            .filter(|row| matches!(row, Row::Run { .. }))
+            .count();
+        assert_eq!((passed, failed, cancelled), (3, 2, 3));
+        assert_eq!(passed + failed + cancelled, count);
+        assert_eq!(count, run_rows);
+    }
+
+    #[test]
+    fn skipped_neutral_and_unknown_runs_still_never_show() {
+        let conclusions = [
+            Some("skipped"),
+            Some("neutral"),
+            Some("action_required"),
+            Some("stale"),
+            Some("brand_new"),
+            None,
+        ];
+        let runs = conclusions
+            .iter()
+            .zip(1..)
+            .map(|(conclusion, id)| {
+                finished_run(
+                    id,
+                    RunState::from_github("completed", *conclusion),
+                    600,
+                    300,
+                )
+            })
+            .collect();
+        let mut board = board();
+        board.replace(repo("a/x"), runs);
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Active,0,0,0,0)",
+                "Empty(Active)",
+                "Header(Recent,0,0,0,0)",
+                "Empty(Recent)",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_cancelled_run_shows_for_the_whole_window() {
+        let window = 8 * 3600;
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                finished_run(1, RunState::Cancelled, window + 100, window - 1),
+                finished_run(2, RunState::Cancelled, window + 100, window + 1),
+            ],
+        );
+        assert_eq!(
+            shape(&board.rows(now())),
+            [
+                "Header(Active,0,0,0,0)",
+                "Empty(Active)",
+                "Header(Recent,1,0,0,1)",
+                "Run(1)",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_that_is_cancelled_moves_to_the_recent_section_and_stays_selected() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Running, 20, 1),
+                run(3, "a/x", RunState::Passed, 60, 10),
+            ],
+        );
+        board.select_next(now());
+        assert_eq!(
+            marked(&board.rows(now())),
+            [
+                "Header(Active,2,0,0,0)",
+                "Run(1)",
+                "Run(2)*",
+                "Header(Recent,1,1,0,0)",
+                "Run(3)",
+            ]
+        );
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Cancelled, 20, 0),
+                run(3, "a/x", RunState::Passed, 60, 10),
+            ],
+        );
+        assert_eq!(
+            marked(&board.rows(now())),
+            [
+                "Header(Active,1,0,0,0)",
+                "Run(1)",
+                "Header(Recent,2,1,0,1)",
+                "Run(2)*",
+                "Run(3)",
+            ]
+        );
+        assert_eq!(
+            board.selected_url(now()).as_deref(),
+            Some("https://example.test/a/x/runs/2")
+        );
+    }
+
     /// Makes a run that finished `seconds` before `now()`.
     fn finished_run(id: u64, state: RunState, started_secs: i64, finished_secs: i64) -> Run {
         let mut made = run(id, "a/x", state, 0, 0);
@@ -861,9 +1056,9 @@ mod tests {
         assert_eq!(
             shape(&rows),
             [
-                "Header(Active,0,0,0)",
+                "Header(Active,0,0,0,0)",
                 "Empty(Active)",
-                "Header(Recent,2,1,1)",
+                "Header(Recent,2,1,1,0)",
                 "Run(1)",
                 "Run(3)",
             ]
@@ -893,10 +1088,10 @@ mod tests {
         assert_eq!(
             shape(&board.rows(now()))[..4],
             [
-                "Header(Active,2,0,0)",
+                "Header(Active,2,0,0,0)",
                 "Run(1)",
                 "Run(2)",
-                "Header(Recent,0,0,0)",
+                "Header(Recent,0,0,0,0)",
             ]
         );
     }
@@ -919,7 +1114,7 @@ mod tests {
         let shown = shape(&rows);
         assert_eq!(shown[1], "Run(3)");
         assert_eq!(shown[2], "Run(2)");
-        assert_eq!(shown[3..], ["Header(Recent,1,1,0)", "Run(4)"]);
+        assert_eq!(shown[3..], ["Header(Recent,1,1,0,0)", "Run(4)"]);
         assert_eq!(shown.len(), 5);
     }
 
@@ -965,9 +1160,9 @@ mod tests {
         assert_eq!(
             shape(&board.rows(now())),
             [
-                "Header(Active,0,0,0)",
+                "Header(Active,0,0,0,0)",
                 "Empty(Active)",
-                "Header(Recent,0,0,0)",
+                "Header(Recent,0,0,0,0)",
                 "Empty(Recent)"
             ]
         );
@@ -988,7 +1183,7 @@ mod tests {
 
         assert_eq!(
             shape(&board.rows(now()))[..3],
-            ["Header(Active,1,0,0)", "Run(1)", "Header(Recent,0,0,0)"]
+            ["Header(Active,1,0,0,0)", "Run(1)", "Header(Recent,0,0,0,0)"]
         );
         let errors = board.errors();
         assert_eq!(errors.len(), 1);
@@ -1008,9 +1203,9 @@ mod tests {
         assert_eq!(
             marked(&with_active.rows(now())),
             [
-                "Header(Active,1,0,0)",
+                "Header(Active,1,0,0,0)",
                 "Run(1)*",
-                "Header(Recent,1,1,0)",
+                "Header(Recent,1,1,0,0)",
                 "Run(2)"
             ]
         );
@@ -1025,7 +1220,7 @@ mod tests {
         );
         assert_eq!(
             marked(&only_recent.rows(now()))[2..],
-            ["Header(Recent,2,1,1)", "Run(3)*", "Run(2)"]
+            ["Header(Recent,2,1,1,0)", "Run(3)*", "Run(2)"]
         );
     }
 
@@ -1090,7 +1285,7 @@ mod tests {
         let rows = board.rows(now());
         let shown = shape(&rows);
         assert_eq!(shown.iter().filter(|row| *row == "Run(5)").count(), 1);
-        assert_eq!(shown[0], "Header(Active,2,0,0)");
+        assert_eq!(shown[0], "Header(Active,2,0,0,0)");
         let mut seen = Vec::new();
         for _ in 0..3 {
             seen.push(selected_text(&mut board).expect("a selection"));
@@ -1157,11 +1352,11 @@ mod tests {
         assert_eq!(
             marked(&rows),
             [
-                "Header(Active,3,0,0)",
+                "Header(Active,3,0,0,0)",
                 "Run(5)",
                 "Run(1)",
                 "Run(2)",
-                "Header(Recent,3,2,1)",
+                "Header(Recent,3,2,1,0)",
                 "Run(6)",
                 "Run(3)*",
                 "Run(4)",
@@ -1217,10 +1412,10 @@ mod tests {
         assert_eq!(
             marked(&rows),
             [
-                "Header(Active,2,0,0)",
+                "Header(Active,2,0,0,0)",
                 "Run(1)",
                 "Run(2)*",
-                "Header(Recent,0,0,0)",
+                "Header(Recent,0,0,0,0)",
                 "Empty(Recent)",
             ]
         );
@@ -1271,7 +1466,7 @@ mod tests {
         assert_eq!(view.first, 0);
         assert_eq!(
             marked(&view.rows),
-            ["Header(Active,2,0,0)", "Run(1)*", "Run(2)"]
+            ["Header(Active,2,0,0,0)", "Run(1)*", "Run(2)"]
         );
     }
 
@@ -1402,10 +1597,10 @@ mod tests {
         assert_eq!(
             marked(&board.rows(now())),
             [
-                "Header(Active,1,0,0)",
+                "Header(Active,1,0,0,0)",
                 "Run(1)*",
                 "JobsLoading",
-                "Header(Recent,1,1,0)",
+                "Header(Recent,1,1,0,0)",
                 "Run(2)",
             ]
         );
@@ -1430,7 +1625,7 @@ mod tests {
                 "Job(11)",
                 "Job(12)",
                 "LastJob(13)",
-                "Header(Recent,1,1,0)"
+                "Header(Recent,1,1,0,0)"
             ]
         );
     }
@@ -1511,9 +1706,9 @@ mod tests {
         assert_eq!(
             shape(&board.rows(now())),
             [
-                "Header(Active,1,0,0)",
+                "Header(Active,1,0,0,0)",
                 "Run(1)",
-                "Header(Recent,1,1,0)",
+                "Header(Recent,1,1,0,0)",
                 "Run(2)"
             ]
         );
@@ -1544,9 +1739,9 @@ mod tests {
         assert_eq!(
             shape(&rows),
             [
-                "Header(Active,1,0,0)",
+                "Header(Active,1,0,0,0)",
                 "Run(1)",
-                "Header(Recent,0,0,0)",
+                "Header(Recent,0,0,0,0)",
                 "Empty(Recent)"
             ]
         );
@@ -1562,9 +1757,9 @@ mod tests {
         assert_eq!(
             shape(&rows),
             [
-                "Header(Active,1,0,0)",
+                "Header(Active,1,0,0,0)",
                 "Run(1)",
-                "Header(Recent,0,0,0)",
+                "Header(Recent,0,0,0,0)",
                 "Empty(Recent)"
             ]
         );
@@ -1656,10 +1851,10 @@ mod tests {
         assert_eq!(
             marked(&board.rows(now())),
             [
-                "Header(Active,1,0,0)",
+                "Header(Active,1,0,0,0)",
                 "Run(1)",
                 "LastJob(11)",
-                "Header(Recent,1,1,0)",
+                "Header(Recent,1,1,0,0)",
                 "Run(2)*",
                 "JobsLoading",
             ]
@@ -1707,11 +1902,11 @@ mod tests {
         assert_eq!(
             marked(&board.rows(now())),
             [
-                "Header(Active,1,0,0)",
+                "Header(Active,1,0,0,0)",
                 "Run(1)",
                 "Job(11)*",
                 "LastJob(12)",
-                "Header(Recent,1,1,0)",
+                "Header(Recent,1,1,0,0)",
                 "Run(2)",
             ]
         );
@@ -1896,9 +2091,9 @@ mod tests {
         assert_eq!(
             marked(&board.rows(now())),
             [
-                "Header(Active,0,0,0)",
+                "Header(Active,0,0,0,0)",
                 "Empty(Active)",
-                "Header(Recent,1,1,0)",
+                "Header(Recent,1,1,0,0)",
                 "Run(2)*",
                 "Job(21)",
                 "LastJob(22)",
@@ -1994,9 +2189,9 @@ mod tests {
         assert_eq!(
             marked(&board.rows(now())),
             [
-                "Header(Active,0,0,0)",
+                "Header(Active,0,0,0,0)",
                 "Empty(Active)",
-                "Header(Recent,2,2,0)",
+                "Header(Recent,2,2,0,0)",
                 "Run(1)*",
                 "LastJob(11)",
                 "Run(2)",
@@ -2036,9 +2231,9 @@ mod tests {
         assert_eq!(
             shape(&board.rows(now())),
             [
-                "Header(Active,1,0,0)",
+                "Header(Active,1,0,0,0)",
                 "Run(1)",
-                "Header(Recent,1,1,0)",
+                "Header(Recent,1,1,0,0)",
                 "Run(2)"
             ]
         );
@@ -2103,7 +2298,7 @@ mod tests {
         assert_eq!(
             marked(&view.rows),
             [
-                "Header(Recent,3,3,0)",
+                "Header(Recent,3,3,0,0)",
                 "Run(101)*",
                 "Job(10101)",
                 "Job(10102)"
@@ -2132,9 +2327,9 @@ mod tests {
         assert_eq!(
             shape(&board.rows(now())),
             [
-                "Header(Active,1,0,0)",
+                "Header(Active,1,0,0,0)",
                 "Run(1)",
-                "Header(Recent,1,1,0)",
+                "Header(Recent,1,1,0,0)",
                 "Run(2)"
             ]
         );

@@ -1038,7 +1038,7 @@ mod tests {
             ("requested", "null", RunState::Queued),
             ("completed", "\"success\"", RunState::Passed),
             ("completed", "\"failure\"", RunState::Failed),
-            ("completed", "\"cancelled\"", RunState::Other),
+            ("completed", "\"cancelled\"", RunState::Cancelled),
             ("completed", "\"skipped\"", RunState::Other),
         ];
         for (status, conclusion, expected) in cases {

@@ -1,7 +1,7 @@
 //! One GitHub Actions run, as the board and the source share it.
 //!
-//! GitHub names many statuses and conclusions. The board needs only five
-//! states, thus [`RunState`] folds the GitHub values into those five.
+//! GitHub names many statuses and conclusions. The board needs only six
+//! states, thus [`RunState`] folds the GitHub values into those six.
 
 use std::collections::HashSet;
 use std::hash::Hash;
@@ -29,7 +29,9 @@ pub enum RunState {
     Passed,
     /// The run finished and failed, timed out, or did not start.
     Failed,
-    /// Any other state, for example a cancelled or skipped run.
+    /// The run finished because somebody cancelled it.
+    Cancelled,
+    /// Any other state, for example a skipped run.
     Other,
 }
 
@@ -44,6 +46,7 @@ impl RunState {
             "completed" => match conclusion {
                 Some("success") => RunState::Passed,
                 Some("failure" | "timed_out" | "startup_failure") => RunState::Failed,
+                Some("cancelled") => RunState::Cancelled,
                 _ => RunState::Other,
             },
             "queued" | "waiting" | "pending" | "requested" => RunState::Queued,
@@ -58,10 +61,14 @@ impl RunState {
         matches!(self, RunState::Queued | RunState::Running)
     }
 
-    /// Returns true when the run passed or failed. The board shows these.
+    /// Returns true when the run passed, failed, or was cancelled. The board
+    /// shows these runs in its recent section.
     #[must_use]
     pub fn is_finished(self) -> bool {
-        matches!(self, RunState::Passed | RunState::Failed)
+        matches!(
+            self,
+            RunState::Passed | RunState::Failed | RunState::Cancelled
+        )
     }
 
     /// Returns the state that the board shows for a run with this GitHub
@@ -179,7 +186,7 @@ mod tests {
             ("failure", RunState::Failed),
             ("timed_out", RunState::Failed),
             ("startup_failure", RunState::Failed),
-            ("cancelled", RunState::Other),
+            ("cancelled", RunState::Cancelled),
             ("skipped", RunState::Other),
             ("neutral", RunState::Other),
             ("action_required", RunState::Other),
@@ -215,13 +222,15 @@ mod tests {
         assert!(RunState::Running.is_active());
         assert!(!RunState::Passed.is_active());
         assert!(!RunState::Failed.is_active());
+        assert!(!RunState::Cancelled.is_active());
         assert!(!RunState::Other.is_active());
     }
 
     #[test]
-    fn only_passed_and_failed_are_finished() {
+    fn only_passed_failed_and_cancelled_are_finished() {
         assert!(RunState::Passed.is_finished());
         assert!(RunState::Failed.is_finished());
+        assert!(RunState::Cancelled.is_finished());
         assert!(!RunState::Queued.is_finished());
         assert!(!RunState::Running.is_finished());
         assert!(!RunState::Other.is_finished());
@@ -229,8 +238,8 @@ mod tests {
 
     #[test]
     fn the_shown_state_of_a_run_comes_from_its_state_and_its_jobs() {
-        use RunState::{Failed, Other, Passed, Queued, Running};
-        let rows: [(&str, RunState, Vec<RunState>, RunState); 7] = [
+        use RunState::{Cancelled, Failed, Other, Passed, Queued, Running};
+        let rows: [(&str, RunState, Vec<RunState>, RunState); 8] = [
             (
                 "queued run, a job runs",
                 Queued,
@@ -261,6 +270,12 @@ mod tests {
                 Failed,
                 vec![Running],
                 Failed,
+            ),
+            (
+                "cancelled run, stale running job",
+                Cancelled,
+                vec![Running],
+                Cancelled,
             ),
             ("other run, stale running job", Other, vec![Running], Other),
         ];

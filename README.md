@@ -2029,17 +2029,21 @@ cannot hang the caller. Used by `cwt` and `ha`.
   - Shows the GitHub Actions workflow runs of many repositories and owners in one terminal view
     that refreshes itself. The GitHub web interface and `gh run list` show one repository at a
     time, and `gh run list` does not refresh.
-  - The top section, "Running", shows the active runs, the oldest first. `●` (yellow) is a run
-    that has a job in progress. `○` (blue) is a run that waits and has no job in progress: its
-    jobs wait for a runner, for an approval, or for another run. GitHub reports a run as queued
+  - The top section, "Running", shows the active runs, the oldest first. `🏃` is a run that has a
+    job in progress. `⏳` is a run that waits and has no job in progress: its jobs wait for a
+    runner, for an approval, or for another run. GitHub reports a run as queued
     while one of its jobs waits for a runner, also when other jobs of the run are in progress.
     Thus `ha` reads the jobs of each active run to choose the marker, and the marker is the same
     when the run is expanded and when it is collapsed. A finished run always shows the marker of
     its GitHub state. Each row shows the start time in the local time zone and the elapsed time,
     which increases each second. A run that is active for too long is often a stuck runner.
-  - The bottom section shows the runs that passed (`✓`, green) or failed (`✗`, red) in the last
-    8 hours, the newest first, with how long each run took. A run that timed out or that failed
-    to start counts as failed. A cancelled or skipped run does not show.
+  - The bottom section shows the runs that passed (`✅`), failed (`❌`), or were cancelled (`🪦`)
+    in the last 8 hours, the newest first, with how long each run took. A run that timed out or
+    that failed to start counts as failed. The header counts the three apart, for example
+    `Last 8h · 3 passed · 1 failed · 2 cancelled`. A skipped run does not show.
+  - Each marker is one emoji, 2 columns wide. The terminal draws each emoji in its own colors.
+    `🪦` is from Unicode 13 (2020), thus a terminal with an older emoji font can show it as a box.
+    macOS 11 and later has it.
   - Until the first refresh ends, an empty section shows `Loading…` and the section headers
     show no counts. Thus a board that did not load yet does not look like a board with no runs.
   - The status line shows how long ago the last refresh ended (`updated 1m 05s ago`), in the
@@ -2059,14 +2063,15 @@ cannot hang the caller. Used by `cwt` and `ha`.
     emoji do not break a row. The columns fit the terminal again when its size changes.
   - Right expands the highlighted run, and Left collapses it again. An expanded run shows one row
     for each job of its latest attempt, below the run row. Each job row shows the state marker of
-    the job, with the glyph and the color of a run, the name of the job, its job ID, and when it
-    started, if it started. The job ID is the number in the URL of the job page
-    (`/job/107851237794`). It stands in the columns of the run ID, thus all IDs on the board end in
-    one column. The time column of an active job has two meanings. A job that waits for a runner or
-    for an approval (`○`) did not start, thus its started column is empty, and its time column
-    shows how long it waited, from its creation until now. A running job (`●`) shows the time since
-    a runner started it, without the wait before that start. Both times increase each second. A
-    finished job shows how long it took. Thus you can find the job that holds a slow run.
+    the job, the same emoji as for a run, the name of the job, its job ID, and when it started, if
+    it started. A cancelled job shows `🪦`, and a skipped job shows no marker. The job ID is the
+    number in the URL of the job page (`/job/107851237794`). It stands in the columns of the run ID,
+    thus all IDs on the board end in one column. The time column of an active job has two meanings.
+    A job that waits for a runner or for an approval (`⏳`) did not start, thus its started column
+    is empty, and its time column shows how long it waited, from its creation until now. A running
+    job (`🏃`) shows the time since a runner started it, without the wait before that start. Both
+    times increase each second. A finished job shows how long it took. Thus you can find the job
+    that holds a slow run.
     - The jobs are sorted by name, with no difference between capital and small letters. Thus the
       order stays the same through each refresh and each re-run, and the jobs of one matrix stay
       together. GitHub gives the jobs in the order of their IDs, which has no meaning that you can
@@ -2104,8 +2109,9 @@ cannot hang the caller. Used by `cwt` and `ha`.
     - The status line shows `cancelling run …`, and then that GitHub accepted the cancel or the
       reason that GitHub refused it, for example `409` for a run that finished. After GitHub
       accepts, `ha` refreshes at once. GitHub stops the jobs of the run first, and that can take
-      some seconds, thus the run can show as running after that refresh. The run leaves the board
-      at the first refresh after GitHub finishes the cancel, because a cancelled run does not show.
+      some seconds, thus the run can show as running after that refresh. At the first refresh after
+      GitHub finishes the cancel, the run moves to the bottom section with `🪦`, and the highlight
+      stays on it.
     - On a finished run, `c` shows no box. The status line says that there is nothing to cancel.
     - When no box shows, `q`, Esc, or Ctrl-C quits and gives back the terminal.
   - Enter runs the command that `BROWSER` names when that variable is set and not empty. Thus a

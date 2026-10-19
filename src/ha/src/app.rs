@@ -771,7 +771,7 @@ mod tests {
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(
             before[1..5],
-            ["Running", "  Loading…", "Last 8h", "  Loading…"]
+            ["Running", "   Loading…", "Last 8h", "   Loading…"]
         );
         channels
             .updates
@@ -787,9 +787,9 @@ mod tests {
             after[1..5],
             [
                 "Running · 0",
-                "  No runs in progress or in the queue.",
-                "Last 8h · 0 passed · 0 failed",
-                "  No runs finished in the last 8h.",
+                "   No runs in progress or in the queue.",
+                "Last 8h · 0 passed · 0 failed · 0 cancelled",
+                "   No runs finished in the last 8h.",
             ]
         );
     }
@@ -1240,7 +1240,7 @@ mod tests {
         ];
         let (frame, _) = run_steps(&channels, steps);
         let run_row = row_of(&frame, "run 1");
-        assert!(frame[run_row].trim_start().starts_with('●'), "{frame:?}");
+        assert!(frame[run_row].trim_start().starts_with('🏃'), "{frame:?}");
         assert!(
             !frame[run_row + 1].contains('└') && !frame[run_row + 1].contains('├'),
             "{frame:?}"
