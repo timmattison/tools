@@ -10,6 +10,7 @@ use ratatui::backend::Backend;
 use ratatui::Terminal;
 
 use crate::board::Board;
+use crate::cancel::{Canceller, Confirm};
 use crate::render;
 use crate::run::RunId;
 use crate::status::{Message, Status};
@@ -73,21 +74,25 @@ impl Events for TerminalEvents {
 }
 
 /// The state of one run of the event loop.
-pub struct App<'a, O: Opener, Tz: TimeZone> {
+pub struct App<'a, O: Opener, C: Canceller, Tz: TimeZone> {
     /// The runs to show.
     pub board: Board,
     /// The text for the status line.
     pub status: Status,
     opener: &'a O,
+    canceller: &'a C,
     worker: &'a Worker,
     now: &'a dyn Fn() -> DateTime<Utc>,
     tz: &'a Tz,
     /// The set of the last `Command::WatchJobs` that the app sent. It is
     /// empty at the start.
     watched: BTreeSet<(RepoName, RunId)>,
+    /// The box that asks the user to cancel a run. It is `None` when no box
+    /// shows.
+    confirm: Option<Confirm>,
 }
 
-impl<'a, O: Opener, Tz: TimeZone> App<'a, O, Tz>
+impl<'a, O: Opener, C: Canceller, Tz: TimeZone> App<'a, O, C, Tz>
 where
     Tz::Offset: std::fmt::Display,
 {
@@ -98,6 +103,7 @@ where
         board: Board,
         status: Status,
         opener: &'a O,
+        canceller: &'a C,
         worker: &'a Worker,
         now: &'a dyn Fn() -> DateTime<Utc>,
         tz: &'a Tz,
@@ -106,10 +112,12 @@ where
             board,
             status,
             opener,
+            canceller,
             worker,
             now,
             tz,
             watched: BTreeSet::new(),
+            confirm: None,
         }
     }
 
@@ -129,7 +137,14 @@ where
             let now = (self.now)();
             terminal
                 .draw(|frame| {
-                    render::draw(frame, &mut self.board, &self.status, now, self.tz);
+                    render::draw(
+                        frame,
+                        &mut self.board,
+                        &self.status,
+                        now,
+                        self.tz,
+                        self.confirm.as_ref(),
+                    );
                 })
                 .map_err(std::io::Error::other)?;
             let Some(event) = events.next(POLL_INTERVAL)? else {
@@ -143,12 +158,26 @@ where
         }
     }
 
-    /// Posts each open that failed late, and applies each update that the
-    /// worker has sent. A worker that has ended sends nothing more, and that
-    /// is not an error.
+    /// Posts each open that failed late and the result of each cancel, and
+    /// applies each update that the worker has sent. A worker that has ended
+    /// sends nothing more, and that is not an error.
     fn apply_updates(&mut self) {
         while let Some(failure) = self.opener.late_failure() {
             self.status.message = Some(failed_open(&failure.url, &failure.reason, (self.now)()));
+        }
+        while let Some(outcome) = self.canceller.finished() {
+            // The run ID comes before the error, because the status line cuts
+            // a long line at its end. Thus a narrow terminal still shows which
+            // run the error is about.
+            match outcome.result {
+                Ok(()) => {
+                    self.post(format!("GitHub is cancelling run {}", outcome.run.0));
+                    self.refresh_now();
+                }
+                Err(error) => {
+                    self.post(format!("could not cancel run {}: {error}", outcome.run.0));
+                }
+            }
         }
         while let Ok(update) = self.worker.updates.try_recv() {
             match update {
@@ -198,12 +227,34 @@ where
     /// first. The `Enter` key can then post a new one. `Right` expands the
     /// run of the highlighted row. `Left` collapses that run, also from a job
     /// row. `Enter` opens the highlighted run or job.
+    ///
+    /// `c` opens a box that asks to cancel the run of the highlighted row.
+    /// On a finished run it posts that there is nothing to cancel instead.
+    /// While the box shows, it takes every key. `y` cancels the run that the
+    /// box names, Ctrl-C quits, and every other key closes the box and does
+    /// nothing more. Thus `q`, `Esc`, and `Enter` do not quit, open, or move
+    /// anything while the box shows.
     fn handle_key(&mut self, key: KeyEvent) -> Flow {
         self.status.message = None;
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        if let Some(confirm) = self.confirm.take() {
+            return match key.code {
+                KeyCode::Char('c') if control => Flow::Quit,
+                KeyCode::Char('y' | 'Y') if !control => {
+                    self.canceller.cancel(&confirm.repo, confirm.run);
+                    self.post(format!("cancelling run {}…", confirm.run.0));
+                    Flow::Continue
+                }
+                _ => Flow::Continue,
+            };
+        }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => Flow::Quit,
             KeyCode::Char('c') if control => Flow::Quit,
+            KeyCode::Char('c') => {
+                self.ask_to_cancel();
+                Flow::Continue
+            }
             KeyCode::Up => {
                 self.board.select_previous((self.now)());
                 Flow::Continue
@@ -223,8 +274,7 @@ where
                 Flow::Continue
             }
             KeyCode::Char('r') => {
-                let _ = self.worker.commands.send(Command::RefreshNow);
-                self.status.refreshing = true;
+                self.refresh_now();
                 Flow::Continue
             }
             KeyCode::Enter => {
@@ -238,6 +288,43 @@ where
             }
             _ => Flow::Continue,
         }
+    }
+
+    /// Opens the box that asks to cancel the highlighted run, or posts that a
+    /// finished run has nothing to cancel. The box keeps a copy of what it
+    /// shows, thus a later refresh does not change the run that `y` cancels.
+    /// On a job row it names the run of the job.
+    fn ask_to_cancel(&mut self) {
+        let now = (self.now)();
+        let target = self.board.selected_target(now).map(|(run, job)| {
+            if run.state.is_active() {
+                Ok(Confirm::new(run, job))
+            } else {
+                Err(run.id)
+            }
+        });
+        match target {
+            None => {}
+            Some(Ok(confirm)) => self.confirm = Some(confirm),
+            Some(Err(id)) => {
+                self.post(format!("run {} finished: there is nothing to cancel", id.0));
+            }
+        }
+    }
+
+    /// Asks the worker for one refresh now and shows `refreshing…`. A worker
+    /// that has ended is not an error.
+    fn refresh_now(&mut self) {
+        let _ = self.worker.commands.send(Command::RefreshNow);
+        self.status.refreshing = true;
+    }
+
+    /// Shows `text` on the status line, stamped with the current time.
+    fn post(&mut self, text: String) {
+        self.status.message = Some(Message {
+            text,
+            posted_at: (self.now)(),
+        });
     }
 }
 
@@ -272,6 +359,8 @@ mod tests {
     use ratatui::buffer::Buffer;
 
     use super::*;
+    use crate::cancel::CancelOutcome;
+    use crate::github::SourceError;
     use crate::run::{Run, RunId, RunState};
     use crate::target::{OwnerName, RepoName};
     use crate::worker::{Command, Update};
@@ -308,6 +397,30 @@ mod tests {
 
         fn late_failure(&self) -> Option<OpenFailure> {
             self.late.borrow_mut().pop_front()
+        }
+    }
+
+    /// Records each cancel. Each outcome in `outcomes` comes back from one
+    /// call of `finished`, in order.
+    struct RecordingCanceller {
+        cancels: RefCell<Vec<(RepoName, RunId)>>,
+        outcomes: RefCell<VecDeque<CancelOutcome>>,
+    }
+
+    impl Canceller for RecordingCanceller {
+        fn cancel(&self, repo: &RepoName, run: RunId) {
+            self.cancels.borrow_mut().push((repo.clone(), run));
+        }
+
+        fn finished(&self) -> Option<CancelOutcome> {
+            self.outcomes.borrow_mut().pop_front()
+        }
+    }
+
+    fn canceller() -> RecordingCanceller {
+        RecordingCanceller {
+            cancels: RefCell::new(Vec::new()),
+            outcomes: RefCell::new(VecDeque::new()),
         }
     }
 
@@ -424,6 +537,18 @@ mod tests {
         channels: &Channels,
         events: Vec<Event>,
     ) -> (std::io::Result<()>, Vec<String>) {
+        run_app_with(status, opener, &canceller(), channels, events)
+    }
+
+    /// Does the work of `run_app_from` with a canceller that the caller
+    /// keeps, so the caller can read the cancels that the app sent.
+    fn run_app_with(
+        status: Status,
+        opener: &RecordingOpener,
+        canceller: &RecordingCanceller,
+        channels: &Channels,
+        events: Vec<Event>,
+    ) -> (std::io::Result<()>, Vec<String>) {
         let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
         let tz = FixedOffset::east_opt(0).unwrap();
         let clock = now;
@@ -431,6 +556,7 @@ mod tests {
             Board::new(Duration::from_hours(8)),
             status,
             opener,
+            canceller,
             &channels.worker,
             &clock,
             &tz,
@@ -762,10 +888,12 @@ mod tests {
         let tz = FixedOffset::east_opt(0).unwrap();
         let clock = now;
         let opener = opener(false);
+        let canceller = canceller();
         let mut app = App::new(
             Board::new(Duration::from_hours(8)),
             Status::default(),
             &opener,
+            &canceller,
             &channels.worker,
             &clock,
             &tz,
@@ -848,6 +976,26 @@ mod tests {
         opener: &RecordingOpener,
         steps: Vec<Step>,
     ) -> (Vec<String>, Vec<Command>) {
+        run_steps_all(channels, opener, &canceller(), steps)
+    }
+
+    /// Does the work of `run_steps` with a canceller that the caller keeps,
+    /// so the caller can read the cancels that the app sent.
+    fn run_steps_cancelling(
+        channels: &Channels,
+        canceller: &RecordingCanceller,
+        steps: Vec<Step>,
+    ) -> (Vec<String>, Vec<Command>) {
+        run_steps_all(channels, &opener(false), canceller, steps)
+    }
+
+    /// Runs the steps with an opener and a canceller that the caller keeps.
+    fn run_steps_all(
+        channels: &Channels,
+        opener: &RecordingOpener,
+        canceller: &RecordingCanceller,
+        steps: Vec<Step>,
+    ) -> (Vec<String>, Vec<Command>) {
         let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
         let tz = FixedOffset::east_opt(0).unwrap();
         let clock = now;
@@ -855,6 +1003,7 @@ mod tests {
             Board::new(Duration::from_hours(8)),
             Status::default(),
             opener,
+            canceller,
             &channels.worker,
             &clock,
             &tz,
@@ -1154,5 +1303,356 @@ mod tests {
         ];
         let (_, commands) = run_steps(&channels, steps);
         assert_eq!(commands, [watch(&[1]), watch(&[])]);
+    }
+
+    #[test]
+    fn c_and_then_y_cancel_the_highlighted_run_and_show_cancelling() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let canceller = canceller();
+        let (frame, _) = run_steps_cancelling(
+            &channels,
+            &canceller,
+            vec![
+                Step::Idle,
+                key(KeyCode::Char('c')),
+                key(KeyCode::Char('y')),
+                Step::Idle,
+                key(KeyCode::Char('q')),
+            ],
+        );
+        assert_eq!(
+            *canceller.cancels.borrow(),
+            vec![(repo(), RunId(1))],
+            "{frame:?}"
+        );
+        assert!(frame[11].contains("cancelling run 1…"), "{:?}", frame[11]);
+    }
+
+    /// The title that the box shows in the top border.
+    const BOX_TITLE: &str = " Cancel run? ";
+
+    fn shows_box(frame: &[String]) -> bool {
+        frame.iter().any(|line| line.contains(BOX_TITLE))
+    }
+
+    fn ctrl_c() -> Event {
+        key_event(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        )
+    }
+
+    #[test]
+    fn c_shows_the_box_with_the_repository_and_the_run() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let (_, frame) = run_app_with(
+            Status::default(),
+            &opener(false),
+            &canceller(),
+            &channels,
+            vec![press(KeyCode::Char('c'))],
+        );
+        assert!(shows_box(&frame), "{frame:?}");
+        assert!(
+            frame.iter().any(|l| l.contains("acme/widgets")),
+            "{frame:?}"
+        );
+        assert!(
+            frame.iter().any(|l| l.contains("ci 1 on main")),
+            "{frame:?}"
+        );
+    }
+
+    #[test]
+    fn c_on_a_job_row_shows_the_name_of_the_job_in_the_box() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let steps = vec![
+            key(KeyCode::Right),
+            Step::Send(Update::Jobs {
+                run: RunId(1),
+                jobs: vec![job(10, "build")],
+            }),
+            Step::Idle,
+            key(KeyCode::Down),
+            key(KeyCode::Char('c')),
+            Step::Idle,
+        ];
+        let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
+        let tz = FixedOffset::east_opt(0).unwrap();
+        let clock = now;
+        let canceller = canceller();
+        let opener = opener(false);
+        let mut app = App::new(
+            Board::new(Duration::from_hours(8)),
+            Status::default(),
+            &opener,
+            &canceller,
+            &channels.worker,
+            &clock,
+            &tz,
+        );
+        let mut events = StepEvents {
+            steps: steps.into(),
+            updates: channels.updates.clone(),
+        };
+        let result = app.run(&mut terminal, &mut events);
+        assert_eq!(result.unwrap_err().to_string(), "script ended");
+        let frame = lines(terminal.backend().buffer());
+        assert!(shows_box(&frame), "{frame:?}");
+        assert!(frame.iter().any(|l| l.contains("job: build")), "{frame:?}");
+    }
+
+    #[test]
+    fn c_and_y_on_a_job_row_cancel_the_run_of_the_job() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let canceller = canceller();
+        run_steps_cancelling(
+            &channels,
+            &canceller,
+            vec![
+                key(KeyCode::Right),
+                Step::Send(Update::Jobs {
+                    run: RunId(1),
+                    jobs: vec![job(10, "build")],
+                }),
+                Step::Idle,
+                key(KeyCode::Down),
+                key(KeyCode::Char('c')),
+                key(KeyCode::Char('y')),
+                key(KeyCode::Char('q')),
+            ],
+        );
+        assert_eq!(*canceller.cancels.borrow(), vec![(repo(), RunId(1))]);
+    }
+
+    /// Runs the keys `c` and then `other` on a board of two runs, and returns
+    /// the result, the last frame, the cancels, and the addresses opened.
+    fn answer_the_box_with(other: Event) -> (std::io::Result<()>, Vec<String>, usize, Vec<String>) {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
+        let canceller = canceller();
+        let opener = opener(false);
+        let (result, frame) = run_app_with(
+            Status::default(),
+            &opener,
+            &canceller,
+            &channels,
+            vec![press(KeyCode::Char('c')), other, press(KeyCode::Enter)],
+        );
+        let cancels = canceller.cancels.borrow().len();
+        let urls = opener.urls.borrow().clone();
+        (result, frame, cancels, urls)
+    }
+
+    #[test]
+    fn every_key_but_y_closes_the_box_and_cancels_nothing() {
+        let others = [
+            press(KeyCode::Char('n')),
+            press(KeyCode::Esc),
+            press(KeyCode::Char('q')),
+            press(KeyCode::Enter),
+            press(KeyCode::Down),
+        ];
+        for other in others {
+            let (result, frame, cancels, _) = answer_the_box_with(other.clone());
+            // The loop did not quit: it read the last key, then the script ended.
+            assert_eq!(result.unwrap_err().to_string(), "script ended", "{other:?}");
+            assert_eq!(cancels, 0, "{other:?}");
+            assert!(!shows_box(&frame), "{other:?} {frame:?}");
+        }
+    }
+
+    #[test]
+    fn enter_with_the_box_open_opens_nothing_and_down_does_not_move_the_highlight() {
+        // After `c` and Enter, the Enter that follows opens the first row.
+        let (_, _, _, urls) = answer_the_box_with(press(KeyCode::Enter));
+        assert_eq!(urls, ["https://example.test/runs/2"]);
+        // After `c` and Down, the Enter that follows opens the first row too.
+        let (_, _, _, urls) = answer_the_box_with(press(KeyCode::Down));
+        assert_eq!(urls, ["https://example.test/runs/2"]);
+    }
+
+    #[test]
+    fn a_run_that_moves_the_highlight_does_not_change_the_run_that_y_cancels() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
+        let canceller = canceller();
+        run_steps_cancelling(
+            &channels,
+            &canceller,
+            vec![
+                Step::Idle,
+                key(KeyCode::Char('c')),
+                Step::Send(Update::Runs {
+                    repo: repo(),
+                    runs: vec![active_run(1, 5), active_run(3, 60)],
+                }),
+                Step::Idle,
+                key(KeyCode::Char('y')),
+                key(KeyCode::Char('q')),
+            ],
+        );
+        assert_eq!(*canceller.cancels.borrow(), vec![(repo(), RunId(2))]);
+    }
+
+    #[test]
+    fn c_on_an_empty_board_does_nothing() {
+        // A key press clears the message, thus read the frame after `c` alone.
+        let (result, frame) = run_app_with(
+            Status::default(),
+            &opener(false),
+            &canceller(),
+            &channels(),
+            vec![press(KeyCode::Char('c'))],
+        );
+        assert_eq!(result.unwrap_err().to_string(), "script ended");
+        assert!(!shows_box(&frame), "{frame:?}");
+        assert!(!frame[11].contains("cancelling"), "{:?}", frame[11]);
+        assert!(!frame[11].contains("nothing to cancel"), "{:?}", frame[11]);
+    }
+
+    #[test]
+    fn y_after_c_on_an_empty_board_cancels_nothing() {
+        let canceller = canceller();
+        let (result, _) = run_app_with(
+            Status::default(),
+            &opener(false),
+            &canceller,
+            &channels(),
+            vec![press(KeyCode::Char('c')), press(KeyCode::Char('y'))],
+        );
+        assert_eq!(result.unwrap_err().to_string(), "script ended");
+        assert!(canceller.cancels.borrow().is_empty());
+    }
+
+    #[test]
+    fn control_c_with_the_box_open_quits_and_cancels_nothing() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let canceller = canceller();
+        let (result, _) = run_app_with(
+            Status::default(),
+            &opener(false),
+            &canceller,
+            &channels,
+            vec![press(KeyCode::Char('c')), ctrl_c()],
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert!(canceller.cancels.borrow().is_empty());
+    }
+
+    /// A finished run, updated inside the window.
+    fn passed_run(id: u64) -> Run {
+        Run {
+            state: RunState::Passed,
+            ..active_run(id, 5)
+        }
+    }
+
+    #[test]
+    fn c_on_a_finished_run_says_there_is_nothing_to_cancel_and_shows_no_box() {
+        let channels = channels();
+        send_runs(&channels, vec![passed_run(4)]);
+        let (result, frame) = run_app_with(
+            Status::default(),
+            &opener(false),
+            &canceller(),
+            &channels,
+            vec![press(KeyCode::Char('c'))],
+        );
+        assert_eq!(result.unwrap_err().to_string(), "script ended");
+        assert!(!shows_box(&frame), "{frame:?}");
+        assert!(
+            frame[11].contains("run 4 finished: there is nothing to cancel"),
+            "{:?}",
+            frame[11]
+        );
+    }
+
+    #[test]
+    fn y_after_c_on_a_finished_run_cancels_nothing() {
+        let channels = channels();
+        send_runs(&channels, vec![passed_run(4)]);
+        let canceller = canceller();
+        let (result, _) = run_app_with(
+            Status::default(),
+            &opener(false),
+            &canceller,
+            &channels,
+            vec![press(KeyCode::Char('c')), press(KeyCode::Char('y'))],
+        );
+        assert_eq!(result.unwrap_err().to_string(), "script ended");
+        assert!(canceller.cancels.borrow().is_empty());
+    }
+
+    /// An outcome for run 7 that the canceller of a test gives to the loop.
+    fn outcome(result: Result<(), SourceError>) -> CancelOutcome {
+        CancelOutcome {
+            repo: repo(),
+            run: RunId(7),
+            result,
+        }
+    }
+
+    #[test]
+    fn an_accepted_cancel_says_so_and_asks_for_a_refresh_now() {
+        let channels = channels();
+        let canceller = canceller();
+        canceller.outcomes.borrow_mut().push_back(outcome(Ok(())));
+        let (frame, commands) = run_steps_cancelling(
+            &channels,
+            &canceller,
+            vec![Step::Idle, key(KeyCode::Char('q'))],
+        );
+        assert!(commands.contains(&Command::RefreshNow), "{commands:?}");
+        assert!(frame[11].contains("refreshing…"), "{:?}", frame[11]);
+    }
+
+    #[test]
+    fn an_accepted_cancel_posts_that_github_is_cancelling_the_run() {
+        let channels = channels();
+        let canceller = canceller();
+        canceller.outcomes.borrow_mut().push_back(outcome(Ok(())));
+        let (frame, _) = run_steps_cancelling(
+            &channels,
+            &canceller,
+            vec![Step::Idle, key(KeyCode::Char('q'))],
+        );
+        assert!(
+            frame[11].contains("GitHub is cancelling run 7"),
+            "{:?}",
+            frame[11]
+        );
+    }
+
+    #[test]
+    fn a_refused_cancel_posts_the_run_and_the_error() {
+        let channels = channels();
+        let canceller = canceller();
+        canceller
+            .outcomes
+            .borrow_mut()
+            .push_back(outcome(Err(SourceError::Http {
+                status: 409,
+                message: "Cannot cancel a workflow run that is completed.".to_owned(),
+            })));
+        let (frame, commands) = run_steps_cancelling(
+            &channels,
+            &canceller,
+            vec![Step::Idle, key(KeyCode::Char('q'))],
+        );
+        assert!(
+            frame[11].contains(
+                "could not cancel run 7: GitHub answered 409: Cannot cancel a workflow run that is completed."
+            ),
+            "{:?}",
+            frame[11]
+        );
+        assert!(!commands.contains(&Command::RefreshNow), "{commands:?}");
     }
 }

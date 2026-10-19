@@ -14,6 +14,7 @@ use clap::{CommandFactory, FromArgMatches, Parser};
 use ha::app::{App, TerminalEvents};
 use ha::board::Board;
 use ha::browser::BrowserOpener;
+use ha::cancel::GhCanceller;
 use ha::github::GhSource;
 use ha::settings::{self, CommandLine, Settings};
 use ha::status::{RateLimit, Status};
@@ -132,10 +133,12 @@ fn run_view(settings: &Settings, rate: RateLimit, worker: &Worker) -> std::io::R
     };
     let tz = Local;
     let opener = BrowserOpener::from_environment();
+    let canceller = GhCanceller::new(GhSource::new());
     let mut app = App::new(
         Board::new(settings.window),
         status,
         &opener,
+        &canceller,
         worker,
         &Utc::now,
         &tz,

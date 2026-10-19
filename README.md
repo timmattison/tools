@@ -2091,8 +2091,23 @@ cannot hang the caller. Used by `cwt` and `ha`.
     When a re-run gives the jobs new IDs, the highlight stays at the same position, thus on the
     job of the same name in most re-runs. When no browser opens, the status line shows the URL
     and then the reason, for example a `BROWSER` command that this host does not have, for 30
-    seconds. The message fades out, and a key press removes it sooner. `r` refreshes now. `q`,
-    Esc, or Ctrl-C quits and gives back the terminal.
+    seconds. The message fades out, and a key press removes it sooner. `r` refreshes now.
+    - `c` asks to cancel the highlighted run. A box over the board names the repository, the
+      workflow, the run ID, the branch, and the title. On a job row, `c` asks to cancel the run
+      of that job, and the box also names the job. GitHub cannot cancel one job, thus `y` cancels
+      every job of the run.
+    - Only `y` cancels. Every other key closes the box and cancels nothing, also Enter, `q`, and
+      Esc. Ctrl-C still quits.
+    - While the box shows, the status line shows no key hints, because the box names its keys.
+    - The board continues to refresh while the box shows. The box stays on the run that you
+      chose, also when the highlight moves under it.
+    - The status line shows `cancelling run …`, and then that GitHub accepted the cancel or the
+      reason that GitHub refused it, for example `409` for a run that finished. After GitHub
+      accepts, `ha` refreshes at once. GitHub stops the jobs of the run first, and that can take
+      some seconds, thus the run can show as running after that refresh. The run leaves the board
+      at the first refresh after GitHub finishes the cancel, because a cancelled run does not show.
+    - On a finished run, `c` shows no box. The status line says that there is nothing to cancel.
+    - When no box shows, `q`, Esc, or Ctrl-C quits and gives back the terminal.
   - Enter runs the command that `BROWSER` names when that variable is set and not empty. Thus a
     forwarder that sets `BROWSER`, for example the opener of mosh-rs, opens the page on your local
     computer from a mosh-rs session. `ha` splits the value into words as a POSIX shell does, and
@@ -2120,7 +2135,10 @@ cannot hang the caller. Used by `cwt` and `ha`.
     whole number and a unit: `s`, `m`, `h`, or `d`. An unknown key or a bad value stops `ha` with a
     message that names the key and the file.
   - `ha` uses the GitHub CLI, `gh`, and its login and host. It does not keep a second token. When
-    `gh` is missing or not logged in, `ha` stops with a message before it draws.
+    `gh` is missing or not logged in, `ha` stops with a message before it draws. The cancel of a
+    run is the only request of `ha` that changes something on GitHub. It needs the `repo` scope on
+    an OAuth token or a classic token. The default login of `gh auth login` has it. A login
+    without write access to the repository gets `403`, and the status line shows it.
   - API budget: GitHub gives 5,000 requests each hour. An organization of 200 repositories at a
     60 s interval asks for 12,000 requests each hour. Thus `ha` sends the `ETag` of each answer
     back in `If-None-Match`, and GitHub does not count a `304 Not Modified` answer. The lookback

@@ -492,24 +492,28 @@ impl Board {
         }
     }
 
+    /// Gives the run of the selection at `now`, and the job when a job row is
+    /// selected. The value is `None` when the board has no run.
+    ///
+    /// It calls `settle` first, as `selected_url` does.
+    pub fn selected_target(&mut self, now: DateTime<Utc>) -> Option<(&Run, Option<&Job>)> {
+        self.settle(now);
+        let Selection { run: (id, _), job } = self.selected?;
+        let run = self.shown_runs(now).into_iter().find(|run| run.id == id)?;
+        let job = job.and_then(|(_, index)| self.shown_jobs(id).get(index));
+        Some((run, job))
+    }
+
     /// The address of the selected row, or `None` when the board has no run.
     ///
     /// On a run row, this is the address of the run. On a job row, this is the
     /// address of the job, and the address of the run when the job has none.
     pub fn selected_url(&mut self, now: DateTime<Utc>) -> Option<String> {
-        self.settle(now);
-        let Selection { run: (id, _), job } = self.selected?;
+        let (run, job) = self.selected_target(now)?;
         let job_url = job
-            .and_then(|(_, index)| self.shown_jobs(id).get(index))
             .map(|job| job.url.as_str())
             .filter(|url| !url.is_empty());
-        if let Some(url) = job_url {
-            return Some(url.to_owned());
-        }
-        self.shown_runs(now)
-            .into_iter()
-            .find(|run| run.id == id)
-            .map(|run| run.url.clone())
+        Some(job_url.unwrap_or(run.url.as_str()).to_owned())
     }
 }
 
@@ -2149,6 +2153,58 @@ mod tests {
         let expanded = board.expanded(now());
         assert_eq!(expanded.len(), 1);
         assert!(expanded.contains(&(repo("a/x"), RunId(1))));
+    }
+
+    #[test]
+    fn selected_target_on_a_run_row_is_the_run_without_a_job() {
+        let mut board = two_run_board();
+        let (selected, job) = board.selected_target(now()).expect("a selected run");
+        assert_eq!(selected.id, RunId(1));
+        assert_eq!(job, None);
+    }
+
+    #[test]
+    fn selected_target_on_a_job_row_is_the_run_and_the_job() {
+        let mut board = two_run_board();
+        select_job(&mut board, &[(11, "a"), (12, "b")], 1);
+        let (selected, job) = board.selected_target(now()).expect("a selected run");
+        assert_eq!(selected.id, RunId(1));
+        assert_eq!(job.map(|job| job.id), Some(JobId(12)));
+    }
+
+    #[test]
+    fn selected_target_on_an_empty_board_is_none() {
+        let mut board = board();
+        assert_eq!(board.selected_target(now()), None);
+    }
+
+    #[test]
+    fn selected_target_follows_the_settle_after_the_selected_run_leaves() {
+        let mut board = board();
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(2, "a/x", RunState::Passed, 60, 10),
+                run(3, "a/x", RunState::Passed, 70, 20),
+            ],
+        );
+        board.select_next(now());
+        assert_eq!(
+            board.selected_target(now()).map(|(run, _)| run.id),
+            Some(RunId(2))
+        );
+        board.replace(
+            repo("a/x"),
+            vec![
+                run(1, "a/x", RunState::Running, 30, 1),
+                run(3, "a/x", RunState::Passed, 70, 20),
+            ],
+        );
+        assert_eq!(
+            board.selected_target(now()).map(|(run, _)| run.id),
+            Some(RunId(3))
+        );
     }
 
     #[test]
