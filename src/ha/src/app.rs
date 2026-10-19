@@ -1240,7 +1240,7 @@ mod tests {
         ];
         let (frame, _) = run_steps(&channels, steps);
         let run_row = row_of(&frame, "run 1");
-        assert!(frame[run_row].trim_start().starts_with('●'), "{frame:?}");
+        assert!(frame[run_row].trim_start().starts_with('🏃'), "{frame:?}");
         assert!(
             !frame[run_row + 1].contains('└') && !frame[run_row + 1].contains('├'),
             "{frame:?}"
