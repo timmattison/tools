@@ -662,11 +662,11 @@ enum PromptPart {
     Blank,
 }
 
-/// The order in which a low frame removes the parts of the box. The key lines
-/// never go.
+/// The order in which a low frame removes the parts of the box. The empty line goes first,
+/// because it holds no information. The key lines never go.
 const PROMPT_DROP_ORDER: [PromptPart; 6] = [
-    PromptPart::Title,
     PromptPart::Blank,
+    PromptPart::Title,
     PromptPart::Note,
     PromptPart::Job,
     PromptPart::Run,
@@ -760,8 +760,8 @@ fn to_u16(count: usize) -> u16 {
 /// a note (for a job row only), an empty line, and the keys. Each line wraps
 /// at spaces to the text width, which is the outer width minus 4.
 ///
-/// A frame that is too low drops whole parts, in this order: the title, the
-/// empty line, the note, the job, the run, the repository. The key lines
+/// A frame that is too low drops whole parts, in this order: the empty
+/// line, the title, the note, the job, the run, the repository. The key lines
 /// stay. When the board rows cannot hold the border and the key lines, the box
 /// uses all rows of the frame. When even the frame cannot hold them, the box
 /// has no border and shows the key lines from the first row, as many as fit.
@@ -2644,7 +2644,7 @@ mod tests {
     #[test]
     fn a_low_terminal_drops_the_parts_and_keeps_the_key_line() {
         let prompt = confirm("fix(ha): show the run ID", None);
-        // 4 board rows: the title, the blank line, and the run line go.
+        // 4 board rows: the blank line, the title, and the run line go.
         assert_eq!(
             box_rows(&render_prompt(80, 6, &prompt), 18, 44, 1, 4),
             vec![
