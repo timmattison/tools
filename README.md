@@ -2064,13 +2064,14 @@ cannot hang the caller. Used by `cwt` and `ha`.
   - Right expands the highlighted run, and Left collapses it again. An expanded run shows one row
     for each job of its latest attempt, below the run row. Each job row shows the state marker of
     the job, the same emoji as for a run, the name of the job, its job ID, and when it started, if
-    it started. A cancelled job shows `🪦`, and a skipped job shows no marker. The job ID is the number in the URL of the job page
-    (`/job/107851237794`). It stands in the columns of the run ID, thus all IDs on the board end in
-    one column. The time column of an active job has two meanings. A job that waits for a runner or
-    for an approval (`⏳`) did not start, thus its started column is empty, and its time column
-    shows how long it waited, from its creation until now. A running job (`🏃`) shows the time since
-    a runner started it, without the wait before that start. Both times increase each second. A
-    finished job shows how long it took. Thus you can find the job that holds a slow run.
+    it started. A cancelled job shows `🪦`, and a skipped job shows no marker. The job ID is the
+    number in the URL of the job page (`/job/107851237794`). It stands in the columns of the run ID,
+    thus all IDs on the board end in one column. The time column of an active job has two meanings.
+    A job that waits for a runner or for an approval (`⏳`) did not start, thus its started column
+    is empty, and its time column shows how long it waited, from its creation until now. A running
+    job (`🏃`) shows the time since a runner started it, without the wait before that start. Both
+    times increase each second. A finished job shows how long it took. Thus you can find the job
+    that holds a slow run.
     - The jobs are sorted by name, with no difference between capital and small letters. Thus the
       order stays the same through each refresh and each re-run, and the jobs of one matrix stay
       together. GitHub gives the jobs in the order of their IDs, which has no meaning that you can
