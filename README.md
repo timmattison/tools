@@ -2092,6 +2092,7 @@ cannot hang the caller. Used by `cwt` and `ha`.
       every job of the run.
     - Only `y` cancels. Every other key closes the box and cancels nothing, also Enter, `q`, and
       Esc. Ctrl-C still quits.
+    - While the box shows, the status line shows no key hints, because the box names its keys.
     - The board continues to refresh while the box shows. The box stays on the run that you
       chose, also when the highlight moves under it.
     - The status line shows `cancelling run …`, and then that GitHub accepted the cancel or the

@@ -35,7 +35,8 @@ const FIXED_COLUMNS: usize = MARKER_WIDTH + ID_WIDTH + STARTED_WIDTH + TIME_WIDT
 const FIXED_LINES: usize = 2;
 /// The text that stands between two parts of the status line.
 const STATUS_SEPARATOR: &str = "  ·  ";
-/// The key hints at the end of the left part of the status line.
+/// The key hints at the end of the left part of the status line. The status line
+/// shows them only while no cancel box shows.
 const KEY_HINTS: &str = "↑↓ select  →← jobs  ⏎ open  c cancel  r refresh  q quit";
 /// The title in the top border of the box of the cancel prompt.
 const PROMPT_TITLE: &str = " Cancel run? ";
@@ -445,10 +446,19 @@ fn refresh_age(last_refresh: DateTime<Utc>, now: DateTime<Utc>) -> String {
 /// The left part of the status line: the lead, the refresh, the rate limit,
 /// and the key hints.
 ///
+/// With `hints` false, the key hints and the separator before them are absent.
+/// The box of the cancel prompt names its own keys, thus the line drops the hints.
+///
 /// The parts stand in this order, with [`STATUS_SEPARATOR`] between them.
 /// The refresh mark is not part of it. [`layout_status`] puts the mark at the
 /// right end of the line.
-fn status_line<Tz: TimeZone>(board: &Board, status: &Status, now: DateTime<Utc>, tz: &Tz) -> String
+fn status_line<Tz: TimeZone>(
+    board: &Board,
+    status: &Status,
+    now: DateTime<Utc>,
+    tz: &Tz,
+    hints: bool,
+) -> String
 where
     Tz::Offset: Display,
 {
@@ -468,7 +478,9 @@ where
             None => format!("API {}/{}", rate.remaining, rate.limit),
         });
     }
-    parts.push(KEY_HINTS.to_owned());
+    if hints {
+        parts.push(KEY_HINTS.to_owned());
+    }
     parts.join(STATUS_SEPARATOR)
 }
 
@@ -544,7 +556,8 @@ fn marker_color(state: RunState) -> Color {
 ///
 /// The board rows come from [`Board::view`] with the frame height minus the
 /// two fixed lines. Times show in the time zone `tz`. With a `prompt`, the box
-/// of the cancel prompt draws last, over the rows (see [`draw_prompt`]). This
+/// of the cancel prompt draws last, over the rows (see [`draw_prompt`]). While
+/// the box shows, the status line has no key hints. This
 /// function never panics, whatever the size of the frame.
 pub fn draw<Tz: TimeZone>(
     frame: &mut Frame,
@@ -619,7 +632,7 @@ pub fn draw<Tz: TimeZone>(
     }
     if usize::from(area.height) >= FIXED_LINES {
         let layout = layout_status(
-            &status_line(board, status, now, tz),
+            &status_line(board, status, now, tz, prompt.is_none()),
             status.refreshing.then_some(REFRESH_MARK),
             usize::from(area.width),
         );
