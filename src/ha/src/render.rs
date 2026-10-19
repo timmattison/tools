@@ -2695,6 +2695,18 @@ mod tests {
     }
 
     #[test]
+    fn the_status_line_shows_no_key_hints_while_the_box_shows() {
+        let buffer = render_prompt(120, 12, &confirm("fix(ha): show the run ID", None));
+        let status_line = lines(&buffer).pop().expect("the frame has a status line");
+        assert!(
+            status_line.starts_with("updated 30s ago"),
+            "{status_line:?}"
+        );
+        assert!(!status_line.contains("q quit"), "{status_line:?}");
+        assert!(!status_line.contains(KEY_HINTS), "{status_line:?}");
+    }
+
+    #[test]
     fn a_narrow_frame_puts_the_two_keys_on_two_lines() {
         let buffer = render_prompt(30, 10, &confirm("fix(ha): show the run ID", None));
         let text = lines(&buffer);
