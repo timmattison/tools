@@ -327,11 +327,15 @@ const JOBS_ERROR_PREFIX: &str = "└ ⚠ ";
 /// The marker column is empty. The text fills the rest of the line and ends
 /// in `…` when it is too wide. A status row has no time cells.
 fn status_row_line(text: &str, width: usize) -> String {
-    format!(
-        "{} {}",
-        pad_right("", MARKER_WIDTH),
-        fit(text, width.saturating_sub(MARKER_WIDTH + 1))
-    )
+    in_repo_column(&fit(text, width.saturating_sub(MARKER_WIDTH + 1)))
+}
+
+/// Puts a text in the column of `REPO`.
+///
+/// The text starts after the marker cell and one space. Every line that has
+/// no marker of its own and stands under the REPO header takes this indent.
+fn in_repo_column(text: &str) -> String {
+    format!("{} {text}", pad_right("", MARKER_WIDTH))
 }
 
 /// Writes a status row at row `y` of the buffer, as wide as the buffer.
@@ -345,9 +349,9 @@ const TREE_MIDDLE: &str = "├";
 /// The tree glyph of the last row of the block of a run.
 const TREE_LAST: &str = "└";
 
-/// The line that stands in an empty section before the first refresh cycle
-/// ends.
-const SECTION_LOADING: &str = "  Loading…";
+/// The text that stands in an empty section before the first refresh cycle
+/// ends. [`empty_line`] puts it in the REPO column.
+const SECTION_LOADING: &str = "Loading…";
 
 /// The line of a section header.
 ///
@@ -384,14 +388,14 @@ fn header_line(
 /// a text that says "no runs" makes a person think that nothing runs.
 fn empty_line(section: Section, window: Duration, loaded: bool) -> String {
     if !loaded {
-        return SECTION_LOADING.to_owned();
+        return in_repo_column(SECTION_LOADING);
     }
     match section {
-        Section::Active => "  No runs in progress or in the queue.".to_owned(),
-        Section::Recent => format!(
-            "  No runs finished in the last {}.",
+        Section::Active => in_repo_column("No runs in progress or in the queue."),
+        Section::Recent => in_repo_column(&format!(
+            "No runs finished in the last {}.",
             format_duration_setting(window)
-        ),
+        )),
     }
 }
 
@@ -1589,10 +1593,10 @@ mod tests {
     #[test]
     fn an_empty_section_line_starts_in_the_repo_column() {
         let display_column = |line: &str, needle: &str| {
-            let at = line
-                .find(needle)
+            let (before, _) = line
+                .split_once(needle)
                 .unwrap_or_else(|| panic!("{needle:?} is missing: {line:?}"));
-            display_width(&line[..at])
+            display_width(before)
         };
         let mut board = Board::new(Duration::from_hours(8));
         for status in [Status::default(), loaded()] {
@@ -1600,9 +1604,9 @@ mod tests {
             let repo_column = display_column(&text[0], "REPO");
             for row in [2_usize, 4] {
                 let line = &text[row];
-                let first = line.find(|c: char| c != ' ').expect("the line is blank");
+                let text_start = line.trim_start_matches(' ');
                 assert_eq!(
-                    display_width(&line[..first]),
+                    display_width(line) - display_width(text_start),
                     repo_column,
                     "the empty line {line:?} does not start under REPO"
                 );
