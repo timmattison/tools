@@ -188,14 +188,12 @@ mod tests {
         panic!("no outcome arrived");
     }
 
-    /// A script body that waits for the file `release`, for at most 60 s, and
-    /// then prints the accepted answer.
-    fn waiting_body(dir: &TempDir, release: &Path) -> String {
+    /// A script body that waits for the file `release` next to the script, for
+    /// at most 60 s, and then prints the accepted answer. The script reads
+    /// both files through its own path, so no path enters the script text.
+    fn waiting_body(dir: &TempDir) -> String {
         std::fs::write(dir.path().join("answer.out"), ACCEPTED).unwrap();
-        format!(
-            "i=0\nwhile [ ! -e '{}' ] && [ \"$i\" -lt 600 ]; do sleep 0.1; i=$((i + 1)); done\ncat \"$(dirname \"$0\")/answer.out\"",
-            release.display()
-        )
+        "i=0\nwhile [ ! -e \"$(dirname \"$0\")/release\" ] && [ \"$i\" -lt 600 ]; do sleep 0.1; i=$((i + 1)); done\ncat \"$(dirname \"$0\")/answer.out\"".to_owned()
     }
 
     #[test]
@@ -236,7 +234,7 @@ mod tests {
     fn cancel_returns_before_gh_ends_and_the_outcome_arrives_later() {
         let dir = TempDir::new().unwrap();
         let release = dir.path().join("release");
-        let canceller = canceller(&dir, &waiting_body(&dir, &release));
+        let canceller = canceller(&dir, &waiting_body(&dir));
 
         canceller.cancel(&repo("o/r"), RunId(7));
 
@@ -256,7 +254,7 @@ mod tests {
     fn a_stub_in_a_directory_whose_name_holds_a_quote_still_gives_its_outcome() {
         let dir = tempfile::Builder::new().prefix("it's-").tempdir().unwrap();
         let release = dir.path().join("release");
-        let canceller = canceller(&dir, &waiting_body(&dir, &release));
+        let canceller = canceller(&dir, &waiting_body(&dir));
 
         canceller.cancel(&repo("o/r"), RunId(7));
 
