@@ -1,7 +1,7 @@
 //! One GitHub Actions run, as the board and the source share it.
 //!
-//! GitHub names many statuses and conclusions. The board needs only five
-//! states, thus [`RunState`] folds the GitHub values into those five.
+//! GitHub names many statuses and conclusions. The board needs only six
+//! states, thus [`RunState`] folds the GitHub values into those six.
 
 use std::collections::HashSet;
 use std::hash::Hash;
@@ -46,6 +46,7 @@ impl RunState {
             "completed" => match conclusion {
                 Some("success") => RunState::Passed,
                 Some("failure" | "timed_out" | "startup_failure") => RunState::Failed,
+                Some("cancelled") => RunState::Cancelled,
                 _ => RunState::Other,
             },
             "queued" | "waiting" | "pending" | "requested" => RunState::Queued,
@@ -60,10 +61,14 @@ impl RunState {
         matches!(self, RunState::Queued | RunState::Running)
     }
 
-    /// Returns true when the run passed or failed. The board shows these.
+    /// Returns true when the run passed, failed, or was cancelled. The board
+    /// shows these runs in its recent section.
     #[must_use]
     pub fn is_finished(self) -> bool {
-        matches!(self, RunState::Passed | RunState::Failed)
+        matches!(
+            self,
+            RunState::Passed | RunState::Failed | RunState::Cancelled
+        )
     }
 
     /// Returns the state that the board shows for a run with this GitHub
