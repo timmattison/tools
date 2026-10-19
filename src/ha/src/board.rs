@@ -357,10 +357,7 @@ impl Board {
     /// expanded run follows the row of that run.
     fn build_rows(&self, now: DateTime<Utc>) -> Vec<Row<'_>> {
         let (active, recent) = self.sections(now);
-        let passed = recent
-            .iter()
-            .filter(|run| run.state == RunState::Passed)
-            .count();
+        let count_of = |state: RunState| recent.iter().filter(|run| run.state == state).count();
         let mut rows = vec![Row::Header {
             section: Section::Active,
             count: active.len(),
@@ -382,9 +379,9 @@ impl Board {
         rows.push(Row::Header {
             section: Section::Recent,
             count: recent.len(),
-            passed,
-            failed: recent.len() - passed,
-            cancelled: 0,
+            passed: count_of(RunState::Passed),
+            failed: count_of(RunState::Failed),
+            cancelled: count_of(RunState::Cancelled),
         });
         push_runs(
             &mut rows,
