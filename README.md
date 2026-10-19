@@ -2097,8 +2097,9 @@ cannot hang the caller. Used by `cwt` and `ha`.
       chose, also when the highlight moves under it.
     - The status line shows `cancelling run …`, and then that GitHub accepted the cancel or the
       reason that GitHub refused it, for example `409` for a run that finished. After GitHub
-      accepts, `ha` refreshes at once. The run leaves the board after that refresh, because a
-      cancelled run does not show.
+      accepts, `ha` refreshes at once. GitHub stops the jobs of the run first, and that can take
+      some seconds, thus the run can show as running after that refresh. The run leaves the board
+      at the first refresh after GitHub finishes the cancel, because a cancelled run does not show.
     - On a finished run, `c` shows no box. The status line says that there is nothing to cancel.
     - When no box shows, `q`, Esc, or Ctrl-C quits and gives back the terminal.
   - Enter runs the command that `BROWSER` names when that variable is set and not empty. Thus a
