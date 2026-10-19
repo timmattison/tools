@@ -138,7 +138,6 @@ impl Canceller for GhCanceller {
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
-    use std::path::Path;
     use std::time::{Duration, Instant};
 
     use tempfile::TempDir;
