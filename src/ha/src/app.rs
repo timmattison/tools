@@ -788,7 +788,7 @@ mod tests {
             [
                 "Running · 0",
                 "  No runs in progress or in the queue.",
-                "Last 8h · 0 passed · 0 failed",
+                "Last 8h · 0 passed · 0 failed · 0 cancelled",
                 "  No runs finished in the last 8h.",
             ]
         );

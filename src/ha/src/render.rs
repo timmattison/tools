@@ -1114,7 +1114,7 @@ mod tests {
                 "✓ ├ build                      107851237794                                                          11:45:40    4m 20s",
                 "✗ ├ lint                       107851237795                                                          11:46:00    45s",
                 "● └ test                       107851237796                                                          11:50:10    9m 50s",
-                "Last 8h · 1 passed · 0 failed",
+                "Last 8h · 1 passed · 0 failed · 0 cancelled",
                 "✓ acme/widgets        Release   39149711502 issue-11     Bump deps                                   09:00:00    10m 05s",
             ]
         );
@@ -1131,7 +1131,7 @@ mod tests {
                 "Running · 2",
                 "● timmattison/tools   CI                  1 main         Fix the thing                               11:45:30    14m 30s",
                 "○ acme/widgets        Release             2 issue-12     Add release job                             11:58:00    2m 00s",
-                "Last 8h · 1 passed · 1 failed",
+                "Last 8h · 1 passed · 1 failed · 0 cancelled",
                 "✓ timmattison/tools   CI                  3 main         Bump deps                                   09:00:00    10m 05s",
                 "✗ acme/widgets        Release             4 issue-11     Broken build                                10-13 23:50 4h 40m",
                 "",
@@ -1555,7 +1555,7 @@ mod tests {
             [
                 "Running · 0",
                 "  No runs in progress or in the queue.",
-                "Last 8h · 0 passed · 0 failed",
+                "Last 8h · 0 passed · 0 failed · 0 cancelled",
                 "  No runs finished in the last 8h.",
             ]
         );
@@ -1566,8 +1566,36 @@ mod tests {
         let mut board = Board::new(Duration::from_mins(90));
         let buffer = render_with(60, 8, &mut board, &loaded());
         let text = lines(&buffer);
-        assert_eq!(text[3], "Last 90m · 0 passed · 0 failed");
+        assert_eq!(text[3], "Last 90m · 0 passed · 0 failed · 0 cancelled");
         assert_eq!(text[4], "  No runs finished in the last 90m.");
+    }
+
+    #[test]
+    fn the_recent_header_counts_cancelled_runs_apart_from_failed_runs() {
+        let mut board = Board::new(Duration::from_hours(8));
+        let finished = |id: u64, state: RunState, updated: &str| {
+            run(
+                id,
+                "acme/widgets",
+                "Release",
+                "main",
+                "Ship it",
+                state,
+                "2026-10-14T09:00:00Z",
+                updated,
+            )
+        };
+        board.replace(
+            repo("acme/widgets"),
+            vec![
+                finished(1, RunState::Passed, "2026-10-14T09:10:00Z"),
+                finished(2, RunState::Failed, "2026-10-14T09:20:00Z"),
+                finished(3, RunState::Cancelled, "2026-10-14T10:00:00Z"),
+                finished(4, RunState::Cancelled, "2026-10-14T11:00:00Z"),
+            ],
+        );
+        let text = lines(&render_with(120, 10, &mut board, &loaded()));
+        assert_eq!(text[3], "Last 8h · 1 passed · 1 failed · 2 cancelled");
     }
 
     #[test]
