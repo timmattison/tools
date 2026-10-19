@@ -2048,9 +2048,15 @@ cannot hang the caller. Used by `cwt` and `ha`.
   - Each row shows the repository, the workflow, the run ID, the branch, and the run title. The
     run ID stands at the right end of the `WORKFLOW` cell, for example `39149840084`. It is the
     number in the URL of the run page (`/actions/runs/39149840084`), and the `gh run` commands
-    take it. Thus you can find the row of a run that a URL or a message names. A long name keeps
-    its start and ends in `…`, and the ID stays whole. The cut is by display width, thus `日本語`
-    and emoji do not break a row. The columns fit the terminal again when its size changes.
+    take it. Thus you can find the row of a run that a URL or a message names. The workflow name
+    has at most 8 columns, the width of the header `WORKFLOW`, because most workflow names are
+    short, for example `CI`. The branch has at most 12 columns, because you read the start of a
+    branch name, for example `issue-577`, to find a run. The title gets each column that these
+    two limits take from the workflow name and the branch. A short name, such as the workflow
+    `CI` or the branch `main`, does not make its cell narrower. Thus the title starts in the same
+    column on each row. A long name keeps its start and ends in `…`, for example `Release builds`
+    becomes `Release…`, and the ID stays whole. The cut is by display width, thus `日本語` and
+    emoji do not break a row. The columns fit the terminal again when its size changes.
   - Right expands the highlighted run, and Left collapses it again. An expanded run shows one row
     for each job of its latest attempt, below the run row. Each job row shows the state marker of
     the job, with the glyph and the color of a run, the name of the job, its job ID, and when it
