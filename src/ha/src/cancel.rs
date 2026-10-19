@@ -253,6 +253,25 @@ mod tests {
     }
 
     #[test]
+    fn a_stub_in_a_directory_whose_name_holds_a_quote_still_gives_its_outcome() {
+        let dir = tempfile::Builder::new().prefix("it's-").tempdir().unwrap();
+        let release = dir.path().join("release");
+        let canceller = canceller(&dir, &waiting_body(&dir, &release));
+
+        canceller.cancel(&repo("o/r"), RunId(7));
+
+        std::fs::write(&release, "").unwrap();
+        assert_eq!(
+            wait_for_outcome(&canceller),
+            CancelOutcome {
+                repo: repo("o/r"),
+                run: RunId(7),
+                result: Ok(())
+            }
+        );
+    }
+
+    #[test]
     fn two_cancels_give_two_outcomes() {
         let dir = TempDir::new().unwrap();
         let body = answer_body(&dir, ACCEPTED, 0);
