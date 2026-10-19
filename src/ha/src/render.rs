@@ -1469,7 +1469,7 @@ mod tests {
         let text = lines(&render_with(60, 8, &mut board, &Status::default()));
         assert_eq!(
             text[1..5],
-            ["Running", "  Loading…", "Last 8h", "  Loading…"]
+            ["Running", "   Loading…", "Last 8h", "   Loading…"]
         );
     }
 
@@ -1502,7 +1502,7 @@ mod tests {
         let text = lines(&render_with(120, 8, &mut board, &Status::default()));
         assert_eq!(text[1], "Running");
         assert!(text[2].starts_with("🏃 timmattison/tools"), "{:?}", text[2]);
-        assert_eq!(text[3..5], ["Last 8h", "  Loading…"]);
+        assert_eq!(text[3..5], ["Last 8h", "   Loading…"]);
     }
 
     #[test]
@@ -1579,11 +1579,35 @@ mod tests {
             text[1..5],
             [
                 "Running · 0",
-                "  No runs in progress or in the queue.",
+                "   No runs in progress or in the queue.",
                 "Last 8h · 0 passed · 0 failed · 0 cancelled",
-                "  No runs finished in the last 8h.",
+                "   No runs finished in the last 8h.",
             ]
         );
+    }
+
+    #[test]
+    fn an_empty_section_line_starts_in_the_repo_column() {
+        let display_column = |line: &str, needle: &str| {
+            let at = line
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle:?} is missing: {line:?}"));
+            display_width(&line[..at])
+        };
+        let mut board = Board::new(Duration::from_hours(8));
+        for status in [Status::default(), loaded()] {
+            let text = lines(&render_with(60, 8, &mut board, &status));
+            let repo_column = display_column(&text[0], "REPO");
+            for row in [2_usize, 4] {
+                let line = &text[row];
+                let first = line.find(|c: char| c != ' ').expect("the line is blank");
+                assert_eq!(
+                    display_width(&line[..first]),
+                    repo_column,
+                    "the empty line {line:?} does not start under REPO"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1592,7 +1616,7 @@ mod tests {
         let buffer = render_with(60, 8, &mut board, &loaded());
         let text = lines(&buffer);
         assert_eq!(text[3], "Last 90m · 0 passed · 0 failed · 0 cancelled");
-        assert_eq!(text[4], "  No runs finished in the last 90m.");
+        assert_eq!(text[4], "   No runs finished in the last 90m.");
     }
 
     #[test]
