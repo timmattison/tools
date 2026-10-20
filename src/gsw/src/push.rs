@@ -1082,7 +1082,7 @@ impl PushUi {
     /// time, so `clock` is read only while a hint stands, and never otherwise.
     /// Some loop tests use a clock that steps on each read, and a read on each
     /// iteration would change what they measure.
-    pub(crate) fn next_tick(&self, _clock: &impl Fn() -> Instant) -> Option<Duration> {
+    pub(crate) fn next_tick(&self, clock: &impl Fn() -> Instant) -> Option<Duration> {
         match &self.state {
             // A running push ages the same way a fading message does, and for
             // the same reason: the notice reports its own age, and an age only
@@ -1094,6 +1094,15 @@ impl PushUi {
                 ..
             }
             | State::Running { .. } => Some(STATUS_CADENCE),
+            // A hint does not age, but it leaves the row on its own, and a
+            // frame that is not drawn cannot take it off. Overdue gives zero:
+            // the loop wakes at once and the frame removes it.
+            State::Status {
+                life: Life::Hint { posted_at },
+                ..
+            } => Some(
+                RETURN_HINT_LIFETIME.saturating_sub(clock().saturating_duration_since(*posted_at)),
+            ),
             State::Idle | State::Status { .. } | State::Asking { .. } | State::Listing { .. } => {
                 None
             }
@@ -5014,7 +5023,10 @@ mod ui_tests {
             unicode_width::UnicodeWidthStr::width(text.as_str()) <= 12,
             "the hint must fit 12 columns, got {text:?}",
         );
-        assert!(text.starts_with("café"), "the hint must keep its head, got {text:?}");
+        assert!(
+            text.starts_with("café"),
+            "the hint must keep its head, got {text:?}"
+        );
     }
 
     #[test]
