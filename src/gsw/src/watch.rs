@@ -2884,14 +2884,24 @@ where
                 state.ui.dismiss();
                 return Flow::Continue;
             };
-            if !state.returning.is_armed(now) {
+            if state.returning.is_armed(now) {
+                // The second press. The hint leaves the row with the arming,
+                // so a press that finds no worktree to go to leaves no hint
+                // that asks for a press that already happened.
+                state.returning.disarm();
+                state.ui.withdraw_hint();
+                // Rule 1: home is on the start branch. The watch moves home,
+                // as Up does, and no git command runs.
+                let home = state.home.clone();
+                if (hooks.on_start_branch)(&branch, &home) && home != state.current {
+                    state.switch_to(home, clock, &mut hooks.switch);
+                }
+            } else if state.ui.post_hint(branch.return_hint(), now) == crate::push::Posted::OnRow {
                 // The row arms the press, and not the key. A question or a
                 // run owns the row, and a hint that waited in the queue would
                 // arm a press that nobody was asked for. A hint that the busy
                 // row drops arms nothing.
-                if state.ui.post_hint(branch.return_hint(), now) == crate::push::Posted::OnRow {
-                    state.returning.arm(now);
-                }
+                state.returning.arm(now);
             }
         }
         // Left and Right read the paths of the worktrees again at each press,
