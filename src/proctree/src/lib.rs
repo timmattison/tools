@@ -59,6 +59,12 @@ impl Pid {
     pub fn current() -> Self {
         Self(std::process::id())
     }
+
+    /// The number of this process id.
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        0
+    }
 }
 
 /// The basename of a `comm` string.
@@ -310,6 +316,18 @@ impl ProcessTree {
         ps_snapshot().map(|output| Self::parse(&output))
     }
 
+    /// The comm of `pid`, or `None` when the snapshot has no line for `pid`.
+    #[must_use]
+    pub fn comm(&self, pid: Pid) -> Option<&str> {
+        None
+    }
+
+    /// The chain of parents above `pid`.
+    #[must_use]
+    pub fn ancestors(&self, pid: Pid) -> Vec<Pid> {
+        Vec::new()
+    }
+
     /// Whether a process whose basename is `target_name` stands above `pid`, or
     /// is `pid` itself.
     ///
@@ -437,7 +455,10 @@ impl Ancestry {
 
 #[cfg(test)]
 mod tests {
-    use super::{comm_basename, zellij_client_pids, ClientPids, Pid, ProcessTree, ZellijScan};
+    use super::{
+        comm_basename, zellij_client_pids, ClientPids, Pid, ProcessTree, ZellijScan,
+        MAX_ANCESTOR_DEPTH,
+    };
 
     /// Turn the older `in_zellij` flag into a scan. A session whose clients
     /// carry no name uses [`ZellijScan::EveryClient`], which is what
@@ -484,6 +505,99 @@ mod tests {
             "Pid(63481)",
             "a pid must carry the number it was built from"
         );
+    }
+
+
+    // =========================================================================
+    // Tests for the chain of ancestors
+    // =========================================================================
+
+    /// A chain of `count` processes, numbered from 2. Each one is the child of
+    /// the next one, and the last one is the child of PID 1. PID 2 is the
+    /// start of the chain.
+    fn chain_of(count: u32) -> ProcessTree {
+        let mut lines = vec!["1 0 /sbin/launchd".to_string()];
+        for pid in 2..2 + count {
+            let parent = if pid == 1 + count { 1 } else { pid + 1 };
+            lines.push(format!("{pid} {parent} proc{pid}"));
+        }
+        ProcessTree::parse(&lines.join("\n"))
+    }
+
+    #[test]
+    fn a_pid_gives_back_its_number() {
+        assert_eq!(Pid::new(63481).as_u32(), 63481);
+    }
+
+    #[test]
+    fn comm_gives_the_comm_of_a_pid_in_the_snapshot() {
+        let tree = ProcessTree::parse(
+            "1 0 /sbin/launchd\n500 1 /Users/user/my apps/mosh-server\n",
+        );
+        assert_eq!(tree.comm(Pid::new(1)), Some("/sbin/launchd"));
+        assert_eq!(
+            tree.comm(Pid::new(500)),
+            Some("/Users/user/my apps/mosh-server")
+        );
+        assert_eq!(tree.comm(Pid::new(999)), None);
+    }
+
+    #[test]
+    fn ancestors_gives_the_chain_from_the_parent_up_to_pid_1() {
+        let tree = ProcessTree::parse(
+            "1 0 /sbin/launchd\n100 1 /usr/bin/login\n200 100 -zsh\n300 200 /usr/local/bin/spv\n",
+        );
+        assert_eq!(
+            tree.ancestors(Pid::new(300)),
+            vec![Pid::new(200), Pid::new(100), Pid::new(1)]
+        );
+    }
+
+    #[test]
+    fn ancestors_stops_at_pid_1_even_when_pid_1_has_a_parent() {
+        let tree = ProcessTree::parse("1 5 /sbin/launchd\n5 0 odd\n100 1 login\n");
+        assert_eq!(tree.ancestors(Pid::new(100)), vec![Pid::new(1)]);
+    }
+
+    #[test]
+    fn ancestors_stops_at_a_pid_with_no_parent_in_the_snapshot() {
+        let tree = ProcessTree::parse("200 100 -zsh\n300 200 spv\n");
+        assert_eq!(
+            tree.ancestors(Pid::new(300)),
+            vec![Pid::new(200), Pid::new(100)]
+        );
+    }
+
+    #[test]
+    fn ancestors_of_a_pid_that_is_not_in_the_snapshot_is_empty() {
+        let tree = ProcessTree::parse("1 0 /sbin/launchd\n");
+        assert_eq!(tree.ancestors(Pid::new(777)), Vec::<Pid>::new());
+    }
+
+    #[test]
+    fn ancestors_stops_on_a_cycle() {
+        let tree = ProcessTree::parse("10 11 a\n11 10 b\n100 100 /bin/bash\n");
+        assert_eq!(tree.ancestors(Pid::new(10)), vec![Pid::new(11)]);
+        assert_eq!(tree.ancestors(Pid::new(11)), vec![Pid::new(10)]);
+        assert_eq!(tree.ancestors(Pid::new(100)), Vec::<Pid>::new());
+    }
+
+    #[test]
+    fn ancestors_stops_after_the_depth_limit() {
+        let tree = chain_of(100);
+        let chain = tree.ancestors(Pid::new(2));
+        assert_eq!(chain.len(), MAX_ANCESTOR_DEPTH);
+        assert_eq!(chain.first(), Some(&Pid::new(3)));
+        assert_eq!(chain.last(), Some(&Pid::new(2 + 64)));
+    }
+
+    #[test]
+    fn ancestors_reads_every_process_of_a_chain_that_fits_the_depth_limit() {
+        // PID 2 has 63 processes above it, then PID 1: 64 ancestors in all.
+        let tree = chain_of(MAX_ANCESTOR_DEPTH as u32);
+        let chain = tree.ancestors(Pid::new(2));
+        assert_eq!(chain.len(), MAX_ANCESTOR_DEPTH);
+        assert_eq!(chain.last(), Some(&Pid::new(1)));
     }
 
     // =========================================================================
