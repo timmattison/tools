@@ -4201,10 +4201,10 @@ mod tests {
                 job_golden(marker, &format!("└ {name} {runner}"), LONE_JOB, times),
                 "the row of a {case} job"
             );
-            // The marker takes 2 columns, then a space, then `└ ` and the name,
-            // then a space: the runner name starts after them.
-            let start = u16::try_from(2 + 1 + 2 + name.len() + 1).expect("a small column");
-            let width = u16::try_from(runner.len()).expect("a short name");
+            // The runner name starts after the marker, a space, the text, and a space.
+            let start = u16::try_from(display_width(&format!("{marker} └ {name} ")))
+                .expect("a small column");
+            let width = u16::try_from(display_width(runner)).expect("a short name");
             assert_eq!(
                 cyan_columns(&buffer, y),
                 (start..start + width).collect::<Vec<u16>>(),
