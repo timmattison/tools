@@ -74,4 +74,36 @@ impl StartBranch {
         Self::branch_of(&snapshot.branch, snapshot.operation.as_ref(), repo).as_deref()
             == Some(self.0.as_str())
     }
+
+    /// The line that the first press of Esc puts on the row: it asks for a
+    /// second press and names the start branch.
+    ///
+    /// The name is in the line, and the line is the only way it leaves this
+    /// module as text.
+    pub(super) fn return_hint(&self) -> String {
+        String::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The hint names the start branch, in the words of the issue, and nothing
+    /// more: no age, no punctuation at the end.
+    #[test]
+    fn the_return_hint_names_the_start_branch() {
+        let branch = StartBranch("topic".to_string());
+        assert_eq!(branch.return_hint(), "Hit Escape again to go back to topic");
+    }
+
+    /// A name with multi-byte characters goes into the line whole.
+    #[test]
+    fn the_return_hint_keeps_a_multi_byte_name_whole() {
+        let branch = StartBranch("日本語-café-🎉".to_string());
+        assert_eq!(
+            branch.return_hint(),
+            "Hit Escape again to go back to 日本語-café-🎉",
+        );
+    }
 }
