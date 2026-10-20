@@ -12488,7 +12488,11 @@ mod push_loop_tests {
         // at the first one that is on the branch. `charlie` is on it too, and
         // is never asked.
         let (screen, seen) = run_setup(
-            returning(World::three().on_start_branch(ALPHA).on_start_branch(CHARLIE)),
+            returning(
+                World::three()
+                    .on_start_branch(ALPHA)
+                    .on_start_branch(CHARLIE),
+            ),
             vec![key(KeyCode::Esc), key(KeyCode::Esc), Event::Quit],
         );
         assert_eq!(
@@ -12545,7 +12549,12 @@ mod push_loop_tests {
         for between in [KeyCode::Char('r'), KeyCode::Char('m')] {
             let (screen, seen) = run_setup(
                 returning(World::three().on_start_branch(ALPHA)),
-                vec![key(KeyCode::Esc), key(between), key(KeyCode::Esc), Event::Quit],
+                vec![
+                    key(KeyCode::Esc),
+                    key(between),
+                    key(KeyCode::Esc),
+                    Event::Quit,
+                ],
             );
             assert!(
                 seen.switches.is_empty(),
@@ -12624,7 +12633,11 @@ mod push_loop_tests {
         let painted: Vec<String> = seen.paints.iter().map(|text| strip_ansi(text)).collect();
         assert_eq!(
             painted,
-            vec![hint_under(BRAVO), format!("FRAME {BRAVO}"), hint_under(BRAVO)],
+            vec![
+                hint_under(BRAVO),
+                format!("FRAME {BRAVO}"),
+                hint_under(BRAVO)
+            ],
             "the hint must leave after its lifetime, and the Esc after it must ask again",
         );
         assert!(
@@ -12672,10 +12685,16 @@ mod watched_tests {
 
     use tempfile::TempDir;
 
-    use super::tests::{walk_config, WALK_LOG_LIMIT};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::tests::{
+        frame, no_fetch, no_list, timer_off, walk_config, TEST_DEBOUNCE, TEST_DIMS, WALK_LOG_LIMIT,
+    };
     use super::{
-        listed, listed_paths, switch_watched, Event, StartBranch, StartPoint, Watched,
-        DIRECTORY_GONE, NOT_A_WORK_TREE,
+        event_loop, listed, listed_paths, switch_watched, worktree_on_start_branch, Dimensions,
+        Event, FrameTiming, Generation, LogDemand, LoopHooks, LoopStart, PushCommand, PushUi,
+        SnapshotCache, StartBranch, StartPoint, WalkSchedule, Watched, DIRECTORY_GONE,
+        NOT_A_WORK_TREE,
     };
     use crate::render::{Operation, Snapshot};
     use crate::repo::{RepoHandle, DETACHED_HEAD};
@@ -13469,6 +13488,244 @@ mod watched_tests {
         assert_eq!(
             reason,
             format!("{NOT_A_WORK_TREE}: {}", target.as_path().display()),
+        );
+    }
+
+    // The two presses of Esc, against real repositories.
+
+    /// The name of the start branch in the tests of the two presses of Esc.
+    const TOPIC: &str = "topic";
+
+    /// What the render hook of [`drive_real`] saw in one frame: the parts of
+    /// the snapshot that say where the watch is and whether the name is red.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Shown {
+        /// The branch in the header.
+        branch: String,
+        /// Whether the name in the header is red.
+        off_start_branch: bool,
+        /// The badge of the worktree, as the walk put it.
+        worktree: Option<WorktreeBadge>,
+    }
+
+    /// A key press, as the reader thread sends it.
+    fn press(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    /// Run the real [`event_loop`] on the repository at `home`, with the hooks
+    /// that [`super::run`] builds, and give every frame it rendered, in order.
+    ///
+    /// The hooks that touch git are the real ones: the walk, the switch, the
+    /// listing of the worktrees, and the probe of the start branch. A real
+    /// filesystem watcher is live in each [`Watched`], so a change that the
+    /// test or the loop makes can wake the loop at any time. So the events
+    /// come in bursts, as [`super::push_loop_tests`] queues them: the first
+    /// burst before the loop starts, and each frame queues the next one. A
+    /// wake that a filesystem change causes takes a burst too, which only
+    /// moves that burst earlier. The last burst must end with
+    /// [`Event::Quit`].
+    ///
+    /// The clock is frozen and no timed refresh is scheduled, so only the
+    /// events decide when the loop walks. The hooks that start work (push,
+    /// base update, issue, conflicts) do nothing.
+    ///
+    /// `start` must come from [`start_at`] before the test moves HEAD, as the
+    /// start of a session does. The seed walk of `home` fills the cache, so
+    /// the first frame shows the repository as it is when the loop starts.
+    fn drive_real(home: &Path, start: &StartPoint, bursts: Vec<Vec<Event>>) -> Vec<Shown> {
+        let cfg = walk_config();
+        let (tx, rx) = mpsc::channel();
+        let watched = RefCell::new(seeded(home, tx.clone()));
+        let base = Instant::now();
+        let seed = watched
+            .borrow_mut()
+            .walk(&cfg, start, WALK_LOG_LIMIT)
+            .expect("walk the fixture");
+        let mut bursts = std::collections::VecDeque::from(bursts);
+        for event in bursts.pop_front().unwrap_or_default() {
+            tx.send(event).expect("queue event");
+        }
+        let later = RefCell::new(bursts);
+        let shown = RefCell::new(Vec::<Shown>::new());
+        let mut displayed = String::new();
+
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            LoopStart {
+                cache: SnapshotCache {
+                    snapshot: seed,
+                    collected_at: base,
+                    dims: TEST_DIMS,
+                },
+                freshest: None,
+                schedule: WalkSchedule::unscheduled(),
+                ui: PushUi::new(false),
+                session: crate::remote::Session::Local,
+                home: start.home.clone(),
+                log: LogDemand::Off,
+                start_branch: start.branch.clone(),
+            },
+            LoopHooks {
+                collect: |_current: &WorktreePath, limit: usize| {
+                    watched.borrow_mut().walk(&cfg, start, limit)
+                },
+                fetch_log: no_fetch,
+                render: |snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
+                    shown.borrow_mut().push(Shown {
+                        branch: snap.branch.clone(),
+                        off_start_branch: snap.off_start_branch,
+                        worktree: snap.worktree.clone(),
+                    });
+                    if let Some(burst) = later.borrow_mut().pop_front() {
+                        for event in burst {
+                            tx.send(event).expect("queue event");
+                        }
+                    }
+                    frame(&format!("FRAME {}", snap.branch))
+                },
+                render_list: no_list,
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| Ok(()),
+                clock: move || base,
+                next_tick: timer_off,
+                start_push: |_command: PushCommand, _current: &WorktreePath| {},
+                start_base_update: |_command: crate::update::BaseUpdateCommand,
+                                    _current: &WorktreePath| {},
+                start_issue: |_command: crate::shell::ShellCommand,
+                              _current: &WorktreePath,
+                              _generation: Generation| {},
+                start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
+                worktrees: || listed(&watched),
+                worktree_paths: || listed_paths(&watched),
+                switch: |target: &WorktreePath, limit: usize| {
+                    switch_watched(&watched, target, tx.clone(), &cfg, start, limit)
+                },
+                on_start_branch: worktree_on_start_branch,
+            },
+        )
+        .expect("loop");
+
+        shown.into_inner()
+    }
+
+    /// The branch that HEAD names in the work tree at `dir`.
+    fn head_of(dir: &Path) -> String {
+        git_stdout(dir, &["rev-parse", "--abbrev-ref", "HEAD"])
+    }
+
+    /// Rule 1, against real repositories. Home is on the start branch and a
+    /// second worktree is on `main`. Right moves the watch to the second
+    /// worktree, where the name is red, and Esc, Esc moves it home. The last
+    /// frame shows home with a name that is not red.
+    #[test]
+    fn two_presses_of_esc_go_home_when_home_is_on_the_start_branch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        let second = dir.path().join("second");
+        init_repo_at(&home);
+        git(&home, &["switch", "-q", "-c", TOPIC]);
+        git(
+            &home,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                second.to_str().expect("utf-8 path"),
+                "main",
+            ],
+        );
+        let start = start_at(&home);
+
+        let frames = drive_real(
+            &home,
+            &start,
+            vec![
+                vec![press(KeyCode::Right)],
+                vec![press(KeyCode::Esc), press(KeyCode::Esc), Event::Quit],
+            ],
+        );
+
+        let last = frames.last().expect("the loop rendered a frame");
+        assert!(
+            frames
+                .iter()
+                .any(|shown| shown.branch == "main" && shown.off_start_branch),
+            "Right must show the second worktree with a red name, got {frames:?}",
+        );
+        assert_eq!(
+            last.branch, TOPIC,
+            "the last frame must show home, got {frames:?}"
+        );
+        assert!(
+            !last.off_start_branch,
+            "the name must not be red in the last frame"
+        );
+        assert!(
+            last.worktree.as_ref().is_some_and(|badge| badge.home),
+            "the badge of the last frame must say home, got {last:?}",
+        );
+        assert_eq!(
+            head_of(&home),
+            TOPIC,
+            "no git command may move HEAD of home"
+        );
+    }
+
+    /// Rule 2, against real repositories. The session starts on `topic` in
+    /// home, then `git switch main` moves home off the branch, and a second
+    /// worktree takes `topic`. Esc, Esc moves the watch to the second
+    /// worktree, and HEAD of home stays on `main`: no git command ran.
+    #[test]
+    fn two_presses_of_esc_go_to_the_worktree_that_holds_the_start_branch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        let second = dir.path().join("second");
+        init_repo_at(&home);
+        git(&home, &["switch", "-q", "-c", TOPIC]);
+        let start = start_at(&home);
+        git(&home, &["switch", "-q", "main"]);
+        git(
+            &home,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                second.to_str().expect("utf-8 path"),
+                TOPIC,
+            ],
+        );
+
+        let frames = drive_real(
+            &home,
+            &start,
+            vec![
+                vec![press(KeyCode::Esc)],
+                vec![press(KeyCode::Esc), Event::Quit],
+            ],
+        );
+
+        let first = frames.first().expect("the loop rendered a frame");
+        assert_eq!(first.branch, "main");
+        let last = frames.last().expect("the loop rendered a frame");
+        assert_eq!(
+            last.branch, TOPIC,
+            "the last frame must show the second worktree, got {frames:?}"
+        );
+        assert!(
+            !last.off_start_branch,
+            "the name must not be red in the last frame"
+        );
+        assert!(
+            last.worktree.as_ref().is_some_and(|badge| !badge.home),
+            "the badge of the last frame must not say home, got {last:?}",
+        );
+        assert_eq!(
+            head_of(&home),
+            "main",
+            "no git command may move HEAD of home"
         );
     }
 }
