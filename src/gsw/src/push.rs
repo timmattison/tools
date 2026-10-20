@@ -422,6 +422,21 @@ where
     std::thread::spawn(move || on_finish(run_push(&command, &workdir, &on_line)));
 }
 
+/// Run `child` on a thread of its own, through [`run_streamed`], and hand the
+/// outcome to `on_finish`.
+///
+/// The thread is the reason for this function, and it is the reason for
+/// [`spawn`] too: a run takes as long as git takes, and the watch loop must
+/// keep drawing meanwhile. `on_line` and `on_finish` run on that thread, so the
+/// production caller sends each of them down the channel of the loop.
+pub(crate) fn spawn_streamed<L, F>(child: Command, name: String, on_line: L, on_finish: F)
+where
+    L: Fn(String) + Send + Sync + 'static,
+    F: FnOnce(PushOutcome) + Send + 'static,
+{
+    std::thread::spawn(move || on_finish(run_streamed(child, &name, &on_line)));
+}
+
 /// What a refused push tells the user to do. Pressing `p` again re-resolves the
 /// plan against the branch that is checked out now, so the next question
 /// describes the repository as it actually stands — which is the whole remedy.
@@ -510,20 +525,66 @@ fn run_push(
         .args(command.args())
         .current_dir(workdir)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
         .env("GIT_TERMINAL_PROMPT", "0");
     detach_from_terminal(&mut child);
 
+    // The words of a push for the failures of the run itself stay as they
+    // were: `git` for a program that cannot start, and `git push` for a
+    // failure that left no words.
+    stream_child(child, "git", "git push", on_line)
+}
+
+/// Run `child` to completion with both of its pipes captured, report each line
+/// as it lands, and describe how the run went.
+///
+/// The blocking half of [`spawn_streamed`], separated so a test can run it
+/// against a real repository without a thread or a channel in the way. The
+/// caller builds `child` completely: this function sets the two output
+/// streams to pipes, as the run needs, and sets nothing else. The shed of the
+/// git environment, the working directory, the closed stdin, and the
+/// detachment from the terminal are the caller's, and [`run_push`] shows how
+/// each is done and why.
+///
+/// `name` is how a failure of the run itself names the program: it gives
+/// `cannot run {name}: ...` where the program cannot start, `cannot wait for
+/// {name}: ...` where the wait fails, and `{name} failed (...)` where the
+/// program fails and says nothing.
+///
+/// The lines go to `on_line` in the order that they arrive, and the outcome
+/// holds the same lines, joined with a newline between each. See
+/// [`stream_child`].
+pub(crate) fn run_streamed(
+    child: Command,
+    name: &str,
+    on_line: &(dyn Fn(String) + Sync),
+) -> PushOutcome {
+    stream_child(child, name, name, on_line)
+}
+
+/// The run that [`run_push`] and [`run_streamed`] share.
+///
+/// `program` names the program in `cannot run {program}` and `cannot wait for
+/// {program}`. `failed` names it in `{failed} failed (...)`. A push says `git`
+/// in the first two and `git push` in the third, and each message of a push
+/// stays as it was before the run was shared. Any other caller gives one name
+/// for all three, through [`run_streamed`].
+fn stream_child(
+    mut child: Command,
+    program: &str,
+    failed: &str,
+    on_line: &(dyn Fn(String) + Sync),
+) -> PushOutcome {
+    child.stdout(Stdio::piped()).stderr(Stdio::piped());
+
     let mut child = match child.spawn() {
         Ok(child) => child,
-        // git is missing, or not executable. Rare, and worth saying plainly:
-        // every other failure here is git's own words, and this one would
-        // otherwise arrive as an empty message.
+        // The program is missing, or not executable. Rare, and worth saying
+        // plainly: every other failure here is git's own words, and this one
+        // would otherwise arrive as an empty message.
         Err(error) => {
             return PushOutcome {
                 success: false,
-                output: format!("cannot run git: {error}"),
+                output: format!("cannot run {program}: {error}"),
             }
         }
     };
@@ -600,7 +661,7 @@ fn run_push(
         Err(error) => {
             return PushOutcome {
                 success: false,
-                output: format!("cannot wait for git: {error}"),
+                output: format!("cannot wait for {program}: {error}"),
             }
         }
     };
@@ -615,7 +676,7 @@ fn run_push(
     if !success && text.trim().is_empty() {
         // A failure with nothing to show would render as a blank row, which
         // reads as success. The exit status is all git left us.
-        text = format!("git push failed ({status})");
+        text = format!("{failed} failed ({status})");
     }
 
     PushOutcome {
