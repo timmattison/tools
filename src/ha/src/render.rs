@@ -207,7 +207,8 @@ fn fit_runner(name: &RunnerName, room: usize) -> Option<String> {
 ///
 /// The line holds these spans, in this order:
 ///
-/// 1. The marker, the text, and the space after a runner name that shows.
+/// 1. The marker, a space, the text, and, when a runner name shows, the space
+///    before it.
 /// 2. The runner name, when it shows.
 /// 3. The padding of the text cell and the other cells.
 fn job_cells(
