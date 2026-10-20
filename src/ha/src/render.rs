@@ -7,7 +7,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Span;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Widget};
 use ratatui::Frame;
 use textfit::{pad_right, truncate_to_budget};
@@ -170,6 +170,10 @@ fn text_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
+/// The style of a runner name. `Color::Cyan` is a named ANSI color, thus the
+/// terminal theme sets the shade, also on a light background.
+const RUNNER_STYLE: Style = Style::new().fg(Color::Cyan);
+
 /// The runner name that fits in `room` columns, or `None` when it has no room.
 ///
 /// A name that fits shows whole.
@@ -180,10 +184,17 @@ fn fit_runner(name: &RunnerName, room: usize) -> Option<String> {
 /// Joins the cells of one job row into one line. One space stands between cells.
 ///
 /// The text fills the repository cell, one space, and the workflow-name cell.
-/// The runner name follows the text, after one space, when the text leaves room
-/// for it. The job ID stands in the ID part of a run row, right-aligned. The
-/// branch and title columns stay blank. Thus the ID, started, and time cells
-/// stand in the same columns as those of a run row, at every frame width.
+/// The text cut is the one that [`fit`] makes, and the job name has priority.
+/// The runner name follows the text, after one space, in [`RUNNER_STYLE`]. It
+/// gets only the columns that the text leaves free (see [`fit_runner`]). A job
+/// with no runner, or with no room for it, shows no runner name, and its line
+/// reads as it did before the runner name existed. The job ID stands in the ID
+/// part of a run row, right-aligned. The branch and title columns stay blank.
+/// Thus the ID, started, and time cells stand in the same columns as those of a
+/// run row, at every frame width.
+///
+/// The line holds three spans: the marker, the text, and the space after a
+/// shown runner name; the runner name; the padding and the other cells.
 fn job_cells(
     widths: Widths,
     marker: &str,
@@ -192,23 +203,34 @@ fn job_cells(
     id: &str,
     started: &str,
     time: &str,
-) -> String {
+) -> Line<'static> {
     let cell = widths.repo + 1 + widths.workflow;
     let text = truncate_to_budget(text, cell);
     let room = cell.saturating_sub(text_width(&text) + 1);
-    let text = match runner.and_then(|name| fit_runner(name, room)) {
-        Some(name) => format!("{text} {name}"),
-        None => text,
-    };
-    [
-        pad_right(marker, MARKER_WIDTH),
-        fit(&text, cell),
+    let runner = runner.and_then(|name| fit_runner(name, room));
+    let mut used = text_width(&text);
+    let mut lead = format!("{} {text}", pad_right(marker, MARKER_WIDTH));
+    let mut spans = Vec::with_capacity(3);
+    if let Some(name) = &runner {
+        lead.push(' ');
+        used += 1 + text_width(name);
+    }
+    spans.push(Span::raw(lead));
+    if let Some(name) = runner {
+        spans.push(Span::styled(name, RUNNER_STYLE));
+    }
+    let rest = [
         fit_right(id, ID_WIDTH),
         " ".repeat(widths.branch + 1 + widths.title),
         pad_right(started, STARTED_WIDTH),
         pad_right(time, TIME_WIDTH),
     ]
-    .join(" ")
+    .join(" ");
+    spans.push(Span::raw(format!(
+        "{} {rest}",
+        " ".repeat(cell.saturating_sub(used))
+    )));
+    Line::from(spans)
 }
 
 /// The marker of a run state: one emoji, or a blank for the state `Other`.
@@ -284,8 +306,9 @@ where
 /// The line of one job of an expanded run.
 ///
 /// The text cell holds the tree glyph (`└` when `last` is true, else `├`), a
-/// space, and the name of the job. The job ID follows, in the columns of the
-/// run ID.
+/// space, and the name of the job. The runner name of the job follows the text
+/// in cyan, when the text leaves room for it (see [`job_cells`]). The job ID
+/// follows, in the columns of the run ID.
 ///
 /// A job that waits did not start, thus its started cell is empty. Its time
 /// cell shows how long it waited, from its creation until `now`, and is empty
@@ -299,7 +322,7 @@ fn job_line<Tz: TimeZone>(
     now: DateTime<Utc>,
     tz: &Tz,
     widths: Widths,
-) -> String
+) -> Line<'static>
 where
     Tz::Offset: Display,
 {
@@ -584,6 +607,15 @@ fn put(buffer: &mut Buffer, y: usize, text: &str, style: Style) -> u16 {
     y
 }
 
+/// Writes one styled line at row `y` of the area and returns the buffer row.
+/// The line stops at the right edge of the area.
+fn put_line(buffer: &mut Buffer, y: usize, line: &Line<'_>) -> u16 {
+    let area = buffer.area;
+    let y = area.y + u16::try_from(y).unwrap_or(u16::MAX);
+    buffer.set_line(area.x, y, line, area.width);
+    y
+}
+
 /// Reverses the colors across the full width of buffer row `y` when `selected`
 /// is true. The highlight of a run row and of a job row use this one rule.
 fn reverse_if(selected: bool, buffer: &mut Buffer, area: Rect, y: u16) {
@@ -658,7 +690,7 @@ pub fn draw<Tz: TimeZone>(
                 selected,
             } => {
                 let line = job_line(job, *last, now, tz, widths);
-                let y = put(buffer, index + 1, &line, Style::default());
+                let y = put_line(buffer, index + 1, &line);
                 reverse_if(*selected, buffer, area, y);
             }
             Row::JobsLoading => put_status_row(buffer, index + 1, JOBS_LOADING),
@@ -3830,7 +3862,7 @@ mod tests {
                     Some("2026-10-14T11:30:00Z"),
                 );
                 for last in [false, true] {
-                    let line = job_line(&job, last, now(), &utc(), widths);
+                    let line = job_line(&job, last, now(), &utc(), widths).to_string();
                     assert_eq!(display_width(&line), usize::from(w), "{state:?}: {line:?}");
                 }
             }
