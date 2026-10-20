@@ -19,6 +19,19 @@ use unicode_width::UnicodeWidthStr;
 
 mod card;
 
+/// The status text of a zombie process.
+///
+/// `sysinfo` prints `ProcessStatus::Zombie` as this word through `{:?}`, which
+/// is how `collect_processes` builds the status. The macOS status code 5 maps
+/// to the same word. One constant names both.
+const ZOMBIE_STATUS: &str = "Zombie";
+
+/// Why the card shows no parents when `ps` did not run.
+const PARENTS_PS_DID_NOT_RUN: &str = "ps did not run";
+
+/// Why the card shows no parents when the process table has no line for the process.
+const PARENTS_PROCESS_STOPPED: &str = "the process stopped before ps read the process table";
+
 /// Cached result of lsof availability check.
 ///
 /// This prevents repeated warnings when lsof is not found.
@@ -506,9 +519,28 @@ fn status_code_to_string(status: u8) -> String {
         2 => "Run".to_string(),
         3 => "Sleep".to_string(),
         4 => "Stop".to_string(),
-        5 => "Zombie".to_string(),
+        5 => ZOMBIE_STATUS.to_string(),
         _ => format!("Unknown({status})"),
     }
+}
+
+/// Joins the arguments of a process into its command line.
+///
+/// # Arguments
+///
+/// * `process` - The process from the sysinfo snapshot
+///
+/// # Returns
+///
+/// The arguments, separated by one space. The string is empty when the kernel
+/// gave no arguments.
+fn command_line(process: &sysinfo::Process) -> String {
+    process
+        .cmd()
+        .iter()
+        .map(|s| s.to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Collects process information based on the pattern.
@@ -550,12 +582,7 @@ fn collect_processes(
         let pid_u32 = pid.as_u32();
         let name = process.name().to_string_lossy().to_string();
 
-        let command = process
-            .cmd()
-            .iter()
-            .map(|s| s.to_string_lossy().to_string())
-            .collect::<Vec<_>>()
-            .join(" ");
+        let command = command_line(process);
 
         let matches = match pattern {
             PatternType::SinglePid(p) => pid_u32 == *p,
@@ -1603,12 +1630,86 @@ fn format_memory(bytes: u64) -> String {
     human_bytes(bytes as f64)
 }
 
+/// Builds the detail card of one process.
+///
+/// The card reads the executable, the start time, and the ancestors from the
+/// snapshot that `main` took. The chain of ancestors comes from `proctree`
+/// alone. The snapshot gives only the command line of each ancestor. A value
+/// that the kernel withholds shows the reason: a zombie, sudo, or unknown.
+///
+/// # Arguments
+///
+/// * `system` - The snapshot of all processes
+/// * `info` - The facts of the process that `collect_processes` read
+/// * `tree` - The process table from `ps`, or `None` when `ps` did not run
+/// * `viewer` - The credentials of this run
+///
+/// # Returns
+///
+/// The card, ready to print.
+fn collect_card(
+    system: &System,
+    info: &ProcessInfo,
+    tree: Option<&proctree::ProcessTree>,
+    viewer: &Viewer,
+) -> card::ProcessCard {
+    let process = system.process(sysinfo::Pid::from_u32(info.pid));
+    let reason = card::UnreadReason::choose(info.status == ZOMBIE_STATUS, viewer.can_refuse(info));
+
+    let parents = match tree {
+        None => card::Parents::Unread(PARENTS_PS_DID_NOT_RUN.to_string()),
+        Some(tree) if tree.comm(proctree::Pid::new(info.pid)).is_none() => {
+            card::Parents::Unread(PARENTS_PROCESS_STOPPED.to_string())
+        }
+        Some(tree) => card::Parents::Chain(
+            tree.ancestors(proctree::Pid::new(info.pid))
+                .into_iter()
+                .map(|ancestor| card::Ancestor {
+                    pid: ancestor.as_u32(),
+                    command: card::ancestor_command(
+                        system
+                            .process(sysinfo::Pid::from_u32(ancestor.as_u32()))
+                            .map(command_line)
+                            .as_deref(),
+                        tree.comm(ancestor),
+                    ),
+                })
+                .collect(),
+        ),
+    };
+
+    card::ProcessCard {
+        pid: info.pid,
+        name: info.name.clone(),
+        user: info.user.clone(),
+        status: info.status.clone(),
+        cpu_usage: info.cpu_usage,
+        memory: info.memory,
+        started: card::Fact::from_value(
+            process.and_then(|p| card::started(p.start_time(), p.run_time(), &chrono::Local)),
+            reason,
+        ),
+        exe: card::Fact::from_value(
+            process
+                .and_then(|p| p.exe())
+                .map(|path| path.to_string_lossy().to_string()),
+            reason,
+        ),
+        cwd: card::Fact::from_value(info.cwd.clone(), reason),
+        command: card::Fact::from_value(Some(info.command.clone()), reason),
+        parents,
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let sections = args.sections();
 
     // Parse the pattern
     let pattern = parse_pattern(&args.pattern);
+
+    // One PID gives a detail card. Every other pattern gives the table.
+    let shows_card = matches!(pattern, PatternType::SinglePid(_));
 
     // Configure refresh kind based on options
     let mut refresh_kind = ProcessRefreshKind::nothing()
@@ -1617,8 +1718,11 @@ fn main() -> Result<()> {
         .with_memory()
         .with_user(UpdateKind::Always);
 
-    if sections.cwd {
+    if sections.cwd || shows_card {
         refresh_kind = refresh_kind.with_cwd(UpdateKind::Always);
+    }
+    if shows_card {
+        refresh_kind = refresh_kind.with_exe(UpdateKind::Always);
     }
 
     // Create system and refresh processes
@@ -1631,7 +1735,12 @@ fn main() -> Result<()> {
         case_sensitive: args.case_sensitive,
         match_full_command: args.full,
     };
-    let processes = collect_processes(&system, &pattern, &match_options, sections.cwd)?;
+    let processes = collect_processes(
+        &system,
+        &pattern,
+        &match_options,
+        sections.cwd || shows_card,
+    )?;
 
     if processes.is_empty() {
         match &pattern {
@@ -1654,22 +1763,40 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
 
+    // The credentials are read once. The card borrows them, and then they move
+    // into the section printer.
+    let viewer = Viewer::current();
+
     // Print output
-    if args.raw {
+    if shows_card {
+        let tree = proctree::ProcessTree::from_machine();
+        for info in &processes {
+            let card = collect_card(&system, info, tree.as_ref(), &viewer);
+            if args.raw {
+                for line in card.raw_lines() {
+                    println!("{line}");
+                }
+            } else {
+                println!("{}", card.table());
+            }
+        }
+    } else if args.raw {
         print_raw(&processes, sections.cwd);
     } else {
         print_table(&processes, sections.cwd);
     }
 
     // A section reads state the kernel guards, so say up front whose process
-    // this is. A plain listing comes from sysctl and needs no permission.
+    // this is. The card reads the executable and the working directory, which
+    // the kernel guards too. A plain table comes from sysctl and needs no
+    // permission.
     let printer = SectionPrinter {
-        viewer: Viewer::current(),
+        viewer,
         format: SectionFormat::from_raw_flag(args.raw),
         show_secrets: args.show_secrets,
     };
     let wants_a_section = sections.files || sections.env || sections.net;
-    if wants_a_section {
+    if shows_card || wants_a_section {
         if let Some(warning) = permission_warning(&processes, &printer.viewer) {
             eprintln!("\n{warning}");
         }

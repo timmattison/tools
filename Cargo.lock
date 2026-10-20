@@ -7905,6 +7905,7 @@ dependencies = [
  "comfy-table",
  "human_bytes",
  "libc",
+ "proctree",
  "regex",
  "sysinfo",
  "unicode-width",
