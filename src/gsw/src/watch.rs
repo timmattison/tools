@@ -1824,6 +1824,10 @@ const WATCHER_FAILED: &str = "gsw cannot watch the worktree for changes";
 /// worktree`. See [`LoopState::return_home_if_gone`].
 const WORKTREE_GONE: &str = "no longer exists — back to the home worktree";
 
+/// What gsw says when the `git switch` of the second Esc worked. The last line
+/// that git wrote goes under it.
+const RETURN_SUCCESS: &str = "Went back to the start branch";
+
 /// The home worktree: the root of the work tree that `handle` opened, in the
 /// one spelling that every comparison of the loop uses.
 ///
@@ -2930,9 +2934,23 @@ where
                     // frame is stale: the branch moved since the last walk. The
                     // next frame walks, and its header tells the truth.
                     Some(_) => pending.force = true,
-                    // Rule 3, which no worktree on the start branch leads to,
-                    // is for a later step.
-                    None => {}
+                    // Rule 3: no worktree is on the start branch. gsw runs
+                    // `git switch --no-guess` in the home worktree, as a run
+                    // of the row, and it shows the command while it runs. The
+                    // switch moves HEAD, so a measurement of `m` in flight is
+                    // overlapped, as it is by a rebase. A row that is busy
+                    // refuses the run, and then nothing starts.
+                    None => {
+                        let child = branch.switch_child(state.home.as_path());
+                        let notice = format!("{}…", crate::child::command_line(&child));
+                        let success = crate::push::SuccessReport::WithLastLine {
+                            sentence: RETURN_SUCCESS.to_string(),
+                        };
+                        if state.ui.start_run(notice, success, RunKind::Return, now) {
+                            state.conflicts.base_update_started();
+                            (hooks.start_return)(child);
+                        }
+                    }
                 }
             } else if state.ui.post_hint(branch.return_hint(), now) == crate::push::Posted::OnRow {
                 // The row arms the press, and not the key. A question or a
