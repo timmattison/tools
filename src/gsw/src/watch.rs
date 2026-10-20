@@ -12387,6 +12387,30 @@ mod push_loop_tests {
             "the frame of home must show no hint",
         );
     }
+
+    #[test]
+    fn the_second_esc_goes_to_the_worktree_that_is_on_the_start_branch() {
+        // Rule 2. Home is off the start branch and `alpha` is on it, so the
+        // second Esc moves the watch to `alpha`. The probe asks home first and
+        // then each other worktree in the order of the listing, and it stops
+        // at the first one that is on the branch. `charlie` is on it too, and
+        // is never asked.
+        let (screen, seen) = run_setup(
+            returning(World::three().on_start_branch(ALPHA).on_start_branch(CHARLIE)),
+            vec![key(KeyCode::Esc), key(KeyCode::Esc), Event::Quit],
+        );
+        assert_eq!(
+            seen.start_branch_probes,
+            vec![worktree(BRAVO), worktree(ALPHA)],
+            "the probe must ask home first, then the others in the order of the list",
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(ALPHA)],
+            "the second Esc must move the watch to the worktree on the start branch",
+        );
+        assert_eq!(strip_ansi(&screen), format!("FRAME {ALPHA}"));
+    }
 }
 
 /// The tests of [`Watched`] and of the production switch, against real
