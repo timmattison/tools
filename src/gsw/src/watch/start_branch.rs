@@ -5,7 +5,7 @@
 //! `StartBranch::is_shown_by`.
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::render::{Operation, Snapshot};
 
@@ -107,10 +107,12 @@ impl StartBranch {
     /// so.
     pub(super) fn switch_child(&self, workdir: &Path) -> Command {
         let mut command = Command::new("git");
+        gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
         command
             .args(["switch", "--no-guess"])
             .arg(&self.0)
-            .current_dir(workdir);
+            .current_dir(workdir)
+            .stdin(Stdio::null());
         command
     }
 
