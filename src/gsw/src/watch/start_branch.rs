@@ -393,4 +393,223 @@ mod tests {
         );
         assert_eq!(head_of(p), "main");
     }
+
+    /// The tests that read the process that gsw starts, under a hostile
+    /// environment. They start this test binary again, as the tests of the
+    /// abort child do, and a recording git stands first on the `PATH` of that
+    /// child.
+    #[cfg(unix)]
+    mod hostile {
+        use super::*;
+        use crate::shell::stub_shell::{
+            a_child_with_a_recording_git_passes, recorded_git_calls, shed_git_lines, test_name,
+            test_process_can_open_the_terminal, user_intent_lost, user_intent_value, RecordedCall,
+            CHILD_RAN, HOSTILE_GIT_ENVIRONMENT, HOSTILE_MARKER, TTY_OPENED, TTY_REFUSED,
+        };
+
+        /// The calls of the recording git of this child that are the switch
+        /// of `branch`.
+        ///
+        /// The arguments to look for come from the switch child itself, so the
+        /// record and the switch cannot name two different commands.
+        fn recorded_switches(branch: &StartBranch) -> Vec<RecordedCall> {
+            let arguments: Vec<String> = branch
+                .switch_child(Path::new("."))
+                .get_args()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect();
+            recorded_git_calls()
+                .into_iter()
+                .filter(|call| call.arguments == arguments)
+                .collect()
+        }
+
+        /// The switch child sheds the git variables of gsw, keeps those of
+        /// the user, and still does its work.
+        ///
+        /// **This test starts this test binary again, and the hostile
+        /// environment goes on that child**, for the reason that the tests of
+        /// the abort child give. A `gsw` that a pre-commit hook started holds
+        /// `GIT_DIR`. A switch that obeyed it would move HEAD in the
+        /// repository of the hook.
+        ///
+        /// **Two halves.** The run: the switch lands in the fixture although
+        /// the child holds a decoy `GIT_DIR`, and nothing appears at a decoy.
+        /// The record: the recording git, which the switch child starts by
+        /// name, writes down the environment that it got.
+        ///
+        /// **The armed control comes first.** The child asserts that it holds
+        /// each hostile variable and each variable of the user, that no decoy
+        /// path exists on this machine, and that the recording git saw the
+        /// calls of the fixture.
+        #[test]
+        fn the_switch_child_sheds_the_git_variables_of_gsw_and_keeps_those_of_the_user() {
+            if std::env::var_os(HOSTILE_MARKER).is_none() {
+                a_child_with_a_recording_git_passes(&test_name(
+                    module_path!(),
+                    "the_switch_child_sheds_the_git_variables_of_gsw_and_keeps_those_of_the_user",
+                ));
+                return;
+            }
+
+            for (name, _) in HOSTILE_GIT_ENVIRONMENT {
+                assert!(
+                    std::env::var_os(name).is_some(),
+                    "the child must really hold {name}, or there is nothing here to remove and \
+                     the assertions below are measured against nothing",
+                );
+            }
+            for name in gitscratch::USER_INTENT_GIT_ENVIRONMENT {
+                assert_eq!(
+                    std::env::var(name).ok(),
+                    Some(user_intent_value(name)),
+                    "the child must really hold {name}, or there is nothing here to keep",
+                );
+            }
+            let nothing_at = |path: &Path| {
+                matches!(
+                    std::fs::symlink_metadata(path),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                )
+            };
+            let decoys: Vec<&Path> = HOSTILE_GIT_ENVIRONMENT
+                .iter()
+                .map(|(_, value)| Path::new(*value))
+                .filter(|path| path.is_absolute())
+                .collect();
+            for decoy in &decoys {
+                assert!(
+                    nothing_at(decoy),
+                    "{} must name nothing on this machine, or a write there cannot be seen",
+                    decoy.display(),
+                );
+            }
+
+            let dir = repo_on_main_with_topic();
+            assert!(
+                !recorded_git_calls().is_empty(),
+                "the fixture runs git by name, so the recording git must have recorded it. \
+                 Without that, the record of the switch below is empty for a reason that is \
+                 not the switch",
+            );
+            let branch = StartBranch("topic".to_string());
+
+            let outcome = switched(&branch, dir.path());
+
+            assert!(
+                outcome.success,
+                "the switch did not land in the work tree of the run. A switch that obeyed \
+                 GIT_DIR goes to a repository that does not exist, and fails: {:?}",
+                outcome.output,
+            );
+            assert_eq!(head_of(dir.path()), "topic");
+            for decoy in &decoys {
+                assert!(
+                    nothing_at(decoy),
+                    "a git child of gsw obeyed a hostile variable and wrote to {}",
+                    decoy.display(),
+                );
+            }
+
+            let switches = recorded_switches(&branch);
+            let calls: Vec<String> = recorded_git_calls()
+                .iter()
+                .map(|call| call.arguments.join(" "))
+                .collect();
+            assert_eq!(
+                switches.len(),
+                1,
+                "the run must switch once, through the git that the PATH finds: {calls:?}",
+            );
+            let switch = &switches[0];
+            assert_eq!(
+                switch.cwd,
+                dir.path().canonicalize().expect("resolve the fixture"),
+                "the switch must run in the work tree of the run",
+            );
+            let carried = shed_git_lines(&switch.environment);
+            assert!(
+                carried.is_empty(),
+                "the switch child carried a git variable out of the environment of gsw. Each \
+                 of these aims the switch, or configures it, somewhere the user never pointed \
+                 it: {carried:?}",
+            );
+            let lost = user_intent_lost(&switch.environment, None);
+            assert!(
+                lost.is_empty(),
+                "the switch child lost a git variable that the user states on purpose, so git \
+                 switches with a configuration that the user did not choose: {lost:?}",
+            );
+
+            println!("{CHILD_RAN}");
+        }
+
+        /// The switch child has no controlling terminal.
+        ///
+        /// gsw holds the terminal in raw mode while the switch runs. git
+        /// starts hooks for a switch (`post-checkout`), and each of them gets
+        /// the terminal of the switch child. A hook that opens `/dev/tty`
+        /// paints over the frame of gsw and reads the keys that the event
+        /// thread of gsw waits for.
+        ///
+        /// **The recording git is the probe, and the control is armed
+        /// first**, as in the test of the abort child: the test process must
+        /// hold a terminal, and the git calls of the fixture, which do not
+        /// detach, must open it.
+        #[test]
+        fn the_switch_child_cannot_open_the_controlling_terminal() {
+            if std::env::var_os(HOSTILE_MARKER).is_none() {
+                if !test_process_can_open_the_terminal() {
+                    eprintln!(
+                        "skipped: this test process has no controlling terminal, so /dev/tty \
+                         is unopenable for every child regardless - the assertion would hold \
+                         vacuously",
+                    );
+                    return;
+                }
+                a_child_with_a_recording_git_passes(&test_name(
+                    module_path!(),
+                    "the_switch_child_cannot_open_the_controlling_terminal",
+                ));
+                return;
+            }
+
+            assert!(
+                test_process_can_open_the_terminal(),
+                "the child must hold the terminal of this test, or the refusal below holds for \
+                 every process",
+            );
+            let dir = repo_on_main_with_topic();
+            let fixture: Vec<String> = recorded_git_calls()
+                .into_iter()
+                .map(|call| call.terminal)
+                .collect();
+            assert!(
+                !fixture.is_empty() && fixture.iter().all(|terminal| terminal == TTY_OPENED),
+                "the fixture does not detach its git, so each of its calls must open the \
+                 terminal. Otherwise the probe sees no terminal anywhere: {fixture:?}",
+            );
+            let branch = StartBranch("topic".to_string());
+
+            let outcome = switched(&branch, dir.path());
+
+            assert!(
+                outcome.success,
+                "the switch must run, or there is no switch child to ask: {:?}",
+                outcome.output,
+            );
+            let terminals: Vec<String> = recorded_switches(&branch)
+                .into_iter()
+                .map(|call| call.terminal)
+                .collect();
+            assert_eq!(
+                terminals,
+                [TTY_REFUSED],
+                "the switch child keeps the controlling terminal, so a hook or a helper that \
+                 git starts can paint over the frame of gsw and take the keys gsw is reading",
+            );
+
+            println!("{CHILD_RAN}");
+        }
+    }
 }
