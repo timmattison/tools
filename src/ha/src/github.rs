@@ -20,7 +20,7 @@ use chrono::{DateTime, Utc};
 use runlimit::{run_with_limit, RunFailure};
 use serde::Deserialize;
 
-use crate::job::{Job, JobId};
+use crate::job::{Job, JobId, RunnerName};
 use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
 use crate::status::RateLimit;
 use crate::target::{OwnerName, RepoName};
@@ -142,6 +142,7 @@ struct JobJson {
     created_at: Option<DateTime<Utc>>,
     completed_at: Option<DateTime<Utc>>,
     html_url: Option<String>,
+    runner_name: Option<String>,
 }
 
 /// Maps the JSON body of one page of jobs to a [`JobsPage`].
@@ -164,6 +165,7 @@ fn parse_jobs(body: &str) -> Result<JobsPage, SourceError> {
                 id: JobId(json.id),
                 name: json.name.unwrap_or_default(),
                 state,
+                runner: None,
                 created_at: json.created_at,
                 started_at,
                 completed_at: json.completed_at,
@@ -948,6 +950,21 @@ mod tests {
         )
     }
 
+    /// A jobs body with one job that carries the given JSON `extra` members.
+    /// The text is empty for a job with no extra member.
+    fn one_job_json_with(extra: &str) -> String {
+        format!(
+            r#"{{"total_count":1,"jobs":[{{"id":9,"name":"build","status":"queued","conclusion":null{extra}}}]}}"#
+        )
+    }
+
+    #[test]
+    fn a_runner_name_maps_to_the_runner_of_the_job() {
+        let page = parse_jobs(&one_job_json_with(r#","runner_name":"mbp""#)).expect("a page");
+        assert_eq!(page.jobs[0].runner, RunnerName::new("mbp".to_owned()));
+        assert!(page.jobs[0].runner.is_some());
+    }
+
     const JOBS_JSON: &str = r#"{"total_count":3,"jobs":[
         {"id":399444496,"run_id":29679449,"name":"build (ubuntu)","status":"completed","conclusion":"failure",
          "started_at":"2026-09-24T21:56:49Z","created_at":"2026-09-24T21:55:00Z",
@@ -970,6 +987,7 @@ mod tests {
                     id: JobId(399_444_496),
                     name: "build (ubuntu)".to_owned(),
                     state: RunState::Failed,
+                    runner: None,
                     created_at: Some(time("2026-09-24T21:55:00Z")),
                     started_at: Some(time("2026-09-24T21:56:49Z")),
                     completed_at: Some(time("2026-09-24T21:57:56Z")),
@@ -979,6 +997,7 @@ mod tests {
                     id: JobId(2),
                     name: "test".to_owned(),
                     state: RunState::Running,
+                    runner: None,
                     created_at: Some(time("2026-09-25T01:02:03Z")),
                     started_at: Some(time("2026-09-25T01:02:03Z")),
                     completed_at: None,
@@ -988,6 +1007,7 @@ mod tests {
                     id: JobId(3),
                     name: String::new(),
                     state: RunState::Queued,
+                    runner: None,
                     created_at: Some(time("2026-09-25T01:04:00Z")),
                     started_at: None,
                     completed_at: None,
