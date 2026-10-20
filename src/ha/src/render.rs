@@ -4111,8 +4111,12 @@ mod tests {
     /// The time cells of [`passed_job`] in a golden line.
     const PASSED_TIMES: &str = "11:46:00    2m 00s";
 
+    /// A job name of 22 columns. Its text `└ ` plus the name is 24 columns, thus
+    /// the room for a runner name is 3.
+    const ROOM_OF_3_NAME: &str = "abcdefghijklmnopqrstuv";
+
     #[test]
-    fn a_job_text_that_leaves_fewer_than_4_columns_shows_no_runner_name() {
+    fn a_long_runner_name_with_fewer_than_4_columns_does_not_show() {
         // The text `└ Full check list (Linux)` is 25 columns, thus the room is 2.
         let (buffer, row, y) = lone_job_row(
             on(
@@ -4127,19 +4131,27 @@ mod tests {
         );
         assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
         // A name of 22 columns makes a text of 24 columns, thus the room is 3.
-        let name = "abcdefghijklmnopqrstuv";
-        assert_eq!(display_width(name), 22);
-        let (buffer, row, y) = lone_job_row(on("m1-ts", passed_job(name)), 120);
+        assert_eq!(display_width(ROOM_OF_3_NAME), 22);
+        let (buffer, row, y) = lone_job_row(on("m1-ts", passed_job(ROOM_OF_3_NAME)), 120);
         assert_eq!(
             row,
-            job_golden("✅", &format!("└ {name}"), LONE_JOB, PASSED_TIMES)
+            job_golden("✅", &format!("└ {ROOM_OF_3_NAME}"), LONE_JOB, PASSED_TIMES)
         );
         assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
+    }
+
+    #[test]
+    fn a_short_runner_name_that_fits_shows_in_fewer_than_4_columns() {
         // A name that fits whole shows in a room of 3.
-        let (buffer, row, y) = lone_job_row(on("mbp", passed_job(name)), 120);
+        let (buffer, row, y) = lone_job_row(on("mbp", passed_job(ROOM_OF_3_NAME)), 120);
         assert_eq!(
             row,
-            job_golden("✅", &format!("└ {name} mbp"), LONE_JOB, PASSED_TIMES)
+            job_golden(
+                "✅",
+                &format!("└ {ROOM_OF_3_NAME} mbp"),
+                LONE_JOB,
+                PASSED_TIMES
+            )
         );
         assert_eq!(cyan_columns(&buffer, y).len(), 3);
     }
