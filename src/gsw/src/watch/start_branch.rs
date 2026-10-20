@@ -1,8 +1,11 @@
 //! The start branch of watch mode.
 //!
 //! This module holds `StartBranch`. Its own module makes the field private to
-//! the rest of `watch`, tests included. The one question a caller can ask is
-//! `StartBranch::is_shown_by`.
+//! the rest of `watch`, tests included. A caller can ask four things:
+//! `StartBranch::is_shown_by` (does a frame show the start branch),
+//! `StartBranch::is_checked_out_in` (is a work tree on it),
+//! `StartBranch::return_hint` (the line of the first Esc), and
+//! `StartBranch::switch_child` (the command that goes back to it).
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -17,9 +20,12 @@ const RETURN_HINT: &str = "Hit Escape again to go back to";
 /// branch.
 ///
 /// **The field is private to this module, and no accessor gives the name out.**
-/// The rest of `watch`, its tests included, thus cannot read the name. The one
-/// question a caller may ask is [`StartBranch::is_shown_by`], so the rule for
-/// "this frame is on the start branch" lives in one place.
+/// The rest of `watch`, its tests included, thus cannot read the name. A caller
+/// asks [`StartBranch::is_shown_by`] about a frame, or
+/// [`StartBranch::is_checked_out_in`] about a work tree, so the rule for "this
+/// is on the start branch" lives in one place ([`StartBranch::branch_of`]). The
+/// name leaves only inside the line of [`StartBranch::return_hint`] and the
+/// arguments of [`StartBranch::switch_child`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct StartBranch(String);
 
