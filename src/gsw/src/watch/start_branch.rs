@@ -4,6 +4,9 @@
 //! the rest of `watch`, tests included. The one question a caller can ask is
 //! `StartBranch::is_shown_by`.
 
+use std::path::Path;
+use std::process::Command;
+
 use crate::render::{Operation, Snapshot};
 
 /// The words of the hint that the first press of Esc puts on the row. The
@@ -88,6 +91,16 @@ impl StartBranch {
         format!("{RETURN_HINT} {}", self.0)
     }
 
+    /// The git command that takes the work tree at `workdir` back to the start
+    /// branch: `git switch` with the name as one argument.
+    pub(super) fn switch_child(&self, workdir: &Path) -> Command {
+        let mut command = Command::new("git");
+        command
+            .args(["switch", self.0.as_str()])
+            .current_dir(workdir);
+        command
+    }
+
     /// Whether the work tree that `repo` was opened on is on the start branch.
     ///
     /// The rule is [`StartBranch::read`], so a HEAD that names the branch is on
@@ -101,7 +114,11 @@ impl StartBranch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testrepo::{diverged_repo, git, git_allowing_failure, init_repo};
+    use crate::push::{run_streamed, PushOutcome};
+    use crate::testrepo::{
+        diverged_repo, git, git_allowing_failure, git_output, git_stdout, init_repo,
+        init_repo_with_worktree,
+    };
 
     /// The hint names the start branch, in the words of the issue, and nothing
     /// more: no age, no punctuation at the end.
@@ -175,5 +192,192 @@ mod tests {
         let branch = StartBranch::read(&open(dir.path())).expect("a start branch");
         git(dir.path(), &["checkout", "-q", "--detach"]);
         assert!(!branch.is_checked_out_in(&open(dir.path())));
+    }
+
+    /// The name of the program in the failure lines of a run of the switch.
+    const RUN_NAME: &str = "git switch";
+
+    /// Run the switch child of `branch` in `dir`, through the streamed runner
+    /// that the loop uses, and give the outcome.
+    fn switched(branch: &StartBranch, dir: &Path) -> PushOutcome {
+        run_streamed(branch.switch_child(dir), RUN_NAME, &|_| {})
+    }
+
+    /// The branch that HEAD of the work tree at `dir` names.
+    fn head_of(dir: &Path) -> String {
+        git_stdout(dir, &["symbolic-ref", "--short", "HEAD"])
+    }
+
+    /// Whether the local branch `name` exists in the repository at `dir`.
+    fn branch_exists(dir: &Path, name: &str) -> bool {
+        git_output(
+            dir,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{name}"),
+            ],
+        )
+        .status
+        .success()
+    }
+
+    /// Commit `file` with `content` on the branch that is checked out in `dir`.
+    fn commit_file(dir: &Path, file: &str, content: &str) {
+        std::fs::write(dir.join(file), content).expect("write the file");
+        git(dir, &["add", file]);
+        git(dir, &["commit", "-q", "-m", &format!("write {file}")]);
+    }
+
+    /// A repository whose `topic` branch holds one more commit than `main`,
+    /// with HEAD on `main`. The change of `topic` is `a.txt`, which a test can
+    /// make a local change collide with.
+    fn repo_on_main_with_topic() -> tempfile::TempDir {
+        let dir = init_repo();
+        git(dir.path(), &["checkout", "-q", "-b", "topic"]);
+        commit_file(dir.path(), "a.txt", "from topic\n");
+        git(dir.path(), &["checkout", "-q", "main"]);
+        dir
+    }
+
+    /// The plain case: home is on `main`, `topic` exists, and the switch takes
+    /// HEAD to `topic`.
+    #[test]
+    fn the_switch_takes_a_clean_work_tree_to_the_start_branch() {
+        let dir = repo_on_main_with_topic();
+        let branch = StartBranch("topic".to_string());
+
+        let outcome = switched(&branch, dir.path());
+
+        assert!(outcome.success, "git said: {:?}", outcome.output);
+        assert_eq!(head_of(dir.path()), "topic");
+    }
+
+    /// A local change that the switch would overwrite stops the switch. The
+    /// run says so in git's words, and HEAD stays. The switch has no force.
+    #[test]
+    fn the_switch_refuses_when_it_would_overwrite_a_local_change() {
+        let dir = repo_on_main_with_topic();
+        std::fs::write(dir.path().join("a.txt"), "local edit\n").expect("edit a.txt");
+        let branch = StartBranch("topic".to_string());
+
+        let outcome = switched(&branch, dir.path());
+
+        assert!(!outcome.success, "git said: {:?}", outcome.output);
+        assert!(
+            outcome.output.contains("would be overwritten"),
+            "git said: {:?}",
+            outcome.output,
+        );
+        assert_eq!(head_of(dir.path()), "main");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).expect("read a.txt"),
+            "local edit\n",
+            "the refused switch must keep the local change",
+        );
+    }
+
+    /// A local change that the switch does not touch is no reason to refuse.
+    /// The switch goes through, and the change comes along.
+    #[test]
+    fn the_switch_carries_a_local_change_that_it_does_not_touch() {
+        let dir = init_repo();
+        git(dir.path(), &["checkout", "-q", "-b", "topic"]);
+        commit_file(dir.path(), "b.txt", "from topic\n");
+        git(dir.path(), &["checkout", "-q", "main"]);
+        std::fs::write(dir.path().join("a.txt"), "local edit\n").expect("edit a.txt");
+        let branch = StartBranch("topic".to_string());
+
+        let outcome = switched(&branch, dir.path());
+
+        assert!(outcome.success, "git said: {:?}", outcome.output);
+        assert_eq!(head_of(dir.path()), "topic");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).expect("read a.txt"),
+            "local edit\n",
+            "the local change must stay",
+        );
+    }
+
+    /// A merge in progress, with a conflict, stops the switch. HEAD stays. The
+    /// test does not pin the words of git, which differ between versions.
+    #[test]
+    fn the_switch_refuses_in_a_merge_in_progress() {
+        let dir = init_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "topic"]);
+        commit_file(p, "a.txt", "from topic\n");
+        git(p, &["checkout", "-q", "main"]);
+        commit_file(p, "a.txt", "from main\n");
+        git_allowing_failure(p, &["merge", "topic"]);
+        assert!(
+            p.join(".git").join("MERGE_HEAD").exists(),
+            "the fixture must stop in a merge",
+        );
+        let branch = StartBranch("topic".to_string());
+
+        let outcome = switched(&branch, p);
+
+        assert!(!outcome.success, "git said: {:?}", outcome.output);
+        assert_eq!(head_of(p), "main", "HEAD must not move");
+    }
+
+    /// A branch that another worktree holds cannot be checked out here. The
+    /// run says so in git's words, and HEAD stays.
+    #[test]
+    fn the_switch_refuses_a_branch_that_another_worktree_holds() {
+        let (repo, linked) = init_repo_with_worktree();
+        let branch = StartBranch("linked".to_string());
+        assert_eq!(head_of(&linked), "linked", "the fixture holds the branch");
+
+        let outcome = switched(&branch, repo.path());
+
+        assert!(!outcome.success, "git said: {:?}", outcome.output);
+        assert!(
+            outcome.output.contains("already used by worktree"),
+            "git said: {:?}",
+            outcome.output,
+        );
+        assert_eq!(head_of(repo.path()), "main");
+    }
+
+    /// **This test proves that the switch takes `--no-guess`.** The start
+    /// branch is gone, and a remote branch of the same name exists. A plain
+    /// `git switch topic` guesses what the user means, and makes a new local
+    /// `topic` that tracks `origin/topic`. That branch is not the start branch.
+    /// With `--no-guess`, git refuses, and no branch appears.
+    #[test]
+    fn the_switch_does_not_make_a_branch_out_of_a_remote_one() {
+        let dir = repo_on_main_with_topic();
+        let p = dir.path();
+        let tip = git_stdout(p, &["rev-parse", "topic"]);
+        git(p, &["branch", "-q", "-D", "topic"]);
+        git(
+            p,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/none.git",
+            ],
+        );
+        git(p, &["update-ref", "refs/remotes/origin/topic", &tip]);
+        assert!(!branch_exists(p, "topic"), "the fixture deletes topic");
+        let branch = StartBranch("topic".to_string());
+
+        let outcome = switched(&branch, p);
+
+        assert!(!outcome.success, "git said: {:?}", outcome.output);
+        assert!(
+            outcome.output.contains("invalid reference"),
+            "git said: {:?}",
+            outcome.output,
+        );
+        assert!(
+            !branch_exists(p, "topic"),
+            "the switch made a branch out of origin/topic",
+        );
+        assert_eq!(head_of(p), "main");
     }
 }
