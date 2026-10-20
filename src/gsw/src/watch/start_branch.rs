@@ -92,11 +92,24 @@ impl StartBranch {
     }
 
     /// The git command that takes the work tree at `workdir` back to the start
-    /// branch: `git switch` with the name as one argument.
+    /// branch: `git switch --no-guess`, with the name as one argument.
+    ///
+    /// **`--no-guess` is necessary.** Without it, `git switch <name>` guesses
+    /// when no local branch has that name and exactly one remote has one. It
+    /// makes a new local branch that tracks the remote one. A start branch that
+    /// was deleted, with an `origin/<branch>` of the same name, would then give
+    /// a branch that is not the start branch, and the work tree would be
+    /// "back" on a branch that did not exist when gsw started. With
+    /// `--no-guess`, git refuses and says the reference is invalid.
+    ///
+    /// The command has no `--force`, no `--discard-changes`, and no `--merge`.
+    /// A local change that the switch would overwrite stops it, and git says
+    /// so.
     pub(super) fn switch_child(&self, workdir: &Path) -> Command {
         let mut command = Command::new("git");
         command
-            .args(["switch", self.0.as_str()])
+            .args(["switch", "--no-guess"])
+            .arg(&self.0)
             .current_dir(workdir);
         command
     }
