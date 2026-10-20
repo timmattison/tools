@@ -742,6 +742,14 @@ enum Event {
     /// aborts that operation when the run ends. Only a walk puts the header
     /// right again.
     BaseUpdateFinished(crate::push::PushOutcome),
+    /// The `git switch` of the second Esc has finished, either way.
+    ///
+    /// It carries the outcome a push carries, and it arrives after the last
+    /// [`Event::RunOutput`] of the run, as [`Event::PushFinished`] does.
+    /// **Every outcome of this one walks the home worktree at once.** A switch
+    /// that worked moved HEAD, and one that git refused can have changed the
+    /// index before it did. Only a walk puts the header right again.
+    ReturnFinished(crate::push::PushOutcome),
     /// A key press with no other meaning. Clears a status message if one is on
     /// screen and does nothing otherwise, which is what keeps a push error up
     /// until the user has actually looked at the screen.
@@ -3130,6 +3138,7 @@ where
             state.ui.finished(outcome, clock());
             pending.force = true;
         }
+        Event::ReturnFinished(_outcome) => {}
         Event::PushFinished(outcome) => {
             let succeeded = outcome.success;
             state.ui.finished(outcome, clock());
@@ -8437,6 +8446,7 @@ mod push_loop_tests {
     use super::*;
     use crate::conflicts::ConflictsOutcome;
     use crate::push::PushOutcome;
+    use colored::Colorize;
     use crossterm::event::{KeyCode, KeyModifiers};
     use std::cell::RefCell;
     use std::collections::VecDeque;
@@ -12857,6 +12867,76 @@ mod push_loop_tests {
         assert!(
             !painted.contains(SWITCH_NOTICE),
             "no run may show on the row, got {painted:?}",
+        );
+    }
+    /// What git writes when the switch of the second Esc worked.
+    const SWITCHED: &str = "Switched to branch 'topic'";
+
+    /// What git writes when a local change stands in the way of the switch.
+    const WOULD_BE_OVERWRITTEN: &str =
+        "error: Your local changes to the following files would be overwritten by checkout:";
+
+    /// The events that end at the start of the `git switch` of the second Esc.
+    fn return_started() -> Vec<Event> {
+        vec![key(KeyCode::Esc), key(KeyCode::Esc)]
+    }
+
+    #[test]
+    fn a_switch_that_worked_walks_and_says_so_with_the_last_line_of_git() {
+        // The switch moved HEAD of home, so every outcome walks at once. The
+        // row says what gsw did, and under it goes the last line of git.
+        let mut events = return_started();
+        events.extend([
+            Event::ReturnFinished(PushOutcome {
+                success: true,
+                output: format!("{SWITCHED}\n"),
+            }),
+            Event::Quit,
+        ]);
+        let (screen, seen) = run_setup(returning(World::three()), events);
+        assert_eq!(
+            seen.collects, 1,
+            "the outcome must make the loop walk home once",
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {BRAVO}\nWent back to the start branch (0s ago)\n{SWITCHED}"),
+            "the row must say that the switch worked, with the last line of git under it",
+        );
+    }
+
+    #[test]
+    fn a_switch_that_git_refused_shows_the_words_of_git_in_red_until_a_key() {
+        // The words of git are the whole reason, so they stay in red until the
+        // user presses a key. The refusal moved nothing, but it walks all the
+        // same, as every outcome of this run does.
+        let refusal = PushOutcome {
+            success: false,
+            output: format!("{WOULD_BE_OVERWRITTEN}\n\tsrc/lib.rs\nAborting\n"),
+        };
+        let mut events = return_started();
+        events.extend([Event::ReturnFinished(refusal.clone()), Event::Quit]);
+        let (screen, seen) =
+            testcolor::with_forced_ansi(|| run_setup(returning(World::three()), events));
+        assert_eq!(seen.collects, 1, "a refusal must walk home too");
+        let red = testcolor::with_forced_ansi(|| WOULD_BE_OVERWRITTEN.red().to_string());
+        assert!(
+            screen.contains(&red),
+            "the words of git must be red on the row, got {screen:?}",
+        );
+
+        // A key takes them away.
+        let mut events = return_started();
+        events.extend([
+            Event::ReturnFinished(refusal),
+            key(KeyCode::Char('x')),
+            Event::Quit,
+        ]);
+        let (screen, _seen) = run_setup(returning(World::three()), events);
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {BRAVO}"),
+            "the next key must remove the words of git",
         );
     }
 }
