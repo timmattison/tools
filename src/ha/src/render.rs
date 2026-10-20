@@ -205,8 +205,11 @@ fn fit_runner(name: &RunnerName, room: usize) -> Option<String> {
 /// Thus the ID, started, and time cells stand in the same columns as those of a
 /// run row, at every frame width.
 ///
-/// The line holds three spans: the marker, the text, and the space after a
-/// shown runner name; the runner name; the padding and the other cells.
+/// The line holds these spans, in this order:
+///
+/// 1. The marker, the text, and the space after a runner name that shows.
+/// 2. The runner name, when it shows.
+/// 3. The padding of the text cell and the other cells.
 fn job_cells(
     widths: Widths,
     marker: &str,
