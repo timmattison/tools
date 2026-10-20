@@ -142,6 +142,13 @@ impl StartBranch {
     pub(super) fn is_checked_out_in(&self, repo: &gix::Repository) -> bool {
         Self::read(repo).as_ref() == Some(self)
     }
+
+    /// A start branch that no repository gave, for the pure loop tests. It
+    /// gives no name out, as no other start branch does.
+    #[cfg(test)]
+    pub(super) fn fake(name: &str) -> Self {
+        Self(name.to_string())
+    }
 }
 
 #[cfg(test)]

@@ -1637,6 +1637,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             session,
             home: start.home.clone(),
             log: cfg.log,
+            start_branch: start.branch.clone(),
         },
         LoopHooks {
             // The loop passes the worktree on the screen. The loop moves to a
@@ -1767,6 +1768,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             switch: |target: &WorktreePath, log_limit: usize| {
                 switch_watched(&watched, target, switch_tx.clone(), cfg, &start, log_limit)
             },
+            on_start_branch: worktree_on_start_branch,
         },
     );
 
@@ -1781,6 +1783,17 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     });
 
     result
+}
+
+/// Whether the work tree at `path` is on `branch`: the question of the second
+/// press of Esc, for each worktree in turn.
+///
+/// It opens the work tree with `gix::open`, and never with `gix::discover`,
+/// for the reason that [`crate::repo::held_operation`] states: a path that is
+/// no longer a work tree must not lead the search to a parent repository. A
+/// work tree that cannot be opened is not on the branch.
+fn worktree_on_start_branch(branch: &StartBranch, path: &WorktreePath) -> bool {
+    gix::open(path.as_path()).is_ok_and(|repo| branch.is_checked_out_in(&repo))
 }
 
 /// Why watch mode does not start: no directory is at the root of the work tree
@@ -2376,6 +2389,9 @@ struct LoopStart {
     /// switch, and each read of the log on a resize. So the loop is the one
     /// place that decides how many commits a read of the log gets.
     log: LogDemand,
+    /// The branch where the user started gsw, when HEAD named one. The two
+    /// presses of Esc go back to it. `None` leaves Esc with no return.
+    start_branch: Option<StartBranch>,
 }
 
 /// Everything the loop changes while it runs.
@@ -2408,6 +2424,11 @@ struct LoopState {
     generation: Generation,
     /// How many recent commits the log asks for. See [`LoopStart::log`].
     log: LogDemand,
+    /// The branch where the user started gsw. See [`LoopStart::start_branch`].
+    start_branch: Option<StartBranch>,
+    /// The arming of the second press of Esc. The hint on the row is the
+    /// armed state. See [`Arming`].
+    returning: Arming,
 }
 
 impl LoopState {
@@ -2574,6 +2595,7 @@ struct LoopHooks<
     Worktrees,
     Paths,
     Switch,
+    OnStartBranch,
 > {
     /// Walk the worktree that the loop passes, which is the worktree the frame
     /// shows, into a fresh [`Snapshot`] (the expensive git work). The walk
@@ -2660,6 +2682,12 @@ struct LoopHooks<
     /// of that worktree. `Err` carries the reason for a fading line, and then
     /// nothing changes: the loop stays on the worktree it shows.
     switch: Switch,
+    /// Whether the worktree at the path is on the start branch. The second
+    /// press of Esc asks it of each worktree, to find the one that holds the
+    /// start branch. Production opens the worktree and reads its HEAD through
+    /// [`StartBranch::is_checked_out_in`], so a rebase of the start branch
+    /// counts.
+    on_start_branch: OnStartBranch,
 }
 
 /// The triggers one wake collected, before the render decides what to do with
@@ -2720,9 +2748,9 @@ enum Flow {
 /// is where the push, the issue key, and `m` do their work.
 #[expect(
     clippy::type_complexity,
-    reason = "the loop takes one generic for each of its fifteen hooks, so each hook stays \
+    reason = "the loop takes one generic for each of its sixteen hooks, so each hook stays \
               a plain closure that a test replaces with a fake. A type alias spells the same \
-              fifteen generics, and the borrow of the whole value keeps every call of \
+              sixteen generics, and the borrow of the whole value keeps every call of \
               absorb the same"
 )]
 fn absorb<
@@ -2741,6 +2769,7 @@ fn absorb<
     Worktrees,
     Paths,
     Switch,
+    OnStartBranch,
 >(
     event: Event,
     pending: &mut Pending,
@@ -2761,6 +2790,7 @@ fn absorb<
         Worktrees,
         Paths,
         Switch,
+        OnStartBranch,
     >,
 ) -> Flow
 where
@@ -2772,6 +2802,7 @@ where
     Worktrees: FnMut() -> Vec<WorktreeEntry>,
     Paths: FnMut() -> Vec<WorktreePath>,
     Switch: FnMut(&WorktreePath, usize) -> Result<Snapshot, String>,
+    OnStartBranch: FnMut(&StartBranch, &WorktreePath) -> bool,
 {
     let clock = &hooks.clock;
     match event {
@@ -3096,9 +3127,9 @@ where
 /// loop goes back to the home worktree ([`LoopState::return_home_if_gone`]).
 #[expect(
     clippy::type_complexity,
-    reason = "the loop takes one generic for each of its fifteen hooks, so each hook stays \
+    reason = "the loop takes one generic for each of its sixteen hooks, so each hook stays \
               a plain closure that a test replaces with a fake. A type alias spells the same \
-              fifteen generics, as the expectation on absorb says"
+              sixteen generics, as the expectation on absorb says"
 )]
 fn event_loop<
     Collect,
@@ -3116,6 +3147,7 @@ fn event_loop<
     Worktrees,
     Paths,
     Switch,
+    OnStartBranch,
 >(
     rx: &Receiver<Event>,
     debounce: Duration,
@@ -3137,6 +3169,7 @@ fn event_loop<
         Worktrees,
         Paths,
         Switch,
+        OnStartBranch,
     >,
 ) -> Result<()>
 where
@@ -3155,6 +3188,7 @@ where
     Worktrees: FnMut() -> Vec<WorktreeEntry>,
     Paths: FnMut() -> Vec<WorktreePath>,
     Switch: FnMut(&WorktreePath, usize) -> Result<Snapshot, String>,
+    OnStartBranch: FnMut(&StartBranch, &WorktreePath) -> bool,
 {
     let LoopStart {
         cache,
@@ -3164,6 +3198,7 @@ where
         session,
         home,
         log,
+        start_branch,
     } = start;
     let mut state = LoopState {
         cache,
@@ -3182,6 +3217,8 @@ where
         home,
         generation: Generation::default(),
         log,
+        start_branch,
+        returning: Arming::new(crate::push::RETURN_HINT_LIFETIME),
     };
     loop {
         // Wait for the first event, or — when the decay timer is enabled — wake
@@ -5496,6 +5533,12 @@ mod tests {
         Err("this loop test watches one worktree".to_string())
     }
 
+    /// An `on_start_branch` hook for the loop tests that never press Esc
+    /// twice. It says that no worktree is on the start branch.
+    pub(super) fn no_start_branch(_branch: &StartBranch, _path: &WorktreePath) -> bool {
+        false
+    }
+
     /// A `fetch_log` hook for the loop tests whose log is off. The limit of
     /// such a pane is zero, and no cached log holds fewer commits than zero,
     /// so the loop never calls it. It gives no commit, and a fetch with no
@@ -5609,6 +5652,7 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -5638,6 +5682,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -5676,6 +5721,7 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| Ok(empty_snapshot()),
@@ -5698,6 +5744,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -5736,6 +5783,7 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -5761,6 +5809,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -5802,6 +5851,7 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -5826,6 +5876,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -5861,6 +5912,7 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -5887,6 +5939,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -5921,6 +5974,7 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -5945,6 +5999,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -5977,6 +6032,7 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| Ok(empty_snapshot()),
@@ -6005,6 +6061,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -6040,6 +6097,7 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| Ok(empty_snapshot()),
@@ -6065,6 +6123,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -6100,6 +6159,7 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -6126,6 +6186,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -6169,6 +6230,7 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -6193,6 +6255,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -6476,6 +6539,7 @@ mod tests {
                     session: crate::remote::Session::Local,
                     home: loop_home(),
                     log: cfg.log,
+                    start_branch: None,
                 },
                 LoopHooks {
                     collect: |_current: &WorktreePath, limit: usize| {
@@ -6518,6 +6582,7 @@ mod tests {
                     worktrees: Vec::new,
                     worktree_paths: Vec::new,
                     switch: no_switch,
+                    on_start_branch: no_start_branch,
                     render_list: no_list,
                 },
             )
@@ -7042,6 +7107,7 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Fill,
+                start_branch: None,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, limit: usize| {
@@ -7064,6 +7130,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
                 render_list: no_list,
             },
         )
@@ -7111,6 +7178,7 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Fill,
+                start_branch: None,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| Ok(empty_snapshot()),
@@ -7137,6 +7205,7 @@ mod tests {
                     switches.push((target.clone(), limit));
                     Ok(empty_snapshot())
                 },
+                on_start_branch: no_start_branch,
                 render_list: no_list,
             },
         )
@@ -7180,6 +7249,7 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| Ok(empty_snapshot()),
@@ -7210,6 +7280,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -7272,6 +7343,7 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -7307,6 +7379,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -7363,6 +7436,7 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -7408,6 +7482,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -7451,6 +7526,7 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -7490,6 +7566,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -7540,6 +7617,7 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -7579,6 +7657,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -7629,6 +7708,7 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -7667,6 +7747,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -7707,6 +7788,7 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -7735,6 +7817,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -7788,6 +7871,7 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -7816,6 +7900,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -7886,6 +7971,7 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -7921,6 +8007,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -7994,6 +8081,7 @@ mod tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| {
@@ -8050,6 +8138,7 @@ mod tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -8207,8 +8296,8 @@ mod tests {
 #[cfg(test)]
 mod push_loop_tests {
     use super::tests::{
-        frame, loop_home, no_fetch, no_list, no_switch, stepping_clock, timer_off, TEST_DEBOUNCE,
-        TEST_DIMS,
+        frame, loop_home, no_fetch, no_list, no_start_branch, no_switch, stepping_clock, timer_off,
+        TEST_DEBOUNCE, TEST_DIMS,
     };
     use super::*;
     use crate::conflicts::ConflictsOutcome;
@@ -8314,6 +8403,9 @@ mod push_loop_tests {
         conflict_paths: Vec<(WorktreePath, Generation)>,
         /// The timing of each frame the loop rendered, in order.
         timings: Vec<FrameTiming>,
+        /// Every worktree the `on_start_branch` hook was asked about, in
+        /// order.
+        start_branch_probes: Vec<WorktreePath>,
     }
 
     /// Run the loop over a pre-loaded event queue and report what it did.
@@ -8418,6 +8510,7 @@ mod push_loop_tests {
                 session,
                 schedule: no_timed_refresh_for_push(),
                 world: World::alone(),
+                start_branch: None,
             },
             clock,
         )
@@ -8478,6 +8571,10 @@ mod push_loop_tests {
         schedule: WalkSchedule,
         /// The worktrees, and how each switch comes out.
         world: World,
+        /// The start branch of the session. `None` for every test that does
+        /// not press Esc twice: no worktree is then ever off the start
+        /// branch, and Esc has no return.
+        start_branch: Option<StartBranch>,
     }
 
     /// The name of the one worktree of [`World::alone`]. Its snapshot is
@@ -8561,6 +8658,10 @@ mod push_loop_tests {
         /// whole reason they exist — so a test of those keys sets this
         /// instead of moving the snapshot the push tests read.
         behind: u32,
+        /// The worktrees that are on the start branch. A snapshot of a
+        /// worktree that this list does not hold has `off_start_branch` set,
+        /// when the session has a start branch.
+        on_start_branch: Vec<WorktreePath>,
     }
 
     impl World {
@@ -8592,6 +8693,7 @@ mod push_loop_tests {
                 unreadable: Vec::new(),
                 list_cost: Duration::ZERO,
                 behind: 0,
+                on_start_branch: Vec::new(),
             }
         }
 
@@ -8653,6 +8755,13 @@ mod push_loop_tests {
             self.behind = commits;
             self
         }
+
+        /// This world, where the worktree `name` is on the start branch. See
+        /// [`World::on_start_branch`].
+        fn on_start_branch(mut self, name: &str) -> Self {
+            self.on_start_branch.push(worktree(name));
+            self
+        }
     }
 
     /// The shared body of every helper above: pre-load the queue, run the loop
@@ -8690,6 +8799,7 @@ mod push_loop_tests {
             session,
             schedule,
             world,
+            start_branch,
         } = setup;
         let (tx, rx) = mpsc::channel();
         let mut bursts = VecDeque::from(bursts);
@@ -8722,8 +8832,11 @@ mod push_loop_tests {
         // Every branch of the world stands the same distance behind its base,
         // so one number describes them all. See [`World::behind`].
         let behind = world.behind;
+        let has_start_branch = start_branch.is_some();
+        let on_start_branch = world.on_start_branch.clone();
         let snapshot_here = move |path: &WorktreePath| Snapshot {
             commits_behind: behind,
+            off_start_branch: has_start_branch && !on_start_branch.contains(path),
             ..snapshot_of(path)
         };
 
@@ -8743,6 +8856,7 @@ mod push_loop_tests {
                 session,
                 home: world.home.clone(),
                 log: LogDemand::Off,
+                start_branch,
             },
             LoopHooks {
                 collect: |current: &WorktreePath, _limit: usize| {
@@ -8832,6 +8946,10 @@ mod push_loop_tests {
                         removed.borrow_mut().push(target.clone());
                     }
                     Ok(snapshot_here(target))
+                },
+                on_start_branch: |_branch: &StartBranch, path: &WorktreePath| {
+                    seen.borrow_mut().start_branch_probes.push(path.clone());
+                    world.on_start_branch.contains(path)
                 },
             },
         )
@@ -9603,6 +9721,7 @@ mod push_loop_tests {
                 session: crate::remote::Session::Local,
                 home: loop_home(),
                 log: LogDemand::Off,
+                start_branch: None,
             },
             LoopHooks {
                 collect: |_current: &WorktreePath, _limit: usize| Ok(pushable_snapshot()),
@@ -9636,6 +9755,7 @@ mod push_loop_tests {
                 worktrees: Vec::new,
                 worktree_paths: Vec::new,
                 switch: no_switch,
+                on_start_branch: no_start_branch,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -10458,6 +10578,7 @@ mod push_loop_tests {
                     session: crate::remote::Session::Local,
                     home: loop_home(),
                     log: LogDemand::Off,
+                    start_branch: None,
                 },
                 LoopHooks {
                     collect: |_current: &WorktreePath, _limit: usize| Ok(pushable_snapshot()),
@@ -10486,6 +10607,7 @@ mod push_loop_tests {
                     worktrees: Vec::new,
                     worktree_paths: Vec::new,
                     switch: no_switch,
+                    on_start_branch: no_start_branch,
                     fetch_log: no_fetch,
                     render_list: no_list,
                 },
@@ -10518,6 +10640,7 @@ mod push_loop_tests {
             session: crate::remote::Session::Local,
             schedule: no_timed_refresh_for_push(),
             world,
+            start_branch: None,
         }
     }
 
@@ -11057,6 +11180,8 @@ mod push_loop_tests {
             current: worktree(BRAVO),
             generation: Generation::default(),
             log: LogDemand::Off,
+            start_branch: None,
+            returning: Arming::new(crate::push::RETURN_HINT_LIFETIME),
         };
         assert!(
             state.issue.armed.is_armed(now),
@@ -12095,6 +12220,100 @@ mod push_loop_tests {
             seen.listings, 1,
             "only the Down that opens the list reads it",
         );
+    }
+
+    // The two presses of Esc that go back to the start branch.
+
+    /// The name of the start branch in the tests of the two presses of Esc.
+    const TOPIC: &str = "topic";
+
+    /// The hint that the first press of Esc puts on the row, for [`TOPIC`].
+    const RETURN_HINT_LINE: &str = "Hit Escape again to go back to topic";
+
+    /// The setup of the tests of Esc: `world`, and a session that started on
+    /// [`TOPIC`]. A worktree of `world` that is not in
+    /// [`World::on_start_branch`] is off the start branch, so the name in its
+    /// header is red.
+    fn returning(world: World) -> Setup {
+        Setup {
+            start_branch: Some(StartBranch::fake(TOPIC)),
+            ..in_world(world)
+        }
+    }
+
+    /// Run the loop over `events` in `setup` on a frozen clock.
+    fn run_setup(setup: Setup, events: Vec<Event>) -> (String, Seen) {
+        let base = Instant::now();
+        drive(events, setup, move || base)
+    }
+
+    #[test]
+    fn the_first_esc_off_the_start_branch_puts_the_hint_on_the_row_and_does_nothing_else() {
+        // The name in the header is red, so the first Esc asks for a second
+        // one. The line has no age and it fades by no rule of its own. The
+        // press asks no worktree whether it is on the start branch, and
+        // moves nowhere.
+        let (screen, seen) = run_setup(
+            returning(World::three()),
+            vec![key(KeyCode::Esc), Event::Quit],
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {BRAVO}\n{RETURN_HINT_LINE}"),
+            "the first Esc must put the hint on the row, with no age",
+        );
+        assert!(
+            seen.start_branch_probes.is_empty(),
+            "the first press must probe nothing, got {:?}",
+            seen.start_branch_probes,
+        );
+        assert!(
+            seen.switches.is_empty(),
+            "the first press must switch nothing, got {:?}",
+            seen.switches,
+        );
+    }
+
+    #[test]
+    fn esc_on_the_start_branch_does_what_dismiss_does_and_posts_no_hint() {
+        // The name is not red, so Esc takes the fading line off the row, as it
+        // did before the two presses existed.
+        let base = Instant::now();
+        let (screen, seen) = drive(
+            vec![key(KeyCode::Esc), Event::Quit],
+            Setup {
+                ui: pushed_ui(base),
+                ..returning(World::three().on_start_branch(BRAVO))
+            },
+            move || base,
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {BRAVO}"),
+            "Esc on the start branch must dismiss the line and post no hint",
+        );
+        assert!(seen.start_branch_probes.is_empty());
+        assert!(seen.switches.is_empty());
+    }
+
+    #[test]
+    fn esc_in_a_session_with_no_start_branch_does_what_dismiss_does_and_posts_no_hint() {
+        let base = Instant::now();
+        let (screen, seen) = drive(
+            vec![key(KeyCode::Esc), Event::Quit],
+            Setup {
+                ui: pushed_ui(base),
+                ..in_world(World::three())
+            },
+            move || base,
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {BRAVO}"),
+            "with no start branch, Esc must dismiss the line and post no hint",
+        );
+        assert!(seen.start_branch_probes.is_empty());
+        assert!(seen.switches.is_empty());
     }
 }
 
