@@ -2080,10 +2080,11 @@ cannot hang the caller. Used by `cwt` and `ha`.
       occurs while the job waits for a runner, and when the job ended before a runner took it, for
       example a skipped job.
     - The job name has priority in its cell. The runner name gets only the columns that the job
-      name does not use. A long runner name keeps its start and ends in `…`, for example `m1-…`.
-      When fewer than 4 columns are free, no runner name shows. Thus the job ID and the time
-      columns do not move when a runner takes a job. On a highlighted job row, the runner name
-      stays cyan.
+      name does not use. Thus the job ID and the time columns do not move when a runner takes a
+      job. A runner name that fits shows whole, also in fewer than 4 columns, for example `mbp` in
+      3 columns. A longer runner name keeps its start and ends in `…`, for example `m1-…`. This cut
+      needs 4 free columns, thus in fewer columns the longer name does not show. On a highlighted
+      job row, the runner name stays cyan.
     - The jobs are sorted by name, with no difference between capital and small letters. Thus the
       order stays the same through each refresh and each re-run, and the jobs of one matrix stay
       together. GitHub gives the jobs in the order of their IDs, which has no meaning that you can
