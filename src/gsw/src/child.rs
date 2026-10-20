@@ -6,7 +6,20 @@
 //! shell that answers whether the issue command exists, and the run of that
 //! command all pass through this module.
 
+use std::ffi::OsStr;
 use std::process::Command;
+
+/// The command line that `command` runs, as the words of gsw name it.
+///
+/// Read from the child itself, so a line that names the abort cannot name a
+/// different command from the one that ran.
+pub(crate) fn command_line(command: &Command) -> String {
+    std::iter::once(command.get_program())
+        .chain(command.get_args())
+        .map(OsStr::to_string_lossy)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 /// Arrange for `command`'s child to run detached from the terminal, so nothing
 /// in its process tree can reach the keyboard gsw is reading.

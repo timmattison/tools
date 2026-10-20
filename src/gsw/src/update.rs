@@ -860,7 +860,7 @@ fn abort_child(workdir: &Path, operation: &Operation) -> Command {
 fn abort(workdir: &Path, operation: &Operation) -> Result<(), Vec<String>> {
     let mut child = abort_child(workdir, operation);
     let attempt = child.output();
-    abort_result(&command_line(&child), attempt)
+    abort_result(&crate::child::command_line(&child), attempt)
 }
 
 /// Whether `attempt`, a run of the abort that `line` names, aborted the
@@ -905,18 +905,6 @@ fn abort_result(line: &str, attempt: std::io::Result<Output>) -> Result<(), Vec<
         return Err(vec![format!("{line} failed ({})", output.status)]);
     }
     Err(written)
-}
-
-/// The command line that `command` runs, as the words of gsw name it.
-///
-/// Read from the child itself, so a line that names the abort cannot name a
-/// different command from the one that ran.
-fn command_line(command: &Command) -> String {
-    std::iter::once(command.get_program())
-        .chain(command.get_args())
-        .map(OsStr::to_string_lossy)
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// Every line a run has written, in arrival order, as one string with a newline
@@ -1483,9 +1471,12 @@ mod abort_tests {
             conflicts: 1,
         };
         let merge = Operation::Merge { conflicts: 1 };
-        assert_eq!(command_line(&abort_child(&dir, &rebase)), REBASE_ABORT);
         assert_eq!(
-            command_line(&abort_child(&dir, &merge)),
+            crate::child::command_line(&abort_child(&dir, &rebase)),
+            REBASE_ABORT
+        );
+        assert_eq!(
+            crate::child::command_line(&abort_child(&dir, &merge)),
             "git merge --abort"
         );
     }
