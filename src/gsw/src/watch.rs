@@ -3574,7 +3574,9 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 ///   its base, `M` asks to merge the base into the branch, and `m` asks to
 ///   measure a rebase and a merge against the default branch. Up goes to the
 ///   home worktree, Left to the previous worktree, Right to the next worktree,
-///   and Down opens the list of the worktrees.
+///   and Down opens the list of the worktrees. Esc is
+///   [`Event::ReturnRequested`], which goes back to the start branch on its
+///   second press.
 /// - [`InputMode::Confirm`]: `y` and Enter carry out whatever the question on
 ///   the row asks about — a push, a rebase, or a merge — and `n`, Esc, and `q`
 ///   cancel it. Nothing else acts: with a question on screen, `q` is the answer
@@ -3660,6 +3662,10 @@ fn classify_input(key: KeyEvent, mode: InputMode, keys: CommandKeys) -> Option<E
             // and the window of a running push belongs to the worktree that
             // pushes, so it opens in the normal mode only.
             KeyCode::Down if mode == InputMode::Normal => Event::OpenList,
+            // Esc in the normal mode is the key of the return to the start
+            // branch. In a run it keeps its old meaning, because the window
+            // under the frame belongs to the run.
+            KeyCode::Esc if mode == InputMode::Normal => Event::ReturnRequested,
             _ => Event::Dismiss,
         },
         InputMode::Confirm => match code {
