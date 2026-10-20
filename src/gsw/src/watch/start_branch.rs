@@ -105,6 +105,17 @@ impl StartBranch {
     /// The command has no `--force`, no `--discard-changes`, and no `--merge`.
     /// A local change that the switch would overwrite stops it, and git says
     /// so.
+    ///
+    /// The child obeys the rules of the other git children of gsw. It sheds
+    /// the git environment that gsw inherited and keeps the six variables that
+    /// the user states
+    /// ([`gitscratch::shed_inherited_git_environment_keeping_user_intent`]),
+    /// because a gsw that a hook started holds a `GIT_DIR` that is not the
+    /// repository of the user. Its stdin is closed. It is detached from the
+    /// terminal ([`crate::child::detach_from_terminal`]), because gsw holds the
+    /// terminal in raw mode and a hook of git, such as `post-checkout`, must
+    /// not open `/dev/tty`. The caller pipes the output: see
+    /// [`crate::push::run_streamed`].
     pub(super) fn switch_child(&self, workdir: &Path) -> Command {
         let mut command = Command::new("git");
         gitscratch::shed_inherited_git_environment_keeping_user_intent(&mut command);
@@ -113,6 +124,7 @@ impl StartBranch {
             .arg(&self.0)
             .current_dir(workdir)
             .stdin(Stdio::null());
+        crate::child::detach_from_terminal(&mut command);
         command
     }
 
