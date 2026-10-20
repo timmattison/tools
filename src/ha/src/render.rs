@@ -174,14 +174,22 @@ fn text_width(text: &str) -> usize {
 /// terminal theme sets the shade, also on a light background.
 const RUNNER_STYLE: Style = Style::new().fg(Color::Cyan);
 
+/// The fewest columns that a cut runner name gets: three characters and `…`.
+const MIN_RUNNER_WIDTH: usize = 4;
+
 /// The runner name cut to `room` columns, or `None` when it has no room.
 ///
-/// A name that fits shows whole. A longer name keeps its start and ends in `…`.
+/// A name that fits shows whole, also in fewer than [`MIN_RUNNER_WIDTH`]
+/// columns. A longer name keeps its start and ends in `…`. It needs
+/// [`MIN_RUNNER_WIDTH`] columns, because a shorter cut shows too little of the
+/// name to be of use.
 fn fit_runner(name: &RunnerName, room: usize) -> Option<String> {
     if text_width(name.as_str()) <= room {
         Some(name.as_str().to_owned())
-    } else {
+    } else if room >= MIN_RUNNER_WIDTH {
         Some(truncate_to_budget(name.as_str(), room))
+    } else {
+        None
     }
 }
 
