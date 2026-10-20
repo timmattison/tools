@@ -1273,8 +1273,17 @@ impl PushUi {
         run: RunKind,
         now: Instant,
     ) -> bool {
-        let _ = (notice, success, run, now);
-        false
+        if !matches!(self.state, State::Idle | State::Status { .. }) {
+            return false;
+        }
+        self.state = State::Running {
+            notice,
+            success,
+            started_at: now,
+            run,
+            recent: VecDeque::new(),
+        };
+        true
     }
 
     /// Handle one line of a running command's output.
