@@ -87,11 +87,21 @@ impl StartBranch {
     pub(super) fn return_hint(&self) -> String {
         format!("{RETURN_HINT} {}", self.0)
     }
+
+    /// Whether the work tree that `repo` was opened on is on the start branch.
+    ///
+    /// The rule is [`StartBranch::read`], so a HEAD that names the branch is on
+    /// it, and so is a HEAD that a rebase of the branch detached. Any other
+    /// detached HEAD is on no branch.
+    pub(super) fn is_checked_out_in(&self, repo: &gix::Repository) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testrepo::{diverged_repo, git, git_allowing_failure, init_repo};
 
     /// The hint names the start branch, in the words of the issue, and nothing
     /// more: no age, no punctuation at the end.
@@ -109,5 +119,61 @@ mod tests {
             branch.return_hint(),
             "Hit Escape again to go back to 日本語-café-🎉",
         );
+    }
+
+    /// Open the repository at `dir` the way the watch does: by path, with no
+    /// search upward.
+    fn open(dir: &std::path::Path) -> gix::Repository {
+        gix::open(dir).expect("open the fixture")
+    }
+
+    /// A HEAD on the start branch is on it.
+    #[test]
+    fn a_work_tree_on_the_start_branch_is_on_it() {
+        let dir = init_repo();
+        git(dir.path(), &["checkout", "-q", "-b", "topic"]);
+        let branch = StartBranch::read(&open(dir.path())).expect("a start branch");
+        assert_eq!(branch, StartBranch("topic".to_string()));
+        assert!(branch.is_checked_out_in(&open(dir.path())));
+    }
+
+    /// A HEAD on another branch is not on the start branch.
+    #[test]
+    fn a_work_tree_on_another_branch_is_not_on_the_start_branch() {
+        let dir = init_repo();
+        git(dir.path(), &["checkout", "-q", "-b", "topic"]);
+        let branch = StartBranch::read(&open(dir.path())).expect("a start branch");
+        git(dir.path(), &["checkout", "-q", "main"]);
+        assert!(!branch.is_checked_out_in(&open(dir.path())));
+    }
+
+    /// A rebase of the start branch, stopped on a conflict, detaches HEAD. The
+    /// work tree is still on the start branch.
+    #[test]
+    fn a_stopped_rebase_of_the_start_branch_is_on_it() {
+        let dir = diverged_repo();
+        let p = dir.path();
+        let branch = StartBranch::read(&open(p)).expect("a start branch");
+        assert_eq!(branch, StartBranch("feature".to_string()));
+
+        git_allowing_failure(p, &["rebase", "main"]);
+
+        let repo = open(p);
+        assert_eq!(
+            crate::repo::branch_name(&repo),
+            crate::repo::DETACHED_HEAD,
+            "git detaches HEAD in a rebase",
+        );
+        assert!(branch.is_checked_out_in(&repo));
+    }
+
+    /// A detached HEAD outside a rebase is on no branch.
+    #[test]
+    fn a_detached_head_outside_a_rebase_is_not_on_the_start_branch() {
+        let dir = init_repo();
+        git(dir.path(), &["checkout", "-q", "-b", "topic"]);
+        let branch = StartBranch::read(&open(dir.path())).expect("a start branch");
+        git(dir.path(), &["checkout", "-q", "--detach"]);
+        assert!(!branch.is_checked_out_in(&open(dir.path())));
     }
 }
