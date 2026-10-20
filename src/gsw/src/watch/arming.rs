@@ -44,17 +44,19 @@ impl Arming {
 
     /// The message took the row at `now`, so the key is armed from `now`.
     pub(super) fn arm(&mut self, now: Instant) {
-        let _ = now;
+        self.posted_at = Some(now);
     }
 
     /// Whether the message still stands at `now`.
     pub(super) fn is_armed(&self, now: Instant) -> bool {
-        let _ = (now, self.lifetime, self.posted_at);
-        false
+        self.posted_at
+            .is_some_and(|posted_at| now.saturating_duration_since(posted_at) < self.lifetime)
     }
 
     /// Take the arming away at once.
-    pub(super) fn disarm(&mut self) {}
+    pub(super) fn disarm(&mut self) {
+        self.posted_at = None;
+    }
 }
 
 #[cfg(test)]
