@@ -2941,6 +2941,15 @@ where
                     // overlapped, as it is by a rebase. A row that is busy
                     // refuses the run, and then nothing starts.
                     None => {
+                        // The run is in the home worktree, so the watch goes
+                        // there first. A move that fails puts its reason on
+                        // the row, and then no git command runs.
+                        if state.current != home {
+                            state.switch_to(home.clone(), clock, &mut hooks.switch);
+                            if state.current != home {
+                                return Flow::Continue;
+                            }
+                        }
                         let child = branch.switch_child(state.home.as_path());
                         let notice = format!("{}…", crate::child::command_line(&child));
                         let success = crate::push::SuccessReport::WithLastLine {
