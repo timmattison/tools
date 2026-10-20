@@ -1532,7 +1532,17 @@ impl PushUi {
     /// other thing on the row stays: a fading line, an error that waits for a
     /// key, a progress notice, a question, a run, and the open list are not
     /// the hint's to remove.
-    pub(crate) fn withdraw_hint(&mut self) {}
+    pub(crate) fn withdraw_hint(&mut self) {
+        if matches!(
+            self.state,
+            State::Status {
+                life: Life::Hint { .. },
+                ..
+            }
+        ) {
+            self.state = State::Idle;
+        }
+    }
 
     /// Take every message off the row and out of the queue: a status line of
     /// any [`Life`], the question, the open list, and every message held for
