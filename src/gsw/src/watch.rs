@@ -746,6 +746,11 @@ enum Event {
     /// screen and does nothing otherwise, which is what keeps a push error up
     /// until the user has actually looked at the screen.
     Dismiss,
+    /// The user pressed Esc in the normal mode. When the name in the header is
+    /// red, the first press asks for a second one, and the second press goes
+    /// back to the start branch. Otherwise it does what [`Event::Dismiss`]
+    /// does.
+    ReturnRequested,
     /// The user asked to go to the home worktree (Up): the worktree where gsw
     /// started.
     GoHome,
@@ -2827,7 +2832,7 @@ where
         },
         Event::RunOutput(line) => state.ui.output_line(line),
         Event::Cancelled => state.ui.cancel(),
-        Event::Dismiss => state.ui.dismiss(),
+        Event::Dismiss | Event::ReturnRequested => state.ui.dismiss(),
         // Left and Right read the paths of the worktrees again at each press,
         // because `nwt` and `swt` add and remove worktrees while gsw runs.
         // They read no label, because they show none. Where no other worktree
@@ -5123,6 +5128,7 @@ mod tests {
             Some(Event::ListClose) => "ListClose",
             Some(Event::Quit) => "Quit",
             Some(Event::Dismiss) => "Dismiss",
+            Some(Event::ReturnRequested) => "ReturnRequested",
             Some(Event::Confirmed) => "Confirmed",
             Some(Event::Cancelled) => "Cancelled",
             Some(Event::BaseUpdateRequested(update)) => asks_for(update),
@@ -5179,7 +5185,7 @@ mod tests {
                     "GoPrevious",
                     "GoNext",
                     "Dismiss",
-                    "Dismiss",
+                    "ReturnRequested",
                 ],
             ),
             (
@@ -5222,6 +5228,29 @@ mod tests {
                         "{code:?} in {mode:?} with {keys:?}",
                     );
                 }
+            }
+        }
+    }
+
+    /// Esc in the normal mode is the key of the return to the start branch.
+    /// In every other mode it keeps the meaning it had: a run drops the line
+    /// on the row, the question is cancelled, and the list closes.
+    #[test]
+    fn esc_asks_for_the_return_in_the_normal_mode_only() {
+        for keys in EVERY_BINDING_COMBINATION {
+            for (mode, expected) in [
+                (InputMode::Normal, "ReturnRequested"),
+                (InputMode::Confirm, "Cancelled"),
+                (InputMode::Running(RunKind::Push), "Dismiss"),
+                (InputMode::Running(RunKind::BaseUpdate), "Dismiss"),
+                (InputMode::Running(RunKind::Return), "Dismiss"),
+                (InputMode::List, "ListClose"),
+            ] {
+                assert_eq!(
+                    meaning(classify_input(press(KeyCode::Esc), mode, keys)),
+                    expected,
+                    "Esc in {mode:?} with {keys:?}",
+                );
             }
         }
     }
