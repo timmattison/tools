@@ -165,7 +165,7 @@ fn parse_jobs(body: &str) -> Result<JobsPage, SourceError> {
                 id: JobId(json.id),
                 name: json.name.unwrap_or_default(),
                 state,
-                runner: None,
+                runner: json.runner_name.and_then(RunnerName::new),
                 created_at: json.created_at,
                 started_at,
                 completed_at: json.completed_at,
