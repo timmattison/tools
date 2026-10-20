@@ -174,11 +174,15 @@ fn text_width(text: &str) -> usize {
 /// terminal theme sets the shade, also on a light background.
 const RUNNER_STYLE: Style = Style::new().fg(Color::Cyan);
 
-/// The runner name that fits in `room` columns, or `None` when it has no room.
+/// The runner name cut to `room` columns, or `None` when it has no room.
 ///
-/// A name that fits shows whole.
+/// A name that fits shows whole. A longer name keeps its start and ends in `…`.
 fn fit_runner(name: &RunnerName, room: usize) -> Option<String> {
-    (text_width(name.as_str()) <= room).then(|| name.as_str().to_owned())
+    if text_width(name.as_str()) <= room {
+        Some(name.as_str().to_owned())
+    } else {
+        Some(truncate_to_budget(name.as_str(), room))
+    }
 }
 
 /// Joins the cells of one job row into one line. One space stands between cells.
@@ -4059,5 +4063,72 @@ mod tests {
                 "🏃 └ sites gr96283qcxw61jpesqn… 107851237706",
             ]
         );
+    }
+
+    /// The job ID of the one job that [`lone_job_row`] draws.
+    const LONE_JOB: u64 = 900_000_000_001;
+
+    /// Draws the first run, expanded with the one job `job`, at `width` columns.
+    /// Returns the buffer, the text of the job row, and the buffer row of it.
+    fn lone_job_row(job: Job, width: u16) -> (Buffer, String, u16) {
+        let mut board = board_with_jobs(vec![job]);
+        let buffer = render_with(width, 14, &mut board, &loaded());
+        let text = lines(&buffer);
+        let y = text
+            .iter()
+            .position(|line| line.contains(&LONE_JOB.to_string()))
+            .expect("the job row shows its ID");
+        (
+            buffer,
+            text[y].clone(),
+            u16::try_from(y).expect("a small row"),
+        )
+    }
+
+    /// A passed job with the ID [`LONE_JOB`], run from 11:46:00 to 11:48:00.
+    fn passed_job(name: &str) -> Job {
+        job(
+            LONE_JOB,
+            name,
+            RunState::Passed,
+            Some("2026-10-14T11:46:00Z"),
+            Some("2026-10-14T11:48:00Z"),
+        )
+    }
+
+    /// The time cells of [`passed_job`] in a golden line.
+    const PASSED_TIMES: &str = "11:46:00    2m 00s";
+
+    #[test]
+    fn a_job_text_that_leaves_fewer_than_4_columns_shows_no_runner_name() {
+        // The text `└ Full check list (Linux)` is 25 columns, thus the room is 2.
+        let (buffer, row, y) = lone_job_row(
+            on(
+                "GitHub Actions 1000001050",
+                passed_job("Full check list (Linux)"),
+            ),
+            120,
+        );
+        assert_eq!(
+            row,
+            job_golden("✅", "└ Full check list (Linux)", LONE_JOB, PASSED_TIMES)
+        );
+        assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
+        // A name of 22 columns makes a text of 24 columns, thus the room is 3.
+        let name = "abcdefghijklmnopqrstuv";
+        assert_eq!(display_width(name), 22);
+        let (buffer, row, y) = lone_job_row(on("m1-ts", passed_job(name)), 120);
+        assert_eq!(
+            row,
+            job_golden("✅", &format!("└ {name}"), LONE_JOB, PASSED_TIMES)
+        );
+        assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
+        // A name that fits whole shows in a room of 3.
+        let (buffer, row, y) = lone_job_row(on("mbp", passed_job(name)), 120);
+        assert_eq!(
+            row,
+            job_golden("✅", &format!("└ {name} mbp"), LONE_JOB, PASSED_TIMES)
+        );
+        assert_eq!(cyan_columns(&buffer, y).len(), 3);
     }
 }
