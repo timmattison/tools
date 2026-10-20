@@ -1769,6 +1769,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                 switch_watched(&watched, target, switch_tx.clone(), cfg, &start, log_limit)
             },
             on_start_branch: worktree_on_start_branch,
+            start_return: |_child: std::process::Command| {},
         },
     );
 
@@ -2598,6 +2599,7 @@ struct LoopHooks<
     Paths,
     Switch,
     OnStartBranch,
+    StartReturn,
 > {
     /// Walk the worktree that the loop passes, which is the worktree the frame
     /// shows, into a fresh [`Snapshot`] (the expensive git work). The walk
@@ -2690,6 +2692,13 @@ struct LoopHooks<
     /// [`StartBranch::is_checked_out_in`], so a rebase of the start branch
     /// counts.
     on_start_branch: OnStartBranch,
+    /// Start the `git switch` of the second Esc, given the child that
+    /// [`StartBranch::switch_child`] built: `git switch --no-guess` and the
+    /// start branch, to run in the home worktree. Production spawns a thread
+    /// that runs it, sends each line it writes back as [`Event::RunOutput`],
+    /// and sends the outcome as [`Event::ReturnFinished`]; tests record the
+    /// child and decide for themselves when, or whether, the outcome arrives.
+    start_return: StartReturn,
 }
 
 /// The triggers one wake collected, before the render decides what to do with
@@ -2750,9 +2759,9 @@ enum Flow {
 /// is where the push, the issue key, and `m` do their work.
 #[expect(
     clippy::type_complexity,
-    reason = "the loop takes one generic for each of its sixteen hooks, so each hook stays \
+    reason = "the loop takes one generic for each of its seventeen hooks, so each hook stays \
               a plain closure that a test replaces with a fake. A type alias spells the same \
-              sixteen generics, and the borrow of the whole value keeps every call of \
+              seventeen generics, and the borrow of the whole value keeps every call of \
               absorb the same"
 )]
 fn absorb<
@@ -2772,6 +2781,7 @@ fn absorb<
     Paths,
     Switch,
     OnStartBranch,
+    StartReturn,
 >(
     event: Event,
     pending: &mut Pending,
@@ -2793,6 +2803,7 @@ fn absorb<
         Paths,
         Switch,
         OnStartBranch,
+        StartReturn,
     >,
 ) -> Flow
 where
@@ -2805,6 +2816,7 @@ where
     Paths: FnMut() -> Vec<WorktreePath>,
     Switch: FnMut(&WorktreePath, usize) -> Result<Snapshot, String>,
     OnStartBranch: FnMut(&StartBranch, &WorktreePath) -> bool,
+    StartReturn: FnMut(std::process::Command),
 {
     let clock = &hooks.clock;
     match event {
@@ -3193,9 +3205,9 @@ where
 /// loop goes back to the home worktree ([`LoopState::return_home_if_gone`]).
 #[expect(
     clippy::type_complexity,
-    reason = "the loop takes one generic for each of its sixteen hooks, so each hook stays \
+    reason = "the loop takes one generic for each of its seventeen hooks, so each hook stays \
               a plain closure that a test replaces with a fake. A type alias spells the same \
-              sixteen generics, as the expectation on absorb says"
+              seventeen generics, as the expectation on absorb says"
 )]
 fn event_loop<
     Collect,
@@ -3214,6 +3226,7 @@ fn event_loop<
     Paths,
     Switch,
     OnStartBranch,
+    StartReturn,
 >(
     rx: &Receiver<Event>,
     debounce: Duration,
@@ -3236,6 +3249,7 @@ fn event_loop<
         Paths,
         Switch,
         OnStartBranch,
+        StartReturn,
     >,
 ) -> Result<()>
 where
@@ -3255,6 +3269,7 @@ where
     Paths: FnMut() -> Vec<WorktreePath>,
     Switch: FnMut(&WorktreePath, usize) -> Result<Snapshot, String>,
     OnStartBranch: FnMut(&StartBranch, &WorktreePath) -> bool,
+    StartReturn: FnMut(std::process::Command),
 {
     let LoopStart {
         cache,
@@ -5605,6 +5620,10 @@ mod tests {
         false
     }
 
+    /// A `start_return` hook for the loop tests that never press Esc twice
+    /// with no worktree on the start branch. It starts nothing.
+    pub(super) fn no_return(_child: std::process::Command) {}
+
     /// A `fetch_log` hook for the loop tests whose log is off. The limit of
     /// such a pane is zero, and no cached log holds fewer commits than zero,
     /// so the loop never calls it. It gives no commit, and a fetch with no
@@ -5749,6 +5768,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -5811,6 +5831,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -5876,6 +5897,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -5943,6 +5965,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -6006,6 +6029,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -6066,6 +6090,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -6128,6 +6153,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -6190,6 +6216,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -6253,6 +6280,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -6322,6 +6350,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -6649,6 +6678,7 @@ mod tests {
                     worktree_paths: Vec::new,
                     switch: no_switch,
                     on_start_branch: no_start_branch,
+                    start_return: no_return,
                     render_list: no_list,
                 },
             )
@@ -7197,6 +7227,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_return: no_return,
                 render_list: no_list,
             },
         )
@@ -7272,6 +7303,7 @@ mod tests {
                     Ok(empty_snapshot())
                 },
                 on_start_branch: no_start_branch,
+                start_return: no_return,
                 render_list: no_list,
             },
         )
@@ -7347,6 +7379,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -7446,6 +7479,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -7549,6 +7583,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -7633,6 +7668,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -7724,6 +7760,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -7814,6 +7851,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -7884,6 +7922,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -7967,6 +8006,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -8074,6 +8114,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -8205,6 +8246,7 @@ mod tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -8362,8 +8404,8 @@ mod tests {
 #[cfg(test)]
 mod push_loop_tests {
     use super::tests::{
-        frame, loop_home, no_fetch, no_list, no_start_branch, no_switch, stepping_clock, timer_off,
-        TEST_DEBOUNCE, TEST_DIMS,
+        frame, loop_home, no_fetch, no_list, no_return, no_start_branch, no_switch, stepping_clock,
+        timer_off, TEST_DEBOUNCE, TEST_DIMS,
     };
     use super::*;
     use crate::conflicts::ConflictsOutcome;
@@ -8472,6 +8514,9 @@ mod push_loop_tests {
         /// Every worktree the `on_start_branch` hook was asked about, in
         /// order.
         start_branch_probes: Vec<WorktreePath>,
+        /// The program, the arguments, and the current directory of each
+        /// child the `start_return` hook was given, in order.
+        returns: Vec<(String, Vec<String>, Option<std::path::PathBuf>)>,
     }
 
     /// Run the loop over a pre-loaded event queue and report what it did.
@@ -9034,6 +9079,16 @@ mod push_loop_tests {
                 on_start_branch: |_branch: &StartBranch, path: &WorktreePath| {
                     seen.borrow_mut().start_branch_probes.push(path.clone());
                     world.on_start_branch.contains(path)
+                },
+                start_return: |child: std::process::Command| {
+                    seen.borrow_mut().returns.push((
+                        child.get_program().to_string_lossy().into_owned(),
+                        child
+                            .get_args()
+                            .map(|arg| arg.to_string_lossy().into_owned())
+                            .collect(),
+                        child.get_current_dir().map(std::path::Path::to_path_buf),
+                    ));
                 },
             },
         )
@@ -9840,6 +9895,7 @@ mod push_loop_tests {
                 worktree_paths: Vec::new,
                 switch: no_switch,
                 on_start_branch: no_start_branch,
+                start_return: no_return,
                 fetch_log: no_fetch,
                 render_list: no_list,
             },
@@ -10692,6 +10748,7 @@ mod push_loop_tests {
                     worktree_paths: Vec::new,
                     switch: no_switch,
                     on_start_branch: no_start_branch,
+                    start_return: no_return,
                     fetch_log: no_fetch,
                     render_list: no_list,
                 },
@@ -12668,6 +12725,47 @@ mod push_loop_tests {
         );
         assert_eq!(strip_ansi(&screen), hint_under(BRAVO));
     }
+    // Rule 3: no worktree is on the start branch, so the second Esc runs
+    // `git switch --no-guess` in the home worktree.
+
+    /// The command line of the `git switch` of the second Esc, as the row
+    /// shows it while the run is in flight.
+    const SWITCH_NOTICE: &str = "git switch --no-guess topic…";
+
+    #[test]
+    fn the_second_esc_runs_git_switch_in_home_when_no_worktree_is_on_the_start_branch() {
+        // Nothing is on the start branch, so there is no worktree to go to.
+        // The loop is on home already, so it switches nowhere. It starts the
+        // `git switch` once, in the work tree of home, and the row shows the
+        // command while it runs.
+        let (screen, seen) = run_setup(
+            returning(World::three()),
+            vec![key(KeyCode::Esc), key(KeyCode::Esc), Event::Quit],
+        );
+        assert_eq!(
+            seen.returns,
+            vec![(
+                "git".to_string(),
+                vec![
+                    "switch".to_string(),
+                    "--no-guess".to_string(),
+                    TOPIC.to_string()
+                ],
+                Some(worktree(BRAVO).as_path().to_path_buf()),
+            )],
+            "the second Esc must start `git switch --no-guess topic` in home, once",
+        );
+        assert!(
+            seen.switches.is_empty(),
+            "the loop is on home, so it must switch nowhere, got {:?}",
+            seen.switches,
+        );
+        let painted = strip_ansi(&screen);
+        assert!(
+            painted.starts_with(&format!("FRAME {BRAVO}\n{SWITCH_NOTICE}")),
+            "the row must show the command while it runs, got {painted:?}",
+        );
+    }
 }
 
 /// The tests of [`Watched`] and of the production switch, against real
@@ -13604,6 +13702,7 @@ mod watched_tests {
                     switch_watched(&watched, target, tx.clone(), &cfg, start, limit)
                 },
                 on_start_branch: worktree_on_start_branch,
+                start_return: |_child: std::process::Command| {},
             },
         )
         .expect("loop");
