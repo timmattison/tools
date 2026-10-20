@@ -1501,6 +1501,124 @@ pub(crate) mod stub_shell {
         names
     }
 
+    /// The variable that names the directory of the recording git to the
+    /// child that finds it first on its `PATH`.
+    ///
+    /// The name carries no `GIT_` prefix, so no sweep of gsw takes it away.
+    pub(crate) const RECORDING_GIT_VAR: &str = "GSW_RECORDING_GIT";
+
+    /// One call of the recording git.
+    pub(crate) struct RecordedCall {
+        /// Each argument of the call, in order.
+        pub(crate) arguments: Vec<String>,
+        /// The directory of the call, with every symbolic link in it resolved.
+        pub(crate) cwd: PathBuf,
+        /// The environment of the call, one `NAME=value` line for each
+        /// variable.
+        pub(crate) environment: String,
+        /// [`TTY_OPENED`] where the call could open the controlling terminal,
+        /// and [`TTY_REFUSED`] where it could not.
+        pub(crate) terminal: String,
+    }
+
+    /// Run `test` in a child of this test binary whose `PATH` finds a
+    /// recording git first, and fail where that child fails.
+    ///
+    /// **The recording git is how a test reads the environment of a git child
+    /// of gsw itself.** gsw starts git by name, so the first `git` on the
+    /// `PATH` is the process that gsw starts. That program writes down its
+    /// arguments, its directory and its environment, and it tries to open the
+    /// controlling terminal, as [`StubShell::probing_the_terminal`] does. Then
+    /// it puts back the `PATH` of this process and gives the call to the real
+    /// git, so the run does all of its real work.
+    ///
+    /// A read of the removals off the [`Command`] proves less. It reads the
+    /// command that a function builds, and not the process that the run
+    /// starts. A change that a caller makes to the command after its builder
+    /// built it does not show in that read, and neither does a second builder
+    /// that the run uses in place of the first. A git
+    /// hook proves less too. git adds variables of its own to the environment
+    /// of a hook, so a record from a hook cannot use the rule of the `GIT_`
+    /// prefix.
+    ///
+    /// **The `PATH` goes on the child, and never on this process**, for the
+    /// reason [`a_child_of_this_test_passes_with`] gives. This process writes
+    /// the program into a temporary directory of its own, and holds that
+    /// directory until the child ends.
+    ///
+    /// # Panics
+    ///
+    /// Panics where the program cannot be written, and where
+    /// [`a_child_of_this_test_passes_with`] panics.
+    pub(crate) fn a_child_with_a_recording_git_passes(test: &str) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let own_path = std::env::var_os("PATH").unwrap_or_default();
+        let program = dir.path().join("git");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\n\
+                 call=$(mktemp -d {dir}/call.XXXXXX) || exit 1\n\
+                 printf '%s\\n' \"$@\" > \"$call/arguments\"\n\
+                 pwd -P > \"$call/cwd\"\n\
+                 env > \"$call/environment\"\n\
+                 if ( exec 3<>/dev/tty ) 2>/dev/null; then\n\
+                 \tprintf '{TTY_OPENED}' > \"$call/terminal\"\n\
+                 else\n\
+                 \tprintf '{TTY_REFUSED}' > \"$call/terminal\"\n\
+                 fi\n\
+                 PATH={own_path}\n\
+                 export PATH\n\
+                 exec git \"$@\"\n",
+                dir = shell_quote(&dir.path().display().to_string()),
+                own_path = shell_quote(&own_path.to_string_lossy()),
+            ),
+        )
+        .expect("write the recording git");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+            .expect("make the recording git executable");
+        let path = std::env::join_paths(
+            std::iter::once(dir.path().to_path_buf()).chain(std::env::split_paths(&own_path)),
+        )
+        .expect("a PATH that holds the recording git");
+        a_child_of_this_test_passes_with(
+            test,
+            &[
+                ("PATH", path.as_os_str()),
+                (RECORDING_GIT_VAR, dir.path().as_os_str()),
+            ],
+        );
+    }
+
+    /// Each call that the recording git of this child recorded, in no order.
+    ///
+    /// # Panics
+    ///
+    /// Panics where [`a_child_with_a_recording_git_passes`] did not start this
+    /// process, and where a record cannot be read.
+    pub(crate) fn recorded_git_calls() -> Vec<RecordedCall> {
+        let dir = PathBuf::from(
+            std::env::var_os(RECORDING_GIT_VAR).expect("the parent must name the recording git"),
+        );
+        let read = |call: &Path, name: &str| {
+            std::fs::read_to_string(call.join(name)).expect("read a record of the call")
+        };
+        std::fs::read_dir(&dir)
+            .expect("read the records of the recording git")
+            .map(|entry| entry.expect("an entry of the records").path())
+            .filter(|path| path.is_dir())
+            .map(|call| RecordedCall {
+                arguments: read(&call, "arguments")
+                    .lines()
+                    .map(str::to_string)
+                    .collect(),
+                cwd: PathBuf::from(read(&call, "cwd").trim_end_matches('\n')),
+                environment: read(&call, "environment"),
+                terminal: read(&call, "terminal"),
+            })
+            .collect()
+    }
+
     /// The prefix that makes a variable git's.
     ///
     /// The rule the children hold is this prefix, and never a list of names, so
