@@ -8712,6 +8712,11 @@ mod push_loop_tests {
         /// worktree that this list does not hold has `off_start_branch` set,
         /// when the session has a start branch.
         on_start_branch: Vec<WorktreePath>,
+        /// The worktrees whose first frame is stale: the cache of the loop
+        /// says the name is red, as it does when `git switch` ran in another
+        /// pane since the last walk. Every later walk tells the truth. The
+        /// probe tells the truth too.
+        reddened: Vec<WorktreePath>,
     }
 
     impl World {
@@ -8744,6 +8749,7 @@ mod push_loop_tests {
                 list_cost: Duration::ZERO,
                 behind: 0,
                 on_start_branch: Vec::new(),
+                reddened: Vec::new(),
             }
         }
 
@@ -8810,6 +8816,13 @@ mod push_loop_tests {
         /// [`World::on_start_branch`].
         fn on_start_branch(mut self, name: &str) -> Self {
             self.on_start_branch.push(worktree(name));
+            self
+        }
+
+        /// This world, where the first frame of the worktree `name` is stale.
+        /// See [`World::reddened`].
+        fn reddened(mut self, name: &str) -> Self {
+            self.reddened.push(worktree(name));
             self
         }
     }
@@ -8896,7 +8909,12 @@ mod push_loop_tests {
             &mut displayed,
             LoopStart {
                 cache: SnapshotCache {
-                    snapshot: snapshot_here(&world.home),
+                    snapshot: Snapshot {
+                        off_start_branch: has_start_branch
+                            && (world.reddened.contains(&world.home)
+                                || !world.on_start_branch.contains(&world.home)),
+                        ..snapshot_here(&world.home)
+                    },
                     collected_at: base,
                     dims,
                 },
@@ -12420,6 +12438,32 @@ mod push_loop_tests {
             "the second Esc must move the watch to the worktree on the start branch",
         );
         assert_eq!(strip_ansi(&screen), format!("FRAME {ALPHA}"));
+    }
+
+    #[test]
+    fn the_second_esc_moves_nowhere_when_the_watch_is_on_the_only_worktree_on_the_start_branch() {
+        // The frame says the name is red, and the probe finds the worktree
+        // that the frame shows. That happens when the snapshot is stale: the
+        // branch moved since the last walk. The loop then walks at once, so
+        // the next frame is right, and it switches nowhere.
+        let (screen, seen) = run_setup(
+            returning(World::three().on_start_branch(BRAVO).reddened(BRAVO)),
+            vec![key(KeyCode::Esc), key(KeyCode::Esc), Event::Quit],
+        );
+        assert!(
+            seen.switches.is_empty(),
+            "the watch is on the worktree already, got {:?}",
+            seen.switches,
+        );
+        assert_eq!(
+            seen.collects, 1,
+            "a stale frame must make the next frame walk",
+        );
+        assert_eq!(
+            strip_ansi(&screen),
+            format!("FRAME {BRAVO}"),
+            "the walk shows the name right and no hint",
+        );
     }
 }
 
