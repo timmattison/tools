@@ -4139,4 +4139,84 @@ mod tests {
         );
         assert_eq!(cyan_columns(&buffer, y).len(), 3);
     }
+
+    /// The display column where the run ID `1` of the first run ends at `width`
+    /// columns.
+    fn run_id_column(width: u16) -> usize {
+        let mut board = board_with_jobs(vec![passed_job("build")]);
+        let text = lines(&render_with(width, 14, &mut board, &loaded()));
+        last_digit_column(&text[2], "1").expect("the run row shows its ID")
+    }
+
+    #[test]
+    fn a_job_name_that_fills_the_cell_shows_no_runner_name() {
+        let name = "n".repeat(40);
+        let (buffer, row, y) = lone_job_row(on("mbp", passed_job(&name)), 120);
+        // The text is cut to the 28 columns of the cell and ends in `…`.
+        let cut = format!("└ {}…", "n".repeat(25));
+        assert_eq!(display_width(&cut), 28);
+        assert_eq!(row, job_golden("✅", &cut, LONE_JOB, PASSED_TIMES));
+        assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
+        assert_eq!(
+            last_digit_column(&row, &LONE_JOB.to_string()),
+            Some(run_id_column(120))
+        );
+    }
+
+    #[test]
+    fn a_job_with_no_runner_gives_the_same_row_as_before() {
+        let (buffer, row, y) = lone_job_row(passed_job("build"), 120);
+        assert_eq!(row, job_golden("✅", "└ build", LONE_JOB, PASSED_TIMES));
+        assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
+    }
+
+    #[test]
+    fn wide_glyphs_do_not_move_the_runner_color_or_the_job_id() {
+        let runner = "🎉mac🎉";
+        let (buffer, row, y) = lone_job_row(on(runner, passed_job("日本語")), 120);
+        // Marker 2, space 1, `└ 日本語` 8, space 1: the runner starts in column 12.
+        let from = 12_usize;
+        let (before, _) = row.split_once(runner).expect("the runner shows");
+        assert_eq!(display_width(before), from);
+        let mut column = from;
+        for glyph in runner.chars() {
+            let x = u16::try_from(column).expect("a small column");
+            assert_eq!(buffer[(x, y)].fg, Color::Cyan, "glyph {glyph:?}");
+            column += unicode_width::UnicodeWidthChar::width(glyph).unwrap_or(0);
+        }
+        assert_eq!(column, from + display_width(runner));
+        for x in column..120 {
+            let x = u16::try_from(x).expect("a small column");
+            assert_ne!(buffer[(x, y)].fg, Color::Cyan, "column {x}");
+        }
+        assert_eq!(
+            last_digit_column(&row, &LONE_JOB.to_string()),
+            Some(run_id_column(120))
+        );
+    }
+
+    #[test]
+    fn the_selected_job_row_keeps_the_runner_name_cyan() {
+        let mut board = megarepo_board();
+        board.select_next(now());
+        let buffer = render_with(160, 16, &mut board, &loaded());
+        let text = lines(&buffer);
+        let runner = "grwetky1t8721h17t103k8gce0";
+        let (before, _) = text[3].split_once(runner).expect("the runner shows");
+        let from = display_width(before);
+        for x in from..from + display_width(runner) {
+            let cell = &buffer[(u16::try_from(x).expect("a small column"), 3)];
+            assert_eq!(cell.fg, Color::Cyan, "column {x}");
+            assert!(cell.modifier.contains(Modifier::REVERSED), "column {x}");
+        }
+    }
+
+    #[test]
+    fn no_cell_of_a_run_row_is_cyan() {
+        for width in [160_u16, 120] {
+            let mut board = megarepo_board();
+            let buffer = render_with(width, 16, &mut board, &loaded());
+            assert_eq!(cyan_columns(&buffer, 2), Vec::<u16>::new(), "width {width}");
+        }
+    }
 }
