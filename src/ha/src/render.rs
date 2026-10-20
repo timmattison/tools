@@ -11,10 +11,11 @@ use ratatui::text::Span;
 use ratatui::widgets::{Block, Clear, Widget};
 use ratatui::Frame;
 use textfit::{pad_right, truncate_to_budget};
+use unicode_width::UnicodeWidthStr;
 
 use crate::board::{Board, Row, Section};
 use crate::cancel::Confirm;
-use crate::job::Job;
+use crate::job::{Job, RunnerName};
 use crate::run::{Run, RunState};
 use crate::settings::format_duration_setting;
 use crate::status::{Status, MESSAGE_LIFETIME};
@@ -164,23 +165,44 @@ fn header_cells(widths: Widths) -> String {
     .join(" ")
 }
 
+/// The display width of a text, in terminal columns.
+fn text_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
+/// The runner name that fits in `room` columns, or `None` when it has no room.
+///
+/// A name that fits shows whole.
+fn fit_runner(name: &RunnerName, room: usize) -> Option<String> {
+    (text_width(name.as_str()) <= room).then(|| name.as_str().to_owned())
+}
+
 /// Joins the cells of one job row into one line. One space stands between cells.
 ///
 /// The text fills the repository cell, one space, and the workflow-name cell.
-/// The job ID stands in the ID part of a run row, right-aligned. The branch and
-/// title columns stay blank. Thus the ID, started, and time cells stand in the
-/// same columns as those of a run row, at every frame width.
+/// The runner name follows the text, after one space, when the text leaves room
+/// for it. The job ID stands in the ID part of a run row, right-aligned. The
+/// branch and title columns stay blank. Thus the ID, started, and time cells
+/// stand in the same columns as those of a run row, at every frame width.
 fn job_cells(
     widths: Widths,
     marker: &str,
     text: &str,
+    runner: Option<&RunnerName>,
     id: &str,
     started: &str,
     time: &str,
 ) -> String {
+    let cell = widths.repo + 1 + widths.workflow;
+    let text = truncate_to_budget(text, cell);
+    let room = cell.saturating_sub(text_width(&text) + 1);
+    let text = match runner.and_then(|name| fit_runner(name, room)) {
+        Some(name) => format!("{text} {name}"),
+        None => text,
+    };
     [
         pad_right(marker, MARKER_WIDTH),
-        fit(text, widths.repo + 1 + widths.workflow),
+        fit(&text, cell),
         fit_right(id, ID_WIDTH),
         " ".repeat(widths.branch + 1 + widths.title),
         pad_right(started, STARTED_WIDTH),
@@ -309,6 +331,7 @@ where
         widths,
         marker(job.state),
         &format!("{glyph} {}", job.name),
+        job.runner.as_ref(),
         &job.id.0.to_string(),
         &started,
         &time,
