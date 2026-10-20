@@ -17,7 +17,11 @@ impl RunnerName {
     /// Returns `None` for an empty text. The text is not trimmed.
     #[must_use]
     pub fn new(name: String) -> Option<RunnerName> {
-        Some(RunnerName(name))
+        if name.is_empty() {
+            None
+        } else {
+            Some(RunnerName(name))
+        }
     }
 
     /// The name as text. The text is never empty.
