@@ -4156,6 +4156,63 @@ mod tests {
         assert_eq!(cyan_columns(&buffer, y).len(), 3);
     }
 
+    /// The rule of `Job::runner` is that a runner name shows whatever the state
+    /// of the job. This test holds it for the three states where no other test
+    /// gives a runner.
+    #[test]
+    fn a_waiting_failed_or_cancelled_job_names_its_runner() {
+        let finished = (Some("2026-10-14T11:46:00Z"), Some("2026-10-14T11:48:00Z"));
+        let cases = [
+            (
+                "waiting",
+                "⏳",
+                "mbp",
+                "build",
+                RunState::Queued,
+                (None, None),
+                "",
+            ),
+            (
+                "failed",
+                "❌",
+                "m1-ts",
+                "lint",
+                RunState::Failed,
+                finished,
+                PASSED_TIMES,
+            ),
+            (
+                "cancelled",
+                "🪦",
+                "m1-ts",
+                "lint",
+                RunState::Cancelled,
+                finished,
+                PASSED_TIMES,
+            ),
+        ];
+        for (case, marker, runner, name, state, (started, completed), times) in cases {
+            let (buffer, row, y) = lone_job_row(
+                on(runner, job(LONE_JOB, name, state, started, completed)),
+                120,
+            );
+            assert_eq!(
+                row,
+                job_golden(marker, &format!("└ {name} {runner}"), LONE_JOB, times),
+                "the row of a {case} job"
+            );
+            // The marker takes 2 columns, then a space, then `└ ` and the name,
+            // then a space: the runner name starts after them.
+            let start = u16::try_from(2 + 1 + 2 + name.len() + 1).expect("a small column");
+            let width = u16::try_from(runner.len()).expect("a short name");
+            assert_eq!(
+                cyan_columns(&buffer, y),
+                (start..start + width).collect::<Vec<u16>>(),
+                "the cyan columns of a {case} job"
+            );
+        }
+    }
+
     /// The display column where the run ID `1` of the first run ends at `width`
     /// columns.
     fn run_id_column(width: u16) -> usize {
