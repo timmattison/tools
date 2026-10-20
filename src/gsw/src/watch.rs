@@ -2901,10 +2901,17 @@ where
                     .chain(paths.iter().filter(|path| **path != home))
                     .find(|path| (hooks.on_start_branch)(&branch, path))
                     .cloned();
-                if let Some(target) = target {
-                    if target != state.current {
+                match target {
+                    Some(target) if target != state.current => {
                         state.switch_to(target, clock, &mut hooks.switch);
                     }
+                    // The probe finds the worktree that the frame shows, so the
+                    // frame is stale: the branch moved since the last walk. The
+                    // next frame walks, and its header tells the truth.
+                    Some(_) => pending.force = true,
+                    // Rule 3, which no worktree on the start branch leads to,
+                    // is for a later step.
+                    None => {}
                 }
             } else if state.ui.post_hint(branch.return_hint(), now) == crate::push::Posted::OnRow {
                 // The row arms the press, and not the key. A question or a
