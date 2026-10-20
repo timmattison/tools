@@ -1777,7 +1777,23 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                 switch_watched(&watched, target, switch_tx.clone(), cfg, &start, log_limit)
             },
             on_start_branch: worktree_on_start_branch,
-            start_return: |_child: std::process::Command| {},
+            start_return: |child: std::process::Command| {
+                // Two senders on the one channel, as the push has. The lines
+                // are the push's own event, because the window under the frame
+                // is the same window.
+                let line_tx = push_tx.clone();
+                let finish_tx = push_tx.clone();
+                crate::push::spawn_streamed(
+                    child,
+                    RETURN_RUN_NAME.to_string(),
+                    move |line| {
+                        let _ = line_tx.send(Event::RunOutput(line));
+                    },
+                    move |outcome| {
+                        let _ = finish_tx.send(Event::ReturnFinished(outcome));
+                    },
+                );
+            },
         },
     );
 
@@ -1831,6 +1847,10 @@ const WATCHER_FAILED: &str = "gsw cannot watch the worktree for changes";
 /// the worktree that went away: `<path> no longer exists — back to the home
 /// worktree`. See [`LoopState::return_home_if_gone`].
 const WORKTREE_GONE: &str = "no longer exists — back to the home worktree";
+
+/// The name of the program of the `git switch` of the second Esc, for the line
+/// that gsw writes when it cannot run it.
+const RETURN_RUN_NAME: &str = "git switch";
 
 /// What gsw says when the `git switch` of the second Esc worked. The last line
 /// that git wrote goes under it.
@@ -3138,7 +3158,14 @@ where
             state.ui.finished(outcome, clock());
             pending.force = true;
         }
-        Event::ReturnFinished(_outcome) => {}
+        // **A walk on every outcome**, for the reason of the rebase above: the
+        // header must show the bold name with no wait after a switch that
+        // worked, and a switch that git refused can have left the index
+        // changed.
+        Event::ReturnFinished(outcome) => {
+            state.ui.finished(outcome, clock());
+            pending.force = true;
+        }
         Event::PushFinished(outcome) => {
             let succeeded = outcome.success;
             state.ui.finished(outcome, clock());
@@ -12873,8 +12900,10 @@ mod push_loop_tests {
     const SWITCHED: &str = "Switched to branch 'topic'";
 
     /// What git writes when a local change stands in the way of the switch.
-    const WOULD_BE_OVERWRITTEN: &str =
-        "error: Your local changes to the following files would be overwritten by checkout:";
+    ///
+    /// Short enough to fit one row of the test pane, so the row does not cut
+    /// it.
+    const WOULD_BE_OVERWRITTEN: &str = "error: local changes would be overwritten";
 
     /// The events that end at the start of the `git switch` of the second Esc.
     fn return_started() -> Vec<Event> {
@@ -12900,7 +12929,7 @@ mod push_loop_tests {
         );
         assert_eq!(
             strip_ansi(&screen),
-            format!("FRAME {BRAVO}\nWent back to the start branch (0s ago)\n{SWITCHED}"),
+            format!("FRAME {BRAVO}\nWent back to the start branch (0s ago)\n  {SWITCHED}"),
             "the row must say that the switch worked, with the last line of git under it",
         );
     }
