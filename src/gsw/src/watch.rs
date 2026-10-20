@@ -707,9 +707,10 @@ enum Event {
     /// It names no act either, for the reason [`Event::Confirmed`] gives: the
     /// answer takes away whatever question stands, and nothing starts.
     Cancelled,
-    /// A run that the row owns wrote a line: a push, a rebase onto the base,
-    /// or a merge of the base. All three write through this one event, because
-    /// the window under the frame is the same window.
+    /// A run that the row owns wrote a line: a push, a rebase onto the base, a
+    /// merge of the base, or the `git switch` of the second Esc. All four
+    /// write through this one event, because the window under the frame is the
+    /// same window.
     ///
     /// Carried one line at a time rather than as a batch at the end, because
     /// the point of it is to arrive early: a pre-push hook can hold any of
@@ -849,16 +850,17 @@ pub(crate) enum InputMode {
     /// of a push, of a rebase onto the base, or of a merge of the base. The
     /// arrow keys never answer it.
     Confirm,
-    /// A command of one of those three keys is running. `p`, `R`, and `M` are
-    /// all inert here, so no two of those runs overlap — a rebase and a push
-    /// of one branch least of all. The arrow keys are inert too, because the
+    /// A command of one of those three keys is running, or the `git switch` of
+    /// the second Esc. `p`, `R`, and `M` are all inert here, so no two of those
+    /// runs overlap — a rebase and a push of one branch least of all. The arrow keys are inert too, because the
     /// window under the frame belongs to the worktree that runs the command,
     /// and every run that ends walks that worktree again.
     ///
     /// It is named for what runs rather than for the key that started it: a
-    /// rebase and a merge run in it as a push does, and it is the mode that
-    /// `push::State::Running` gives. The [`RunKind`] changes one key: `m` acts
-    /// in a push and is inert in a rebase or a merge.
+    /// rebase, a merge, and the switch of the second Esc run in it as a push
+    /// does, and it is the mode that `push::State::Running` gives. The
+    /// [`RunKind`] changes one key: `m` acts in a push and is inert in the
+    /// three runs that move HEAD.
     Running(RunKind),
     /// The list of the worktrees is open. Up and Down move its cursor, Enter
     /// goes to the worktree under the cursor, and Esc and `q` close it. Every
@@ -1142,9 +1144,10 @@ enum ConflictsRun {
     /// A run is in flight. Set by the press that starts the run, and cleared
     /// by the outcome of that run.
     Measuring,
-    /// A run is in flight, and a rebase or a merge started after it. The run
-    /// started from the HEAD that the update moves, so its line describes a
-    /// branch that is gone. Cleared by the outcome of that run.
+    /// A run is in flight, and a rebase, a merge, or the `git switch` of the
+    /// second Esc started after it. The run started from the HEAD that the
+    /// update or the switch moves, so its line describes a branch that is
+    /// gone. Cleared by the outcome of that run.
     Overlapped,
 }
 
@@ -1169,7 +1172,8 @@ impl ConflictsRun {
         }
     }
 
-    /// A rebase or a merge started, so a run in flight is overlapped.
+    /// A rebase, a merge, or the `git switch` of the second Esc started. Each
+    /// of them moves HEAD, so a run in flight is overlapped.
     fn base_update_started(&mut self) {
         if matches!(self, Self::Measuring) {
             *self = Self::Overlapped;
@@ -2433,8 +2437,8 @@ struct LoopStart {
 /// of them through the one function [`absorb`], and because a switch of the
 /// worktree changes most of this in one step: the cache takes the snapshot of
 /// the new worktree, the schedule starts the refresh clock again, the row under
-/// the frame empties, and the `G` key loses its arming. An argument for each
-/// part would give [`absorb`] more arguments than a reader can hold.
+/// the frame empties, and the `G` key and the second press of Esc lose their
+/// arming. An argument for each part would give [`absorb`] more arguments than a reader can hold.
 struct LoopState {
     /// The snapshot a re-render can use without walking git again.
     cache: SnapshotCache,
@@ -3113,8 +3117,9 @@ where
         Event::IssueFinished { generation, .. } if state.is_stale(generation) => {
             state.issue.finished();
         }
-        // A run that a rebase or a merge overlapped measured the branch before
-        // the update moved HEAD. Its line reaches the row after the update, and
+        // A run that a rebase, a merge, or the `git switch` of the second Esc
+        // overlapped measured the branch before HEAD moved. Its line reaches
+        // the row after the run, and
         // then reads as a measurement of the new branch. So it posts nothing,
         // and its outcome still frees the key. See [`ConflictsRun::Overlapped`].
         Event::ConflictsStarted { .. } if state.conflicts.overlapped() => {}
@@ -3218,7 +3223,8 @@ where
 /// last ([`LoopState::log_limit`]).
 ///
 /// `hooks` bundles the side effects (collect, read of the log, render,
-/// terminal-size query, paint, clock, tick cadence) so the loop is one function
+/// terminal-size query, paint, clock, tick cadence, the starts of the runs, the
+/// switch, and the probe of the start branch) so the loop is one function
 /// testable without a TTY or real time: a test feeds a pre-loaded channel, a
 /// controllable clock, and counters, then asserts which hooks ran and with what
 /// age offset. The contracts verified there:
@@ -3756,8 +3762,11 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 ///   measure a rebase and a merge against the default branch. Up goes to the
 ///   home worktree, Left to the previous worktree, Right to the next worktree,
 ///   and Down opens the list of the worktrees. Esc is
-///   [`Event::ReturnRequested`], which goes back to the start branch on its
-///   second press.
+///   [`Event::ReturnRequested`]. Where the name in the header is red, its first
+///   press asks for a second one, and the second press goes back to the start
+///   branch: it moves the watch to the worktree that is on it, or else it runs
+///   `git switch --no-guess` in the home worktree. Where the name is not red,
+///   Esc only clears the row.
 /// - [`InputMode::Confirm`]: `y` and Enter carry out whatever the question on
 ///   the row asks about — a push, a rebase, or a merge — and `n`, Esc, and `q`
 ///   cancel it. Nothing else acts: with a question on screen, `q` is the answer
@@ -3767,8 +3776,9 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 /// - [`InputMode::Running`]: `q` quits, `r` refreshes, and `G` still asks for
 ///   the issue — a browser conflicts with nothing any of these runs does. `m`
 ///   still asks to measure during a push, because a measurement is read-only
-///   for the repository. A rebase or a merge moves HEAD, and a measurement
-///   starts from HEAD, so `m` is inert during those two runs. `p`, `R`, and
+///   for the repository. A rebase, a merge, and the `git switch` of the second
+///   Esc move HEAD, and a measurement starts from HEAD, so `m` is inert during
+///   those three runs. `p`, `R`, and
 ///   `M` are inert, so an impatient second press cannot start an overlapping
 ///   run: a rebase and a push must not overlap, and a base update that runs
 ///   puts the loop in this same mode. The arrow keys
@@ -3827,7 +3837,8 @@ fn classify_input(key: KeyEvent, mode: InputMode, keys: CommandKeys) -> Option<E
             }
             // A measurement is read-only for the repository of the user, so a
             // push in flight is no reason to refuse it. It starts from HEAD,
-            // and a rebase or a merge moves HEAD, so those two runs refuse it.
+            // and a rebase, a merge, or the switch of the second Esc moves
+            // HEAD, so those three runs refuse it.
             KeyCode::Char('m')
                 if matches!(mode, InputMode::Normal | InputMode::Running(RunKind::Push)) =>
             {
