@@ -12784,6 +12784,72 @@ mod push_loop_tests {
             "the row must show the command while it runs, got {painted:?}",
         );
     }
+    #[test]
+    fn the_second_esc_goes_home_before_it_runs_git_switch() {
+        // The watch is on `charlie`, and no worktree is on the start branch.
+        // The switch runs in home, so the watch moves home first, and then the
+        // run starts in the work tree of home.
+        let (screen, seen) = run_setup(
+            returning(World::three()),
+            vec![
+                key(KeyCode::Right),
+                key(KeyCode::Esc),
+                key(KeyCode::Esc),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(CHARLIE), worktree(BRAVO)],
+            "the second Esc must move the watch home before it starts the run",
+        );
+        assert_eq!(
+            seen.returns
+                .iter()
+                .map(|(_, _, dir)| dir.clone())
+                .collect::<Vec<_>>(),
+            vec![Some(worktree(BRAVO).as_path().to_path_buf())],
+            "the run must start once, in home",
+        );
+        let painted = strip_ansi(&screen);
+        assert!(
+            painted.starts_with(&format!("FRAME {BRAVO}\n{SWITCH_NOTICE}")),
+            "the row must show the command while it runs, got {painted:?}",
+        );
+    }
+
+    #[test]
+    fn the_second_esc_runs_no_git_when_the_move_home_is_refused() {
+        // Home cannot be opened. The reason of the refused move goes on the
+        // row, as the reason of each refused move does, and nothing else
+        // happens: no run starts.
+        let (screen, seen) = run_setup(
+            returning(World::three().refusing(BRAVO)),
+            vec![
+                key(KeyCode::Right),
+                key(KeyCode::Esc),
+                key(KeyCode::Esc),
+                Event::Quit,
+            ],
+        );
+        assert!(
+            seen.returns.is_empty(),
+            "a refused move home must start no run, got {:?}",
+            seen.returns,
+        );
+        let painted = strip_ansi(&screen);
+        assert!(
+            painted.contains(&format!(
+                "{REFUSED}: {}",
+                worktree(BRAVO).as_path().display()
+            )),
+            "the reason of the refused move must be on the row, got {painted:?}",
+        );
+        assert!(
+            !painted.contains(SWITCH_NOTICE),
+            "no run may show on the row, got {painted:?}",
+        );
+    }
 }
 
 /// The tests of [`Watched`] and of the production switch, against real
