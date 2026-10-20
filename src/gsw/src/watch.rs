@@ -11013,7 +11013,10 @@ mod push_loop_tests {
             generation: Generation::default(),
             log: LogDemand::Off,
         };
-        assert!(state.issue.armed.is_armed(now), "the fixture must start armed");
+        assert!(
+            state.issue.armed.is_armed(now),
+            "the fixture must start armed"
+        );
 
         state.switch_to(
             worktree(CHARLIE),
