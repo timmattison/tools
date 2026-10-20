@@ -931,22 +931,10 @@ struct IssueRun {
     running: bool,
     /// Where the person who reads this screen sits. Decided once, at start.
     session: crate::remote::Session,
-    /// When the message that asks for a second press took the row, or `None`
-    /// when no such message stands.
-    ///
-    /// The message on screen is the armed state, so this holds an instant and
-    /// not a flag: the message goes away by itself after
-    /// [`crate::push::STATUS_LIFETIME`], and the arming goes with it.
-    ///
-    /// **The instant is the one the message took the row at, and not the one
-    /// the key was pressed at.** The row is not always free — a question and a
-    /// push in flight own it, and [`crate::push::PushUi::post_notice`] holds a
-    /// message that arrives then. A held message is a message nobody has read,
-    /// so an arming that started at the press would offer a second press
-    /// against a warning still sitting in the queue. [`IssueRun::arm`] is
-    /// therefore called by [`absorb`] and only for the answer that says the
-    /// words reached the screen.
-    armed: Option<Instant>,
+    /// The arming of the message that asks for a second press. [`Arming`]
+    /// says why it holds the instant the message took the row, and
+    /// [`IssueRun::arm`] is the one door into it.
+    armed: Arming,
 }
 
 impl IssueRun {
@@ -956,7 +944,7 @@ impl IssueRun {
             command: None,
             running: false,
             session,
-            armed: None,
+            armed: Arming::new(crate::push::STATUS_LIFETIME),
         }
     }
 
@@ -994,7 +982,7 @@ impl IssueRun {
     /// **The asking and the arming are two halves, and this half only asks.**
     /// The message is the armed state, and whether the message reaches the
     /// screen is the row's answer rather than this one's — see
-    /// [`IssueRun::armed`]. So [`absorb`] posts the words, reads that answer,
+    /// [`Arming`]. So [`absorb`] posts the words, reads that answer,
     /// and calls [`IssueRun::arm`] for the answer that says the row took them.
     fn press(&mut self, now: Instant) -> IssuePress {
         if self.running {
@@ -1003,11 +991,11 @@ impl IssueRun {
         let Some(command) = self.command.clone() else {
             return IssuePress::Nothing;
         };
-        if self.session == crate::remote::Session::Local || self.is_armed(now) {
+        if self.session == crate::remote::Session::Local || self.armed.is_armed(now) {
             // The arming goes as the run starts. An arming that outlived the
             // run it was given for would let the next press open a browser on
             // the wrong machine, with nobody asked a second time for it.
-            self.armed = None;
+            self.armed.disarm();
             self.running = true;
             return IssuePress::Run(command);
         }
@@ -1021,27 +1009,10 @@ impl IssueRun {
     ///
     /// The one door into the armed state, and [`absorb`] is its one caller:
     /// the row answers whether the words are on the screen, and only that
-    /// answer arms the key. [`IssueRun::armed`] says why the instant is this
-    /// one and not the instant of the press.
+    /// answer arms the key. [`Arming`] says why the instant is this one and
+    /// not the instant of the press.
     fn arm(&mut self, now: Instant) {
-        self.armed = Some(now);
-    }
-
-    /// Whether the message that asks for a second press still stands.
-    ///
-    /// The message goes off the screen one [`crate::push::STATUS_LIFETIME`]
-    /// after it took the row, and [`IssueRun::armed`] holds that same instant,
-    /// so the arming ends at that same moment. The screen and the key then say
-    /// one thing: a `G` a minute later asks again.
-    ///
-    /// Saturating for the reason the age of a status message in
-    /// [`crate::push`] is: `now` comes from the loop's injected clock, and a
-    /// clock a test drives backwards reports the zero age it plainly has
-    /// rather than underflowing.
-    fn is_armed(&self, now: Instant) -> bool {
-        self.armed.is_some_and(|posted_at| {
-            now.saturating_duration_since(posted_at) < crate::push::STATUS_LIFETIME
-        })
+        self.armed.arm(now);
     }
 
     /// A key other than `G` takes the arming away.
@@ -1050,7 +1021,7 @@ impl IssueRun {
     /// armed state. The two go together, so a `G` after such a key is a first
     /// press again.
     fn disarm(&mut self) {
-        self.armed = None;
+        self.armed.disarm();
     }
 
     /// A run has ended, so `G` means something again.
@@ -11042,7 +11013,7 @@ mod push_loop_tests {
             generation: Generation::default(),
             log: LogDemand::Off,
         };
-        assert!(state.issue.is_armed(now), "the fixture must start armed");
+        assert!(state.issue.armed.is_armed(now), "the fixture must start armed");
 
         state.switch_to(
             worktree(CHARLIE),
@@ -11056,7 +11027,7 @@ mod push_loop_tests {
             "the switch must reach charlie"
         );
         assert!(
-            !state.issue.is_armed(now),
+            !state.issue.armed.is_armed(now),
             "a switch must take the arming of `G` away",
         );
     }
