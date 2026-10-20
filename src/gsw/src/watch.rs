@@ -11287,6 +11287,54 @@ mod push_loop_tests {
         );
     }
 
+    #[test]
+    fn a_switch_takes_the_arming_of_esc_away_whatever_made_it() {
+        // The hint of the second Esc is on the row, and a switch takes every
+        // message off the row. A switch that no key made, as the return after
+        // a worktree went away, must take the arming away with the hint.
+        let now = Instant::now();
+        let mut returning = Arming::new(crate::push::RETURN_HINT_LIFETIME);
+        returning.arm(now);
+        let mut state = LoopState {
+            cache: SnapshotCache {
+                snapshot: snapshot_of(&worktree(BRAVO)),
+                collected_at: now,
+                dims: TEST_DIMS,
+            },
+            schedule: no_timed_refresh_for_push(),
+            ui: PushUi::new(false),
+            issue: issue_run_in(crate::remote::Session::Local),
+            base_updates: BaseUpdateCommands::new(),
+            conflicts: ConflictsRun::new(),
+            home: worktree(BRAVO),
+            current: worktree(BRAVO),
+            generation: Generation::default(),
+            log: LogDemand::Off,
+            start_branch: Some(StartBranch::fake(TOPIC)),
+            returning,
+        };
+        assert!(
+            state.returning.is_armed(now),
+            "the fixture must start armed"
+        );
+
+        state.switch_to(
+            worktree(CHARLIE),
+            &|| now,
+            &mut |target: &WorktreePath, _limit: usize| Ok(snapshot_of(target)),
+        );
+
+        assert_eq!(
+            state.current,
+            worktree(CHARLIE),
+            "the switch must reach charlie"
+        );
+        assert!(
+            !state.returning.is_armed(now),
+            "a switch must take the arming of Esc away",
+        );
+    }
+
     /// The reason the fake `switch` hook gives when it refuses the worktree
     /// `name`, as it reaches the row.
     fn refusal_of(name: &str) -> String {
