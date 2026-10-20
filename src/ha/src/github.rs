@@ -965,6 +965,14 @@ mod tests {
         assert!(page.jobs[0].runner.is_some());
     }
 
+    #[test]
+    fn an_empty_null_or_absent_runner_name_gives_no_runner() {
+        for extra in [r#","runner_name":"""#, r#","runner_name":null"#, ""] {
+            let page = parse_jobs(&one_job_json_with(extra)).expect("a page");
+            assert_eq!(page.jobs[0].runner, None, "extra members: {extra}");
+        }
+    }
+
     const JOBS_JSON: &str = r#"{"total_count":3,"jobs":[
         {"id":399444496,"run_id":29679449,"name":"build (ubuntu)","status":"completed","conclusion":"failure",
          "started_at":"2026-09-24T21:56:49Z","created_at":"2026-09-24T21:55:00Z",
