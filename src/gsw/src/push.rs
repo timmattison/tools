@@ -1254,6 +1254,29 @@ impl PushUi {
         Some(command)
     }
 
+    /// Start a run that no question asked for, and say whether it started.
+    ///
+    /// The door into a run for a key that acts at once, as the second press of
+    /// Esc does. A question asks first and [`PushUi::confirm`] starts its run,
+    /// and this starts a run with the notice and the report composed by the
+    /// caller. [`PushUi::finished`] and [`PushUi::output_line`] work for it as
+    /// for any run.
+    ///
+    /// The row must be free: nothing on it, or a message. A message goes, as a
+    /// new message replaces an old one. A question, a run, and the open list own
+    /// the row, so on any of them this changes nothing and answers `false`, and
+    /// the caller must not start the command.
+    pub(crate) fn start_run(
+        &mut self,
+        notice: String,
+        success: SuccessReport,
+        run: RunKind,
+        now: Instant,
+    ) -> bool {
+        let _ = (notice, success, run, now);
+        false
+    }
+
     /// Handle one line of a running command's output.
     ///
     /// Ignored in every other state. A line cannot really arrive after the run
@@ -5238,6 +5261,137 @@ mod ui_tests {
                 "{what} must stay",
             );
             assert_eq!(ui.mode(), mode, "{what} must keep its mode");
+        }
+    }
+
+    /// The notice of the runs that the tests of [`PushUi::start_run`] start.
+    const RETURN_NOTICE: &str = "git switch --no-guess topic…";
+
+    /// A UI after a `start_run` of a return at `now`, which must have started.
+    fn returning(ui: &mut PushUi, now: Instant) {
+        assert!(
+            ui.start_run(
+                RETURN_NOTICE.to_string(),
+                SuccessReport::WithLastLine {
+                    sentence: "Went back".to_string(),
+                },
+                RunKind::Return,
+                now,
+            ),
+            "the row was free, so the run must start",
+        );
+    }
+
+    #[test]
+    fn a_run_starts_on_an_idle_row_and_shows_its_age() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        returning(&mut ui, now);
+
+        assert_eq!(ui.mode(), InputMode::Running(RunKind::Return));
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now),
+            format!("{RETURN_NOTICE} (0s)"),
+        );
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now + Duration::from_secs(5)),
+            format!("{RETURN_NOTICE} (5s)"),
+        );
+    }
+
+    #[test]
+    fn a_run_takes_the_row_from_a_fading_line() {
+        let now = t0();
+        let mut ui = pushed_at(now);
+        returning(&mut ui, now);
+
+        assert_eq!(ui.mode(), InputMode::Running(RunKind::Return));
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert!(
+            !text.contains("Pushed"),
+            "the old line must be gone, got {text:?}",
+        );
+        assert!(text.starts_with(RETURN_NOTICE), "got {text:?}");
+    }
+
+    #[test]
+    fn a_return_that_worked_says_so_and_shows_the_last_line_of_git() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        returning(&mut ui, now);
+        ui.output_line("Switched to branch 'topic'".to_string());
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: "Switched to branch 'topic'\n".to_string(),
+            },
+            now,
+        );
+
+        assert_eq!(ui.mode(), InputMode::Normal);
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert_eq!(
+            text,
+            format!("Went back (0s ago)\n{WINDOW_INDENT}Switched to branch 'topic'"),
+        );
+    }
+
+    #[test]
+    fn a_return_that_failed_shows_the_words_of_git_in_red_until_a_key() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        returning(&mut ui, now);
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output: "error: Your local changes would be overwritten".to_string(),
+            },
+            now,
+        );
+
+        let much_later = now + STATUS_LIFETIME * 3;
+        let raw = escapes(&mut ui, much_later);
+        assert!(
+            raw.contains("would be overwritten"),
+            "git's words must still be up, got {raw:?}",
+        );
+        assert!(
+            raw.contains("\u{1b}[31m"),
+            "git's words are red, got {raw:?}"
+        );
+        ui.dismiss();
+        assert_eq!(painted(&mut ui, tall_pane(80), much_later), "");
+    }
+
+    #[test]
+    fn a_run_does_not_start_on_a_busy_row() {
+        let now = t0();
+        let mut listing = PushUi::new(false);
+        listing.open_list(three_worktrees());
+
+        for (what, mut ui, mode) in [
+            ("a question", asking(), InputMode::Confirm),
+            ("a run", pushing(now), InputMode::Running(RunKind::Push)),
+            ("the list", listing, InputMode::List),
+        ] {
+            let before = painted(&mut ui, tall_pane(80), now);
+            assert!(
+                !ui.start_run(
+                    RETURN_NOTICE.to_string(),
+                    SuccessReport::Alone {
+                        sentence: "Went back".to_string(),
+                    },
+                    RunKind::Return,
+                    now,
+                ),
+                "{what} owns the row, so the run must not start",
+            );
+            assert_eq!(ui.mode(), mode, "{what} must keep its mode");
+            assert_eq!(
+                painted(&mut ui, tall_pane(80), now),
+                before,
+                "{what} must stay as it was",
+            );
         }
     }
 }

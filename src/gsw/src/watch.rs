@@ -865,6 +865,10 @@ pub(crate) enum RunKind {
     /// A rebase onto the base or a merge of the base. It moves HEAD for the
     /// whole run.
     BaseUpdate,
+    /// The `git switch` of the second Esc, which takes the home worktree back
+    /// to the start branch. It moves HEAD, as a base update does, so `m` is
+    /// inert during it.
+    Return,
 }
 
 /// Whether one key has a command behind it.
@@ -4653,18 +4657,20 @@ mod tests {
     }
 
     /// Every mode a key can arrive in.
-    const EVERY_MODE: [InputMode; 5] = [
+    const EVERY_MODE: [InputMode; 6] = [
         InputMode::Normal,
         InputMode::Confirm,
         InputMode::Running(RunKind::Push),
         InputMode::Running(RunKind::BaseUpdate),
+        InputMode::Running(RunKind::Return),
         InputMode::List,
     ];
 
-    /// Both modes of a run in flight.
-    const EVERY_RUN: [InputMode; 2] = [
+    /// Every mode of a run in flight.
+    const EVERY_RUN: [InputMode; 3] = [
         InputMode::Running(RunKind::Push),
         InputMode::Running(RunKind::BaseUpdate),
+        InputMode::Running(RunKind::Return),
     ];
 
     /// What a key with no meaning gives in `mode`, as [`meaning`] names it.
@@ -4775,6 +4781,7 @@ mod tests {
             InputMode::Normal,
             InputMode::Running(RunKind::Push),
             InputMode::Running(RunKind::BaseUpdate),
+            InputMode::Running(RunKind::Return),
         ] {
             for keys in issue_bound() {
                 assert!(
@@ -4870,9 +4877,9 @@ mod tests {
                         matches!(m, Some(Event::ConflictsRequested)),
                         "`m` must ask to measure in {mode:?} with {keys:?}",
                     ),
-                    InputMode::Running(RunKind::BaseUpdate) => assert!(
+                    InputMode::Running(RunKind::BaseUpdate | RunKind::Return) => assert!(
                         matches!(m, Some(Event::Dismiss)),
-                        "`m` must not measure during a rebase or a merge with {keys:?}",
+                        "`m` must not measure during a rebase, a merge, or a return with {keys:?}",
                     ),
                     InputMode::Confirm => assert!(
                         matches!(m, Some(Event::Dismiss)),
@@ -4958,6 +4965,7 @@ mod tests {
                     InputMode::Confirm,
                     InputMode::Running(RunKind::Push),
                     InputMode::Running(RunKind::BaseUpdate),
+                    InputMode::Running(RunKind::Return),
                     InputMode::List,
                 ] {
                     assert_eq!(
@@ -5162,7 +5170,7 @@ mod tests {
         // arrow key there does nothing. In the list, Up and Down move the
         // cursor, Enter goes, Esc closes, and Left and Right do nothing at
         // all.
-        let table: [(InputMode, [&str; 6]); 5] = [
+        let table: [(InputMode, [&str; 6]); 6] = [
             (
                 InputMode::Normal,
                 [
@@ -5187,6 +5195,7 @@ mod tests {
             ),
             (InputMode::Running(RunKind::Push), ["Dismiss"; 6]),
             (InputMode::Running(RunKind::BaseUpdate), ["Dismiss"; 6]),
+            (InputMode::Running(RunKind::Return), ["Dismiss"; 6]),
             (
                 InputMode::List,
                 [
@@ -5273,6 +5282,7 @@ mod tests {
                 InputMode::Confirm,
                 InputMode::Running(RunKind::Push),
                 InputMode::Running(RunKind::BaseUpdate),
+                InputMode::Running(RunKind::Return),
             ] {
                 for code in ARROWS {
                     assert_eq!(
