@@ -955,6 +955,19 @@ impl Life {
         }
     }
 
+    /// How long a message of this life stays on the row, or `None` for one that
+    /// no clock takes away.
+    ///
+    /// The one rule for every life that ends by itself: [`PushUi::expire`] takes
+    /// the message off when [`Life::elapsed`] reaches this.
+    fn lifetime(&self) -> Option<Duration> {
+        match self {
+            Self::Fading { .. } => Some(STATUS_LIFETIME),
+            Self::Hint { .. } => Some(RETURN_HINT_LIFETIME),
+            Self::UntilDismissed | Self::UntilReplaced => None,
+        }
+    }
+
     /// What is left of this life for a message that must wait for the row, or
     /// `None` for a message that must not wait.
     ///
@@ -965,11 +978,15 @@ impl Life {
     /// [`Life::UntilReplaced`] gives `None`. Its words are true only while
     /// the work they describe is in flight, and a message that waits reaches
     /// the row after an unknown time. So a busy row drops such a message.
+    ///
+    /// [`Life::Hint`] gives `None` for a like reason. It asks for a press now,
+    /// and a request that reaches the row later asks for a press the user was
+    /// never given a reason for.
     fn kind(&self) -> Option<HeldLife> {
         match self {
             Self::UntilDismissed => Some(HeldLife::UntilDismissed),
-            Self::Fading { .. } | Self::Hint { .. } => Some(HeldLife::Fading),
-            Self::UntilReplaced => None,
+            Self::Fading { .. } => Some(HeldLife::Fading),
+            Self::UntilReplaced | Self::Hint { .. } => None,
         }
     }
 }
@@ -1244,7 +1261,8 @@ impl PushUi {
         }
     }
 
-    /// Drop a message that has outlived [`STATUS_LIFETIME`].
+    /// Drop a message that has outlived its [`Life::lifetime`]: a fading line
+    /// at [`STATUS_LIFETIME`], and a hint at [`RETURN_HINT_LIFETIME`].
     ///
     /// The counterpart to [`PushUi::dismiss`], and deliberately the only other
     /// way a status leaves the screen: one of them is the user saying they have
@@ -1257,7 +1275,8 @@ impl PushUi {
         };
         if life
             .elapsed(now)
-            .is_some_and(|elapsed| elapsed >= STATUS_LIFETIME)
+            .zip(life.lifetime())
+            .is_some_and(|(elapsed, lifetime)| elapsed >= lifetime)
         {
             self.state = State::Idle;
         }
@@ -1718,7 +1737,7 @@ impl PushUi {
                         // of what the pane has to fit rather than something
                         // added to a row already measured against its width.
                         // Saturating for the reason [`Life::elapsed`] gives.
-                        Life::Fading { posted_at } | Life::Hint { posted_at } => {
+                        Life::Fading { posted_at } => {
                             let elapsed = now.saturating_duration_since(*posted_at);
                             let line = if row == dropped {
                                 format!("{line} ({} ago)", format_age_detailed(elapsed))
@@ -1728,9 +1747,10 @@ impl PushUi {
                             colorize_status(&truncate_right(&line, width), elapsed, self.truecolor)
                                 .to_string()
                         }
-                        // gsw's news about work in flight. It does not age, so
-                        // it keeps the look of a report at age zero.
-                        Life::UntilReplaced => colorize_status(
+                        // gsw's news about work in flight, and gsw's request for
+                        // a second press. Neither ages, so each keeps the look
+                        // of a report at age zero.
+                        Life::UntilReplaced | Life::Hint { .. } => colorize_status(
                             &truncate_right(line, width),
                             Duration::ZERO,
                             self.truecolor,
