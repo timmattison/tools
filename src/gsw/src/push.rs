@@ -1525,6 +1525,15 @@ impl PushUi {
         }
     }
 
+    /// Take the line off the row, but only when it is a hint.
+    ///
+    /// Any key other than the second press takes the offer away, and a hint
+    /// with no offer behind it is a sentence that is no longer true. Every
+    /// other thing on the row stays: a fading line, an error that waits for a
+    /// key, a progress notice, a question, a run, and the open list are not
+    /// the hint's to remove.
+    pub(crate) fn withdraw_hint(&mut self) {}
+
     /// Take every message off the row and out of the queue: a status line of
     /// any [`Life`], the question, the open list, and every message held for
     /// the row.
@@ -5177,6 +5186,49 @@ mod ui_tests {
         let reads = std::cell::Cell::new(0);
         let _ = hinted.next_tick(&counting(now, &reads));
         assert_eq!(reads.get(), 1, "a hint reads the clock once");
+    }
+
+    #[test]
+    fn withdrawing_removes_a_hint() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        let _ = ui.post_hint(HINT.to_string(), now);
+
+        ui.withdraw_hint();
+        assert_eq!(painted(&mut ui, tall_pane(80), now), "");
+    }
+
+    #[test]
+    fn withdrawing_leaves_everything_but_a_hint_alone() {
+        let now = t0();
+
+        let mut error = PushUi::new(false);
+        error.post_error("fatal: no".to_string());
+        let mut progress = PushUi::new(false);
+        progress.post_progress("Measuring".to_string());
+        let mut notice = PushUi::new(false);
+        let _ = notice.post_notice("Nothing to do".to_string(), now);
+        let mut listing = PushUi::new(false);
+        listing.open_list(three_worktrees());
+
+        for (what, mut ui, mode) in [
+            ("a fading line", pushed_at(now), InputMode::Normal),
+            ("an error", error, InputMode::Normal),
+            ("a progress notice", progress, InputMode::Normal),
+            ("a notice", notice, InputMode::Normal),
+            ("a question", asking(), InputMode::Confirm),
+            ("a run", pushing(now), InputMode::Running(RunKind::Push)),
+            ("the list", listing, InputMode::List),
+        ] {
+            let before = painted(&mut ui, tall_pane(80), now);
+            ui.withdraw_hint();
+            assert_eq!(
+                painted(&mut ui, tall_pane(80), now),
+                before,
+                "{what} must stay",
+            );
+            assert_eq!(ui.mode(), mode, "{what} must keep its mode");
+        }
     }
 }
 
