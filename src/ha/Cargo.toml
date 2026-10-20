@@ -20,11 +20,11 @@ shlex.workspace = true
 textfit.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+unicode-width.workspace = true
 
 [dev-dependencies]
 shellquote.workspace = true
 tempfile.workspace = true
-unicode-width.workspace = true
 
 [lints]
 workspace = true

@@ -213,6 +213,7 @@ mod tests {
             id: crate::job::JobId(5),
             name: "build (ubuntu-latest)".to_owned(),
             state: crate::run::RunState::Running,
+            runner: None,
             created_at: None,
             started_at: None,
             completed_at: None,

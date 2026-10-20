@@ -667,6 +667,7 @@ mod tests {
             id: JobId(id),
             name: format!("job {id}"),
             state,
+            runner: None,
             created_at: None,
             started_at: None,
             completed_at: None,

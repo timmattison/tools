@@ -7,14 +7,15 @@ use chrono::{DateTime, TimeZone, Utc};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Span;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Widget};
 use ratatui::Frame;
 use textfit::{pad_right, truncate_to_budget};
+use unicode_width::UnicodeWidthStr;
 
 use crate::board::{Board, Row, Section};
 use crate::cancel::Confirm;
-use crate::job::Job;
+use crate::job::{Job, RunnerName};
 use crate::run::{Run, RunState};
 use crate::settings::format_duration_setting;
 use crate::status::{Status, MESSAGE_LIFETIME};
@@ -164,29 +165,88 @@ fn header_cells(widths: Widths) -> String {
     .join(" ")
 }
 
+/// The display width of a text, in terminal columns.
+fn text_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
+/// The style of a runner name. `Color::Cyan` is a named ANSI color, thus the
+/// terminal theme sets the shade, also on a light background.
+const RUNNER_STYLE: Style = Style::new().fg(Color::Cyan);
+
+/// The fewest columns that a cut runner name gets: three characters and `…`.
+const MIN_RUNNER_WIDTH: usize = 4;
+
+/// The runner name cut to `room` columns, or `None` when it has no room.
+///
+/// A name that fits shows whole, also in fewer than [`MIN_RUNNER_WIDTH`]
+/// columns. A longer name keeps its start and ends in `…`. It needs
+/// [`MIN_RUNNER_WIDTH`] columns, because a shorter cut shows too little of the
+/// name to be of use.
+fn fit_runner(name: &RunnerName, room: usize) -> Option<String> {
+    if text_width(name.as_str()) <= room {
+        Some(name.as_str().to_owned())
+    } else if room >= MIN_RUNNER_WIDTH {
+        Some(truncate_to_budget(name.as_str(), room))
+    } else {
+        None
+    }
+}
+
 /// Joins the cells of one job row into one line. One space stands between cells.
 ///
 /// The text fills the repository cell, one space, and the workflow-name cell.
-/// The job ID stands in the ID part of a run row, right-aligned. The branch and
-/// title columns stay blank. Thus the ID, started, and time cells stand in the
-/// same columns as those of a run row, at every frame width.
+/// The text cut is the one that [`fit`] makes, and the job name has priority.
+/// The runner name follows the text, after one space, in [`RUNNER_STYLE`]. It
+/// gets only the columns that the text leaves free (see [`fit_runner`]). A job
+/// with no runner, or with no room for it, shows no runner name, and its line
+/// reads as it did before the runner name existed. The job ID stands in the ID
+/// part of a run row, right-aligned. The branch and title columns stay blank.
+/// Thus the ID, started, and time cells stand in the same columns as those of a
+/// run row, at every frame width.
+///
+/// The line holds these spans, in this order:
+///
+/// 1. The marker, a space, the text, and, when a runner name shows, the space
+///    before it.
+/// 2. The runner name, when it shows.
+/// 3. The padding of the text cell and the other cells.
 fn job_cells(
     widths: Widths,
     marker: &str,
     text: &str,
+    runner: Option<&RunnerName>,
     id: &str,
     started: &str,
     time: &str,
-) -> String {
-    [
-        pad_right(marker, MARKER_WIDTH),
-        fit(text, widths.repo + 1 + widths.workflow),
+) -> Line<'static> {
+    let cell = widths.repo + 1 + widths.workflow;
+    let text = truncate_to_budget(text, cell);
+    let room = cell.saturating_sub(text_width(&text) + 1);
+    let runner = runner.and_then(|name| fit_runner(name, room));
+    let mut used = text_width(&text);
+    let mut lead = format!("{} {text}", pad_right(marker, MARKER_WIDTH));
+    let mut spans = Vec::with_capacity(3);
+    if let Some(name) = &runner {
+        lead.push(' ');
+        used += 1 + text_width(name);
+    }
+    spans.push(Span::raw(lead));
+    if let Some(name) = runner {
+        spans.push(Span::styled(name, RUNNER_STYLE));
+    }
+    let rest = [
         fit_right(id, ID_WIDTH),
         " ".repeat(widths.branch + 1 + widths.title),
         pad_right(started, STARTED_WIDTH),
         pad_right(time, TIME_WIDTH),
     ]
-    .join(" ")
+    .join(" ");
+    spans.push(Span::raw(format!(
+        "{} {rest}",
+        " ".repeat(cell.saturating_sub(used))
+    )));
+    Line::from(spans)
 }
 
 /// The marker of a run state: one emoji, or a blank for the state `Other`.
@@ -262,8 +322,9 @@ where
 /// The line of one job of an expanded run.
 ///
 /// The text cell holds the tree glyph (`└` when `last` is true, else `├`), a
-/// space, and the name of the job. The job ID follows, in the columns of the
-/// run ID.
+/// space, and the name of the job. The runner name of the job follows the text
+/// in cyan, when the text leaves room for it (see [`job_cells`]). The job ID
+/// follows, in the columns of the run ID.
 ///
 /// A job that waits did not start, thus its started cell is empty. Its time
 /// cell shows how long it waited, from its creation until `now`, and is empty
@@ -277,7 +338,7 @@ fn job_line<Tz: TimeZone>(
     now: DateTime<Utc>,
     tz: &Tz,
     widths: Widths,
-) -> String
+) -> Line<'static>
 where
     Tz::Offset: Display,
 {
@@ -309,6 +370,7 @@ where
         widths,
         marker(job.state),
         &format!("{glyph} {}", job.name),
+        job.runner.as_ref(),
         &job.id.0.to_string(),
         &started,
         &time,
@@ -561,6 +623,15 @@ fn put(buffer: &mut Buffer, y: usize, text: &str, style: Style) -> u16 {
     y
 }
 
+/// Writes one styled line at row `y` of the area and returns the buffer row.
+/// The line stops at the right edge of the area.
+fn put_line(buffer: &mut Buffer, y: usize, line: &Line<'_>) -> u16 {
+    let area = buffer.area;
+    let y = area.y + u16::try_from(y).unwrap_or(u16::MAX);
+    buffer.set_line(area.x, y, line, area.width);
+    y
+}
+
 /// Reverses the colors across the full width of buffer row `y` when `selected`
 /// is true. The highlight of a run row and of a job row use this one rule.
 fn reverse_if(selected: bool, buffer: &mut Buffer, area: Rect, y: u16) {
@@ -635,7 +706,7 @@ pub fn draw<Tz: TimeZone>(
                 selected,
             } => {
                 let line = job_line(job, *last, now, tz, widths);
-                let y = put(buffer, index + 1, &line, Style::default());
+                let y = put_line(buffer, index + 1, &line);
                 reverse_if(*selected, buffer, area, y);
             }
             Row::JobsLoading => put_status_row(buffer, index + 1, JOBS_LOADING),
@@ -907,7 +978,7 @@ mod tests {
 
     use ratatui::Terminal;
 
-    use crate::job::{Job, JobId};
+    use crate::job::{Job, JobId, RunnerName};
     use crate::run::{Run, RunId, RunState};
     use crate::status::{Message, RateLimit};
     use crate::target::{OwnerName, RepoName};
@@ -1801,6 +1872,7 @@ mod tests {
             id: JobId(id),
             name: name.to_owned(),
             state,
+            runner: None,
             created_at: None,
             started_at: started.map(at),
             completed_at: completed.map(at),
@@ -3806,7 +3878,7 @@ mod tests {
                     Some("2026-10-14T11:30:00Z"),
                 );
                 for last in [false, true] {
-                    let line = job_line(&job, last, now(), &utc(), widths);
+                    let line = job_line(&job, last, now(), &utc(), widths).to_string();
                     assert_eq!(display_width(&line), usize::from(w), "{state:?}: {line:?}");
                 }
             }
@@ -3820,6 +3892,404 @@ mod tests {
                 let mut board = marker_board();
                 let _ = render_with(width, height, &mut board, &loaded());
             }
+        }
+    }
+
+    /// Sets the runner of a job.
+    fn on(runner: &str, job: Job) -> Job {
+        Job {
+            runner: RunnerName::new(runner.to_owned()),
+            ..job
+        }
+    }
+
+    /// The run ID of the megarepo board.
+    const MEGAREPO_RUN: u64 = 39_450_362_521;
+
+    /// The board of issue #584: one expanded run with six jobs, four of them on
+    /// a runner. The runner names are the real ones of `timmattison/megarepo`.
+    fn megarepo_board() -> Board {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("timmattison/megarepo"),
+            vec![run(
+                MEGAREPO_RUN,
+                "timmattison/megarepo",
+                "CI",
+                "main",
+                "Add the sites",
+                RunState::Running,
+                "2026-10-14T11:45:30Z",
+                "2026-10-14T11:59:00Z",
+            )],
+        );
+        board.expand(now());
+        board.set_jobs(
+            RunId(MEGAREPO_RUN),
+            vec![
+                on(
+                    "grwetky1t8721h17t103k8gce0",
+                    job(
+                        107_851_237_701,
+                        "e2e-plan",
+                        RunState::Passed,
+                        Some("2026-10-14T11:46:00Z"),
+                        Some("2026-10-14T11:48:00Z"),
+                    ),
+                ),
+                job(
+                    107_851_237_705,
+                    "e2e-remotesensing (1)",
+                    RunState::Queued,
+                    None,
+                    None,
+                ),
+                on(
+                    "m1-ts",
+                    job(
+                        107_851_237_702,
+                        "e2e-remotesensing (2)",
+                        RunState::Running,
+                        Some("2026-10-14T11:50:00Z"),
+                        None,
+                    ),
+                ),
+                on(
+                    "mbp",
+                    job(
+                        107_851_237_703,
+                        "e2e-remotesensing (3)",
+                        RunState::Running,
+                        Some("2026-10-14T11:51:00Z"),
+                        None,
+                    ),
+                ),
+                job(
+                    107_851_237_704,
+                    "e2e-remotesensing (4)",
+                    RunState::Queued,
+                    None,
+                    None,
+                ),
+                on(
+                    "gr96283qcxw61jpesqnhtrkhwb",
+                    job(
+                        107_851_237_706,
+                        "sites",
+                        RunState::Running,
+                        Some("2026-10-14T11:52:00Z"),
+                        None,
+                    ),
+                ),
+            ],
+        );
+        board
+    }
+
+    #[test]
+    fn the_runner_of_each_job_stands_after_its_name_at_160_columns() {
+        let mut board = megarepo_board();
+        let text = lines(&render_with(160, 16, &mut board, &loaded()));
+        let block: Vec<String> = (2..=8)
+            .map(|y| columns(&text[y], 0, 54).trim_end().to_owned())
+            .collect();
+        assert_eq!(
+            block,
+            [
+                "🏃 timmattison/megarepo          CI        39450362521",
+                "✅ ├ e2e-plan grwetky1t8721h17t103k8gce0  107851237701",
+                "⏳ ├ e2e-remotesensing (1)                107851237705",
+                "🏃 ├ e2e-remotesensing (2) m1-ts          107851237702",
+                "🏃 ├ e2e-remotesensing (3) mbp            107851237703",
+                "⏳ ├ e2e-remotesensing (4)                107851237704",
+                "🏃 └ sites gr96283qcxw61jpesqnhtrkhwb     107851237706",
+            ]
+        );
+        let started = ["11:46:00", "", "11:50:00", "11:51:00", "", "11:52:00"];
+        let time = ["2m 00s", "", "10m 00s", "9m 00s", "", "8m 00s"];
+        for (offset, (started, time)) in started.iter().zip(time).enumerate() {
+            assert_eq!(started_cells(&text, 3 + offset), *started, "row {offset}");
+            assert_eq!(time_cells(&text, 3 + offset), time, "row {offset}");
+        }
+    }
+
+    /// The columns of buffer row `y` whose foreground is cyan.
+    fn cyan_columns(buffer: &Buffer, y: u16) -> Vec<u16> {
+        (0..buffer.area.width)
+            .filter(|x| buffer[(*x, y)].fg == Color::Cyan)
+            .collect()
+    }
+
+    #[test]
+    fn the_runner_name_is_cyan_and_the_rest_of_the_job_row_is_not() {
+        let mut board = megarepo_board();
+        let buffer = render_with(160, 16, &mut board, &loaded());
+        let text = lines(&buffer);
+        let runners = [
+            "grwetky1t8721h17t103k8gce0",
+            "",
+            "m1-ts",
+            "mbp",
+            "",
+            "gr96283qcxw61jpesqnhtrkhwb",
+        ];
+        for (offset, runner) in runners.iter().enumerate() {
+            let y = 3 + offset;
+            let cyan: Vec<usize> = if runner.is_empty() {
+                Vec::new()
+            } else {
+                let (before, _) = text[y].split_once(runner).expect("the runner shows");
+                let from = display_width(before);
+                (from..from + display_width(runner)).collect()
+            };
+            for x in 0..160_u16 {
+                let expected = if cyan.contains(&usize::from(x)) {
+                    Color::Cyan
+                } else {
+                    Color::Reset
+                };
+                assert_eq!(
+                    buffer[(x, u16::try_from(y).expect("a small row"))].fg,
+                    expected,
+                    "row {y}, column {x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_long_runner_name_is_cut_to_the_room_that_the_job_text_leaves() {
+        let mut board = megarepo_board();
+        let text = lines(&render_with(120, 16, &mut board, &loaded()));
+        let block: Vec<String> = (3..=8)
+            .map(|y| columns(&text[y], 0, 44).trim_end().to_owned())
+            .collect();
+        assert_eq!(
+            block,
+            [
+                "✅ ├ e2e-plan grwetky1t8721h17… 107851237701",
+                "⏳ ├ e2e-remotesensing (1)      107851237705",
+                "🏃 ├ e2e-remotesensing (2) m1-… 107851237702",
+                "🏃 ├ e2e-remotesensing (3) mbp  107851237703",
+                "⏳ ├ e2e-remotesensing (4)      107851237704",
+                "🏃 └ sites gr96283qcxw61jpesqn… 107851237706",
+            ]
+        );
+    }
+
+    /// The job ID of the one job that [`lone_job_row`] draws.
+    const LONE_JOB: u64 = 900_000_000_001;
+
+    /// Draws the first run, expanded with the one job `job`, at `width` columns.
+    /// Returns the buffer, the text of the job row, and the buffer row of it.
+    fn lone_job_row(job: Job, width: u16) -> (Buffer, String, u16) {
+        let mut board = board_with_jobs(vec![job]);
+        let buffer = render_with(width, 14, &mut board, &loaded());
+        let text = lines(&buffer);
+        let y = text
+            .iter()
+            .position(|line| line.contains(&LONE_JOB.to_string()))
+            .expect("the job row shows its ID");
+        (
+            buffer,
+            text[y].clone(),
+            u16::try_from(y).expect("a small row"),
+        )
+    }
+
+    /// A passed job with the ID [`LONE_JOB`], run from 11:46:00 to 11:48:00.
+    fn passed_job(name: &str) -> Job {
+        job(
+            LONE_JOB,
+            name,
+            RunState::Passed,
+            Some("2026-10-14T11:46:00Z"),
+            Some("2026-10-14T11:48:00Z"),
+        )
+    }
+
+    /// The time cells of [`passed_job`] in a golden line.
+    const PASSED_TIMES: &str = "11:46:00    2m 00s";
+
+    /// A job name of 22 columns. Its text `└ ` plus the name is 24 columns, thus
+    /// the room for a runner name is 3.
+    const ROOM_OF_3_NAME: &str = "abcdefghijklmnopqrstuv";
+
+    #[test]
+    fn a_long_runner_name_with_fewer_than_4_columns_does_not_show() {
+        // The text `└ Full check list (Linux)` is 25 columns, thus the room is 2.
+        let (buffer, row, y) = lone_job_row(
+            on(
+                "GitHub Actions 1000001050",
+                passed_job("Full check list (Linux)"),
+            ),
+            120,
+        );
+        assert_eq!(
+            row,
+            job_golden("✅", "└ Full check list (Linux)", LONE_JOB, PASSED_TIMES)
+        );
+        assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
+        // A name of 22 columns makes a text of 24 columns, thus the room is 3.
+        assert_eq!(display_width(ROOM_OF_3_NAME), 22);
+        let (buffer, row, y) = lone_job_row(on("m1-ts", passed_job(ROOM_OF_3_NAME)), 120);
+        assert_eq!(
+            row,
+            job_golden("✅", &format!("└ {ROOM_OF_3_NAME}"), LONE_JOB, PASSED_TIMES)
+        );
+        assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
+    }
+
+    #[test]
+    fn a_short_runner_name_that_fits_shows_in_fewer_than_4_columns() {
+        // A name that fits whole shows in a room of 3.
+        let (buffer, row, y) = lone_job_row(on("mbp", passed_job(ROOM_OF_3_NAME)), 120);
+        assert_eq!(
+            row,
+            job_golden(
+                "✅",
+                &format!("└ {ROOM_OF_3_NAME} mbp"),
+                LONE_JOB,
+                PASSED_TIMES
+            )
+        );
+        assert_eq!(cyan_columns(&buffer, y).len(), 3);
+    }
+
+    /// The rule of `Job::runner` is that a runner name shows whatever the state
+    /// of the job. This test holds it for the three states where no other test
+    /// gives a runner.
+    #[test]
+    fn a_waiting_failed_or_cancelled_job_names_its_runner() {
+        let finished = (Some("2026-10-14T11:46:00Z"), Some("2026-10-14T11:48:00Z"));
+        let cases = [
+            (
+                "waiting",
+                "⏳",
+                "mbp",
+                "build",
+                RunState::Queued,
+                (None, None),
+                "",
+            ),
+            (
+                "failed",
+                "❌",
+                "m1-ts",
+                "lint",
+                RunState::Failed,
+                finished,
+                PASSED_TIMES,
+            ),
+            (
+                "cancelled",
+                "🪦",
+                "m1-ts",
+                "lint",
+                RunState::Cancelled,
+                finished,
+                PASSED_TIMES,
+            ),
+        ];
+        for (case, marker, runner, name, state, (started, completed), times) in cases {
+            let (buffer, row, y) = lone_job_row(
+                on(runner, job(LONE_JOB, name, state, started, completed)),
+                120,
+            );
+            assert_eq!(
+                row,
+                job_golden(marker, &format!("└ {name} {runner}"), LONE_JOB, times),
+                "the row of a {case} job"
+            );
+            // The runner name starts after the marker, a space, the text, and a space.
+            let start = u16::try_from(display_width(&format!("{marker} └ {name} ")))
+                .expect("a small column");
+            let width = u16::try_from(display_width(runner)).expect("a short name");
+            assert_eq!(
+                cyan_columns(&buffer, y),
+                (start..start + width).collect::<Vec<u16>>(),
+                "the cyan columns of a {case} job"
+            );
+        }
+    }
+
+    /// The display column where the run ID `1` of the first run ends at `width`
+    /// columns.
+    fn run_id_column(width: u16) -> usize {
+        let mut board = board_with_jobs(vec![passed_job("build")]);
+        let text = lines(&render_with(width, 14, &mut board, &loaded()));
+        last_digit_column(&text[2], "1").expect("the run row shows its ID")
+    }
+
+    #[test]
+    fn a_job_name_that_fills_the_cell_shows_no_runner_name() {
+        let name = "n".repeat(40);
+        let (buffer, row, y) = lone_job_row(on("mbp", passed_job(&name)), 120);
+        // The text is cut to the 28 columns of the cell and ends in `…`.
+        let cut = format!("└ {}…", "n".repeat(25));
+        assert_eq!(display_width(&cut), 28);
+        assert_eq!(row, job_golden("✅", &cut, LONE_JOB, PASSED_TIMES));
+        assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
+        assert_eq!(
+            last_digit_column(&row, &LONE_JOB.to_string()),
+            Some(run_id_column(120))
+        );
+    }
+
+    #[test]
+    fn a_job_with_no_runner_gives_the_same_row_as_before() {
+        let (buffer, row, y) = lone_job_row(passed_job("build"), 120);
+        assert_eq!(row, job_golden("✅", "└ build", LONE_JOB, PASSED_TIMES));
+        assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
+    }
+
+    #[test]
+    fn wide_glyphs_do_not_move_the_runner_color_or_the_job_id() {
+        let runner = "🎉mac🎉";
+        let (buffer, row, y) = lone_job_row(on(runner, passed_job("日本語")), 120);
+        // Marker 2, space 1, `└ 日本語` 8, space 1: the runner starts in column 12.
+        let from = 12_usize;
+        let (before, _) = row.split_once(runner).expect("the runner shows");
+        assert_eq!(display_width(before), from);
+        let mut column = from;
+        for glyph in runner.chars() {
+            let x = u16::try_from(column).expect("a small column");
+            assert_eq!(buffer[(x, y)].fg, Color::Cyan, "glyph {glyph:?}");
+            column += unicode_width::UnicodeWidthChar::width(glyph).unwrap_or(0);
+        }
+        assert_eq!(column, from + display_width(runner));
+        for x in column..120 {
+            let x = u16::try_from(x).expect("a small column");
+            assert_ne!(buffer[(x, y)].fg, Color::Cyan, "column {x}");
+        }
+        assert_eq!(
+            last_digit_column(&row, &LONE_JOB.to_string()),
+            Some(run_id_column(120))
+        );
+    }
+
+    #[test]
+    fn the_selected_job_row_keeps_the_runner_name_cyan() {
+        let mut board = megarepo_board();
+        board.select_next(now());
+        let buffer = render_with(160, 16, &mut board, &loaded());
+        let text = lines(&buffer);
+        let runner = "grwetky1t8721h17t103k8gce0";
+        let (before, _) = text[3].split_once(runner).expect("the runner shows");
+        let from = display_width(before);
+        for x in from..from + display_width(runner) {
+            let cell = &buffer[(u16::try_from(x).expect("a small column"), 3)];
+            assert_eq!(cell.fg, Color::Cyan, "column {x}");
+            assert!(cell.modifier.contains(Modifier::REVERSED), "column {x}");
+        }
+    }
+
+    #[test]
+    fn no_cell_of_a_run_row_is_cyan() {
+        for width in [160_u16, 120] {
+            let mut board = megarepo_board();
+            let buffer = render_with(width, 16, &mut board, &loaded());
+            assert_eq!(cyan_columns(&buffer, 2), Vec::<u16>::new(), "width {width}");
         }
     }
 }

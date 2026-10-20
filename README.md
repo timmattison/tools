@@ -2072,6 +2072,19 @@ cannot hang the caller. Used by `cwt` and `ha`.
     job (`🏃`) shows the time since a runner started it, without the wait before that start. Both
     times increase each second. A finished job shows how long it took. Thus you can find the job
     that holds a slow run.
+    - Each job row also names the runner that has the job, after the job name, in cyan, for
+      example `e2e-remotesensing (2) m1-ts`. Thus you can find the machine of a slow or failed job
+      without the browser, and you can tell the jobs of one matrix apart. The color shows that the
+      runner name is not part of the job name. A finished job keeps its runner name, thus a failed
+      job names the machine where it failed. A job that has no runner shows no runner name. This
+      occurs while the job waits for a runner, and when the job ended before a runner took it, for
+      example a skipped job.
+    - The job name has priority in its cell. The runner name gets only the columns that the job
+      name does not use. Thus the job ID and the time columns do not move when a runner takes a
+      job. A runner name that fits shows whole, also in fewer than 4 columns, for example `mbp` in
+      3 columns. A longer runner name keeps its start and ends in `…`, for example `m1-…`. This cut
+      needs 4 free columns, thus in fewer columns the longer name does not show. On a highlighted
+      job row, the runner name stays cyan.
     - The jobs are sorted by name, with no difference between capital and small letters. Thus the
       order stays the same through each refresh and each re-run, and the jobs of one matrix stay
       together. GitHub gives the jobs in the order of their IDs, which has no meaning that you can
