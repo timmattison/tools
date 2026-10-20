@@ -907,7 +907,7 @@ mod tests {
 
     use ratatui::Terminal;
 
-    use crate::job::{Job, JobId};
+    use crate::job::{Job, JobId, RunnerName};
     use crate::run::{Run, RunId, RunState};
     use crate::status::{Message, RateLimit};
     use crate::target::{OwnerName, RepoName};
@@ -3821,6 +3821,124 @@ mod tests {
                 let mut board = marker_board();
                 let _ = render_with(width, height, &mut board, &loaded());
             }
+        }
+    }
+
+    /// Sets the runner of a job.
+    fn on(runner: &str, job: Job) -> Job {
+        Job {
+            runner: RunnerName::new(runner.to_owned()),
+            ..job
+        }
+    }
+
+    /// The run ID of the megarepo board.
+    const MEGAREPO_RUN: u64 = 39_450_362_521;
+
+    /// The board of issue #584: one expanded run with six jobs, four of them on
+    /// a runner. The runner names are the real ones of `timmattison/megarepo`.
+    fn megarepo_board() -> Board {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("timmattison/megarepo"),
+            vec![run(
+                MEGAREPO_RUN,
+                "timmattison/megarepo",
+                "CI",
+                "main",
+                "Add the sites",
+                RunState::Running,
+                "2026-10-14T11:45:30Z",
+                "2026-10-14T11:59:00Z",
+            )],
+        );
+        board.expand(now());
+        board.set_jobs(
+            RunId(MEGAREPO_RUN),
+            vec![
+                on(
+                    "grwetky1t8721h17t103k8gce0",
+                    job(
+                        107_851_237_701,
+                        "e2e-plan",
+                        RunState::Passed,
+                        Some("2026-10-14T11:46:00Z"),
+                        Some("2026-10-14T11:48:00Z"),
+                    ),
+                ),
+                job(
+                    107_851_237_705,
+                    "e2e-remotesensing (1)",
+                    RunState::Queued,
+                    None,
+                    None,
+                ),
+                on(
+                    "m1-ts",
+                    job(
+                        107_851_237_702,
+                        "e2e-remotesensing (2)",
+                        RunState::Running,
+                        Some("2026-10-14T11:50:00Z"),
+                        None,
+                    ),
+                ),
+                on(
+                    "mbp",
+                    job(
+                        107_851_237_703,
+                        "e2e-remotesensing (3)",
+                        RunState::Running,
+                        Some("2026-10-14T11:51:00Z"),
+                        None,
+                    ),
+                ),
+                job(
+                    107_851_237_704,
+                    "e2e-remotesensing (4)",
+                    RunState::Queued,
+                    None,
+                    None,
+                ),
+                on(
+                    "gr96283qcxw61jpesqnhtrkhwb",
+                    job(
+                        107_851_237_706,
+                        "sites",
+                        RunState::Running,
+                        Some("2026-10-14T11:52:00Z"),
+                        None,
+                    ),
+                ),
+            ],
+        );
+        board
+    }
+
+    #[test]
+    fn the_runner_of_each_job_stands_after_its_name_at_160_columns() {
+        let mut board = megarepo_board();
+        let text = lines(&render_with(160, 16, &mut board, &loaded()));
+        let block: Vec<String> = (2..=8)
+            .map(|y| columns(&text[y], 0, 54).trim_end().to_owned())
+            .collect();
+        assert_eq!(
+            block,
+            [
+                "🏃 timmattison/megarepo          CI        39450362521",
+                "✅ ├ e2e-plan grwetky1t8721h17t103k8gce0  107851237701",
+                "⏳ ├ e2e-remotesensing (1)                107851237705",
+                "🏃 ├ e2e-remotesensing (2) m1-ts          107851237702",
+                "🏃 ├ e2e-remotesensing (3) mbp            107851237703",
+                "⏳ ├ e2e-remotesensing (4)                107851237704",
+                "🏃 └ sites gr96283qcxw61jpesqnhtrkhwb     107851237706",
+            ]
+        );
+        let started = ["11:46:00", "", "11:50:00", "11:51:00", "", "11:52:00"];
+        let time = ["2m 00s", "", "10m 00s", "9m 00s", "", "8m 00s"];
+        for (offset, (started, time)) in started.iter().zip(time).enumerate() {
+            assert_eq!(started_cells(&text, 3 + offset), *started, "row {offset}");
+            assert_eq!(time_cells(&text, 3 + offset), time, "row {offset}");
         }
     }
 }
