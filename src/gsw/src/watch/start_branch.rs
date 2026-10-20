@@ -94,7 +94,7 @@ impl StartBranch {
     /// it, and so is a HEAD that a rebase of the branch detached. Any other
     /// detached HEAD is on no branch.
     pub(super) fn is_checked_out_in(&self, repo: &gix::Repository) -> bool {
-        false
+        Self::read(repo).as_ref() == Some(self)
     }
 }
 
