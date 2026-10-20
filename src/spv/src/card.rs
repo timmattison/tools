@@ -73,14 +73,22 @@ impl UnreadReason {
     ///
     /// The reason to show in the row.
     pub(crate) fn choose(is_zombie: bool, can_refuse: bool) -> Self {
-        let _ = (is_zombie, can_refuse);
-        Self::Unknown
+        if is_zombie {
+            Self::Zombie
+        } else if can_refuse {
+            Self::NeedsSudo
+        } else {
+            Self::Unknown
+        }
     }
 
     /// The text the row shows.
     fn text(self) -> &'static str {
-        let _ = (TEXT_NEEDS_SUDO, TEXT_ZOMBIE, TEXT_UNKNOWN);
-        ""
+        match self {
+            Self::NeedsSudo => TEXT_NEEDS_SUDO,
+            Self::Zombie => TEXT_ZOMBIE,
+            Self::Unknown => TEXT_UNKNOWN,
+        }
     }
 }
 
@@ -105,13 +113,18 @@ impl Fact {
     ///
     /// `Known` when `value` is `Some` and not empty, otherwise `Unread(reason)`.
     pub(crate) fn from_value(value: Option<String>, reason: UnreadReason) -> Self {
-        let _ = value;
-        Self::Unread(reason)
+        match value {
+            Some(text) if !text.is_empty() => Self::Known(text),
+            _ => Self::Unread(reason),
+        }
     }
 
     /// The text of the row: the value, or the text of the reason.
     fn text(&self) -> &str {
-        ""
+        match self {
+            Self::Known(value) => value,
+            Self::Unread(reason) => reason.text(),
+        }
     }
 }
 
@@ -168,8 +181,15 @@ impl ProcessCard {
     ///
     /// A table with one `[key, value]` row for each key and no header.
     pub(crate) fn table(&self) -> Table {
-        let _ = (UTF8_FULL, ContentArrangement::Dynamic);
-        Table::new()
+        let mut table = Table::new();
+        table
+            .load_preset(UTF8_FULL)
+            .set_content_arrangement(ContentArrangement::Dynamic);
+        for (key, value) in self.facts() {
+            table.add_row([key, &value]);
+        }
+        table.add_row([KEY_PARENTS, &self.parents_table_text()]);
+        table
     }
 
     /// Renders the card as `key: value` lines for `--raw`.
@@ -179,24 +199,70 @@ impl ProcessCard {
     /// One line for each fact, and one line for each ancestor. A control
     /// character in a value is escaped, so each fact stays on one line.
     pub(crate) fn raw_lines(&self) -> Vec<String> {
-        let _ = (
-            KEY_PID,
-            KEY_NAME,
-            KEY_USER,
-            KEY_STATUS,
-            KEY_CPU,
-            KEY_MEMORY,
-            KEY_STARTED,
-            KEY_EXE,
-            KEY_CWD,
-            KEY_COMMAND,
-            KEY_PARENTS,
-            RAW_KEY_PARENT,
-            RAW_KEY_PARENTS,
-            TEXT_NONE,
-            TEXT_PARENTS_UNREAD_PREFIX,
-        );
-        Vec::new()
+        let mut lines: Vec<String> = self
+            .facts()
+            .into_iter()
+            .map(|(key, value)| raw_line(&key.to_lowercase(), &value))
+            .collect();
+        match &self.parents {
+            Parents::Chain(chain) if chain.is_empty() => {
+                lines.push(raw_line(RAW_KEY_PARENTS, TEXT_NONE));
+            }
+            Parents::Chain(chain) => {
+                for ancestor in chain {
+                    let value = format!("{} {}", ancestor.pid, ancestor.command);
+                    lines.push(raw_line(RAW_KEY_PARENT, &value));
+                }
+            }
+            Parents::Unread(reason) => {
+                lines.push(raw_line(RAW_KEY_PARENTS, &unread_parents_text(reason)));
+            }
+        }
+        lines
+    }
+
+    /// The rows that hold one value each, in the order of the card.
+    ///
+    /// # Returns
+    ///
+    /// The key and the text of each row, without the parents.
+    fn facts(&self) -> Vec<(&'static str, String)> {
+        vec![
+            (KEY_PID, self.pid.to_string()),
+            (KEY_NAME, self.name.clone()),
+            (KEY_USER, self.user.clone()),
+            (KEY_STATUS, self.status.clone()),
+            (KEY_CPU, format!("{:.1}%", self.cpu_usage)),
+            (KEY_MEMORY, super::format_memory(self.memory)),
+            (KEY_STARTED, self.started.text().to_string()),
+            (KEY_EXE, self.exe.text().to_string()),
+            (KEY_CWD, self.cwd.text().to_string()),
+            (KEY_COMMAND, self.command.text().to_string()),
+        ]
+    }
+
+    /// The value of the parents row in the table.
+    ///
+    /// # Returns
+    ///
+    /// One line for each ancestor, with the PIDs padded to the widest PID.
+    fn parents_table_text(&self) -> String {
+        match &self.parents {
+            Parents::Chain(chain) if chain.is_empty() => TEXT_NONE.to_string(),
+            Parents::Chain(chain) => {
+                let width = chain
+                    .iter()
+                    .map(|ancestor| ancestor.pid.to_string().len())
+                    .max()
+                    .unwrap_or(0);
+                chain
+                    .iter()
+                    .map(|ancestor| format!("{:<width$}  {}", ancestor.pid, ancestor.command))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+            Parents::Unread(reason) => unread_parents_text(reason),
+        }
     }
 }
 
@@ -210,12 +276,12 @@ impl ProcessCard {
 /// # Returns
 ///
 /// The command line when it is not empty, else the comm, else "(cannot be read)".
-pub(crate) fn ancestor_command(
-    snapshot_command: Option<&str>,
-    tree_comm: Option<&str>,
-) -> String {
-    let _ = (snapshot_command, tree_comm);
-    String::new()
+pub(crate) fn ancestor_command(snapshot_command: Option<&str>, tree_comm: Option<&str>) -> String {
+    snapshot_command
+        .filter(|command| !command.is_empty())
+        .or(tree_comm.filter(|comm| !comm.is_empty()))
+        .unwrap_or(TEXT_UNKNOWN)
+        .to_string()
 }
 
 /// Formats an elapsed time in its two largest units.
@@ -228,8 +294,17 @@ pub(crate) fn ancestor_command(
 ///
 /// For example `59s`, `9m 23s`, `2h 5m`, or `3d 4h`.
 pub(crate) fn format_elapsed(seconds: u64) -> String {
-    let _ = seconds;
-    String::new()
+    let (days, hours) = (seconds / 86_400, seconds % 86_400 / 3_600);
+    let (minutes, rest) = (seconds % 3_600 / 60, seconds % 60);
+    if seconds < 60 {
+        format!("{rest}s")
+    } else if seconds < 3_600 {
+        format!("{minutes}m {rest}s")
+    } else if seconds < 86_400 {
+        format!("{hours}h {minutes}m")
+    } else {
+        format!("{days}d {hours}h")
+    }
 }
 
 /// Formats the start time as a time in `zone`, with the elapsed time.
@@ -253,8 +328,43 @@ pub(crate) fn started<Tz: chrono::TimeZone>(
 where
     Tz::Offset: std::fmt::Display,
 {
-    let _ = (start_epoch_seconds, run_seconds, zone);
-    None
+    if start_epoch_seconds == 0 {
+        return None;
+    }
+    let seconds = i64::try_from(start_epoch_seconds).ok()?;
+    let time = chrono::DateTime::from_timestamp(seconds, 0)?.with_timezone(zone);
+    Some(format!(
+        "{} ({} ago)",
+        time.format("%Y-%m-%d %H:%M:%S"),
+        format_elapsed(run_seconds)
+    ))
+}
+
+/// Makes the text that says why the parents are not known.
+///
+/// # Arguments
+///
+/// * `reason` - The reason, in plain words
+fn unread_parents_text(reason: &str) -> String {
+    format!("{TEXT_PARENTS_UNREAD_PREFIX}{reason})")
+}
+
+/// Makes one raw line. Each control character in the value is escaped.
+///
+/// # Arguments
+///
+/// * `key` - The raw key
+/// * `value` - The value, which can hold control characters
+fn raw_line(key: &str, value: &str) -> String {
+    let mut line = format!("{key}: ");
+    for c in value.chars() {
+        if c.is_control() {
+            line.extend(c.escape_default());
+        } else {
+            line.push(c);
+        }
+    }
+    line
 }
 
 #[cfg(test)]
@@ -360,7 +470,7 @@ mod tests {
         card.cwd = Fact::Known(cwd.clone());
         card.command = Fact::Known(command.clone());
 
-        for width in [30u16, 31] {
+        for width in [30_u16, 31] {
             let out = render(&card, width);
             assert!(!out.contains('\u{FFFD}'));
             for line in out.lines() {
@@ -465,9 +575,7 @@ mod tests {
         let raw = card_with_reason(UnreadReason::Zombie).raw_lines();
         for key in ["exe", "cwd", "command"] {
             assert!(
-                raw.contains(&format!(
-                    "{key}: (cannot be read: the process is a zombie)"
-                )),
+                raw.contains(&format!("{key}: (cannot be read: the process is a zombie)")),
                 "{key}"
             );
         }
