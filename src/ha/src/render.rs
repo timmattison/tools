@@ -3964,4 +3964,48 @@ mod tests {
             assert_eq!(time_cells(&text, 3 + offset), time, "row {offset}");
         }
     }
+
+    /// The columns of buffer row `y` whose foreground is cyan.
+    fn cyan_columns(buffer: &Buffer, y: u16) -> Vec<u16> {
+        (0..buffer.area.width)
+            .filter(|x| buffer[(*x, y)].fg == Color::Cyan)
+            .collect()
+    }
+
+    #[test]
+    fn the_runner_name_is_cyan_and_the_rest_of_the_job_row_is_not() {
+        let mut board = megarepo_board();
+        let buffer = render_with(160, 16, &mut board, &loaded());
+        let text = lines(&buffer);
+        let runners = [
+            "grwetky1t8721h17t103k8gce0",
+            "",
+            "m1-ts",
+            "mbp",
+            "",
+            "gr96283qcxw61jpesqnhtrkhwb",
+        ];
+        for (offset, runner) in runners.iter().enumerate() {
+            let y = 3 + offset;
+            let cyan: Vec<usize> = if runner.is_empty() {
+                Vec::new()
+            } else {
+                let (before, _) = text[y].split_once(runner).expect("the runner shows");
+                let from = display_width(before);
+                (from..from + display_width(runner)).collect()
+            };
+            for x in 0..160_u16 {
+                let expected = if cyan.contains(&usize::from(x)) {
+                    Color::Cyan
+                } else {
+                    Color::Reset
+                };
+                assert_eq!(
+                    buffer[(x, u16::try_from(y).expect("a small row"))].fg,
+                    expected,
+                    "row {y}, column {x}"
+                );
+            }
+        }
+    }
 }
