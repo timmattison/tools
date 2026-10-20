@@ -3194,7 +3194,7 @@ where
             (hooks.next_tick)(freshest),
             walk_wait,
             state.schedule.interval.map(|_| CLOCK_CADENCE),
-            state.ui.next_tick(),
+            state.ui.next_tick(&hooks.clock),
         ]);
         let woke_for_timeout = match wait {
             Some(interval) => match rx.recv_timeout(interval) {

@@ -1077,7 +1077,12 @@ impl PushUi {
     /// A question, a push in flight, an error that never expires, and the open
     /// list all say `None`: none of them changes with the clock, and a wake-up
     /// costs a repaint of the whole pane.
-    pub(crate) fn next_tick(&self) -> Option<Duration> {
+    ///
+    /// A hint says how long it has left. That is the one answer that needs the
+    /// time, so `clock` is read only while a hint stands, and never otherwise.
+    /// Some loop tests use a clock that steps on each read, and a read on each
+    /// iteration would change what they measure.
+    pub(crate) fn next_tick(&self, _clock: &impl Fn() -> Instant) -> Option<Duration> {
         match &self.state {
             // A running push ages the same way a fading message does, and for
             // the same reason: the notice reports its own age, and an age only
@@ -2518,7 +2523,7 @@ mod ui_tests {
             "the message must reach the screen, got {text:?}",
         );
         assert_eq!(
-            ui.next_tick(),
+            ui.next_tick(&t0),
             None,
             "a message that waits for a key does not age",
         );
@@ -2736,7 +2741,7 @@ mod ui_tests {
             "a message the clock removes says how old it is, got {text:?}",
         );
         assert_eq!(
-            ui.next_tick(),
+            ui.next_tick(&t0),
             Some(STATUS_CADENCE),
             "a message that ages must wake the loop to age",
         );
@@ -2953,7 +2958,7 @@ mod ui_tests {
                 "",
                 "{what}: no held message may reach the row later",
             );
-            assert_eq!(ui.next_tick(), None, "{what}: nothing is left to age");
+            assert_eq!(ui.next_tick(&t0), None, "{what}: nothing is left to age");
         }
     }
 
@@ -3048,7 +3053,7 @@ mod ui_tests {
             pane.height,
             "the frame of the list takes the whole pane",
         );
-        assert_eq!(ui.next_tick(), None, "nothing on the list ages");
+        assert_eq!(ui.next_tick(&t0), None, "nothing on the list ages");
 
         ui.dismiss();
         assert_eq!(
@@ -3294,7 +3299,7 @@ mod ui_tests {
         // that is quiet for a minute gives the loop no other reason to draw
         // one.
         let ui = pushing(t0());
-        assert_eq!(ui.next_tick(), Some(STATUS_CADENCE));
+        assert_eq!(ui.next_tick(&t0), Some(STATUS_CADENCE));
     }
 
     #[test]
@@ -3533,7 +3538,7 @@ mod ui_tests {
             "the words of a command that failed are drawn red",
         );
         assert_eq!(
-            ui.next_tick(),
+            ui.next_tick(&t0),
             None,
             "a message that waits for a key does not age",
         );
@@ -4708,12 +4713,12 @@ mod ui_tests {
         let start = t0();
         let mut ui = pushed_at(start);
         ui.overlay(tall_pane(80), start);
-        assert_eq!(ui.next_tick(), Some(STATUS_CADENCE));
+        assert_eq!(ui.next_tick(&t0), Some(STATUS_CADENCE));
 
         // And it stops asking once there is nothing left to move.
         ui.overlay(tall_pane(80), start + STATUS_LIFETIME);
         assert_eq!(
-            ui.next_tick(),
+            ui.next_tick(&t0),
             None,
             "an expired message must not go on waking the loop",
         );
@@ -4725,9 +4730,9 @@ mod ui_tests {
         // actually changes with the clock may ask for one.
         let start = t0();
 
-        assert_eq!(PushUi::new(false).next_tick(), None, "an idle UI");
+        assert_eq!(PushUi::new(false).next_tick(&t0), None, "an idle UI");
         assert_eq!(
-            asking().next_tick(),
+            asking().next_tick(&t0),
             None,
             "a question waiting for an answer"
         );
@@ -4747,7 +4752,7 @@ mod ui_tests {
             },
             start,
         );
-        assert_eq!(failed.next_tick(), None, "an error that never expires");
+        assert_eq!(failed.next_tick(&t0), None, "an error that never expires");
     }
 
     #[test]
@@ -4795,7 +4800,7 @@ mod ui_tests {
             "the notice must reach the row, with no age after it",
         );
         assert_eq!(
-            ui.next_tick(),
+            ui.next_tick(&t0),
             None,
             "a notice that does not age must not wake the loop",
         );
@@ -4840,7 +4845,7 @@ mod ui_tests {
             PROGRESS,
             "the clock must not take the notice away, and the notice shows no age",
         );
-        assert_eq!(ui.next_tick(), None, "the notice still does not age");
+        assert_eq!(ui.next_tick(&t0), None, "the notice still does not age");
     }
 
     #[test]
@@ -5091,6 +5096,75 @@ mod ui_tests {
 
         ui.dismiss();
         assert_eq!(painted(&mut ui, tall_pane(80), now), "");
+    }
+
+    /// A clock that counts its reads and answers `at`.
+    fn counting(at: Instant, reads: &std::cell::Cell<u32>) -> impl Fn() -> Instant + '_ {
+        move || {
+            reads.set(reads.get() + 1);
+            at
+        }
+    }
+
+    #[test]
+    fn a_hint_wakes_the_loop_when_it_is_due_to_leave() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        let _ = ui.post_hint(HINT.to_string(), now);
+
+        let one_second_later = now + Duration::from_secs(1);
+        assert_eq!(
+            ui.next_tick(&|| one_second_later),
+            Some(RETURN_HINT_LIFETIME - Duration::from_secs(1)),
+        );
+    }
+
+    #[test]
+    fn an_overdue_hint_wakes_the_loop_at_once() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        let _ = ui.post_hint(HINT.to_string(), now);
+
+        let overdue = now + RETURN_HINT_LIFETIME * 2;
+        assert_eq!(ui.next_tick(&|| overdue), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn the_clock_is_read_only_while_a_hint_stands() {
+        let now = t0();
+        let mut fading = pushed_at(now);
+        fading.overlay(tall_pane(80), now);
+        let mut running = pushing(now);
+        running.output_line("hook".to_string());
+        let mut listing = PushUi::new(false);
+        listing.open_list(three_worktrees());
+        let mut failed = pushing(now);
+        failed.finished(
+            PushOutcome {
+                success: false,
+                output: "boom".to_string(),
+            },
+            now,
+        );
+
+        for (what, ui) in [
+            ("an idle UI", PushUi::new(false)),
+            ("a fading line", fading),
+            ("a question", asking()),
+            ("a run", running),
+            ("the list", listing),
+            ("an error", failed),
+        ] {
+            let reads = std::cell::Cell::new(0);
+            let _ = ui.next_tick(&counting(now, &reads));
+            assert_eq!(reads.get(), 0, "{what} must not read the clock");
+        }
+
+        let mut hinted = PushUi::new(false);
+        let _ = hinted.post_hint(HINT.to_string(), now);
+        let reads = std::cell::Cell::new(0);
+        let _ = hinted.next_tick(&counting(now, &reads));
+        assert_eq!(reads.get(), 1, "a hint reads the clock once");
     }
 }
 
