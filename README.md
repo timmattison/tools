@@ -847,6 +847,16 @@ cannot hang the caller. Used by `cwt` and `ha`.
       takes the branch of that rebase as its start branch. Any other session that starts on a
       detached HEAD has no start branch, and its name is never red. One-shot mode never paints
       it red.
+    - While the name is red, two presses of Esc go back to the start branch. The first Esc puts
+      `Hit Escape again to go back to <start branch>` under the frame for 3 seconds. An Esc in
+      that time goes to the home worktree when it is on the start branch, or else to the worktree
+      that is on it. When no worktree is on it, gsw goes to the home worktree and runs
+      `git switch --no-guess <start branch>` there, with the output of git live under the frame,
+      as a push shows its output. gsw never forces the switch. When git refuses, for example
+      because the switch would overwrite a local change, the last lines that git wrote stay under
+      the frame in red until you press a key, and HEAD does not move. Any other key between the two presses
+      takes the line away, and the next Esc is a first press again. While the name is bold, Esc
+      only clears the line under the frame, as before.
     - A switch walks the new worktree at once and starts the refresh clock again. It moves the
       filesystem watcher to the new worktree, and `p`, `G`, and `m` then act on the worktree that
       is on the screen. Every line under the frame goes, because each one described the old
