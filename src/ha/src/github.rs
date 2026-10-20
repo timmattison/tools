@@ -977,12 +977,14 @@ mod tests {
         {"id":399444496,"run_id":29679449,"name":"build (ubuntu)","status":"completed","conclusion":"failure",
          "started_at":"2026-09-24T21:56:49Z","created_at":"2026-09-24T21:55:00Z",
          "completed_at":"2026-09-24T21:57:56Z",
+         "runner_name":"GitHub Actions 1000001050",
          "html_url":"https://github.com/o/r/actions/runs/29679449/job/399444496","steps":[]},
         {"id":2,"name":"test","status":"in_progress","conclusion":null,
          "started_at":null,"created_at":"2026-09-25T01:02:03Z","completed_at":null,
+         "runner_name":"",
          "html_url":"https://github.com/o/r/actions/runs/29679449/job/2"},
         {"id":3,"name":null,"status":"queued","conclusion":null,
-         "started_at":null,"created_at":"2026-09-25T01:04:00Z","completed_at":null,"html_url":null}]}"#;
+         "started_at":null,"created_at":"2026-09-25T01:04:00Z","completed_at":null,"html_url":null,"runner_name":null}]}"#;
 
     #[test]
     fn the_jobs_json_maps_to_jobs() {
@@ -995,7 +997,7 @@ mod tests {
                     id: JobId(399_444_496),
                     name: "build (ubuntu)".to_owned(),
                     state: RunState::Failed,
-                    runner: None,
+                    runner: RunnerName::new("GitHub Actions 1000001050".to_owned()),
                     created_at: Some(time("2026-09-24T21:55:00Z")),
                     started_at: Some(time("2026-09-24T21:56:49Z")),
                     completed_at: Some(time("2026-09-24T21:57:56Z")),
