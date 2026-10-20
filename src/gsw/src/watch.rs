@@ -12472,6 +12472,132 @@ mod push_loop_tests {
             "the walk shows the name right and no hint",
         );
     }
+
+    /// What the screen shows when the second Esc has not been taken for a
+    /// second press: the hint, under the frame of `name`, with no switch.
+    fn hint_under(name: &str) -> String {
+        format!("FRAME {name}\n{RETURN_HINT_LINE}")
+    }
+
+    #[test]
+    fn a_key_between_two_presses_of_esc_makes_the_second_one_a_first_press() {
+        // Every key but Esc takes the hint and the arming away. `r`, `m`, and
+        // Left are three kinds of key: one that walks, one that starts work,
+        // and one that moves the watch. `alpha` is on the start branch, so a
+        // second press would move the watch there, and none of these may.
+        for between in [KeyCode::Char('r'), KeyCode::Char('m')] {
+            let (screen, seen) = run_setup(
+                returning(World::three().on_start_branch(ALPHA)),
+                vec![key(KeyCode::Esc), key(between), key(KeyCode::Esc), Event::Quit],
+            );
+            assert!(
+                seen.switches.is_empty(),
+                "{between:?} between the presses must leave the third press a first press, got {:?}",
+                seen.switches,
+            );
+            assert_eq!(
+                strip_ansi(&screen),
+                hint_under(BRAVO),
+                "{between:?} between the presses: the hint must be on the row again",
+            );
+        }
+
+        let (screen, seen) = run_setup(
+            returning(World::three().on_start_branch(CHARLIE)),
+            vec![
+                key(KeyCode::Esc),
+                key(KeyCode::Left),
+                key(KeyCode::Esc),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(
+            seen.switches,
+            vec![worktree(ALPHA)],
+            "only Left may switch: the second Esc is a first press",
+        );
+        assert_eq!(strip_ansi(&screen), hint_under(ALPHA));
+    }
+
+    #[test]
+    fn an_event_that_no_key_made_leaves_the_hint_and_the_arming_alone() {
+        // A change on the disk is not the user. The hint stays on the row, and
+        // the second press still goes back.
+        let (screen, seen) = run_setup(
+            returning(World::three().on_start_branch(ALPHA)),
+            vec![
+                key(KeyCode::Esc),
+                Event::FsChanged,
+                key(KeyCode::Esc),
+                Event::Quit,
+            ],
+        );
+        assert_eq!(seen.switches, vec![worktree(ALPHA)]);
+        assert_eq!(strip_ansi(&screen), format!("FRAME {ALPHA}"));
+    }
+
+    #[test]
+    fn a_hint_that_lived_its_lifetime_is_off_the_row_and_the_next_esc_is_a_first_press() {
+        // The hint leaves the row `RETURN_HINT_LIFETIME` after it came, and
+        // the arming leaves with it, at the same instant. The render hook
+        // moves the clock on by that much, once, after the first frame. The
+        // frame between the two presses shows no hint, and the second press
+        // asks again.
+        let moved = std::rc::Rc::new(std::cell::Cell::new(Duration::ZERO));
+        let base = Instant::now();
+        let clock_offset = std::rc::Rc::clone(&moved);
+        let render_offset = std::rc::Rc::clone(&moved);
+        let (_screen, seen) = drive_bursts(
+            vec![
+                vec![key(KeyCode::Esc)],
+                vec![Event::FsChanged],
+                vec![key(KeyCode::Esc), Event::Quit],
+            ],
+            Setup {
+                render: Box::new(move |snapshot: &Snapshot, dims: Dimensions| {
+                    let text = frame_of(snapshot, dims);
+                    // After the first frame, one lifetime has passed.
+                    render_offset.set(crate::push::RETURN_HINT_LIFETIME);
+                    text
+                }),
+                ..returning(World::three().on_start_branch(ALPHA))
+            },
+            move || base + clock_offset.get(),
+        );
+        let painted: Vec<String> = seen.paints.iter().map(|text| strip_ansi(text)).collect();
+        assert_eq!(
+            painted,
+            vec![hint_under(BRAVO), format!("FRAME {BRAVO}"), hint_under(BRAVO)],
+            "the hint must leave after its lifetime, and the Esc after it must ask again",
+        );
+        assert!(
+            seen.switches.is_empty(),
+            "the Esc after the lifetime must not switch, got {:?}",
+            seen.switches,
+        );
+    }
+
+    #[test]
+    fn an_esc_that_cancels_the_question_arms_nothing() {
+        // `p` asks the question, and Esc answers no. That Esc is the answer,
+        // and not a press of the two. The next Esc is a first press: the hint
+        // goes on the row, and nothing switches.
+        let (screen, seen) = run_setup(
+            returning(World::three().on_start_branch(ALPHA)),
+            vec![
+                key(KeyCode::Char('p')),
+                key(KeyCode::Esc),
+                key(KeyCode::Esc),
+                Event::Quit,
+            ],
+        );
+        assert!(
+            seen.switches.is_empty(),
+            "the Esc after the answer must be a first press, got {:?}",
+            seen.switches,
+        );
+        assert_eq!(strip_ansi(&screen), hint_under(BRAVO));
+    }
 }
 
 /// The tests of [`Watched`] and of the production switch, against real
