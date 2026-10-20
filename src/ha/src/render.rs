@@ -4040,4 +4040,24 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn a_long_runner_name_is_cut_to_the_room_that_the_job_text_leaves() {
+        let mut board = megarepo_board();
+        let text = lines(&render_with(120, 16, &mut board, &loaded()));
+        let block: Vec<String> = (3..=8)
+            .map(|y| columns(&text[y], 0, 44).trim_end().to_owned())
+            .collect();
+        assert_eq!(
+            block,
+            [
+                "✅ ├ e2e-plan grwetky1t8721h17… 107851237701",
+                "⏳ ├ e2e-remotesensing (1)      107851237705",
+                "🏃 ├ e2e-remotesensing (2) m1-… 107851237702",
+                "🏃 ├ e2e-remotesensing (3) mbp  107851237703",
+                "⏳ ├ e2e-remotesensing (4)      107851237704",
+                "🏃 └ sites gr96283qcxw61jpesqn… 107851237706",
+            ]
+        );
+    }
 }
