@@ -13936,12 +13936,33 @@ mod watched_tests {
     ///
     /// The clock is frozen and no timed refresh is scheduled, so only the
     /// events decide when the loop walks. The hooks that start work (push,
-    /// base update, issue, conflicts) do nothing.
+    /// base update, issue, conflicts) do nothing. The `git switch` of the
+    /// second Esc is the exception: it runs for real, and `drive_real_painted`
+    /// explains how.
     ///
     /// `start` must come from [`start_at`] before the test moves HEAD, as the
     /// start of a session does. The seed walk of `home` fills the cache, so
     /// the first frame shows the repository as it is when the loop starts.
     fn drive_real(home: &Path, start: &StartPoint, bursts: Vec<Vec<Event>>) -> Vec<Shown> {
+        drive_real_painted(home, start, bursts).0
+    }
+
+    /// [`drive_real`], and every text the loop painted, in order.
+    ///
+    /// The text of a paint holds the rows under the frame, so a test reads in
+    /// it what the row said. The `start_return` hook runs the `git switch` to
+    /// the end on the thread of the loop, and queues each line it wrote as
+    /// [`Event::RunOutput`] and its outcome as [`Event::ReturnFinished`] on
+    /// the channel of the loop. Production does the same from a thread of its
+    /// own. The run ends inside the wake that started it, so the walk that
+    /// follows the outcome belongs to that wake. A burst that holds the second
+    /// Esc must not hold [`Event::Quit`]: the events of the run queue behind
+    /// it.
+    fn drive_real_painted(
+        home: &Path,
+        start: &StartPoint,
+        bursts: Vec<Vec<Event>>,
+    ) -> (Vec<Shown>, Vec<String>) {
         let cfg = walk_config();
         let (tx, rx) = mpsc::channel();
         let watched = RefCell::new(seeded(home, tx.clone()));
@@ -13956,6 +13977,7 @@ mod watched_tests {
         }
         let later = RefCell::new(bursts);
         let shown = RefCell::new(Vec::<Shown>::new());
+        let painted = RefCell::new(Vec::<String>::new());
         let mut displayed = String::new();
 
         event_loop(
@@ -13996,7 +14018,10 @@ mod watched_tests {
                 },
                 render_list: no_list,
                 dimensions: || TEST_DIMS,
-                paint: |_output: &str| Ok(()),
+                paint: |output: &str| {
+                    painted.borrow_mut().push(output.to_string());
+                    Ok(())
+                },
                 clock: move || base,
                 next_tick: timer_off,
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
@@ -14012,12 +14037,19 @@ mod watched_tests {
                     switch_watched(&watched, target, tx.clone(), &cfg, start, limit)
                 },
                 on_start_branch: worktree_on_start_branch,
-                start_return: |_child: std::process::Command| {},
+                start_return: |child: std::process::Command| {
+                    let outcome =
+                        crate::push::run_streamed(child, super::RETURN_RUN_NAME, &|line| {
+                            tx.send(Event::RunOutput(line)).expect("queue the line");
+                        });
+                    tx.send(Event::ReturnFinished(outcome))
+                        .expect("queue the outcome");
+                },
             },
         )
         .expect("loop");
 
-        shown.into_inner()
+        (shown.into_inner(), painted.into_inner())
     }
 
     /// The branch that HEAD names in the work tree at `dir`.
@@ -14135,6 +14167,174 @@ mod watched_tests {
             head_of(&home),
             "main",
             "no git command may move HEAD of home"
+        );
+    }
+
+    /// The words of git, when a local change stands in the way of a switch,
+    /// that reach the row. Git writes four lines: `error: Your local changes
+    /// to the following files would be overwritten by checkout:`, the file,
+    /// this advice, and `Aborting`. The row keeps the last three lines of a
+    /// failed run ([`crate::push`]), so the first line is not on it.
+    const COMMIT_OR_STASH: &str = "Please commit your changes or stash them";
+
+    /// The text that git writes when the branch of `git switch --no-guess` is
+    /// not a local branch.
+    const INVALID_REFERENCE: &str = "invalid reference";
+
+    /// Whether the repository at `dir` holds the local branch `name`.
+    fn has_local_branch(dir: &Path, name: &str) -> bool {
+        !git_stdout(
+            dir,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                &format!("refs/heads/{name}"),
+            ],
+        )
+        .is_empty()
+    }
+
+    /// Rule 3, against real repositories. The session starts on `topic` in
+    /// home, then `git switch main` moves home off the branch. No worktree is
+    /// on `topic`, so Esc, Esc runs `git switch --no-guess topic` in home.
+    /// HEAD of home is `topic` after it, and the last frame has a name that is
+    /// not red.
+    #[test]
+    fn two_presses_of_esc_switch_home_to_the_start_branch_when_no_worktree_holds_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        init_repo_at(&home);
+        git(&home, &["switch", "-q", "-c", TOPIC]);
+        let start = start_at(&home);
+        git(&home, &["switch", "-q", "main"]);
+
+        let (frames, painted) = drive_real_painted(
+            &home,
+            &start,
+            vec![
+                vec![press(KeyCode::Esc)],
+                vec![press(KeyCode::Esc)],
+                vec![Event::Quit],
+            ],
+        );
+
+        let first = frames.first().expect("the loop rendered a frame");
+        assert!(
+            first.off_start_branch,
+            "the first frame must show a red name, got {frames:?}",
+        );
+        assert_eq!(head_of(&home), TOPIC, "the run must switch home to topic");
+        let last = frames.last().expect("the loop rendered a frame");
+        assert_eq!(
+            last.branch, TOPIC,
+            "the last frame must show topic, got {frames:?}"
+        );
+        assert!(
+            !last.off_start_branch,
+            "the name must not be red in the last frame, got {frames:?}",
+        );
+        assert!(
+            painted
+                .iter()
+                .any(|text| testcolor::strip_ansi(text).contains("Went back to the start branch")),
+            "the row must say that the switch worked, got {painted:?}",
+        );
+    }
+
+    /// A local change in home that the switch would overwrite. Git refuses,
+    /// gsw never forces, and the words of git are on the row. HEAD of home
+    /// stays on `main`, and the name stays red.
+    #[test]
+    fn a_local_change_that_the_switch_would_overwrite_stops_it_and_git_says_why() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        init_repo_at(&home);
+        git(&home, &["switch", "-q", "-c", TOPIC]);
+        std::fs::write(home.join("a.txt"), "on topic\n").expect("write a.txt");
+        git(
+            &home,
+            &["commit", "-q", "-a", "-m", "change a.txt on topic"],
+        );
+        let start = start_at(&home);
+        git(&home, &["switch", "-q", "main"]);
+        std::fs::write(home.join("a.txt"), "local change\n").expect("write a.txt");
+
+        let (frames, painted) = drive_real_painted(
+            &home,
+            &start,
+            vec![
+                vec![press(KeyCode::Esc)],
+                vec![press(KeyCode::Esc)],
+                vec![Event::Quit],
+            ],
+        );
+
+        assert_eq!(
+            head_of(&home),
+            "main",
+            "a refused switch must not move HEAD"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join("a.txt")).expect("read a.txt"),
+            "local change\n",
+            "a refused switch must keep the local change",
+        );
+        let last = frames.last().expect("the loop rendered a frame");
+        assert!(
+            last.off_start_branch,
+            "the name must stay red, got {frames:?}"
+        );
+        let last_paint = painted.last().expect("the loop painted");
+        assert!(
+            testcolor::strip_ansi(last_paint).contains(COMMIT_OR_STASH),
+            "the words of git must be on the row, got {last_paint:?}",
+        );
+    }
+
+    /// The start branch is gone, and only `origin/topic` is left. Plain `git
+    /// switch topic` would make a new `topic` from it, and that branch is not
+    /// the start branch. `--no-guess` refuses, and no local `topic` appears.
+    #[test]
+    fn a_start_branch_that_only_origin_holds_is_not_made_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        init_repo_at(&home);
+        git(&home, &["switch", "-q", "-c", TOPIC]);
+        let start = start_at(&home);
+        git(&home, &["switch", "-q", "main"]);
+        let sha = git_stdout(&home, &["rev-parse", TOPIC]);
+        git(&home, &["update-ref", "refs/remotes/origin/topic", &sha]);
+        git(&home, &["branch", "-q", "-D", TOPIC]);
+        assert!(!has_local_branch(&home, TOPIC), "the fixture deleted topic");
+
+        let (frames, painted) = drive_real_painted(
+            &home,
+            &start,
+            vec![
+                vec![press(KeyCode::Esc)],
+                vec![press(KeyCode::Esc)],
+                vec![Event::Quit],
+            ],
+        );
+
+        assert!(
+            !has_local_branch(&home, TOPIC),
+            "the switch must not make a new topic from origin/topic",
+        );
+        assert_eq!(
+            head_of(&home),
+            "main",
+            "a refused switch must not move HEAD"
+        );
+        let last = frames.last().expect("the loop rendered a frame");
+        assert!(
+            last.off_start_branch,
+            "the name must stay red, got {frames:?}"
+        );
+        let last_paint = painted.last().expect("the loop painted");
+        assert!(
+            testcolor::strip_ansi(last_paint).contains(INVALID_REFERENCE),
+            "the words of git must be on the row, got {last_paint:?}",
         );
     }
 }
