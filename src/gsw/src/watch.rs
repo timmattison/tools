@@ -2891,10 +2891,20 @@ where
                 state.returning.disarm();
                 state.ui.withdraw_hint();
                 // Rule 1: home is on the start branch. The watch moves home,
-                // as Up does, and no git command runs.
+                // as Up does. Rule 2: another worktree is on it, and the watch
+                // moves there. No git command runs for either. Home is probed
+                // first, and then each other worktree in the order of the
+                // listing, so the first one that is on the branch wins.
                 let home = state.home.clone();
-                if (hooks.on_start_branch)(&branch, &home) && home != state.current {
-                    state.switch_to(home, clock, &mut hooks.switch);
+                let paths = (hooks.worktree_paths)();
+                let target = std::iter::once(&home)
+                    .chain(paths.iter().filter(|path| **path != home))
+                    .find(|path| (hooks.on_start_branch)(&branch, path))
+                    .cloned();
+                if let Some(target) = target {
+                    if target != state.current {
+                        state.switch_to(target, clock, &mut hooks.switch);
+                    }
                 }
             } else if state.ui.post_hint(branch.return_hint(), now) == crate::push::Posted::OnRow {
                 // The row arms the press, and not the key. A question or a
