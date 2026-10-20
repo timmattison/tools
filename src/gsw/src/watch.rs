@@ -2863,7 +2863,37 @@ where
         },
         Event::RunOutput(line) => state.ui.output_line(line),
         Event::Cancelled => state.ui.cancel(),
-        Event::Dismiss | Event::ReturnRequested => state.ui.dismiss(),
+        Event::Dismiss => state.ui.dismiss(),
+        // Esc in the normal mode. It goes back to the start branch on its
+        // second press, and only where the name in the header is red.
+        //
+        // One read of the clock, for both halves of one press, as the `G` key
+        // reads it: the arming and the hint must end at the same instant. The
+        // arm runs only where the hint went straight onto the row, so `now` is
+        // the instant the hint got there.
+        Event::ReturnRequested => {
+            let now = clock();
+            let Some(branch) = state
+                .start_branch
+                .clone()
+                .filter(|_| state.cache.snapshot.off_start_branch)
+            else {
+                // The name is not red, or the session has no start branch.
+                // Esc does what it did before the two presses existed.
+                state.returning.disarm();
+                state.ui.dismiss();
+                return Flow::Continue;
+            };
+            if !state.returning.is_armed(now) {
+                // The row arms the press, and not the key. A question or a
+                // run owns the row, and a hint that waited in the queue would
+                // arm a press that nobody was asked for. A hint that the busy
+                // row drops arms nothing.
+                if state.ui.post_hint(branch.return_hint(), now) == crate::push::Posted::OnRow {
+                    state.returning.arm(now);
+                }
+            }
+        }
         // Left and Right read the paths of the worktrees again at each press,
         // because `nwt` and `swt` add and remove worktrees while gsw runs.
         // They read no label, because they show none. Where no other worktree
