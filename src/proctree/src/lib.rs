@@ -6,6 +6,10 @@
 //! differently on each transport. `gsw` asks for `mosh-server`, because a
 //! command that opens a browser opens it on the wrong machine.
 //!
+//! A tool can also ask for the chain itself, through
+//! [`ProcessTree::ancestors`]. The chain goes from the parent of a process up
+//! to PID 1. `spv` shows that chain on its detail card.
+//!
 //! A multiplexer breaks the chain of parents. Zellij starts its server as a
 //! daemon, so the server reparents to PID 1. The chain from this process stops
 //! at PID 1 and never reaches a terminal. The Zellij client keeps that chain,
@@ -24,7 +28,7 @@
 //! The crate holds the mechanics. Each tool holds its own policy over the
 //! answers, because each tool does something different with them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Stdio;
 
@@ -61,9 +65,12 @@ impl Pid {
     }
 
     /// The number of this process id.
+    ///
+    /// A tool uses the number to look up the process in another table, for
+    /// example a `sysinfo` snapshot.
     #[must_use]
     pub const fn as_u32(self) -> u32 {
-        0
+        self.0
     }
 }
 
@@ -317,15 +324,50 @@ impl ProcessTree {
     }
 
     /// The comm of `pid`, or `None` when the snapshot has no line for `pid`.
+    ///
+    /// The comm is the text that `ps` gave, which can be a full path.
     #[must_use]
     pub fn comm(&self, pid: Pid) -> Option<&str> {
-        None
+        self.comm_of.get(&pid).map(String::as_str)
     }
 
-    /// The chain of parents above `pid`.
+    /// The chain of parents above `pid`, from the parent of `pid` up to PID 1.
+    ///
+    /// The rules of the walk are these.
+    ///
+    /// - `pid` itself is never in the chain. A `pid` with no line in the
+    ///   snapshot has an empty chain.
+    /// - PID 1 is the last element, and the walk stops there even when the
+    ///   snapshot gives PID 1 a parent.
+    /// - A parent with no line of its own is in the chain, because the line
+    ///   below it names it. The walk stops after it.
+    /// - PID 0 means "no parent", and the walk stops before it.
+    /// - A PID that the walk saw before is a cycle in a bad snapshot. The walk
+    ///   stops before it.
+    /// - The chain holds at most `MAX_ANCESTOR_DEPTH` elements (64).
     #[must_use]
     pub fn ancestors(&self, pid: Pid) -> Vec<Pid> {
-        Vec::new()
+        let mut chain = Vec::new();
+        let mut seen = HashSet::from([pid]);
+        let mut current = pid;
+        while chain.len() < MAX_ANCESTOR_DEPTH {
+            // A PID with no line in the snapshot has no known parent, so the
+            // walk ends there.
+            let Some(&parent) = self.parent_of.get(&current) else {
+                break;
+            };
+            // PID 0 is "no parent". A PID seen before is a cycle in a bad
+            // snapshot.
+            if parent == Pid(0) || !seen.insert(parent) {
+                break;
+            }
+            chain.push(parent);
+            if parent == Pid(1) {
+                break;
+            }
+            current = parent;
+        }
+        chain
     }
 
     /// Whether a process whose basename is `target_name` stands above `pid`, or
@@ -507,7 +549,6 @@ mod tests {
         );
     }
 
-
     // =========================================================================
     // Tests for the chain of ancestors
     // =========================================================================
@@ -531,9 +572,7 @@ mod tests {
 
     #[test]
     fn comm_gives_the_comm_of_a_pid_in_the_snapshot() {
-        let tree = ProcessTree::parse(
-            "1 0 /sbin/launchd\n500 1 /Users/user/my apps/mosh-server\n",
-        );
+        let tree = ProcessTree::parse("1 0 /sbin/launchd\n500 1 /Users/user/my apps/mosh-server\n");
         assert_eq!(tree.comm(Pid::new(1)), Some("/sbin/launchd"));
         assert_eq!(
             tree.comm(Pid::new(500)),
@@ -594,7 +633,8 @@ mod tests {
     #[test]
     fn ancestors_reads_every_process_of_a_chain_that_fits_the_depth_limit() {
         // PID 2 has 63 processes above it, then PID 1: 64 ancestors in all.
-        let tree = chain_of(MAX_ANCESTOR_DEPTH as u32);
+        let tree =
+            chain_of(u32::try_from(MAX_ANCESTOR_DEPTH).expect("the depth limit fits in a u32"));
         let chain = tree.ancestors(Pid::new(2));
         assert_eq!(chain.len(), MAX_ANCESTOR_DEPTH);
         assert_eq!(chain.last(), Some(&Pid::new(1)));
