@@ -2472,7 +2472,8 @@ impl LoopState {
     ///    run that started before the switch is known as stale. Every message
     ///    under the frame goes, and the list closes, because each one
     ///    describes the worktree the frame showed before. The `G` key loses
-    ///    its arming with the message that armed it.
+    ///    its arming with the message that armed it, and so does the second
+    ///    press of Esc.
     /// 3. On `Err`, nothing changes, and the reason comes back. The caller
     ///    decides whether the reason goes on the row.
     fn enter(
@@ -2492,6 +2493,7 @@ impl LoopState {
         self.generation = self.generation.next();
         self.ui.clear();
         self.issue.disarm();
+        self.returning.disarm();
         Ok(())
     }
 
