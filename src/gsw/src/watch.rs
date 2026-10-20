@@ -12968,6 +12968,109 @@ mod push_loop_tests {
             "the next key must remove the words of git",
         );
     }
+    #[test]
+    fn no_key_but_g_starts_anything_while_the_switch_of_the_second_esc_runs() {
+        // The run owns the row and moves HEAD of home. Esc, the arrows, `p`,
+        // `R`, `M`, and `m` start nothing: no second switch, no push, no base
+        // update, no measurement, and the watch stays where it is. Both probes
+        // of the base updates have answered, so `R` and `M` are bound keys,
+        // and they still start nothing.
+        for pressed in [
+            KeyCode::Esc,
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Char('p'),
+            KeyCode::Char('R'),
+            KeyCode::Char('M'),
+            KeyCode::Char('m'),
+        ] {
+            let mut events = vec![
+                base_update_probe_answered(crate::update::BaseUpdate::Rebase),
+                base_update_probe_answered(crate::update::BaseUpdate::Merge),
+            ];
+            events.extend(return_started());
+            events.extend([key(pressed), key(pressed), Event::Quit]);
+            let (screen, seen) = run_setup(returning(World::three()), events);
+            assert_eq!(
+                seen.returns.len(),
+                1,
+                "{pressed:?} during the run must start no second switch, got {:?}",
+                seen.returns,
+            );
+            assert!(
+                seen.pushes.is_empty() && seen.base_updates.is_empty(),
+                "{pressed:?} during the run must start no push and no base update",
+            );
+            assert_eq!(
+                seen.conflict_runs, 0,
+                "{pressed:?} during the run must start no measurement",
+            );
+            assert!(
+                seen.switches.is_empty(),
+                "{pressed:?} during the run must move the watch nowhere, got {:?}",
+                seen.switches,
+            );
+            assert!(
+                strip_ansi(&screen).contains(SWITCH_NOTICE),
+                "{pressed:?} during the run must leave the run on the row, got {screen:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_measurement_that_the_switch_of_the_second_esc_overlapped_says_nothing_and_frees_m() {
+        // `m` started a measurement of the branch that HEAD of home names. The
+        // switch moves HEAD, so the line of that measurement would describe a
+        // branch that is gone. It says nothing, and its outcome frees `m`.
+        let bursts = vec![
+            vec![press_m(), key(KeyCode::Esc), key(KeyCode::Esc)],
+            vec![
+                Event::ConflictsStarted {
+                    generation: Generation::default(),
+                    branch: OVERLAPPED_BASE.to_string(),
+                },
+                finished(ConflictsOutcome::Measured {
+                    branch: OVERLAPPED_BASE.to_string(),
+                    rebase: Ok(gitscratch::Conflicts::nothing_replayed()),
+                    merge: Ok(gitscratch::Conflicts::nothing_replayed()),
+                    dirty: false,
+                }),
+            ],
+            vec![Event::ReturnFinished(PushOutcome {
+                success: true,
+                output: format!("{SWITCHED}\n"),
+            })],
+            // A key takes the report of the switch off the row, so the row is
+            // free for a line that waited.
+            vec![key(KeyCode::Char('x'))],
+            vec![
+                press_m(),
+                started_against_main(),
+                finished(measured_clean()),
+                Event::Quit,
+            ],
+        ];
+        let base = Instant::now();
+        let (displayed, seen) = drive_bursts(bursts, returning(World::three()), move || base);
+        assert_eq!(
+            seen.conflict_runs, 2,
+            "the outcome of the overlapped measurement must free `m`",
+        );
+        assert!(
+            !seen
+                .paints
+                .iter()
+                .any(|paint| strip_ansi(paint).contains(OVERLAPPED_BASE)),
+            "a line of the overlapped measurement must never reach the row, got {:?}",
+            seen.paints,
+        );
+        assert!(
+            strip_ansi(&displayed).contains(MEASURED_CLEAN),
+            "the next measurement must report, got {displayed:?}",
+        );
+    }
 }
 
 /// The tests of [`Watched`] and of the production switch, against real
