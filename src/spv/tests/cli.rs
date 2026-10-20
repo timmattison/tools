@@ -246,6 +246,17 @@ fn no_argument_prints_the_usage_text_and_fails() {
 }
 
 #[test]
+fn the_long_help_says_that_one_pid_prints_the_detail_card() {
+    let (ok, stdout, stderr) = run(spv().arg("--help").output().expect("spv runs"));
+
+    assert!(ok, "--help succeeds; stderr: {stderr}");
+    assert!(
+        stdout.contains("spv 77763           - Show the detail card of PID 77763"),
+        "the example of one PID names the card; stdout: {stdout}"
+    );
+}
+
+#[test]
 fn a_process_id_that_is_gone_gives_a_message_and_not_a_panic() {
     let pid = reaped_pid();
     let (ok, _stdout, stderr) = run(spv()
