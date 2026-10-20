@@ -263,6 +263,13 @@ cannot hang the caller. Used by `cwt` and `ha`.
       whose name reads like a credential is hidden, and `--show-secrets` prints it in full. A section that cannot be
       read says why, and a run that touches a process belonging to another user says that sudo is needed. Examples:
       `spv 77763`, `spv node`, `spv --regex 'node.*'`, `spv --cwd --lsof zsh`, `spv --all --full deploy.sh`.
+    - A pattern of exactly one PID (`spv 77763`) prints a detail card instead of the table. The card shows the whole
+      command line, the executable, the working directory, the start time with the elapsed time, and the chain of
+      parents up to PID 1, each parent with its full command line. No value is truncated: a long value wraps at the
+      width of the terminal. `--raw` prints the card as `key: value` lines, with one `parent: <pid> <command>` line
+      for each parent. A row that the kernel withholds says `(needs sudo)` for a process of another user. The other
+      section flags add their sections under the card. A list of PIDs (`spv 77763,82313`) and a name pattern print
+      the table, also when only one process matches.
     - This tool replaces `procinfo`, which was removed. `procinfo` did not work on macOS. A `procinfo` user meets
       three changes:
         - A search that matches nothing exits 1. `procinfo` exited 0.

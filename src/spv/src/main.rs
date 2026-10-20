@@ -42,7 +42,7 @@ static LSOF_AVAILABLE: OnceLock<bool> = OnceLock::new();
 /// # Examples
 ///
 /// ```text
-/// spv 77763           - Show process with PID 77763
+/// spv 77763           - Show the detail card of PID 77763
 /// spv 77763,82313     - Show multiple PIDs
 /// spv node            - Find processes containing 'node'
 /// spv --regex 'node.*' - Find with regex
@@ -58,12 +58,15 @@ static LSOF_AVAILABLE: OnceLock<bool> = OnceLock::new();
     name = "spv",
     version = version_string!(),
     about = "Smart process viewer with enhanced filtering and display",
-    long_about = "Examples:\n  spv 77763           - Show process with PID 77763\n  spv 77763,82313     - Show multiple PIDs\n  spv node            - Find processes containing 'node'\n  spv --regex 'node.*' - Find with regex\n  spv --full deploy   - Search the whole command line, as `pgrep -f` does\n  spv --cwd zsh       - Show processes with their CWD\n  spv --lsof $$       - Show open files for process\n  spv --env $$        - Show the environment, credentials hidden\n  spv --net node      - Show network connections\n  spv --all zsh       - Show every section"
+    long_about = "Examples:\n  spv 77763           - Show the detail card of PID 77763\n  spv 77763,82313     - Show multiple PIDs\n  spv node            - Find processes containing 'node'\n  spv --regex 'node.*' - Find with regex\n  spv --full deploy   - Search the whole command line, as `pgrep -f` does\n  spv --cwd zsh       - Show processes with their CWD\n  spv --lsof $$       - Show open files for process\n  spv --env $$        - Show the environment, credentials hidden\n  spv --net node      - Show network connections\n  spv --all zsh       - Show every section"
 )]
 struct Args {
     /// PID(s) or name pattern to match.
     ///
-    /// Can be a single PID, comma-separated PIDs, or a name pattern.
+    /// Can be a single PID, comma-separated PIDs, or a name pattern. A single
+    /// PID prints a detail card: the whole command line, the executable, the
+    /// working directory, the start time, and the parents up to PID 1. Every
+    /// other pattern prints a table.
     #[arg(required = true)]
     pattern: String,
 
@@ -76,7 +79,9 @@ struct Args {
 
     /// Show current working directory.
     ///
-    /// Adds a CWD column showing each process's working directory.
+    /// Adds a CWD column showing each process's working directory. The detail
+    /// card of a single PID always has a CWD row, so this flag changes nothing
+    /// there.
     #[arg(long)]
     cwd: bool,
 
@@ -121,7 +126,8 @@ struct Args {
 
     /// Raw output without table formatting.
     ///
-    /// Produces columnar output similar to traditional ps.
+    /// Produces columnar output similar to traditional ps. The detail card of a
+    /// single PID prints as `key: value` lines, one fact on each line.
     #[arg(long)]
     raw: bool,
 }
