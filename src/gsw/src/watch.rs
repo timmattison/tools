@@ -2819,6 +2819,13 @@ where
                 if !matches!(action, Event::IssueRequested) {
                     state.issue.disarm();
                 }
+                // Every key but Esc takes the hint and the arming of the
+                // second Esc away, for the same reason. The hint is the armed
+                // state, and this key is not the second press.
+                if !matches!(action, Event::ReturnRequested) {
+                    state.returning.disarm();
+                    state.ui.withdraw_hint();
+                }
                 return absorb(action, pending, state, hooks);
             }
         }
