@@ -19,6 +19,7 @@ which.workspace = true
 libc.workspace = true
 regex.workspace = true
 unicode-width.workspace = true
+chrono.workspace = true
 
 [lints]
 workspace = true

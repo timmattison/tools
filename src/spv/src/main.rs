@@ -17,6 +17,8 @@ use regex::Regex;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind};
 use unicode_width::UnicodeWidthStr;
 
+mod card;
+
 /// Cached result of lsof availability check.
 ///
 /// This prevents repeated warnings when lsof is not found.

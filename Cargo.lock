@@ -7900,6 +7900,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "chrono",
  "clap",
  "comfy-table",
  "human_bytes",
