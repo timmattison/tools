@@ -6,6 +6,10 @@
 
 use crate::render::{Operation, Snapshot};
 
+/// The words of the hint that the first press of Esc puts on the row. The
+/// name of the start branch follows them, after one space.
+const RETURN_HINT: &str = "Hit Escape again to go back to";
+
 /// The branch that HEAD named when gsw started in watch mode: the start
 /// branch.
 ///
@@ -81,7 +85,7 @@ impl StartBranch {
     /// The name is in the line, and the line is the only way it leaves this
     /// module as text.
     pub(super) fn return_hint(&self) -> String {
-        String::new()
+        format!("{RETURN_HINT} {}", self.0)
     }
 }
 
