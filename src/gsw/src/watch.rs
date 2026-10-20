@@ -12525,6 +12525,11 @@ mod push_loop_tests {
             "the first press must switch nothing, got {:?}",
             seen.switches,
         );
+        assert!(
+            seen.returns.is_empty(),
+            "the first press must start no git command, got {:?}",
+            seen.returns,
+        );
     }
 
     #[test]
