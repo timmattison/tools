@@ -926,6 +926,15 @@ enum Life {
     /// own. It shows no age for the same reason. It is drawn as a report at
     /// age zero, because it is gsw's news and that news is current.
     UntilReplaced,
+    /// gsw's own words that ask for a second press of a key, posted through
+    /// [`PushUi::post_hint`].
+    ///
+    /// It shows no age and does not fade, because it is a request and not news.
+    /// It leaves the row by itself, [`RETURN_HINT_LIFETIME`] after it was posted.
+    Hint {
+        /// When the hint was posted, against the watch loop's injected clock.
+        posted_at: Instant,
+    },
 }
 
 impl Life {
@@ -940,7 +949,9 @@ impl Life {
     fn elapsed(&self, now: Instant) -> Option<Duration> {
         match self {
             Self::UntilDismissed | Self::UntilReplaced => None,
-            Self::Fading { posted_at } => Some(now.saturating_duration_since(*posted_at)),
+            Self::Fading { posted_at } | Self::Hint { posted_at } => {
+                Some(now.saturating_duration_since(*posted_at))
+            }
         }
     }
 
@@ -957,7 +968,7 @@ impl Life {
     fn kind(&self) -> Option<HeldLife> {
         match self {
             Self::UntilDismissed => Some(HeldLife::UntilDismissed),
-            Self::Fading { .. } => Some(HeldLife::Fading),
+            Self::Fading { .. } | Self::Hint { .. } => Some(HeldLife::Fading),
             Self::UntilReplaced => None,
         }
     }
@@ -1403,6 +1414,18 @@ impl PushUi {
         let _ = self.post(line, Life::UntilReplaced);
     }
 
+    /// Put gsw's request for a second press under the frame, to be taken off
+    /// again by the clock.
+    ///
+    /// The fourth door into the row. A question, a run, and the open list own
+    /// the row here as at the other doors, and the hint then goes nowhere: it
+    /// never waits in [`PushUi::held`], because a request that reaches the row
+    /// later asks for a press the user was never given a reason for. The answer
+    /// says which happened, as [`Posted`] states.
+    pub(crate) fn post_hint(&mut self, line: String, now: Instant) -> Posted {
+        self.post(line, Life::Hint { posted_at: now })
+    }
+
     /// Put `line` on the row with `life`, or hold it until the row is free.
     ///
     /// The body the three doors share, so the rule about who owns the row is
@@ -1455,7 +1478,7 @@ impl PushUi {
     pub(crate) fn dismiss(&mut self) {
         match self.state {
             State::Status {
-                life: Life::UntilDismissed | Life::Fading { .. },
+                life: Life::UntilDismissed | Life::Fading { .. } | Life::Hint { .. },
                 ..
             } => self.state = State::Idle,
             State::Status {
@@ -1695,7 +1718,7 @@ impl PushUi {
                         // of what the pane has to fit rather than something
                         // added to a row already measured against its width.
                         // Saturating for the reason [`Life::elapsed`] gives.
-                        Life::Fading { posted_at } => {
+                        Life::Fading { posted_at } | Life::Hint { posted_at } => {
                             let elapsed = now.saturating_duration_since(*posted_at);
                             let line = if row == dropped {
                                 format!("{line} ({} ago)", format_age_detailed(elapsed))
@@ -1864,6 +1887,13 @@ const RUNNING_NOTICE: &str = "Pushing…";
 /// number, read in both places, rather than two numbers that agree until
 /// somebody changes one of them.
 pub(crate) const STATUS_LIFETIME: Duration = Duration::from_secs(60);
+
+/// How long the hint of the second Esc stays on the row.
+///
+/// The hint asks for a second press, and the arming of Esc in `crate::watch`
+/// reads this same constant. The hint is the armed state, so the arming and the
+/// line it stands for end at the same instant.
+pub(crate) const RETURN_HINT_LIFETIME: Duration = Duration::from_secs(3);
 
 /// How often such a message has to be repainted for its age text and its fade
 /// to move.
@@ -4928,6 +4958,119 @@ mod ui_tests {
                 "{what} must replace the progress notice, got {text:?}",
             );
         }
+    }
+
+    /// The line the tests of the hint post. Multi-byte on purpose: the
+    /// truncation of the hint must count characters and not bytes.
+    const HINT: &str = "Hit Escape again to go back to topic";
+
+    #[test]
+    fn a_hint_shows_its_words_and_no_age() {
+        // The hint is a request and not news, so it has no age to report.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        assert_eq!(ui.post_hint(HINT.to_string(), now), Posted::OnRow);
+
+        let text = painted(&mut ui, tall_pane(80), now + Duration::from_secs(1));
+        assert_eq!(text, HINT, "the row must hold the line and nothing else");
+    }
+
+    #[test]
+    fn a_hint_in_a_narrow_pane_is_cut_to_the_width() {
+        // Nothing gsw paints wraps the pane it was measured to fill, and the
+        // words of a hint can hold any character a branch name can.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        let _ = ui.post_hint("café 日本 café 日本 café 日本".to_string(), now);
+
+        let text = painted(&mut ui, tall_pane(12), now);
+        assert!(!text.is_empty(), "the hint must still show");
+        assert!(
+            unicode_width::UnicodeWidthStr::width(text.as_str()) <= 12,
+            "the hint must fit 12 columns, got {text:?}",
+        );
+        assert!(text.starts_with("café"), "the hint must keep its head, got {text:?}");
+    }
+
+    #[test]
+    fn a_hint_leaves_the_row_at_exactly_its_lifetime() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        let _ = ui.post_hint(HINT.to_string(), now);
+
+        let before = RETURN_HINT_LIFETIME - Duration::from_millis(1);
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now + before),
+            HINT,
+            "1 ms before its lifetime the hint stays",
+        );
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now + RETURN_HINT_LIFETIME),
+            "",
+            "at its lifetime the hint goes",
+        );
+    }
+
+    #[test]
+    fn a_hint_that_finds_a_question_on_the_row_is_never_shown() {
+        let now = t0();
+        let mut ui = asking();
+        assert_eq!(ui.post_hint(HINT.to_string(), now), Posted::Held);
+
+        ui.cancel();
+        assert_eq!(
+            drained(&mut ui, now),
+            Vec::<String>::new(),
+            "no frame may show the hint after the question goes",
+        );
+        assert!(ui.held.is_empty(), "the hint must not wait in the queue");
+    }
+
+    #[test]
+    fn a_hint_that_finds_a_run_on_the_row_is_never_shown() {
+        let now = t0();
+        let mut ui = pushing(now);
+        assert_eq!(ui.post_hint(HINT.to_string(), now), Posted::Held);
+
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output: String::new(),
+            },
+            now,
+        );
+        let seen = drained(&mut ui, now);
+        assert!(
+            seen.iter().all(|text| !text.contains(HINT)),
+            "no frame may show the hint after the run ends, got {seen:?}",
+        );
+        assert!(ui.held.is_empty(), "the hint must not wait in the queue");
+    }
+
+    #[test]
+    fn a_hint_that_finds_the_list_open_is_never_shown() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        ui.open_list(three_worktrees());
+        assert_eq!(ui.post_hint(HINT.to_string(), now), Posted::Held);
+
+        let _ = ui.close_list();
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now),
+            "",
+            "no frame may show the hint after the list closes",
+        );
+        assert!(ui.held.is_empty(), "the hint must not wait in the queue");
+    }
+
+    #[test]
+    fn dismissing_removes_a_hint() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        let _ = ui.post_hint(HINT.to_string(), now);
+
+        ui.dismiss();
+        assert_eq!(painted(&mut ui, tall_pane(80), now), "");
     }
 }
 
