@@ -43,8 +43,10 @@ use termwindow::{
     DEFAULT_TERMINAL_WIDTH,
 };
 
+mod arming;
 mod start_branch;
 
+use arming::Arming;
 use start_branch::StartBranch;
 
 /// Which rendering mode `gsw` is running in. The mode — not ambient env
