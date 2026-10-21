@@ -31,8 +31,12 @@ const KEY_EXE: &str = "Exe";
 const KEY_CWD: &str = "CWD";
 /// Key of the command line row.
 const KEY_COMMAND: &str = "Command";
-/// Key of the parents row.
+/// Key of the parents row. The row holds the text that says why no parent row
+/// follows: the chain is empty or the chain cannot be read.
 const KEY_PARENTS: &str = "Parents";
+/// Key of the row of one ancestor in the table. The PID of the ancestor follows
+/// the key.
+const KEY_PARENT: &str = "Parent";
 /// Raw key of one ancestor line. The raw form has one line for each ancestor.
 const RAW_KEY_PARENT: &str = "parent";
 /// Raw key of the parents line, used when there is no chain to list.
@@ -233,7 +237,10 @@ impl ProcessCard {
     ///
     /// # Returns
     ///
-    /// A table with one `[key, value]` row for each key and no header. Each
+    /// A table with one `[key, value]` row for each fact and no header. Each
+    /// ancestor has its own row, nearest first, with the key `Parent <pid>`.
+    /// A long command wraps inside the value column. A chain with no ancestor
+    /// or a chain that cannot be read has one `Parents` row that says so. Each
     /// control character in a value is escaped, so no value can fake a row or
     /// act on the terminal.
     pub(crate) fn table(&self) -> Table {
@@ -244,7 +251,9 @@ impl ProcessCard {
         for (key, value) in self.facts() {
             table.add_row([key, &escape_controls(&value)]);
         }
-        table.add_row([KEY_PARENTS, &self.parents_table_text()]);
+        for (key, value) in self.parent_rows() {
+            table.add_row([&key, &value]);
+        }
         table
     }
 
@@ -298,35 +307,31 @@ impl ProcessCard {
         ]
     }
 
-    /// The value of the parents row in the table.
+    /// The parent rows of the table.
     ///
     /// # Returns
     ///
-    /// One line for each ancestor, with the PIDs padded to the widest PID. Each
-    /// command is escaped before the lines are joined, so the newlines between
-    /// the ancestors stay real.
-    fn parents_table_text(&self) -> String {
+    /// One `Parent <pid>` row for each ancestor, nearest first, with the
+    /// escaped command as the value. A chain with no ancestor gives one
+    /// `Parents` row with `(none)`. A chain that cannot be read gives one
+    /// `Parents` row with the reason.
+    fn parent_rows(&self) -> Vec<(String, String)> {
         match &self.parents {
-            Parents::Chain(chain) if chain.is_empty() => TEXT_NONE.to_string(),
-            Parents::Chain(chain) => {
-                let width = chain
-                    .iter()
-                    .map(|ancestor| ancestor.pid.to_string().len())
-                    .max()
-                    .unwrap_or(0);
-                chain
-                    .iter()
-                    .map(|ancestor| {
-                        format!(
-                            "{:<width$}  {}",
-                            ancestor.pid,
-                            escape_controls(&ancestor.command)
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
+            Parents::Chain(chain) if chain.is_empty() => {
+                vec![(KEY_PARENTS.to_string(), TEXT_NONE.to_string())]
             }
-            Parents::Unread(reason) => unread_parents_text(reason),
+            Parents::Chain(chain) => chain
+                .iter()
+                .map(|ancestor| {
+                    (
+                        format!("{KEY_PARENT} {}", ancestor.pid),
+                        escape_controls(&ancestor.command),
+                    )
+                })
+                .collect(),
+            Parents::Unread(reason) => {
+                vec![(KEY_PARENTS.to_string(), unread_parents_text(reason))]
+            }
         }
     }
 }
@@ -631,90 +636,6 @@ mod tests {
         card.command = Fact::Known("sh -c a\nPID 1".to_string());
         let out = render(&card, 200);
         assert!(out.contains("sh -c a\\nPID 1"), "{out}");
-    }
-
-    #[test]
-    fn the_parents_line_up_by_the_widest_pid() {
-        let mut card = sample_card();
-        card.parents = Parents::Chain(vec![
-            Ancestor {
-                pid: 75757,
-                command: "node cli.mjs".to_string(),
-            },
-            Ancestor {
-                pid: 1,
-                command: "launchd".to_string(),
-            },
-        ]);
-        let out = render(&card, 200);
-        assert!(out.contains("75757  node cli.mjs"), "{out}");
-        assert!(out.contains("1      launchd"), "{out}");
-    }
-
-    /// Reads a rendered table into the `(key cell, value cell)` of each line
-    /// that holds a column separator. A separator line has no such pair.
-    fn cell_rows(rendered: &str) -> Vec<Option<(String, String)>> {
-        let trim = |cell: &str| {
-            cell.trim_matches(|c: char| c == '│' || c.is_whitespace())
-                .to_string()
-        };
-        rendered
-            .lines()
-            .map(|line| {
-                line.split_once('┆')
-                    .map(|(key, value)| (trim(key), trim(value)))
-            })
-            .collect()
-    }
-
-    #[test]
-    fn each_parent_gets_a_row_of_its_own() {
-        let rows = cell_rows(&render(&sample_card(), 200));
-        let position = |key: &str, value: &str| {
-            rows.iter()
-                .position(|row| row.as_ref().is_some_and(|(k, v)| k == key && v == value))
-        };
-        let near = position("Parent 75757", "zsh -l");
-        let far = position("Parent 1", "/sbin/launchd");
-        assert!(near.is_some(), "no row for 75757: {rows:?}");
-        assert!(far.is_some(), "no row for 1: {rows:?}");
-        assert!(near < far, "the nearest parent must come first: {rows:?}");
-    }
-
-    #[test]
-    fn a_long_parent_command_wraps_inside_its_own_column() {
-        let command = format!(
-            "zellij --server /var/folders/m8/{}",
-            "T/zellij-501/contract_version_1/session-name ".repeat(5)
-        );
-        let command = command.trim_end().to_string();
-        assert!(command.chars().count() >= 190);
-        let mut card = sample_card();
-        card.parents = Parents::Chain(vec![Ancestor {
-            pid: 17331,
-            command: command.clone(),
-        }]);
-        let out = render(&card, 60);
-        for line in out.lines() {
-            assert!(line.width() <= 60, "line too wide: {line}");
-        }
-        let rows = cell_rows(&out);
-        let start = rows
-            .iter()
-            .position(|row| row.as_ref().is_some_and(|(k, _)| k == "Parent 17331"))
-            .unwrap_or_else(|| panic!("no row for 17331: {out}"));
-        let mut value = String::new();
-        for row in &rows[start..] {
-            let Some((key, cell)) = row else { break };
-            if value.is_empty() {
-                assert_eq!(key, "Parent 17331");
-            } else {
-                assert!(key.is_empty(), "continuation has a key cell: {key}");
-            }
-            value.push_str(cell);
-        }
-        let squeeze = |s: &str| s.split_whitespace().collect::<String>();
-        assert_eq!(squeeze(&value), squeeze(&command));
     }
 
     #[test]

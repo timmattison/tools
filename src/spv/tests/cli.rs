@@ -822,7 +822,7 @@ fn one_pid_prints_a_card_with_the_whole_command_the_directory_the_executable_and
         flat.contains("Exe/"),
         "the card shows the executable as an absolute path; stdout: {stdout}"
     );
-    let parent_needle = format!("Parents{}", std::process::id());
+    let parent_needle = format!("Parent{}", std::process::id());
     assert!(
         flat.split(&parent_needle)
             .skip(1)
@@ -887,7 +887,7 @@ fn all_prints_the_card_then_every_section() {
 
     assert!(ok, "spv should succeed; stderr: {stderr}");
     let positions: Vec<Option<usize>> = [
-        "Parents",
+        "Parent ",
         "Open files for",
         "Environment for",
         "Network connections for",
@@ -1033,7 +1033,7 @@ fn more_than_one_pid_and_a_name_still_print_the_table() {
             "spv {args:?} prints the table headers; stdout: {stdout}"
         );
         assert!(
-            !flatten(&stdout).contains("Parents"),
+            !flatten(&stdout).contains("Parent"),
             "spv {args:?} prints no card; stdout: {stdout}"
         );
     }
