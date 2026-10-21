@@ -10,7 +10,7 @@ use std::fmt;
 
 use crate::github::SourceError;
 use crate::status::OwnerProblem;
-use crate::target::{OwnerName, RepoName};
+use crate::target::{OwnerName, RepoName, Target};
 use crate::worker::Update;
 
 /// The first line of the text of [`NoTargetRead`].
@@ -83,11 +83,11 @@ impl FirstCycle {
         let repositories = self
             .failed_repositories
             .into_iter()
-            .map(|(repo, error)| (repo.to_string(), error));
+            .map(|(repo, error)| (Target::Repo(repo), error));
         let owners = self
             .failed_owners
             .into_iter()
-            .map(|(owner, error)| (owner.to_string(), error));
+            .map(|(owner, error)| (Target::Owner(owner), error));
         Err(NoTargetRead {
             failures: repositories.chain(owners).collect(),
         })
@@ -99,9 +99,9 @@ impl FirstCycle {
 /// after the list one time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoTargetRead {
-    /// The name and the error of each failed target. The failed repositories
+    /// Each failed target with its error. The failed repositories
     /// come first, then the failed owners. Each group is sorted by name.
-    failures: Vec<(String, SourceError)>,
+    failures: Vec<(Target, SourceError)>,
 }
 
 impl fmt::Display for NoTargetRead {
