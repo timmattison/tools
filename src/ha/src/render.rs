@@ -488,16 +488,16 @@ fn lead(board: &Board, status: &Status, now: DateTime<Utc>) -> Option<String> {
     if let Some(message) = status.message_at(now) {
         return Some(message.text.clone());
     }
-    let mut errors: Vec<(String, &str)> = board
+    let mut errors: Vec<(String, String)> = board
         .errors()
         .into_iter()
-        .map(|(repo, error)| (repo.to_string(), error))
+        .map(|(repo, error)| (repo.to_string(), error.to_owned()))
         .collect();
     errors.extend(
         status
             .owner_errors
             .iter()
-            .map(|(owner, error)| (owner.to_string(), error.as_str())),
+            .map(|(owner, problem)| (owner.to_string(), problem.to_string())),
     );
     if let Some((name, error)) = errors.first() {
         let more = match errors.len() - 1 {
@@ -997,7 +997,7 @@ mod tests {
 
     use crate::job::{Job, JobId, RunnerName};
     use crate::run::{Run, RunId, RunState};
-    use crate::status::{Message, RateLimit};
+    use crate::status::{Message, OwnerProblem, RateLimit};
     use crate::target::{OwnerName, RepoName};
 
     fn at(text: &str) -> DateTime<Utc> {
@@ -3463,7 +3463,7 @@ mod tests {
         let status = Status {
             owner_errors: vec![(
                 OwnerName::parse("acme").expect("the test owner is valid"),
-                "not found".to_owned(),
+                OwnerProblem::Cut("not found".to_owned()),
             )],
             ..Status::default()
         };

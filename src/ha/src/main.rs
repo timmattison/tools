@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use chrono::{Local, Utc};
 use clap::{CommandFactory, FromArgMatches, Parser};
-use ha::app::{App, TerminalEvents};
+use ha::app::{App, RunError, TerminalEvents};
 use ha::board::Board;
 use ha::browser::BrowserOpener;
 use ha::cancel::GhCanceller;
@@ -121,9 +121,11 @@ fn main() -> ExitCode {
     }
 }
 
-/// Draws the full-screen view until the user quits. The terminal is back
-/// in its normal state when this function returns.
-fn run_view(settings: &Settings, rate: RateLimit, worker: &Worker) -> std::io::Result<()> {
+/// Draws the full-screen view until the user quits, or until the first
+/// refresh cycle reads no target. A cycle that ends with a spent API budget
+/// does not count, and the next cycle decides. The terminal is back in its
+/// normal state when this function returns.
+fn run_view(settings: &Settings, rate: RateLimit, worker: &Worker) -> Result<(), RunError> {
     // `ratatui::init` also installs a panic hook that restores the terminal.
     let mut terminal = ratatui::init();
     let _guard = TerminalGuard;

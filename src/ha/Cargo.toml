@@ -23,6 +23,8 @@ toml.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]
+# Gives the end-to-end test a pseudo-terminal of a size that the test chose.
+gitscratch = { workspace = true, features = ["testing"] }
 shellquote.workspace = true
 tempfile.workspace = true
 

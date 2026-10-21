@@ -129,3 +129,110 @@ fn standard_output_that_is_not_a_terminal_is_refused_before_any_drawing() {
         run.stderr
     );
 }
+
+/// A `gh` stub for the test of a first refresh that reads no target. It answers
+/// the preflight (`rate_limit`) with a good status and the three rate headers.
+/// It answers every other call with a 404 and exit status 1, as `gh api -i`
+/// does.
+#[cfg(unix)]
+const GH_STUB_404: &str = "#!/bin/sh
+for argument in \"$@\"; do
+  if [ \"$argument\" = rate_limit ]; then
+    printf 'HTTP/2.0 200 OK\\r\\n'
+    printf 'X-Ratelimit-Limit: 5000\\r\\n'
+    printf 'X-Ratelimit-Remaining: 4999\\r\\n'
+    printf 'X-Ratelimit-Reset: 4102444800\\r\\n'
+    printf 'Content-Type: application/json\\r\\n'
+    printf '\\r\\n'
+    printf '{}'
+    exit 0
+  fi
+done
+printf 'HTTP/2.0 404 Not Found\\r\\n'
+printf 'Content-Type: application/json\\r\\n'
+printf '\\r\\n'
+printf '{\"message\":\"Not Found\"}'
+exit 1
+";
+
+/// Runs the program that follows it: the first argument is a number of seconds,
+/// and the rest is the command. It sets a kernel alarm, puts standard input and
+/// standard error on the terminal, and replaces itself with the command.
+///
+/// The alarm bounds the child. A broken `ha` never ends by itself, and a child
+/// that a killed `cargo` leaves alive reparents to `launchd` and runs forever.
+/// The alarm survives `exec` and the death of the test, so the kernel stops the
+/// child at the bound.
+///
+/// Standard input goes to the terminal because of `crossterm`. When standard
+/// input is not a terminal, `crossterm` opens `/dev/tty`, and on macOS the
+/// event source cannot poll that device. A real session has standard input on
+/// the terminal, so the test starts `ha` the same way.
+///
+/// Standard error goes to the terminal too. The test can then prove the order:
+/// the error comes after the terminal is restored, the same as a person sees
+/// it.
+#[cfg(unix)]
+const BOUND_ON_THE_TERMINAL: &str = r#"alarm(shift @ARGV); open(STDIN, '<&', \*STDOUT) or die "stdin: $!"; open(STDERR, '>&', \*STDOUT) or die "stderr: $!"; exec { $ARGV[0] } @ARGV or die "exec: $!";"#;
+
+/// The bytes that leave the alternate screen. `ratatui::restore` writes them.
+#[cfg(unix)]
+const LEAVE_ALTERNATE_SCREEN: &str = "\x1b[?1049l";
+
+/// The header of the error of a first refresh that reads no target.
+#[cfg(unix)]
+const NO_TARGET_HEADER: &str = "the first refresh could not read any target";
+
+#[cfg(unix)]
+#[test]
+fn a_first_refresh_that_reads_no_target_exits_1_with_the_error_after_the_terminal_is_restored() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir().expect("a temporary directory");
+    let bin = home.path().join("bin");
+    std::fs::create_dir(&bin).expect("the bin directory is made");
+    let gh = bin.join("gh");
+    std::fs::write(&gh, GH_STUB_404).expect("the gh stub is written");
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755))
+        .expect("the gh stub is executable");
+
+    let mut command = Command::new("perl");
+    command
+        .arg("-e")
+        .arg(BOUND_ON_THE_TERMINAL)
+        .arg("60")
+        .arg(env!("CARGO_BIN_EXE_ha"))
+        .arg("does-not-exist/nope")
+        .env_clear()
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path())
+        .env("TERM", "xterm-256color");
+
+    let output = gitscratch::testing::pty::Pty::open(100).run_with_stdout_on_terminal(command);
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "ha must exit with status 1. A child that the alarm stopped has no exit code. status: {:?}, terminal: {text:?}",
+        output.status
+    );
+    assert!(
+        text.contains(LEAVE_ALTERNATE_SCREEN),
+        "the terminal must be restored. terminal: {text:?}"
+    );
+    let after_restore = text
+        .rsplit_once(LEAVE_ALTERNATE_SCREEN)
+        .map_or("", |(_, tail)| tail);
+    let expected = "ha: the first refresh could not read any target:\n  does-not-exist/nope: GitHub answered 404: Not Found\nGitHub answers 404 for a repository that does not exist, and for a private repository that this gh account cannot read.\nRun gh auth status to see the account.\n";
+    assert!(
+        after_restore.contains(expected),
+        "the full error must follow the restore. terminal: {text:?}"
+    );
+    assert_eq!(
+        text.matches(NO_TARGET_HEADER).count(),
+        1,
+        "the header must occur one time. terminal: {text:?}"
+    );
+}

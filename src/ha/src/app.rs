@@ -11,6 +11,7 @@ use ratatui::Terminal;
 
 use crate::board::Board;
 use crate::cancel::{Canceller, Confirm};
+use crate::first_cycle::{FirstCycle, NoTargetRead, Verdict};
 use crate::render;
 use crate::run::RunId;
 use crate::status::{Message, Status};
@@ -90,6 +91,22 @@ pub struct App<'a, O: Opener, C: Canceller, Tz: TimeZone> {
     /// The box that asks the user to cancel a run. It is `None` when no box
     /// shows.
     confirm: Option<Confirm>,
+    /// The tally of the first refresh cycle. It is `None` after the first
+    /// cycle that gives a verdict. A cycle that ends with a spent API budget
+    /// gives none, and the tally then starts again for the next cycle.
+    first_cycle: Option<FirstCycle>,
+}
+
+/// Why the event loop ended with an error.
+#[derive(Debug, thiserror::Error)]
+pub enum RunError {
+    /// The terminal could not draw or read.
+    #[error(transparent)]
+    Terminal(#[from] std::io::Error),
+    /// The first refresh cycle that did not end with a spent API budget read
+    /// no target.
+    #[error(transparent)]
+    NoTargetRead(#[from] NoTargetRead),
 }
 
 impl<'a, O: Opener, C: Canceller, Tz: TimeZone> App<'a, O, C, Tz>
@@ -118,21 +135,28 @@ where
             tz,
             watched: BTreeSet::new(),
             confirm: None,
+            first_cycle: Some(FirstCycle::default()),
         }
     }
 
-    /// Runs the loop until the user quits.
+    /// Runs the loop until the user quits, or until the first refresh cycle
+    /// reads no target. A cycle that ends with a spent API budget does not
+    /// count, and the next cycle decides. The loop draws no frame after it
+    /// finds that.
     ///
     /// # Errors
-    /// Returns the error of the terminal when it cannot draw or read.
-    pub fn run<B, E>(&mut self, terminal: &mut Terminal<B>, events: &mut E) -> std::io::Result<()>
+    /// Returns [`RunError::Terminal`] when the terminal cannot draw or read.
+    /// Returns [`RunError::NoTargetRead`] when the first refresh cycle ends
+    /// with no good repository fetch, at least one failed target, and an API
+    /// budget that is not spent.
+    pub fn run<B, E>(&mut self, terminal: &mut Terminal<B>, events: &mut E) -> Result<(), RunError>
     where
         B: Backend,
         B::Error: std::error::Error + Send + Sync + 'static,
         E: Events,
     {
         loop {
-            self.apply_updates();
+            self.apply_updates()?;
             self.sync_watch();
             let now = (self.now)();
             terminal
@@ -161,7 +185,13 @@ where
     /// Posts each open that failed late and the result of each cancel, and
     /// applies each update that the worker has sent. A worker that has ended
     /// sends nothing more, and that is not an error.
-    fn apply_updates(&mut self) {
+    ///
+    /// # Errors
+    /// Returns [`NoTargetRead`] when the first refresh cycle ends with no
+    /// good repository fetch, at least one failed target, and an API budget
+    /// that is not spent. When the budget is spent, the tally starts again
+    /// and the next cycle decides.
+    fn apply_updates(&mut self) -> Result<(), NoTargetRead> {
         while let Some(failure) = self.opener.late_failure() {
             self.status.message = Some(failed_open(&failure.url, &failure.reason, (self.now)()));
         }
@@ -180,9 +210,12 @@ where
             }
         }
         while let Ok(update) = self.worker.updates.try_recv() {
+            if let Some(first_cycle) = &mut self.first_cycle {
+                first_cycle.note(&update);
+            }
             match update {
                 Update::Runs { repo, runs } => self.board.replace(repo, runs),
-                Update::Failed { repo, error } => self.board.fail(repo, error),
+                Update::Failed { repo, error } => self.board.fail(repo, error.to_string()),
                 Update::Jobs { run, jobs } => self.board.set_jobs(run, jobs),
                 Update::JobsFailed { run, error } => self.board.fail_jobs(run, error),
                 Update::Repos {
@@ -201,9 +234,15 @@ where
                     self.status.rate = rate;
                     self.status.backoff_until = backoff_until;
                     self.status.refreshing = false;
+                    if let Some(first_cycle) = self.first_cycle.take() {
+                        if first_cycle.verdict(rate)? == Verdict::BudgetSpent {
+                            self.first_cycle = Some(FirstCycle::default());
+                        }
+                    }
                 }
             }
         }
+        Ok(())
     }
 
     /// Tells the worker which expanded runs to watch.
@@ -360,8 +399,9 @@ mod tests {
 
     use super::*;
     use crate::cancel::CancelOutcome;
-    use crate::github::SourceError;
+    use crate::github::{RepoList, SourceError};
     use crate::run::{Run, RunId, RunState};
+    use crate::status::{OwnerProblem, RateLimit};
     use crate::target::{OwnerName, RepoName};
     use crate::worker::{Command, Update};
 
@@ -526,7 +566,7 @@ mod tests {
         opener: &RecordingOpener,
         channels: &Channels,
         events: Vec<Event>,
-    ) -> (std::io::Result<()>, Vec<String>) {
+    ) -> (Result<(), RunError>, Vec<String>) {
         run_app_from(Status::default(), opener, channels, events)
     }
 
@@ -536,7 +576,7 @@ mod tests {
         opener: &RecordingOpener,
         channels: &Channels,
         events: Vec<Event>,
-    ) -> (std::io::Result<()>, Vec<String>) {
+    ) -> (Result<(), RunError>, Vec<String>) {
         run_app_with(status, opener, &canceller(), channels, events)
     }
 
@@ -548,7 +588,7 @@ mod tests {
         canceller: &RecordingCanceller,
         channels: &Channels,
         events: Vec<Event>,
-    ) -> (std::io::Result<()>, Vec<String>) {
+    ) -> (Result<(), RunError>, Vec<String>) {
         let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
         let tz = FixedOffset::east_opt(0).unwrap();
         let clock = now;
@@ -686,7 +726,7 @@ mod tests {
             .updates
             .send(Update::Failed {
                 repo: repo(),
-                error: "boom".to_owned(),
+                error: SourceError::Failed("boom".to_owned()),
             })
             .unwrap();
         let opener = opener(true);
@@ -702,7 +742,7 @@ mod tests {
         assert!(result.is_ok(), "{result:?}");
         let status_line = frame.last().unwrap();
         assert!(
-            status_line.contains("acme/widgets: boom"),
+            status_line.contains("acme/widgets: gh failed: boom"),
             "{status_line:?}"
         );
         assert!(
@@ -752,14 +792,14 @@ mod tests {
             .updates
             .send(Update::Failed {
                 repo: repo(),
-                error: "boom".to_owned(),
+                error: SourceError::Failed("boom".to_owned()),
             })
             .unwrap();
         let (result, frame) = run_app(&opener(false), &channels, quit());
         assert!(result.is_ok(), "{result:?}");
         let status_line = frame.last().unwrap();
         assert!(
-            status_line.contains("acme/widgets: boom"),
+            status_line.contains("acme/widgets: gh failed: boom"),
             "{status_line:?}"
         );
     }
@@ -816,6 +856,396 @@ mod tests {
         assert!(!status_line.contains("refreshing…"), "{status_line:?}");
     }
 
+    fn not_found() -> SourceError {
+        SourceError::Http {
+            status: 404,
+            message: "Not Found".to_owned(),
+        }
+    }
+
+    fn cycle_done() -> Update {
+        Update::CycleDone {
+            finished_at: now(),
+            rate: None,
+            backoff_until: None,
+        }
+    }
+
+    /// The error that GitHub gives when the API budget is spent.
+    fn rate_limited() -> SourceError {
+        SourceError::Http {
+            status: 403,
+            message: "rate limit hit".to_owned(),
+        }
+    }
+
+    /// The end of a cycle that spent the whole API budget.
+    fn cycle_done_with_spent_budget() -> Update {
+        let reset = now() + chrono::Duration::minutes(20);
+        Update::CycleDone {
+            finished_at: now(),
+            rate: Some(RateLimit {
+                limit: 5000,
+                remaining: 0,
+                reset,
+            }),
+            backoff_until: Some(reset),
+        }
+    }
+
+    /// Sends the repositories `acme/a` and `acme/b`, a 403 rate-limit failure
+    /// for each, and the end of a cycle with a spent budget.
+    fn send_first_cycle_with_spent_budget(channels: &Channels) {
+        let a = RepoName::parse("acme/a").unwrap();
+        let b = RepoName::parse("acme/b").unwrap();
+        let updates = [
+            Update::Repos {
+                repos: BTreeSet::from([a.clone(), b.clone()]),
+                owner_errors: vec![],
+            },
+            Update::Failed {
+                repo: a,
+                error: rate_limited(),
+            },
+            Update::Failed {
+                repo: b,
+                error: rate_limited(),
+            },
+            cycle_done_with_spent_budget(),
+        ];
+        for update in updates {
+            channels.updates.send(update).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_first_cycle_that_ends_with_a_spent_budget_keeps_the_view() {
+        let channels = channels();
+        send_first_cycle_with_spent_budget(&channels);
+        let (result, frame) = run_app(&opener(false), &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        let status_line = frame.last().unwrap();
+        assert!(
+            status_line.contains("API low 0/5000, next refresh"),
+            "{status_line:?}"
+        );
+    }
+
+    #[test]
+    fn after_a_spent_budget_the_next_cycle_gives_the_verdict() {
+        let channels = channels();
+        send_first_cycle_with_spent_budget(&channels);
+        let updates = [
+            Update::Failed {
+                repo: RepoName::parse("acme/a").unwrap(),
+                error: not_found(),
+            },
+            Update::Failed {
+                repo: RepoName::parse("acme/b").unwrap(),
+                error: not_found(),
+            },
+            cycle_done(),
+        ];
+        for update in updates {
+            channels.updates.send(update).unwrap();
+        }
+        let (result, _) = run_app(&opener(false), &channels, vec![]);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "the first refresh could not read any target:\n  \
+             acme/a: GitHub answered 404: Not Found\n  \
+             acme/b: GitHub answered 404: Not Found\n\
+             GitHub answers 404 for a repository that does not exist, and for a private \
+             repository that this gh account cannot read.\n\
+             Run gh auth status to see the account."
+        );
+    }
+
+    #[test]
+    fn after_a_spent_budget_a_good_fetch_keeps_the_view() {
+        let channels = channels();
+        send_first_cycle_with_spent_budget(&channels);
+        let a = RepoName::parse("acme/a").unwrap();
+        let b = RepoName::parse("acme/b").unwrap();
+        let updates = [
+            Update::Runs {
+                repo: a.clone(),
+                runs: vec![],
+            },
+            Update::Failed {
+                repo: b.clone(),
+                error: not_found(),
+            },
+            cycle_done(),
+            Update::Failed {
+                repo: a,
+                error: not_found(),
+            },
+            Update::Failed {
+                repo: b,
+                error: not_found(),
+            },
+            cycle_done(),
+        ];
+        for update in updates {
+            channels.updates.send(update).unwrap();
+        }
+        let (result, _) = run_app(&opener(false), &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn a_first_cycle_with_one_good_fetch_of_zero_runs_keeps_the_view() {
+        let channels = channels();
+        let a = RepoName::parse("acme/a").unwrap();
+        let b = RepoName::parse("acme/b").unwrap();
+        let updates = [
+            Update::Repos {
+                repos: BTreeSet::from([a.clone(), b.clone()]),
+                owner_errors: vec![],
+            },
+            Update::Runs {
+                repo: a,
+                runs: vec![],
+            },
+            Update::Failed {
+                repo: b,
+                error: not_found(),
+            },
+            cycle_done(),
+        ];
+        for update in updates {
+            channels.updates.send(update).unwrap();
+        }
+        let (result, frame) = run_app(&opener(false), &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        let status_line = frame.last().unwrap();
+        assert!(
+            status_line.contains("acme/b: GitHub answered 404: Not Found"),
+            "{status_line:?}"
+        );
+    }
+
+    #[test]
+    fn a_later_cycle_in_which_every_fetch_fails_keeps_the_view_and_the_last_runs() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        channels.updates.send(cycle_done()).unwrap();
+        let (frame, _) = run_steps(
+            &channels,
+            vec![
+                Step::Idle,
+                Step::Send(Update::Failed {
+                    repo: repo(),
+                    error: not_found(),
+                }),
+                Step::Send(cycle_done()),
+                Step::Idle,
+                key(KeyCode::Char('q')),
+            ],
+        );
+        assert!(frame.iter().any(|line| line.contains("run 1")), "{frame:?}");
+        let status_line = frame.last().unwrap();
+        assert!(
+            status_line.contains("acme/widgets: GitHub answered 404: Not Found"),
+            "{status_line:?}"
+        );
+    }
+
+    #[test]
+    fn a_first_cycle_that_reads_no_repository_ends_the_view_with_each_error() {
+        let channels = channels();
+        let a = RepoName::parse("acme/a").unwrap();
+        let b = RepoName::parse("acme/b").unwrap();
+        let updates = [
+            Update::Repos {
+                repos: BTreeSet::from([a.clone(), b.clone()]),
+                owner_errors: vec![],
+            },
+            Update::Failed {
+                repo: b,
+                error: SourceError::TimedOut(Duration::from_secs(30)),
+            },
+            Update::Failed {
+                repo: a,
+                error: SourceError::Http {
+                    status: 403,
+                    message: "Resource not accessible by integration".to_owned(),
+                },
+            },
+            Update::CycleDone {
+                finished_at: now(),
+                rate: None,
+                backoff_until: None,
+            },
+        ];
+        for update in updates {
+            channels.updates.send(update).unwrap();
+        }
+        let (result, _) = run_app(&opener(false), &channels, vec![]);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "the first refresh could not read any target:\n  \
+             acme/a: GitHub answered 403: Resource not accessible by integration\n  \
+             acme/b: gh did not finish within 30s"
+        );
+    }
+
+    #[test]
+    fn a_404_adds_one_hint_about_a_wrong_name_or_a_private_repository() {
+        let channels = channels();
+        let a = RepoName::parse("acme/a").unwrap();
+        let b = RepoName::parse("acme/b").unwrap();
+        let c = RepoName::parse("acme/c").unwrap();
+        let updates = [
+            Update::Repos {
+                repos: BTreeSet::from([a.clone(), b.clone(), c.clone()]),
+                owner_errors: vec![],
+            },
+            Update::Failed {
+                repo: a,
+                error: not_found(),
+            },
+            Update::Failed {
+                repo: b,
+                error: not_found(),
+            },
+            Update::Failed {
+                repo: c,
+                error: SourceError::TimedOut(Duration::from_secs(30)),
+            },
+            cycle_done(),
+        ];
+        for update in updates {
+            channels.updates.send(update).unwrap();
+        }
+        let (result, _) = run_app(&opener(false), &channels, vec![]);
+        // Two failures are a 404, and the hint shows one time.
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "the first refresh could not read any target:\n  \
+             acme/a: GitHub answered 404: Not Found\n  \
+             acme/b: GitHub answered 404: Not Found\n  \
+             acme/c: gh did not finish within 30s\n\
+             GitHub answers 404 for a repository that does not exist, and for a private \
+             repository that this gh account cannot read.\n\
+             Run gh auth status to see the account."
+        );
+    }
+
+    #[test]
+    fn a_first_cycle_whose_only_owner_fails_to_list_ends_the_view() {
+        let channels = channels();
+        let message = "GraphQL: Could not resolve to a User with the login of 'acme'.";
+        let updates = [
+            Update::Repos {
+                repos: BTreeSet::new(),
+                owner_errors: vec![(
+                    OwnerName::parse("acme").unwrap(),
+                    OwnerProblem::Failed(SourceError::Failed(message.to_owned())),
+                )],
+            },
+            cycle_done(),
+        ];
+        for update in updates {
+            channels.updates.send(update).unwrap();
+        }
+        let (result, _) = run_app(&opener(false), &channels, vec![]);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "the first refresh could not read any target:\n  \
+             acme: gh failed: GraphQL: Could not resolve to a User with the login of 'acme'."
+        );
+    }
+
+    #[test]
+    fn an_owner_with_an_empty_list_and_no_other_target_keeps_the_view() {
+        let channels = channels();
+        let updates = [
+            Update::Repos {
+                repos: BTreeSet::new(),
+                owner_errors: vec![],
+            },
+            cycle_done(),
+        ];
+        for update in updates {
+            channels.updates.send(update).unwrap();
+        }
+        let (result, frame) = run_app(&opener(false), &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            frame.contains(&"   No runs in progress or in the queue.".to_owned()),
+            "{frame:?}"
+        );
+        assert!(
+            frame.contains(&"   No runs finished in the last 8h.".to_owned()),
+            "{frame:?}"
+        );
+    }
+
+    #[test]
+    fn a_cut_owner_list_is_not_called_a_failure() {
+        let channels = channels();
+        let a = RepoName::parse("acme/a").unwrap();
+        let cut = RepoList {
+            repos: vec![],
+            cut: true,
+        };
+        let updates = [
+            Update::Repos {
+                repos: BTreeSet::from([a.clone()]),
+                owner_errors: vec![(
+                    OwnerName::parse("acme").unwrap(),
+                    OwnerProblem::Cut(cut.warning().unwrap()),
+                )],
+            },
+            Update::Failed {
+                repo: a,
+                error: SourceError::TimedOut(Duration::from_secs(30)),
+            },
+            cycle_done(),
+        ];
+        for update in updates {
+            channels.updates.send(update).unwrap();
+        }
+        let (result, _) = run_app(&opener(false), &channels, vec![]);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "the first refresh could not read any target:\n  \
+             acme/a: gh did not finish within 30s"
+        );
+    }
+
+    #[test]
+    fn a_failed_owner_and_one_good_fetch_keep_the_view() {
+        let channels = channels();
+        let x = RepoName::parse("other/x").unwrap();
+        let updates = [
+            Update::Repos {
+                repos: BTreeSet::from([x.clone()]),
+                owner_errors: vec![(
+                    OwnerName::parse("acme").unwrap(),
+                    OwnerProblem::Failed(SourceError::Failed("boom".to_owned())),
+                )],
+            },
+            Update::Runs {
+                repo: x,
+                runs: vec![],
+            },
+            cycle_done(),
+        ];
+        for update in updates {
+            channels.updates.send(update).unwrap();
+        }
+        let (result, frame) = run_app(&opener(false), &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        let status_line = frame.last().unwrap();
+        assert!(
+            status_line.contains("acme: gh failed: boom"),
+            "{status_line:?}"
+        );
+    }
+
     #[test]
     fn a_repository_list_without_a_repository_removes_its_runs() {
         let channels = channels();
@@ -844,7 +1274,7 @@ mod tests {
                 repos: std::collections::BTreeSet::new(),
                 owner_errors: vec![(
                     OwnerName::parse("acme").unwrap(),
-                    "no such owner".to_owned(),
+                    OwnerProblem::Cut("no such owner".to_owned()),
                 )],
             })
             .unwrap();
@@ -1433,7 +1863,9 @@ mod tests {
 
     /// Runs the keys `c` and then `other` on a board of two runs, and returns
     /// the result, the last frame, the cancels, and the addresses opened.
-    fn answer_the_box_with(other: Event) -> (std::io::Result<()>, Vec<String>, usize, Vec<String>) {
+    fn answer_the_box_with(
+        other: Event,
+    ) -> (Result<(), RunError>, Vec<String>, usize, Vec<String>) {
         let channels = channels();
         send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
         let canceller = canceller();

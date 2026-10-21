@@ -2198,9 +2198,19 @@ cannot hang the caller. Used by `cwt` and `ha`.
     shows the remaining budget. When less than 10% remains, `ha` waits until the reset of the budget and says so.
   - A failure for one repository shows in the status line, and the board keeps the last good runs
     of that repository.
+  - When the first refresh can read no target, `ha` does not show an empty board. It restores the
+    terminal, names each repository and each owner that failed with its error, and stops with exit
+    status 1. A repository whose fetch succeeds with no runs is a target that `ha` read. An owner
+    list that GitHub cut at the limit is a warning, not a failure. When one of the errors is a
+    404, `ha` adds a hint: GitHub answers 404 for a repository that does not exist, and also for a
+    private repository that this `gh` account cannot read. `gh auth status` shows the account. A
+    later refresh in which each request fails does not stop `ha`, because the board keeps the
+    last good runs. When the first refresh ends with no request left in the API budget, each
+    failure can be the spent budget. Then `ha` keeps the view and waits for the reset, and the
+    first refresh after the reset decides.
   - `ha` needs a terminal. When its standard output is not a terminal, it stops with exit
-    status 2. Exit status: 0 success, 1 a failure of `gh` or of the terminal, 2 a usage or
-    configuration error.
+    status 2. Exit status: 0 success, 1 a failure of `gh` or of the terminal, or a first refresh
+    that read no target, 2 a usage or configuration error.
   - The Home Assistant CLI also installs a binary named `ha`. When you have both tools, the one
     that comes first on `PATH` runs.
   - To install: `cargo install --git https://github.com/timmattison/tools ha`
