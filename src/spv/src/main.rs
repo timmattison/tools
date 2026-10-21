@@ -196,6 +196,8 @@ struct ProcessInfo {
     status: String,
     command: String,
     cwd: Option<String>,
+    /// Start time in seconds since the Unix epoch. It is 0 when no source gave one.
+    start_time: u64,
 }
 
 /// Information about an open file from lsof.
@@ -386,13 +388,16 @@ impl Viewer {
 ///
 /// The sysinfo crate uses proc_pidinfo() which requires elevated privileges to
 /// get info for other users' processes. On macOS, sysctl(KERN_PROC_ALL) provides
-/// basic process info (including UID and status) to all users without root.
-/// This struct stores that fallback information.
+/// basic process info (including UID, status, and start time) to all users
+/// without root. This struct stores that fallback information.
 #[cfg(target_os = "macos")]
 #[derive(Debug, Clone)]
 struct SysctlProcessInfo {
     uid: u32,
     status: u8,
+    /// Start time in seconds since the Unix epoch. It is 0 when the kernel gave
+    /// none or a value that is not positive.
+    start_time: u64,
 }
 
 // Constants for kinfo_proc struct layout on macOS (arm64/x86_64).
@@ -404,6 +409,9 @@ mod kinfo_proc_layout {
     pub const SIZE: usize = 648;
     /// Offset of kp_proc.p_pid (i32)
     pub const OFFSET_PID: usize = 40;
+    /// Offset of kp_proc.p_un.__p_starttime.tv_sec (i64 on 64-bit macOS).
+    /// `p_starttime` is a `#define` for that union member in `sys/proc.h`.
+    pub const OFFSET_START_SEC: usize = 0;
     /// Offset of kp_proc.p_stat (i8)
     pub const OFFSET_STAT: usize = 36;
     /// Offset of kp_eproc.e_ucred.cr_uid (u32)
@@ -412,7 +420,7 @@ mod kinfo_proc_layout {
 
 /// Gets process info for all processes using sysctl(KERN_PROC_ALL).
 ///
-/// This provides UID and status for all processes without root privileges,
+/// This provides UID, status, and start time for all processes without root privileges,
 /// unlike proc_pidinfo which requires elevated privileges for other users' processes.
 ///
 /// # Returns
@@ -420,7 +428,7 @@ mod kinfo_proc_layout {
 /// A HashMap mapping PID to process info, or None if the sysctl call fails.
 #[cfg(target_os = "macos")]
 fn get_all_process_info_via_sysctl() -> Option<HashMap<u32, SysctlProcessInfo>> {
-    use kinfo_proc_layout::{OFFSET_PID, OFFSET_STAT, OFFSET_UID, SIZE};
+    use kinfo_proc_layout::{OFFSET_PID, OFFSET_START_SEC, OFFSET_STAT, OFFSET_UID, SIZE};
 
     // SAFETY: sysctl is a standard BSD system call. We first query the size needed,
     // allocate a buffer, then retrieve the data. We read values at known offsets
@@ -496,12 +504,28 @@ fn get_all_process_info_via_sysctl() -> Option<HashMap<u32, SysctlProcessInfo>> 
                 };
                 let uid = u32::from_ne_bytes(uid_bytes);
 
+                // Read the start time at offset (i64 seconds, native endian).
+                // A value that is not positive means the kernel gave none.
+                let Ok(start_bytes): Result<[u8; 8], _> =
+                    buffer[base + OFFSET_START_SEC..base + OFFSET_START_SEC + 8].try_into()
+                else {
+                    continue;
+                };
+                let start_time = u64::try_from(i64::from_ne_bytes(start_bytes)).unwrap_or(0);
+
                 #[expect(
                     clippy::cast_sign_loss,
                     reason = "PIDs are always non-negative, checked above"
                 )]
                 let pid_u32 = pid as u32;
-                map.insert(pid_u32, SysctlProcessInfo { uid, status });
+                map.insert(
+                    pid_u32,
+                    SysctlProcessInfo {
+                        uid,
+                        status,
+                        start_time,
+                    },
+                );
             }
         }
 
@@ -665,6 +689,22 @@ fn collect_processes(
                 }
             };
 
+            let start_time = match process.start_time() {
+                // sysinfo gives 0 for the process of another user on macOS.
+                // The kernel gives the start time to every user through sysctl.
+                0 => {
+                    #[cfg(target_os = "macos")]
+                    {
+                        sysctl_info.get(&pid_u32).map_or(0, |info| info.start_time)
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        0
+                    }
+                }
+                seconds => seconds,
+            };
+
             let cwd = if include_cwd {
                 process.cwd().map(|p| p.to_string_lossy().to_string())
             } else {
@@ -680,6 +720,7 @@ fn collect_processes(
                 status,
                 command,
                 cwd,
+                start_time,
             });
         }
     }
@@ -1638,8 +1679,9 @@ fn format_memory(bytes: u64) -> String {
 
 /// Builds the detail card of one process.
 ///
-/// The card reads the executable, the start time, and the ancestors from the
-/// snapshot that `main` took. The chain of ancestors comes from `proctree`
+/// The card reads the executable and the ancestors from the snapshot that
+/// `main` took. The start time comes from the facts of `collect_processes`:
+/// sysinfo, else sysctl on macOS. The chain of ancestors comes from `proctree`
 /// alone. The snapshot gives only the command line of each ancestor. A value
 /// that the kernel withholds shows the reason: a zombie, sudo, or unknown.
 ///
@@ -1661,6 +1703,12 @@ fn collect_card(
 ) -> card::ProcessCard {
     let process = system.process(sysinfo::Pid::from_u32(info.pid));
     let reason = card::UnreadReason::choose(info.status == ZOMBIE_STATUS, viewer.can_refuse(info));
+    // The elapsed time is the clock now minus the start time. A clock before
+    // the start time gives 0.
+    let now_seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let run_seconds = now_seconds.saturating_sub(info.start_time);
 
     let parents = match tree {
         None => card::Parents::Unread(PARENTS_PS_DID_NOT_RUN.to_string()),
@@ -1692,7 +1740,7 @@ fn collect_card(
         cpu_usage: info.cpu_usage,
         memory: info.memory,
         started: card::Fact::from_value(
-            process.and_then(|p| card::started(p.start_time(), p.run_time(), &chrono::Local)),
+            card::started(info.start_time, run_seconds, &chrono::Local),
             reason,
         ),
         exe: card::Fact::from_value(
@@ -2332,6 +2380,7 @@ mod tests {
             status: "Sleep".to_string(),
             command: "tool".to_string(),
             cwd: None,
+            start_time: 0,
         }
     }
 

@@ -940,11 +940,10 @@ fn the_card_of_a_root_process_shows_its_start_time_without_sudo() {
     let (ok, stdout, stderr) = run(spv().args(["--raw", "1"]).output().expect("spv runs"));
 
     assert!(ok, "spv should succeed; stderr: {stderr}");
-    let line = stdout
+    let (line, value) = stdout
         .lines()
-        .find(|line| line.starts_with("started: "))
+        .find_map(|line| line.strip_prefix("started: ").map(|value| (line, value)))
         .unwrap_or_else(|| panic!("the card has a started row; stdout: {stdout}"));
-    let value = &line["started: ".len()..];
     assert!(
         value.chars().next().is_some_and(|c| c.is_ascii_digit()),
         "the started row shows a time and not a reason; stdout: {stdout}"
