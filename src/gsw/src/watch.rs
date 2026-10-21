@@ -12740,6 +12740,69 @@ mod push_loop_tests {
     }
 
     #[test]
+    fn a_message_that_takes_the_row_from_the_hint_takes_the_arming_of_esc_too() {
+        // The hint is the armed state. The name is red and `alpha` is on the
+        // start branch, so a second press would move the watch there. Each
+        // message below takes the row from the hint in normal mode, with no
+        // key. The next Esc then finds no hint, so it is a first press: it
+        // moves nowhere, and the hint stands on the row again. The Esc after
+        // that one finds the new hint, and it goes back.
+        let messages: [(&str, fn() -> Vec<Event>); 3] = [
+            // post_progress: a measurement starts.
+            ("ConflictsStarted", || vec![started_against_main()]),
+            // post_notice: a measurement ends.
+            ("ConflictsFinished", || {
+                vec![started_against_main(), finished(measured_clean())]
+            }),
+            // post_error: the command of `G` fails.
+            ("IssueFinished", || {
+                vec![issue_failed_in(Generation::default())]
+            }),
+        ];
+        for (name, between) in messages {
+            let run = |third_esc: bool| {
+                let mut bursts = vec![vec![press_m()], vec![key(KeyCode::Esc)], between()];
+                bursts.push(vec![key(KeyCode::Esc)]);
+                if third_esc {
+                    bursts.push(vec![key(KeyCode::Esc)]);
+                }
+                bursts.push(vec![Event::Quit]);
+                let base = Instant::now();
+                drive_bursts(
+                    bursts,
+                    returning(World::three().on_start_branch(ALPHA)),
+                    move || base,
+                )
+            };
+
+            let (screen, seen) = run(false);
+            assert!(
+                seen.switches.is_empty(),
+                "{name}: the Esc after the message must be a first press, got {:?}",
+                seen.switches,
+            );
+            assert!(
+                seen.returns.is_empty(),
+                "{name}: the Esc after the message must start no git command, got {:?}",
+                seen.returns,
+            );
+            assert_eq!(
+                strip_ansi(&screen),
+                hint_under(BRAVO),
+                "{name}: the hint must stand on the row again",
+            );
+
+            let (screen, seen) = run(true);
+            assert_eq!(
+                seen.switches,
+                vec![worktree(ALPHA)],
+                "{name}: the Esc after the new hint must go back",
+            );
+            assert_eq!(strip_ansi(&screen), format!("FRAME {ALPHA}"));
+        }
+    }
+
+    #[test]
     fn a_hint_that_lived_its_lifetime_is_off_the_row_and_the_next_esc_is_a_first_press() {
         // The hint leaves the row `RETURN_HINT_LIFETIME` after it came, and
         // the arming leaves with it, at the same instant. The render hook
