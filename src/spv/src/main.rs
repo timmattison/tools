@@ -26,6 +26,14 @@ mod card;
 /// to the same word. One constant names both.
 const ZOMBIE_STATUS: &str = "Zombie";
 
+/// Whether the kernel withholds the task info of another user's process.
+///
+/// macOS refuses `proc_pidinfo(PROC_PIDTASKINFO)` for such a process, and
+/// `sysinfo` then gives 0 for the memory and the CPU. Linux gives
+/// `/proc/<pid>/statm` to every user, and a kernel thread really holds 0 bytes.
+/// On Linux a 0 is thus a value, and the rule stays off.
+const KERNEL_WITHHOLDS_TASK_INFO: bool = cfg!(target_os = "macos");
+
 /// Why the card shows no parents when `ps` did not run.
 const PARENTS_PS_DID_NOT_RUN: &str = "ps did not run";
 
@@ -1703,6 +1711,7 @@ fn collect_card(
 ) -> card::ProcessCard {
     let process = system.process(sysinfo::Pid::from_u32(info.pid));
     let reason = card::UnreadReason::choose(info.status == ZOMBIE_STATUS, viewer.can_refuse(info));
+    let withheld = (KERNEL_WITHHOLDS_TASK_INFO && viewer.can_refuse(info)).then_some(reason);
     // The elapsed time is the clock now minus the start time. A clock before
     // the start time gives 0.
     let now_seconds = std::time::SystemTime::now()
@@ -1737,8 +1746,7 @@ fn collect_card(
         name: info.name.clone(),
         user: info.user.clone(),
         status: info.status.clone(),
-        cpu_usage: info.cpu_usage,
-        memory: info.memory,
+        usage: card::Usage::from_snapshot(info.cpu_usage, info.memory, withheld),
         started: card::Fact::from_value(
             card::started(info.start_time, run_seconds, &chrono::Local),
             reason,

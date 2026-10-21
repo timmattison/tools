@@ -128,6 +128,61 @@ impl Fact {
     }
 }
 
+/// The CPU and memory use of the process, or why the kernel withheld them.
+///
+/// One read of the task info gives both values, so the kernel withholds both or neither.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Usage {
+    /// The values were read.
+    Known {
+        /// The CPU use, in percent.
+        cpu_usage: f32,
+        /// The memory use, in bytes.
+        memory: u64,
+    },
+    /// The values were not read, for the stated reason.
+    Unread(UnreadReason),
+}
+
+impl Usage {
+    /// Makes the usage from the values that `sysinfo` gave.
+    ///
+    /// The rule rests on the memory alone. A live process always holds memory,
+    /// but 0.0% CPU is a normal value.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_usage` - The CPU use, in percent, as `sysinfo` gave it
+    /// * `memory` - The memory use, in bytes, as `sysinfo` gave it
+    /// * `withheld` - The reason to use when a 0 means the kernel withheld the
+    ///   values, or `None` when a 0 is a real value
+    ///
+    /// # Returns
+    ///
+    /// `Unread(reason)` when `memory` is 0 and `withheld` is `Some(reason)`,
+    /// otherwise `Known` with both values.
+    pub(crate) fn from_snapshot(
+        cpu_usage: f32,
+        memory: u64,
+        withheld: Option<UnreadReason>,
+    ) -> Self {
+        match withheld {
+            Some(reason) if memory == 0 => Self::Unread(reason),
+            _ => Self::Known { cpu_usage, memory },
+        }
+    }
+
+    /// The text of the CPU row and the text of the memory row.
+    fn texts(&self) -> (String, String) {
+        match self {
+            Self::Known { cpu_usage, memory } => {
+                (format!("{cpu_usage:.1}%"), super::format_memory(*memory))
+            }
+            Self::Unread(reason) => (reason.text().to_string(), reason.text().to_string()),
+        }
+    }
+}
+
 /// One process above the process of the card.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Ancestor {
@@ -156,10 +211,8 @@ pub(crate) struct ProcessCard {
     pub(crate) user: String,
     /// The status of the process, for example `Run` or `Sleep`.
     pub(crate) status: String,
-    /// The CPU use, in percent.
-    pub(crate) cpu_usage: f32,
-    /// The memory use, in bytes.
-    pub(crate) memory: u64,
+    /// The CPU and memory use.
+    pub(crate) usage: Usage,
     /// The start time with the elapsed time.
     pub(crate) started: Fact,
     /// The path of the executable.
@@ -227,13 +280,14 @@ impl ProcessCard {
     ///
     /// The key and the text of each row, without the parents.
     fn facts(&self) -> Vec<(&'static str, String)> {
+        let (cpu, memory) = self.usage.texts();
         vec![
             (KEY_PID, self.pid.to_string()),
             (KEY_NAME, self.name.clone()),
             (KEY_USER, self.user.clone()),
             (KEY_STATUS, self.status.clone()),
-            (KEY_CPU, format!("{:.1}%", self.cpu_usage)),
-            (KEY_MEMORY, super::format_memory(self.memory)),
+            (KEY_CPU, cpu),
+            (KEY_MEMORY, memory),
             (KEY_STARTED, self.started.text().to_string()),
             (KEY_EXE, self.exe.text().to_string()),
             (KEY_CWD, self.cwd.text().to_string()),
@@ -391,8 +445,10 @@ mod tests {
             name: "node".to_string(),
             user: "tim".to_string(),
             status: "Run".to_string(),
-            cpu_usage: 0.0,
-            memory: 41_523_200,
+            usage: Usage::Known {
+                cpu_usage: 0.0,
+                memory: 41_523_200,
+            },
             started: Fact::Known("2026-10-20 13:24:50 (9m 23s ago)".to_string()),
             exe: Fact::Known("/usr/local/bin/node".to_string()),
             cwd: Fact::Known("/x".to_string()),
@@ -574,6 +630,53 @@ mod tests {
     fn a_zombie_row_says_it_cannot_be_read() {
         let raw = card_with_reason(UnreadReason::Zombie).raw_lines();
         for key in ["exe", "cwd", "command"] {
+            assert!(
+                raw.contains(&format!("{key}: (cannot be read: the process is a zombie)")),
+                "{key}"
+            );
+        }
+    }
+
+    /// The raw lines of a card with the given usage.
+    fn raw_with_usage(usage: Usage) -> Vec<String> {
+        let mut card = sample_card();
+        card.usage = usage;
+        card.raw_lines()
+    }
+
+    #[test]
+    fn withheld_task_info_says_needs_sudo_for_cpu_and_memory() {
+        let usage = Usage::from_snapshot(0.0, 0, Some(UnreadReason::NeedsSudo));
+        let raw = raw_with_usage(usage);
+        assert!(raw.contains(&"cpu: (needs sudo)".to_string()), "{raw:?}");
+        assert!(raw.contains(&"memory: (needs sudo)".to_string()), "{raw:?}");
+    }
+
+    #[test]
+    fn a_zero_is_a_value_when_the_kernel_withholds_nothing() {
+        let raw = raw_with_usage(Usage::from_snapshot(0.0, 0, None));
+        assert!(raw.contains(&"cpu: 0.0%".to_string()), "{raw:?}");
+        let memory = format!("memory: {}", super::super::format_memory(0));
+        assert!(raw.contains(&memory), "{raw:?}");
+    }
+
+    #[test]
+    fn memory_that_is_not_zero_means_the_read_worked() {
+        let usage = Usage::from_snapshot(1.5, 4096, Some(UnreadReason::NeedsSudo));
+        assert_eq!(
+            usage,
+            Usage::Known {
+                cpu_usage: 1.5,
+                memory: 4096
+            }
+        );
+    }
+
+    #[test]
+    fn a_zombie_says_it_cannot_be_read_for_cpu_and_memory() {
+        let usage = Usage::from_snapshot(0.0, 0, Some(UnreadReason::Zombie));
+        let raw = raw_with_usage(usage);
+        for key in ["cpu", "memory"] {
             assert!(
                 raw.contains(&format!("{key}: (cannot be read: the process is a zombie)")),
                 "{key}"
