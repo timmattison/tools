@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
+use crate::github::SourceError;
 use crate::target::OwnerName;
 
 /// The core rate limit of the GitHub API, as the last response stated it.
@@ -42,6 +43,27 @@ pub struct Message {
     pub posted_at: DateTime<Utc>,
 }
 
+/// Why the repository list of one owner is not whole.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnerProblem {
+    /// The list failed. The owner keeps its last good list, when it has one.
+    Failed(SourceError),
+    /// GitHub has more repositories for the owner than `ha` watches. The text
+    /// says so. A cut list is a warning, not a failure.
+    Cut(String),
+}
+
+impl std::fmt::Display for OwnerProblem {
+    /// Writes the text that the status line shows: the error of a failed list,
+    /// or the warning of a cut list.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failed(error) => write!(f, "{error}"),
+            Self::Cut(text) => f.write_str(text),
+        }
+    }
+}
+
 /// The state that the status line shows.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Status {
@@ -53,9 +75,9 @@ pub struct Status {
     pub rate: Option<RateLimit>,
     /// When the worker stops to slow down. `Some` while it slows down.
     pub backoff_until: Option<DateTime<Utc>>,
-    /// The owners whose repository list failed or was cut, with the text to show
-    /// for each: the error of a failed list, or the warning of a cut list.
-    pub owner_errors: Vec<(OwnerName, String)>,
+    /// The owners whose repository list failed or was cut, with the problem of
+    /// each. The status line shows the text of the problem.
+    pub owner_errors: Vec<(OwnerName, OwnerProblem)>,
     /// A one-off message, for example the address after a failed open. It
     /// fades out over [`MESSAGE_LIFETIME`], then leaves. A key press removes
     /// it sooner. Read it with [`Status::message_at`].

@@ -182,7 +182,7 @@ where
         while let Ok(update) = self.worker.updates.try_recv() {
             match update {
                 Update::Runs { repo, runs } => self.board.replace(repo, runs),
-                Update::Failed { repo, error } => self.board.fail(repo, error),
+                Update::Failed { repo, error } => self.board.fail(repo, error.to_string()),
                 Update::Jobs { run, jobs } => self.board.set_jobs(run, jobs),
                 Update::JobsFailed { run, error } => self.board.fail_jobs(run, error),
                 Update::Repos {
@@ -362,6 +362,7 @@ mod tests {
     use crate::cancel::CancelOutcome;
     use crate::github::SourceError;
     use crate::run::{Run, RunId, RunState};
+    use crate::status::OwnerProblem;
     use crate::target::{OwnerName, RepoName};
     use crate::worker::{Command, Update};
 
@@ -686,7 +687,7 @@ mod tests {
             .updates
             .send(Update::Failed {
                 repo: repo(),
-                error: "boom".to_owned(),
+                error: SourceError::Failed("boom".to_owned()),
             })
             .unwrap();
         let opener = opener(true);
@@ -702,7 +703,7 @@ mod tests {
         assert!(result.is_ok(), "{result:?}");
         let status_line = frame.last().unwrap();
         assert!(
-            status_line.contains("acme/widgets: boom"),
+            status_line.contains("acme/widgets: gh failed: boom"),
             "{status_line:?}"
         );
         assert!(
@@ -752,14 +753,14 @@ mod tests {
             .updates
             .send(Update::Failed {
                 repo: repo(),
-                error: "boom".to_owned(),
+                error: SourceError::Failed("boom".to_owned()),
             })
             .unwrap();
         let (result, frame) = run_app(&opener(false), &channels, quit());
         assert!(result.is_ok(), "{result:?}");
         let status_line = frame.last().unwrap();
         assert!(
-            status_line.contains("acme/widgets: boom"),
+            status_line.contains("acme/widgets: gh failed: boom"),
             "{status_line:?}"
         );
     }
@@ -844,7 +845,7 @@ mod tests {
                 repos: std::collections::BTreeSet::new(),
                 owner_errors: vec![(
                     OwnerName::parse("acme").unwrap(),
-                    "no such owner".to_owned(),
+                    OwnerProblem::Cut("no such owner".to_owned()),
                 )],
             })
             .unwrap();

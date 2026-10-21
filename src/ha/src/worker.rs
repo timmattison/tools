@@ -32,7 +32,7 @@ use crate::github::{RunQuery, Source, SourceError};
 use crate::job::Job;
 use crate::run::{Run, RunId};
 use crate::settings::Settings;
-use crate::status::RateLimit;
+use crate::status::{OwnerProblem, RateLimit};
 use crate::target::{OwnerName, RepoName, Target};
 
 /// How many repositories the worker fetches at the same time.
@@ -50,8 +50,8 @@ pub enum Update {
     Repos {
         /// Every repository to watch, without duplicates.
         repos: BTreeSet<RepoName>,
-        /// The owners whose list failed or was cut, with the text to show.
-        owner_errors: Vec<(OwnerName, String)>,
+        /// The owners whose list failed or was cut, with the problem of each.
+        owner_errors: Vec<(OwnerName, OwnerProblem)>,
     },
     /// The runs of one repository.
     Runs {
@@ -64,8 +64,8 @@ pub enum Update {
     Failed {
         /// The repository that failed.
         repo: RepoName,
-        /// The error text.
-        error: String,
+        /// The error of the fetch.
+        error: SourceError,
     },
     /// The jobs of one run. The worker sends them for a run that the screen
     /// shows expanded and for every active run.
@@ -202,8 +202,8 @@ impl RunFacts {
 struct State {
     owner_cadence: Cadence,
     owner_lists: BTreeMap<OwnerName, Vec<RepoName>>,
-    /// The text to show for each owner whose last list failed or was cut.
-    owner_errors: BTreeMap<OwnerName, String>,
+    /// The problem of each owner whose last list failed or was cut.
+    owner_errors: BTreeMap<OwnerName, OwnerProblem>,
     sweep_cadence: Cadence,
     /// The active runs of the last good sweep, for each repository.
     sweeps: Mutex<HashMap<RepoName, Vec<Run>>>,
@@ -511,7 +511,7 @@ fn fetch_all<S: Source>(
             }
             Err(error) => Update::Failed {
                 repo: (*repo).clone(),
-                error: error.to_string(),
+                error,
             },
         }
     })
@@ -689,7 +689,9 @@ fn refresh_repos<S: Source>(
             Ok(list) => {
                 match list.warning() {
                     Some(text) => {
-                        state.owner_errors.insert(owner.clone(), text);
+                        state
+                            .owner_errors
+                            .insert(owner.clone(), OwnerProblem::Cut(text));
                     }
                     None => {
                         state.owner_errors.remove(owner);
@@ -698,7 +700,9 @@ fn refresh_repos<S: Source>(
                 state.owner_lists.insert(owner.clone(), list.repos);
             }
             Err(error) => {
-                state.owner_errors.insert(owner.clone(), error.to_string());
+                state
+                    .owner_errors
+                    .insert(owner.clone(), OwnerProblem::Failed(error));
             }
         }
     }
@@ -1072,8 +1076,7 @@ mod tests {
         let error = SourceError::Http {
             status: 502,
             message: "Bad Gateway".to_owned(),
-        }
-        .to_string();
+        };
         let failed: Vec<_> = updates
             .iter()
             .filter(|update| matches!(update, Update::Failed { .. }))
@@ -1230,7 +1233,7 @@ mod tests {
             second[0],
             Update::Repos {
                 repos: expected,
-                owner_errors: vec![(owner("acme"), failure.to_string())]
+                owner_errors: vec![(owner("acme"), OwnerProblem::Failed(failure))]
             }
         );
     }
@@ -1304,7 +1307,7 @@ mod tests {
             for_repo,
             vec![&Update::Failed {
                 repo: repo("acme/a"),
-                error: failure.to_string()
+                error: failure
             }]
         );
     }
@@ -1328,7 +1331,9 @@ mod tests {
                 repos: [repo("acme/a")].into(),
                 owner_errors: vec![(
                     owner("acme"),
-                    "more than 1000 repositories, ha watches the first 1000".to_owned()
+                    OwnerProblem::Cut(
+                        "more than 1000 repositories, ha watches the first 1000".to_owned()
+                    )
                 )]
             }
         );
@@ -1369,7 +1374,7 @@ mod tests {
             first[0],
             Update::Repos {
                 repos: BTreeSet::new(),
-                owner_errors: vec![(owner("acme"), failure.to_string())]
+                owner_errors: vec![(owner("acme"), OwnerProblem::Failed(failure))]
             }
         );
         assert_eq!(
@@ -1411,7 +1416,10 @@ mod tests {
         let mut state = State {
             owner_cadence: cadence,
             owner_lists: BTreeMap::from([(owner("acme-b"), vec![repo("acme-b/x")])]),
-            owner_errors: BTreeMap::from([(owner("acme-b"), "old error".to_owned())]),
+            owner_errors: BTreeMap::from([(
+                owner("acme-b"),
+                OwnerProblem::Cut("old error".to_owned()),
+            )]),
             ..State::new(SLOW_CADENCE)
         };
         let (updates_tx, updates_rx) = mpsc::channel();
@@ -1430,8 +1438,8 @@ mod tests {
             Ok(Update::Repos {
                 repos: BTreeSet::from([repo("acme-b/x")]),
                 owner_errors: vec![
-                    (owner("acme-a"), failure.to_string()),
-                    (owner("acme-b"), "old error".to_owned()),
+                    (owner("acme-a"), OwnerProblem::Failed(failure)),
+                    (owner("acme-b"), OwnerProblem::Cut("old error".to_owned())),
                 ]
             })
         );
