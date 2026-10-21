@@ -818,6 +818,45 @@ mod tests {
     }
 
     #[test]
+    fn a_first_cycle_that_reads_no_repository_ends_the_view_with_each_error() {
+        let channels = channels();
+        let a = RepoName::parse("acme/a").unwrap();
+        let b = RepoName::parse("acme/b").unwrap();
+        let updates = [
+            Update::Repos {
+                repos: BTreeSet::from([a.clone(), b.clone()]),
+                owner_errors: vec![],
+            },
+            Update::Failed {
+                repo: b,
+                error: SourceError::TimedOut(Duration::from_secs(30)),
+            },
+            Update::Failed {
+                repo: a,
+                error: SourceError::Http {
+                    status: 403,
+                    message: "Resource not accessible by integration".to_owned(),
+                },
+            },
+            Update::CycleDone {
+                finished_at: now(),
+                rate: None,
+                backoff_until: None,
+            },
+        ];
+        for update in updates {
+            channels.updates.send(update).unwrap();
+        }
+        let (result, _) = run_app(&opener(false), &channels, vec![]);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "the first refresh could not read any target:\n  \
+             acme/a: GitHub answered 403: Resource not accessible by integration\n  \
+             acme/b: gh did not finish within 30s"
+        );
+    }
+
+    #[test]
     fn a_repository_list_without_a_repository_removes_its_runs() {
         let channels = channels();
         send_runs(&channels, vec![active_run(1, 5)]);
