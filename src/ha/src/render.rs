@@ -266,10 +266,12 @@ fn job_cells(
 /// [`MARKER_WIDTH`] columns wide. A terminal draws an emoji in its own colors,
 /// thus the marker has no foreground color.
 ///
-/// The marker of [`RunState::Skipped`] is `🚫` (U+1F6AB). The text symbols of
-/// a circle with a line through it, for example `⊘` (U+2298), are 1 column
-/// wide and would move the columns. A skipped run does not show on the board,
-/// thus only a job row shows `🚫`.
+/// The marker of [`RunState::Skipped`] is `💨` (U+1F4A8, DASH SYMBOL). The
+/// no-entry sign has a red circle, and from a distance it looks like the `❌`
+/// of a failed job (issue #597). `💨` has no red and no circle. The text
+/// symbols of a circle with a line through it, for example `⊘` (U+2298), are
+/// 1 column wide, thus they move the columns. A skipped run does not show on
+/// the board, thus only a job row shows `💨`.
 fn marker(state: RunState) -> &'static str {
     match state {
         RunState::Running => "🏃",
@@ -277,7 +279,7 @@ fn marker(state: RunState) -> &'static str {
         RunState::Cancelled => "🪦",
         RunState::Passed => "✅",
         RunState::Failed => "❌",
-        RunState::Skipped => "🚫",
+        RunState::Skipped => "💨",
         RunState::Other => " ",
     }
 }
@@ -3665,14 +3667,15 @@ mod tests {
     }
 
     /// The marker of each state, as the code point that the table of issue
-    /// #581 names. Issue #590 adds the marker of a skipped job.
+    /// #581 names. Issue #590 adds the marker of a skipped job, and issue
+    /// #597 changes it.
     const MARKER_CODE_POINTS: [(RunState, char); 6] = [
         (RunState::Running, '\u{1F3C3}'),
         (RunState::Queued, '\u{23F3}'),
         (RunState::Cancelled, '\u{1FAA6}'),
         (RunState::Passed, '\u{2705}'),
         (RunState::Failed, '\u{274C}'),
-        (RunState::Skipped, '\u{1F6AB}'),
+        (RunState::Skipped, '\u{1F4A8}'),
     ];
 
     #[test]
@@ -3878,17 +3881,17 @@ mod tests {
         board
     }
 
-    /// A skipped job shows `🚫` (issue #590). A job of the state `Other` keeps
-    /// a blank marker.
+    /// A skipped job shows `💨` (issue #590, issue #597). A job of the state
+    /// `Other` keeps a blank marker.
     #[test]
-    fn a_skipped_job_shows_the_no_entry_sign() {
+    fn a_skipped_job_shows_the_dash_symbol() {
         let mut board = marker_board();
         let text = lines(&render_with(120, 20, &mut board, &loaded()));
         let skipped = &text[row_holding(&text, "g-skipped")];
-        assert!(skipped.starts_with("🚫 └ g-skipped"), "{skipped:?}");
+        assert!(skipped.starts_with("💨 └ g-skipped"), "{skipped:?}");
         let other = &text[row_holding(&text, "f-other")];
         assert!(other.starts_with("   ├ f-other"), "{other:?}");
-        assert!(skipped.ends_with(" 🚫"), "{skipped:?}");
+        assert!(skipped.ends_with(" 💨"), "{skipped:?}");
         assert!(
             other.ends_with("20s"),
             "the right marker of Other is blank: {other:?}"
