@@ -1208,14 +1208,14 @@ mod tests {
         assert_eq!(
             text[0..8],
             [
-                "   REPO                WORKFLOW              BRANCH       TITLE                                      STARTED     TIME",
+                "   REPO               WORKFLOW              BRANCH       TITLE                                    STARTED     TIME",
                 "Running · 1",
-                "🏃 timmattison/tools   CI        39149840084 main         Fix the thing                              11:45:30    14m 30s",
-                "✅ ├ build                      107851237794                                                         11:45:40    4m 20s",
-                "❌ ├ lint                       107851237795                                                         11:46:00    45s",
-                "🏃 └ test                       107851237796                                                         11:50:10    9m 50s",
+                "🏃 timmattison/tools  CI        39149840084 main         Fix the thing                            11:45:30    14m 30s 🏃",
+                "✅ ├ build                     107851237794                                                       11:45:40    4m 20s  ✅",
+                "❌ ├ lint                      107851237795                                                       11:46:00    45s     ❌",
+                "🏃 └ test                      107851237796                                                       11:50:10    9m 50s  🏃",
                 "Last 8h · 1 passed · 0 failed · 0 cancelled",
-                "✅ acme/widgets        Release   39149711502 issue-11     Bump deps                                  09:00:00    10m 05s",
+                "✅ acme/widgets       Release   39149711502 issue-11     Bump deps                                09:00:00    10m 05s ✅",
             ]
         );
     }
@@ -1227,13 +1227,13 @@ mod tests {
         assert_eq!(
             lines(&buffer),
             [
-                "   REPO                WORKFLOW              BRANCH       TITLE                                      STARTED     TIME",
+                "   REPO               WORKFLOW              BRANCH       TITLE                                    STARTED     TIME",
                 "Running · 2",
-                "🏃 timmattison/tools   CI                  1 main         Fix the thing                              11:45:30    14m 30s",
-                "⏳ acme/widgets        Release             2 issue-12     Add release job                            11:58:00    2m 00s",
+                "🏃 timmattison/tools  CI                  1 main         Fix the thing                            11:45:30    14m 30s 🏃",
+                "⏳ acme/widgets       Release             2 issue-12     Add release job                          11:58:00    2m 00s  ⏳",
                 "Last 8h · 1 passed · 1 failed · 0 cancelled",
-                "✅ timmattison/tools   CI                  3 main         Bump deps                                  09:00:00    10m 05s",
-                "❌ acme/widgets        Release             4 issue-11     Broken build                               10-13 23:50 4h 40m",
+                "✅ timmattison/tools  CI                  3 main         Bump deps                                09:00:00    10m 05s ✅",
+                "❌ acme/widgets       Release             4 issue-11     Broken build                             10-13 23:50 4h 40m  ❌",
                 "",
                 "",
                 "updated 30s ago      ·  ↑↓ select  →← jobs  ⏎ open  c cancel  r refresh  q quit",
@@ -1644,7 +1644,13 @@ mod tests {
         let reversed = |x: u16, y: u16| buffer[(x, y)].modifier.contains(Modifier::REVERSED);
         assert!(reversed(0, 2), "the marker of the selected row");
         assert!(reversed(60, 2), "the middle of the selected row");
-        assert!(reversed(119, 2), "the end of the selected row");
+        // The test backend does not store the second cell of a wide glyph. The
+        // marker cells are thus checked at their first cell.
+        assert!(reversed(117, 2), "the blank before the right marker");
+        assert!(
+            reversed(118, 2),
+            "the first cell of the right marker of the selected row"
+        );
         for y in [0_u16, 1, 3, 4, 5, 6, 9] {
             assert!(!reversed(0, y), "line {y} start");
             assert!(!reversed(60, y), "line {y} middle");
@@ -1922,16 +1928,17 @@ mod tests {
     }
 
     /// The expected line of a job row at 120 columns. The widths follow the
-    /// shares of the 81 columns of room: 19 repository, 8 workflow name, 12
-    /// branch, and 42 title. The text fills 28 columns, the job ID fills 12, and
-    /// the branch and title columns are 55 blank columns.
+    /// shares of the 78 columns of room: 18 repository, 8 workflow name, 12
+    /// branch, and 40 title. The text fills 27 columns, the job ID fills 12, and
+    /// the branch and title columns are 53 blank columns. The started and time
+    /// cells fill 19 columns, and the right marker follows them after one space.
     ///
     /// The marker is an emoji of 2 columns. `format!` pads by characters, thus
     /// the caller never pads the marker with a format width. A blank marker is
     /// 2 spaces.
     fn job_golden(marker: &str, text: &str, id: u64, times: &str) -> String {
         format!(
-            "{marker} {text:<28} {id:>ID_WIDTH$} {blank:<55} {times}",
+            "{marker} {text:<27} {id:>ID_WIDTH$} {blank:<53} {times:<19} {marker}",
             blank = ""
         )
         .trim_end()
@@ -1945,7 +1952,7 @@ mod tests {
         assert_eq!(
             text[2..6],
             [
-                "🏃 timmattison/tools   CI                  1 main         Fix the thing                              11:45:30    14m 30s".to_owned(),
+                "🏃 timmattison/tools  CI                  1 main         Fix the thing                            11:45:30    14m 30s 🏃".to_owned(),
                 job_golden("✅", "├ build", 12, "11:45:40    4m 20s"),
                 job_golden("❌", "├ lint", 13, "11:46:00    45s"),
                 job_golden("🏃", "└ test", 11, "11:50:10    9m 50s"),
@@ -2177,6 +2184,12 @@ mod tests {
                 ("🏃", Color::Reset),
                 "{name}"
             );
+            let right = 120 - u16::try_from(MARKER_WIDTH).expect("the marker width fits in u16");
+            assert_eq!(
+                (buffer[(right, y)].symbol(), buffer[(right, y)].fg),
+                ("🏃", Color::Reset),
+                "{name}: the right marker"
+            );
         }
     }
 
@@ -2199,7 +2212,12 @@ mod tests {
         board.select_next(now());
         let buffer = render_with(120, 14, &mut board, &loaded());
         let reversed = |x: u16, y: u16| buffer[(x, y)].modifier.contains(Modifier::REVERSED);
-        for x in [0_u16, 5, 60, 95, 119] {
+        // The test backend does not store the second cell of a wide glyph. The
+        // marker cells are thus checked at their first cell.
+        for x in [0_u16, 118] {
+            assert!(reversed(x, 3), "the selected job row, marker cell {x}");
+        }
+        for x in [0_u16, 5, 60, 95, 117] {
             assert!(reversed(x, 3), "the selected job row, column {x}");
             assert!(!reversed(x, 2), "the run row, column {x}");
             for y in [4_u16, 5] {
@@ -2331,11 +2349,22 @@ mod tests {
         let mut board = four_run_board();
         board.expand(now());
         board.fail_jobs(RunId(1), "日本語のエラー".repeat(30));
-        let text = lines(&render_with(40, 14, &mut board, &loaded()));
+        let buffer = render_with(40, 14, &mut board, &loaded());
+        let text = lines(&buffer);
         assert!(text[3].starts_with("   └ ⚠ 日本語"), "{:?}", text[3]);
         assert!(text[3].ends_with('…'), "{:?}", text[3]);
-        assert!(display_width(&text[3]) <= 40, "{:?}", text[3]);
-        assert!(display_width(&text[3]) >= 39, "{:?}", text[3]);
+        // The text gets 40 - 6 = 34 columns, and the line ends in the space and the
+        // blank right marker cell. The trim takes both. A wide glyph that does
+        // not fit leaves 1 column free.
+        assert!(display_width(&text[3]) <= 37, "{:?}", text[3]);
+        assert!(display_width(&text[3]) >= 36, "{:?}", text[3]);
+        for x in 40 - MARKER_WIDTH - 1..40 {
+            assert_eq!(
+                buffer[(u16::try_from(x).expect("a column fits in u16"), 3)].symbol(),
+                " ",
+                "cell {x} is blank"
+            );
+        }
     }
 
     #[test]
@@ -2347,6 +2376,34 @@ mod tests {
             assert!(!buffer[(x, 3)].modifier.contains(Modifier::REVERSED), "{x}");
         }
         assert_eq!(buffer[(0, 3)].fg, Color::Reset);
+    }
+
+    /// A status row has no state, thus it has no marker on either side. The
+    /// header has no marker either (issue #590).
+    #[test]
+    fn the_status_rows_and_the_header_leave_the_right_marker_cell_blank() {
+        let mut loading = four_run_board();
+        loading.expand(now());
+        let mut empty = four_run_board();
+        empty.expand(now());
+        empty.set_jobs(RunId(1), vec![]);
+        let mut failed = four_run_board();
+        failed.expand(now());
+        failed.fail_jobs(RunId(1), "x".repeat(400));
+        for (case, mut board) in [("loading", loading), ("no jobs", empty), ("error", failed)] {
+            let buffer = render_with(120, 14, &mut board, &loaded());
+            let text = lines(&buffer);
+            assert!(text[3].starts_with("   └ "), "{case}: {:?}", text[3]);
+            for y in [0_u16, 3] {
+                for x in 120 - MARKER_WIDTH - 1..120 {
+                    assert_eq!(
+                        buffer[(u16::try_from(x).expect("a column fits in u16"), y)].symbol(),
+                        " ",
+                        "{case}: row {y}, cell {x} is not blank"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -2389,7 +2446,10 @@ mod tests {
     /// The (branch, title) widths that the board gave before issue #571, at
     /// each width from 80 to 200 columns. The entry for width `w` is at index
     /// `w - 80`. A change to the layout must never go below these values,
-    /// except that the branch gets at most 12 columns (issue #577).
+    /// except that the branch gets at most 12 columns (issue #577). The right
+    /// marker cell of issue #590 takes `MARKER_WIDTH + 1` columns from the text
+    /// columns, thus a width keeps the floor of the frame that many columns
+    /// narrower.
     const TODAY_BRANCH_AND_TITLE: [(usize, usize); 121] = [
         (7, 15),
         (7, 16),
@@ -2543,19 +2603,23 @@ mod tests {
                 .expect("the frame holds the run row");
             let branch = row.chars().filter(|c| *c == 'B').count() + 1;
             let title = row.chars().filter(|c| *c == 'T').count() + 1;
-            let (old_branch, old_title) = TODAY_BRANCH_AND_TITLE[usize::from(w) - 80];
-            assert!(
-                branch >= old_branch.min(12),
-                "width {w}: the branch is {branch} wide, the old width is {old_branch}"
-            );
             assert!(
                 branch <= 12,
                 "width {w}: the branch is {branch} wide, more than 12 columns"
             );
-            assert!(
-                title >= old_title,
-                "width {w}: the title is {title} wide, the old width is {old_title}"
-            );
+            // The right marker cell takes `MARKER_WIDTH + 1` columns, thus the
+            // floor is the one of the frame that many columns narrower.
+            if let Some(index) = usize::from(w).checked_sub(80 + MARKER_WIDTH + 1) {
+                let (old_branch, old_title) = TODAY_BRANCH_AND_TITLE[index];
+                assert!(
+                    branch >= old_branch.min(12),
+                    "width {w}: the branch is {branch} wide, the old width is {old_branch}"
+                );
+                assert!(
+                    title >= old_title,
+                    "width {w}: the title is {title} wide, the old width is {old_title}"
+                );
+            }
             for line in &text {
                 assert!(
                     display_width(line) <= usize::from(w),
@@ -2572,8 +2636,13 @@ mod tests {
     /// `WORKFLOW`, which is 8 columns, and the branch is never wider than 12
     /// columns. The title gets each column that the two give up. The marker
     /// column is 2 columns wide since issue #581, thus each width has the entry
-    /// that the frame one column narrower had before.
+    /// that the frame one column narrower had before. Since issue #590, the right
+    /// marker cell and its space take 3 columns, thus each width has the entry
+    /// that the frame three columns narrower had before.
     const TEXT_WIDTHS: [(usize, usize, usize, usize); 121] = [
+        (9, 7, 7, 15),
+        (9, 7, 8, 15),
+        (9, 7, 8, 16),
         (9, 7, 8, 17),
         (10, 7, 8, 17),
         (10, 8, 9, 16),
@@ -2692,9 +2761,6 @@ mod tests {
         (37, 8, 12, 99),
         (37, 8, 12, 100),
         (37, 8, 12, 101),
-        (38, 8, 12, 101),
-        (38, 8, 12, 102),
-        (38, 8, 12, 103),
     ];
 
     #[test]
@@ -2751,10 +2817,10 @@ mod tests {
             )],
         );
         let text = lines(&render_with(68, 6, &mut board, &Status::default()));
-        // 68 - 39 = 29 columns for the text: 6, 5, 6, and 12.
+        // 68 - 42 = 26 columns for the text: 6, 4, 5, and 11.
         assert_eq!(
             text[2],
-            "🏃 timma… Cont…            1 featu… A very long… 11:55:00    5m 00s"
+            "🏃 timma… Con…            1 feat… A very lon… 11:55:00    5m 00s  🏃"
         );
     }
 
@@ -2799,15 +2865,15 @@ mod tests {
         let text = lines(&render_with(68, 7, &mut board, &Status::default()));
         assert_eq!(
             text[2],
-            "🏃 a/x    CI               1 日本…  t            11:51:00    9m 00s"
+            "🏃 a/x    CI              1 日本… t           11:51:00    9m 00s  🏃"
         );
         assert_eq!(
             text[3],
-            "🏃 a/x    CI               2 café-… t            11:52:00    8m 00s"
+            "🏃 a/x    CI              2 café… t           11:52:00    8m 00s  🏃"
         );
         assert_eq!(
             text[4],
-            "🏃 a/x    CI               3 🎉🎉…  t            11:53:00    7m 00s"
+            "🏃 a/x    CI              3 🎉🎉… t           11:53:00    7m 00s  🏃"
         );
         for line in &text {
             assert!(display_width(line) <= 68, "{line:?} is too wide");
@@ -2834,7 +2900,9 @@ mod tests {
         let narrow = lines(&render_with(80, 6, &mut board, &Status::default()));
         let wide = lines(&render_with(160, 6, &mut board, &Status::default()));
         // The header ends with `TIME`, which is 3 columns short of its cell.
-        let short = TIME_WIDTH - "TIME".len();
+        // After `TIME` stand one space and the blank cell of the right marker.
+        // The trim takes all of them.
+        let short = TIME_WIDTH - "TIME".len() + 1 + MARKER_WIDTH;
         assert_eq!(display_width(&narrow[0]), 80 - short, "the header fills 80");
         assert_eq!(display_width(&wide[0]), 160 - short, "the header fills 160");
         for line in &narrow {
@@ -3809,6 +3877,11 @@ mod tests {
         assert!(skipped.starts_with("🚫 └ g-skipped"), "{skipped:?}");
         let other = &text[row_holding(&text, "f-other")];
         assert!(other.starts_with("   ├ f-other"), "{other:?}");
+        assert!(skipped.ends_with(" 🚫"), "{skipped:?}");
+        assert!(
+            other.ends_with("20s"),
+            "the right marker of Other is blank: {other:?}"
+        );
     }
 
     /// The index of the line that holds `needle`.
@@ -3826,7 +3899,7 @@ mod tests {
         for (id, _) in MARKER_ROWS {
             let y = u16::try_from(row_holding(&text, &id.to_string()))
                 .expect("a row index fits in u16");
-            for x in [0_u16, 1] {
+            for x in [0_u16, 1, 118, 119] {
                 assert_eq!(
                     buffer[(x, y)].fg,
                     Color::Reset,
@@ -3839,13 +3912,17 @@ mod tests {
 
     /// This test passes before issue #581 too. It locks the layout in: a
     /// marker that is wider than its cell moves each cell after it, and the
-    /// buffer clips what stands past the right edge without a sign.
+    /// buffer clips what stands past the right edge without a sign. Since issue
+    /// #590, the right marker cell stands in the last `MARKER_WIDTH` columns of
+    /// each row. It repeats the left marker, one blank column follows the time
+    /// cell, and the header leaves the right marker cell blank.
     #[test]
     fn the_id_started_and_time_columns_stay_put_at_every_width() {
         let first_width = u16::try_from(FIXED_COLUMNS).expect("the fixed columns fit in u16");
         for w in first_width..=200 {
             let mut board = marker_board();
-            let text = lines(&render_with(w, 20, &mut board, &loaded()));
+            let buffer = render_with(w, 20, &mut board, &loaded());
+            let text = lines(&buffer);
             let started_column = header_column(&text, "STARTED");
             let time_column = header_column(&text, "TIME");
             let mut id_column = None;
@@ -3857,6 +3934,18 @@ mod tests {
                     *id_column.get_or_insert(column),
                     column,
                     "width {w}: the ID {id} moved: {line:?}"
+                );
+                let y = u16::try_from(row_holding(&text, &id)).expect("a row index fits in u16");
+                let right = w - u16::try_from(MARKER_WIDTH).expect("the marker width fits in u16");
+                assert_eq!(
+                    buffer[(right, y)].symbol(),
+                    buffer[(0, y)].symbol(),
+                    "width {w}: the right marker differs from the left marker: {line:?}"
+                );
+                assert_eq!(
+                    buffer[(right - 1, y)].symbol(),
+                    " ",
+                    "width {w}: no blank column stands before the right marker: {line:?}"
                 );
                 let Some((started, time)) = cells else {
                     continue;
@@ -3884,6 +3973,14 @@ mod tests {
             // The buffer clips a line that is too wide, thus the lines of the
             // rows must fill the width exactly.
             let widths = Widths::for_width(usize::from(w));
+            let right = w - u16::try_from(MARKER_WIDTH).expect("the marker width fits in u16");
+            for x in right..w {
+                assert_eq!(
+                    buffer[(x, 0)].symbol(),
+                    " ",
+                    "width {w}: the header cell {x} is not blank"
+                );
+            }
             for (state, _) in MARKER_CODE_POINTS {
                 let run = run(
                     1,
@@ -4025,13 +4122,13 @@ mod tests {
         assert_eq!(
             block,
             [
-                "🏃 timmattison/megarepo          CI        39450362521",
-                "✅ ├ e2e-plan grwetky1t8721h17t103k8gce0  107851237701",
-                "⏳ ├ e2e-remotesensing (1)                107851237705",
-                "🏃 ├ e2e-remotesensing (2) m1-ts          107851237702",
-                "🏃 ├ e2e-remotesensing (3) mbp            107851237703",
-                "⏳ ├ e2e-remotesensing (4)                107851237704",
-                "🏃 └ sites gr96283qcxw61jpesqnhtrkhwb     107851237706",
+                "🏃 timmattison/megarepo         CI        39450362521",
+                "✅ ├ e2e-plan grwetky1t8721h17t103k8gce0 107851237701",
+                "⏳ ├ e2e-remotesensing (1)               107851237705",
+                "🏃 ├ e2e-remotesensing (2) m1-ts         107851237702",
+                "🏃 ├ e2e-remotesensing (3) mbp           107851237703",
+                "⏳ ├ e2e-remotesensing (4)               107851237704",
+                "🏃 └ sites gr96283qcxw61jpesqnhtrkhwb    107851237706",
             ]
         );
         let started = ["11:46:00", "", "11:50:00", "11:51:00", "", "11:52:00"];
@@ -4096,12 +4193,12 @@ mod tests {
         assert_eq!(
             block,
             [
-                "✅ ├ e2e-plan grwetky1t8721h17… 107851237701",
-                "⏳ ├ e2e-remotesensing (1)      107851237705",
-                "🏃 ├ e2e-remotesensing (2) m1-… 107851237702",
-                "🏃 ├ e2e-remotesensing (3) mbp  107851237703",
-                "⏳ ├ e2e-remotesensing (4)      107851237704",
-                "🏃 └ sites gr96283qcxw61jpesqn… 107851237706",
+                "✅ ├ e2e-plan grwetky1t8721h1… 107851237701",
+                "⏳ ├ e2e-remotesensing (1)     107851237705",
+                "🏃 ├ e2e-remotesensing (2)     107851237702",
+                "🏃 ├ e2e-remotesensing (3) mbp 107851237703",
+                "⏳ ├ e2e-remotesensing (4)     107851237704",
+                "🏃 └ sites gr96283qcxw61jpesq… 107851237706",
             ]
         );
     }
@@ -4140,13 +4237,13 @@ mod tests {
     /// The time cells of [`passed_job`] in a golden line.
     const PASSED_TIMES: &str = "11:46:00    2m 00s";
 
-    /// A job name of 22 columns. Its text `└ ` plus the name is 24 columns, thus
+    /// A job name of 21 columns. Its text `└ ` plus the name is 23 columns, thus
     /// the room for a runner name is 3.
-    const ROOM_OF_3_NAME: &str = "abcdefghijklmnopqrstuv";
+    const ROOM_OF_3_NAME: &str = "abcdefghijklmnopqrstu";
 
     #[test]
     fn a_long_runner_name_with_fewer_than_4_columns_does_not_show() {
-        // The text `└ Full check list (Linux)` is 25 columns, thus the room is 2.
+        // The text `└ Full check list (Linux)` is 25 columns, thus the room is 1.
         let (buffer, row, y) = lone_job_row(
             on(
                 "GitHub Actions 1000001050",
@@ -4159,8 +4256,8 @@ mod tests {
             job_golden("✅", "└ Full check list (Linux)", LONE_JOB, PASSED_TIMES)
         );
         assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
-        // A name of 22 columns makes a text of 24 columns, thus the room is 3.
-        assert_eq!(display_width(ROOM_OF_3_NAME), 22);
+        // A name of 21 columns makes a text of 23 columns, thus the room is 3.
+        assert_eq!(display_width(ROOM_OF_3_NAME), 21);
         let (buffer, row, y) = lone_job_row(on("m1-ts", passed_job(ROOM_OF_3_NAME)), 120);
         assert_eq!(
             row,
@@ -4254,9 +4351,9 @@ mod tests {
     fn a_job_name_that_fills_the_cell_shows_no_runner_name() {
         let name = "n".repeat(40);
         let (buffer, row, y) = lone_job_row(on("mbp", passed_job(&name)), 120);
-        // The text is cut to the 28 columns of the cell and ends in `…`.
-        let cut = format!("└ {}…", "n".repeat(25));
-        assert_eq!(display_width(&cut), 28);
+        // The text is cut to the 27 columns of the cell and ends in `…`.
+        let cut = format!("└ {}…", "n".repeat(24));
+        assert_eq!(display_width(&cut), 27);
         assert_eq!(row, job_golden("✅", &cut, LONE_JOB, PASSED_TIMES));
         assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
         assert_eq!(
