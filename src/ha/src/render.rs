@@ -3580,13 +3580,14 @@ mod tests {
     }
 
     /// The marker of each state, as the code point that the table of issue
-    /// #581 names.
-    const MARKER_CODE_POINTS: [(RunState, char); 5] = [
+    /// #581 names. Issue #590 adds the marker of a skipped job.
+    const MARKER_CODE_POINTS: [(RunState, char); 6] = [
         (RunState::Running, '\u{1F3C3}'),
         (RunState::Queued, '\u{23F3}'),
         (RunState::Cancelled, '\u{1FAA6}'),
         (RunState::Passed, '\u{2705}'),
         (RunState::Failed, '\u{274C}'),
+        (RunState::Skipped, '\u{1F6AB}'),
     ];
 
     #[test]
@@ -3675,14 +3676,15 @@ mod tests {
         39_149_840_005,
     ];
 
-    /// The IDs and the states of the six jobs of [`marker_board`].
-    const MARKER_JOB_STATES: [(u64, RunState); 6] = [
+    /// The IDs and the states of the seven jobs of [`marker_board`].
+    const MARKER_JOB_STATES: [(u64, RunState); 7] = [
         (107_851_237_801, RunState::Queued),
         (107_851_237_802, RunState::Running),
         (107_851_237_803, RunState::Passed),
         (107_851_237_804, RunState::Failed),
         (107_851_237_805, RunState::Cancelled),
         (107_851_237_806, RunState::Other),
+        (107_851_237_807, RunState::Skipped),
     ];
 
     /// The started cell and the time cell that the row of an ID shows at
@@ -3690,7 +3692,7 @@ mod tests {
     type ExpectedCells = (u64, Option<(&'static str, &'static str)>);
 
     /// The rows of [`marker_board`] with their cells.
-    const MARKER_ROWS: [ExpectedCells; 11] = [
+    const MARKER_ROWS: [ExpectedCells; 12] = [
         (39_149_840_001, Some(("11:00:00", "1h 00m"))),
         (39_149_840_002, Some(("11:10:00", "50m 00s"))),
         (39_149_840_003, Some(("10:00:00", "5m 00s"))),
@@ -3702,10 +3704,11 @@ mod tests {
         (107_851_237_804, Some(("11:02:00", "30s"))),
         (107_851_237_805, Some(("11:03:00", "45s"))),
         (107_851_237_806, Some(("11:04:00", "20s"))),
+        (107_851_237_807, Some(("11:04:30", "0s"))),
     ];
 
     /// A board with a run in each of the five shown states. The first run is
-    /// expanded and holds a job in each of the six states.
+    /// expanded and holds a job in each of the seven states.
     fn marker_board() -> Board {
         let runs = [
             (RunState::Running, "11:00:00", "11:59:00"),
@@ -3736,7 +3739,7 @@ mod tests {
         );
         board.expand(now());
         // The order is by name, thus the names state the order of the rows.
-        let [queued_job, running_job, passed_job, failed_job, cancelled_job, other_job] =
+        let [queued_job, running_job, passed_job, failed_job, cancelled_job, other_job, skipped_job] =
             MARKER_JOB_STATES;
         board.set_jobs(
             RunId(MARKER_RUN_IDS[0]),
@@ -3777,9 +3780,29 @@ mod tests {
                     Some("2026-10-14T11:04:00Z"),
                     Some("2026-10-14T11:04:20Z"),
                 ),
+                // GitHub gives a skipped job the same start time and finish time.
+                job(
+                    skipped_job.0,
+                    "g-skipped",
+                    skipped_job.1,
+                    Some("2026-10-14T11:04:30Z"),
+                    Some("2026-10-14T11:04:30Z"),
+                ),
             ],
         );
         board
+    }
+
+    /// A skipped job shows `🚫` (issue #590). A job of the state `Other` keeps
+    /// a blank marker.
+    #[test]
+    fn a_skipped_job_shows_the_no_entry_sign() {
+        let mut board = marker_board();
+        let text = lines(&render_with(120, 20, &mut board, &loaded()));
+        let skipped = &text[row_holding(&text, "g-skipped")];
+        assert!(skipped.starts_with("🚫 └ g-skipped"), "{skipped:?}");
+        let other = &text[row_holding(&text, "f-other")];
+        assert!(other.starts_with("   ├ f-other"), "{other:?}");
     }
 
     /// The index of the line that holds `needle`.
