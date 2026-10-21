@@ -390,7 +390,7 @@ mod tests {
 
     use super::*;
     use crate::cancel::CancelOutcome;
-    use crate::github::SourceError;
+    use crate::github::{RepoList, SourceError};
     use crate::run::{Run, RunId, RunState};
     use crate::status::OwnerProblem;
     use crate::target::{OwnerName, RepoName};
@@ -981,6 +981,94 @@ mod tests {
             result.unwrap_err().to_string(),
             "the first refresh could not read any target:\n  \
              acme: gh failed: GraphQL: Could not resolve to a User with the login of 'acme'."
+        );
+    }
+
+    #[test]
+    fn an_owner_with_an_empty_list_and_no_other_target_keeps_the_view() {
+        let channels = channels();
+        let updates = [
+            Update::Repos {
+                repos: BTreeSet::new(),
+                owner_errors: vec![],
+            },
+            cycle_done(),
+        ];
+        for update in updates {
+            channels.updates.send(update).unwrap();
+        }
+        let (result, frame) = run_app(&opener(false), &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            frame.contains(&"   No runs in progress or in the queue.".to_owned()),
+            "{frame:?}"
+        );
+        assert!(
+            frame.contains(&"   No runs finished in the last 8h.".to_owned()),
+            "{frame:?}"
+        );
+    }
+
+    #[test]
+    fn a_cut_owner_list_is_not_called_a_failure() {
+        let channels = channels();
+        let a = RepoName::parse("acme/a").unwrap();
+        let cut = RepoList {
+            repos: vec![],
+            cut: true,
+        };
+        let updates = [
+            Update::Repos {
+                repos: BTreeSet::from([a.clone()]),
+                owner_errors: vec![(
+                    OwnerName::parse("acme").unwrap(),
+                    OwnerProblem::Cut(cut.warning().unwrap()),
+                )],
+            },
+            Update::Failed {
+                repo: a,
+                error: SourceError::TimedOut(Duration::from_secs(30)),
+            },
+            cycle_done(),
+        ];
+        for update in updates {
+            channels.updates.send(update).unwrap();
+        }
+        let (result, _) = run_app(&opener(false), &channels, vec![]);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "the first refresh could not read any target:\n  \
+             acme/a: gh did not finish within 30s"
+        );
+    }
+
+    #[test]
+    fn a_failed_owner_and_one_good_fetch_keep_the_view() {
+        let channels = channels();
+        let x = RepoName::parse("other/x").unwrap();
+        let updates = [
+            Update::Repos {
+                repos: BTreeSet::from([x.clone()]),
+                owner_errors: vec![(
+                    OwnerName::parse("acme").unwrap(),
+                    OwnerProblem::Failed(SourceError::Failed("boom".to_owned())),
+                )],
+            },
+            Update::Runs {
+                repo: x,
+                runs: vec![],
+            },
+            cycle_done(),
+        ];
+        for update in updates {
+            channels.updates.send(update).unwrap();
+        }
+        let (result, frame) = run_app(&opener(false), &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        let status_line = frame.last().unwrap();
+        assert!(
+            status_line.contains("acme: gh failed: boom"),
+            "{status_line:?}"
         );
     }
 

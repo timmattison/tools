@@ -1,11 +1,16 @@
 //! The tally of the first refresh cycle. It decides when `ha` must stop
 //! because the cycle read no target.
+//!
+//! A failed target is a repository whose fetch failed or an owner whose
+//! repository list failed. An owner list that GitHub cut at the limit is a
+//! warning, not a failure.
 
 use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::github::SourceError;
-use crate::target::RepoName;
+use crate::status::OwnerProblem;
+use crate::target::{OwnerName, RepoName};
 use crate::worker::Update;
 
 /// The first line of the text of [`NoTargetRead`].
@@ -14,26 +19,42 @@ const NO_TARGET_READ: &str = "the first refresh could not read any target";
 /// What the updates of the first refresh cycle say about the targets.
 ///
 /// This type holds the one definition of "the first cycle read no target".
-/// A good fetch that finds zero runs is a success.
+/// A good fetch that finds zero runs is a success. A failed target is a
+/// repository whose fetch failed or an owner whose list failed. An owner
+/// list that GitHub cut is a warning and does not count as a failure.
 #[derive(Debug, Default)]
 pub struct FirstCycle {
     /// Set when one repository fetch succeeded.
     read_a_repository: bool,
     /// The error of each repository whose fetch failed.
     failed_repositories: BTreeMap<RepoName, SourceError>,
+    /// The error of each owner whose list failed. A cut list is not here.
+    failed_owners: BTreeMap<OwnerName, SourceError>,
 }
 
 impl FirstCycle {
     /// Counts one update of the worker. An [`Update::Runs`] is a good fetch,
     /// also when it holds no run. An [`Update::Failed`] records the
-    /// repository and its error. Every other update changes nothing.
+    /// repository and its error. An [`Update::Repos`] replaces the failed
+    /// owners with the owners whose list failed. It skips an owner whose
+    /// list was cut, because a cut list is a warning, not a failure. Every
+    /// other update changes nothing.
     pub fn note(&mut self, update: &Update) {
         match update {
             Update::Runs { .. } => self.read_a_repository = true,
             Update::Failed { repo, error } => {
                 self.failed_repositories.insert(repo.clone(), error.clone());
             }
-            _ => {}
+            Update::Repos { owner_errors, .. } => {
+                self.failed_owners = owner_errors
+                    .iter()
+                    .filter_map(|(owner, problem)| match problem {
+                        OwnerProblem::Failed(error) => Some((owner.clone(), error.clone())),
+                        OwnerProblem::Cut(_) => None,
+                    })
+                    .collect();
+            }
+            Update::Jobs { .. } | Update::JobsFailed { .. } | Update::CycleDone { .. } => {}
         }
     }
 
@@ -41,17 +62,23 @@ impl FirstCycle {
     ///
     /// # Errors
     /// Returns [`NoTargetRead`] when no repository fetch succeeded and at
-    /// least one target failed.
+    /// least one target failed. A target is a repository or an owner. A cut
+    /// owner list is a warning and does not count.
     pub fn verdict(self) -> Result<(), NoTargetRead> {
-        if self.read_a_repository || self.failed_repositories.is_empty() {
+        let nothing_failed = self.failed_repositories.is_empty() && self.failed_owners.is_empty();
+        if self.read_a_repository || nothing_failed {
             return Ok(());
         }
+        let repositories = self
+            .failed_repositories
+            .into_iter()
+            .map(|(repo, error)| (repo.to_string(), error));
+        let owners = self
+            .failed_owners
+            .into_iter()
+            .map(|(owner, error)| (owner.to_string(), error));
         Err(NoTargetRead {
-            failures: self
-                .failed_repositories
-                .into_iter()
-                .map(|(repo, error)| (repo.to_string(), error))
-                .collect(),
+            failures: repositories.chain(owners).collect(),
         })
     }
 }
@@ -60,7 +87,8 @@ impl FirstCycle {
 /// target with its error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoTargetRead {
-    /// The name and the error of each failed target, sorted by name.
+    /// The name and the error of each failed target. The failed repositories
+    /// come first, then the failed owners. Each group is sorted by name.
     failures: Vec<(String, SourceError)>,
 }
 
@@ -78,6 +106,7 @@ impl std::error::Error for NoTargetRead {}
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::time::Duration;
 
     use super::*;
@@ -121,5 +150,31 @@ mod tests {
             runs: vec![],
         });
         assert_eq!(cycle.verdict(), Ok(()));
+    }
+
+    #[test]
+    fn a_failed_repository_comes_before_a_failed_owner() {
+        let mut cycle = FirstCycle::default();
+        cycle.note(&Update::Repos {
+            repos: BTreeSet::new(),
+            owner_errors: vec![
+                (
+                    OwnerName::parse("aaa").unwrap(),
+                    OwnerProblem::Failed(SourceError::Failed("no such owner".to_owned())),
+                ),
+                (
+                    OwnerName::parse("ccc").unwrap(),
+                    OwnerProblem::Cut("only the first 1000 repositories".to_owned()),
+                ),
+            ],
+        });
+        cycle.note(&failed("zzz/r"));
+        let error = cycle.verdict().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "the first refresh could not read any target:\n  \
+             zzz/r: gh did not finish within 30s\n  \
+             aaa: gh failed: no such owner"
+        );
     }
 }
