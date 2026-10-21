@@ -788,6 +788,26 @@ fn flatten(text: &str) -> String {
         .collect()
 }
 
+/// Finds the `started:` line of a raw card, and makes sure it shows a time.
+///
+/// The line must start with `started: ` and a digit, and end with ` ago)`.
+/// A row that says why the time is missing starts with a parenthesis, and a
+/// missing row has no line at all. Both fail.
+fn assert_raw_card_shows_a_start_time(stdout: &str) {
+    let (line, value) = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("started: ").map(|value| (line, value)))
+        .unwrap_or_else(|| panic!("the card has a started row; stdout: {stdout}"));
+    assert!(
+        value.chars().next().is_some_and(|c| c.is_ascii_digit()),
+        "the started row shows a time and not a reason; stdout: {stdout}"
+    );
+    assert!(
+        line.ends_with(" ago)"),
+        "the started row shows the elapsed time; stdout: {stdout}"
+    );
+}
+
 /// A command line of more than 200 bytes, to prove that the card never cuts it.
 fn long_marker() -> String {
     let marker = format!("{}{}", unique_token("spv_card_"), "_long".repeat(45));
@@ -830,7 +850,9 @@ fn one_pid_prints_a_card_with_the_whole_command_the_directory_the_executable_and
         "the card names this test as the parent; stdout: {stdout}"
     );
     assert!(
-        !flat.contains("Started("),
+        flat.split_once("Started").is_some_and(|(_, rest)| {
+            rest.starts_with(|c: char| c.is_ascii_digit()) && rest.contains("ago)")
+        }),
         "the card shows the start time; stdout: {stdout}"
     );
     assert!(
@@ -870,6 +892,7 @@ fn raw_prints_the_card_as_one_line_for_each_fact() {
         stdout.lines().any(|line| line.starts_with("exe: /")),
         "a line holds the executable; stdout: {stdout}"
     );
+    assert_raw_card_shows_a_start_time(&stdout);
     assert!(
         table_border_character(&stdout).is_none(),
         "--raw draws no table; stdout: {stdout}"
@@ -968,18 +991,7 @@ fn the_card_of_a_root_process_shows_its_start_time_without_sudo() {
     let (ok, stdout, stderr) = run(spv().args(["--raw", "1"]).output().expect("spv runs"));
 
     assert!(ok, "spv should succeed; stderr: {stderr}");
-    let (line, value) = stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("started: ").map(|value| (line, value)))
-        .unwrap_or_else(|| panic!("the card has a started row; stdout: {stdout}"));
-    assert!(
-        value.chars().next().is_some_and(|c| c.is_ascii_digit()),
-        "the started row shows a time and not a reason; stdout: {stdout}"
-    );
-    assert!(
-        line.ends_with(" ago)"),
-        "the started row shows the elapsed time; stdout: {stdout}"
-    );
+    assert_raw_card_shows_a_start_time(&stdout);
 }
 
 #[cfg(target_os = "macos")]
