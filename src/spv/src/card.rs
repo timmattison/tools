@@ -3,7 +3,8 @@
 //! When the pattern of `spv` is exactly one PID, `spv` prints a card instead of
 //! a table. The card is a two-column table of key and value. A long value wraps
 //! at the width of the terminal, and no value is ever shortened. With `--raw`,
-//! the card is `key: value` lines.
+//! the card is `key: value` lines. Both renders escape each control character
+//! in a value.
 //!
 //! This module holds the data model and the two renders. It reads nothing from
 //! the machine. The caller fills a [`ProcessCard`] and prints it.
@@ -232,14 +233,16 @@ impl ProcessCard {
     ///
     /// # Returns
     ///
-    /// A table with one `[key, value]` row for each key and no header.
+    /// A table with one `[key, value]` row for each key and no header. Each
+    /// control character in a value is escaped, so no value can fake a row or
+    /// act on the terminal.
     pub(crate) fn table(&self) -> Table {
         let mut table = Table::new();
         table
             .load_preset(UTF8_FULL)
             .set_content_arrangement(ContentArrangement::Dynamic);
         for (key, value) in self.facts() {
-            table.add_row([key, &value]);
+            table.add_row([key, &escape_controls(&value)]);
         }
         table.add_row([KEY_PARENTS, &self.parents_table_text()]);
         table
@@ -299,7 +302,9 @@ impl ProcessCard {
     ///
     /// # Returns
     ///
-    /// One line for each ancestor, with the PIDs padded to the widest PID.
+    /// One line for each ancestor, with the PIDs padded to the widest PID. Each
+    /// command is escaped before the lines are joined, so the newlines between
+    /// the ancestors stay real.
     fn parents_table_text(&self) -> String {
         match &self.parents {
             Parents::Chain(chain) if chain.is_empty() => TEXT_NONE.to_string(),
@@ -311,7 +316,13 @@ impl ProcessCard {
                     .unwrap_or(0);
                 chain
                     .iter()
-                    .map(|ancestor| format!("{:<width$}  {}", ancestor.pid, ancestor.command))
+                    .map(|ancestor| {
+                        format!(
+                            "{:<width$}  {}",
+                            ancestor.pid,
+                            escape_controls(&ancestor.command)
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n")
             }
@@ -403,6 +414,33 @@ fn unread_parents_text(reason: &str) -> String {
     format!("{TEXT_PARENTS_UNREAD_PREFIX}{reason})")
 }
 
+/// Escapes each control character in a value.
+///
+/// A value comes from the process, and the process chooses its own bytes. A
+/// control character in it reaches the terminal of the viewer whole, so an
+/// escape sequence can change the title or write to the clipboard. A newline
+/// in it can fake a second row or a second line.
+///
+/// # Arguments
+///
+/// * `value` - The value, which can hold control characters
+///
+/// # Returns
+///
+/// The value, with each control character written as its `escape_default`
+/// text (for example `\u{1b}` or `\n`). Every other character stays.
+fn escape_controls(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for c in value.chars() {
+        if c.is_control() {
+            escaped.extend(c.escape_default());
+        } else {
+            escaped.push(c);
+        }
+    }
+    escaped
+}
+
 /// Makes one raw line. Each control character in the value is escaped.
 ///
 /// # Arguments
@@ -410,15 +448,7 @@ fn unread_parents_text(reason: &str) -> String {
 /// * `key` - The raw key
 /// * `value` - The value, which can hold control characters
 fn raw_line(key: &str, value: &str) -> String {
-    let mut line = format!("{key}: ");
-    for c in value.chars() {
-        if c.is_control() {
-            line.extend(c.escape_default());
-        } else {
-            line.push(c);
-        }
-    }
-    line
+    format!("{key}: {}", escape_controls(value))
 }
 
 #[cfg(test)]
