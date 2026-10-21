@@ -5134,8 +5134,7 @@ mod ui_tests {
         }
     }
 
-    /// The line the tests of the hint post. Multi-byte on purpose: the
-    /// truncation of the hint must count characters and not bytes.
+    /// The line the tests of the hint post.
     const HINT: &str = "Hit Escape again to go back to topic";
 
     #[test]
