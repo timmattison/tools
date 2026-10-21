@@ -103,7 +103,8 @@ pub enum RunError {
     /// The terminal could not draw or read.
     #[error(transparent)]
     Terminal(#[from] std::io::Error),
-    /// The first refresh cycle that GitHub answered read no target.
+    /// The first refresh cycle that did not end with a spent API budget read
+    /// no target.
     #[error(transparent)]
     NoTargetRead(#[from] NoTargetRead),
 }

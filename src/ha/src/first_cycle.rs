@@ -119,9 +119,9 @@ impl FirstCycle {
     }
 }
 
-/// The first refresh cycle that GitHub answered read no target. The text lists each failed
-/// target with its error. When one or more errors are a 404, a hint comes
-/// after the list one time.
+/// The first refresh cycle that did not end with a spent API budget read no
+/// target. The text lists each failed target with its error. When one or more
+/// errors are a 404, a hint comes after the list one time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoTargetRead {
     /// Each failed target with its error. The failed repositories
@@ -171,27 +171,26 @@ mod tests {
         }
     }
 
-    fn rate(remaining: u64) -> Option<RateLimit> {
-        let reset = chrono::DateTime::UNIX_EPOCH;
-        Option::from(RateLimit {
+    fn rate(remaining: u64) -> RateLimit {
+        RateLimit {
             limit: 5000,
             remaining,
-            reset,
-        })
+            reset: chrono::DateTime::UNIX_EPOCH,
+        }
     }
 
     #[test]
     fn a_failure_with_a_spent_budget_is_a_verdict_of_budget_spent() {
         let mut cycle = FirstCycle::default();
         cycle.note(&failed("acme/a"));
-        assert_eq!(cycle.verdict(rate(0)), Ok(Verdict::BudgetSpent));
+        assert_eq!(cycle.verdict(Some(rate(0))), Ok(Verdict::BudgetSpent));
     }
 
     #[test]
     fn a_failure_with_a_low_budget_that_is_not_spent_is_a_verdict_of_error() {
         let mut cycle = FirstCycle::default();
         cycle.note(&failed("acme/a"));
-        assert!(cycle.verdict(rate(3)).is_err());
+        assert!(cycle.verdict(Some(rate(3))).is_err());
     }
 
     #[test]
@@ -202,12 +201,15 @@ mod tests {
             repo: repo("acme/a"),
             runs: vec![],
         });
-        assert_eq!(cycle.verdict(rate(0)), Ok(Verdict::Read));
+        assert_eq!(cycle.verdict(Some(rate(0))), Ok(Verdict::Read));
     }
 
     #[test]
     fn no_failure_and_no_fetch_with_a_spent_budget_is_a_success() {
-        assert_eq!(FirstCycle::default().verdict(rate(0)), Ok(Verdict::Read));
+        assert_eq!(
+            FirstCycle::default().verdict(Some(rate(0))),
+            Ok(Verdict::Read)
+        );
     }
 
     #[test]

@@ -123,8 +123,8 @@ fn main() -> ExitCode {
 
 /// Draws the full-screen view until the user quits, or until the first
 /// refresh cycle reads no target. A cycle that ends with a spent API budget
-/// does not count, and the next cycle decides. The terminal is back in its normal state
-/// when this function returns.
+/// does not count, and the next cycle decides. The terminal is back in its
+/// normal state when this function returns.
 fn run_view(settings: &Settings, rate: RateLimit, worker: &Worker) -> Result<(), RunError> {
     // `ratatui::init` also installs a panic hook that restores the terminal.
     let mut terminal = ratatui::init();
