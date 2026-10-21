@@ -992,6 +992,7 @@ enum Life {
     ///
     /// It shows no age and does not fade, because it is a request and not news.
     /// It leaves the row by itself, [`RETURN_HINT_LIFETIME`] after it was posted.
+    /// While it is on the row, the key is armed. See [`PushUi::shows_hint`].
     Hint {
         /// When the hint was posted, against the watch loop's injected clock.
         posted_at: Instant,
@@ -1096,7 +1097,8 @@ impl HeldLife {
 /// key is that caller: the message it posts asks for a second press, and the
 /// offer of that press stands exactly as long as the message on the row does.
 /// A message that waits for a push is a message nobody has read, so a key
-/// armed by it would take a press the user never gave a reason for.
+/// armed by it would take a press the user never gave a reason for. Esc
+/// needs no such answer, because it asks the row itself: [`PushUi::shows_hint`].
 ///
 /// An enum rather than a `bool`, because the two answers are two places and
 /// not the presence and absence of one thing. `Posted::Held` at
@@ -1548,6 +1550,9 @@ impl PushUi {
     /// never waits in [`PushUi::held`], because a request that reaches the row
     /// later asks for a press the user was never given a reason for. The answer
     /// says which happened, as [`Posted`] states.
+    ///
+    /// The hint on the row is the armed state of the key, so a caller keeps
+    /// no arming of its own. It asks [`PushUi::shows_hint`] at the next press.
     pub(crate) fn post_hint(&mut self, line: String, now: Instant) -> Posted {
         self.post(line, Life::Hint { posted_at: now })
     }
@@ -1621,7 +1626,8 @@ impl PushUi {
     /// Take the line off the row, but only when it is a hint.
     ///
     /// Any key other than the second press takes the offer away, and a hint
-    /// with no offer behind it is a sentence that is no longer true. Every
+    /// with no offer behind it is a sentence that is no longer true. The hint
+    /// is the offer, so there is no second state to take away with it. Every
     /// other thing on the row stays: a fading line, an error that waits for a
     /// key, a progress notice, a question, a run, and the open list are not
     /// the hint's to remove.
@@ -1635,6 +1641,27 @@ impl PushUi {
         ) {
             self.state = State::Idle;
         }
+    }
+
+    /// Whether a hint is on the row at `now`. The answer is the armed state
+    /// of the second press of Esc.
+    ///
+    /// It is `true` only when the row holds a [`Life::Hint`] that has not
+    /// lived its [`Life::lifetime`] at `now`. It uses the rule of
+    /// [`PushUi::expire`], so the answer is `false` at the instant the hint
+    /// is due to leave, even when no frame has drawn the row since. A
+    /// message that took the row from the hint, a key that withdrew the hint,
+    /// and a switch of the worktree each make the answer `false`, because the
+    /// hint is gone then. No second state can disagree with the row.
+    pub(crate) fn shows_hint(&self, now: Instant) -> bool {
+        let State::Status { life, .. } = &self.state else {
+            return false;
+        };
+        matches!(life, Life::Hint { .. })
+            && life
+                .elapsed(now)
+                .zip(life.lifetime())
+                .is_some_and(|(elapsed, lifetime)| elapsed < lifetime)
     }
 
     /// Take every message off the row and out of the queue: a status line of
@@ -2036,9 +2063,10 @@ pub(crate) const STATUS_LIFETIME: Duration = Duration::from_secs(60);
 
 /// How long the hint of the second Esc stays on the row.
 ///
-/// The hint asks for a second press, and the arming of Esc in `crate::watch`
-/// reads this same constant. The hint is the armed state, so the arming and the
-/// line it stands for end at the same instant.
+/// The hint asks for a second press. The hint is the only armed state of Esc:
+/// `crate::watch` asks the row with [`PushUi::shows_hint`], and that answer
+/// reads this same constant through [`Life::lifetime`]. So the arming and the
+/// line it stands for end at the same instant, because they are one thing.
 pub(crate) const RETURN_HINT_LIFETIME: Duration = Duration::from_secs(3);
 
 /// How often such a message has to be repainted for its age text and its fade
@@ -5220,6 +5248,87 @@ mod ui_tests {
 
         ui.dismiss();
         assert_eq!(painted(&mut ui, tall_pane(80), now), "");
+    }
+
+    #[test]
+    fn a_hint_on_the_row_shows_until_exactly_its_lifetime() {
+        // The rule is the rule of `expire`: 1 ms before the lifetime the hint
+        // shows, and at the lifetime it does not.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        assert!(!ui.shows_hint(now), "an empty row shows no hint");
+        assert_eq!(ui.post_hint(HINT.to_string(), now), Posted::OnRow);
+
+        assert!(ui.shows_hint(now), "the hint shows when it lands");
+        assert!(
+            ui.shows_hint(now + RETURN_HINT_LIFETIME - Duration::from_millis(1)),
+            "1 ms before its lifetime the hint shows",
+        );
+        assert!(
+            !ui.shows_hint(now + RETURN_HINT_LIFETIME),
+            "at its lifetime the hint does not show, whether or not a frame has expired it",
+        );
+    }
+
+    #[test]
+    fn a_message_that_takes_the_row_from_the_hint_ends_the_hint() {
+        let now = t0();
+        type Take = fn(&mut PushUi, Instant);
+        let takers: [(&str, Take); 3] = [
+            ("post_notice", |ui, now| {
+                let _ = ui.post_notice("notice".to_string(), now);
+            }),
+            ("post_progress", |ui, _| {
+                ui.post_progress("progress".to_string());
+            }),
+            ("post_error", |ui, _| ui.post_error("error".to_string())),
+        ];
+        for (what, take) in takers {
+            let mut ui = PushUi::new(false);
+            let _ = ui.post_hint(HINT.to_string(), now);
+            assert!(ui.shows_hint(now), "the hint must show before {what}");
+
+            take(&mut ui, now);
+            assert!(!ui.shows_hint(now), "{what} must end the hint");
+        }
+    }
+
+    #[test]
+    fn a_hint_that_leaves_the_row_by_a_door_is_not_shown() {
+        let now = t0();
+        type Leave = fn(&mut PushUi);
+        let leaves: [(&str, Leave); 3] = [
+            ("withdraw_hint", PushUi::withdraw_hint),
+            ("dismiss", PushUi::dismiss),
+            ("clear", PushUi::clear),
+        ];
+        for (what, leave) in leaves {
+            let mut ui = PushUi::new(false);
+            let _ = ui.post_hint(HINT.to_string(), now);
+            assert!(ui.shows_hint(now), "the hint must show before {what}");
+
+            leave(&mut ui);
+            assert!(!ui.shows_hint(now), "{what} must remove the hint");
+        }
+    }
+
+    #[test]
+    fn a_status_that_is_not_a_hint_is_not_a_shown_hint() {
+        let now = t0();
+        let mut fading = PushUi::new(false);
+        let _ = fading.post_notice("notice".to_string(), now);
+        assert!(!fading.shows_hint(now), "a fading line is not a hint");
+
+        let mut asking = asking();
+        assert!(!asking.shows_hint(now), "a question is not a hint");
+        assert_eq!(asking.post_hint(HINT.to_string(), now), Posted::Held);
+        assert!(
+            !asking.shows_hint(now),
+            "a hint that was dropped is not shown"
+        );
+
+        let running = pushing(now);
+        assert!(!running.shows_hint(now), "a run is not a hint");
     }
 
     /// A clock that counts its reads and answers `at`.

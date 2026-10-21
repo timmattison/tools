@@ -1,8 +1,13 @@
 //! The arming of a key that needs a second press.
 //!
 //! This module holds `Arming`. A key that asks for a second press (`G` on a
-//! remote shell, Esc off the start branch) puts a message on the row. That
-//! message is the armed state, and `Arming` holds it.
+//! remote shell) puts a message on the row. That message is the armed state,
+//! and `Arming` holds it.
+//!
+//! Esc off the start branch does not use `Arming`. Its hint is a
+//! `crate::push::Life::Hint`, and `PushUi::shows_hint` asks the row itself.
+//! The row cannot disagree with itself. A copy of the row in an `Arming` can,
+//! and it did: a message that took the row from the hint left the arming on.
 
 use std::time::{Duration, Instant};
 

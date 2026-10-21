@@ -153,7 +153,8 @@ mod worktrees;
                   is on it, gsw goes home and runs git switch --no-guess <branch> there, with \
                   its output live under the frame. gsw never forces the switch: when git \
                   refuses, the last lines of git stay in red until a key. Another key between the \
-                  two presses makes the next Esc a first press. A switch walks the new worktree \
+                  two presses makes the next Esc a first press, and so does another line that \
+                  takes the place of the hint under the frame. A switch walks the new worktree \
                   at once and removes every line under the frame. The arrow keys do nothing \
                   while a push runs or while the push question is up. When the worktree on the \
                   screen is removed, gsw goes back to the home worktree. gsw does not change the \

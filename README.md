@@ -854,8 +854,10 @@ cannot hang the caller. Used by `cwt` and `ha`.
       `git switch --no-guess <start branch>` there, with the output of git live under the frame,
       as a push shows its output. gsw never forces the switch. When git refuses, for example
       because the switch would overwrite a local change, the last lines that git wrote stay under
-      the frame in red until you press a key, and HEAD does not move. Any other key between the two presses
-      takes the line away, and the next Esc is a first press again. While the name is bold, Esc
+      the frame in red until you press a key, and HEAD does not move. The line is the offer of the
+      second press. Any other key between the two presses takes the line away, and so does any
+      other line that takes its place, such as the result of an `m` run. The next Esc is then a
+      first press again. While the name is bold, Esc
       only clears the line under the frame, as before.
     - A switch walks the new worktree at once and starts the refresh clock again. It moves the
       filesystem watcher to the new worktree, and `p`, `G`, and `m` then act on the worktree that

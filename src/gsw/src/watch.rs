@@ -2437,8 +2437,9 @@ struct LoopStart {
 /// of them through the one function [`absorb`], and because a switch of the
 /// worktree changes most of this in one step: the cache takes the snapshot of
 /// the new worktree, the schedule starts the refresh clock again, the row under
-/// the frame empties, and the `G` key and the second press of Esc lose their
-/// arming. An argument for each part would give [`absorb`] more arguments than a reader can hold.
+/// the frame empties, and the `G` key loses its arming. The second press of
+/// Esc loses its hint with the row. An argument for each part would give
+/// [`absorb`] more arguments than a reader can hold.
 struct LoopState {
     /// The snapshot a re-render can use without walking git again.
     cache: SnapshotCache,
@@ -2463,9 +2464,6 @@ struct LoopState {
     log: LogDemand,
     /// The branch where the user started gsw. See [`LoopStart::start_branch`].
     start_branch: Option<StartBranch>,
-    /// The arming of the second press of Esc. The hint on the row is the
-    /// armed state. See [`Arming`].
-    returning: Arming,
 }
 
 impl LoopState {
@@ -2509,8 +2507,8 @@ impl LoopState {
     ///    run that started before the switch is known as stale. Every message
     ///    under the frame goes, and the list closes, because each one
     ///    describes the worktree the frame showed before. The `G` key loses
-    ///    its arming with the message that armed it, and so does the second
-    ///    press of Esc.
+    ///    its arming with the message that armed it. The second press of Esc
+    ///    needs no call, because its hint is one of those messages.
     /// 3. On `Err`, nothing changes, and the reason comes back. The caller
     ///    decides whether the reason goes on the row.
     fn enter(
@@ -2530,7 +2528,6 @@ impl LoopState {
         self.generation = self.generation.next();
         self.ui.clear();
         self.issue.disarm();
-        self.returning.disarm();
         Ok(())
     }
 
@@ -2869,11 +2866,10 @@ where
                 if !matches!(action, Event::IssueRequested) {
                     state.issue.disarm();
                 }
-                // Every key but Esc takes the hint and the arming of the
-                // second Esc away, for the same reason. The hint is the armed
-                // state, and this key is not the second press.
+                // Every key but Esc takes the hint away, for the same reason.
+                // The hint is the armed state of the second Esc, and this key
+                // is not the second press.
                 if !matches!(action, Event::ReturnRequested) {
-                    state.returning.disarm();
                     state.ui.withdraw_hint();
                 }
                 return absorb(action, pending, state, hooks);
@@ -2924,10 +2920,13 @@ where
         // Esc in the normal mode. It goes back to the start branch on its
         // second press, and only where the name in the header is red.
         //
-        // One read of the clock, for both halves of one press, as the `G` key
-        // reads it: the arming and the hint must end at the same instant. The
-        // arm runs only where the hint went straight onto the row, so `now` is
-        // the instant the hint got there.
+        // The hint on the row is the only armed state. The second press is
+        // the press that finds the hint on the row, and no other state says
+        // so. A message that takes the row from the hint, a key, a switch,
+        // and the clock each remove the hint, and with it the arming.
+        //
+        // One read of the clock for the whole press, so the hint is posted
+        // and judged at the same instant.
         Event::ReturnRequested => {
             let now = clock();
             let Some(branch) = state
@@ -2937,15 +2936,13 @@ where
             else {
                 // The name is not red, or the session has no start branch.
                 // Esc does what it did before the two presses existed.
-                state.returning.disarm();
                 state.ui.dismiss();
                 return Flow::Continue;
             };
-            if state.returning.is_armed(now) {
-                // The second press. The hint leaves the row with the arming,
-                // so a press that finds no worktree to go to leaves no hint
-                // that asks for a press that already happened.
-                state.returning.disarm();
+            if state.ui.shows_hint(now) {
+                // The second press. The hint leaves the row, so a press that
+                // finds no worktree to go to leaves no hint that asks for a
+                // press that already happened.
                 state.ui.withdraw_hint();
                 // Rule 1: home is on the start branch. The watch moves home,
                 // as Up does. Rule 2: another worktree is on it, and the watch
@@ -2993,12 +2990,11 @@ where
                         }
                     }
                 }
-            } else if state.ui.post_hint(branch.return_hint(), now) == crate::push::Posted::OnRow {
-                // The row arms the press, and not the key. A question or a
-                // run owns the row, and a hint that waited in the queue would
-                // arm a press that nobody was asked for. A hint that the busy
-                // row drops arms nothing.
-                state.returning.arm(now);
+            } else {
+                // The first press. The hint is the arming. A question or a
+                // run owns the row, and the hint then goes nowhere, so the
+                // press arms nothing and the next Esc is a first press too.
+                let _ = state.ui.post_hint(branch.return_hint(), now);
             }
         }
         // Left and Right read the paths of the worktrees again at each press,
@@ -3368,7 +3364,6 @@ where
         generation: Generation::default(),
         log,
         start_branch,
-        returning: Arming::new(crate::push::RETURN_HINT_LIFETIME),
     };
     loop {
         // Wait for the first event, or — when the decay timer is enabled — wake
@@ -11397,7 +11392,6 @@ mod push_loop_tests {
             generation: Generation::default(),
             log: LogDemand::Off,
             start_branch: None,
-            returning: Arming::new(crate::push::RETURN_HINT_LIFETIME),
         };
         assert!(
             state.issue.armed.is_armed(now),
@@ -11423,12 +11417,13 @@ mod push_loop_tests {
 
     #[test]
     fn a_switch_takes_the_arming_of_esc_away_whatever_made_it() {
-        // The hint of the second Esc is on the row, and a switch takes every
-        // message off the row. A switch that no key made, as the return after
-        // a worktree went away, must take the arming away with the hint.
+        // The hint of the second Esc is on the row, and it is the armed
+        // state. A switch takes every message off the row. A switch that no
+        // key made, as the return after a worktree went away, must take the
+        // hint away, and the arming with it.
         let now = Instant::now();
-        let mut returning = Arming::new(crate::push::RETURN_HINT_LIFETIME);
-        returning.arm(now);
+        let mut ui = PushUi::new(false);
+        let _ = ui.post_hint(RETURN_HINT_LINE.to_string(), now);
         let mut state = LoopState {
             cache: SnapshotCache {
                 snapshot: snapshot_of(&worktree(BRAVO)),
@@ -11436,7 +11431,7 @@ mod push_loop_tests {
                 dims: TEST_DIMS,
             },
             schedule: no_timed_refresh_for_push(),
-            ui: PushUi::new(false),
+            ui,
             issue: issue_run_in(crate::remote::Session::Local),
             base_updates: BaseUpdateCommands::new(),
             conflicts: ConflictsRun::new(),
@@ -11445,12 +11440,8 @@ mod push_loop_tests {
             generation: Generation::default(),
             log: LogDemand::Off,
             start_branch: Some(StartBranch::fake(TOPIC)),
-            returning,
         };
-        assert!(
-            state.returning.is_armed(now),
-            "the fixture must start armed"
-        );
+        assert!(state.ui.shows_hint(now), "the fixture must start armed");
 
         state.switch_to(
             worktree(CHARLIE),
@@ -11464,7 +11455,7 @@ mod push_loop_tests {
             "the switch must reach charlie"
         );
         assert!(
-            !state.returning.is_armed(now),
+            !state.ui.shows_hint(now),
             "a switch must take the arming of Esc away",
         );
     }
@@ -12679,7 +12670,7 @@ mod push_loop_tests {
 
     #[test]
     fn a_key_between_two_presses_of_esc_makes_the_second_one_a_first_press() {
-        // Every key but Esc takes the hint and the arming away. `r`, `m`, and
+        // Every key but Esc takes the hint away, and the hint is the arming. `r`, `m`, and
         // Left are three kinds of key: one that walks, one that starts work,
         // and one that moves the watch. `alpha` is on the start branch, so a
         // second press would move the watch there, and none of these may.
@@ -12723,7 +12714,7 @@ mod push_loop_tests {
     }
 
     #[test]
-    fn an_event_that_no_key_made_leaves_the_hint_and_the_arming_alone() {
+    fn an_event_that_no_key_made_leaves_the_hint_alone() {
         // A change on the disk is not the user. The hint stays on the row, and
         // the second press still goes back.
         let (screen, seen) = run_setup(
@@ -12747,7 +12738,8 @@ mod push_loop_tests {
         // key. The next Esc then finds no hint, so it is a first press: it
         // moves nowhere, and the hint stands on the row again. The Esc after
         // that one finds the new hint, and it goes back.
-        let messages: [(&str, fn() -> Vec<Event>); 3] = [
+        type Between = fn() -> Vec<Event>;
+        let messages: [(&str, Between); 3] = [
             // post_progress: a measurement starts.
             ("ConflictsStarted", || vec![started_against_main()]),
             // post_notice: a measurement ends.
@@ -12805,7 +12797,7 @@ mod push_loop_tests {
     #[test]
     fn a_hint_that_lived_its_lifetime_is_off_the_row_and_the_next_esc_is_a_first_press() {
         // The hint leaves the row `RETURN_HINT_LIFETIME` after it came, and
-        // the arming leaves with it, at the same instant. The render hook
+        // the arming is the hint, so it ends at the same instant. The render hook
         // moves the clock on by that much, once, after the first frame. The
         // frame between the two presses shows no hint, and the second press
         // asks again.
