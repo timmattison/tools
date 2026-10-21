@@ -11,7 +11,7 @@ use ratatui::Terminal;
 
 use crate::board::Board;
 use crate::cancel::{Canceller, Confirm};
-use crate::first_cycle::{FirstCycle, NoTargetRead};
+use crate::first_cycle::{FirstCycle, NoTargetRead, Verdict};
 use crate::render;
 use crate::run::RunId;
 use crate::status::{Message, Status};
@@ -91,8 +91,9 @@ pub struct App<'a, O: Opener, C: Canceller, Tz: TimeZone> {
     /// The box that asks the user to cancel a run. It is `None` when no box
     /// shows.
     confirm: Option<Confirm>,
-    /// The tally of the first refresh cycle. It is `None` after that cycle
-    /// ends.
+    /// The tally of the first refresh cycle. It is `None` after the first
+    /// cycle that gives a verdict. A cycle that ends with a spent API budget
+    /// gives none, and the tally then starts again for the next cycle.
     first_cycle: Option<FirstCycle>,
 }
 
@@ -102,7 +103,7 @@ pub enum RunError {
     /// The terminal could not draw or read.
     #[error(transparent)]
     Terminal(#[from] std::io::Error),
-    /// The first refresh cycle read no target.
+    /// The first refresh cycle that GitHub answered read no target.
     #[error(transparent)]
     NoTargetRead(#[from] NoTargetRead),
 }
@@ -138,12 +139,15 @@ where
     }
 
     /// Runs the loop until the user quits, or until the first refresh cycle
-    /// reads no target. The loop draws no frame after it finds that.
+    /// reads no target. A cycle that ends with a spent API budget does not
+    /// count, and the next cycle decides. The loop draws no frame after it
+    /// finds that.
     ///
     /// # Errors
     /// Returns [`RunError::Terminal`] when the terminal cannot draw or read.
     /// Returns [`RunError::NoTargetRead`] when the first refresh cycle ends
-    /// with no good repository fetch and at least one failed target.
+    /// with no good repository fetch, at least one failed target, and an API
+    /// budget that is not spent.
     pub fn run<B, E>(&mut self, terminal: &mut Terminal<B>, events: &mut E) -> Result<(), RunError>
     where
         B: Backend,
@@ -183,7 +187,9 @@ where
     ///
     /// # Errors
     /// Returns [`NoTargetRead`] when the first refresh cycle ends with no
-    /// good repository fetch and at least one failed target.
+    /// good repository fetch, at least one failed target, and an API budget
+    /// that is not spent. When the budget is spent, the tally starts again
+    /// and the next cycle decides.
     fn apply_updates(&mut self) -> Result<(), NoTargetRead> {
         while let Some(failure) = self.opener.late_failure() {
             self.status.message = Some(failed_open(&failure.url, &failure.reason, (self.now)()));
@@ -228,7 +234,9 @@ where
                     self.status.backoff_until = backoff_until;
                     self.status.refreshing = false;
                     if let Some(first_cycle) = self.first_cycle.take() {
-                        first_cycle.verdict()?;
+                        if first_cycle.verdict(rate)? == Verdict::BudgetSpent {
+                            self.first_cycle = Some(FirstCycle::default());
+                        }
                     }
                 }
             }
@@ -866,7 +874,7 @@ mod tests {
     fn rate_limited() -> SourceError {
         SourceError::Http {
             status: 403,
-            message: "API rate limit exceeded for user ID 1.".to_owned(),
+            message: "rate limit hit".to_owned(),
         }
     }
 

@@ -1,6 +1,10 @@
 //! The tally of the first refresh cycle. It decides when `ha` must stop
 //! because the cycle read no target.
 //!
+//! A cycle that ends with no request left in the API budget gives no verdict.
+//! Each failure of that cycle can be the spent budget. The tally then starts
+//! again, and the next cycle decides.
+//!
 //! A failed target is a repository whose fetch failed or an owner whose
 //! repository list failed. An owner list that GitHub cut at the limit is a
 //! warning, not a failure.
@@ -9,7 +13,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::github::SourceError;
-use crate::status::OwnerProblem;
+use crate::status::{OwnerProblem, RateLimit};
 use crate::target::{OwnerName, RepoName, Target};
 use crate::worker::Update;
 
@@ -27,9 +31,20 @@ const NOT_FOUND_HINT: &str = "GitHub answers 404 for a repository that does not 
 /// The HTTP status that GitHub gives for a name that it does not show.
 const NOT_FOUND: u16 = 404;
 
-/// What the updates of the first refresh cycle say about the targets.
+/// What the end of a tallied cycle decides, when it does not stop `ha`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// The cycle read a target, or no target failed. No later cycle is tallied.
+    Read,
+    /// No target was read, and the cycle ended with 0 requests remaining. Each
+    /// failure can be the spent budget, thus the next cycle is tallied.
+    BudgetSpent,
+}
+
+/// What the updates of a refresh cycle say about the targets. The tally
+/// covers the first cycle, and each next cycle while the budget is spent.
 ///
-/// This type holds the one definition of "the first cycle read no target".
+/// This type holds the one definition of "the cycle read no target".
 /// A good fetch that finds zero runs is a success. A failed target is a
 /// repository whose fetch failed or an owner whose list failed. An owner
 /// list that GitHub cut is a warning and does not count as a failure.
@@ -69,16 +84,26 @@ impl FirstCycle {
         }
     }
 
-    /// Gives the verdict at the end of the cycle.
+    /// Gives the verdict at the end of the cycle. `rate` is the API budget
+    /// that the end of the cycle states.
+    ///
+    /// When no repository fetch succeeded and a target failed, the budget
+    /// decides. With 0 requests remaining, each failure can be the spent
+    /// budget, and the verdict is [`Verdict::BudgetSpent`]. With a budget
+    /// that is not spent, or with no rate, the cycle read no target.
     ///
     /// # Errors
-    /// Returns [`NoTargetRead`] when no repository fetch succeeded and at
-    /// least one target failed. A target is a repository or an owner. A cut
-    /// owner list is a warning and does not count.
-    pub fn verdict(self) -> Result<(), NoTargetRead> {
+    /// Returns [`NoTargetRead`] when no repository fetch succeeded, at least
+    /// one target failed, and the budget is not spent. A target is a
+    /// repository or an owner. A cut owner list is a warning and does not
+    /// count.
+    pub fn verdict(self, rate: Option<RateLimit>) -> Result<Verdict, NoTargetRead> {
         let nothing_failed = self.failed_repositories.is_empty() && self.failed_owners.is_empty();
         if self.read_a_repository || nothing_failed {
-            return Ok(());
+            return Ok(Verdict::Read);
+        }
+        if rate.is_some_and(|rate| rate.remaining == 0) {
+            return Ok(Verdict::BudgetSpent);
         }
         let repositories = self
             .failed_repositories
@@ -94,7 +119,7 @@ impl FirstCycle {
     }
 }
 
-/// The first refresh cycle read no target. The text lists each failed
+/// The first refresh cycle that GitHub answered read no target. The text lists each failed
 /// target with its error. When one or more errors are a 404, a hint comes
 /// after the list one time.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,9 +171,48 @@ mod tests {
         }
     }
 
+    fn rate(remaining: u64) -> Option<RateLimit> {
+        let reset = chrono::DateTime::UNIX_EPOCH;
+        Option::from(RateLimit {
+            limit: 5000,
+            remaining,
+            reset,
+        })
+    }
+
+    #[test]
+    fn a_failure_with_a_spent_budget_is_a_verdict_of_budget_spent() {
+        let mut cycle = FirstCycle::default();
+        cycle.note(&failed("acme/a"));
+        assert_eq!(cycle.verdict(rate(0)), Ok(Verdict::BudgetSpent));
+    }
+
+    #[test]
+    fn a_failure_with_a_low_budget_that_is_not_spent_is_a_verdict_of_error() {
+        let mut cycle = FirstCycle::default();
+        cycle.note(&failed("acme/a"));
+        assert!(cycle.verdict(rate(3)).is_err());
+    }
+
+    #[test]
+    fn a_good_fetch_with_a_spent_budget_is_a_success() {
+        let mut cycle = FirstCycle::default();
+        cycle.note(&failed("acme/b"));
+        cycle.note(&Update::Runs {
+            repo: repo("acme/a"),
+            runs: vec![],
+        });
+        assert_eq!(cycle.verdict(rate(0)), Ok(Verdict::Read));
+    }
+
+    #[test]
+    fn no_failure_and_no_fetch_with_a_spent_budget_is_a_success() {
+        assert_eq!(FirstCycle::default().verdict(rate(0)), Ok(Verdict::Read));
+    }
+
     #[test]
     fn a_cycle_with_no_update_is_fine() {
-        assert_eq!(FirstCycle::default().verdict(), Ok(()));
+        assert_eq!(FirstCycle::default().verdict(None), Ok(Verdict::Read));
     }
 
     #[test]
@@ -156,7 +220,7 @@ mod tests {
         let mut cycle = FirstCycle::default();
         cycle.note(&failed("acme/b"));
         cycle.note(&failed("acme/a"));
-        let error = cycle.verdict().unwrap_err();
+        let error = cycle.verdict(None).unwrap_err();
         assert_eq!(
             error.to_string(),
             "the first refresh could not read any target:\n  \
@@ -173,7 +237,7 @@ mod tests {
             repo: repo("acme/a"),
             runs: vec![],
         });
-        assert_eq!(cycle.verdict(), Ok(()));
+        assert_eq!(cycle.verdict(None), Ok(Verdict::Read));
     }
 
     #[test]
@@ -193,7 +257,7 @@ mod tests {
             ],
         });
         cycle.note(&failed("zzz/r"));
-        let error = cycle.verdict().unwrap_err();
+        let error = cycle.verdict(None).unwrap_err();
         assert_eq!(
             error.to_string(),
             "the first refresh could not read any target:\n  \

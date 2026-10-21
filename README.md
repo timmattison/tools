@@ -2205,7 +2205,9 @@ cannot hang the caller. Used by `cwt` and `ha`.
     404, `ha` adds a hint: GitHub answers 404 for a repository that does not exist, and also for a
     private repository that this `gh` account cannot read. `gh auth status` shows the account. A
     later refresh in which each request fails does not stop `ha`, because the board keeps the
-    last good runs.
+    last good runs. When the first refresh ends with no request left in the API budget, each
+    failure can be the spent budget. Then `ha` keeps the view and waits for the reset, and the
+    first refresh after the reset decides.
   - `ha` needs a terminal. When its standard output is not a terminal, it stops with exit
     status 2. Exit status: 0 success, 1 a failure of `gh` or of the terminal, or a first refresh
     that read no target, 2 a usage or configuration error.
