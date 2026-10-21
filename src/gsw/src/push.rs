@@ -1111,7 +1111,7 @@ pub(crate) enum Posted {
     OnRow,
     /// A question, a push in flight, or the open list owns the row, so the
     /// message waits in [`PushUi::held`] — or, on a full queue or for a
-    /// progress notice, went nowhere at all.
+    /// progress notice or a hint, went nowhere at all.
     Held,
 }
 
@@ -1532,7 +1532,7 @@ impl PushUi {
     /// message.
     ///
     /// A question, a push in flight, and the open list own the row here, as at
-    /// the other two doors. The difference is what happens to the words then:
+    /// the other doors. The difference is what happens to the words then:
     /// they go nowhere, and they never wait in [`PushUi::held`]. A held notice
     /// reaches the row after the run it describes has ended, and it then says
     /// that a run is in flight when none is.
@@ -1559,12 +1559,12 @@ impl PushUi {
 
     /// Put `line` on the row with `life`, or hold it until the row is free.
     ///
-    /// The body the three doors share, so the rule about who owns the row is
+    /// The body the four doors share, so the rule about who owns the row is
     /// written once. A question, a push in flight, and the open list are never
     /// painted over, and a message that arrives while one of them is up joins
     /// the back of [`PushUi::held`]. Two messages go instead: a life with no
-    /// [`HeldLife`], which is a progress notice, and a message that finds the
-    /// queue at [`MAX_HELD_MESSAGES`].
+    /// [`HeldLife`], which is a progress notice or a hint, and a message that
+    /// finds the queue at [`MAX_HELD_MESSAGES`].
     ///
     /// A held message keeps the kind of its life and loses the instant. The
     /// instant in `life` is the instant the message arrived, and a held
@@ -1574,7 +1574,7 @@ impl PushUi {
     ///
     /// The answer reports which of the two arms below ran, so a caller whose
     /// own state stands on the message can see whether anybody has read it
-    /// yet — see [`Posted`]. A full queue and a progress notice answer
+    /// yet — see [`Posted`]. A full queue, a progress notice, and a hint answer
     /// [`Posted::Held`] with the message dropped, because the question is
     /// whether it took the row and it did not.
     fn post(&mut self, line: String, life: Life) -> Posted {
