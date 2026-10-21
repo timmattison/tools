@@ -100,7 +100,7 @@ pub struct App<'a, O: Opener, C: Canceller, Tz: TimeZone> {
 /// Why the event loop ended with an error.
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
-    /// The terminal could not draw or read.
+    /// The terminal could not clear, draw or read.
     #[error(transparent)]
     Terminal(#[from] std::io::Error),
     /// The first refresh cycle that did not end with a spent API budget read
@@ -139,22 +139,36 @@ where
         }
     }
 
-    /// Runs the loop until the user quits, or until the first refresh cycle
-    /// reads no target. A cycle that ends with a spent API budget does not
-    /// count, and the next cycle decides. The loop draws no frame after it
-    /// finds that.
+    /// Clears the whole screen one time, then runs the loop until the user
+    /// quits, or until the first refresh cycle reads no target. A cycle that
+    /// ends with a spent API budget does not count, and the next cycle
+    /// decides. The loop draws no frame after it finds that.
     ///
     /// # Errors
-    /// Returns [`RunError::Terminal`] when the terminal cannot draw or read.
-    /// Returns [`RunError::NoTargetRead`] when the first refresh cycle ends
-    /// with no good repository fetch, at least one failed target, and an API
-    /// budget that is not spent.
+    /// Returns [`RunError::Terminal`] when the terminal cannot clear, draw or
+    /// read. Returns [`RunError::NoTargetRead`] when the first refresh cycle
+    /// ends with no good repository fetch, at least one failed target, and an
+    /// API budget that is not spent.
     pub fn run<B, E>(&mut self, terminal: &mut Terminal<B>, events: &mut E) -> Result<(), RunError>
     where
         B: Backend,
         B::Error: std::error::Error + Send + Sync + 'static,
         E: Events,
     {
+        // This clear is not a duplicate of the entry to the alternate screen.
+        // mosh ignores mode 1049, so the text of the shell is still on the
+        // screen. ratatui sends no clear at startup, and its first frame
+        // writes only the cells that are not blank. Without this clear, the
+        // shell text stays in each cell where the view draws a blank.
+        //
+        // A resize to the current size clears the whole screen and resets
+        // the back buffer. `Terminal::clear` does the same, but it also asks
+        // the terminal for the cursor position and waits for the answer. If
+        // the terminal does not answer, that wait stops `ha` at the start.
+        let size = terminal.size().map_err(std::io::Error::other)?;
+        terminal
+            .resize(size.into())
+            .map_err(std::io::Error::other)?;
         loop {
             self.apply_updates()?;
             self.sync_watch();
@@ -394,8 +408,9 @@ mod tests {
 
     use chrono::FixedOffset;
     use crossterm::event::KeyEventState;
-    use ratatui::backend::TestBackend;
-    use ratatui::buffer::Buffer;
+    use ratatui::backend::{ClearType, TestBackend, WindowSize};
+    use ratatui::buffer::{Buffer, Cell};
+    use ratatui::layout::{Position, Size};
 
     use super::*;
     use crate::cancel::CancelOutcome;
@@ -589,7 +604,27 @@ mod tests {
         channels: &Channels,
         events: Vec<Event>,
     ) -> (Result<(), RunError>, Vec<String>) {
-        let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
+        run_app_on(
+            TestBackend::new(120, 12),
+            status,
+            opener,
+            canceller,
+            channels,
+            events,
+        )
+    }
+
+    /// Does the work of `run_app_with` on `backend`, so the caller can give
+    /// a screen that already holds text.
+    fn run_app_on(
+        backend: TestBackend,
+        status: Status,
+        opener: &RecordingOpener,
+        canceller: &RecordingCanceller,
+        channels: &Channels,
+        events: Vec<Event>,
+    ) -> (Result<(), RunError>, Vec<String>) {
+        let mut terminal = Terminal::new(backend).unwrap();
         let tz = FixedOffset::east_opt(0).unwrap();
         let clock = now;
         let mut app = App::new(
@@ -2087,5 +2122,138 @@ mod tests {
             frame[11]
         );
         assert!(!commands.contains(&Command::RefreshNow), "{commands:?}");
+    }
+
+    /// The text that the shell wrote on the screen before `ha` started.
+    const SHELL_TEXT: &str = "old-shell-text";
+
+    /// A screen of `width` by `height` cells that the shell filled before
+    /// `ha` started. Each cell holds a glyph, and no cell is blank.
+    fn screen_with_shell_text(width: u16, height: u16) -> TestBackend {
+        TestBackend::with_lines((0..height).map(|row| {
+            format!("{SHELL_TEXT}-{row}|")
+                .chars()
+                .cycle()
+                .take(usize::from(width))
+                .collect::<String>()
+        }))
+    }
+
+    #[test]
+    fn the_first_frame_hides_the_text_that_was_on_the_screen_before() {
+        let quit = || vec![press(KeyCode::Char('q'))];
+        let on_blank = channels();
+        send_runs(&on_blank, vec![active_run(1, 5)]);
+        let (result, expected) = run_app_on(
+            TestBackend::new(120, 12),
+            Status::default(),
+            &opener(false),
+            &canceller(),
+            &on_blank,
+            quit(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+        let on_shell_text = channels();
+        send_runs(&on_shell_text, vec![active_run(1, 5)]);
+        let (result, frame) = run_app_on(
+            screen_with_shell_text(120, 12),
+            Status::default(),
+            &opener(false),
+            &canceller(),
+            &on_shell_text,
+            quit(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert!(!frame.iter().any(|l| l.contains(SHELL_TEXT)), "{frame:#?}");
+        assert_eq!(frame, expected);
+    }
+
+    /// A terminal that does not answer the query for the cursor position.
+    /// A recording under `script` does not answer it, and a slow link
+    /// answers too late. Each other call goes to the `TestBackend` inside.
+    struct NoCursorReport(TestBackend);
+
+    impl Backend for NoCursorReport {
+        type Error = std::io::Error;
+
+        fn draw<'a, I>(&mut self, content: I) -> std::io::Result<()>
+        where
+            I: Iterator<Item = (u16, u16, &'a Cell)>,
+        {
+            let Ok(()) = self.0.draw(content);
+            Ok(())
+        }
+
+        fn hide_cursor(&mut self) -> std::io::Result<()> {
+            let Ok(()) = self.0.hide_cursor();
+            Ok(())
+        }
+
+        fn show_cursor(&mut self) -> std::io::Result<()> {
+            let Ok(()) = self.0.show_cursor();
+            Ok(())
+        }
+
+        fn get_cursor_position(&mut self) -> std::io::Result<Position> {
+            Err(std::io::Error::other(
+                "the terminal does not report the cursor position",
+            ))
+        }
+
+        fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> std::io::Result<()> {
+            let Ok(()) = self.0.set_cursor_position(position);
+            Ok(())
+        }
+
+        fn clear(&mut self) -> std::io::Result<()> {
+            let Ok(()) = self.0.clear();
+            Ok(())
+        }
+
+        fn clear_region(&mut self, clear_type: ClearType) -> std::io::Result<()> {
+            let Ok(()) = self.0.clear_region(clear_type);
+            Ok(())
+        }
+
+        fn size(&self) -> std::io::Result<Size> {
+            let Ok(size) = self.0.size();
+            Ok(size)
+        }
+
+        fn window_size(&mut self) -> std::io::Result<WindowSize> {
+            let Ok(size) = self.0.window_size();
+            Ok(size)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            let Ok(()) = self.0.flush();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_view_starts_on_a_terminal_that_does_not_report_the_cursor() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let backend = NoCursorReport(screen_with_shell_text(120, 12));
+        let mut terminal = Terminal::new(backend).unwrap();
+        let tz = FixedOffset::east_opt(0).unwrap();
+        let clock = now;
+        let opener = opener(false);
+        let canceller = canceller();
+        let mut app = App::new(
+            Board::new(Duration::from_hours(8)),
+            Status::default(),
+            &opener,
+            &canceller,
+            &channels.worker,
+            &clock,
+            &tz,
+        );
+        let events = vec![press(KeyCode::Char('q')).into()];
+        let result = app.run(&mut terminal, &mut script(events));
+        assert!(result.is_ok(), "{result:?}");
+        let frame = lines(terminal.backend().0.buffer());
+        assert!(!frame.iter().any(|l| l.contains(SHELL_TEXT)), "{frame:#?}");
     }
 }

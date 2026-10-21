@@ -2208,6 +2208,10 @@ cannot hang the caller. Used by `cwt` and `ha`.
     last good runs. When the first refresh ends with no request left in the API budget, each
     failure can be the spent budget. Then `ha` keeps the view and waits for the reset, and the
     first refresh after the reset decides.
+  - The view clears the whole screen when it starts. Thus no text of the shell shows under the
+    view, also in a terminal that has no alternate screen, for example mosh. The clear does not
+    ask the terminal for the cursor position, thus `ha` also starts on a terminal that does not
+    answer that query.
   - `ha` needs a terminal. When its standard output is not a terminal, it stops with exit
     status 2. Exit status: 0 success, 1 a failure of `gh` or of the terminal, or a first refresh
     that read no target, 2 a usage or configuration error.
