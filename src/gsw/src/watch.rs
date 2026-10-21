@@ -12860,6 +12860,7 @@ mod push_loop_tests {
         );
         assert_eq!(strip_ansi(&screen), hint_under(BRAVO));
     }
+
     // Rule 3: no worktree is on the start branch, so the second Esc runs
     // `git switch --no-guess` in the home worktree.
 
@@ -12901,6 +12902,7 @@ mod push_loop_tests {
             "the row must show the command while it runs, got {painted:?}",
         );
     }
+
     #[test]
     fn the_second_esc_goes_home_before_it_runs_git_switch() {
         // The watch is on `charlie`, and no worktree is on the start branch.
@@ -12967,6 +12969,7 @@ mod push_loop_tests {
             "no run may show on the row, got {painted:?}",
         );
     }
+
     /// What git writes when the switch of the second Esc worked.
     const SWITCHED: &str = "Switched to branch 'topic'";
 
@@ -13039,6 +13042,7 @@ mod push_loop_tests {
             "the next key must remove the words of git",
         );
     }
+
     #[test]
     fn no_key_but_g_starts_anything_while_the_switch_of_the_second_esc_runs() {
         // The run owns the row and moves HEAD of home. Esc, the arrows, `p`,
