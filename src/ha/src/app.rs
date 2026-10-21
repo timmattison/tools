@@ -392,7 +392,7 @@ mod tests {
     use crate::cancel::CancelOutcome;
     use crate::github::{RepoList, SourceError};
     use crate::run::{Run, RunId, RunState};
-    use crate::status::OwnerProblem;
+    use crate::status::{OwnerProblem, RateLimit};
     use crate::target::{OwnerName, RepoName};
     use crate::worker::{Command, Update};
 
@@ -860,6 +860,129 @@ mod tests {
             rate: None,
             backoff_until: None,
         }
+    }
+
+    /// The error that GitHub gives when the API budget is spent.
+    fn rate_limited() -> SourceError {
+        SourceError::Http {
+            status: 403,
+            message: "API rate limit exceeded for user ID 1.".to_owned(),
+        }
+    }
+
+    /// The end of a cycle that spent the whole API budget.
+    fn cycle_done_with_spent_budget() -> Update {
+        let reset = now() + chrono::Duration::minutes(20);
+        Update::CycleDone {
+            finished_at: now(),
+            rate: Some(RateLimit {
+                limit: 5000,
+                remaining: 0,
+                reset,
+            }),
+            backoff_until: Some(reset),
+        }
+    }
+
+    /// Sends the repositories `acme/a` and `acme/b`, a 403 rate-limit failure
+    /// for each, and the end of a cycle with a spent budget.
+    fn send_first_cycle_with_spent_budget(channels: &Channels) {
+        let a = RepoName::parse("acme/a").unwrap();
+        let b = RepoName::parse("acme/b").unwrap();
+        let updates = [
+            Update::Repos {
+                repos: BTreeSet::from([a.clone(), b.clone()]),
+                owner_errors: vec![],
+            },
+            Update::Failed {
+                repo: a,
+                error: rate_limited(),
+            },
+            Update::Failed {
+                repo: b,
+                error: rate_limited(),
+            },
+            cycle_done_with_spent_budget(),
+        ];
+        for update in updates {
+            channels.updates.send(update).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_first_cycle_that_ends_with_a_spent_budget_keeps_the_view() {
+        let channels = channels();
+        send_first_cycle_with_spent_budget(&channels);
+        let (result, frame) = run_app(&opener(false), &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        let status_line = frame.last().unwrap();
+        assert!(
+            status_line.contains("API low 0/5000, next refresh"),
+            "{status_line:?}"
+        );
+    }
+
+    #[test]
+    fn after_a_spent_budget_the_next_cycle_gives_the_verdict() {
+        let channels = channels();
+        send_first_cycle_with_spent_budget(&channels);
+        let updates = [
+            Update::Failed {
+                repo: RepoName::parse("acme/a").unwrap(),
+                error: not_found(),
+            },
+            Update::Failed {
+                repo: RepoName::parse("acme/b").unwrap(),
+                error: not_found(),
+            },
+            cycle_done(),
+        ];
+        for update in updates {
+            channels.updates.send(update).unwrap();
+        }
+        let (result, _) = run_app(&opener(false), &channels, vec![]);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "the first refresh could not read any target:\n  \
+             acme/a: GitHub answered 404: Not Found\n  \
+             acme/b: GitHub answered 404: Not Found\n\
+             GitHub answers 404 for a repository that does not exist, and for a private \
+             repository that this gh account cannot read.\n\
+             Run gh auth status to see the account."
+        );
+    }
+
+    #[test]
+    fn after_a_spent_budget_a_good_fetch_keeps_the_view() {
+        let channels = channels();
+        send_first_cycle_with_spent_budget(&channels);
+        let a = RepoName::parse("acme/a").unwrap();
+        let b = RepoName::parse("acme/b").unwrap();
+        let updates = [
+            Update::Runs {
+                repo: a.clone(),
+                runs: vec![],
+            },
+            Update::Failed {
+                repo: b.clone(),
+                error: not_found(),
+            },
+            cycle_done(),
+            Update::Failed {
+                repo: a,
+                error: not_found(),
+            },
+            Update::Failed {
+                repo: b,
+                error: not_found(),
+            },
+            cycle_done(),
+        ];
+        for update in updates {
+            channels.updates.send(update).unwrap();
+        }
+        let (result, _) = run_app(&opener(false), &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[test]
