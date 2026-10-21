@@ -160,7 +160,15 @@ where
         // screen. ratatui sends no clear at startup, and its first frame
         // writes only the cells that are not blank. Without this clear, the
         // shell text stays in each cell where the view draws a blank.
-        terminal.clear().map_err(std::io::Error::other)?;
+        //
+        // A resize to the current size clears the whole screen and resets
+        // the back buffer. `Terminal::clear` does the same, but it also asks
+        // the terminal for the cursor position and waits for the answer. A
+        // terminal that does not answer would then stop `ha` at the start.
+        let size = terminal.size().map_err(std::io::Error::other)?;
+        terminal
+            .resize(size.into())
+            .map_err(std::io::Error::other)?;
         loop {
             self.apply_updates()?;
             self.sync_watch();
