@@ -30,9 +30,11 @@ const ID_WIDTH: usize = 12;
 const STARTED_WIDTH: usize = 11;
 /// The width of the time column.
 const TIME_WIDTH: usize = 7;
-/// The columns that the text columns do not share: the marker, the ID part,
-/// started, and time columns, and the seven spaces between the columns.
-const FIXED_COLUMNS: usize = MARKER_WIDTH + ID_WIDTH + STARTED_WIDTH + TIME_WIDTH + 7;
+/// The columns that the text columns do not share: the two marker cells, the
+/// ID part, the started and time columns, and the eight spaces between the
+/// columns.
+const FIXED_COLUMNS: usize =
+    MARKER_WIDTH + ID_WIDTH + STARTED_WIDTH + TIME_WIDTH + MARKER_WIDTH + 8;
 /// The header word of the workflow column.
 const WORKFLOW_HEADER: &str = "WORKFLOW";
 /// The most columns that the workflow name gets: the width of its header word.
@@ -124,7 +126,10 @@ fn fit_right(text: &str, width: usize) -> String {
 /// Joins the cells of one row into one line. One space stands between cells.
 ///
 /// The ID part stands after the workflow cell, and `id` is right-aligned in it.
-/// The header line does not come from this function. `header_cells` builds it.
+/// The right marker cell stands after the time cell. The one `marker` argument
+/// fills it and the left marker cell, thus a row never shows two different
+/// markers. The header line does not come from this function. `header_cells`
+/// builds it.
 fn cells(
     widths: Widths,
     marker: &str,
@@ -143,6 +148,7 @@ fn cells(
         fit(title, widths.title),
         pad_right(started, STARTED_WIDTH),
         pad_right(time, TIME_WIDTH),
+        pad_right(marker, MARKER_WIDTH),
     ]
     .join(" ")
 }
@@ -151,7 +157,8 @@ fn cells(
 ///
 /// The word `WORKFLOW` fills the workflow cell, one space, and the ID part. Thus the
 /// whole word shows at every frame width, and it heads the workflow name and the ID.
-/// The other cells stand in the same columns as those of a run row.
+/// The other cells stand in the same columns as those of a run row. The cell of
+/// the right marker is blank.
 fn header_cells(widths: Widths) -> String {
     [
         pad_right(" ", MARKER_WIDTH),
@@ -161,6 +168,7 @@ fn header_cells(widths: Widths) -> String {
         fit("TITLE", widths.title),
         pad_right("STARTED", STARTED_WIDTH),
         pad_right("TIME", TIME_WIDTH),
+        pad_right(" ", MARKER_WIDTH),
     ]
     .join(" ")
 }
@@ -202,8 +210,9 @@ fn fit_runner(name: &RunnerName, room: usize) -> Option<String> {
 /// with no runner, or with no room for it, shows no runner name, and its line
 /// reads as it did before the runner name existed. The job ID stands in the ID
 /// part of a run row, right-aligned. The branch and title columns stay blank.
-/// Thus the ID, started, and time cells stand in the same columns as those of a
-/// run row, at every frame width.
+/// Thus the ID, started, time, and right marker cells stand in the same columns
+/// as those of a run row, at every frame width. The right marker repeats the
+/// left marker.
 ///
 /// The line holds these spans, in this order:
 ///
@@ -240,6 +249,7 @@ fn job_cells(
         " ".repeat(widths.branch + 1 + widths.title),
         pad_right(started, STARTED_WIDTH),
         pad_right(time, TIME_WIDTH),
+        pad_right(marker, MARKER_WIDTH),
     ]
     .join(" ");
     spans.push(Span::raw(format!(
@@ -392,10 +402,11 @@ const JOBS_ERROR_PREFIX: &str = "└ ⚠ ";
 
 /// The line of a status row of an expanded run.
 ///
-/// The marker column is empty. The text fills the rest of the line and ends
-/// in `…` when it is too wide. A status row has no time cells.
+/// The marker cells are empty, the left one and the right one. The text fills
+/// the line between them and ends in `…` when it is too wide. The space before
+/// the right marker cell stays blank too. A status row has no time cells.
 fn status_row_line(text: &str, width: usize) -> String {
-    in_repo_column(&fit(text, width.saturating_sub(MARKER_WIDTH + 1)))
+    in_repo_column(&fit(text, width.saturating_sub(2 * (MARKER_WIDTH + 1))))
 }
 
 /// Puts a text in the column of `REPO`.
