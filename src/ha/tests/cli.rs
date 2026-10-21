@@ -173,7 +173,7 @@ exit 1
 /// the error comes after the terminal is restored, the same as a person sees
 /// it.
 #[cfg(unix)]
-const BOUND_AND_MERGE_STDERR: &str = r#"alarm(shift @ARGV); open(STDIN, '<&', \*STDOUT) or die "stdin: $!"; open(STDERR, '>&', \*STDOUT) or die "stderr: $!"; exec { $ARGV[0] } @ARGV or die "exec: $!";"#;
+const BOUND_ON_THE_TERMINAL: &str = r#"alarm(shift @ARGV); open(STDIN, '<&', \*STDOUT) or die "stdin: $!"; open(STDERR, '>&', \*STDOUT) or die "stderr: $!"; exec { $ARGV[0] } @ARGV or die "exec: $!";"#;
 
 /// The bytes that leave the alternate screen. `ratatui::restore` writes them.
 #[cfg(unix)]
@@ -199,7 +199,7 @@ fn a_first_refresh_that_reads_no_target_exits_1_with_the_error_after_the_termina
     let mut command = Command::new("perl");
     command
         .arg("-e")
-        .arg(BOUND_AND_MERGE_STDERR)
+        .arg(BOUND_ON_THE_TERMINAL)
         .arg("60")
         .arg(env!("CARGO_BIN_EXE_ha"))
         .arg("does-not-exist/nope")
