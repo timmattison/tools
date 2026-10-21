@@ -163,8 +163,8 @@ where
         //
         // A resize to the current size clears the whole screen and resets
         // the back buffer. `Terminal::clear` does the same, but it also asks
-        // the terminal for the cursor position and waits for the answer. A
-        // terminal that does not answer would then stop `ha` at the start.
+        // the terminal for the cursor position and waits for the answer. If
+        // the terminal does not answer, that wait stops `ha` at the start.
         let size = terminal.size().map_err(std::io::Error::other)?;
         terminal
             .resize(size.into())
