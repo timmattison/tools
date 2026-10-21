@@ -850,11 +850,12 @@ pub(crate) enum InputMode {
     /// of a push, of a rebase onto the base, or of a merge of the base. The
     /// arrow keys never answer it.
     Confirm,
-    /// A command of one of those three keys is running, or the `git switch` of
-    /// the second Esc. `p`, `R`, and `M` are all inert here, so no two of those
-    /// runs overlap — a rebase and a push of one branch least of all. The arrow keys are inert too, because the
-    /// window under the frame belongs to the worktree that runs the command,
-    /// and every run that ends walks that worktree again.
+    /// A command of one of those three keys is running, or the `git switch`
+    /// of the second Esc. `p`, `R`, and `M` are all inert here, so no two of
+    /// those runs overlap — a rebase and a push of one branch least of all.
+    /// The arrow keys are inert too, because the window under the frame
+    /// belongs to the worktree that runs the command, and every run that ends
+    /// walks that worktree again.
     ///
     /// It is named for what runs rather than for the key that started it: a
     /// rebase, a merge, and the switch of the second Esc run in it as a push
@@ -3115,9 +3116,9 @@ where
         }
         // A run that a rebase, a merge, or the `git switch` of the second Esc
         // overlapped measured the branch before HEAD moved. Its line reaches
-        // the row after the run, and
-        // then reads as a measurement of the new branch. So it posts nothing,
-        // and its outcome still frees the key. See [`ConflictsRun::Overlapped`].
+        // the row after the run, and then reads as a measurement of the new
+        // branch. So it posts nothing, and its outcome still frees the key. See
+        // [`ConflictsRun::Overlapped`].
         Event::ConflictsStarted { .. } if state.conflicts.overlapped() => {}
         Event::ConflictsFinished { .. } if state.conflicts.overlapped() => {
             state.conflicts.finished();
@@ -3773,12 +3774,11 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 ///   still asks to measure during a push, because a measurement is read-only
 ///   for the repository. A rebase, a merge, and the `git switch` of the second
 ///   Esc move HEAD, and a measurement starts from HEAD, so `m` is inert during
-///   those three runs. `p`, `R`, and
-///   `M` are inert, so an impatient second press cannot start an overlapping
-///   run: a rebase and a push must not overlap, and a base update that runs
-///   puts the loop in this same mode. The arrow keys
-///   are inert too: the window under the frame belongs to the worktree that the
-///   command runs in, so the watch stays on that worktree.
+///   those three runs. `p`, `R`, and `M` are inert, so an impatient second
+///   press cannot start an overlapping run: a rebase and a push must not
+///   overlap, and a base update that runs puts the loop in this same mode. The
+///   arrow keys are inert too: the window under the frame belongs to the
+///   worktree that the command runs in, so the watch stays on that worktree.
 /// - [`InputMode::List`]: Up and Down move the cursor, Enter goes to the
 ///   worktree under it, and Esc and `q` close the list. Every other key gives
 ///   `None` and does nothing at all: `r` does not walk, `p` does not ask, `G`,
