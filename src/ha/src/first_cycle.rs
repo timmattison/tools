@@ -16,6 +16,17 @@ use crate::worker::Update;
 /// The first line of the text of [`NoTargetRead`].
 const NO_TARGET_READ: &str = "the first refresh could not read any target";
 
+/// The hint after the failures when one of them is a 404. GitHub gives the
+/// same 404 for a repository that does not exist and for a private
+/// repository that the token cannot read, thus "Not Found" alone does not
+/// tell the person what to do.
+const NOT_FOUND_HINT: &str = "GitHub answers 404 for a repository that does not exist, and for a \
+                              private repository that this gh account cannot read.\n\
+                              Run gh auth status to see the account.";
+
+/// The HTTP status that GitHub gives for a name that it does not show.
+const NOT_FOUND: u16 = 404;
+
 /// What the updates of the first refresh cycle say about the targets.
 ///
 /// This type holds the one definition of "the first cycle read no target".
@@ -84,7 +95,8 @@ impl FirstCycle {
 }
 
 /// The first refresh cycle read no target. The text lists each failed
-/// target with its error.
+/// target with its error. When one or more errors are a 404, a hint comes
+/// after the list one time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoTargetRead {
     /// The name and the error of each failed target. The failed repositories
@@ -97,6 +109,18 @@ impl fmt::Display for NoTargetRead {
         write!(f, "{NO_TARGET_READ}:")?;
         for (name, error) in &self.failures {
             write!(f, "\n  {name}: {error}")?;
+        }
+        let not_found = self.failures.iter().any(|(_, error)| {
+            matches!(
+                error,
+                SourceError::Http {
+                    status: NOT_FOUND,
+                    ..
+                }
+            )
+        });
+        if not_found {
+            write!(f, "\n{NOT_FOUND_HINT}")?;
         }
         Ok(())
     }
