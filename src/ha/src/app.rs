@@ -960,6 +960,31 @@ mod tests {
     }
 
     #[test]
+    fn a_first_cycle_whose_only_owner_fails_to_list_ends_the_view() {
+        let channels = channels();
+        let message = "GraphQL: Could not resolve to a User with the login of 'acme'.";
+        let updates = [
+            Update::Repos {
+                repos: BTreeSet::new(),
+                owner_errors: vec![(
+                    OwnerName::parse("acme").unwrap(),
+                    OwnerProblem::Failed(SourceError::Failed(message.to_owned())),
+                )],
+            },
+            cycle_done(),
+        ];
+        for update in updates {
+            channels.updates.send(update).unwrap();
+        }
+        let (result, _) = run_app(&opener(false), &channels, vec![]);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "the first refresh could not read any target:\n  \
+             acme: gh failed: GraphQL: Could not resolve to a User with the login of 'acme'."
+        );
+    }
+
+    #[test]
     fn a_repository_list_without_a_repository_removes_its_runs() {
         let channels = channels();
         send_runs(&channels, vec![active_run(1, 5)]);
