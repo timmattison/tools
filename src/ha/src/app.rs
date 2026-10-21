@@ -100,7 +100,7 @@ pub struct App<'a, O: Opener, C: Canceller, Tz: TimeZone> {
 /// Why the event loop ended with an error.
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
-    /// The terminal could not draw or read.
+    /// The terminal could not clear, draw or read.
     #[error(transparent)]
     Terminal(#[from] std::io::Error),
     /// The first refresh cycle that did not end with a spent API budget read
@@ -139,22 +139,28 @@ where
         }
     }
 
-    /// Runs the loop until the user quits, or until the first refresh cycle
-    /// reads no target. A cycle that ends with a spent API budget does not
-    /// count, and the next cycle decides. The loop draws no frame after it
-    /// finds that.
+    /// Clears the whole screen one time, then runs the loop until the user
+    /// quits, or until the first refresh cycle reads no target. A cycle that
+    /// ends with a spent API budget does not count, and the next cycle
+    /// decides. The loop draws no frame after it finds that.
     ///
     /// # Errors
-    /// Returns [`RunError::Terminal`] when the terminal cannot draw or read.
-    /// Returns [`RunError::NoTargetRead`] when the first refresh cycle ends
-    /// with no good repository fetch, at least one failed target, and an API
-    /// budget that is not spent.
+    /// Returns [`RunError::Terminal`] when the terminal cannot clear, draw or
+    /// read. Returns [`RunError::NoTargetRead`] when the first refresh cycle
+    /// ends with no good repository fetch, at least one failed target, and an
+    /// API budget that is not spent.
     pub fn run<B, E>(&mut self, terminal: &mut Terminal<B>, events: &mut E) -> Result<(), RunError>
     where
         B: Backend,
         B::Error: std::error::Error + Send + Sync + 'static,
         E: Events,
     {
+        // This clear is not a duplicate of the entry to the alternate screen.
+        // mosh ignores mode 1049, so the text of the shell is still on the
+        // screen. ratatui sends no clear at startup, and its first frame
+        // writes only the cells that are not blank. Without this clear, the
+        // shell text stays in each cell where the view draws a blank.
+        terminal.clear().map_err(std::io::Error::other)?;
         loop {
             self.apply_updates()?;
             self.sync_watch();
