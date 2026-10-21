@@ -146,7 +146,15 @@ mod worktrees;
                   repository has more than one worktree, the header shows the position of the \
                   worktree and marks the home worktree with ⌂. The name in the header is red \
                   while it is not the branch where gsw started, and bold again when it is. A \
-                  rebase of that branch keeps it bold. A switch walks the new worktree \
+                  rebase of that branch keeps it bold. While the name is red, two presses of \
+                  Esc go back to that branch. The first Esc shows Hit Escape again to go back \
+                  to <branch> for 3 seconds. An Esc in that time goes to the home worktree when \
+                  it is on the branch, or else to the worktree that is on it. When no worktree \
+                  is on it, gsw goes home and runs git switch --no-guess <branch> there, with \
+                  its output live under the frame. gsw never forces the switch: when git \
+                  refuses, the last lines of git stay in red until a key. Another key between the \
+                  two presses makes the next Esc a first press, and so does another line that \
+                  takes the place of the hint under the frame. A switch walks the new worktree \
                   at once and removes every line under the frame. The arrow keys do nothing \
                   while a push runs or while the push question is up. When the worktree on the \
                   screen is removed, gsw goes back to the home worktree. gsw does not change the \

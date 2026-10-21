@@ -422,6 +422,21 @@ where
     std::thread::spawn(move || on_finish(run_push(&command, &workdir, &on_line)));
 }
 
+/// Run `child` on a thread of its own, through [`run_streamed`], and hand the
+/// outcome to `on_finish`.
+///
+/// The thread is the reason for this function, and it is the reason for
+/// [`spawn`] too: a run takes as long as git takes, and the watch loop must
+/// keep drawing meanwhile. `on_line` and `on_finish` run on that thread, so the
+/// production caller sends each of them down the channel of the loop.
+pub(crate) fn spawn_streamed<L, F>(child: Command, name: String, on_line: L, on_finish: F)
+where
+    L: Fn(String) + Send + Sync + 'static,
+    F: FnOnce(PushOutcome) + Send + 'static,
+{
+    std::thread::spawn(move || on_finish(run_streamed(child, &name, &on_line)));
+}
+
 /// What a refused push tells the user to do. Pressing `p` again re-resolves the
 /// plan against the branch that is checked out now, so the next question
 /// describes the repository as it actually stands — which is the whole remedy.
@@ -510,20 +525,66 @@ fn run_push(
         .args(command.args())
         .current_dir(workdir)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
         .env("GIT_TERMINAL_PROMPT", "0");
     detach_from_terminal(&mut child);
 
+    // The words of a push for the failures of the run itself stay as they
+    // were: `git` for a program that cannot start, and `git push` for a
+    // failure that left no words.
+    stream_child(child, "git", "git push", on_line)
+}
+
+/// Run `child` to completion with both of its pipes captured, report each line
+/// as it lands, and describe how the run went.
+///
+/// The blocking half of [`spawn_streamed`], separated so a test can run it
+/// against a real repository without a thread or a channel in the way. The
+/// caller builds `child` completely: this function sets the two output
+/// streams to pipes, as the run needs, and sets nothing else. The shed of the
+/// git environment, the working directory, the closed stdin, and the
+/// detachment from the terminal are the caller's, and [`run_push`] shows how
+/// each is done and why.
+///
+/// `name` is how a failure of the run itself names the program: it gives
+/// `cannot run {name}: ...` where the program cannot start, `cannot wait for
+/// {name}: ...` where the wait fails, and `{name} failed (...)` where the
+/// program fails and says nothing.
+///
+/// The lines go to `on_line` in the order that they arrive, and the outcome
+/// holds the same lines, joined with a newline between each. See
+/// [`stream_child`].
+pub(crate) fn run_streamed(
+    child: Command,
+    name: &str,
+    on_line: &(dyn Fn(String) + Sync),
+) -> PushOutcome {
+    stream_child(child, name, name, on_line)
+}
+
+/// The run that [`run_push`] and [`run_streamed`] share.
+///
+/// `program` names the program in `cannot run {program}` and `cannot wait for
+/// {program}`. `failed` names it in `{failed} failed (...)`. A push says `git`
+/// in the first two and `git push` in the third, and each message of a push
+/// stays as it was before the run was shared. Any other caller gives one name
+/// for all three, through [`run_streamed`].
+fn stream_child(
+    mut child: Command,
+    program: &str,
+    failed: &str,
+    on_line: &(dyn Fn(String) + Sync),
+) -> PushOutcome {
+    child.stdout(Stdio::piped()).stderr(Stdio::piped());
+
     let mut child = match child.spawn() {
         Ok(child) => child,
-        // git is missing, or not executable. Rare, and worth saying plainly:
-        // every other failure here is git's own words, and this one would
-        // otherwise arrive as an empty message.
+        // The program is missing, or not executable. Rare, and worth saying
+        // plainly: every other failure here is git's own words, and this one
+        // would otherwise arrive as an empty message.
         Err(error) => {
             return PushOutcome {
                 success: false,
-                output: format!("cannot run git: {error}"),
+                output: format!("cannot run {program}: {error}"),
             }
         }
     };
@@ -600,7 +661,7 @@ fn run_push(
         Err(error) => {
             return PushOutcome {
                 success: false,
-                output: format!("cannot wait for git: {error}"),
+                output: format!("cannot wait for {program}: {error}"),
             }
         }
     };
@@ -615,7 +676,7 @@ fn run_push(
     if !success && text.trim().is_empty() {
         // A failure with nothing to show would render as a blank row, which
         // reads as success. The exit status is all git left us.
-        text = format!("git push failed ({status})");
+        text = format!("{failed} failed ({status})");
     }
 
     PushOutcome {
@@ -926,6 +987,16 @@ enum Life {
     /// own. It shows no age for the same reason. It is drawn as a report at
     /// age zero, because it is gsw's news and that news is current.
     UntilReplaced,
+    /// gsw's own words that ask for a second press of a key, posted through
+    /// [`PushUi::post_hint`].
+    ///
+    /// It shows no age and does not fade, because it is a request and not news.
+    /// It leaves the row by itself, [`RETURN_HINT_LIFETIME`] after it was posted.
+    /// While it is on the row, the key is armed. See [`PushUi::shows_hint`].
+    Hint {
+        /// When the hint was posted, against the watch loop's injected clock.
+        posted_at: Instant,
+    },
 }
 
 impl Life {
@@ -940,7 +1011,22 @@ impl Life {
     fn elapsed(&self, now: Instant) -> Option<Duration> {
         match self {
             Self::UntilDismissed | Self::UntilReplaced => None,
-            Self::Fading { posted_at } => Some(now.saturating_duration_since(*posted_at)),
+            Self::Fading { posted_at } | Self::Hint { posted_at } => {
+                Some(now.saturating_duration_since(*posted_at))
+            }
+        }
+    }
+
+    /// How long a message of this life stays on the row, or `None` for one that
+    /// no clock takes away.
+    ///
+    /// The one rule for every life that ends by itself: [`PushUi::expire`] takes
+    /// the message off when [`Life::elapsed`] reaches this.
+    fn lifetime(&self) -> Option<Duration> {
+        match self {
+            Self::Fading { .. } => Some(STATUS_LIFETIME),
+            Self::Hint { .. } => Some(RETURN_HINT_LIFETIME),
+            Self::UntilDismissed | Self::UntilReplaced => None,
         }
     }
 
@@ -954,11 +1040,15 @@ impl Life {
     /// [`Life::UntilReplaced`] gives `None`. Its words are true only while
     /// the work they describe is in flight, and a message that waits reaches
     /// the row after an unknown time. So a busy row drops such a message.
+    ///
+    /// [`Life::Hint`] gives `None` for a like reason. It asks for a press now,
+    /// and a request that reaches the row later asks for a press the user was
+    /// never given a reason for.
     fn kind(&self) -> Option<HeldLife> {
         match self {
             Self::UntilDismissed => Some(HeldLife::UntilDismissed),
             Self::Fading { .. } => Some(HeldLife::Fading),
-            Self::UntilReplaced => None,
+            Self::UntilReplaced | Self::Hint { .. } => None,
         }
     }
 }
@@ -1007,7 +1097,8 @@ impl HeldLife {
 /// key is that caller: the message it posts asks for a second press, and the
 /// offer of that press stands exactly as long as the message on the row does.
 /// A message that waits for a push is a message nobody has read, so a key
-/// armed by it would take a press the user never gave a reason for.
+/// armed by it would take a press the user never gave a reason for. Esc
+/// needs no such answer, because it asks the row itself: [`PushUi::shows_hint`].
 ///
 /// An enum rather than a `bool`, because the two answers are two places and
 /// not the presence and absence of one thing. `Posted::Held` at
@@ -1020,7 +1111,7 @@ pub(crate) enum Posted {
     OnRow,
     /// A question, a push in flight, or the open list owns the row, so the
     /// message waits in [`PushUi::held`] — or, on a full queue or for a
-    /// progress notice, went nowhere at all.
+    /// progress notice or a hint, went nowhere at all.
     Held,
 }
 
@@ -1049,7 +1140,12 @@ impl PushUi {
     /// A question, a push in flight, an error that never expires, and the open
     /// list all say `None`: none of them changes with the clock, and a wake-up
     /// costs a repaint of the whole pane.
-    pub(crate) fn next_tick(&self) -> Option<Duration> {
+    ///
+    /// A hint says how long it has left. That is the one answer that needs the
+    /// time, so `clock` is read only while a hint stands, and never otherwise.
+    /// Some loop tests use a clock that steps on each read, and a read on each
+    /// iteration would change what they measure.
+    pub(crate) fn next_tick(&self, clock: &impl Fn() -> Instant) -> Option<Duration> {
         match &self.state {
             // A running push ages the same way a fading message does, and for
             // the same reason: the notice reports its own age, and an age only
@@ -1061,6 +1157,15 @@ impl PushUi {
                 ..
             }
             | State::Running { .. } => Some(STATUS_CADENCE),
+            // A hint does not age, but it leaves the row on its own, and a
+            // frame that is not drawn cannot take it off. Overdue gives zero:
+            // the loop wakes at once and the frame removes it.
+            State::Status {
+                life: Life::Hint { posted_at },
+                ..
+            } => Some(
+                RETURN_HINT_LIFETIME.saturating_sub(clock().saturating_duration_since(*posted_at)),
+            ),
             State::Idle | State::Status { .. } | State::Asking { .. } | State::Listing { .. } => {
                 None
             }
@@ -1212,6 +1317,38 @@ impl PushUi {
         Some(command)
     }
 
+    /// Start a run that no question asked for, and say whether it started.
+    ///
+    /// The door into a run for a key that acts at once, as the second press of
+    /// Esc does. A question asks first and [`PushUi::confirm`] starts its run,
+    /// and this starts a run with the notice and the report composed by the
+    /// caller. [`PushUi::finished`] and [`PushUi::output_line`] work for it as
+    /// for any run.
+    ///
+    /// The row must be free: nothing on it, or a message. A message goes, as a
+    /// new message replaces an old one. A question, a run, and the open list own
+    /// the row, so on any of them this changes nothing and answers `false`, and
+    /// the caller must not start the command.
+    pub(crate) fn start_run(
+        &mut self,
+        notice: String,
+        success: SuccessReport,
+        run: RunKind,
+        now: Instant,
+    ) -> bool {
+        if !matches!(self.state, State::Idle | State::Status { .. }) {
+            return false;
+        }
+        self.state = State::Running {
+            notice,
+            success,
+            started_at: now,
+            run,
+            recent: VecDeque::new(),
+        };
+        true
+    }
+
     /// Handle one line of a running command's output.
     ///
     /// Ignored in every other state. A line cannot really arrive after the run
@@ -1233,7 +1370,8 @@ impl PushUi {
         }
     }
 
-    /// Drop a message that has outlived [`STATUS_LIFETIME`].
+    /// Drop a message that has outlived its [`Life::lifetime`]: a fading line
+    /// at [`STATUS_LIFETIME`], and a hint at [`RETURN_HINT_LIFETIME`].
     ///
     /// The counterpart to [`PushUi::dismiss`], and deliberately the only other
     /// way a status leaves the screen: one of them is the user saying they have
@@ -1246,7 +1384,8 @@ impl PushUi {
         };
         if life
             .elapsed(now)
-            .is_some_and(|elapsed| elapsed >= STATUS_LIFETIME)
+            .zip(life.lifetime())
+            .is_some_and(|(elapsed, lifetime)| elapsed >= lifetime)
         {
             self.state = State::Idle;
         }
@@ -1393,7 +1532,7 @@ impl PushUi {
     /// message.
     ///
     /// A question, a push in flight, and the open list own the row here, as at
-    /// the other two doors. The difference is what happens to the words then:
+    /// the other doors. The difference is what happens to the words then:
     /// they go nowhere, and they never wait in [`PushUi::held`]. A held notice
     /// reaches the row after the run it describes has ended, and it then says
     /// that a run is in flight when none is.
@@ -1403,14 +1542,29 @@ impl PushUi {
         let _ = self.post(line, Life::UntilReplaced);
     }
 
+    /// Put gsw's request for a second press under the frame, to be taken off
+    /// again by the clock.
+    ///
+    /// The fourth door into the row. A question, a run, and the open list own
+    /// the row here as at the other doors, and the hint then goes nowhere: it
+    /// never waits in [`PushUi::held`], because a request that reaches the row
+    /// later asks for a press the user was never given a reason for. The answer
+    /// says which happened, as [`Posted`] states.
+    ///
+    /// The hint on the row is the armed state of the key, so a caller keeps
+    /// no arming of its own. It asks [`PushUi::shows_hint`] at the next press.
+    pub(crate) fn post_hint(&mut self, line: String, now: Instant) -> Posted {
+        self.post(line, Life::Hint { posted_at: now })
+    }
+
     /// Put `line` on the row with `life`, or hold it until the row is free.
     ///
-    /// The body the three doors share, so the rule about who owns the row is
+    /// The body the four doors share, so the rule about who owns the row is
     /// written once. A question, a push in flight, and the open list are never
     /// painted over, and a message that arrives while one of them is up joins
     /// the back of [`PushUi::held`]. Two messages go instead: a life with no
-    /// [`HeldLife`], which is a progress notice, and a message that finds the
-    /// queue at [`MAX_HELD_MESSAGES`].
+    /// [`HeldLife`], which is a progress notice or a hint, and a message that
+    /// finds the queue at [`MAX_HELD_MESSAGES`].
     ///
     /// A held message keeps the kind of its life and loses the instant. The
     /// instant in `life` is the instant the message arrived, and a held
@@ -1420,7 +1574,7 @@ impl PushUi {
     ///
     /// The answer reports which of the two arms below ran, so a caller whose
     /// own state stands on the message can see whether anybody has read it
-    /// yet — see [`Posted`]. A full queue and a progress notice answer
+    /// yet — see [`Posted`]. A full queue, a progress notice, and a hint answer
     /// [`Posted::Held`] with the message dropped, because the question is
     /// whether it took the row and it did not.
     fn post(&mut self, line: String, life: Life) -> Posted {
@@ -1455,7 +1609,7 @@ impl PushUi {
     pub(crate) fn dismiss(&mut self) {
         match self.state {
             State::Status {
-                life: Life::UntilDismissed | Life::Fading { .. },
+                life: Life::UntilDismissed | Life::Fading { .. } | Life::Hint { .. },
                 ..
             } => self.state = State::Idle,
             State::Status {
@@ -1467,6 +1621,47 @@ impl PushUi {
             | State::Running { .. }
             | State::Listing { .. } => {}
         }
+    }
+
+    /// Take the line off the row, but only when it is a hint.
+    ///
+    /// Any key other than the second press takes the offer away, and a hint
+    /// with no offer behind it is a sentence that is no longer true. The hint
+    /// is the offer, so there is no second state to take away with it. Every
+    /// other thing on the row stays: a fading line, an error that waits for a
+    /// key, a progress notice, a question, a run, and the open list are not
+    /// the hint's to remove.
+    pub(crate) fn withdraw_hint(&mut self) {
+        if matches!(
+            self.state,
+            State::Status {
+                life: Life::Hint { .. },
+                ..
+            }
+        ) {
+            self.state = State::Idle;
+        }
+    }
+
+    /// Whether a hint is on the row at `now`. The answer is the armed state
+    /// of the second press of Esc.
+    ///
+    /// It is `true` only when the row holds a [`Life::Hint`] that has not
+    /// lived its [`Life::lifetime`] at `now`. It uses the rule of
+    /// [`PushUi::expire`], so the answer is `false` at the instant the hint
+    /// is due to leave, even when no frame has drawn the row since. A
+    /// message that took the row from the hint, a key that withdrew the hint,
+    /// and a switch of the worktree each make the answer `false`, because the
+    /// hint is gone then. No second state can disagree with the row.
+    pub(crate) fn shows_hint(&self, now: Instant) -> bool {
+        let State::Status { life, .. } = &self.state else {
+            return false;
+        };
+        matches!(life, Life::Hint { .. })
+            && life
+                .elapsed(now)
+                .zip(life.lifetime())
+                .is_some_and(|(elapsed, lifetime)| elapsed < lifetime)
     }
 
     /// Take every message off the row and out of the queue: a status line of
@@ -1705,9 +1900,10 @@ impl PushUi {
                             colorize_status(&truncate_right(&line, width), elapsed, self.truecolor)
                                 .to_string()
                         }
-                        // gsw's news about work in flight. It does not age, so
-                        // it keeps the look of a report at age zero.
-                        Life::UntilReplaced => colorize_status(
+                        // gsw's news about work in flight, and gsw's request for
+                        // a second press. Neither ages, so each keeps the look
+                        // of a report at age zero.
+                        Life::UntilReplaced | Life::Hint { .. } => colorize_status(
                             &truncate_right(line, width),
                             Duration::ZERO,
                             self.truecolor,
@@ -1864,6 +2060,14 @@ const RUNNING_NOTICE: &str = "Pushing…";
 /// number, read in both places, rather than two numbers that agree until
 /// somebody changes one of them.
 pub(crate) const STATUS_LIFETIME: Duration = Duration::from_secs(60);
+
+/// How long the hint of the second Esc stays on the row.
+///
+/// The hint asks for a second press. The hint is the only armed state of Esc:
+/// `crate::watch` asks the row with [`PushUi::shows_hint`], and that answer
+/// reads this same constant through [`Life::lifetime`]. So the arming and the
+/// line it stands for end at the same instant, because they are one thing.
+pub(crate) const RETURN_HINT_LIFETIME: Duration = Duration::from_secs(3);
 
 /// How often such a message has to be repainted for its age text and its fade
 /// to move.
@@ -2468,7 +2672,7 @@ mod ui_tests {
             "the message must reach the screen, got {text:?}",
         );
         assert_eq!(
-            ui.next_tick(),
+            ui.next_tick(&t0),
             None,
             "a message that waits for a key does not age",
         );
@@ -2686,7 +2890,7 @@ mod ui_tests {
             "a message the clock removes says how old it is, got {text:?}",
         );
         assert_eq!(
-            ui.next_tick(),
+            ui.next_tick(&t0),
             Some(STATUS_CADENCE),
             "a message that ages must wake the loop to age",
         );
@@ -2903,7 +3107,7 @@ mod ui_tests {
                 "",
                 "{what}: no held message may reach the row later",
             );
-            assert_eq!(ui.next_tick(), None, "{what}: nothing is left to age");
+            assert_eq!(ui.next_tick(&t0), None, "{what}: nothing is left to age");
         }
     }
 
@@ -2998,7 +3202,7 @@ mod ui_tests {
             pane.height,
             "the frame of the list takes the whole pane",
         );
-        assert_eq!(ui.next_tick(), None, "nothing on the list ages");
+        assert_eq!(ui.next_tick(&t0), None, "nothing on the list ages");
 
         ui.dismiss();
         assert_eq!(
@@ -3244,7 +3448,7 @@ mod ui_tests {
         // that is quiet for a minute gives the loop no other reason to draw
         // one.
         let ui = pushing(t0());
-        assert_eq!(ui.next_tick(), Some(STATUS_CADENCE));
+        assert_eq!(ui.next_tick(&t0), Some(STATUS_CADENCE));
     }
 
     #[test]
@@ -3483,7 +3687,7 @@ mod ui_tests {
             "the words of a command that failed are drawn red",
         );
         assert_eq!(
-            ui.next_tick(),
+            ui.next_tick(&t0),
             None,
             "a message that waits for a key does not age",
         );
@@ -4658,12 +4862,12 @@ mod ui_tests {
         let start = t0();
         let mut ui = pushed_at(start);
         ui.overlay(tall_pane(80), start);
-        assert_eq!(ui.next_tick(), Some(STATUS_CADENCE));
+        assert_eq!(ui.next_tick(&t0), Some(STATUS_CADENCE));
 
         // And it stops asking once there is nothing left to move.
         ui.overlay(tall_pane(80), start + STATUS_LIFETIME);
         assert_eq!(
-            ui.next_tick(),
+            ui.next_tick(&t0),
             None,
             "an expired message must not go on waking the loop",
         );
@@ -4675,9 +4879,9 @@ mod ui_tests {
         // actually changes with the clock may ask for one.
         let start = t0();
 
-        assert_eq!(PushUi::new(false).next_tick(), None, "an idle UI");
+        assert_eq!(PushUi::new(false).next_tick(&t0), None, "an idle UI");
         assert_eq!(
-            asking().next_tick(),
+            asking().next_tick(&t0),
             None,
             "a question waiting for an answer"
         );
@@ -4697,7 +4901,7 @@ mod ui_tests {
             },
             start,
         );
-        assert_eq!(failed.next_tick(), None, "an error that never expires");
+        assert_eq!(failed.next_tick(&t0), None, "an error that never expires");
     }
 
     #[test]
@@ -4745,7 +4949,7 @@ mod ui_tests {
             "the notice must reach the row, with no age after it",
         );
         assert_eq!(
-            ui.next_tick(),
+            ui.next_tick(&t0),
             None,
             "a notice that does not age must not wake the loop",
         );
@@ -4790,7 +4994,7 @@ mod ui_tests {
             PROGRESS,
             "the clock must not take the notice away, and the notice shows no age",
         );
-        assert_eq!(ui.next_tick(), None, "the notice still does not age");
+        assert_eq!(ui.next_tick(&t0), None, "the notice still does not age");
     }
 
     #[test]
@@ -4926,6 +5130,445 @@ mod ui_tests {
             assert!(
                 !text.contains(PROGRESS),
                 "{what} must replace the progress notice, got {text:?}",
+            );
+        }
+    }
+
+    /// The line the tests of the hint post.
+    const HINT: &str = "Hit Escape again to go back to topic";
+
+    #[test]
+    fn a_hint_shows_its_words_and_no_age() {
+        // The hint is a request and not news, so it has no age to report.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        assert_eq!(ui.post_hint(HINT.to_string(), now), Posted::OnRow);
+
+        let text = painted(&mut ui, tall_pane(80), now + Duration::from_secs(1));
+        assert_eq!(text, HINT, "the row must hold the line and nothing else");
+    }
+
+    #[test]
+    fn a_hint_in_a_narrow_pane_is_cut_to_the_width() {
+        // Nothing gsw paints wraps the pane it was measured to fill, and the
+        // words of a hint can hold any character a branch name can.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        let _ = ui.post_hint("café 日本 café 日本 café 日本".to_string(), now);
+
+        let text = painted(&mut ui, tall_pane(12), now);
+        assert!(!text.is_empty(), "the hint must still show");
+        assert!(
+            unicode_width::UnicodeWidthStr::width(text.as_str()) <= 12,
+            "the hint must fit 12 columns, got {text:?}",
+        );
+        assert!(
+            text.starts_with("café"),
+            "the hint must keep its head, got {text:?}"
+        );
+    }
+
+    #[test]
+    fn a_hint_leaves_the_row_at_exactly_its_lifetime() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        let _ = ui.post_hint(HINT.to_string(), now);
+
+        let before = RETURN_HINT_LIFETIME - Duration::from_millis(1);
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now + before),
+            HINT,
+            "1 ms before its lifetime the hint stays",
+        );
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now + RETURN_HINT_LIFETIME),
+            "",
+            "at its lifetime the hint goes",
+        );
+    }
+
+    #[test]
+    fn a_hint_that_finds_a_question_on_the_row_is_never_shown() {
+        let now = t0();
+        let mut ui = asking();
+        assert_eq!(ui.post_hint(HINT.to_string(), now), Posted::Held);
+
+        ui.cancel();
+        assert_eq!(
+            drained(&mut ui, now),
+            Vec::<String>::new(),
+            "no frame may show the hint after the question goes",
+        );
+        assert!(ui.held.is_empty(), "the hint must not wait in the queue");
+    }
+
+    #[test]
+    fn a_hint_that_finds_a_run_on_the_row_is_never_shown() {
+        let now = t0();
+        let mut ui = pushing(now);
+        assert_eq!(ui.post_hint(HINT.to_string(), now), Posted::Held);
+
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output: String::new(),
+            },
+            now,
+        );
+        let seen = drained(&mut ui, now);
+        assert!(
+            seen.iter().all(|text| !text.contains(HINT)),
+            "no frame may show the hint after the run ends, got {seen:?}",
+        );
+        assert!(ui.held.is_empty(), "the hint must not wait in the queue");
+    }
+
+    #[test]
+    fn a_hint_that_finds_the_list_open_is_never_shown() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        ui.open_list(three_worktrees());
+        assert_eq!(ui.post_hint(HINT.to_string(), now), Posted::Held);
+
+        let _ = ui.close_list();
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now),
+            "",
+            "no frame may show the hint after the list closes",
+        );
+        assert!(ui.held.is_empty(), "the hint must not wait in the queue");
+    }
+
+    #[test]
+    fn dismissing_removes_a_hint() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        let _ = ui.post_hint(HINT.to_string(), now);
+
+        ui.dismiss();
+        assert_eq!(painted(&mut ui, tall_pane(80), now), "");
+    }
+
+    #[test]
+    fn a_hint_on_the_row_shows_until_exactly_its_lifetime() {
+        // The rule is the rule of `expire`: 1 ms before the lifetime the hint
+        // shows, and at the lifetime it does not.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        assert!(!ui.shows_hint(now), "an empty row shows no hint");
+        assert_eq!(ui.post_hint(HINT.to_string(), now), Posted::OnRow);
+
+        assert!(ui.shows_hint(now), "the hint shows when it lands");
+        assert!(
+            ui.shows_hint(now + RETURN_HINT_LIFETIME - Duration::from_millis(1)),
+            "1 ms before its lifetime the hint shows",
+        );
+        assert!(
+            !ui.shows_hint(now + RETURN_HINT_LIFETIME),
+            "at its lifetime the hint does not show, whether or not a frame has expired it",
+        );
+    }
+
+    #[test]
+    fn a_message_that_takes_the_row_from_the_hint_ends_the_hint() {
+        let now = t0();
+        type Take = fn(&mut PushUi, Instant);
+        let takers: [(&str, Take); 3] = [
+            ("post_notice", |ui, now| {
+                let _ = ui.post_notice("notice".to_string(), now);
+            }),
+            ("post_progress", |ui, _| {
+                ui.post_progress("progress".to_string());
+            }),
+            ("post_error", |ui, _| ui.post_error("error".to_string())),
+        ];
+        for (what, take) in takers {
+            let mut ui = PushUi::new(false);
+            let _ = ui.post_hint(HINT.to_string(), now);
+            assert!(ui.shows_hint(now), "the hint must show before {what}");
+
+            take(&mut ui, now);
+            assert!(!ui.shows_hint(now), "{what} must end the hint");
+        }
+    }
+
+    #[test]
+    fn a_hint_that_leaves_the_row_by_a_door_is_not_shown() {
+        let now = t0();
+        type Leave = fn(&mut PushUi);
+        let leaves: [(&str, Leave); 3] = [
+            ("withdraw_hint", PushUi::withdraw_hint),
+            ("dismiss", PushUi::dismiss),
+            ("clear", PushUi::clear),
+        ];
+        for (what, leave) in leaves {
+            let mut ui = PushUi::new(false);
+            let _ = ui.post_hint(HINT.to_string(), now);
+            assert!(ui.shows_hint(now), "the hint must show before {what}");
+
+            leave(&mut ui);
+            assert!(!ui.shows_hint(now), "{what} must remove the hint");
+        }
+    }
+
+    #[test]
+    fn a_status_that_is_not_a_hint_is_not_a_shown_hint() {
+        let now = t0();
+        let mut fading = PushUi::new(false);
+        let _ = fading.post_notice("notice".to_string(), now);
+        assert!(!fading.shows_hint(now), "a fading line is not a hint");
+
+        let mut asking = asking();
+        assert!(!asking.shows_hint(now), "a question is not a hint");
+        assert_eq!(asking.post_hint(HINT.to_string(), now), Posted::Held);
+        assert!(
+            !asking.shows_hint(now),
+            "a hint that was dropped is not shown"
+        );
+
+        let running = pushing(now);
+        assert!(!running.shows_hint(now), "a run is not a hint");
+    }
+
+    /// A clock that counts its reads and answers `at`.
+    fn counting(at: Instant, reads: &std::cell::Cell<u32>) -> impl Fn() -> Instant + '_ {
+        move || {
+            reads.set(reads.get() + 1);
+            at
+        }
+    }
+
+    #[test]
+    fn a_hint_wakes_the_loop_when_it_is_due_to_leave() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        let _ = ui.post_hint(HINT.to_string(), now);
+
+        let one_second_later = now + Duration::from_secs(1);
+        assert_eq!(
+            ui.next_tick(&|| one_second_later),
+            Some(RETURN_HINT_LIFETIME - Duration::from_secs(1)),
+        );
+    }
+
+    #[test]
+    fn an_overdue_hint_wakes_the_loop_at_once() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        let _ = ui.post_hint(HINT.to_string(), now);
+
+        let overdue = now + RETURN_HINT_LIFETIME * 2;
+        assert_eq!(ui.next_tick(&|| overdue), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn the_clock_is_read_only_while_a_hint_stands() {
+        let now = t0();
+        let mut fading = pushed_at(now);
+        fading.overlay(tall_pane(80), now);
+        let mut running = pushing(now);
+        running.output_line("hook".to_string());
+        let mut listing = PushUi::new(false);
+        listing.open_list(three_worktrees());
+        let mut failed = pushing(now);
+        failed.finished(
+            PushOutcome {
+                success: false,
+                output: "boom".to_string(),
+            },
+            now,
+        );
+
+        for (what, ui) in [
+            ("an idle UI", PushUi::new(false)),
+            ("a fading line", fading),
+            ("a question", asking()),
+            ("a run", running),
+            ("the list", listing),
+            ("an error", failed),
+        ] {
+            let reads = std::cell::Cell::new(0);
+            let _ = ui.next_tick(&counting(now, &reads));
+            assert_eq!(reads.get(), 0, "{what} must not read the clock");
+        }
+
+        let mut hinted = PushUi::new(false);
+        let _ = hinted.post_hint(HINT.to_string(), now);
+        let reads = std::cell::Cell::new(0);
+        let _ = hinted.next_tick(&counting(now, &reads));
+        assert_eq!(reads.get(), 1, "a hint reads the clock once");
+    }
+
+    #[test]
+    fn withdrawing_removes_a_hint() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        let _ = ui.post_hint(HINT.to_string(), now);
+
+        ui.withdraw_hint();
+        assert_eq!(painted(&mut ui, tall_pane(80), now), "");
+    }
+
+    #[test]
+    fn withdrawing_leaves_everything_but_a_hint_alone() {
+        let now = t0();
+
+        let mut error = PushUi::new(false);
+        error.post_error("fatal: no".to_string());
+        let mut progress = PushUi::new(false);
+        progress.post_progress("Measuring".to_string());
+        let mut notice = PushUi::new(false);
+        let _ = notice.post_notice("Nothing to do".to_string(), now);
+        let mut listing = PushUi::new(false);
+        listing.open_list(three_worktrees());
+
+        for (what, mut ui, mode) in [
+            ("a fading line", pushed_at(now), InputMode::Normal),
+            ("an error", error, InputMode::Normal),
+            ("a progress notice", progress, InputMode::Normal),
+            ("a notice", notice, InputMode::Normal),
+            ("a question", asking(), InputMode::Confirm),
+            ("a run", pushing(now), InputMode::Running(RunKind::Push)),
+            ("the list", listing, InputMode::List),
+        ] {
+            let before = painted(&mut ui, tall_pane(80), now);
+            ui.withdraw_hint();
+            assert_eq!(
+                painted(&mut ui, tall_pane(80), now),
+                before,
+                "{what} must stay",
+            );
+            assert_eq!(ui.mode(), mode, "{what} must keep its mode");
+        }
+    }
+
+    /// The notice of the runs that the tests of [`PushUi::start_run`] start.
+    const RETURN_NOTICE: &str = "git switch --no-guess topic…";
+
+    /// A UI after a `start_run` of a return at `now`, which must have started.
+    fn returning(ui: &mut PushUi, now: Instant) {
+        assert!(
+            ui.start_run(
+                RETURN_NOTICE.to_string(),
+                SuccessReport::WithLastLine {
+                    sentence: "Went back".to_string(),
+                },
+                RunKind::Return,
+                now,
+            ),
+            "the row was free, so the run must start",
+        );
+    }
+
+    #[test]
+    fn a_run_starts_on_an_idle_row_and_shows_its_age() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        returning(&mut ui, now);
+
+        assert_eq!(ui.mode(), InputMode::Running(RunKind::Return));
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now),
+            format!("{RETURN_NOTICE} (0s)"),
+        );
+        assert_eq!(
+            painted(&mut ui, tall_pane(80), now + Duration::from_secs(5)),
+            format!("{RETURN_NOTICE} (5s)"),
+        );
+    }
+
+    #[test]
+    fn a_run_takes_the_row_from_a_fading_line() {
+        let now = t0();
+        let mut ui = pushed_at(now);
+        returning(&mut ui, now);
+
+        assert_eq!(ui.mode(), InputMode::Running(RunKind::Return));
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert!(
+            !text.contains("Pushed"),
+            "the old line must be gone, got {text:?}",
+        );
+        assert!(text.starts_with(RETURN_NOTICE), "got {text:?}");
+    }
+
+    #[test]
+    fn a_return_that_worked_says_so_and_shows_the_last_line_of_git() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        returning(&mut ui, now);
+        ui.output_line("Switched to branch 'topic'".to_string());
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: "Switched to branch 'topic'\n".to_string(),
+            },
+            now,
+        );
+
+        assert_eq!(ui.mode(), InputMode::Normal);
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert_eq!(
+            text,
+            format!("Went back (0s ago)\n{WINDOW_INDENT}Switched to branch 'topic'"),
+        );
+    }
+
+    #[test]
+    fn a_return_that_failed_shows_the_words_of_git_in_red_until_a_key() {
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        returning(&mut ui, now);
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output: "error: Your local changes would be overwritten".to_string(),
+            },
+            now,
+        );
+
+        let much_later = now + STATUS_LIFETIME * 3;
+        let raw = escapes(&mut ui, much_later);
+        assert!(
+            raw.contains("would be overwritten"),
+            "git's words must still be up, got {raw:?}",
+        );
+        assert!(
+            raw.contains("\u{1b}[31m"),
+            "git's words are red, got {raw:?}"
+        );
+        ui.dismiss();
+        assert_eq!(painted(&mut ui, tall_pane(80), much_later), "");
+    }
+
+    #[test]
+    fn a_run_does_not_start_on_a_busy_row() {
+        let now = t0();
+        let mut listing = PushUi::new(false);
+        listing.open_list(three_worktrees());
+
+        for (what, mut ui, mode) in [
+            ("a question", asking(), InputMode::Confirm),
+            ("a run", pushing(now), InputMode::Running(RunKind::Push)),
+            ("the list", listing, InputMode::List),
+        ] {
+            let before = painted(&mut ui, tall_pane(80), now);
+            assert!(
+                !ui.start_run(
+                    RETURN_NOTICE.to_string(),
+                    SuccessReport::Alone {
+                        sentence: "Went back".to_string(),
+                    },
+                    RunKind::Return,
+                    now,
+                ),
+                "{what} owns the row, so the run must not start",
+            );
+            assert_eq!(ui.mode(), mode, "{what} must keep its mode");
+            assert_eq!(
+                painted(&mut ui, tall_pane(80), now),
+                before,
+                "{what} must stay as it was",
             );
         }
     }

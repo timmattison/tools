@@ -860,7 +860,7 @@ fn abort_child(workdir: &Path, operation: &Operation) -> Command {
 fn abort(workdir: &Path, operation: &Operation) -> Result<(), Vec<String>> {
     let mut child = abort_child(workdir, operation);
     let attempt = child.output();
-    abort_result(&command_line(&child), attempt)
+    abort_result(&crate::child::command_line(&child), attempt)
 }
 
 /// Whether `attempt`, a run of the abort that `line` names, aborted the
@@ -905,18 +905,6 @@ fn abort_result(line: &str, attempt: std::io::Result<Output>) -> Result<(), Vec<
         return Err(vec![format!("{line} failed ({})", output.status)]);
     }
     Err(written)
-}
-
-/// The command line that `command` runs, as the words of gsw name it.
-///
-/// Read from the child itself, so a line that names the abort cannot name a
-/// different command from the one that ran.
-fn command_line(command: &Command) -> String {
-    std::iter::once(command.get_program())
-        .chain(command.get_args())
-        .map(OsStr::to_string_lossy)
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// Every line a run has written, in arrival order, as one string with a newline
@@ -1483,9 +1471,12 @@ mod abort_tests {
             conflicts: 1,
         };
         let merge = Operation::Merge { conflicts: 1 };
-        assert_eq!(command_line(&abort_child(&dir, &rebase)), REBASE_ABORT);
         assert_eq!(
-            command_line(&abort_child(&dir, &merge)),
+            crate::child::command_line(&abort_child(&dir, &rebase)),
+            REBASE_ABORT
+        );
+        assert_eq!(
+            crate::child::command_line(&abort_child(&dir, &merge)),
             "git merge --abort"
         );
     }
@@ -1605,15 +1596,14 @@ mod run_tests {
     use super::*;
     use crate::repo::DETACHED_HEAD;
     use crate::shell::stub_shell::{
-        a_child_of_this_test_passes, a_child_of_this_test_passes_with, entries_of, kill_now,
-        shed_git_lines, test_name, test_process_can_open_the_terminal, user_intent_lost,
-        user_intent_value, StubShell, CHILD_RAN, GAVE_UP_WITHIN, HOSTILE_GIT_ENVIRONMENT,
-        HOSTILE_MARKER, TTY_OPENED, TTY_REFUSED,
+        a_child_of_this_test_passes, a_child_with_a_recording_git_passes, entries_of, kill_now,
+        recorded_git_calls, shed_git_lines, test_name, test_process_can_open_the_terminal,
+        user_intent_lost, user_intent_value, RecordedCall, StubShell, CHILD_RAN, GAVE_UP_WITHIN,
+        HOSTILE_GIT_ENVIRONMENT, HOSTILE_MARKER, TTY_OPENED, TTY_REFUSED,
     };
     use crate::testrepo::{
         git, git_allowing_failure, git_output, git_stdout, init_repo, init_repo_with_worktree,
     };
-    use std::os::unix::fs::PermissionsExt;
     use std::sync::mpsc::{channel, Receiver};
     use std::time::Instant;
     use tempfile::TempDir;
@@ -1871,124 +1861,6 @@ mod run_tests {
     /// The sentence of gsw under a merge that the run did not start, which gsw
     /// left as it is.
     const MERGE_LEFT: &str = "a merge is in progress that gsw did not start — left as it is";
-
-    /// The variable that names the directory of the recording git to the
-    /// child that finds it first on its `PATH`.
-    ///
-    /// The name carries no `GIT_` prefix, so no sweep of gsw takes it away.
-    const RECORDING_GIT_VAR: &str = "GSW_RECORDING_GIT";
-
-    /// One call of the recording git.
-    struct RecordedCall {
-        /// Each argument of the call, in order.
-        arguments: Vec<String>,
-        /// The directory of the call, with every symbolic link in it resolved.
-        cwd: PathBuf,
-        /// The environment of the call, one `NAME=value` line for each
-        /// variable.
-        environment: String,
-        /// [`TTY_OPENED`] where the call could open the controlling terminal,
-        /// and [`TTY_REFUSED`] where it could not.
-        terminal: String,
-    }
-
-    /// Run `test` in a child of this test binary whose `PATH` finds a
-    /// recording git first, and fail where that child fails.
-    ///
-    /// **The recording git is how a test reads the environment of a git child
-    /// of gsw itself.** gsw starts git by name, so the first `git` on the
-    /// `PATH` is the process that gsw starts. That program writes down its
-    /// arguments, its directory and its environment, and it tries to open the
-    /// controlling terminal, as [`StubShell::probing_the_terminal`] does. Then
-    /// it puts back the `PATH` of this process and gives the call to the real
-    /// git, so the run does all of its real work.
-    ///
-    /// A read of the removals off the [`Command`] proves less. It reads the
-    /// command that a function builds, and not the process that the run
-    /// starts. A change that [`abort`] makes to the command after
-    /// [`abort_child`] built it does not show in that read, and neither does a
-    /// second builder that the run uses in place of [`abort_child`]. A git
-    /// hook proves less too. git adds variables of its own to the environment
-    /// of a hook, so a record from a hook cannot use the rule of the `GIT_`
-    /// prefix.
-    ///
-    /// **The `PATH` goes on the child, and never on this process**, for the
-    /// reason [`a_child_of_this_test_passes_with`] gives. This process writes
-    /// the program into a temporary directory of its own, and holds that
-    /// directory until the child ends.
-    ///
-    /// # Panics
-    ///
-    /// Panics where the program cannot be written, and where
-    /// [`a_child_of_this_test_passes_with`] panics.
-    fn a_child_with_a_recording_git_passes(test: &str) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let own_path = std::env::var_os("PATH").unwrap_or_default();
-        let program = dir.path().join("git");
-        std::fs::write(
-            &program,
-            format!(
-                "#!/bin/sh\n\
-                 call=$(mktemp -d {dir}/call.XXXXXX) || exit 1\n\
-                 printf '%s\\n' \"$@\" > \"$call/arguments\"\n\
-                 pwd -P > \"$call/cwd\"\n\
-                 env > \"$call/environment\"\n\
-                 if ( exec 3<>/dev/tty ) 2>/dev/null; then\n\
-                 \tprintf '{TTY_OPENED}' > \"$call/terminal\"\n\
-                 else\n\
-                 \tprintf '{TTY_REFUSED}' > \"$call/terminal\"\n\
-                 fi\n\
-                 PATH={own_path}\n\
-                 export PATH\n\
-                 exec git \"$@\"\n",
-                dir = shell_quote(&dir.path().display().to_string()),
-                own_path = shell_quote(&own_path.to_string_lossy()),
-            ),
-        )
-        .expect("write the recording git");
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
-            .expect("make the recording git executable");
-        let path = std::env::join_paths(
-            std::iter::once(dir.path().to_path_buf()).chain(std::env::split_paths(&own_path)),
-        )
-        .expect("a PATH that holds the recording git");
-        a_child_of_this_test_passes_with(
-            test,
-            &[
-                ("PATH", path.as_os_str()),
-                (RECORDING_GIT_VAR, dir.path().as_os_str()),
-            ],
-        );
-    }
-
-    /// Each call that the recording git of this child recorded, in no order.
-    ///
-    /// # Panics
-    ///
-    /// Panics where [`a_child_with_a_recording_git_passes`] did not start this
-    /// process, and where a record cannot be read.
-    fn recorded_git_calls() -> Vec<RecordedCall> {
-        let dir = PathBuf::from(
-            std::env::var_os(RECORDING_GIT_VAR).expect("the parent must name the recording git"),
-        );
-        let read = |call: &Path, name: &str| {
-            std::fs::read_to_string(call.join(name)).expect("read a record of the call")
-        };
-        std::fs::read_dir(&dir)
-            .expect("read the records of the recording git")
-            .map(|entry| entry.expect("an entry of the records").path())
-            .filter(|path| path.is_dir())
-            .map(|call| RecordedCall {
-                arguments: read(&call, "arguments")
-                    .lines()
-                    .map(str::to_string)
-                    .collect(),
-                cwd: PathBuf::from(read(&call, "cwd").trim_end_matches('\n')),
-                environment: read(&call, "environment"),
-                terminal: read(&call, "terminal"),
-            })
-            .collect()
-    }
 
     /// The calls of the recording git of this child that abort a rebase.
     ///
