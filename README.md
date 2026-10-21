@@ -2064,6 +2064,9 @@ cannot hang the caller. Used by `cwt` and `ha`.
   - Each marker is one emoji, 2 columns wide. The terminal draws each emoji in its own colors.
     `🪦` is from Unicode 13 (2020), thus a terminal with an older emoji font can show it as a box.
     macOS 11 and later has it.
+  - Each run row and each job row shows its marker two times: in the first column, and after
+    the time column. Thus the marker is next to the time that it explains, and on a wide terminal
+    you do not have to read across the full row. The two markers of a row are always the same.
   - Until the first refresh ends, an empty section shows `Loading…` and the section headers
     show no counts. Thus a board that did not load yet does not look like a board with no runs.
   - The status line shows how long ago the last refresh ended (`updated 1m 05s ago`), in the
@@ -2084,14 +2087,16 @@ cannot hang the caller. Used by `cwt` and `ha`.
   - Right expands the highlighted run, and Left collapses it again. An expanded run shows one row
     for each job of its latest attempt, below the run row. Each job row shows the state marker of
     the job, the same emoji as for a run, the name of the job, its job ID, and when it started, if
-    it started. A cancelled job shows `🪦`, and a skipped job shows no marker. The job ID is the
+    it started. A cancelled job shows `🪦`. A skipped job shows `🚫`, for example a job whose `if:`
+    condition is false, or a job that needs a failed job. The job ID is the
     number in the URL of the job page (`/job/107851237794`). It stands in the columns of the run ID,
     thus all IDs on the board end in one column. The time column of an active job has two meanings.
     A job that waits for a runner or for an approval (`⏳`) did not start, thus its started column
     is empty, and its time column shows how long it waited, from its creation until now. A running
     job (`🏃`) shows the time since a runner started it, without the wait before that start. Both
-    times increase each second. A finished job shows how long it took. Thus you can find the job
-    that holds a slow run.
+    times increase each second. The marker after the time tells the two meanings apart: `⏳` is a
+    wait, and `🏃` is a run. A finished job shows how long it took. Thus you can find the job that
+    holds a slow run.
     - Each job row also names the runner that has the job, after the job name, in cyan, for
       example `e2e-remotesensing (2) m1-ts`. Thus you can find the machine of a slow or failed job
       without the browser, and you can tell the jobs of one matrix apart. The color shows that the
