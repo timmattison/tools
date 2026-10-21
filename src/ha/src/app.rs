@@ -11,6 +11,7 @@ use ratatui::Terminal;
 
 use crate::board::Board;
 use crate::cancel::{Canceller, Confirm};
+use crate::first_cycle::{FirstCycle, NoTargetRead};
 use crate::render;
 use crate::run::RunId;
 use crate::status::{Message, Status};
@@ -90,6 +91,20 @@ pub struct App<'a, O: Opener, C: Canceller, Tz: TimeZone> {
     /// The box that asks the user to cancel a run. It is `None` when no box
     /// shows.
     confirm: Option<Confirm>,
+    /// The tally of the first refresh cycle. It is `None` after that cycle
+    /// ends.
+    first_cycle: Option<FirstCycle>,
+}
+
+/// Why the event loop ended with an error.
+#[derive(Debug, thiserror::Error)]
+pub enum RunError {
+    /// The terminal could not draw or read.
+    #[error(transparent)]
+    Terminal(#[from] std::io::Error),
+    /// The first refresh cycle read no target.
+    #[error(transparent)]
+    NoTargetRead(#[from] NoTargetRead),
 }
 
 impl<'a, O: Opener, C: Canceller, Tz: TimeZone> App<'a, O, C, Tz>
@@ -118,21 +133,25 @@ where
             tz,
             watched: BTreeSet::new(),
             confirm: None,
+            first_cycle: Some(FirstCycle::default()),
         }
     }
 
-    /// Runs the loop until the user quits.
+    /// Runs the loop until the user quits, or until the first refresh cycle
+    /// reads no target. The loop draws no frame after it finds that.
     ///
     /// # Errors
-    /// Returns the error of the terminal when it cannot draw or read.
-    pub fn run<B, E>(&mut self, terminal: &mut Terminal<B>, events: &mut E) -> std::io::Result<()>
+    /// Returns [`RunError::Terminal`] when the terminal cannot draw or read.
+    /// Returns [`RunError::NoTargetRead`] when the first refresh cycle ends
+    /// with no good repository fetch and at least one failed target.
+    pub fn run<B, E>(&mut self, terminal: &mut Terminal<B>, events: &mut E) -> Result<(), RunError>
     where
         B: Backend,
         B::Error: std::error::Error + Send + Sync + 'static,
         E: Events,
     {
         loop {
-            self.apply_updates();
+            self.apply_updates()?;
             self.sync_watch();
             let now = (self.now)();
             terminal
@@ -161,7 +180,11 @@ where
     /// Posts each open that failed late and the result of each cancel, and
     /// applies each update that the worker has sent. A worker that has ended
     /// sends nothing more, and that is not an error.
-    fn apply_updates(&mut self) {
+    ///
+    /// # Errors
+    /// Returns [`NoTargetRead`] when the first refresh cycle ends with no
+    /// good repository fetch and at least one failed target.
+    fn apply_updates(&mut self) -> Result<(), NoTargetRead> {
         while let Some(failure) = self.opener.late_failure() {
             self.status.message = Some(failed_open(&failure.url, &failure.reason, (self.now)()));
         }
@@ -180,6 +203,9 @@ where
             }
         }
         while let Ok(update) = self.worker.updates.try_recv() {
+            if let Some(first_cycle) = &mut self.first_cycle {
+                first_cycle.note(&update);
+            }
             match update {
                 Update::Runs { repo, runs } => self.board.replace(repo, runs),
                 Update::Failed { repo, error } => self.board.fail(repo, error.to_string()),
@@ -201,9 +227,13 @@ where
                     self.status.rate = rate;
                     self.status.backoff_until = backoff_until;
                     self.status.refreshing = false;
+                    if let Some(first_cycle) = self.first_cycle.take() {
+                        first_cycle.verdict()?;
+                    }
                 }
             }
         }
+        Ok(())
     }
 
     /// Tells the worker which expanded runs to watch.
@@ -527,7 +557,7 @@ mod tests {
         opener: &RecordingOpener,
         channels: &Channels,
         events: Vec<Event>,
-    ) -> (std::io::Result<()>, Vec<String>) {
+    ) -> (Result<(), RunError>, Vec<String>) {
         run_app_from(Status::default(), opener, channels, events)
     }
 
@@ -537,7 +567,7 @@ mod tests {
         opener: &RecordingOpener,
         channels: &Channels,
         events: Vec<Event>,
-    ) -> (std::io::Result<()>, Vec<String>) {
+    ) -> (Result<(), RunError>, Vec<String>) {
         run_app_with(status, opener, &canceller(), channels, events)
     }
 
@@ -549,7 +579,7 @@ mod tests {
         canceller: &RecordingCanceller,
         channels: &Channels,
         events: Vec<Event>,
-    ) -> (std::io::Result<()>, Vec<String>) {
+    ) -> (Result<(), RunError>, Vec<String>) {
         let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
         let tz = FixedOffset::east_opt(0).unwrap();
         let clock = now;
@@ -815,6 +845,79 @@ mod tests {
         let status_line = frame.last().unwrap();
         assert!(status_line.contains("updated 0s ago"), "{status_line:?}");
         assert!(!status_line.contains("refreshing…"), "{status_line:?}");
+    }
+
+    fn not_found() -> SourceError {
+        SourceError::Http {
+            status: 404,
+            message: "Not Found".to_owned(),
+        }
+    }
+
+    fn cycle_done() -> Update {
+        Update::CycleDone {
+            finished_at: now(),
+            rate: None,
+            backoff_until: None,
+        }
+    }
+
+    #[test]
+    fn a_first_cycle_with_one_good_fetch_of_zero_runs_keeps_the_view() {
+        let channels = channels();
+        let a = RepoName::parse("acme/a").unwrap();
+        let b = RepoName::parse("acme/b").unwrap();
+        let updates = [
+            Update::Repos {
+                repos: BTreeSet::from([a.clone(), b.clone()]),
+                owner_errors: vec![],
+            },
+            Update::Runs {
+                repo: a,
+                runs: vec![],
+            },
+            Update::Failed {
+                repo: b,
+                error: not_found(),
+            },
+            cycle_done(),
+        ];
+        for update in updates {
+            channels.updates.send(update).unwrap();
+        }
+        let (result, frame) = run_app(&opener(false), &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        let status_line = frame.last().unwrap();
+        assert!(
+            status_line.contains("acme/b: GitHub answered 404: Not Found"),
+            "{status_line:?}"
+        );
+    }
+
+    #[test]
+    fn a_later_cycle_in_which_every_fetch_fails_keeps_the_view_and_the_last_runs() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        channels.updates.send(cycle_done()).unwrap();
+        let (frame, _) = run_steps(
+            &channels,
+            vec![
+                Step::Idle,
+                Step::Send(Update::Failed {
+                    repo: repo(),
+                    error: not_found(),
+                }),
+                Step::Send(cycle_done()),
+                Step::Idle,
+                key(KeyCode::Char('q')),
+            ],
+        );
+        assert!(frame.iter().any(|line| line.contains("run 1")), "{frame:?}");
+        let status_line = frame.last().unwrap();
+        assert!(
+            status_line.contains("acme/widgets: GitHub answered 404: Not Found"),
+            "{status_line:?}"
+        );
     }
 
     #[test]
@@ -1473,7 +1576,9 @@ mod tests {
 
     /// Runs the keys `c` and then `other` on a board of two runs, and returns
     /// the result, the last frame, the cancels, and the addresses opened.
-    fn answer_the_box_with(other: Event) -> (std::io::Result<()>, Vec<String>, usize, Vec<String>) {
+    fn answer_the_box_with(
+        other: Event,
+    ) -> (Result<(), RunError>, Vec<String>, usize, Vec<String>) {
         let channels = channels();
         send_runs(&channels, vec![active_run(1, 5), active_run(2, 30)]);
         let canceller = canceller();
