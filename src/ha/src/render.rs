@@ -266,10 +266,12 @@ fn job_cells(
 /// [`MARKER_WIDTH`] columns wide. A terminal draws an emoji in its own colors,
 /// thus the marker has no foreground color.
 ///
-/// The marker of [`RunState::Skipped`] is `🚫` (U+1F6AB). The text symbols of
-/// a circle with a line through it, for example `⊘` (U+2298), are 1 column
-/// wide and would move the columns. A skipped run does not show on the board,
-/// thus only a job row shows `🚫`.
+/// The marker of [`RunState::Skipped`] is `💨` (U+1F4A8, DASH SYMBOL). The
+/// no-entry sign has a red circle, and from a distance it looks like the `❌`
+/// of a failed job (issue #597). `💨` has no red and no circle. The text
+/// symbols of a circle with a line through it, for example `⊘` (U+2298), are
+/// 1 column wide, thus they move the columns. A skipped run does not show on
+/// the board, thus only a job row shows `💨`.
 fn marker(state: RunState) -> &'static str {
     match state {
         RunState::Running => "🏃",
@@ -277,7 +279,7 @@ fn marker(state: RunState) -> &'static str {
         RunState::Cancelled => "🪦",
         RunState::Passed => "✅",
         RunState::Failed => "❌",
-        RunState::Skipped => "🚫",
+        RunState::Skipped => "💨",
         RunState::Other => " ",
     }
 }
