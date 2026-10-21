@@ -960,6 +960,48 @@ mod tests {
     }
 
     #[test]
+    fn a_404_adds_one_hint_about_a_wrong_name_or_a_private_repository() {
+        let channels = channels();
+        let a = RepoName::parse("acme/a").unwrap();
+        let b = RepoName::parse("acme/b").unwrap();
+        let c = RepoName::parse("acme/c").unwrap();
+        let updates = [
+            Update::Repos {
+                repos: BTreeSet::from([a.clone(), b.clone(), c.clone()]),
+                owner_errors: vec![],
+            },
+            Update::Failed {
+                repo: a,
+                error: not_found(),
+            },
+            Update::Failed {
+                repo: b,
+                error: not_found(),
+            },
+            Update::Failed {
+                repo: c,
+                error: SourceError::TimedOut(Duration::from_secs(30)),
+            },
+            cycle_done(),
+        ];
+        for update in updates {
+            channels.updates.send(update).unwrap();
+        }
+        let (result, _) = run_app(&opener(false), &channels, vec![]);
+        // Two failures are a 404, and the hint shows one time.
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "the first refresh could not read any target:\n  \
+             acme/a: GitHub answered 404: Not Found\n  \
+             acme/b: GitHub answered 404: Not Found\n  \
+             acme/c: gh did not finish within 30s\n\
+             GitHub answers 404 for a repository that does not exist, and for a private \
+             repository that this gh account cannot read.\n\
+             Run gh auth status to see the account."
+        );
+    }
+
+    #[test]
     fn a_first_cycle_whose_only_owner_fails_to_list_ends_the_view() {
         let channels = channels();
         let message = "GraphQL: Could not resolve to a User with the login of 'acme'.";
