@@ -17,6 +17,40 @@ use regex::Regex;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind};
 use unicode_width::UnicodeWidthStr;
 
+mod card;
+
+/// The status text of a zombie process.
+///
+/// `sysinfo` prints `ProcessStatus::Zombie` as this word through `{:?}`, which
+/// is how `collect_processes` builds the status. The macOS status code 5 maps
+/// to the same word. One constant names both.
+const ZOMBIE_STATUS: &str = "Zombie";
+
+/// Whether the kernel withholds the task info of another user's process.
+///
+/// macOS refuses `proc_pidinfo(PROC_PIDTASKINFO)` for such a process, and
+/// `sysinfo` then gives 0 for the memory and the CPU. Linux gives
+/// `/proc/<pid>/statm` to every user, and a kernel thread really holds 0 bytes.
+/// On Linux a 0 is thus a value, and the rule stays off.
+const KERNEL_WITHHOLDS_TASK_INFO: bool = cfg!(target_os = "macos");
+
+/// What the warning says can be refused when only the card prints.
+const REFUSAL_OF_THE_CARD: &str = "The kernel can refuse some rows of the card above.";
+
+/// What the warning says can be refused when only sections print.
+const REFUSAL_OF_THE_SECTIONS: &str = "A section below can come back empty or refused.";
+
+/// What the warning says can be refused when the card and sections print.
+const REFUSAL_OF_THE_CARD_AND_SECTIONS: &str =
+    "The kernel can refuse some rows of the card above, \
+     and a section below can come back empty or refused.";
+
+/// Why the card shows no parents when `ps` did not run.
+const PARENTS_PS_DID_NOT_RUN: &str = "ps did not run";
+
+/// Why the card shows no parents when the process table has no line for the process.
+const PARENTS_PROCESS_STOPPED: &str = "the process stopped before ps read the process table";
+
 /// Cached result of lsof availability check.
 ///
 /// This prevents repeated warnings when lsof is not found.
@@ -27,7 +61,7 @@ static LSOF_AVAILABLE: OnceLock<bool> = OnceLock::new();
 /// # Examples
 ///
 /// ```text
-/// spv 77763           - Show process with PID 77763
+/// spv 77763           - Show the detail card of PID 77763
 /// spv 77763,82313     - Show multiple PIDs
 /// spv node            - Find processes containing 'node'
 /// spv --regex 'node.*' - Find with regex
@@ -43,12 +77,15 @@ static LSOF_AVAILABLE: OnceLock<bool> = OnceLock::new();
     name = "spv",
     version = version_string!(),
     about = "Smart process viewer with enhanced filtering and display",
-    long_about = "Examples:\n  spv 77763           - Show process with PID 77763\n  spv 77763,82313     - Show multiple PIDs\n  spv node            - Find processes containing 'node'\n  spv --regex 'node.*' - Find with regex\n  spv --full deploy   - Search the whole command line, as `pgrep -f` does\n  spv --cwd zsh       - Show processes with their CWD\n  spv --lsof $$       - Show open files for process\n  spv --env $$        - Show the environment, credentials hidden\n  spv --net node      - Show network connections\n  spv --all zsh       - Show every section"
+    long_about = "Examples:\n  spv 77763           - Show the detail card of PID 77763\n  spv 77763,82313     - Show multiple PIDs\n  spv node            - Find processes containing 'node'\n  spv --regex 'node.*' - Find with regex\n  spv --full deploy   - Search the whole command line, as `pgrep -f` does\n  spv --cwd zsh       - Show processes with their CWD\n  spv --lsof $$       - Show open files for process\n  spv --env $$        - Show the environment, credentials hidden\n  spv --net node      - Show network connections\n  spv --all zsh       - Show every section"
 )]
 struct Args {
     /// PID(s) or name pattern to match.
     ///
-    /// Can be a single PID, comma-separated PIDs, or a name pattern.
+    /// Can be a single PID, comma-separated PIDs, or a name pattern. A single
+    /// PID prints a detail card: the whole command line, the executable, the
+    /// working directory, the start time, and the parents up to PID 1. Every
+    /// other pattern prints a table.
     #[arg(required = true)]
     pattern: String,
 
@@ -61,7 +98,9 @@ struct Args {
 
     /// Show current working directory.
     ///
-    /// Adds a CWD column showing each process's working directory.
+    /// Adds a CWD column showing each process's working directory. The detail
+    /// card of a single PID always has a CWD row, so this flag changes nothing
+    /// there.
     #[arg(long)]
     cwd: bool,
 
@@ -106,7 +145,8 @@ struct Args {
 
     /// Raw output without table formatting.
     ///
-    /// Produces columnar output similar to traditional ps.
+    /// Produces columnar output similar to traditional ps. The detail card of a
+    /// single PID prints as `key: value` lines, one fact on each line.
     #[arg(long)]
     raw: bool,
 }
@@ -175,6 +215,8 @@ struct ProcessInfo {
     status: String,
     command: String,
     cwd: Option<String>,
+    /// Start time in seconds since the Unix epoch. It is 0 when no source gave one.
+    start_time: u64,
 }
 
 /// Information about an open file from lsof.
@@ -365,13 +407,16 @@ impl Viewer {
 ///
 /// The sysinfo crate uses proc_pidinfo() which requires elevated privileges to
 /// get info for other users' processes. On macOS, sysctl(KERN_PROC_ALL) provides
-/// basic process info (including UID and status) to all users without root.
-/// This struct stores that fallback information.
+/// basic process info (including UID, status, and start time) to all users
+/// without root. This struct stores that fallback information.
 #[cfg(target_os = "macos")]
 #[derive(Debug, Clone)]
 struct SysctlProcessInfo {
     uid: u32,
     status: u8,
+    /// Start time in seconds since the Unix epoch. It is 0 when the kernel gave
+    /// none or a value that is not positive.
+    start_time: u64,
 }
 
 // Constants for kinfo_proc struct layout on macOS (arm64/x86_64).
@@ -383,6 +428,9 @@ mod kinfo_proc_layout {
     pub const SIZE: usize = 648;
     /// Offset of kp_proc.p_pid (i32)
     pub const OFFSET_PID: usize = 40;
+    /// Offset of kp_proc.p_un.__p_starttime.tv_sec (i64 on 64-bit macOS).
+    /// `p_starttime` is a `#define` for that union member in `sys/proc.h`.
+    pub const OFFSET_START_SEC: usize = 0;
     /// Offset of kp_proc.p_stat (i8)
     pub const OFFSET_STAT: usize = 36;
     /// Offset of kp_eproc.e_ucred.cr_uid (u32)
@@ -391,7 +439,7 @@ mod kinfo_proc_layout {
 
 /// Gets process info for all processes using sysctl(KERN_PROC_ALL).
 ///
-/// This provides UID and status for all processes without root privileges,
+/// This provides UID, status, and start time for all processes without root privileges,
 /// unlike proc_pidinfo which requires elevated privileges for other users' processes.
 ///
 /// # Returns
@@ -399,7 +447,7 @@ mod kinfo_proc_layout {
 /// A HashMap mapping PID to process info, or None if the sysctl call fails.
 #[cfg(target_os = "macos")]
 fn get_all_process_info_via_sysctl() -> Option<HashMap<u32, SysctlProcessInfo>> {
-    use kinfo_proc_layout::{OFFSET_PID, OFFSET_STAT, OFFSET_UID, SIZE};
+    use kinfo_proc_layout::{OFFSET_PID, OFFSET_START_SEC, OFFSET_STAT, OFFSET_UID, SIZE};
 
     // SAFETY: sysctl is a standard BSD system call. We first query the size needed,
     // allocate a buffer, then retrieve the data. We read values at known offsets
@@ -475,12 +523,28 @@ fn get_all_process_info_via_sysctl() -> Option<HashMap<u32, SysctlProcessInfo>> 
                 };
                 let uid = u32::from_ne_bytes(uid_bytes);
 
+                // Read the start time at offset (i64 seconds, native endian).
+                // A value that is not positive means the kernel gave none.
+                let Ok(start_bytes): Result<[u8; 8], _> =
+                    buffer[base + OFFSET_START_SEC..base + OFFSET_START_SEC + 8].try_into()
+                else {
+                    continue;
+                };
+                let start_time = u64::try_from(i64::from_ne_bytes(start_bytes)).unwrap_or(0);
+
                 #[expect(
                     clippy::cast_sign_loss,
                     reason = "PIDs are always non-negative, checked above"
                 )]
                 let pid_u32 = pid as u32;
-                map.insert(pid_u32, SysctlProcessInfo { uid, status });
+                map.insert(
+                    pid_u32,
+                    SysctlProcessInfo {
+                        uid,
+                        status,
+                        start_time,
+                    },
+                );
             }
         }
 
@@ -504,9 +568,28 @@ fn status_code_to_string(status: u8) -> String {
         2 => "Run".to_string(),
         3 => "Sleep".to_string(),
         4 => "Stop".to_string(),
-        5 => "Zombie".to_string(),
+        5 => ZOMBIE_STATUS.to_string(),
         _ => format!("Unknown({status})"),
     }
+}
+
+/// Joins the arguments of a process into its command line.
+///
+/// # Arguments
+///
+/// * `process` - The process from the sysinfo snapshot
+///
+/// # Returns
+///
+/// The arguments, separated by one space. The string is empty when the kernel
+/// gave no arguments.
+fn command_line(process: &sysinfo::Process) -> String {
+    process
+        .cmd()
+        .iter()
+        .map(|s| s.to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Collects process information based on the pattern.
@@ -548,12 +631,7 @@ fn collect_processes(
         let pid_u32 = pid.as_u32();
         let name = process.name().to_string_lossy().to_string();
 
-        let command = process
-            .cmd()
-            .iter()
-            .map(|s| s.to_string_lossy().to_string())
-            .collect::<Vec<_>>()
-            .join(" ");
+        let command = command_line(process);
 
         let matches = match pattern {
             PatternType::SinglePid(p) => pid_u32 == *p,
@@ -630,6 +708,22 @@ fn collect_processes(
                 }
             };
 
+            let start_time = match process.start_time() {
+                // sysinfo gives 0 for the process of another user on macOS.
+                // The kernel gives the start time to every user through sysctl.
+                0 => {
+                    #[cfg(target_os = "macos")]
+                    {
+                        sysctl_info.get(&pid_u32).map_or(0, |info| info.start_time)
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        0
+                    }
+                }
+                seconds => seconds,
+            };
+
             let cwd = if include_cwd {
                 process.cwd().map(|p| p.to_string_lossy().to_string())
             } else {
@@ -645,6 +739,7 @@ fn collect_processes(
                 status,
                 command,
                 cwd,
+                start_time,
             });
         }
     }
@@ -1121,21 +1216,69 @@ fn matches_name_pattern(
     subject.to_lowercase().contains(&pattern.to_lowercase())
 }
 
+/// The output that the kernel can refuse in part, which the warning names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuardedOutput {
+    /// The card of one PID, with no section under it.
+    Card,
+    /// One or more sections under the table.
+    Sections,
+    /// The card of one PID, with one or more sections under it.
+    CardAndSections,
+}
+
+impl GuardedOutput {
+    /// Names the guarded output that a run prints.
+    ///
+    /// # Arguments
+    ///
+    /// * `shows_card` - Whether the run prints the card of one PID
+    /// * `wants_a_section` - Whether the run prints a section
+    ///
+    /// # Returns
+    ///
+    /// The output, or `None` for a plain table, which reads nothing that the
+    /// kernel guards.
+    fn of(shows_card: bool, wants_a_section: bool) -> Option<Self> {
+        match (shows_card, wants_a_section) {
+            (false, false) => None,
+            (true, false) => Some(Self::Card),
+            (false, true) => Some(Self::Sections),
+            (true, true) => Some(Self::CardAndSections),
+        }
+    }
+
+    /// Gives the sentence that says which part of the output can be refused.
+    fn what_can_be_refused(self) -> &'static str {
+        match self {
+            Self::Card => REFUSAL_OF_THE_CARD,
+            Self::Sections => REFUSAL_OF_THE_SECTIONS,
+            Self::CardAndSections => REFUSAL_OF_THE_CARD_AND_SECTIONS,
+        }
+    }
+}
+
 /// Warns that a matched process belongs to another user.
 ///
-/// A section that comes back empty teaches the user that the process holds
-/// nothing, which is worse than a refusal. So the warning goes out before the
-/// sections do.
+/// A card or a section that comes back empty teaches the user that the process
+/// holds nothing, which is worse than a refusal. So the warning goes out after
+/// the card and before the sections. Its words say "above" for the card and
+/// "below" for the sections.
 ///
 /// # Arguments
 ///
 /// * `processes` - The processes that matched
 /// * `viewer` - The user who runs this tool, and the reach that user has
+/// * `output` - The output that the warning names as the part that can be refused
 ///
 /// # Returns
 ///
 /// The warning, or `None` when every matched process is readable.
-fn permission_warning(processes: &[ProcessInfo], viewer: &Viewer) -> Option<String> {
+fn permission_warning(
+    processes: &[ProcessInfo],
+    viewer: &Viewer,
+    output: GuardedOutput,
+) -> Option<String> {
     let mut owners: Vec<&str> = processes
         .iter()
         .filter(|process| viewer.can_refuse(process))
@@ -1148,10 +1291,11 @@ fn permission_warning(processes: &[ProcessInfo], viewer: &Viewer) -> Option<Stri
     }
     Some(format!(
         "Warning: some matched processes belong to {}, and you are {}. \
-         A section below can come back empty or refused. \
+         {} \
          Run spv again with sudo to see all of it.",
         owners.join(", "),
-        viewer.username
+        viewer.username,
+        output.what_can_be_refused()
     ))
 }
 
@@ -1601,12 +1745,94 @@ fn format_memory(bytes: u64) -> String {
     human_bytes(bytes as f64)
 }
 
+/// Builds the detail card of one process.
+///
+/// The executable comes from the snapshot that `main` took. The CPU, the
+/// memory, the start time, the working directory, and the command line come
+/// from the facts that `collect_processes` read. The chain of ancestors comes
+/// from `proctree`. The command of each ancestor comes from the snapshot, else
+/// from the comm that `proctree` gives. A value that the kernel withholds
+/// shows the reason: a zombie, sudo, or unknown.
+///
+/// # Arguments
+///
+/// * `system` - The snapshot of all processes
+/// * `info` - The facts of the process that `collect_processes` read
+/// * `tree` - The process table from `ps`, or `None` when `ps` did not run
+/// * `viewer` - The credentials of this run
+///
+/// # Returns
+///
+/// The card, ready to print.
+fn collect_card(
+    system: &System,
+    info: &ProcessInfo,
+    tree: Option<&proctree::ProcessTree>,
+    viewer: &Viewer,
+) -> card::ProcessCard {
+    let process = system.process(sysinfo::Pid::from_u32(info.pid));
+    let reason = card::UnreadReason::choose(info.status == ZOMBIE_STATUS, viewer.can_refuse(info));
+    let withheld = (KERNEL_WITHHOLDS_TASK_INFO && viewer.can_refuse(info)).then_some(reason);
+    // The elapsed time is the clock now minus the start time. A clock before
+    // the start time gives 0.
+    let now_seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let run_seconds = now_seconds.saturating_sub(info.start_time);
+
+    let parents = match tree {
+        None => card::Parents::Unread(PARENTS_PS_DID_NOT_RUN.to_string()),
+        Some(tree) if tree.comm(proctree::Pid::new(info.pid)).is_none() => {
+            card::Parents::Unread(PARENTS_PROCESS_STOPPED.to_string())
+        }
+        Some(tree) => card::Parents::Chain(
+            tree.ancestors(proctree::Pid::new(info.pid))
+                .into_iter()
+                .map(|ancestor| card::Ancestor {
+                    pid: ancestor.as_u32(),
+                    command: card::ancestor_command(
+                        system
+                            .process(sysinfo::Pid::from_u32(ancestor.as_u32()))
+                            .map(command_line)
+                            .as_deref(),
+                        tree.comm(ancestor),
+                    ),
+                })
+                .collect(),
+        ),
+    };
+
+    card::ProcessCard {
+        pid: info.pid,
+        name: info.name.clone(),
+        user: info.user.clone(),
+        status: info.status.clone(),
+        usage: card::Usage::from_snapshot(info.cpu_usage, info.memory, withheld),
+        started: card::Fact::from_value(
+            card::started(info.start_time, run_seconds, &chrono::Local),
+            reason,
+        ),
+        exe: card::Fact::from_value(
+            process
+                .and_then(|p| p.exe())
+                .map(|path| path.to_string_lossy().to_string()),
+            reason,
+        ),
+        cwd: card::Fact::from_value(info.cwd.clone(), reason),
+        command: card::Fact::from_value(Some(info.command.clone()), reason),
+        parents,
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let sections = args.sections();
 
     // Parse the pattern
     let pattern = parse_pattern(&args.pattern);
+
+    // One PID gives a detail card. Every other pattern gives the table.
+    let shows_card = matches!(pattern, PatternType::SinglePid(_));
 
     // Configure refresh kind based on options
     let mut refresh_kind = ProcessRefreshKind::nothing()
@@ -1615,8 +1841,11 @@ fn main() -> Result<()> {
         .with_memory()
         .with_user(UpdateKind::Always);
 
-    if sections.cwd {
+    if sections.cwd || shows_card {
         refresh_kind = refresh_kind.with_cwd(UpdateKind::Always);
+    }
+    if shows_card {
+        refresh_kind = refresh_kind.with_exe(UpdateKind::Always);
     }
 
     // Create system and refresh processes
@@ -1629,7 +1858,12 @@ fn main() -> Result<()> {
         case_sensitive: args.case_sensitive,
         match_full_command: args.full,
     };
-    let processes = collect_processes(&system, &pattern, &match_options, sections.cwd)?;
+    let processes = collect_processes(
+        &system,
+        &pattern,
+        &match_options,
+        sections.cwd || shows_card,
+    )?;
 
     if processes.is_empty() {
         match &pattern {
@@ -1652,23 +1886,41 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
 
+    // The credentials are read once. The card borrows them, and then they move
+    // into the section printer.
+    let viewer = Viewer::current();
+
     // Print output
-    if args.raw {
+    if shows_card {
+        let tree = proctree::ProcessTree::from_machine();
+        for info in &processes {
+            let card = collect_card(&system, info, tree.as_ref(), &viewer);
+            if args.raw {
+                for line in card.raw_lines() {
+                    println!("{line}");
+                }
+            } else {
+                println!("{}", card.table());
+            }
+        }
+    } else if args.raw {
         print_raw(&processes, sections.cwd);
     } else {
         print_table(&processes, sections.cwd);
     }
 
     // A section reads state the kernel guards, so say up front whose process
-    // this is. A plain listing comes from sysctl and needs no permission.
+    // this is. The card reads the executable and the working directory, which
+    // the kernel guards too. A plain table comes from sysctl and needs no
+    // permission.
     let printer = SectionPrinter {
-        viewer: Viewer::current(),
+        viewer,
         format: SectionFormat::from_raw_flag(args.raw),
         show_secrets: args.show_secrets,
     };
     let wants_a_section = sections.files || sections.env || sections.net;
-    if wants_a_section {
-        if let Some(warning) = permission_warning(&processes, &printer.viewer) {
+    if let Some(output) = GuardedOutput::of(shows_card, wants_a_section) {
+        if let Some(warning) = permission_warning(&processes, &printer.viewer, output) {
             eprintln!("\n{warning}");
         }
     }
@@ -2197,6 +2449,7 @@ mod tests {
             status: "Sleep".to_string(),
             command: "tool".to_string(),
             cwd: None,
+            start_time: 0,
         }
     }
 
@@ -2258,14 +2511,23 @@ mod tests {
     #[test]
     fn your_own_processes_raise_no_warning() {
         let processes = [process_owned_by(1, "tim"), process_owned_by(2, "tim")];
-        assert!(permission_warning(&processes, &viewer_named("tim", false)).is_none());
+        assert!(permission_warning(
+            &processes,
+            &viewer_named("tim", false),
+            GuardedOutput::Sections
+        )
+        .is_none());
     }
 
     #[test]
     fn another_users_process_raises_a_warning_that_names_both_users() {
         let processes = [process_owned_by(1, "root"), process_owned_by(2, "tim")];
-        let warning = permission_warning(&processes, &viewer_named("tim", false))
-            .expect("root is not tim, so warn");
+        let warning = permission_warning(
+            &processes,
+            &viewer_named("tim", false),
+            GuardedOutput::Sections,
+        )
+        .expect("root is not tim, so warn");
         assert!(
             warning.contains("root"),
             "the warning names the owner: {warning}"
@@ -2281,9 +2543,49 @@ mod tests {
     }
 
     #[test]
+    fn the_output_follows_from_the_card_and_the_sections() {
+        assert_eq!(GuardedOutput::of(false, false), None);
+        assert_eq!(GuardedOutput::of(true, false), Some(GuardedOutput::Card));
+        assert_eq!(
+            GuardedOutput::of(false, true),
+            Some(GuardedOutput::Sections)
+        );
+        assert_eq!(
+            GuardedOutput::of(true, true),
+            Some(GuardedOutput::CardAndSections)
+        );
+    }
+
+    #[test]
+    fn the_warning_names_the_output_that_the_run_prints() {
+        let processes = [process_owned_by(1, "root")];
+        let viewer = viewer_named("tim", false);
+        let words = |output| {
+            permission_warning(&processes, &viewer, output).expect("root is not tim, so warn")
+        };
+
+        let card = words(GuardedOutput::Card);
+        assert!(card.contains("card above"), "{card}");
+        assert!(!card.contains("section below"), "{card}");
+
+        let sections = words(GuardedOutput::Sections);
+        assert!(sections.contains("section below"), "{sections}");
+        assert!(!sections.contains("card above"), "{sections}");
+
+        let both = words(GuardedOutput::CardAndSections);
+        assert!(both.contains("card above"), "{both}");
+        assert!(both.contains("section below"), "{both}");
+    }
+
+    #[test]
     fn root_reads_every_process_and_raises_no_warning() {
         let processes = [process_owned_by(1, "root"), process_owned_by(2, "nobody")];
-        assert!(permission_warning(&processes, &viewer_named("root", true)).is_none());
+        assert!(permission_warning(
+            &processes,
+            &viewer_named("root", true),
+            GuardedOutput::Sections
+        )
+        .is_none());
     }
 
     #[test]
@@ -2294,8 +2596,12 @@ mod tests {
             process_owned_by(3, "root"),
             process_owned_by(4, "tim"),
         ];
-        let warning =
-            permission_warning(&processes, &viewer_named("tim", false)).expect("two owners differ");
+        let warning = permission_warning(
+            &processes,
+            &viewer_named("tim", false),
+            GuardedOutput::Sections,
+        )
+        .expect("two owners differ");
         assert!(
             warning.contains("nobody, root"),
             "the owners come once each and in order: {warning}"

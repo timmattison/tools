@@ -14,6 +14,7 @@
 
 use std::net::TcpListener;
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -105,6 +106,22 @@ impl Sleeper {
     /// * `marker` - Text to put in the command line of the child
     /// * `env` - Extra environment variables for the child
     fn spawn(marker: &str, env: &[(&str, &str)]) -> Self {
+        Self::start(marker, env, None)
+    }
+
+    /// Starts a child like `spawn`, with `dir` as its working directory.
+    ///
+    /// # Arguments
+    ///
+    /// * `marker` - Text to put in the command line of the child
+    /// * `env` - Extra environment variables for the child
+    /// * `dir` - The working directory of the child
+    fn spawn_in(marker: &str, env: &[(&str, &str)], dir: &Path) -> Self {
+        Self::start(marker, env, Some(dir))
+    }
+
+    /// Starts the child for `spawn` and `spawn_in`.
+    fn start(marker: &str, env: &[(&str, &str)], dir: Option<&Path>) -> Self {
         let mut command = Command::new("/bin/sh");
         command
             .arg("-c")
@@ -120,6 +137,9 @@ impl Sleeper {
             .process_group(0);
         for (name, value) in env {
             command.env(name, value);
+        }
+        if let Some(dir) = dir {
+            command.current_dir(dir);
         }
         // `spawn` returns after the child has replaced itself with /bin/sh: a
         // failed exec comes back as an error here. So the command line of the
@@ -150,6 +170,40 @@ impl Drop for Sleeper {
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// A directory that the test makes and removes.
+///
+/// Declare it before the `Sleeper` that runs in it. Rust drops the locals in
+/// the reverse order, so the child dies before the directory goes.
+struct ScratchDir {
+    path: PathBuf,
+}
+
+impl ScratchDir {
+    /// Makes an empty directory with a name no other run can also build.
+    fn new(prefix: &str) -> Self {
+        let path = std::env::temp_dir().join(unique_token(prefix));
+        std::fs::create_dir(&path).expect("the temporary directory accepts a new directory");
+        Self { path }
+    }
+
+    /// The path as the test built it.
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The path as the kernel reports it. On macOS the temporary directory
+    /// lies under `/var`, a link to `/private/var`.
+    fn canonical(&self) -> PathBuf {
+        std::fs::canonicalize(&self.path).expect("the directory exists")
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
     }
 }
 
@@ -188,6 +242,17 @@ fn no_argument_prints_the_usage_text_and_fails() {
     assert!(
         stderr.contains("Usage"),
         "the run prints the usage text; stderr: {stderr}"
+    );
+}
+
+#[test]
+fn the_long_help_says_that_one_pid_prints_the_detail_card() {
+    let (ok, stdout, stderr) = run(spv().arg("--help").output().expect("spv runs"));
+
+    assert!(ok, "--help succeeds; stderr: {stderr}");
+    assert!(
+        stdout.contains("spv 77763           - Show the detail card of PID 77763"),
+        "the example of one PID names the card; stdout: {stdout}"
     );
 }
 
@@ -413,11 +478,19 @@ fn a_process_owned_by_another_user_raises_a_warning() {
         stderr.contains("root") && stderr.contains("sudo"),
         "the warning names the owner and the remedy; stderr: {stderr}"
     );
+    assert!(
+        stderr.contains("card above") && stderr.contains("section below"),
+        "the card and the section both print, so the warning names both; stderr: {stderr}"
+    );
 }
 
 #[test]
-fn a_run_without_a_section_raises_no_warning() {
-    let (ok, _stdout, stderr) = run(spv().arg("1").output().expect("spv runs"));
+fn a_table_without_a_section_raises_no_warning() {
+    // Two PIDs make a table. A table comes from sysctl and reads nothing that
+    // the kernel guards. The card of one PID reads the executable and the
+    // directory, so it can warn. The test of the card covers that case.
+    let pids = format!("1,{}", std::process::id());
+    let (ok, _stdout, stderr) = run(spv().arg(pids).output().expect("spv runs"));
 
     assert!(ok, "spv should succeed; stderr: {stderr}");
     assert!(
@@ -451,12 +524,13 @@ fn the_environment_of_another_process_is_refused_with_a_reason() {
         stdout.contains("Environment for"),
         "the section names itself; stdout: {stdout}"
     );
+    let section = after_heading(&stdout, "Environment for");
     assert!(
-        stdout.contains("unavailable:") && stdout.contains("sudo"),
+        section.contains("unavailable:") && section.contains("sudo"),
         "the section says why it is empty and names the remedy; stdout: {stdout}"
     );
     assert!(
-        !stdout.contains("none found"),
+        !section.contains("none found"),
         "a refusal never reads as an empty environment; stdout: {stdout}"
     );
 }
@@ -492,12 +566,30 @@ fn spv_without_lsof(flag: &str, pid: u32) -> Output {
 /// # Arguments
 ///
 /// * `stdout` - The whole standard output of a run
+/// * `heading` - The heading of the section. The search starts after it.
 ///
 /// # Returns
 ///
-/// The line, or `None` when the run printed no such line.
-fn unavailable_line(stdout: &str) -> Option<&str> {
-    stdout.lines().find(|line| line.contains("unavailable:"))
+/// The line, or `None` when the section printed no such line.
+fn unavailable_line<'a>(stdout: &'a str, heading: &str) -> Option<&'a str> {
+    after_heading(stdout, heading)
+        .lines()
+        .find(|line| line.contains("unavailable:"))
+}
+
+/// Gives the text of a run after a heading.
+///
+/// The card prints its own text above the sections. A search of the whole
+/// output can thus match the card and not the section.
+///
+/// # Panics
+///
+/// Panics with the whole output when the heading is missing.
+fn after_heading<'a>(stdout: &'a str, heading: &str) -> &'a str {
+    stdout
+        .split_once(heading)
+        .unwrap_or_else(|| panic!("the output holds the heading {heading}; stdout: {stdout}"))
+        .1
 }
 
 #[test]
@@ -513,7 +605,7 @@ fn the_open_files_section_names_the_missing_lsof() {
         stdout.contains("Open files for"),
         "the section names itself; stdout: {stdout}"
     );
-    let note = unavailable_line(&stdout)
+    let note = unavailable_line(&stdout, "Open files for")
         .unwrap_or_else(|| panic!("the section says it is unavailable; stdout: {stdout}"));
     assert!(
         note.contains("lsof"),
@@ -534,7 +626,7 @@ fn the_network_section_names_the_missing_lsof() {
         stdout.contains("Network connections for"),
         "the section names itself; stdout: {stdout}"
     );
-    let note = unavailable_line(&stdout)
+    let note = unavailable_line(&stdout, "Network connections for")
         .unwrap_or_else(|| panic!("the section says it is unavailable; stdout: {stdout}"));
     assert!(
         note.contains("lsof"),
@@ -568,12 +660,13 @@ fn a_section_the_kernel_can_refuse_says_so_on_standard_output() {
             stdout.contains(heading),
             "the section names itself; stdout: {stdout}"
         );
+        let section = after_heading(&stdout, heading);
         assert!(
-            stdout.contains("sudo"),
+            section.contains("sudo"),
             "{flag} names the remedy on standard output; stdout: {stdout}"
         );
         assert!(
-            !stdout.contains("none found"),
+            !section.contains("none found"),
             "{flag} never reads as a process that holds nothing; stdout: {stdout}"
         );
     }
@@ -682,4 +775,278 @@ fn raw_prints_the_network_section_without_a_table() {
         table_border_character(&stdout).is_none(),
         "--raw draws no table; stdout: {stdout}"
     );
+}
+
+/// Drops every whitespace character and every table border character.
+///
+/// A table wraps a long value at the width of its terminal. The wrapped value
+/// is contiguous again after this call, so a test that asserts on content
+/// never depends on the width.
+fn flatten(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_whitespace() && !TABLE_BORDER_CHARACTERS.contains(c))
+        .collect()
+}
+
+/// Finds the `started:` line of a raw card, and makes sure it shows a time.
+///
+/// The line must start with `started: ` and a digit, and end with ` ago)`.
+/// A row that says why the time is missing starts with a parenthesis, and a
+/// missing row has no line at all. Both fail.
+fn assert_raw_card_shows_a_start_time(stdout: &str) {
+    let (line, value) = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("started: ").map(|value| (line, value)))
+        .unwrap_or_else(|| panic!("the card has a started row; stdout: {stdout}"));
+    assert!(
+        value.chars().next().is_some_and(|c| c.is_ascii_digit()),
+        "the started row shows a time and not a reason; stdout: {stdout}"
+    );
+    assert!(
+        line.ends_with(" ago)"),
+        "the started row shows the elapsed time; stdout: {stdout}"
+    );
+}
+
+/// A command line of more than 200 bytes, to prove that the card never cuts it.
+fn long_marker() -> String {
+    let marker = format!("{}{}", unique_token("spv_card_"), "_long".repeat(45));
+    assert!(marker.len() > 200, "the marker is long");
+    marker
+}
+
+#[test]
+fn one_pid_prints_a_card_with_the_whole_command_the_directory_the_executable_and_the_parent() {
+    let marker = long_marker();
+    let dir = ScratchDir::new("spv_card_dir_");
+    let child = Sleeper::spawn_in(&marker, &[], dir.path());
+
+    let (ok, stdout, stderr) = run(spv()
+        .arg(child.pid().to_string())
+        .output()
+        .expect("spv runs"));
+
+    assert!(ok, "spv should succeed; stderr: {stderr}");
+    let flat = flatten(&stdout);
+    assert!(
+        flat.contains(&flatten(&marker)),
+        "the card shows the whole command; stdout: {stdout}"
+    );
+    let canonical = dir.canonical();
+    let cwd = canonical.to_str().expect("the directory path is UTF-8");
+    assert!(
+        flat.contains(&format!("CWD{}", flatten(cwd))),
+        "the card shows the working directory; stdout: {stdout}"
+    );
+    assert!(
+        flat.contains("Exe/"),
+        "the card shows the executable as an absolute path; stdout: {stdout}"
+    );
+    let parent_needle = format!("Parent{}", std::process::id());
+    assert!(
+        flat.split(&parent_needle)
+            .skip(1)
+            .any(|rest| !rest.starts_with(|c: char| c.is_ascii_digit())),
+        "the card names this test as the parent; stdout: {stdout}"
+    );
+    assert!(
+        flat.split_once("Started").is_some_and(|(_, rest)| {
+            rest.starts_with(|c: char| c.is_ascii_digit()) && rest.contains("ago)")
+        }),
+        "the card shows the start time; stdout: {stdout}"
+    );
+    assert!(
+        table_border_character(&stdout).is_some(),
+        "the card is a table; stdout: {stdout}"
+    );
+}
+
+#[test]
+fn raw_prints_the_card_as_one_line_for_each_fact() {
+    let marker = long_marker();
+    let dir = ScratchDir::new("spv_card_raw_");
+    let child = Sleeper::spawn_in(&marker, &[], dir.path());
+
+    let (ok, stdout, stderr) = run(spv()
+        .args(["--raw", &child.pid().to_string()])
+        .output()
+        .expect("spv runs"));
+
+    assert!(ok, "spv should succeed; stderr: {stderr}");
+    let command_line = format!("command: /bin/sh -c sleep {SLEEPER_SECONDS}; : {marker}");
+    assert!(
+        stdout.lines().any(|line| line == command_line),
+        "a line holds the whole command; stdout: {stdout}"
+    );
+    let cwd_line = format!("cwd: {}", dir.canonical().display());
+    assert!(
+        stdout.lines().any(|line| line == cwd_line),
+        "a line holds the working directory; stdout: {stdout}"
+    );
+    let parent_prefix = format!("parent: {} ", std::process::id());
+    assert!(
+        stdout.lines().any(|line| line.starts_with(&parent_prefix)),
+        "a line names this test as the parent; stdout: {stdout}"
+    );
+    assert!(
+        stdout.lines().any(|line| line.starts_with("exe: /")),
+        "a line holds the executable; stdout: {stdout}"
+    );
+    assert_raw_card_shows_a_start_time(&stdout);
+    assert!(
+        table_border_character(&stdout).is_none(),
+        "--raw draws no table; stdout: {stdout}"
+    );
+}
+
+#[test]
+fn all_prints_the_card_then_every_section() {
+    let child = Sleeper::spawn(&unique_token("spv_card_all_"), &[]);
+
+    let (ok, stdout, stderr) = run(spv()
+        .args(["--all", &child.pid().to_string()])
+        .output()
+        .expect("spv runs"));
+
+    assert!(ok, "spv should succeed; stderr: {stderr}");
+    let positions: Vec<Option<usize>> = [
+        "Parent ",
+        "Open files for",
+        "Environment for",
+        "Network connections for",
+    ]
+    .iter()
+    .map(|heading| stdout.find(heading))
+    .collect();
+    assert!(
+        positions.iter().all(Option::is_some),
+        "the card and the three sections all appear; stdout: {stdout}"
+    );
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "the card comes first, then the sections in their order; stdout: {stdout}"
+    );
+}
+
+#[test]
+fn the_card_of_another_users_process_says_sudo_is_needed() {
+    // SAFETY: geteuid is a POSIX call that reads an integer out of the process
+    // credentials. It takes no pointer, it cannot fail, and it changes nothing.
+    let euid = unsafe { libc::geteuid() };
+    if euid == 0 {
+        // As root the kernel refuses nothing, so there is nothing to say.
+        return;
+    }
+
+    // PID 1 belongs to root on every Unix.
+    let (ok, stdout, stderr) = run(spv().arg("1").output().expect("spv runs"));
+
+    assert!(ok, "spv should succeed; stderr: {stderr}");
+    assert!(
+        stdout.contains("(needs sudo)"),
+        "the card says that sudo brings the missing rows; stdout: {stdout}"
+    );
+    assert!(
+        stderr.contains("Warning") && stderr.contains("sudo"),
+        "the run warns about the owner and names the remedy; stderr: {stderr}"
+    );
+}
+
+#[test]
+fn the_warning_of_a_card_with_no_section_names_the_card() {
+    // SAFETY: geteuid is a POSIX call that reads an integer out of the process
+    // credentials. It takes no pointer, it cannot fail, and it changes nothing.
+    let euid = unsafe { libc::geteuid() };
+    if euid == 0 {
+        // As root the kernel refuses nothing, so there is no warning.
+        return;
+    }
+
+    // PID 1 belongs to root on every Unix. No flag asks for a section.
+    let (ok, _stdout, stderr) = run(spv().arg("1").output().expect("spv runs"));
+
+    assert!(ok, "spv should succeed; stderr: {stderr}");
+    assert!(
+        stderr.contains("card above"),
+        "the warning names the card that it means; stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("section below"),
+        "no section prints, so the warning names none; stderr: {stderr}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_card_of_a_root_process_shows_its_start_time_without_sudo() {
+    // SAFETY: geteuid is a POSIX call that reads an integer out of the process
+    // credentials. It takes no pointer, it cannot fail, and it changes nothing.
+    let euid = unsafe { libc::geteuid() };
+    if euid == 0 {
+        // As root, sysinfo reads every process. The test proves nothing there.
+        return;
+    }
+
+    // PID 1 belongs to root. The kernel gives its start time to every user.
+    let (ok, stdout, stderr) = run(spv().args(["--raw", "1"]).output().expect("spv runs"));
+
+    assert!(ok, "spv should succeed; stderr: {stderr}");
+    assert_raw_card_shows_a_start_time(&stdout);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_card_of_a_root_process_says_sudo_for_cpu_and_memory() {
+    // SAFETY: geteuid is a POSIX call that reads an integer out of the process
+    // credentials. It takes no pointer, it cannot fail, and it changes nothing.
+    let euid = unsafe { libc::geteuid() };
+    if euid == 0 {
+        // As root, sysinfo reads every process. The test proves nothing there.
+        return;
+    }
+
+    // The kernel withholds the task info of PID 1 from another user. sysinfo
+    // then gives 0 for the CPU and the memory. The card must not show those 0
+    // values as facts.
+    let (ok, stdout, stderr) = run(spv().args(["--raw", "1"]).output().expect("spv runs"));
+
+    assert!(ok, "spv should succeed; stderr: {stderr}");
+    assert!(
+        stdout.lines().any(|line| line == "cpu: (needs sudo)"),
+        "the cpu row says why it is missing; stdout: {stdout}"
+    );
+    assert!(
+        stdout.lines().any(|line| line == "memory: (needs sudo)"),
+        "the memory row says why it is missing; stdout: {stdout}"
+    );
+    assert!(
+        !stdout.lines().any(|line| line == "memory: 0 B"),
+        "the memory row does not show a false 0 B; stdout: {stdout}"
+    );
+}
+
+#[test]
+fn more_than_one_pid_and_a_name_still_print_the_table() {
+    // This test guards the shape of the output. It passes before the card
+    // exists and after it, and it fails if a later change gives a card to a
+    // run that must print the table.
+    let first = unique_token("spv_table_one_");
+    let second = unique_token("spv_table_two_");
+    let child_one = Sleeper::spawn(&first, &[]);
+    let child_two = Sleeper::spawn(&second, &[]);
+    let pids = format!("{},{}", child_one.pid(), child_two.pid());
+
+    for args in [vec![pids.as_str()], vec!["--full", first.as_str()]] {
+        let (ok, stdout, stderr) = run(spv().args(&args).output().expect("spv runs"));
+
+        assert!(ok, "spv {args:?} should succeed; stderr: {stderr}");
+        assert!(
+            stdout.contains("COMMAND") && stdout.contains("STATUS"),
+            "spv {args:?} prints the table headers; stdout: {stdout}"
+        );
+        assert!(
+            !flatten(&stdout).contains("Parent"),
+            "spv {args:?} prints no card; stdout: {stdout}"
+        );
+    }
 }

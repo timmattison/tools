@@ -64,7 +64,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `seescc` | Self-refreshing terminal viewer for sccache statistics, with sparklines and a one-shot JSON mode. |
 | `sf` | Size of Files — total size of files in directories, with optional suffix/prefix/substring filters. |
 | `sirn` | Serve It Right Now — a zero-config HTTP file server; serves files or the current directory on a git-derived port. |
-| `spv` | Smart Process Viewer — find and view processes by PID/name/regex, with optional cwd, open files, environment, and network connections. |
+| `spv` | Smart Process Viewer — find and view processes by PID/name/regex, with optional cwd, open files, environment, and network connections. One PID prints a detail card with the full command, the executable, the start time, and the parent chain. |
 | `subito` | Subscribes to AWS IoT Core topics over a signed WebSocket and prints received messages, as text, indented JSON, or a hex dump. |
 | `swt` | Subagent Worktree — isolated-worktree helper for parallel TDD (create/merge with green checks, list the children of a branch). |
 | `symfix` | Recursively finds broken symlinks and optionally repairs them, by prepending to or removing a prefix from the target, with a dry run. |
