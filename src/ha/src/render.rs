@@ -3921,12 +3921,13 @@ mod tests {
         }
     }
 
-    /// This test passes before issue #581 too. It locks the layout in: a
-    /// marker that is wider than its cell moves each cell after it, and the
-    /// buffer clips what stands past the right edge without a sign. Since issue
-    /// #590, the right marker cell stands in the last `MARKER_WIDTH` columns of
-    /// each row. It repeats the left marker, one blank column follows the time
-    /// cell, and the header leaves the right marker cell blank.
+    /// The checks of the ID, STARTED, and TIME columns pass before issue #581
+    /// too. They lock the layout in: a marker that is wider than its cell moves
+    /// each cell after it, and the buffer clips what stands past the right edge
+    /// without a sign. Since issue #590, the test also checks the right marker
+    /// cell, which stands in the last `MARKER_WIDTH` columns of each row. It
+    /// repeats the left marker, one blank column follows the time cell, and the
+    /// header leaves the right marker cell blank.
     #[test]
     fn the_id_started_and_time_columns_stay_put_at_every_width() {
         let first_width = u16::try_from(FIXED_COLUMNS).expect("the fixed columns fit in u16");
