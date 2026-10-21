@@ -574,6 +574,36 @@ mod tests {
     }
 
     #[test]
+    fn the_table_escapes_a_control_character_in_the_command() {
+        let mut card = sample_card();
+        card.command = Fact::Known("x\u{1b}]0;PWNED\u{7}y".to_string());
+        let out = render(&card, 200);
+        assert!(!out.contains('\u{1b}'), "{out:?}");
+        assert!(!out.contains('\u{7}'), "{out:?}");
+        assert!(out.contains("x\\u{1b}]0;PWNED\\u{7}y"), "{out}");
+    }
+
+    #[test]
+    fn the_table_escapes_a_control_character_in_an_ancestor() {
+        let mut card = sample_card();
+        card.parents = Parents::Chain(vec![Ancestor {
+            pid: 7,
+            command: "evil\u{1b}[2J".to_string(),
+        }]);
+        let out = render(&card, 200);
+        assert!(!out.contains('\u{1b}'), "{out:?}");
+        assert!(out.contains("evil\\u{1b}[2J"), "{out}");
+    }
+
+    #[test]
+    fn a_newline_in_the_command_cannot_fake_a_row_of_the_table() {
+        let mut card = sample_card();
+        card.command = Fact::Known("sh -c a\nPID 1".to_string());
+        let out = render(&card, 200);
+        assert!(out.contains("sh -c a\\nPID 1"), "{out}");
+    }
+
+    #[test]
     fn the_parents_line_up_by_the_widest_pid() {
         let mut card = sample_card();
         card.parents = Parents::Chain(vec![
