@@ -925,6 +925,36 @@ fn the_card_of_another_users_process_says_sudo_is_needed() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn the_card_of_a_root_process_shows_its_start_time_without_sudo() {
+    // SAFETY: geteuid is a POSIX call that reads an integer out of the process
+    // credentials. It takes no pointer, it cannot fail, and it changes nothing.
+    let euid = unsafe { libc::geteuid() };
+    if euid == 0 {
+        // As root, sysinfo reads every process. The test proves nothing there.
+        return;
+    }
+
+    // PID 1 belongs to root. The kernel gives its start time to every user.
+    let (ok, stdout, stderr) = run(spv().args(["--raw", "1"]).output().expect("spv runs"));
+
+    assert!(ok, "spv should succeed; stderr: {stderr}");
+    let line = stdout
+        .lines()
+        .find(|line| line.starts_with("started: "))
+        .unwrap_or_else(|| panic!("the card has a started row; stdout: {stdout}"));
+    let value = &line["started: ".len()..];
+    assert!(
+        value.chars().next().is_some_and(|c| c.is_ascii_digit()),
+        "the started row shows a time and not a reason; stdout: {stdout}"
+    );
+    assert!(
+        line.ends_with(" ago)"),
+        "the started row shows the elapsed time; stdout: {stdout}"
+    );
+}
+
 #[test]
 fn more_than_one_pid_and_a_name_still_print_the_table() {
     // This test guards the shape of the output. It passes before the card
