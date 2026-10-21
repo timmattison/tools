@@ -651,6 +651,72 @@ mod tests {
         assert!(out.contains("1      launchd"), "{out}");
     }
 
+    /// Reads a rendered table into the `(key cell, value cell)` of each line
+    /// that holds a column separator. A separator line has no such pair.
+    fn cell_rows(rendered: &str) -> Vec<Option<(String, String)>> {
+        let trim = |cell: &str| {
+            cell.trim_matches(|c: char| c == '│' || c.is_whitespace())
+                .to_string()
+        };
+        rendered
+            .lines()
+            .map(|line| {
+                line.split_once('┆')
+                    .map(|(key, value)| (trim(key), trim(value)))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn each_parent_gets_a_row_of_its_own() {
+        let rows = cell_rows(&render(&sample_card(), 200));
+        let position = |key: &str, value: &str| {
+            rows.iter()
+                .position(|row| row.as_ref().is_some_and(|(k, v)| k == key && v == value))
+        };
+        let near = position("Parent 75757", "zsh -l");
+        let far = position("Parent 1", "/sbin/launchd");
+        assert!(near.is_some(), "no row for 75757: {rows:?}");
+        assert!(far.is_some(), "no row for 1: {rows:?}");
+        assert!(near < far, "the nearest parent must come first: {rows:?}");
+    }
+
+    #[test]
+    fn a_long_parent_command_wraps_inside_its_own_column() {
+        let command = format!(
+            "zellij --server /var/folders/m8/{}",
+            "T/zellij-501/contract_version_1/session-name ".repeat(5)
+        );
+        let command = command.trim_end().to_string();
+        assert!(command.chars().count() >= 190);
+        let mut card = sample_card();
+        card.parents = Parents::Chain(vec![Ancestor {
+            pid: 17331,
+            command: command.clone(),
+        }]);
+        let out = render(&card, 60);
+        for line in out.lines() {
+            assert!(line.width() <= 60, "line too wide: {line}");
+        }
+        let rows = cell_rows(&out);
+        let start = rows
+            .iter()
+            .position(|row| row.as_ref().is_some_and(|(k, _)| k == "Parent 17331"))
+            .unwrap_or_else(|| panic!("no row for 17331: {out}"));
+        let mut value = String::new();
+        for row in &rows[start..] {
+            let Some((key, cell)) = row else { break };
+            if value.is_empty() {
+                assert_eq!(key, "Parent 17331");
+            } else {
+                assert!(key.is_empty(), "continuation has a key cell: {key}");
+            }
+            value.push_str(cell);
+        }
+        let squeeze = |s: &str| s.split_whitespace().collect::<String>();
+        assert_eq!(squeeze(&value), squeeze(&command));
+    }
+
     #[test]
     fn an_empty_chain_says_none() {
         let mut card = sample_card();
