@@ -954,6 +954,37 @@ fn the_card_of_a_root_process_shows_its_start_time_without_sudo() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn the_card_of_a_root_process_says_sudo_for_cpu_and_memory() {
+    // SAFETY: geteuid is a POSIX call that reads an integer out of the process
+    // credentials. It takes no pointer, it cannot fail, and it changes nothing.
+    let euid = unsafe { libc::geteuid() };
+    if euid == 0 {
+        // As root, sysinfo reads every process. The test proves nothing there.
+        return;
+    }
+
+    // The kernel withholds the task info of PID 1 from another user. sysinfo
+    // then gives 0 for the CPU and the memory. The card must not show those 0
+    // values as facts.
+    let (ok, stdout, stderr) = run(spv().args(["--raw", "1"]).output().expect("spv runs"));
+
+    assert!(ok, "spv should succeed; stderr: {stderr}");
+    assert!(
+        stdout.lines().any(|line| line == "cpu: (needs sudo)"),
+        "the cpu row says why it is missing; stdout: {stdout}"
+    );
+    assert!(
+        stdout.lines().any(|line| line == "memory: (needs sudo)"),
+        "the memory row says why it is missing; stdout: {stdout}"
+    );
+    assert!(
+        !stdout.lines().any(|line| line == "memory: 0 B"),
+        "the memory row does not show a false 0 B; stdout: {stdout}"
+    );
+}
+
 #[test]
 fn more_than_one_pid_and_a_name_still_print_the_table() {
     // This test guards the shape of the output. It passes before the card
