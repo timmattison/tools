@@ -1747,11 +1747,12 @@ fn format_memory(bytes: u64) -> String {
 
 /// Builds the detail card of one process.
 ///
-/// The card reads the executable and the ancestors from the snapshot that
-/// `main` took. The start time comes from the facts of `collect_processes`:
-/// sysinfo, else sysctl on macOS. The chain of ancestors comes from `proctree`
-/// alone. The snapshot gives only the command line of each ancestor. A value
-/// that the kernel withholds shows the reason: a zombie, sudo, or unknown.
+/// The executable comes from the snapshot that `main` took. The CPU, the
+/// memory, the start time, the working directory, and the command line come
+/// from the facts that `collect_processes` read. The chain of ancestors comes
+/// from `proctree`. The command of each ancestor comes from the snapshot, else
+/// from the comm that `proctree` gives. A value that the kernel withholds
+/// shows the reason: a zombie, sudo, or unknown.
 ///
 /// # Arguments
 ///
