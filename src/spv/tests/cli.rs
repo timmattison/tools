@@ -925,6 +925,30 @@ fn the_card_of_another_users_process_says_sudo_is_needed() {
     );
 }
 
+#[test]
+fn the_warning_of_a_card_with_no_section_names_the_card() {
+    // SAFETY: geteuid is a POSIX call that reads an integer out of the process
+    // credentials. It takes no pointer, it cannot fail, and it changes nothing.
+    let euid = unsafe { libc::geteuid() };
+    if euid == 0 {
+        // As root the kernel refuses nothing, so there is no warning.
+        return;
+    }
+
+    // PID 1 belongs to root on every Unix. No flag asks for a section.
+    let (ok, _stdout, stderr) = run(spv().arg("1").output().expect("spv runs"));
+
+    assert!(ok, "spv should succeed; stderr: {stderr}");
+    assert!(
+        stderr.contains("card above"),
+        "the warning names the card that it means; stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("section below"),
+        "no section prints, so the warning names none; stderr: {stderr}"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn the_card_of_a_root_process_shows_its_start_time_without_sudo() {
