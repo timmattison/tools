@@ -31,6 +31,8 @@ pub enum RunState {
     Failed,
     /// The run finished because somebody cancelled it.
     Cancelled,
+    /// The run finished because GitHub skipped it.
+    Skipped,
     /// Any other state, for example a skipped run.
     Other,
 }
@@ -187,7 +189,7 @@ mod tests {
             ("timed_out", RunState::Failed),
             ("startup_failure", RunState::Failed),
             ("cancelled", RunState::Cancelled),
-            ("skipped", RunState::Other),
+            ("skipped", RunState::Skipped),
             ("neutral", RunState::Other),
             ("action_required", RunState::Other),
             ("stale", RunState::Other),
@@ -223,6 +225,7 @@ mod tests {
         assert!(!RunState::Passed.is_active());
         assert!(!RunState::Failed.is_active());
         assert!(!RunState::Cancelled.is_active());
+        assert!(!RunState::Skipped.is_active());
         assert!(!RunState::Other.is_active());
     }
 
@@ -233,13 +236,14 @@ mod tests {
         assert!(RunState::Cancelled.is_finished());
         assert!(!RunState::Queued.is_finished());
         assert!(!RunState::Running.is_finished());
+        assert!(!RunState::Skipped.is_finished());
         assert!(!RunState::Other.is_finished());
     }
 
     #[test]
     fn the_shown_state_of_a_run_comes_from_its_state_and_its_jobs() {
-        use RunState::{Cancelled, Failed, Other, Passed, Queued, Running};
-        let rows: [(&str, RunState, Vec<RunState>, RunState); 8] = [
+        use RunState::{Cancelled, Failed, Other, Passed, Queued, Running, Skipped};
+        let rows: [(&str, RunState, Vec<RunState>, RunState); 9] = [
             (
                 "queued run, a job runs",
                 Queued,
@@ -276,6 +280,12 @@ mod tests {
                 Cancelled,
                 vec![Running],
                 Cancelled,
+            ),
+            (
+                "skipped run, stale running job",
+                Skipped,
+                vec![Running],
+                Skipped,
             ),
             ("other run, stale running job", Other, vec![Running], Other),
         ];

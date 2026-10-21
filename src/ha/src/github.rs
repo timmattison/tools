@@ -1069,7 +1069,8 @@ mod tests {
             ("completed", "\"success\"", RunState::Passed),
             ("completed", "\"failure\"", RunState::Failed),
             ("completed", "\"cancelled\"", RunState::Cancelled),
-            ("completed", "\"skipped\"", RunState::Other),
+            ("completed", "\"skipped\"", RunState::Skipped),
+            ("completed", "\"neutral\"", RunState::Other),
         ];
         for (status, conclusion, expected) in cases {
             let body = one_job_json(&format!("\"{status}\""), conclusion);

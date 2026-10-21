@@ -262,7 +262,7 @@ fn marker(state: RunState) -> &'static str {
         RunState::Cancelled => "🪦",
         RunState::Passed => "✅",
         RunState::Failed => "❌",
-        RunState::Other => " ",
+        RunState::Skipped | RunState::Other => " ",
     }
 }
 
