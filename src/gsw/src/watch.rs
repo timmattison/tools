@@ -14357,9 +14357,11 @@ mod watched_tests {
         );
     }
 
-    /// The start branch is gone, and only `origin/topic` is left. Plain `git
-    /// switch topic` would make a new `topic` from it, and that branch is not
-    /// the start branch. `--no-guess` refuses, and no local `topic` appears.
+    /// The start branch is gone, and only `origin/topic` is left. The fixture
+    /// adds the remote `origin`, because git guesses a branch only when the
+    /// remote exists. Plain `git switch topic` then makes a new `topic` from
+    /// `origin/topic`, and that branch is not the start branch. `--no-guess`
+    /// refuses, and no local `topic` appears.
     #[test]
     fn a_start_branch_that_only_origin_holds_is_not_made_again() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -14369,6 +14371,15 @@ mod watched_tests {
         let start = start_at(&home);
         git(&home, &["switch", "-q", "main"]);
         let sha = git_stdout(&home, &["rev-parse", TOPIC]);
+        git(
+            &home,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/none.git",
+            ],
+        );
         git(&home, &["update-ref", "refs/remotes/origin/topic", &sha]);
         git(&home, &["branch", "-q", "-D", TOPIC]);
         assert!(!has_local_branch(&home, TOPIC), "the fixture deleted topic");
