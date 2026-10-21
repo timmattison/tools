@@ -34,6 +34,17 @@ const ZOMBIE_STATUS: &str = "Zombie";
 /// On Linux a 0 is thus a value, and the rule stays off.
 const KERNEL_WITHHOLDS_TASK_INFO: bool = cfg!(target_os = "macos");
 
+/// What the warning says can be refused when only the card prints.
+const REFUSAL_OF_THE_CARD: &str = "The kernel can refuse some rows of the card above.";
+
+/// What the warning says can be refused when only sections print.
+const REFUSAL_OF_THE_SECTIONS: &str = "A section below can come back empty or refused.";
+
+/// What the warning says can be refused when the card and sections print.
+const REFUSAL_OF_THE_CARD_AND_SECTIONS: &str =
+    "The kernel can refuse some rows of the card above, \
+     and a section below can come back empty or refused.";
+
 /// Why the card shows no parents when `ps` did not run.
 const PARENTS_PS_DID_NOT_RUN: &str = "ps did not run";
 
@@ -1205,21 +1216,69 @@ fn matches_name_pattern(
     subject.to_lowercase().contains(&pattern.to_lowercase())
 }
 
+/// The output that the kernel can refuse in part, which the warning names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuardedOutput {
+    /// The card of one PID, with no section under it.
+    Card,
+    /// One or more sections under the table.
+    Sections,
+    /// The card of one PID, with one or more sections under it.
+    CardAndSections,
+}
+
+impl GuardedOutput {
+    /// Names the guarded output that a run prints.
+    ///
+    /// # Arguments
+    ///
+    /// * `shows_card` - Whether the run prints the card of one PID
+    /// * `wants_a_section` - Whether the run prints a section
+    ///
+    /// # Returns
+    ///
+    /// The output, or `None` for a plain table, which reads nothing that the
+    /// kernel guards.
+    fn of(shows_card: bool, wants_a_section: bool) -> Option<Self> {
+        match (shows_card, wants_a_section) {
+            (false, false) => None,
+            (true, false) => Some(Self::Card),
+            (false, true) => Some(Self::Sections),
+            (true, true) => Some(Self::CardAndSections),
+        }
+    }
+
+    /// Gives the sentence that says which part of the output can be refused.
+    fn what_can_be_refused(self) -> &'static str {
+        match self {
+            Self::Card => REFUSAL_OF_THE_CARD,
+            Self::Sections => REFUSAL_OF_THE_SECTIONS,
+            Self::CardAndSections => REFUSAL_OF_THE_CARD_AND_SECTIONS,
+        }
+    }
+}
+
 /// Warns that a matched process belongs to another user.
 ///
-/// A section that comes back empty teaches the user that the process holds
-/// nothing, which is worse than a refusal. So the warning goes out before the
-/// sections do.
+/// A card or a section that comes back empty teaches the user that the process
+/// holds nothing, which is worse than a refusal. So the warning goes out after
+/// the card and before the sections. Its words say "above" for the card and
+/// "below" for the sections.
 ///
 /// # Arguments
 ///
 /// * `processes` - The processes that matched
 /// * `viewer` - The user who runs this tool, and the reach that user has
+/// * `output` - The output that the warning names as the part that can be refused
 ///
 /// # Returns
 ///
 /// The warning, or `None` when every matched process is readable.
-fn permission_warning(processes: &[ProcessInfo], viewer: &Viewer) -> Option<String> {
+fn permission_warning(
+    processes: &[ProcessInfo],
+    viewer: &Viewer,
+    output: GuardedOutput,
+) -> Option<String> {
     let mut owners: Vec<&str> = processes
         .iter()
         .filter(|process| viewer.can_refuse(process))
@@ -1232,10 +1291,11 @@ fn permission_warning(processes: &[ProcessInfo], viewer: &Viewer) -> Option<Stri
     }
     Some(format!(
         "Warning: some matched processes belong to {}, and you are {}. \
-         A section below can come back empty or refused. \
+         {} \
          Run spv again with sudo to see all of it.",
         owners.join(", "),
-        viewer.username
+        viewer.username,
+        output.what_can_be_refused()
     ))
 }
 
@@ -1858,8 +1918,8 @@ fn main() -> Result<()> {
         show_secrets: args.show_secrets,
     };
     let wants_a_section = sections.files || sections.env || sections.net;
-    if shows_card || wants_a_section {
-        if let Some(warning) = permission_warning(&processes, &printer.viewer) {
+    if let Some(output) = GuardedOutput::of(shows_card, wants_a_section) {
+        if let Some(warning) = permission_warning(&processes, &printer.viewer, output) {
             eprintln!("\n{warning}");
         }
     }
@@ -2450,14 +2510,23 @@ mod tests {
     #[test]
     fn your_own_processes_raise_no_warning() {
         let processes = [process_owned_by(1, "tim"), process_owned_by(2, "tim")];
-        assert!(permission_warning(&processes, &viewer_named("tim", false)).is_none());
+        assert!(permission_warning(
+            &processes,
+            &viewer_named("tim", false),
+            GuardedOutput::Sections
+        )
+        .is_none());
     }
 
     #[test]
     fn another_users_process_raises_a_warning_that_names_both_users() {
         let processes = [process_owned_by(1, "root"), process_owned_by(2, "tim")];
-        let warning = permission_warning(&processes, &viewer_named("tim", false))
-            .expect("root is not tim, so warn");
+        let warning = permission_warning(
+            &processes,
+            &viewer_named("tim", false),
+            GuardedOutput::Sections,
+        )
+        .expect("root is not tim, so warn");
         assert!(
             warning.contains("root"),
             "the warning names the owner: {warning}"
@@ -2473,9 +2542,49 @@ mod tests {
     }
 
     #[test]
+    fn the_output_follows_from_the_card_and_the_sections() {
+        assert_eq!(GuardedOutput::of(false, false), None);
+        assert_eq!(GuardedOutput::of(true, false), Some(GuardedOutput::Card));
+        assert_eq!(
+            GuardedOutput::of(false, true),
+            Some(GuardedOutput::Sections)
+        );
+        assert_eq!(
+            GuardedOutput::of(true, true),
+            Some(GuardedOutput::CardAndSections)
+        );
+    }
+
+    #[test]
+    fn the_warning_names_the_output_that_the_run_prints() {
+        let processes = [process_owned_by(1, "root")];
+        let viewer = viewer_named("tim", false);
+        let words = |output| {
+            permission_warning(&processes, &viewer, output).expect("root is not tim, so warn")
+        };
+
+        let card = words(GuardedOutput::Card);
+        assert!(card.contains("card above"), "{card}");
+        assert!(!card.contains("section below"), "{card}");
+
+        let sections = words(GuardedOutput::Sections);
+        assert!(sections.contains("section below"), "{sections}");
+        assert!(!sections.contains("card above"), "{sections}");
+
+        let both = words(GuardedOutput::CardAndSections);
+        assert!(both.contains("card above"), "{both}");
+        assert!(both.contains("section below"), "{both}");
+    }
+
+    #[test]
     fn root_reads_every_process_and_raises_no_warning() {
         let processes = [process_owned_by(1, "root"), process_owned_by(2, "nobody")];
-        assert!(permission_warning(&processes, &viewer_named("root", true)).is_none());
+        assert!(permission_warning(
+            &processes,
+            &viewer_named("root", true),
+            GuardedOutput::Sections
+        )
+        .is_none());
     }
 
     #[test]
@@ -2486,8 +2595,12 @@ mod tests {
             process_owned_by(3, "root"),
             process_owned_by(4, "tim"),
         ];
-        let warning =
-            permission_warning(&processes, &viewer_named("tim", false)).expect("two owners differ");
+        let warning = permission_warning(
+            &processes,
+            &viewer_named("tim", false),
+            GuardedOutput::Sections,
+        )
+        .expect("two owners differ");
         assert!(
             warning.contains("nobody, root"),
             "the owners come once each and in order: {warning}"

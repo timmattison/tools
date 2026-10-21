@@ -478,6 +478,10 @@ fn a_process_owned_by_another_user_raises_a_warning() {
         stderr.contains("root") && stderr.contains("sudo"),
         "the warning names the owner and the remedy; stderr: {stderr}"
     );
+    assert!(
+        stderr.contains("card above") && stderr.contains("section below"),
+        "the card and the section both print, so the warning names both; stderr: {stderr}"
+    );
 }
 
 #[test]
