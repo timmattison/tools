@@ -255,6 +255,11 @@ fn job_cells(
 /// selector and no joiner. Thus all terminals agree that it is
 /// [`MARKER_WIDTH`] columns wide. A terminal draws an emoji in its own colors,
 /// thus the marker has no foreground color.
+///
+/// The marker of [`RunState::Skipped`] is `🚫` (U+1F6AB). The text symbols of
+/// a circle with a line through it, for example `⊘` (U+2298), are 1 column
+/// wide and would move the columns. A skipped run does not show on the board,
+/// thus only a job row shows `🚫`.
 fn marker(state: RunState) -> &'static str {
     match state {
         RunState::Running => "🏃",
@@ -262,7 +267,8 @@ fn marker(state: RunState) -> &'static str {
         RunState::Cancelled => "🪦",
         RunState::Passed => "✅",
         RunState::Failed => "❌",
-        RunState::Skipped | RunState::Other => " ",
+        RunState::Skipped => "🚫",
+        RunState::Other => " ",
     }
 }
 
