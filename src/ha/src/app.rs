@@ -400,8 +400,9 @@ mod tests {
 
     use chrono::FixedOffset;
     use crossterm::event::KeyEventState;
-    use ratatui::backend::TestBackend;
-    use ratatui::buffer::Buffer;
+    use ratatui::backend::{ClearType, TestBackend, WindowSize};
+    use ratatui::buffer::{Buffer, Cell};
+    use ratatui::layout::{Position, Size};
 
     use super::*;
     use crate::cancel::CancelOutcome;
@@ -2157,5 +2158,94 @@ mod tests {
         assert!(result.is_ok(), "{result:?}");
         assert!(!frame.iter().any(|l| l.contains(SHELL_TEXT)), "{frame:#?}");
         assert_eq!(frame, expected);
+    }
+
+    /// A terminal that does not answer the query for the cursor position.
+    /// A recording under `script` does not answer it, and a slow link
+    /// answers too late. Each other call goes to the `TestBackend` inside.
+    struct NoCursorReport(TestBackend);
+
+    impl Backend for NoCursorReport {
+        type Error = std::io::Error;
+
+        fn draw<'a, I>(&mut self, content: I) -> std::io::Result<()>
+        where
+            I: Iterator<Item = (u16, u16, &'a Cell)>,
+        {
+            let Ok(()) = self.0.draw(content);
+            Ok(())
+        }
+
+        fn hide_cursor(&mut self) -> std::io::Result<()> {
+            let Ok(()) = self.0.hide_cursor();
+            Ok(())
+        }
+
+        fn show_cursor(&mut self) -> std::io::Result<()> {
+            let Ok(()) = self.0.show_cursor();
+            Ok(())
+        }
+
+        fn get_cursor_position(&mut self) -> std::io::Result<Position> {
+            Err(std::io::Error::other(
+                "the terminal does not report the cursor position",
+            ))
+        }
+
+        fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> std::io::Result<()> {
+            let Ok(()) = self.0.set_cursor_position(position);
+            Ok(())
+        }
+
+        fn clear(&mut self) -> std::io::Result<()> {
+            let Ok(()) = self.0.clear();
+            Ok(())
+        }
+
+        fn clear_region(&mut self, clear_type: ClearType) -> std::io::Result<()> {
+            let Ok(()) = self.0.clear_region(clear_type);
+            Ok(())
+        }
+
+        fn size(&self) -> std::io::Result<Size> {
+            let Ok(size) = self.0.size();
+            Ok(size)
+        }
+
+        fn window_size(&mut self) -> std::io::Result<WindowSize> {
+            let Ok(size) = self.0.window_size();
+            Ok(size)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            let Ok(()) = self.0.flush();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_view_starts_on_a_terminal_that_does_not_report_the_cursor() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let backend = NoCursorReport(screen_with_shell_text(120, 12));
+        let mut terminal = Terminal::new(backend).unwrap();
+        let tz = FixedOffset::east_opt(0).unwrap();
+        let clock = now;
+        let opener = opener(false);
+        let canceller = canceller();
+        let mut app = App::new(
+            Board::new(Duration::from_hours(8)),
+            Status::default(),
+            &opener,
+            &canceller,
+            &channels.worker,
+            &clock,
+            &tz,
+        );
+        let events = vec![press(KeyCode::Char('q')).into()];
+        let result = app.run(&mut terminal, &mut script(events));
+        assert!(result.is_ok(), "{result:?}");
+        let frame = lines(terminal.backend().0.buffer());
+        assert!(!frame.iter().any(|l| l.contains(SHELL_TEXT)), "{frame:#?}");
     }
 }
