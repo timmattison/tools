@@ -589,7 +589,27 @@ mod tests {
         channels: &Channels,
         events: Vec<Event>,
     ) -> (Result<(), RunError>, Vec<String>) {
-        let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
+        run_app_on(
+            TestBackend::new(120, 12),
+            status,
+            opener,
+            canceller,
+            channels,
+            events,
+        )
+    }
+
+    /// Does the work of `run_app_with` on `backend`, so the caller can give
+    /// a screen that already holds text.
+    fn run_app_on(
+        backend: TestBackend,
+        status: Status,
+        opener: &RecordingOpener,
+        canceller: &RecordingCanceller,
+        channels: &Channels,
+        events: Vec<Event>,
+    ) -> (Result<(), RunError>, Vec<String>) {
+        let mut terminal = Terminal::new(backend).unwrap();
         let tz = FixedOffset::east_opt(0).unwrap();
         let clock = now;
         let mut app = App::new(
@@ -2087,5 +2107,49 @@ mod tests {
             frame[11]
         );
         assert!(!commands.contains(&Command::RefreshNow), "{commands:?}");
+    }
+
+    /// The text that the shell wrote on the screen before `ha` started.
+    const SHELL_TEXT: &str = "old-shell-text";
+
+    /// A screen of `width` by `height` cells that the shell filled before
+    /// `ha` started. Each cell holds a glyph, and no cell is blank.
+    fn screen_with_shell_text(width: u16, height: u16) -> TestBackend {
+        TestBackend::with_lines((0..height).map(|row| {
+            format!("{SHELL_TEXT}-{row}|")
+                .chars()
+                .cycle()
+                .take(usize::from(width))
+                .collect::<String>()
+        }))
+    }
+
+    #[test]
+    fn the_first_frame_hides_the_text_that_was_on_the_screen_before() {
+        let quit = || vec![press(KeyCode::Char('q'))];
+        let on_blank = channels();
+        send_runs(&on_blank, vec![active_run(1, 5)]);
+        let (result, expected) = run_app_on(
+            TestBackend::new(120, 12),
+            Status::default(),
+            &opener(false),
+            &canceller(),
+            &on_blank,
+            quit(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+        let on_shell_text = channels();
+        send_runs(&on_shell_text, vec![active_run(1, 5)]);
+        let (result, frame) = run_app_on(
+            screen_with_shell_text(120, 12),
+            Status::default(),
+            &opener(false),
+            &canceller(),
+            &on_shell_text,
+            quit(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert!(!frame.iter().any(|l| l.contains(SHELL_TEXT)), "{frame:#?}");
+        assert_eq!(frame, expected);
     }
 }
