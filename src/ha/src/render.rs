@@ -2807,6 +2807,129 @@ mod tests {
         assert_eq!(display_width(&stale), display_width(&fresh));
     }
 
+    /// A board with one run of each repository in `repos`. The run IDs are 7001,
+    /// 7002, and so on.
+    fn board_of_repos(repos: &[&str]) -> Board {
+        let mut board = Board::new(Duration::from_hours(8));
+        for (index, name) in repos.iter().enumerate() {
+            board.replace(
+                repo(name),
+                vec![run(
+                    7_001 + index as u64,
+                    name,
+                    "CI",
+                    "main",
+                    "Fix the thing",
+                    RunState::Running,
+                    "2026-10-14T11:45:30Z",
+                    "2026-10-14T11:59:00Z",
+                )],
+                now(),
+            );
+        }
+        board
+    }
+
+    /// The text line of the run with `id`.
+    fn line_of_run(text: &[String], id: u64) -> &str {
+        text.iter()
+            .find(|line| line.contains(&id.to_string()))
+            .expect("the run row shows")
+    }
+
+    #[test]
+    fn a_long_repository_name_keeps_its_end_and_starts_with_an_ellipsis() {
+        let mut board = board_of_repos(&["timmattison/keyboards", "Lock-Free-Labs/expert-witness"]);
+        let text = lines(&render_with(120, 8, &mut board, &loaded()));
+        let whole = line_of_run(&text, 7_001);
+        let cut = line_of_run(&text, 7_002);
+
+        assert!(whole.contains("timmattison/keyboards "), "{whole}");
+        assert!(cut.contains(" …-Labs/expert-witness "), "{cut}");
+        for line in [whole, cut] {
+            for (needle, header) in [("11:45:30", "STARTED"), ("14m 30s", "TIME")] {
+                assert_eq!(
+                    column_of(line, needle),
+                    column_of(&text[0], header),
+                    "{needle} is not under {header}: {line}"
+                );
+            }
+        }
+        assert_eq!(
+            column_of(whole, "7001") + 4,
+            column_of(cut, "7002") + 4,
+            "the run IDs do not end in the same column"
+        );
+    }
+
+    #[test]
+    fn at_100_columns_a_long_repository_name_keeps_its_end() {
+        let mut board = board_of_repos(&["timmattison/megarepo", "timmattison/keyboards"]);
+        let text = lines(&render_with(100, 8, &mut board, &loaded()));
+        assert!(
+            line_of_run(&text, 7_001).contains(" …ttison/megarepo "),
+            "{text:?}"
+        );
+        assert!(
+            line_of_run(&text, 7_002).contains(" …tison/keyboards "),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn a_stale_long_repository_name_keeps_the_mark_and_its_end() {
+        let name = "Lock-Free-Labs/expert-witness";
+        let mut fresh_board = board_of_repos(&[name]);
+        let fresh_text = lines(&render_with(120, 8, &mut fresh_board, &loaded()));
+        let fresh = line_of_run(&fresh_text, 7_001);
+        let mut stale_board = board_of_repos(&[name]);
+        stale_board.fail(repo(name), "HTTP 500".to_owned());
+        let stale_text = lines(&render_with(120, 8, &mut stale_board, &loaded()));
+        let stale = line_of_run(&stale_text, 7_001);
+
+        assert!(stale.contains("\u{1F4A4} …bs/expert-witness "), "{stale}");
+        for cell in ["7001", "11:45:30", "14m 30s", "CI", "main", "Fix the thing"] {
+            assert_eq!(
+                column_of(stale, cell),
+                column_of(fresh, cell),
+                "the cell {cell} moved: {stale}"
+            );
+        }
+        assert_eq!(display_width(stale), display_width(fresh));
+    }
+
+    #[test]
+    fn a_run_line_fills_the_frame_at_every_narrow_repository_cell() {
+        let name = "Lock-Free-Labs/expert-witness";
+        let long = run(
+            9,
+            name,
+            "CI",
+            "main",
+            "Fix the thing",
+            RunState::Running,
+            "2026-10-14T11:45:30Z",
+            "2026-10-14T11:59:00Z",
+        );
+        for frame in 42_usize..=60 {
+            for is_stale in [false, true] {
+                let line = run_line(
+                    &long,
+                    RunState::Running,
+                    is_stale,
+                    now(),
+                    &utc(),
+                    Widths::for_width(frame),
+                );
+                assert_eq!(
+                    display_width(&line),
+                    frame,
+                    "frame {frame}, stale {is_stale}: {line:?}"
+                );
+            }
+        }
+    }
+
     fn display_width(text: &str) -> usize {
         unicode_width::UnicodeWidthStr::width(text)
     }
