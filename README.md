@@ -2102,10 +2102,10 @@ cannot hang the caller. Used by `cwt` and `ha`.
       queue two times has two rows.
     - These rows show no workflow runs and no jobs. The runs of a merge group show in "Running"
       and in "Last 8h", on a branch that starts with `gh-readonly-queue/`.
-    - When the queue merges a pull request, `github-merge-queue[bot]` removes it from the queue,
-      and GitHub writes the `merged` event in the same second. `ha` reads the two events as one
-      merge. A merge more than 60 seconds after a removal by the queue, or after a removal by a
-      person, did not come through the queue, and the history does not show it.
+    - When the queue merges a pull request, `github-merge-queue[bot]` removes it from the queue, and
+      GitHub writes the `merged` event in the same second or the next second. `ha` reads the two
+      events as one merge. A merge more than 60 seconds after a removal by the queue, or after a
+      removal by a person, did not come through the queue, and the history does not show it.
     - The branch of a pull request in the history comes from its row in the queue, when `ha` saw
       it there. Else `ha` asks GitHub for the branch one time. When that request fails, the cell
       stays empty, and the next refresh asks again.
