@@ -782,17 +782,17 @@ enum Event {
     /// The user closed the open list (Esc or `q`). The watch stays on the
     /// worktree that it showed before the list opened.
     ListClose,
-    /// The user asked for the issue of the branch (`G`).
+    /// The user asked for the pull request or the issue of the branch (`G`).
     ///
     /// Only [`classify_input`] makes one, and it makes one only where the
     /// command exists — so the loop never receives a request it cannot serve.
     IssueRequested,
-    /// The probe found the command, and this is its name.
+    /// The probe of one page found its command, and this is the command.
     ///
     /// Sent only where the command exists. A shell that says no, a shell that
     /// cannot be started, and a shell that never answers all send nothing, so
     /// the key stays unbound and silent.
-    IssueCommandFound(crate::shell::ShellCommand),
+    IssueCommandFound(crate::issue::Page, crate::shell::ShellCommand),
     /// A run of the issue command has finished, either way.
     IssueFinished {
         /// The generation that [`LoopHooks::start_issue`] was given for this
@@ -912,7 +912,8 @@ pub(crate) enum Binding {
 /// call site.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct CommandKeys {
-    /// Whether `G`, which opens the issue of the branch, has a command.
+    /// Whether `G`, which opens the pull request or the issue of the branch,
+    /// has a command.
     issue: Binding,
     /// Whether `R`, which rebases the branch onto its base, has a command.
     rebase: Binding,
@@ -938,14 +939,16 @@ enum IssuePress {
 /// The `G` key's own state, for the life of one watch-mode run.
 ///
 /// Four facts, and they are one value because one key reads all of them: the
-/// command the probe found, whether a run of it is in flight, where the person
+/// command each probe found, whether a run of it is in flight, where the person
 /// who reads this screen sits, and whether a message that asks for a second
 /// press stands. None of them is an [`InputMode`], because each changes what
 /// this one key does and changes no other key.
 struct IssueRun {
-    /// The command the probe found. `None` until the probe answers, and
-    /// forever where it found none or where the feature is off.
-    command: Option<crate::shell::ShellCommand>,
+    /// The command the probe of the pull request found. `None` until the probe
+    /// answers, and forever where it found none or where the page is off.
+    pull_request: Option<crate::shell::ShellCommand>,
+    /// The command the probe of the issue found, on the same terms.
+    issue: Option<crate::shell::ShellCommand>,
     /// Whether a run is in flight. One run at a time: a browser opening twice
     /// is two tabs nobody asked for.
     running: bool,
@@ -961,7 +964,8 @@ impl IssueRun {
     /// Nothing found yet, nothing running, and nothing asked.
     fn new(session: crate::remote::Session) -> Self {
         Self {
-            command: None,
+            pull_request: None,
+            issue: None,
             running: false,
             session,
             armed: Arming::new(crate::push::STATUS_LIFETIME),
@@ -970,16 +974,19 @@ impl IssueRun {
 
     /// Whether `G` has a command behind it.
     fn key(&self) -> Binding {
-        if self.command.is_some() {
+        if self.issue.is_some() {
             Binding::Bound
         } else {
             Binding::Unbound
         }
     }
 
-    /// Keep the command the probe found.
-    fn found(&mut self, command: crate::shell::ShellCommand) {
-        self.command = Some(command);
+    /// Keep the command the probe of `page` found.
+    fn found(&mut self, page: crate::issue::Page, command: crate::shell::ShellCommand) {
+        match page {
+            crate::issue::Page::PullRequest => self.pull_request = Some(command),
+            crate::issue::Page::Issue => self.issue = Some(command),
+        }
     }
 
     /// What one press of `G` does now.
@@ -1008,7 +1015,7 @@ impl IssueRun {
         if self.running {
             return IssuePress::Nothing;
         }
-        let Some(steps) = crate::issue::Steps::new(None, self.command.clone()) else {
+        let Some(steps) = crate::issue::Steps::new(None, self.issue.clone()) else {
             return IssuePress::Nothing;
         };
         if self.session == crate::remote::Session::Local || self.armed.is_armed(now) {
@@ -1971,7 +1978,7 @@ fn spawn_command_probes(
         crate::issue::DEFAULT_ISSUE_COMMAND,
         deadline,
         move |command| {
-            let _ = issue_tx.send(Event::IssueCommandFound(command));
+            let _ = issue_tx.send(Event::IssueCommandFound(crate::issue::Page::Issue, command));
         },
     )];
     // Over the acts rather than over two names, so a third act would be probed
@@ -2087,7 +2094,7 @@ mod probe_tests {
     /// that reached the other key would bind `M` to the command that rebases.
     fn answer(event: &Event) -> String {
         match event {
-            Event::IssueCommandFound(command) => format!("G {}", command.name()),
+            Event::IssueCommandFound(_, command) => format!("G {}", command.name()),
             Event::BaseUpdateCommandFound(update, command) => {
                 format!("{} {}", update.key(), command.name())
             }
@@ -3094,7 +3101,7 @@ where
                 IssuePress::Nothing => {}
             }
         }
-        Event::IssueCommandFound(command) => state.issue.found(command),
+        Event::IssueCommandFound(page, command) => state.issue.found(page, command),
         // The check and the start are one step on the thread of the loop, so
         // a burst of presses starts one run. See [`ConflictsRun`].
         Event::ConflictsRequested => match state.conflicts.press() {
@@ -9199,7 +9206,7 @@ mod push_loop_tests {
 
     /// The probe's answer, as the loop receives it.
     fn probe_answered() -> Event {
-        Event::IssueCommandFound(found_command())
+        Event::IssueCommandFound(crate::issue::Page::Issue, found_command())
     }
 
     /// One press of `G`.
@@ -9210,7 +9217,7 @@ mod push_loop_tests {
     /// An [`IssueRun`] in `session`, whose probe has answered.
     fn issue_run_in(session: crate::remote::Session) -> IssueRun {
         let mut issue = IssueRun::new(session);
-        issue.found(found_command());
+        issue.found(crate::issue::Page::Issue, found_command());
         issue
     }
 

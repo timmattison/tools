@@ -30,6 +30,52 @@ pub(crate) const ISSUE_COMMAND_ENV: &str = "GSW_ISSUE_COMMAND";
 /// different one.
 pub(crate) const DEFAULT_ISSUE_COMMAND: &str = "ggs";
 
+/// The variable that holds the command `G` runs first.
+///
+/// The value is a whole command line, as the value of [`ISSUE_COMMAND_ENV`] is.
+pub(crate) const PR_COMMAND_ENV: &str = "GSW_PR_COMMAND";
+
+/// The command `G` runs first when the environment names none.
+///
+/// Like [`DEFAULT_ISSUE_COMMAND`], this repository ships no `ggsp`. It is a
+/// shell function that the user supplies. [`PR_COMMAND_ENV`] names a different
+/// one.
+pub(crate) const DEFAULT_PR_COMMAND: &str = "ggsp";
+
+/// One of the two pages that `G` can open, in the order a press tries them.
+///
+/// Each page has its own command, its own variable, and its own probe. The
+/// type holds every difference between them, so code that works on both pages
+/// loops over [`Page::ALL`] and names neither page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Page {
+    /// The pull request of the branch. A press tries it first.
+    PullRequest,
+    /// The issue of the branch. A press tries it where the first step fails.
+    Issue,
+}
+
+impl Page {
+    /// Every page, in the order a press tries them.
+    pub(crate) const ALL: [Self; 2] = [Self::PullRequest, Self::Issue];
+
+    /// The variable that holds the command of this page.
+    pub(crate) fn env(self) -> &'static str {
+        match self {
+            Self::PullRequest => PR_COMMAND_ENV,
+            Self::Issue => ISSUE_COMMAND_ENV,
+        }
+    }
+
+    /// The command of this page when the environment names none.
+    pub(crate) fn default_command(self) -> &'static str {
+        match self {
+            Self::PullRequest => DEFAULT_PR_COMMAND,
+            Self::Issue => DEFAULT_ISSUE_COMMAND,
+        }
+    }
+}
+
 /// The commands that one press of `G` runs, in the order it runs them.
 ///
 /// The command of the pull request comes first, and the command of the issue
@@ -348,15 +394,10 @@ mod run_tests {
         Steps::new(None, Some(command)).expect("one command is a step")
     }
 
-    /// The command of the pull request in the tests of two steps.
-    ///
-    /// A test-local name: the default of this command belongs to a later slice.
-    const PR_COMMAND: &str = "ggsp";
-
     /// The press of two steps: the pull request command, then the issue
     /// command.
     fn two_steps() -> Steps {
-        let pull_request = ShellCommand::new(Some(PR_COMMAND), DEFAULT_ISSUE_COMMAND)
+        let pull_request = ShellCommand::new(Some(DEFAULT_PR_COMMAND), DEFAULT_ISSUE_COMMAND)
             .expect("a name for the pull request command");
         let issue =
             ShellCommand::new(None, DEFAULT_ISSUE_COMMAND).expect("the default names a command");
@@ -366,7 +407,7 @@ mod run_tests {
     /// The steps that ran, in order, out of every argument the stub recorded.
     fn steps_run(runs: &str) -> Vec<&str> {
         runs.lines()
-            .filter(|line| *line == PR_COMMAND || *line == DEFAULT_ISSUE_COMMAND)
+            .filter(|line| *line == DEFAULT_PR_COMMAND || *line == DEFAULT_ISSUE_COMMAND)
             .collect()
     }
 
@@ -384,7 +425,7 @@ mod run_tests {
         );
         assert_eq!(
             steps_run(&stub.runs()),
-            [PR_COMMAND, DEFAULT_ISSUE_COMMAND],
+            [DEFAULT_PR_COMMAND, DEFAULT_ISSUE_COMMAND],
             "the pull request command runs first and the issue command after it",
         );
         let cwds: Vec<_> = stub
@@ -416,7 +457,7 @@ mod run_tests {
         );
         assert_eq!(
             steps_run(&stub.runs()),
-            [PR_COMMAND],
+            [DEFAULT_PR_COMMAND],
             "a step that is still running must not hand the press to the next step",
         );
         assert_eq!(
@@ -468,7 +509,7 @@ mod run_tests {
         assert_eq!(outcome.message(), None, "the browser is the answer");
         assert_eq!(
             steps_run(&stub.runs()),
-            [PR_COMMAND],
+            [DEFAULT_PR_COMMAND],
             "a step that exits 0 completes the press",
         );
     }

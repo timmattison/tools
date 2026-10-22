@@ -769,7 +769,7 @@ mod run_tests {
         TTY_REFUSED,
     };
     use super::*;
-    use crate::issue::{run, Steps, DEFAULT_ISSUE_COMMAND};
+    use crate::issue::{run, Steps, DEFAULT_ISSUE_COMMAND, DEFAULT_PR_COMMAND};
     use std::path::PathBuf;
     use std::sync::mpsc::channel;
 
@@ -1025,7 +1025,8 @@ mod run_tests {
             probe_with_deadline(probe_stub.as_shell(), &default_command(), ANSWER_DEADLINE),
             "the stub answers 0, so the probe must report the command present",
         );
-        let pull_request = ShellCommand::new(Some("ggsp"), DEFAULT_ISSUE_COMMAND).expect("a name");
+        let pull_request =
+            ShellCommand::new(Some(DEFAULT_PR_COMMAND), DEFAULT_ISSUE_COMMAND).expect("a name");
         let steps = Steps::new(Some(pull_request), Some(default_command()))
             .expect("two commands are steps");
         let outcome = run(run_stub.as_shell(), &steps, workdir.path());
@@ -1035,7 +1036,7 @@ mod run_tests {
             "the issue command exits 0, so the run must report nothing",
         );
         let runs = run_stub.runs();
-        for step in ["ggsp", DEFAULT_ISSUE_COMMAND] {
+        for step in [DEFAULT_PR_COMMAND, DEFAULT_ISSUE_COMMAND] {
             assert!(
                 runs.lines().any(|line| line == step),
                 "both steps must start a child, and {step} did not: {runs:?}",
