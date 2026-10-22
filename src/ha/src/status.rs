@@ -82,7 +82,7 @@ pub struct Status {
     pub rate: Option<RateLimit>,
     /// When the worker stops to slow down. `Some` while it slows down.
     pub backoff_until: Option<DateTime<Utc>>,
-    /// The owners whose repository list failed or was cut, with the problem of
+    /// The owners whose repository list failed, was cut, or was suspect, with the problem of
     /// each. The status line shows the text of the problem.
     pub owner_errors: Vec<(OwnerName, OwnerProblem)>,
     /// The time of the last good list of each owner that has one. The status

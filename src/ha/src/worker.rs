@@ -252,7 +252,7 @@ struct State {
     owner_cadence: Cadence,
     /// The last good list of each owner, with the time of that list.
     owner_lists: BTreeMap<OwnerName, OwnerList>,
-    /// The problem of each owner whose last list failed or was cut.
+    /// The problem of each owner whose last list failed, was cut, or was suspect.
     owner_errors: BTreeMap<OwnerName, OwnerProblem>,
     sweep_cadence: Cadence,
     /// The active runs of the last good sweep, for each repository.

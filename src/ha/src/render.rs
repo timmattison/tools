@@ -566,7 +566,7 @@ fn refresh_age(last_refresh: DateTime<Utc>, now: DateTime<Utc>) -> String {
     )
 }
 
-/// The mark and the word that start the stale part of the status line.
+/// The word after the mark that starts the stale part of the status line.
 const STALE_WORD: &str = "stale";
 /// The text between the word and the time of the stale part.
 const STALE_SINCE: &str = " since ";
