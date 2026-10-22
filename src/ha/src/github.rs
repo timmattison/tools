@@ -294,6 +294,16 @@ pub trait Source: Send + Sync {
     /// `404`.
     fn repo_is_listable(&self, repo: &RepoName) -> Result<bool, SourceError>;
 
+    /// Reads one workflow run of a repository, with no cache.
+    ///
+    /// `Ok(None)` means that GitHub has no such run (`404`). The run has the
+    /// same fields as a run of `runs_of`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SourceError`] when the answer is neither a run nor a `404`.
+    fn run(&self, repo: &RepoName, run: RunId) -> Result<Option<Run>, SourceError>;
+
     /// The rate limit that the last response stated. `None` before any response.
     fn rate_limit(&self) -> Option<RateLimit>;
 }
@@ -646,6 +656,11 @@ impl Source for GhSource {
             Err(SourceError::Http { status: 404, .. }) => Ok(false),
             Err(error) => Err(error),
         }
+    }
+
+    fn run(&self, _repo: &RepoName, _run: RunId) -> Result<Option<Run>, SourceError> {
+        // Red stub: the answer of a source that knows no run.
+        Ok(None)
     }
 
     fn rate_limit(&self) -> Option<RateLimit> {
@@ -1247,6 +1262,66 @@ mod tests {
         stub.file("repo.out", &ok_output("[]"));
         assert!(matches!(
             stub.source().repo_is_listable(&repo("o/r")),
+            Err(SourceError::BadResponse(_))
+        ));
+    }
+
+    /// The body that GitHub gives for one run. `created_at` differs from `run_started_at`.
+    const RUN_JSON: &str = r#"{"id":42,"run_number":9,"name":"CI","display_title":"Fix it","head_branch":"main",
+        "status":"in_progress","conclusion":null,"run_started_at":"2026-09-24T21:56:49Z",
+        "created_at":"2026-09-24T21:50:00Z","updated_at":"2026-09-24T21:57:56Z",
+        "html_url":"https://github.com/o/r/actions/runs/42"}"#;
+
+    #[test]
+    fn a_direct_read_of_a_run_names_the_run_and_maps_the_fields() {
+        let stub = Stub::new("cat \"$dir/run.out\"");
+        stub.file("run.out", &ok_output(RUN_JSON));
+        let run = stub.source().run(&repo("o/r"), RunId(42));
+        assert_eq!(
+            stub.requests(),
+            [["api", "-i", "repos/o/r/actions/runs/42"]]
+        );
+        assert_eq!(
+            run,
+            Ok(Some(Run {
+                id: RunId(42),
+                repo: repo("o/r"),
+                workflow: "CI".to_owned(),
+                branch: "main".to_owned(),
+                title: "Fix it".to_owned(),
+                state: RunState::Running,
+                started_at: time("2026-09-24T21:56:49Z"),
+                created_at: time("2026-09-24T21:50:00Z"),
+                updated_at: time("2026-09-24T21:57:56Z"),
+                url: "https://github.com/o/r/actions/runs/42".to_owned(),
+            }))
+        );
+    }
+
+    #[test]
+    fn a_direct_read_of_a_missing_run_is_none() {
+        let stub = Stub::new("cat \"$dir/run.out\"");
+        stub.file(
+            "run.out",
+            &http_output("HTTP/2.0 404 Not Found", "{\"message\":\"Not Found\"}"),
+        );
+        assert_eq!(stub.source().run(&repo("o/r"), RunId(42)), Ok(None));
+    }
+
+    #[test]
+    fn a_direct_read_of_a_run_with_a_server_error_or_a_bad_body_is_an_error() {
+        let stub = Stub::new("cat \"$dir/run.out\"");
+        stub.file(
+            "run.out",
+            &http_output("HTTP/2.0 500 Server Error", "{\"message\":\"oops\"}"),
+        );
+        assert!(matches!(
+            stub.source().run(&repo("o/r"), RunId(42)),
+            Err(SourceError::Http { status: 500, .. })
+        ));
+        stub.file("run.out", &ok_output("[]"));
+        assert!(matches!(
+            stub.source().run(&repo("o/r"), RunId(42)),
             Err(SourceError::BadResponse(_))
         ));
     }
