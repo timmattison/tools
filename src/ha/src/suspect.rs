@@ -8,6 +8,7 @@
 //! matches the query, the answer is suspect. This module is the one place that
 //! decides this, thus every list that `ha` reads goes through it.
 
+use std::collections::HashSet;
 use std::fmt;
 
 use crate::github::SourceError;
@@ -84,9 +85,10 @@ pub fn first_left_out<T: Listed>(
     read: impl FnMut(&T) -> Presence,
 ) -> Option<Suspicion> {
     let mut read = read;
+    let held: HashSet<Item> = answer.iter().map(Listed::item).collect();
     for item in last_good {
         let identity = item.item();
-        if answer.iter().any(|held| held.item() == identity) || !in_range(item) {
+        if held.contains(&identity) || !in_range(item) {
             continue;
         }
         match read(item) {
