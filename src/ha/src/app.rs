@@ -852,6 +852,69 @@ mod tests {
         vec![press(KeyCode::Char('q'))]
     }
 
+    /// The lines of the frame that show a run row of `acme/widgets`.
+    fn run_rows(frame: &[String]) -> Vec<&String> {
+        frame
+            .iter()
+            .filter(|line| line.contains("acme/widgets") && line.contains("run "))
+            .collect()
+    }
+
+    #[test]
+    fn a_failed_read_marks_every_run_row_of_its_repository_as_stale() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5), active_run(2, 4)]);
+        channels
+            .updates
+            .send(Update::Failed {
+                repo: repo(),
+                error: SourceError::Failed("boom".to_owned()),
+            })
+            .unwrap();
+        let (result, frame) = run_app(&opener(false), &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        let rows = run_rows(&frame);
+        assert_eq!(rows.len(), 2, "{frame:?}");
+        assert!(rows.iter().all(|row| row.contains('\u{1F4A4}')), "{rows:?}");
+    }
+
+    #[test]
+    fn a_suspect_read_marks_every_run_row_of_its_repository_as_stale() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5), active_run(2, 4)]);
+        channels
+            .updates
+            .send(Update::Suspect {
+                repo: repo(),
+                reason: crate::suspect::Suspicion::LeftOut(crate::suspect::Item::Run(RunId(9))),
+            })
+            .unwrap();
+        let (result, frame) = run_app(&opener(false), &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        let rows = run_rows(&frame);
+        assert_eq!(rows.len(), 2, "{frame:?}");
+        assert!(rows.iter().all(|row| row.contains('\u{1F4A4}')), "{rows:?}");
+    }
+
+    #[test]
+    fn a_good_read_after_a_failure_clears_the_stale_mark() {
+        let channels = channels();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        channels
+            .updates
+            .send(Update::Failed {
+                repo: repo(),
+                error: SourceError::Failed("boom".to_owned()),
+            })
+            .unwrap();
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let (result, frame) = run_app(&opener(false), &channels, quit());
+        assert!(result.is_ok(), "{result:?}");
+        let rows = run_rows(&frame);
+        assert_eq!(rows.len(), 1, "{frame:?}");
+        assert!(!rows[0].contains('\u{1F4A4}'), "{rows:?}");
+    }
+
     #[test]
     fn a_failed_update_shows_the_error_on_the_status_line() {
         let channels = channels();

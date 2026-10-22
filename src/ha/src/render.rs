@@ -2474,6 +2474,59 @@ mod tests {
         assert_eq!(time_cells(&text, 4), "0s");
     }
 
+    /// The display column where `needle` starts in `line`.
+    fn column_of(line: &str, needle: &str) -> usize {
+        let byte = line.find(needle).expect("the text is in the line");
+        display_width(&line[..byte])
+    }
+
+    /// A board with one run of `acme/widgets`.
+    fn one_run_board() -> Board {
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("acme/widgets"),
+            vec![run(
+                4_242,
+                "acme/widgets",
+                "CI",
+                "main",
+                "Fix the thing",
+                RunState::Running,
+                "2026-10-14T11:45:30Z",
+                "2026-10-14T11:59:00Z",
+            )],
+            now(),
+        );
+        board
+    }
+
+    /// The line of the one run of `one_run_board`.
+    fn run_text(board: &mut Board) -> String {
+        lines(&render_with(120, 8, board, &loaded()))
+            .into_iter()
+            .find(|line| line.contains("4242"))
+            .expect("the run row shows")
+    }
+
+    #[test]
+    fn a_stale_run_row_starts_its_repo_cell_with_the_sleeping_mark() {
+        let fresh = run_text(&mut one_run_board());
+        let mut stale_board = one_run_board();
+        stale_board.fail(repo("acme/widgets"), "HTTP 500".to_owned());
+        let stale = run_text(&mut stale_board);
+
+        assert!(!fresh.contains('\u{1F4A4}'));
+        assert!(stale.contains("\u{1F4A4} acme/widgets"), "{stale}");
+        for cell in ["4242", "11:45:30", "14m 30s", "CI", "main", "Fix the thing"] {
+            assert_eq!(
+                column_of(&stale, cell),
+                column_of(&fresh, cell),
+                "the cell {cell} moved: {stale}"
+            );
+        }
+        assert_eq!(display_width(&stale), display_width(&fresh));
+    }
+
     fn display_width(text: &str) -> usize {
         unicode_width::UnicodeWidthStr::width(text)
     }
