@@ -111,8 +111,7 @@ fn parse_runs(body: &str, repo: &RepoName) -> Result<Page, SourceError> {
                 workflow,
                 branch: json.head_branch.unwrap_or_default(),
                 started_at: json.run_started_at.unwrap_or(json.created_at),
-                // Red stub: the old start rule.
-                created_at: json.run_started_at.unwrap_or(json.created_at),
+                created_at: json.created_at,
                 updated_at: json.updated_at,
                 url: json.html_url,
             }
