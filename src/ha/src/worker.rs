@@ -3013,4 +3013,87 @@ mod tests {
             "{second:?}"
         );
     }
+
+    /// Scripts the answer of `newest_run` for `acme/a`.
+    fn script_newest(fake: &FakeSource, answer: Result<Option<Run>, SourceError>) {
+        fake.script().newest.insert(repo("acme/a"), answer);
+    }
+
+    #[test]
+    fn an_empty_created_answer_with_a_newest_run_in_the_window_is_suspect() {
+        let fake = Arc::new(FakeSource::default());
+        script_newest(&fake, Ok(Some(created_ago(9, 10))));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+
+        let first = one_cycle(&worker);
+
+        let answers = answers_of_a(&first);
+        assert!(
+            matches!(
+                answers.as_slice(),
+                [Update::Suspect {
+                    reason: Suspicion::NewestLeftOut(RunId(9)),
+                    ..
+                }]
+            ),
+            "{answers:?}"
+        );
+        assert_eq!(
+            calls_named(&fake, "forget-runs"),
+            vec!["acme/a created".to_owned()]
+        );
+    }
+
+    #[test]
+    fn an_empty_created_answer_of_a_quiet_repository_is_good_after_one_probe() {
+        for newest in [None, Some(created_ago(9, 3 * 24 * 60))] {
+            let fake = Arc::new(FakeSource::default());
+            script_newest(&fake, Ok(newest.clone()));
+            let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), Duration::ZERO);
+
+            let first = one_cycle(&worker);
+
+            let answers = answers_of_a(&first);
+            assert!(
+                matches!(answers.as_slice(), [Update::Runs { runs, .. }] if runs.is_empty()),
+                "{newest:?}: {answers:?}"
+            );
+            assert_eq!(calls_named(&fake, "newest").len(), 1, "{newest:?}");
+        }
+    }
+
+    #[test]
+    fn a_failed_read_of_the_newest_run_makes_an_empty_answer_suspect() {
+        let fake = Arc::new(FakeSource::default());
+        let boom = SourceError::Failed("boom".to_owned());
+        script_newest(&fake, Err(boom.clone()));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+
+        let first = one_cycle(&worker);
+
+        let answers = answers_of_a(&first);
+        assert!(
+            matches!(
+                answers.as_slice(),
+                [Update::Suspect { reason: Suspicion::NewestUnread(error), .. }] if *error == boom
+            ),
+            "{answers:?}"
+        );
+    }
+
+    #[test]
+    fn the_newest_run_is_read_one_time_when_the_created_answer_and_the_sweep_are_empty() {
+        let fake = Arc::new(FakeSource::default());
+        script_newest(&fake, Ok(Some(created_ago(9, 3 * 24 * 60))));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+
+        let first = one_cycle(&worker);
+
+        assert_eq!(calls_named(&fake, "active").len(), 1, "the sweep ran");
+        assert_eq!(calls_named(&fake, "newest").len(), 1);
+        assert!(
+            matches!(answers_of_a(&first).as_slice(), [Update::Runs { runs, .. }] if runs.is_empty()),
+            "{first:?}"
+        );
+    }
 }
