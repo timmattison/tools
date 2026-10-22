@@ -1553,6 +1553,25 @@ mod tests {
         );
     }
 
+    /// GitHub gives a filtered query 1,000 results at most, and it can state a
+    /// `total_count` of 1,000 when more runs match. Ten full pages are thus
+    /// cut, also when the count of the runs reaches `total_count`.
+    #[test]
+    fn ten_full_pages_are_cut_also_when_the_total_count_is_1000() {
+        let stub = Stub::new(&ten_page_cases(""));
+        for page in 1..=10_u64 {
+            stub.file(
+                &format!("page{page}.out"),
+                &ok_output(&runs_json(1000, (page - 1) * 100 + 1, 100)),
+            );
+        }
+        let list = stub.source().runs_of(&repo("o/r"), since_query());
+        assert_eq!(
+            list.map(|list| (list.runs.len(), list.cut)),
+            Ok((1000, true))
+        );
+    }
+
     #[test]
     fn an_active_list_is_cut_when_one_status_is_cut() {
         let stub = Stub::new(&format!(
