@@ -544,6 +544,7 @@ mod tests {
             title: format!("run {id}"),
             state: RunState::Running,
             started_at: now() - chrono::Duration::minutes(started),
+            created_at: now() - chrono::Duration::minutes(started),
             updated_at: now(),
             url: format!("https://example.test/runs/{id}"),
         }

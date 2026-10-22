@@ -1042,6 +1042,7 @@ mod tests {
             title: title.to_owned(),
             state,
             started_at: at(started),
+            created_at: at(started),
             updated_at: at(updated),
             url: format!("https://github.com/{repo_text}/actions/runs/{id}"),
         }

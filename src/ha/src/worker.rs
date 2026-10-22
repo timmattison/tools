@@ -968,6 +968,7 @@ mod tests {
             title: format!("run {id}"),
             state: RunState::Passed,
             started_at: at,
+            created_at: at,
             updated_at: at,
             url: format!("https://example.test/{id}"),
         }

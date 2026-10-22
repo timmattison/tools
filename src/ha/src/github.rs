@@ -111,6 +111,8 @@ fn parse_runs(body: &str, repo: &RepoName) -> Result<Page, SourceError> {
                 workflow,
                 branch: json.head_branch.unwrap_or_default(),
                 started_at: json.run_started_at.unwrap_or(json.created_at),
+                // Red stub: the old start rule.
+                created_at: json.run_started_at.unwrap_or(json.created_at),
                 updated_at: json.updated_at,
                 url: json.html_url,
             }
@@ -924,6 +926,7 @@ mod tests {
                     title: "Fix the thing".to_owned(),
                     state: RunState::Failed,
                     started_at: time("2026-09-24T21:56:49Z"),
+                    created_at: time("2026-09-24T21:50:00Z"),
                     updated_at: time("2026-09-24T21:57:56Z"),
                     url: "https://github.com/timmattison/tools/actions/runs/36064582280".to_owned(),
                 },
@@ -935,6 +938,7 @@ mod tests {
                     title: "Release".to_owned(),
                     state: RunState::Running,
                     started_at: time("2026-09-25T01:02:03Z"),
+                    created_at: time("2026-09-25T01:02:03Z"),
                     updated_at: time("2026-09-25T01:03:00Z"),
                     url: "https://github.com/timmattison/tools/actions/runs/7".to_owned(),
                 },

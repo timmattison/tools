@@ -656,6 +656,7 @@ mod tests {
             title: format!("run {id}"),
             state,
             started_at: now() - Span::minutes(started),
+            created_at: now() - Span::minutes(started),
             updated_at: now() - Span::minutes(updated),
             url: format!("https://example.test/{repo_text}/runs/{id}"),
         }

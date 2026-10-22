@@ -116,6 +116,8 @@ pub struct Run {
     pub state: RunState,
     /// When the run started. The creation time is the fallback.
     pub started_at: DateTime<Utc>,
+    /// When GitHub made the run. A re-run does not change it.
+    pub created_at: DateTime<Utc>,
     /// When the run last changed. For a finished run, this is the finish time.
     pub updated_at: DateTime<Utc>,
     /// The address of the run page on GitHub.
@@ -147,6 +149,7 @@ mod tests {
             title: title.to_owned(),
             state: RunState::Running,
             started_at: time,
+            created_at: time,
             updated_at: time,
             url: String::new(),
         }
