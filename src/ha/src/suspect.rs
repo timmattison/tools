@@ -121,8 +121,11 @@ pub fn newest_left_out(
     newest: Result<Option<Run>, SourceError>,
     matches: impl Fn(&Run) -> bool,
 ) -> Option<Suspicion> {
-    let _ = (newest, matches);
-    None
+    match newest {
+        Ok(Some(run)) if matches(&run) => Some(Suspicion::NewestLeftOut(run.id)),
+        Ok(_) => None,
+        Err(error) => Some(Suspicion::NewestUnread(error)),
+    }
 }
 
 #[cfg(test)]
