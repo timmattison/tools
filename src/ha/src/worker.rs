@@ -28,11 +28,12 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 
-use crate::github::{RunQuery, Source, SourceError};
+use crate::github::{RepoList, RunQuery, Source, SourceError};
 use crate::job::Job;
 use crate::run::{Run, RunId};
 use crate::settings::Settings;
 use crate::status::{OwnerProblem, RateLimit};
+use crate::suspect::{first_left_out, Presence, Suspicion};
 use crate::target::{OwnerName, RepoName, Target};
 
 /// How many repositories the worker fetches at the same time.
@@ -659,6 +660,33 @@ fn run_pool<T: Sync>(
     }
 }
 
+/// Decides whether `ha` trusts a successful list of an owner.
+///
+/// A list that GitHub cut gets no suspicion, because a missing repository can
+/// be past the cut. Without a last good list there is nothing to compare. The
+/// other lists go through [`first_left_out`]: a repository that the last good
+/// list held and the new list leaves out is read directly. A repository that
+/// is still listable makes the list suspect. A failed read does the same.
+fn suspicion_of_list<S: Source>(
+    source: &S,
+    last_good: Option<&Vec<RepoName>>,
+    list: &RepoList,
+) -> Option<Suspicion> {
+    if list.cut {
+        return None;
+    }
+    first_left_out(
+        last_good?,
+        &list.repos,
+        |_| true,
+        |repo| match source.repo_is_listable(repo) {
+            Ok(true) => Presence::InRange,
+            Ok(false) => Presence::Gone,
+            Err(error) => Presence::Unread(error),
+        },
+    )
+}
+
 /// Builds the repository set and sends it when it can have changed.
 ///
 /// When the owner cadence is due, the function lists every owner again. On
@@ -689,6 +717,13 @@ fn refresh_repos<S: Source>(
         listed = true;
         match source.repos_of(owner) {
             Ok(list) => {
+                let suspicion = suspicion_of_list(source, state.owner_lists.get(owner), &list);
+                if let Some(suspicion) = suspicion {
+                    state
+                        .owner_errors
+                        .insert(owner.clone(), OwnerProblem::Suspect(suspicion));
+                    continue;
+                }
                 match list.warning() {
                     Some(text) => {
                         state
