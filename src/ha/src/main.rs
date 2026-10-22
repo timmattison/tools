@@ -31,7 +31,7 @@ const EXIT_FAILURE: u8 = 1;
 #[command(
     name = "ha",
     version = buildinfo::version_string!(),
-    about = "Hot action: a self-refreshing terminal view of GitHub Actions runs across repositories and owners"
+    about = "Hot actions: a self-refreshing terminal view of GitHub Actions runs across repositories and owners"
 )]
 struct Cli {
     /// Repositories (owner/name) and owners (owner) to watch.

@@ -1,4 +1,4 @@
-//! `ha` (hot action) shows the GitHub Actions runs of many repositories
+//! `ha` (hot actions) shows the GitHub Actions runs of many repositories
 //! and owners in one self-refreshing terminal view.
 
 // Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.

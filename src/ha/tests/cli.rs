@@ -74,6 +74,18 @@ fn help_lists_the_options_and_shows_the_config_file() {
 }
 
 #[test]
+fn help_starts_with_the_plural_name_hot_actions() {
+    let home = tempfile::tempdir().expect("a temporary directory");
+    let run = run_ha(&home, &["--help"]);
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert!(
+        run.stdout.starts_with("Hot actions: "),
+        "the help does not start with the name of the tool:\n{}",
+        run.stdout
+    );
+}
+
+#[test]
 fn an_empty_config_file_and_no_targets_is_a_usage_error() {
     let home = tempfile::tempdir().expect("a temporary directory");
     let config = write_config(&home, "empty.toml", "");

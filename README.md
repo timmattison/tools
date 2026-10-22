@@ -2045,7 +2045,7 @@ cannot hang the caller. Used by `cwt` and `ha`.
     Code sessions after a question. It supports macOS only. See below for the full entry.
   - To install: `cargo install --git https://github.com/timmattison/tools faulte`
 
-- ha (hot action)
+- ha (hot actions)
   - Shows the GitHub Actions workflow runs of many repositories and owners in one terminal view
     that refreshes itself. The GitHub web interface and `gh run list` show one repository at a
     time, and `gh run list` does not refresh.
