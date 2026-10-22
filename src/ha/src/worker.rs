@@ -2680,4 +2680,221 @@ mod tests {
             "{cycle:?}"
         );
     }
+
+    /// A run of `acme/a` that GitHub created `minutes` ago.
+    fn created_ago(id: u64, minutes: i64) -> Run {
+        let at = Utc::now() - chrono::TimeDelta::minutes(minutes);
+        Run {
+            created_at: at,
+            started_at: at,
+            ..run("acme/a", id)
+        }
+    }
+
+    /// Scripts the created answer of `acme/a`.
+    fn script_created(fake: &FakeSource, runs: Vec<Run>) {
+        fake.script().created.insert(repo("acme/a"), Ok(runs));
+    }
+
+    /// Scripts the direct read of each run as "still there".
+    fn script_direct(fake: &FakeSource, runs: &[Run]) {
+        let mut script = fake.script();
+        for run in runs {
+            script.direct.insert(run.id, Ok(Some(run.clone())));
+        }
+    }
+
+    /// The updates of `acme/a` that carry runs, a suspicion, or a failure.
+    fn answers_of_a(updates: &[Update]) -> Vec<&Update> {
+        updates
+            .iter()
+            .filter(|update| match update {
+                Update::Runs { repo: r, .. }
+                | Update::Suspect { repo: r, .. }
+                | Update::Failed { repo: r, .. } => *r == repo("acme/a"),
+                _ => false,
+            })
+            .collect()
+    }
+
+    fn calls_named(fake: &FakeSource, name: &str) -> Vec<String> {
+        fake.script()
+            .calls
+            .iter()
+            .filter(|(what, _)| *what == name)
+            .map(|(_, detail)| detail.clone())
+            .collect()
+    }
+
+    fn three_runs() -> Vec<Run> {
+        vec![created_ago(1, 10), created_ago(2, 20), created_ago(3, 30)]
+    }
+
+    #[test]
+    fn an_empty_created_answer_after_three_runs_is_suspect_and_keeps_the_runs() {
+        let fake = Arc::new(FakeSource::default());
+        let runs = three_runs();
+        script_created(&fake, runs.clone());
+        script_direct(&fake, &runs);
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), Duration::ZERO);
+        one_cycle(&worker);
+
+        script_created(&fake, Vec::new());
+        let second = refresh_now(&worker);
+
+        let answers = answers_of_a(&second);
+        assert!(
+            matches!(
+                answers.as_slice(),
+                [Update::Suspect {
+                    reason: Suspicion::LeftOut(Item::Run(RunId(1))),
+                    ..
+                }]
+            ),
+            "{answers:?}"
+        );
+        assert_eq!(
+            calls_named(&fake, "forget-runs"),
+            vec!["acme/a created".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_created_answer_that_holds_the_runs_again_is_good_after_a_suspect_one() {
+        let fake = Arc::new(FakeSource::default());
+        let runs = three_runs();
+        script_created(&fake, runs.clone());
+        script_direct(&fake, &runs);
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), Duration::ZERO);
+        one_cycle(&worker);
+        script_created(&fake, Vec::new());
+        refresh_now(&worker);
+
+        script_created(&fake, runs.clone());
+        let third = refresh_now(&worker);
+
+        let answers = answers_of_a(&third);
+        assert!(
+            matches!(answers.as_slice(), [Update::Runs { runs: got, .. }] if *got == runs),
+            "{answers:?}"
+        );
+    }
+
+    #[test]
+    fn a_run_that_the_answer_leaves_out_and_that_is_deleted_is_not_suspect() {
+        let fake = Arc::new(FakeSource::default());
+        let runs = three_runs();
+        script_created(&fake, runs.clone());
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), Duration::ZERO);
+        one_cycle(&worker);
+
+        // The fake answers `Ok(None)` for run 3: GitHub deleted it.
+        script_created(&fake, runs[..2].to_vec());
+        script_direct(&fake, &runs[..2]);
+        let second = refresh_now(&worker);
+
+        let answers = answers_of_a(&second);
+        assert!(
+            matches!(answers.as_slice(), [Update::Runs { runs: got, .. }] if *got == runs[..2]),
+            "{answers:?}"
+        );
+        assert!(calls_named(&fake, "forget-runs").is_empty());
+    }
+
+    #[test]
+    fn a_run_from_before_the_window_that_the_answer_leaves_out_is_never_read() {
+        let fake = Arc::new(FakeSource::default());
+        // Three days old. The window is 8 hours, plus one day.
+        let old = created_ago(1, 3 * 24 * 60);
+        let recent = created_ago(2, 10);
+        script_created(&fake, vec![old.clone(), recent.clone()]);
+        script_direct(&fake, &[old, recent.clone()]);
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), Duration::ZERO);
+        one_cycle(&worker);
+
+        script_created(&fake, vec![recent.clone()]);
+        let second = refresh_now(&worker);
+
+        let answers = answers_of_a(&second);
+        assert!(
+            matches!(answers.as_slice(), [Update::Runs { runs: got, .. }] if *got == vec![recent.clone()]),
+            "{answers:?}"
+        );
+        assert!(calls_named(&fake, "run").is_empty());
+    }
+
+    #[test]
+    fn a_cut_answer_may_leave_out_a_run_older_than_its_oldest_run() {
+        let fake = Arc::new(FakeSource::default());
+        let runs = three_runs();
+        fake.script().cut_runs.insert(repo("acme/a"));
+        script_created(&fake, runs.clone());
+        script_direct(&fake, &runs);
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), Duration::ZERO);
+        one_cycle(&worker);
+
+        // The second answer is cut after run 2. Run 3 is older than run 2.
+        script_created(&fake, runs[..2].to_vec());
+        let second = refresh_now(&worker);
+
+        let answers = answers_of_a(&second);
+        assert!(
+            matches!(answers.as_slice(), [Update::Runs { runs: got, .. }] if *got == runs[..2]),
+            "{answers:?}"
+        );
+        assert!(calls_named(&fake, "run").is_empty());
+    }
+
+    #[test]
+    fn a_failed_direct_read_of_a_left_out_run_is_suspect() {
+        let fake = Arc::new(FakeSource::default());
+        let runs = three_runs();
+        script_created(&fake, runs.clone());
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), Duration::ZERO);
+        one_cycle(&worker);
+
+        let boom = SourceError::Failed("boom".to_owned());
+        fake.script().direct.insert(RunId(1), Err(boom.clone()));
+        script_created(&fake, Vec::new());
+        let second = refresh_now(&worker);
+
+        let answers = answers_of_a(&second);
+        assert!(
+            matches!(
+                answers.as_slice(),
+                [Update::Suspect { reason: Suspicion::Unread(Item::Run(RunId(1)), error), .. }]
+                    if *error == boom
+            ),
+            "{answers:?}"
+        );
+    }
+
+    #[test]
+    fn the_jobs_of_an_active_run_of_a_suspect_repository_are_fetched_again() {
+        let fake = Arc::new(FakeSource::default());
+        let active = Run {
+            state: RunState::Running,
+            ..created_ago(1, 5)
+        };
+        script_created(&fake, vec![active.clone()]);
+        script_direct(&fake, std::slice::from_ref(&active));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), Duration::ZERO);
+        one_cycle(&worker);
+
+        script_created(&fake, Vec::new());
+        let second = refresh_now(&worker);
+
+        assert!(
+            matches!(answers_of_a(&second).as_slice(), [Update::Suspect { .. }]),
+            "{second:?}"
+        );
+        assert_eq!(
+            calls_named(&fake, "jobs").len(),
+            2,
+            "one fetch in each cycle"
+        );
+        assert!(second
+            .iter()
+            .any(|update| matches!(update, Update::Jobs { run: RunId(1), .. })));
+    }
 }
