@@ -23,7 +23,11 @@
 //! GitHub can answer with success and still leave runs out. The worker keeps
 //! the last good created answer of each repository. A run that the new answer
 //! leaves out, and that still exists, makes the answer suspect. The worker
-//! then keeps the last good runs and sends [`Update::Suspect`].
+//! then keeps the last good runs and sends [`Update::Suspect`]. An empty answer
+//! has no run to compare, thus the worker reads the newest run of the
+//! repository one time in each cycle. The same rule judges the sweep for active
+//! runs. A run that the sweep leaves out, and that is still active, makes the
+//! sweep suspect. The worker then repeats the sweep on the next cycle.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,7 +49,9 @@ use crate::target::{OwnerName, RepoName, Target};
 pub const CONCURRENCY: usize = 8;
 
 /// How often the worker lists the repositories of the owners and sweeps for
-/// active runs. The sweep finds runs that started before the window. An owner
+/// active runs. The sweep finds runs that started before the window. A
+/// repository whose last sweep was suspect is swept again on the next cycle.
+/// An owner
 /// with no good list, an owner whose good list is empty, and an owner whose
 /// last list failed or was suspect, is listed on every cycle until a good
 /// list that holds a repository replaces the problem. An empty list needs
@@ -235,6 +241,10 @@ struct State {
     sweep_cadence: Cadence,
     /// The active runs of the last good sweep, for each repository.
     sweeps: Mutex<HashMap<RepoName, Vec<Run>>>,
+    /// The repositories whose last sweep was suspect. A stale sweep runs on the
+    /// next cycle, whatever the cadence. No thread holds this lock during a
+    /// call of the source.
+    stale_sweeps: Mutex<HashSet<RepoName>>,
     /// The last good created answer of each repository. No thread holds this
     /// lock during a call of the source.
     created_answers: Mutex<HashMap<RepoName, Vec<Run>>>,
@@ -260,6 +270,7 @@ impl State {
             owner_errors: BTreeMap::new(),
             sweep_cadence: Cadence::new(slow),
             sweeps: Mutex::new(HashMap::new()),
+            stale_sweeps: Mutex::new(HashSet::new()),
             created_answers: Mutex::new(HashMap::new()),
             watched: BTreeSet::new(),
             facts: Mutex::new(HashMap::new()),
@@ -441,6 +452,11 @@ fn cycle<S: Source>(
         .unwrap_or_else(PoisonError::into_inner)
         .retain(|repo, _| repos.contains(repo));
     state
+        .stale_sweeps
+        .get_mut()
+        .unwrap_or_else(PoisonError::into_inner)
+        .retain(|repo| repos.contains(repo));
+    state
         .created_answers
         .get_mut()
         .unwrap_or_else(PoisonError::into_inner)
@@ -449,6 +465,7 @@ fn cycle<S: Source>(
         since: window_start(settings.window),
         sweep_due,
         sweeps: &state.sweeps,
+        stale_sweeps: &state.stale_sweeps,
         created_answers: &state.created_answers,
         facts: &state.facts,
     };
@@ -486,6 +503,10 @@ struct Fetch<'a> {
     sweep_due: bool,
     /// The stored sweep results. No thread holds this lock during a call.
     sweeps: &'a Mutex<HashMap<RepoName, Vec<Run>>>,
+    /// The repositories whose last sweep was suspect. A suspect sweep adds its
+    /// repository, and a good sweep removes it. No thread holds this lock
+    /// during a call.
+    stale_sweeps: &'a Mutex<HashSet<RepoName>>,
     /// The last good created answer of each repository. A good answer replaces
     /// the entry of its repository. No thread holds this lock during a call.
     created_answers: &'a Mutex<HashMap<RepoName, Vec<Run>>>,
@@ -506,35 +527,66 @@ enum Fetched {
 
 /// Fetches the runs of one repository and merges in the last sweep.
 ///
-/// A good result holds every run of the recent answer. It also holds each run
-/// of the last sweep that the recent answer lacks. Those runs started before
-/// the window and still run. The recent answer goes through
-/// [`suspicion_of_created`]. A suspect answer keeps the last good answer, and
-/// the function tells the source to forget the cached pages of the query, so
-/// the next cycle asks GitHub again. The sweep still runs and its result is
-/// stored, also when the recent answer is suspect. A failed request gives
-/// [`Fetched::Failed`].
+/// The function reads the recent (created) answer. It also reads the sweep
+/// when the slow cadence is due or when the last sweep of the repository was
+/// suspect. A failed request gives [`Fetched::Failed`]. Then the function
+/// judges each answer in one step of its own. The recent answer goes through
+/// [`suspicion_of_created`], and the sweep goes through
+/// [`suspicion_of_sweep`]. Both steps share one read of the newest run, so the
+/// source answers that read at most one time in each cycle. A suspect answer
+/// keeps the last good data of its query, and the function tells the source to
+/// forget the cached pages of that query, so the next cycle asks GitHub again.
+/// A suspect sweep also marks the sweep of the repository as stale, and a good
+/// sweep clears the mark. A suspect answer of either query gives
+/// [`Fetched::Suspect`]. When both are suspect, the result holds the
+/// suspicion of the recent answer. A good result holds every run of the recent
+/// answer. It also holds each run of the last good sweep that the recent answer
+/// lacks. Those runs started before the window and still run.
 fn fetch_repo<S: Source>(source: &S, repo: &RepoName, fetch: &Fetch<'_>) -> Fetched {
     let query = RunQuery::CreatedSince(fetch.since);
     let list = match source.runs_of(repo, query) {
         Ok(list) => list,
         Err(error) => return Fetched::Failed(error),
     };
-    if fetch.sweep_due {
+    let sweep_stale = fetch
+        .stale_sweeps
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(repo);
+    let swept = if fetch.sweep_due || sweep_stale {
         match source.runs_of(repo, RunQuery::Active) {
-            Ok(active) => {
-                fetch
-                    .sweeps
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(repo.clone(), active.runs);
-            }
+            Ok(active) => Some(active),
             Err(error) => return Fetched::Failed(error),
         }
-    }
+    } else {
+        None
+    };
     let mut newest = NewestRun::new(source, repo);
-    if let Some(suspicion) = suspicion_of_created(source, repo, fetch, &list, &mut newest) {
+    let created_suspicion = suspicion_of_created(source, repo, fetch, &list, &mut newest);
+    let sweep_suspicion = swept
+        .as_ref()
+        .and_then(|active| suspicion_of_sweep(source, repo, fetch, &list, active, &mut newest));
+    if created_suspicion.is_some() {
         source.forget_runs(repo, query);
+    }
+    if let Some(active) = swept {
+        let mut stale = fetch
+            .stale_sweeps
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if sweep_suspicion.is_some() {
+            source.forget_runs(repo, RunQuery::Active);
+            stale.insert(repo.clone());
+        } else {
+            stale.remove(repo);
+            fetch
+                .sweeps
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(repo.clone(), active.runs);
+        }
+    }
+    if let Some(suspicion) = created_suspicion.or(sweep_suspicion) {
         return Fetched::Suspect(suspicion);
     }
     let mut runs = list.runs;
@@ -613,11 +665,7 @@ fn suspicion_of_created<S: Source>(
         .unwrap_or_else(PoisonError::into_inner)
         .get(repo)
         .cloned()?;
-    let oldest = if list.cut {
-        list.runs.iter().map(|run| run.created_at).min()
-    } else {
-        None
-    };
+    let oldest = oldest_of_cut(list);
     first_left_out(
         &last_good,
         &list.runs,
@@ -626,6 +674,70 @@ fn suspicion_of_created<S: Source>(
             Ok(Some(_)) => Presence::InRange,
             Ok(None) => Presence::Gone,
             Err(error) => Presence::Unread(error),
+        },
+    )
+}
+
+/// The creation time of the oldest run of a cut answer. An answer that GitHub
+/// did not cut has no such limit, because it holds every run that matches.
+fn oldest_of_cut(list: &RunList) -> Option<DateTime<Utc>> {
+    if list.cut {
+        list.runs.iter().map(|run| run.created_at).min()
+    } else {
+        None
+    }
+}
+
+/// Decides whether `ha` trusts a successful sweep (the active runs) of a
+/// repository.
+///
+/// An empty sweep goes through the probe first: the newest run of the
+/// repository must not be active. Without a last good sweep there is nothing
+/// more to compare. Otherwise the sweep goes through [`first_left_out`]. A run
+/// of the last good sweep is in range, and when GitHub cut the sweep, it must
+/// also be as new as the oldest run of the sweep. A missing run needs proof
+/// that it is not active now. The recent answer of this cycle gives that proof
+/// when it holds the run, also when the function judged that answer as
+/// suspect, because each run that it holds is real. Otherwise the function reads
+/// the run directly. A run that is still active makes the sweep suspect. A
+/// failed read does the same.
+fn suspicion_of_sweep<S: Source>(
+    source: &S,
+    repo: &RepoName,
+    fetch: &Fetch<'_>,
+    created: &RunList,
+    active: &RunList,
+    newest: &mut NewestRun<'_, S>,
+) -> Option<Suspicion> {
+    if active.runs.is_empty() {
+        if let Some(suspicion) = newest.suspicion(|run| run.state.is_active()) {
+            return Some(suspicion);
+        }
+    }
+    let last_good = fetch
+        .sweeps
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(repo)
+        .cloned()?;
+    let oldest = oldest_of_cut(active);
+    first_left_out(
+        &last_good,
+        &active.runs,
+        |run| oldest.is_none_or(|oldest| run.created_at >= oldest),
+        |run| {
+            if let Some(held) = created.runs.iter().find(|held| held.id == run.id) {
+                return if held.state.is_active() {
+                    Presence::InRange
+                } else {
+                    Presence::Gone
+                };
+            }
+            match source.run(repo, run.id) {
+                Ok(Some(current)) if current.state.is_active() => Presence::InRange,
+                Ok(_) => Presence::Gone,
+                Err(error) => Presence::Unread(error),
+            }
         },
     )
 }
@@ -3157,7 +3269,7 @@ mod tests {
         let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), Duration::ZERO);
         let first = one_cycle(&worker);
         assert!(
-            matches!(answers_of_a(&first).as_slice(), [Update::Runs { runs, .. }] if *runs == [old.clone()]),
+            matches!(answers_of_a(&first).as_slice(), [Update::Runs { runs, .. }] if runs.len() == 1 && runs[0].id == old.id),
             "{first:?}"
         );
 
@@ -3264,5 +3376,75 @@ mod tests {
             calls_named(&fake, "forget-runs"),
             vec!["acme/a created".to_owned(), "acme/a active".to_owned()]
         );
+    }
+
+    /// Cycle 1 sweeps the old active run 1. Cycle 2 has an empty sweep, and the
+    /// created answer of cycle 2 holds `held` (when given).
+    fn second_cycle_after_a_sweep_with_run_1(
+        fake: &Arc<FakeSource>,
+        held: Option<Run>,
+    ) -> Vec<Update> {
+        script_active(fake, vec![old_active_run(1)]);
+        let worker = spawn_with(Arc::clone(fake), &settings(&["acme/a"]), Duration::ZERO);
+        one_cycle(&worker);
+        script_active(fake, Vec::new());
+        script_created(fake, held.into_iter().collect());
+        refresh_now(&worker)
+    }
+
+    #[test]
+    fn a_run_that_left_the_sweep_and_that_the_created_answer_holds_as_finished_is_gone() {
+        let fake = Arc::new(FakeSource::default());
+        let finished = created_ago(1, 10);
+
+        let second = second_cycle_after_a_sweep_with_run_1(&fake, Some(finished.clone()));
+
+        let answers = answers_of_a(&second);
+        assert!(
+            matches!(answers.as_slice(), [Update::Runs { runs, .. }] if *runs == [finished]),
+            "{answers:?}"
+        );
+        assert!(calls_named(&fake, "run").is_empty());
+    }
+
+    #[test]
+    fn a_run_that_left_the_sweep_and_that_a_direct_read_finds_finished_or_missing_is_gone() {
+        for direct in [Ok(Some(created_ago(1, 3 * 24 * 60))), Ok(None)] {
+            let fake = Arc::new(FakeSource::default());
+            fake.script().direct.insert(RunId(1), direct.clone());
+
+            let second = second_cycle_after_a_sweep_with_run_1(&fake, None);
+
+            let answers = answers_of_a(&second);
+            assert!(
+                matches!(answers.as_slice(), [Update::Runs { runs, .. }] if runs.is_empty()),
+                "{direct:?}: {answers:?}"
+            );
+            assert_eq!(calls_named(&fake, "run"), vec!["1".to_owned()]);
+        }
+    }
+
+    #[test]
+    fn a_run_that_left_the_sweep_and_that_the_created_answer_holds_as_active_is_suspect() {
+        let fake = Arc::new(FakeSource::default());
+        let still_active = Run {
+            state: RunState::Running,
+            ..created_ago(1, 10)
+        };
+
+        let second = second_cycle_after_a_sweep_with_run_1(&fake, Some(still_active));
+
+        let answers = answers_of_a(&second);
+        assert!(
+            matches!(
+                answers.as_slice(),
+                [Update::Suspect {
+                    reason: Suspicion::LeftOut(Item::Run(RunId(1))),
+                    ..
+                }]
+            ),
+            "{answers:?}"
+        );
+        assert!(calls_named(&fake, "run").is_empty());
     }
 }
