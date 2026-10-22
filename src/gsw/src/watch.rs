@@ -9430,6 +9430,22 @@ mod push_loop_tests {
     }
 
     #[test]
+    fn an_answer_between_two_presses_takes_the_arming_away() {
+        // The message named the steps of the first press. An answer changes
+        // the steps, so the next press must ask again with the new names.
+        let now = Instant::now();
+        let mut issue = issue_run_in(crate::remote::Session::Remote);
+        issue.press(now);
+        issue.arm(now);
+        issue.found(crate::issue::Page::PullRequest, found_pr_command());
+        assert_eq!(
+            issue.press(now + Duration::from_secs(1)),
+            IssuePress::Ask("remote shell — press G again to run ggsp, then ggs".to_string()),
+            "an answer between two presses must leave the next press asking",
+        );
+    }
+
+    #[test]
     fn a_press_while_a_run_is_in_flight_does_nothing() {
         // One run at a time, in both sessions: a browser opening twice is two
         // tabs nobody asked for. A press here must not arm anything either,
@@ -9538,6 +9554,26 @@ mod push_loop_tests {
             seen.issue_runs,
             vec![both_steps()],
             "the second press must run both steps",
+        );
+    }
+
+    #[test]
+    fn a_probe_answer_between_two_presses_makes_the_second_press_ask_again() {
+        let (screen, seen) = run_loop_remote(vec![
+            probe_answered(),
+            press_g(),
+            pr_probe_answered(),
+            press_g(),
+            Event::Quit,
+        ]);
+        assert!(
+            seen.issue_runs.is_empty(),
+            "the second press must not run a command the notice did not name, got {:?}",
+            seen.issue_runs,
+        );
+        assert!(
+            strip_ansi(&screen).contains("remote shell — press G again to run ggsp, then ggs"),
+            "the second press must ask again with both names, got {screen:?}",
         );
     }
 
