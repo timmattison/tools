@@ -4883,6 +4883,37 @@ mod tests {
         }
     }
 
+    /// Issue #587 raised the share of the repository to 28 percent. The widths
+    /// of the repository and of the title at four frame widths state it.
+    #[test]
+    fn the_repository_gets_28_percent_of_the_room() {
+        let widths = |w: usize| {
+            let widths = Widths::for_width(w);
+            (widths.repo, widths.title)
+        };
+        assert_eq!(widths(100), (16, 22), "width 100");
+        assert_eq!(widths(120), (21, 37), "width 120");
+        assert_eq!(widths(140), (27, 51), "width 140");
+        assert_eq!(widths(160), (33, 65), "width 160");
+    }
+
+    /// At 120 columns the text cell of a job row is 30 columns since issue
+    /// #587. The runner `m1-ts` of the job `e2e-remotesensing (2)` fits whole.
+    #[test]
+    fn a_runner_name_shows_whole_in_the_wider_text_cell_of_120_columns() {
+        let name = "e2e-remotesensing (2)";
+        let (buffer, row, y) = lone_job_row(on("m1-ts", passed_job(name)), 120);
+        assert!(
+            row.contains(&format!("{name} m1-ts")),
+            "the row does not show the runner: {row:?}"
+        );
+        let start = u16::try_from(display_width(&format!("✅ └ {name} "))).expect("a small column");
+        assert_eq!(
+            cyan_columns(&buffer, y),
+            (start..start + 5).collect::<Vec<u16>>()
+        );
+    }
+
     /// The display column where the run ID `1` of the first run ends at `width`
     /// columns.
     fn run_id_column(width: u16) -> usize {
