@@ -12,7 +12,7 @@
 
 use std::ffi::OsStr;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::shell::{last_with_text, run_command, start_run, OutputStream, RunEnd, ShellCommand};
 
@@ -181,13 +181,17 @@ fn run_in(
     scratch: &Path,
     deadline: Duration,
 ) -> IssueOutcome {
-    let mut last = match run_step(shell, &steps.first, workdir, scratch, deadline) {
+    let started = Instant::now();
+    // `saturating_sub` stops at zero. A step that starts with nothing left
+    // waits for zero, so it reports "still running" at once.
+    let left = || deadline.saturating_sub(started.elapsed());
+    let mut last = match run_step(shell, &steps.first, workdir, scratch, left(), deadline) {
         StepEnd::Opened => return IssueOutcome { message: None },
         StepEnd::Failed(outcome) => outcome,
         StepEnd::StillRunning(outcome) => return outcome,
     };
     if let Some(then) = &steps.then {
-        match run_step(shell, then, workdir, scratch, deadline) {
+        match run_step(shell, then, workdir, scratch, left(), deadline) {
             StepEnd::Opened => return IssueOutcome { message: None },
             StepEnd::Failed(outcome) | StepEnd::StillRunning(outcome) => last = outcome,
         }
@@ -208,7 +212,10 @@ enum StepEnd {
 }
 
 /// Run `command` in `workdir`, with the two files of the run in `scratch`, and
-/// stop waiting after `deadline`.
+/// stop waiting after `wait`.
+///
+/// `deadline` is the deadline of the whole press. A step that is still running
+/// names it in the message, and not the time that was left to it.
 ///
 /// The directory is a parameter so a test can watch it. Production passes
 /// [`std::env::temp_dir`].
@@ -236,6 +243,7 @@ fn run_step(
     command: &ShellCommand,
     workdir: &Path,
     scratch: &Path,
+    wait: Duration,
     deadline: Duration,
 ) -> StepEnd {
     let name = command.name();
@@ -257,7 +265,7 @@ fn run_step(
     // did on one stream and why it stopped on the other.
     let mut lines = Vec::new();
     let mut reasons = Vec::new();
-    let end = run.wait(Some(deadline), &mut |stream, line| match stream {
+    let end = run.wait(Some(wait), &mut |stream, line| match stream {
         OutputStream::Stdout => lines.push(line),
         OutputStream::Stderr => reasons.push(line),
     });
