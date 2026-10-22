@@ -30,6 +30,50 @@ pub(crate) const ISSUE_COMMAND_ENV: &str = "GSW_ISSUE_COMMAND";
 /// different one.
 pub(crate) const DEFAULT_ISSUE_COMMAND: &str = "ggs";
 
+/// The commands that one press of `G` runs, in the order it runs them.
+///
+/// The command of the pull request comes first, and the command of the issue
+/// comes second. A press always has one command at least, because a key with
+/// no command is unbound — so the first command is a field and not an
+/// `Option`, and [`Steps::new`] is the one door in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Steps {
+    /// The command that runs first.
+    first: ShellCommand,
+    /// The command that runs where the first one fails, if there is one.
+    then: Option<ShellCommand>,
+}
+
+impl Steps {
+    /// The steps of a press, from the command of the pull request and the
+    /// command of the issue that the probes found.
+    ///
+    /// `None` where the probes found neither command, which is a key with
+    /// nothing behind it.
+    pub(crate) fn new(
+        pull_request: Option<ShellCommand>,
+        issue: Option<ShellCommand>,
+    ) -> Option<Self> {
+        match (pull_request, issue) {
+            (Some(first), then) => Some(Self { first, then }),
+            (None, Some(first)) => Some(Self { first, then: None }),
+            (None, None) => None,
+        }
+    }
+
+    /// The names of the commands, in the order a press runs them: `ggsp, then
+    /// ggs`, or `ggs` alone.
+    ///
+    /// This is what the notice on a remote shell says, so the user reads each
+    /// command that the second press can run before they press.
+    pub(crate) fn describe(&self) -> String {
+        match &self.then {
+            Some(then) => format!("{}, then {}", self.first.name(), then.name()),
+            None => self.first.name().to_string(),
+        }
+    }
+}
+
 /// What a finished run of the issue command leaves under the frame.
 ///
 /// `None` is a run that worked. The browser is the answer, and a monitor that
@@ -105,11 +149,23 @@ impl IssueOutcome {
 /// than a slow fetch and shorter than a session.
 pub(crate) const RUN_DEADLINE: Duration = Duration::from_secs(60);
 
-/// Run `command` in `workdir` and report what to say about it.
+/// Run `steps` in `workdir` and report what to say about them.
 ///
 /// Blocking: the caller runs it on a thread of its own.
-pub(crate) fn run(shell: &OsStr, command: &ShellCommand, workdir: &Path) -> IssueOutcome {
-    run_in(shell, command, workdir, &std::env::temp_dir(), RUN_DEADLINE)
+pub(crate) fn run(shell: &OsStr, steps: &Steps, workdir: &Path) -> IssueOutcome {
+    run_in(shell, steps, workdir, &std::env::temp_dir(), RUN_DEADLINE)
+}
+
+/// Run `steps` in `workdir`, with the two files of each run in `scratch`, and
+/// stop waiting after `deadline`.
+fn run_in(
+    shell: &OsStr,
+    steps: &Steps,
+    workdir: &Path,
+    scratch: &Path,
+    deadline: Duration,
+) -> IssueOutcome {
+    run_step(shell, &steps.first, workdir, scratch, deadline)
 }
 
 /// Run `command` in `workdir`, with the two files of the run in `scratch`, and
@@ -136,7 +192,7 @@ pub(crate) fn run(shell: &OsStr, command: &ShellCommand, workdir: &Path) -> Issu
 /// defunct entry for the life of the session — which is the cost this deadline
 /// exists to avoid. So the child goes to a thread that waits for it. That
 /// thread ends when the child ends, so the child is what bounds it.
-fn run_in(
+fn run_step(
     shell: &OsStr,
     command: &ShellCommand,
     workdir: &Path,
@@ -234,16 +290,19 @@ mod run_tests {
     use std::sync::mpsc::channel;
     use std::time::Instant;
 
-    /// The default command, which is what every test here runs.
-    fn default_command() -> ShellCommand {
-        ShellCommand::new(None, DEFAULT_ISSUE_COMMAND).expect("the default names a command")
+    /// The steps of a press that found the default issue command alone,
+    /// which is what every test here runs.
+    fn default_steps() -> Steps {
+        let command =
+            ShellCommand::new(None, DEFAULT_ISSUE_COMMAND).expect("the default names a command");
+        Steps::new(None, Some(command)).expect("one command is a step")
     }
 
     #[test]
     fn a_run_that_worked_leaves_no_message() {
         let stub = StubShell::answering(0);
         let workdir = tempfile::tempdir().expect("tempdir");
-        let outcome = run(stub.as_shell(), &default_command(), workdir.path());
+        let outcome = run(stub.as_shell(), &default_steps(), workdir.path());
         assert_eq!(outcome.message(), None, "the browser is the answer");
         let runs = stub.runs();
         assert!(
@@ -256,7 +315,7 @@ mod run_tests {
     fn a_run_that_failed_puts_what_the_child_said_under_the_frame() {
         let stub = StubShell::new("echo 'branch main names no issue' >&2\nexit 2");
         let workdir = tempfile::tempdir().expect("tempdir");
-        let outcome = run(stub.as_shell(), &default_command(), workdir.path());
+        let outcome = run(stub.as_shell(), &default_steps(), workdir.path());
         assert_eq!(
             outcome.message(),
             Some("branch main names no issue"),
@@ -278,7 +337,7 @@ mod run_tests {
         let started = Instant::now();
         let outcome = run_in(
             stub.as_shell(),
-            &default_command(),
+            &default_steps(),
             workdir.path(),
             scratch.path(),
             HANG_DEADLINE,
@@ -310,7 +369,7 @@ mod run_tests {
         let scratch = tempfile::tempdir().expect("tempdir");
         let outcome = run_in(
             stub.as_shell(),
-            &default_command(),
+            &default_steps(),
             workdir.path(),
             scratch.path(),
             HANG_DEADLINE,
@@ -341,7 +400,7 @@ mod run_tests {
         let scratch = tempfile::tempdir().expect("tempdir");
         let _ = run_in(
             stub.as_shell(),
-            &default_command(),
+            &default_steps(),
             workdir.path(),
             scratch.path(),
             HANG_DEADLINE,
@@ -371,13 +430,7 @@ mod run_tests {
         let scratch_path = scratch.path().to_path_buf();
         let (tx, rx) = channel();
         std::thread::spawn(move || {
-            let outcome = run_in(
-                &shell,
-                &default_command(),
-                &dir,
-                &scratch_path,
-                RUN_DEADLINE,
-            );
+            let outcome = run_in(&shell, &default_steps(), &dir, &scratch_path, RUN_DEADLINE);
             let _ = tx.send(outcome);
         });
 

@@ -927,8 +927,8 @@ pub(crate) struct CommandKeys {
 /// arms of one match, and no second question decides between them.
 #[derive(Debug, PartialEq, Eq)]
 enum IssuePress {
-    /// Run this command.
-    Run(crate::shell::ShellCommand),
+    /// Run these commands.
+    Run(crate::issue::Steps),
     /// Put this under the frame, and wait for a second press.
     Ask(String),
     /// Nothing at all.
@@ -1008,7 +1008,7 @@ impl IssueRun {
         if self.running {
             return IssuePress::Nothing;
         }
-        let Some(command) = self.command.clone() else {
+        let Some(steps) = crate::issue::Steps::new(None, self.command.clone()) else {
             return IssuePress::Nothing;
         };
         if self.session == crate::remote::Session::Local || self.armed.is_armed(now) {
@@ -1017,11 +1017,11 @@ impl IssueRun {
             // the wrong machine, with nobody asked a second time for it.
             self.armed.disarm();
             self.running = true;
-            return IssuePress::Run(command);
+            return IssuePress::Run(steps);
         }
         IssuePress::Ask(format!(
             "remote shell — press G again to run {}",
-            command.name()
+            steps.describe()
         ))
     }
 
@@ -1700,7 +1700,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             paint: |output: &str| paint_output(output),
             clock: Instant::now,
             next_tick: |freshest: Option<Duration>| freshest.and_then(next_tick),
-            start_issue: |command: crate::shell::ShellCommand,
+            start_issue: |steps: crate::issue::Steps,
                           current: &WorktreePath,
                           generation: Generation| {
                 // The run keeps the generation of its press and sends it back
@@ -1710,7 +1710,7 @@ pub(crate) fn run(handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                 let finish_tx = issue_tx.clone();
                 let shell = shell.clone();
                 thread::spawn(move || {
-                    let outcome = crate::issue::run(&shell, &command, &workdir);
+                    let outcome = crate::issue::run(&shell, &steps, &workdir);
                     let _ = finish_tx.send(Event::IssueFinished {
                         generation,
                         outcome,
@@ -2844,7 +2844,7 @@ where
     Clock: Fn() -> Instant,
     StartPush: FnMut(PushCommand, &WorktreePath),
     StartBaseUpdate: FnMut(crate::update::BaseUpdateCommand, &WorktreePath),
-    StartIssue: FnMut(crate::shell::ShellCommand, &WorktreePath, Generation),
+    StartIssue: FnMut(crate::issue::Steps, &WorktreePath, Generation),
     StartConflicts: FnMut(&WorktreePath, Generation),
     Worktrees: FnMut() -> Vec<WorktreeEntry>,
     Paths: FnMut() -> Vec<WorktreePath>,
@@ -3329,7 +3329,7 @@ where
     Tick: Fn(Option<Duration>) -> Option<Duration>,
     StartPush: FnMut(PushCommand, &WorktreePath),
     StartBaseUpdate: FnMut(crate::update::BaseUpdateCommand, &WorktreePath),
-    StartIssue: FnMut(crate::shell::ShellCommand, &WorktreePath, Generation),
+    StartIssue: FnMut(crate::issue::Steps, &WorktreePath, Generation),
     StartConflicts: FnMut(&WorktreePath, Generation),
     Worktrees: FnMut() -> Vec<WorktreeEntry>,
     Paths: FnMut() -> Vec<WorktreePath>,
@@ -5829,7 +5829,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5892,7 +5892,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -5958,7 +5958,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -6026,7 +6026,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -6090,7 +6090,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -6151,7 +6151,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -6214,7 +6214,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -6277,7 +6277,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -6341,7 +6341,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -6411,7 +6411,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -6739,7 +6739,7 @@ mod tests {
                     start_push: |_command: PushCommand, _current: &WorktreePath| {},
                     start_base_update:
                         |_command: crate::update::BaseUpdateCommand, _current: &WorktreePath| {},
-                    start_issue: |_command: crate::shell::ShellCommand,
+                    start_issue: |_steps: crate::issue::Steps,
                                   _current: &WorktreePath,
                                   _generation: Generation| {},
                     start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -7288,7 +7288,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -7359,7 +7359,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -7440,7 +7440,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -7540,7 +7540,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -7644,7 +7644,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -7729,7 +7729,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -7821,7 +7821,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -7912,7 +7912,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -7983,7 +7983,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -8067,7 +8067,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -8175,7 +8175,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -8307,7 +8307,7 @@ mod tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -8551,8 +8551,9 @@ mod push_loop_tests {
         /// right thing once at the end and a loop that paints it as it happens
         /// leave the same final screen behind.
         paints: Vec<String>,
-        /// Every issue command the loop started a run of, in order.
-        issue_runs: Vec<crate::shell::ShellCommand>,
+        /// The steps of every press of `G` that the loop started a run of, in
+        /// order.
+        issue_runs: Vec<crate::issue::Steps>,
         /// How many measurements the loop started with `m`.
         conflict_runs: usize,
         /// Every worktree the `switch` hook was asked to open, in order,
@@ -9100,11 +9101,11 @@ mod push_loop_tests {
                     seen.base_updates.push(command);
                     seen.base_update_paths.push(current.clone());
                 },
-                start_issue: |command: crate::shell::ShellCommand,
+                start_issue: |steps: crate::issue::Steps,
                               current: &WorktreePath,
                               generation: Generation| {
                     let mut seen = seen.borrow_mut();
-                    seen.issue_runs.push(command);
+                    seen.issue_runs.push(steps);
                     seen.issue_paths.push((current.clone(), generation));
                 },
                 start_conflicts: |current: &WorktreePath, generation: Generation| {
@@ -9191,6 +9192,11 @@ mod push_loop_tests {
             .expect("the default names a command")
     }
 
+    /// The steps of a press whose probe found [`found_command`] alone.
+    fn found_steps() -> crate::issue::Steps {
+        crate::issue::Steps::new(None, Some(found_command())).expect("one command is a step")
+    }
+
     /// The probe's answer, as the loop receives it.
     fn probe_answered() -> Event {
         Event::IssueCommandFound(found_command())
@@ -9227,7 +9233,7 @@ mod push_loop_tests {
         let mut issue = issue_run_in(crate::remote::Session::Local);
         assert_eq!(
             issue.press(Instant::now()),
-            IssuePress::Run(found_command()),
+            IssuePress::Run(found_steps()),
             "a local shell must run the command on the first press",
         );
     }
@@ -9253,7 +9259,7 @@ mod push_loop_tests {
         issue.arm(now);
         assert_eq!(
             issue.press(now + Duration::from_secs(1)),
-            IssuePress::Run(found_command()),
+            IssuePress::Run(found_steps()),
             "the second press must run the command the message named",
         );
     }
@@ -9390,7 +9396,7 @@ mod push_loop_tests {
             run_loop_remote(vec![probe_answered(), press_g(), press_g(), Event::Quit]);
         assert_eq!(
             seen.issue_runs,
-            vec![found_command()],
+            vec![found_steps()],
             "the second press must run the command",
         );
     }
@@ -9431,7 +9437,7 @@ mod push_loop_tests {
         );
         assert_eq!(
             seen.issue_runs,
-            vec![found_command()],
+            vec![found_steps()],
             "each press must read the clock once, so the second press runs the command",
         );
     }
@@ -9505,7 +9511,7 @@ mod push_loop_tests {
         let (_screen, seen) = run_loop(vec![probe_answered(), press_g(), Event::Quit]);
         assert_eq!(
             seen.issue_runs,
-            vec![found_command()],
+            vec![found_steps()],
             "the key must run the command the probe found",
         );
     }
@@ -9957,7 +9963,7 @@ mod push_loop_tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
@@ -10806,10 +10812,10 @@ mod push_loop_tests {
                         |command: crate::update::BaseUpdateCommand, _current: &WorktreePath| {
                             seen.borrow_mut().base_updates.push(command)
                         },
-                    start_issue: |command: crate::shell::ShellCommand,
+                    start_issue: |steps: crate::issue::Steps,
                                   _current: &WorktreePath,
                                   _generation: Generation| {
-                        seen.borrow_mut().issue_runs.push(command);
+                        seen.borrow_mut().issue_runs.push(steps);
                     },
                     start_conflicts: |_current: &WorktreePath, _generation: Generation| {
                         seen.borrow_mut().conflict_runs += 1
@@ -14097,7 +14103,7 @@ mod watched_tests {
                 start_push: |_command: PushCommand, _current: &WorktreePath| {},
                 start_base_update: |_command: crate::update::BaseUpdateCommand,
                                     _current: &WorktreePath| {},
-                start_issue: |_command: crate::shell::ShellCommand,
+                start_issue: |_steps: crate::issue::Steps,
                               _current: &WorktreePath,
                               _generation: Generation| {},
                 start_conflicts: |_current: &WorktreePath, _generation: Generation| {},
