@@ -184,4 +184,48 @@ mod tests {
         let suspicion = first_left_out(&last_good, &answer, |_| true, |_| Presence::InRange);
         assert_eq!(suspicion, Some(Suspicion::LeftOut(Item::Run(RunId(1)))));
     }
+
+    #[test]
+    fn a_failed_read_is_a_suspicion_with_its_error() {
+        let last_good = [repo("acme/a"), repo("acme/b")];
+        let answer = [repo("acme/a")];
+        let error = SourceError::TimedOut(std::time::Duration::from_secs(30));
+        let suspicion = first_left_out(
+            &last_good,
+            &answer,
+            |_| true,
+            |_| Presence::Unread(error.clone()),
+        );
+        assert_eq!(
+            suspicion,
+            Some(Suspicion::Unread(Item::Repo(repo("acme/b")), error))
+        );
+    }
+
+    #[test]
+    fn read_is_not_called_after_the_first_suspicion_or_for_a_held_item() {
+        let last_good = [
+            repo("acme/a"),
+            repo("acme/b"),
+            repo("acme/c"),
+            repo("acme/d"),
+        ];
+        let answer = [repo("acme/a")];
+        let mut read_items = Vec::new();
+        let suspicion = first_left_out(
+            &last_good,
+            &answer,
+            |_| true,
+            |item| {
+                read_items.push(item.clone());
+                if *item == repo("acme/c") {
+                    Presence::Unread(SourceError::Failed("x".to_owned()))
+                } else {
+                    Presence::Gone
+                }
+            },
+        );
+        assert!(matches!(suspicion, Some(Suspicion::Unread(..))));
+        assert_eq!(read_items, [repo("acme/b"), repo("acme/c")]);
+    }
 }
