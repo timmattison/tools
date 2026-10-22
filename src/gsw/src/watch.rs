@@ -973,8 +973,11 @@ impl IssueRun {
     }
 
     /// Whether `G` has a command behind it.
+    ///
+    /// One command of the two is enough. A press with one command runs that
+    /// command alone.
     fn key(&self) -> Binding {
-        if self.issue.is_some() {
+        if self.pull_request.is_some() || self.issue.is_some() {
             Binding::Bound
         } else {
             Binding::Unbound
