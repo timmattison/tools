@@ -1509,6 +1509,84 @@ mod tests {
         assert_eq!(owner_calls, vec!["acme-a".to_owned()]);
     }
 
+    /// The owners that `fake` listed, in call order.
+    fn listed_owners(fake: &FakeSource) -> Vec<String> {
+        fake.script()
+            .calls
+            .iter()
+            .filter(|(what, _)| *what == "owner")
+            .map(|(_, name)| name.clone())
+            .collect()
+    }
+
+    /// A state with a good list of `acme` and a cadence that is not due.
+    fn state_with_a_good_list_of_acme() -> State {
+        let mut cadence = Cadence::new(SLOW_CADENCE);
+        cadence.mark(Instant::now());
+        State {
+            owner_cadence: cadence,
+            owner_lists: BTreeMap::from([(owner("acme"), vec![repo("acme/a"), repo("acme/b")])]),
+            ..State::new(SLOW_CADENCE)
+        }
+    }
+
+    #[test]
+    fn an_owner_whose_last_list_was_suspect_is_listed_again_before_the_cadence() {
+        let fake = Arc::new(FakeSource::default());
+        script_owner(&fake, &["acme/a", "acme/b"]);
+        let mut state = state_with_a_good_list_of_acme();
+        state.owner_errors.insert(
+            owner("acme"),
+            OwnerProblem::Suspect(Suspicion::LeftOut(Item::Repo(repo("acme/a")))),
+        );
+        let (updates_tx, updates_rx) = mpsc::channel();
+
+        let repos = refresh_repos(
+            &Arc::clone(&fake),
+            &settings(&["acme"]),
+            &mut state,
+            &updates_tx,
+        )
+        .unwrap_or_else(|_| panic!("the receiver is alive"));
+
+        assert_eq!(listed_owners(&fake), vec!["acme".to_owned()]);
+        assert_eq!(repos, BTreeSet::from([repo("acme/a"), repo("acme/b")]));
+        let sent: Vec<Update> = updates_rx.try_iter().collect();
+        let (_, owner_errors) = repos_of_cycle(&sent);
+        assert!(owner_errors.is_empty(), "a good list clears the problem");
+    }
+
+    #[test]
+    fn an_owner_with_a_good_list_whose_last_list_failed_is_listed_on_the_next_cycle() {
+        let fake = Arc::new(FakeSource::default());
+        let failure = SourceError::Failed("boom".to_owned());
+        fake.script()
+            .owners
+            .insert(owner("acme"), Err(failure.clone()));
+        let mut state = state_with_a_good_list_of_acme();
+        state.owner_cadence = Cadence::new(SLOW_CADENCE);
+        let (updates_tx, updates_rx) = mpsc::channel();
+        let targets = settings(&["acme"]);
+        refresh_repos(&Arc::clone(&fake), &targets, &mut state, &updates_tx)
+            .unwrap_or_else(|_| panic!("the receiver is alive"));
+        let first: Vec<Update> = updates_rx.try_iter().collect();
+        assert_eq!(
+            repos_of_cycle(&first).1,
+            &vec![(owner("acme"), OwnerProblem::Failed(failure))]
+        );
+
+        script_owner(&fake, &["acme/a", "acme/b"]);
+        refresh_repos(&Arc::clone(&fake), &targets, &mut state, &updates_tx)
+            .unwrap_or_else(|_| panic!("the receiver is alive"));
+
+        assert_eq!(
+            listed_owners(&fake),
+            vec!["acme".to_owned(), "acme".to_owned()]
+        );
+        let second: Vec<Update> = updates_rx.try_iter().collect();
+        assert!(repos_of_cycle(&second).1.is_empty());
+    }
+
     /// Asks for a new cycle at once and reads its updates.
     fn refresh_now(worker: &Worker) -> Vec<Update> {
         worker
