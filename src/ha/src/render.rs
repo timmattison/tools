@@ -92,7 +92,7 @@ struct Widths {
 }
 
 impl Widths {
-    /// Shares the columns that the fixed columns leave over: 24 percent to the
+    /// Shares the columns that the fixed columns leave over: 28 percent to the
     /// repository, 19 percent to the workflow name, 21 percent to the branch,
     /// and the rest to the title.
     ///
@@ -104,7 +104,7 @@ impl Widths {
     /// that is too narrow gives each 0.
     fn for_width(width: usize) -> Widths {
         let room = width.saturating_sub(FIXED_COLUMNS);
-        let repo = room * 24 / 100;
+        let repo = room * 28 / 100;
         let workflow = (room * 19 / 100).min(MAX_WORKFLOW_WIDTH);
         let branch = (room * 21 / 100).min(MAX_BRANCH_WIDTH);
         Widths {
@@ -1442,7 +1442,9 @@ mod tests {
     /// These lines are the target example of issue #571, with the two section
     /// headers added. The workflow name is 8 columns wide and the branch is 12
     /// columns wide (issue #577), thus the title has 12 columns more than in
-    /// that example.
+    /// that example. Issue #587 raised the share of the repository to 28
+    /// percent, thus the repository has 21 columns, the text of a job row has
+    /// 30, and the title has 37.
     #[test]
     fn a_frame_of_120_columns_has_the_target_layout_of_issue_571() {
         let mut board = Board::new(Duration::from_hours(8));
@@ -1505,14 +1507,14 @@ mod tests {
         assert_eq!(
             text[0..8],
             [
-                "   REPO               WORKFLOW              BRANCH       TITLE                                    STARTED     TIME",
+                "   REPO                  WORKFLOW              BRANCH       TITLE                                 STARTED     TIME",
                 "Running · 1",
-                "🏃 timmattison/tools  CI        39149840084 main         Fix the thing                            11:45:30    14m 30s 🏃",
-                "✅ ├ build                     107851237794                                                       11:45:40    4m 20s  ✅",
-                "❌ ├ lint                      107851237795                                                       11:46:00    45s     ❌",
-                "🏃 └ test                      107851237796                                                       11:50:10    9m 50s  🏃",
+                "🏃 timmattison/tools     CI        39149840084 main         Fix the thing                         11:45:30    14m 30s 🏃",
+                "✅ ├ build                        107851237794                                                    11:45:40    4m 20s  ✅",
+                "❌ ├ lint                         107851237795                                                    11:46:00    45s     ❌",
+                "🏃 └ test                         107851237796                                                    11:50:10    9m 50s  🏃",
                 "Last 8h · 1 passed · 0 failed · 0 cancelled",
-                "✅ acme/widgets       Release   39149711502 issue-11     Bump deps                                09:00:00    10m 05s ✅",
+                "✅ acme/widgets          Release   39149711502 issue-11     Bump deps                             09:00:00    10m 05s ✅",
             ]
         );
     }
@@ -1524,13 +1526,13 @@ mod tests {
         assert_eq!(
             lines(&buffer),
             [
-                "   REPO               WORKFLOW              BRANCH       TITLE                                    STARTED     TIME",
+                "   REPO                  WORKFLOW              BRANCH       TITLE                                 STARTED     TIME",
                 "Running · 2",
-                "🏃 timmattison/tools  CI                  1 main         Fix the thing                            11:45:30    14m 30s 🏃",
-                "⏳ acme/widgets       Release             2 issue-12     Add release job                          11:58:00    2m 00s  ⏳",
+                "🏃 timmattison/tools     CI                  1 main         Fix the thing                         11:45:30    14m 30s 🏃",
+                "⏳ acme/widgets          Release             2 issue-12     Add release job                       11:58:00    2m 00s  ⏳",
                 "Last 8h · 1 passed · 1 failed · 0 cancelled",
-                "✅ timmattison/tools  CI                  3 main         Bump deps                                09:00:00    10m 05s ✅",
-                "❌ acme/widgets       Release             4 issue-11     Broken build                             10-13 23:50 4h 40m  ❌",
+                "✅ timmattison/tools     CI                  3 main         Bump deps                             09:00:00    10m 05s ✅",
+                "❌ acme/widgets          Release             4 issue-11     Broken build                          10-13 23:50 4h 40m  ❌",
                 "",
                 "",
                 "updated 30s ago      ·  ↑↓ select  →← jobs  ⏎ open  c cancel  r refresh  q quit",
@@ -2237,9 +2239,9 @@ mod tests {
     }
 
     /// The expected line of a job row at 120 columns. The widths follow the
-    /// shares of the 78 columns of room: 18 repository, 8 workflow name, 12
-    /// branch, and 40 title. The text fills 27 columns, the job ID fills 12, and
-    /// the branch and title columns are 53 blank columns. The started and time
+    /// shares of the 78 columns of room: 21 repository, 8 workflow name, 12
+    /// branch, and 37 title. The text fills 30 columns, the job ID fills 12, and
+    /// the branch and title columns are 50 blank columns. The started and time
     /// cells fill 19 columns, and the right marker follows them after one space.
     ///
     /// The marker is an emoji of 2 columns. `format!` pads by characters, thus
@@ -2247,7 +2249,7 @@ mod tests {
     /// 2 spaces.
     fn job_golden(marker: &str, text: &str, id: u64, times: &str) -> String {
         format!(
-            "{marker} {text:<27} {id:>ID_WIDTH$} {blank:<53} {times:<19} {marker}",
+            "{marker} {text:<30} {id:>ID_WIDTH$} {blank:<50} {times:<19} {marker}",
             blank = ""
         )
         .trim_end()
@@ -2261,7 +2263,7 @@ mod tests {
         assert_eq!(
             text[2..6],
             [
-                "🏃 timmattison/tools  CI                  1 main         Fix the thing                            11:45:30    14m 30s 🏃".to_owned(),
+                "🏃 timmattison/tools     CI                  1 main         Fix the thing                         11:45:30    14m 30s 🏃".to_owned(),
                 job_golden("✅", "├ build", 12, "11:45:40    4m 20s"),
                 job_golden("❌", "├ lint", 13, "11:46:00    45s"),
                 job_golden("🏃", "└ test", 11, "11:50:10    9m 50s"),
@@ -3005,129 +3007,130 @@ mod tests {
     /// column is 2 columns wide since issue #581, thus each width has the entry
     /// that the frame one column narrower had before. Since issue #590, the right
     /// marker cell and its space take 3 columns, thus each width has the entry
-    /// that the frame three columns narrower had before.
+    /// that the frame three columns narrower had before. Since issue #587 the
+    /// repository gets 28 percent.
     const TEXT_WIDTHS: [(usize, usize, usize, usize); 121] = [
-        (9, 7, 7, 15),
-        (9, 7, 8, 15),
-        (9, 7, 8, 16),
-        (9, 7, 8, 17),
-        (10, 7, 8, 17),
-        (10, 8, 9, 16),
-        (10, 8, 9, 17),
-        (10, 8, 9, 18),
-        (11, 8, 9, 18),
-        (11, 8, 9, 19),
-        (11, 8, 10, 19),
-        (11, 8, 10, 20),
-        (12, 8, 10, 20),
-        (12, 8, 10, 21),
-        (12, 8, 10, 22),
-        (12, 8, 11, 22),
-        (12, 8, 11, 23),
-        (13, 8, 11, 23),
-        (13, 8, 11, 24),
-        (13, 8, 11, 25),
-        (13, 8, 12, 25),
-        (14, 8, 12, 25),
-        (14, 8, 12, 26),
-        (14, 8, 12, 27),
-        (14, 8, 12, 28),
-        (15, 8, 12, 28),
-        (15, 8, 12, 29),
-        (15, 8, 12, 30),
-        (15, 8, 12, 31),
-        (16, 8, 12, 31),
-        (16, 8, 12, 32),
-        (16, 8, 12, 33),
-        (16, 8, 12, 34),
-        (17, 8, 12, 34),
-        (17, 8, 12, 35),
-        (17, 8, 12, 36),
-        (17, 8, 12, 37),
-        (18, 8, 12, 37),
-        (18, 8, 12, 38),
-        (18, 8, 12, 39),
-        (18, 8, 12, 40),
-        (18, 8, 12, 41),
-        (19, 8, 12, 41),
-        (19, 8, 12, 42),
-        (19, 8, 12, 43),
-        (19, 8, 12, 44),
-        (20, 8, 12, 44),
-        (20, 8, 12, 45),
-        (20, 8, 12, 46),
-        (20, 8, 12, 47),
-        (21, 8, 12, 47),
-        (21, 8, 12, 48),
-        (21, 8, 12, 49),
-        (21, 8, 12, 50),
-        (22, 8, 12, 50),
-        (22, 8, 12, 51),
-        (22, 8, 12, 52),
-        (22, 8, 12, 53),
-        (23, 8, 12, 53),
-        (23, 8, 12, 54),
-        (23, 8, 12, 55),
-        (23, 8, 12, 56),
-        (24, 8, 12, 56),
-        (24, 8, 12, 57),
-        (24, 8, 12, 58),
-        (24, 8, 12, 59),
-        (24, 8, 12, 60),
-        (25, 8, 12, 60),
-        (25, 8, 12, 61),
-        (25, 8, 12, 62),
-        (25, 8, 12, 63),
-        (26, 8, 12, 63),
-        (26, 8, 12, 64),
-        (26, 8, 12, 65),
-        (26, 8, 12, 66),
-        (27, 8, 12, 66),
-        (27, 8, 12, 67),
-        (27, 8, 12, 68),
-        (27, 8, 12, 69),
-        (28, 8, 12, 69),
-        (28, 8, 12, 70),
-        (28, 8, 12, 71),
-        (28, 8, 12, 72),
-        (29, 8, 12, 72),
-        (29, 8, 12, 73),
-        (29, 8, 12, 74),
-        (29, 8, 12, 75),
-        (30, 8, 12, 75),
-        (30, 8, 12, 76),
-        (30, 8, 12, 77),
-        (30, 8, 12, 78),
-        (30, 8, 12, 79),
-        (31, 8, 12, 79),
-        (31, 8, 12, 80),
-        (31, 8, 12, 81),
-        (31, 8, 12, 82),
-        (32, 8, 12, 82),
-        (32, 8, 12, 83),
-        (32, 8, 12, 84),
-        (32, 8, 12, 85),
-        (33, 8, 12, 85),
-        (33, 8, 12, 86),
-        (33, 8, 12, 87),
-        (33, 8, 12, 88),
-        (34, 8, 12, 88),
-        (34, 8, 12, 89),
-        (34, 8, 12, 90),
-        (34, 8, 12, 91),
-        (35, 8, 12, 91),
-        (35, 8, 12, 92),
-        (35, 8, 12, 93),
-        (35, 8, 12, 94),
-        (36, 8, 12, 94),
-        (36, 8, 12, 95),
-        (36, 8, 12, 96),
-        (36, 8, 12, 97),
-        (36, 8, 12, 98),
-        (37, 8, 12, 98),
-        (37, 8, 12, 99),
-        (37, 8, 12, 100),
-        (37, 8, 12, 101),
+        (10, 7, 7, 14),
+        (10, 7, 8, 14),
+        (11, 7, 8, 14),
+        (11, 7, 8, 15),
+        (11, 7, 8, 16),
+        (12, 8, 9, 14),
+        (12, 8, 9, 15),
+        (12, 8, 9, 16),
+        (12, 8, 9, 17),
+        (13, 8, 9, 17),
+        (13, 8, 10, 17),
+        (13, 8, 10, 18),
+        (14, 8, 10, 18),
+        (14, 8, 10, 19),
+        (14, 8, 10, 20),
+        (14, 8, 11, 20),
+        (15, 8, 11, 20),
+        (15, 8, 11, 21),
+        (15, 8, 11, 22),
+        (15, 8, 11, 23),
+        (16, 8, 12, 22),
+        (16, 8, 12, 23),
+        (16, 8, 12, 24),
+        (17, 8, 12, 24),
+        (17, 8, 12, 25),
+        (17, 8, 12, 26),
+        (17, 8, 12, 27),
+        (18, 8, 12, 27),
+        (18, 8, 12, 28),
+        (18, 8, 12, 29),
+        (19, 8, 12, 29),
+        (19, 8, 12, 30),
+        (19, 8, 12, 31),
+        (19, 8, 12, 32),
+        (20, 8, 12, 32),
+        (20, 8, 12, 33),
+        (20, 8, 12, 34),
+        (21, 8, 12, 34),
+        (21, 8, 12, 35),
+        (21, 8, 12, 36),
+        (21, 8, 12, 37),
+        (22, 8, 12, 37),
+        (22, 8, 12, 38),
+        (22, 8, 12, 39),
+        (22, 8, 12, 40),
+        (23, 8, 12, 40),
+        (23, 8, 12, 41),
+        (23, 8, 12, 42),
+        (24, 8, 12, 42),
+        (24, 8, 12, 43),
+        (24, 8, 12, 44),
+        (24, 8, 12, 45),
+        (25, 8, 12, 45),
+        (25, 8, 12, 46),
+        (25, 8, 12, 47),
+        (26, 8, 12, 47),
+        (26, 8, 12, 48),
+        (26, 8, 12, 49),
+        (26, 8, 12, 50),
+        (27, 8, 12, 50),
+        (27, 8, 12, 51),
+        (27, 8, 12, 52),
+        (28, 8, 12, 52),
+        (28, 8, 12, 53),
+        (28, 8, 12, 54),
+        (28, 8, 12, 55),
+        (29, 8, 12, 55),
+        (29, 8, 12, 56),
+        (29, 8, 12, 57),
+        (29, 8, 12, 58),
+        (30, 8, 12, 58),
+        (30, 8, 12, 59),
+        (30, 8, 12, 60),
+        (31, 8, 12, 60),
+        (31, 8, 12, 61),
+        (31, 8, 12, 62),
+        (31, 8, 12, 63),
+        (32, 8, 12, 63),
+        (32, 8, 12, 64),
+        (32, 8, 12, 65),
+        (33, 8, 12, 65),
+        (33, 8, 12, 66),
+        (33, 8, 12, 67),
+        (33, 8, 12, 68),
+        (34, 8, 12, 68),
+        (34, 8, 12, 69),
+        (34, 8, 12, 70),
+        (35, 8, 12, 70),
+        (35, 8, 12, 71),
+        (35, 8, 12, 72),
+        (35, 8, 12, 73),
+        (36, 8, 12, 73),
+        (36, 8, 12, 74),
+        (36, 8, 12, 75),
+        (36, 8, 12, 76),
+        (37, 8, 12, 76),
+        (37, 8, 12, 77),
+        (37, 8, 12, 78),
+        (38, 8, 12, 78),
+        (38, 8, 12, 79),
+        (38, 8, 12, 80),
+        (38, 8, 12, 81),
+        (39, 8, 12, 81),
+        (39, 8, 12, 82),
+        (39, 8, 12, 83),
+        (40, 8, 12, 83),
+        (40, 8, 12, 84),
+        (40, 8, 12, 85),
+        (40, 8, 12, 86),
+        (41, 8, 12, 86),
+        (41, 8, 12, 87),
+        (41, 8, 12, 88),
+        (42, 8, 12, 88),
+        (42, 8, 12, 89),
+        (42, 8, 12, 90),
+        (42, 8, 12, 91),
+        (43, 8, 12, 91),
+        (43, 8, 12, 92),
+        (43, 8, 12, 93),
+        (43, 8, 12, 94),
+        (44, 8, 12, 94),
     ];
 
     #[test]
@@ -3186,10 +3189,10 @@ mod tests {
             now(),
         );
         let text = lines(&render_with(68, 6, &mut board, &Status::default()));
-        // 68 - 42 = 26 columns for the text: 6, 4, 5, and 11.
+        // 68 - 42 = 26 columns for the text: 7, 4, 5, and 10.
         assert_eq!(
             text[2],
-            "🏃 timma… Con…            1 feat… A very lon… 11:55:00    5m 00s  🏃"
+            "🏃 timmat… Con…            1 feat… A very lo… 11:55:00    5m 00s  🏃"
         );
     }
 
@@ -3235,15 +3238,15 @@ mod tests {
         let text = lines(&render_with(68, 7, &mut board, &Status::default()));
         assert_eq!(
             text[2],
-            "🏃 a/x    CI              1 日本… t           11:51:00    9m 00s  🏃"
+            "🏃 a/x     CI              1 日本… t          11:51:00    9m 00s  🏃"
         );
         assert_eq!(
             text[3],
-            "🏃 a/x    CI              2 café… t           11:52:00    8m 00s  🏃"
+            "🏃 a/x     CI              2 café… t          11:52:00    8m 00s  🏃"
         );
         assert_eq!(
             text[4],
-            "🏃 a/x    CI              3 🎉🎉… t           11:53:00    7m 00s  🏃"
+            "🏃 a/x     CI              3 🎉🎉… t          11:53:00    7m 00s  🏃"
         );
         for line in &text {
             assert!(display_width(line) <= 68, "{line:?} is too wide");
@@ -4661,18 +4664,18 @@ mod tests {
         let mut board = megarepo_board();
         let text = lines(&render_with(160, 16, &mut board, &loaded()));
         let block: Vec<String> = (2..=8)
-            .map(|y| columns(&text[y], 0, 54).trim_end().to_owned())
+            .map(|y| columns(&text[y], 0, 59).trim_end().to_owned())
             .collect();
         assert_eq!(
             block,
             [
-                "🏃 timmattison/megarepo         CI        39450362521",
-                "✅ ├ e2e-plan grwetky1t8721h17t103k8gce0 107851237701",
-                "⏳ ├ e2e-remotesensing (1)               107851237705",
-                "🏃 ├ e2e-remotesensing (2) m1-ts         107851237702",
-                "🏃 ├ e2e-remotesensing (3) mbp           107851237703",
-                "⏳ ├ e2e-remotesensing (4)               107851237704",
-                "🏃 └ sites gr96283qcxw61jpesqnhtrkhwb    107851237706",
+                "🏃 timmattison/megarepo              CI        39450362521",
+                "✅ ├ e2e-plan grwetky1t8721h17t103k8gce0      107851237701",
+                "⏳ ├ e2e-remotesensing (1)                    107851237705",
+                "🏃 ├ e2e-remotesensing (2) m1-ts              107851237702",
+                "🏃 ├ e2e-remotesensing (3) mbp                107851237703",
+                "⏳ ├ e2e-remotesensing (4)                    107851237704",
+                "🏃 └ sites gr96283qcxw61jpesqnhtrkhwb         107851237706",
             ]
         );
         let started = ["11:46:00", "", "11:50:00", "11:51:00", "", "11:52:00"];
@@ -4732,17 +4735,17 @@ mod tests {
         let mut board = megarepo_board();
         let text = lines(&render_with(120, 16, &mut board, &loaded()));
         let block: Vec<String> = (3..=8)
-            .map(|y| columns(&text[y], 0, 44).trim_end().to_owned())
+            .map(|y| columns(&text[y], 0, 47).trim_end().to_owned())
             .collect();
         assert_eq!(
             block,
             [
-                "✅ ├ e2e-plan grwetky1t8721h1… 107851237701",
-                "⏳ ├ e2e-remotesensing (1)     107851237705",
-                "🏃 ├ e2e-remotesensing (2)     107851237702",
-                "🏃 ├ e2e-remotesensing (3) mbp 107851237703",
-                "⏳ ├ e2e-remotesensing (4)     107851237704",
-                "🏃 └ sites gr96283qcxw61jpesq… 107851237706",
+                "✅ ├ e2e-plan grwetky1t8721h17t1… 107851237701",
+                "⏳ ├ e2e-remotesensing (1)        107851237705",
+                "🏃 ├ e2e-remotesensing (2) m1-ts  107851237702",
+                "🏃 ├ e2e-remotesensing (3) mbp    107851237703",
+                "⏳ ├ e2e-remotesensing (4)        107851237704",
+                "🏃 └ sites gr96283qcxw61jpesqnht… 107851237706",
             ]
         );
     }
@@ -4781,27 +4784,27 @@ mod tests {
     /// The time cells of [`passed_job`] in a golden line.
     const PASSED_TIMES: &str = "11:46:00    2m 00s";
 
-    /// A job name of 21 columns. Its text `└ ` plus the name is 23 columns, thus
-    /// the room for a runner name is 3.
-    const ROOM_OF_3_NAME: &str = "abcdefghijklmnopqrstu";
+    /// A job name of 24 columns. Its text `└ ` plus the name is 26 columns, thus
+    /// the room for a runner name in the 30 columns of the cell is 3.
+    const ROOM_OF_3_NAME: &str = "abcdefghijklmnopqrstuvwx";
 
     #[test]
     fn a_long_runner_name_with_fewer_than_4_columns_does_not_show() {
-        // The text `└ Full check list (Linux)` is 25 columns, thus the room is 1.
+        // The text `└ Full check list (Linux 22)` is 28 columns, thus the room is 1.
         let (buffer, row, y) = lone_job_row(
             on(
                 "GitHub Actions 1000001050",
-                passed_job("Full check list (Linux)"),
+                passed_job("Full check list (Linux 22)"),
             ),
             120,
         );
         assert_eq!(
             row,
-            job_golden("✅", "└ Full check list (Linux)", LONE_JOB, PASSED_TIMES)
+            job_golden("✅", "└ Full check list (Linux 22)", LONE_JOB, PASSED_TIMES)
         );
         assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
-        // A name of 21 columns makes a text of 23 columns, thus the room is 3.
-        assert_eq!(display_width(ROOM_OF_3_NAME), 21);
+        // A name of 24 columns makes a text of 26 columns, thus the room is 3.
+        assert_eq!(display_width(ROOM_OF_3_NAME), 24);
         let (buffer, row, y) = lone_job_row(on("m1-ts", passed_job(ROOM_OF_3_NAME)), 120);
         assert_eq!(
             row,
@@ -4926,9 +4929,9 @@ mod tests {
     fn a_job_name_that_fills_the_cell_shows_no_runner_name() {
         let name = "n".repeat(40);
         let (buffer, row, y) = lone_job_row(on("mbp", passed_job(&name)), 120);
-        // The text is cut to the 27 columns of the cell and ends in `…`.
-        let cut = format!("└ {}…", "n".repeat(24));
-        assert_eq!(display_width(&cut), 27);
+        // The text is cut to the 30 columns of the cell and ends in `…`.
+        let cut = format!("└ {}…", "n".repeat(27));
+        assert_eq!(display_width(&cut), 30);
         assert_eq!(row, job_golden("✅", &cut, LONE_JOB, PASSED_TIMES));
         assert_eq!(cyan_columns(&buffer, y), Vec::<u16>::new());
         assert_eq!(
