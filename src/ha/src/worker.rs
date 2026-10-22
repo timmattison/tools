@@ -1147,6 +1147,7 @@ mod tests {
     use super::*;
     use crate::github::{RepoList, RunList, RunQuery, SourceError};
     use crate::job::Job;
+    use crate::queue::{PullNumber, QueueEntry, QueueEvent};
     use crate::run::{RunId, RunState};
     use crate::suspect::{Item, Suspicion};
     use crate::target::Target;
@@ -1285,6 +1286,37 @@ mod tests {
             self.script()
                 .calls
                 .push(("forget-runs", format!("{repo} {what}")));
+        }
+
+        fn merge_queues_among(
+            &self,
+            repos: &[RepoName],
+        ) -> Result<BTreeSet<RepoName>, SourceError> {
+            let _ = repos;
+            Ok(BTreeSet::new())
+        }
+
+        fn queue_entries_of(&self, repo: &RepoName) -> Result<Vec<QueueEntry>, SourceError> {
+            let _ = repo;
+            Ok(Vec::new())
+        }
+
+        fn queue_events_of(
+            &self,
+            repo: &RepoName,
+            since: DateTime<Utc>,
+        ) -> Result<Vec<QueueEvent>, SourceError> {
+            let _ = (repo, since);
+            Ok(Vec::new())
+        }
+
+        fn pull_branches_of(
+            &self,
+            repo: &RepoName,
+            pulls: &[PullNumber],
+        ) -> Result<BTreeMap<PullNumber, String>, SourceError> {
+            let _ = (repo, pulls);
+            Ok(BTreeMap::new())
         }
 
         fn rate_limit(&self) -> Option<RateLimit> {
