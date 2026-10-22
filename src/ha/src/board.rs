@@ -1,10 +1,17 @@
-//! The board: the runs of all watched repositories, as rows for one screen.
+//! The board: the merge queues and the runs of all watched repositories, as
+//! rows for one screen.
 //!
 //! The board holds the last good runs of each repository, the last error of
 //! each repository, the last job answer of each run, the set of expanded runs,
-//! the time window, the selection, and the scroll offset.
+//! the last good merge queue answer of each repository that has a queue, the
+//! time window, the selection, and the scroll offset.
 //! It does no I/O. Every reader takes the current time as an argument, so a
 //! test uses one fixed time and never reads the clock.
+//!
+//! When a watched repository has a merge queue, two sections stand above the
+//! runs: the pull requests in the queues, and the pull requests that left a
+//! queue inside the window. The selection moves through the rows of all the
+//! sections.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -12,7 +19,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 
 use crate::job::{Job, JobId};
-use crate::queue::{Departure, PullNumber, QueueEntry};
+use crate::queue::{Departure, Outcome, PullNumber, QueueEntry};
 use crate::run::{keep_first_of_each_id, Run, RunId, RunState};
 use crate::target::RepoName;
 
@@ -33,16 +40,24 @@ pub enum Section {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Row<'a> {
     /// The title row of a section.
+    ///
+    /// In the history section, the three counts are about pull requests:
+    /// `passed` counts the merged ones, `failed` the ones that the queue
+    /// removed, and `cancelled` the ones that a person removed. Each one shows
+    /// the marker of the run state of the same name.
     Header {
         /// The section that the header opens.
         section: Section,
-        /// The number of runs in the section.
+        /// The number of rows in the section.
         count: usize,
-        /// The number of passed runs. This is 0 for the active section.
+        /// The number of passed runs, or of merged pull requests. This is 0
+        /// for the queue section and the active section.
         passed: usize,
-        /// The number of failed runs. This is 0 for the active section.
+        /// The number of failed runs, or of pull requests that the queue
+        /// removed. This is 0 for the queue section and the active section.
         failed: usize,
-        /// The number of cancelled runs. This is 0 for the active section.
+        /// The number of cancelled runs, or of pull requests that a person
+        /// removed. This is 0 for the queue section and the active section.
         cancelled: usize,
     },
     /// The row that shows an empty section.
@@ -94,6 +109,28 @@ pub enum Row<'a> {
     JobsError(&'a str),
 }
 
+impl Row<'_> {
+    /// True for a row that the selection can mark, other than a job row: a
+    /// pull request row or a run row.
+    fn is_item(&self) -> bool {
+        matches!(
+            self,
+            Row::Entry { .. } | Row::Departure { .. } | Row::Run { .. }
+        )
+    }
+
+    /// True for the one row that the selection marks.
+    fn is_selected(&self) -> bool {
+        matches!(
+            self,
+            Row::Entry { selected: true, .. }
+                | Row::Departure { selected: true, .. }
+                | Row::Run { selected: true, .. }
+                | Row::Job { selected: true, .. }
+        )
+    }
+}
+
 /// The last job answer that the board holds for one run.
 ///
 /// A run with no entry has no answer yet. If such a run is expanded, it shows
@@ -111,17 +148,89 @@ enum Jobs {
     },
 }
 
-/// The selected row: one run, and as an option one job of that run.
+/// One row that the selection can mark, other than a job row, in the order of
+/// the board.
+#[derive(Debug, Clone, Copy)]
+enum Item<'a> {
+    /// A pull request in a merge queue.
+    Entry(&'a QueueEntry),
+    /// A pull request that left a merge queue.
+    Departure(&'a Departure),
+    /// A run.
+    Run(&'a Run),
+}
+
+impl Item<'_> {
+    /// The key that names this item through a refresh.
+    fn key(&self) -> ItemKey {
+        match self {
+            Item::Entry(entry) => ItemKey::Entry(entry.repo.clone(), entry.pull),
+            Item::Departure(departure) => {
+                ItemKey::Departure(departure.repo.clone(), departure.pull, departure.left_at)
+            }
+            Item::Run(run) => ItemKey::Run(run.id),
+        }
+    }
+
+    /// True when `key` names this item. The function makes no copy.
+    fn has_key(&self, key: &ItemKey) -> bool {
+        match (self, key) {
+            (Item::Entry(entry), ItemKey::Entry(repo, pull)) => {
+                entry.pull == *pull && entry.repo == *repo
+            }
+            (Item::Departure(departure), ItemKey::Departure(repo, pull, left_at)) => {
+                departure.pull == *pull && departure.left_at == *left_at && departure.repo == *repo
+            }
+            (Item::Run(run), ItemKey::Run(id)) => run.id == *id,
+            _ => false,
+        }
+    }
+
+    /// The address of the page of the item: the pull request or the run.
+    fn url(&self) -> &str {
+        match self {
+            Item::Entry(entry) => &entry.url,
+            Item::Departure(departure) => &departure.url,
+            Item::Run(run) => &run.url,
+        }
+    }
+}
+
+/// What names one [`Item`] through a refresh.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ItemKey {
+    /// A pull request in the merge queue of a repository.
+    Entry(RepoName, PullNumber),
+    /// A pull request that left the merge queue of a repository at a time. A
+    /// pull request can leave a queue more than one time.
+    Departure(RepoName, PullNumber, DateTime<Utc>),
+    /// A run.
+    Run(RunId),
+}
+
+/// The selected row: one item, and for a run, as an option one job of that
+/// run.
 ///
-/// Each level keeps its position. When its ID goes away, `settle` falls back
+/// Each level keeps its position. When its key goes away, `settle` falls back
 /// to the row at that position.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Selection {
-    /// The ID of the run, and its position among the runs that show.
-    run: (RunId, usize),
+    /// The key of the item, and its position among the items that show.
+    item: (ItemKey, usize),
     /// The ID of the job, and its position among the job rows of its run.
-    /// `None` when the run row itself is selected.
+    /// `None` when the item row itself is selected. Only a run has jobs.
     job: Option<(JobId, usize)>,
+}
+
+impl Selection {
+    /// The run of the selection, or `None` when the selected item is a pull
+    /// request.
+    fn run(&self) -> Option<RunId> {
+        match self.item.0 {
+            ItemKey::Run(id) => Some(id),
+            ItemKey::Entry(..) | ItemKey::Departure(..) => None,
+        }
+    }
 }
 
 /// The rows that fit on the screen.
@@ -148,7 +257,8 @@ pub struct Board {
     jobs: BTreeMap<RunId, Jobs>,
     /// The runs that show their job rows.
     expanded: BTreeSet<RunId>,
-    /// The merge queue of each watched repository that has one.
+    /// The merge queue of each watched repository that has one. The two merge
+    /// sections show while this map holds a repository.
     queues: BTreeMap<RepoName, QueueBook>,
 }
 
@@ -159,12 +269,18 @@ struct QueueBook {
     entries: Vec<QueueEntry>,
     /// The last good departures.
     departures: Vec<Departure>,
-    /// The text of the error of the last read, when it failed.
+    /// The text of the error of the last answer, when a read of it failed.
     error: Option<String>,
 }
 
+/// The text before the error of a failed read of the entries of a queue.
+const QUEUE_ERROR_PREFIX: &str = "merge queue: ";
+/// The text before the error of a failed read of the events of a queue.
+const HISTORY_ERROR_PREFIX: &str = "merge history: ";
+
 impl Board {
-    /// Makes an empty board. A finished run shows while it ended inside `window`.
+    /// Makes an empty board. A finished run shows while it ended inside
+    /// `window`, and so does a pull request that left a merge queue.
     #[must_use]
     pub fn new(window: Duration) -> Board {
         Board {
@@ -180,36 +296,7 @@ impl Board {
         }
     }
 
-    /// Keeps the merge queue of each repository of `repos`, and drops the
-    /// merge queue of every other repository. A repository that is new in
-    /// `repos` shows an empty queue until its first answer.
-    pub fn set_queues(&mut self, repos: &BTreeSet<RepoName>) {
-        let _ = repos;
-    }
-
-    /// Stores the merge queue answer of `repo`.
-    ///
-    /// A good list replaces the last one. A failed read keeps the last good
-    /// list and records its error, which [`Board::errors`] gives. When both
-    /// reads succeed, the error goes away. An answer for a repository whose
-    /// queue the board does not hold is dropped.
-    pub fn set_queue(
-        &mut self,
-        repo: &RepoName,
-        entries: Result<Vec<QueueEntry>, String>,
-        departures: Result<Vec<Departure>, String>,
-    ) {
-        let _ = (repo, entries, departures, &self.queues);
-    }
-
-    /// The number of the pull request of the selected row, or `None` when the
-    /// selected row is not a merge queue row.
-    pub fn selected_pull(&mut self, now: DateTime<Utc>) -> Option<PullNumber> {
-        let _ = now;
-        None
-    }
-
-    /// The time window of the finished runs.
+    /// The time window of the finished runs and of the merge history.
     #[must_use]
     pub fn window(&self) -> Duration {
         self.window
@@ -247,11 +334,13 @@ impl Board {
         self.errors.insert(repo, error);
     }
 
-    /// Drops the runs, the errors, and the read times of every repository that is not in `repos`.
+    /// Drops the runs, the errors, the read times, and the merge queue of
+    /// every repository that is not in `repos`.
     pub fn keep_only(&mut self, repos: &BTreeSet<RepoName>) {
         self.runs.retain(|repo, _| repos.contains(repo));
         self.errors.retain(|repo, _| repos.contains(repo));
         self.read_at.retain(|repo, _| repos.contains(repo));
+        self.queues.retain(|repo, _| repos.contains(repo));
     }
 
     /// The stale repositories of issue #599: each repository with an error,
@@ -265,13 +354,63 @@ impl Board {
             .collect()
     }
 
-    /// The error of each failed repository, sorted by repository.
+    /// Keeps the merge queue of each repository of `repos`, and drops the
+    /// merge queue of every other repository. A repository that is new in
+    /// `repos` shows an empty queue until its first answer.
+    pub fn set_queues(&mut self, repos: &BTreeSet<RepoName>) {
+        self.queues.retain(|repo, _| repos.contains(repo));
+        for repo in repos {
+            self.queues.entry(repo.clone()).or_default();
+        }
+    }
+
+    /// Stores the merge queue answer of `repo`.
+    ///
+    /// A good list replaces the last one. A failed read keeps the last good
+    /// list and records its error, which [`Board::errors`] gives. When both
+    /// reads succeed, the error goes away. An answer for a repository whose
+    /// queue the board does not hold is dropped.
+    pub fn set_queue(
+        &mut self,
+        repo: &RepoName,
+        entries: Result<Vec<QueueEntry>, String>,
+        departures: Result<Vec<Departure>, String>,
+    ) {
+        let Some(book) = self.queues.get_mut(repo) else {
+            return;
+        };
+        let mut error = None;
+        match entries {
+            Ok(entries) => book.entries = entries,
+            Err(text) => {
+                error.get_or_insert(format!("{QUEUE_ERROR_PREFIX}{text}"));
+            }
+        }
+        match departures {
+            Ok(departures) => book.departures = departures,
+            Err(text) => {
+                error.get_or_insert(format!("{HISTORY_ERROR_PREFIX}{text}"));
+            }
+        }
+        book.error = error;
+    }
+
+    /// The error of each failed repository, sorted by repository. The error
+    /// of the runs of a repository comes before the error of its merge queue.
     #[must_use]
     pub fn errors(&self) -> Vec<(&RepoName, &str)> {
-        self.errors
+        let mut errors: Vec<(&RepoName, &str)> = self
+            .errors
             .iter()
             .map(|(repo, error)| (repo, error.as_str()))
-            .collect()
+            .chain(
+                self.queues
+                    .iter()
+                    .filter_map(|(repo, book)| book.error.as_deref().map(|error| (repo, error))),
+            )
+            .collect();
+        errors.sort_by(|left, right| left.0.cmp(right.0));
+        errors
     }
 
     /// All rows of the board at time `now`.
@@ -282,30 +421,25 @@ impl Board {
 
     /// The rows that fit in `height` lines, with the selected row inside.
     ///
-    /// The selected row is a run row or a job row. A run row also keeps its
-    /// header and the start of its block in view. A job row keeps only itself.
+    /// The selected row is an item row (a pull request or a run) or a job
+    /// row. An item row also keeps its header and the start of its block in
+    /// view. A job row keeps only itself.
     pub fn view(&mut self, now: DateTime<Utc>, height: usize) -> View<'_> {
         self.settle(now);
         if height > 0 {
             let rows = self.build_rows(now);
-            let selected_row = rows.iter().position(|row| {
-                matches!(
-                    row,
-                    Row::Run { selected: true, .. } | Row::Job { selected: true, .. }
-                )
-            });
-            let on_run_row =
-                selected_row.is_some_and(|row| matches!(rows.get(row), Some(Row::Run { .. })));
-            let header_above = on_run_row
+            let selected_row = rows.iter().position(Row::is_selected);
+            let on_item_row = selected_row.is_some_and(|row| rows[row].is_item());
+            let header_above = on_item_row
                 && selected_row.is_some_and(|row| {
                     row > 0 && matches!(rows.get(row - 1), Some(Row::Header { .. }))
                 });
             let len = rows.len();
-            let below = selected_row.filter(|_| on_run_row).map_or(0, |row| {
+            let below = selected_row.filter(|_| on_item_row).map_or(0, |row| {
                 rows[row + 1..]
                     .iter()
                     .take_while(|next| {
-                        !matches!(next, Row::Header { .. } | Row::Empty(_) | Row::Run { .. })
+                        !matches!(next, Row::Header { .. } | Row::Empty(_)) && !next.is_item()
                     })
                     .count()
             });
@@ -323,6 +457,14 @@ impl Board {
         }
     }
 
+    /// The oldest finish time that the window holds at `now`.
+    fn window_start(&self, now: DateTime<Utc>) -> DateTime<Utc> {
+        chrono::Duration::from_std(self.window)
+            .ok()
+            .and_then(|window| now.checked_sub_signed(window))
+            .unwrap_or(DateTime::<Utc>::MIN_UTC)
+    }
+
     /// Splits the shown runs into the active list and the recent list.
     ///
     /// Both lists are sorted. A run that is not shown at `now` is in neither.
@@ -334,10 +476,7 @@ impl Board {
             .filter(|run| run.state.is_active())
             .collect();
         active.sort_by_key(|run| (run.started_at, run.id));
-        let oldest = chrono::Duration::from_std(self.window)
-            .ok()
-            .and_then(|window| now.checked_sub_signed(window))
-            .unwrap_or(DateTime::<Utc>::MIN_UTC);
+        let oldest = self.window_start(now);
         let mut recent: Vec<&Run> = self
             .runs
             .values()
@@ -346,6 +485,46 @@ impl Board {
             .collect();
         recent.sort_by_key(|run| std::cmp::Reverse((run.updated_at, run.id)));
         (active, recent)
+    }
+
+    /// The entries of all merge queues and the departures that show at `now`.
+    ///
+    /// The entries are sorted by repository, then by position. A departure
+    /// shows while it left the queue inside the window, and the departures
+    /// are sorted newest first.
+    fn queue_sections(&self, now: DateTime<Utc>) -> (Vec<&QueueEntry>, Vec<&Departure>) {
+        let mut entries: Vec<&QueueEntry> = self
+            .queues
+            .values()
+            .flat_map(|book| &book.entries)
+            .collect();
+        entries.sort_by(|left, right| {
+            (&left.repo, left.position, left.pull).cmp(&(&right.repo, right.position, right.pull))
+        });
+        let oldest = self.window_start(now);
+        let mut departures: Vec<&Departure> = self
+            .queues
+            .values()
+            .flat_map(|book| &book.departures)
+            .filter(|departure| departure.left_at >= oldest)
+            .collect();
+        departures.sort_by(|left, right| {
+            (right.left_at, &right.repo, right.pull).cmp(&(left.left_at, &left.repo, left.pull))
+        });
+        (entries, departures)
+    }
+
+    /// All items that show at `now`, in the order of the board: the entries,
+    /// the departures, the active runs, and the recent runs.
+    fn shown_items(&self, now: DateTime<Utc>) -> Vec<Item<'_>> {
+        let (entries, departures) = self.queue_sections(now);
+        let (active, recent) = self.sections(now);
+        entries
+            .into_iter()
+            .map(Item::Entry)
+            .chain(departures.into_iter().map(Item::Departure))
+            .chain(active.into_iter().chain(recent).map(Item::Run))
+            .collect()
     }
 
     /// All runs that show at `now`, in the order of the board: active, then recent.
@@ -373,61 +552,84 @@ impl Board {
 
     /// All rows that the selection can mark at `now`, in the order of the board.
     ///
-    /// Each shown run gives its own slot, and then one slot for each job row
-    /// of that run.
+    /// Each shown item gives its own slot. Each run then gives one slot for
+    /// each of its job rows.
     fn selectable_rows(&self, now: DateTime<Utc>) -> Vec<Selection> {
         let mut slots = Vec::new();
-        for (position, run) in self.shown_runs(now).into_iter().enumerate() {
+        for (position, item) in self.shown_items(now).into_iter().enumerate() {
+            let key = item.key();
             slots.push(Selection {
-                run: (run.id, position),
+                item: (key.clone(), position),
                 job: None,
             });
-            slots.extend(
-                self.shown_jobs(run.id)
-                    .iter()
-                    .enumerate()
-                    .map(|(index, job)| Selection {
-                        run: (run.id, position),
-                        job: Some((job.id, index)),
-                    }),
-            );
+            if let Item::Run(run) = item {
+                slots.extend(
+                    self.shown_jobs(run.id)
+                        .iter()
+                        .enumerate()
+                        .map(|(index, job)| Selection {
+                            item: (key.clone(), position),
+                            job: Some((job.id, index)),
+                        }),
+                );
+            }
         }
         slots
     }
 
-    /// Makes the selection valid for the runs that show at `now`.
+    /// Makes the selection valid for the items that show at `now`.
     ///
     /// A run that does not show at `now` loses its expansion and its job
     /// answer. This is how the board forgets a run that leaves it.
     ///
-    /// The run comes first. The selection follows its run. When the run is
-    /// gone, the run at the old position is selected, or the last run when the
-    /// old position is past the end, and the job part goes away. A board with
-    /// no run has no selection. A new selection is the first run.
+    /// The item comes first. The selection follows its item: a run by its ID,
+    /// a pull request in a queue by its repository and number, and a pull
+    /// request that left a queue by its repository, its number, and the time
+    /// that it left. When the item is gone, the item at the old position is
+    /// selected, or the last item when the old position is past the end, and
+    /// the job part goes away. Thus a pull request that leaves the queue gives
+    /// the selection to the row that takes its position. A board with no item
+    /// has no selection. A new selection is the first item.
     ///
-    /// The job comes second. The selection follows its job inside the run.
-    /// When the job is gone, the job at the old position is selected, or the
-    /// last job when the old position is past the end. A re-run gives new job
-    /// IDs, thus the highlight then stays on the job of the same name. When
-    /// the run shows no job row, the run row is selected.
+    /// The job comes second, for a run only. The selection follows its job
+    /// inside the run. When the job is gone, the job at the old position is
+    /// selected, or the last job when the old position is past the end. A
+    /// re-run gives new job IDs, thus the highlight then stays on the job of
+    /// the same name. When the run shows no job row, the run row is selected.
     fn settle(&mut self, now: DateTime<Utc>) {
-        let runs = self.shown_runs(now);
-        let position = match self.selected {
+        let items = self.shown_items(now);
+        let position = match &self.selected {
             None => 0,
-            Some(Selection { run: (id, old), .. }) => runs
+            Some(Selection {
+                item: (key, old), ..
+            }) => items
                 .iter()
-                .position(|run| run.id == id)
-                .unwrap_or_else(|| old.min(runs.len().saturating_sub(1))),
+                .position(|item| item.has_key(key))
+                .unwrap_or_else(|| (*old).min(items.len().saturating_sub(1))),
         };
         let old_job = self
             .selected
-            .filter(|old| runs.get(position).is_some_and(|run| run.id == old.run.0))
+            .as_ref()
+            .filter(|old| {
+                items
+                    .get(position)
+                    .is_some_and(|item| item.has_key(&old.item.0))
+            })
             .and_then(|old| old.job);
-        let selected = runs.get(position).map(|run| Selection {
-            run: (run.id, position),
-            job: self.settled_job(run.id, old_job),
+        let selected = items.get(position).map(|item| Selection {
+            item: (item.key(), position),
+            job: match item {
+                Item::Run(run) => self.settled_job(run.id, old_job),
+                Item::Entry(_) | Item::Departure(_) => None,
+            },
         });
-        let shown: BTreeSet<RunId> = runs.iter().map(|run| run.id).collect();
+        let shown: BTreeSet<RunId> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Run(run) => Some(run.id),
+                Item::Entry(_) | Item::Departure(_) => None,
+            })
+            .collect();
         self.selected = selected;
         self.expanded.retain(|id| shown.contains(id));
         self.jobs.retain(|id, _| shown.contains(id));
@@ -450,33 +652,81 @@ impl Board {
         Some((jobs[index].id, index))
     }
 
-    /// Builds the full list of rows. The list has two sections.
+    /// Builds the full list of rows.
     ///
-    /// The selected row carries the selection mark. This is the row of the
-    /// selected run, or the row of its selected job. The block of each
-    /// expanded run follows the row of that run.
+    /// The list has the two merge sections when the board holds a merge
+    /// queue, and then the two run sections. The selected row carries the
+    /// selection mark. This is the row of the selected item, or the row of
+    /// its selected job. The block of each expanded run follows the row of
+    /// that run.
     fn build_rows(&self, now: DateTime<Utc>) -> Vec<Row<'_>> {
+        let selected = self.selected.as_ref();
+        let mut rows = Vec::new();
+        let mut first = 0;
+        if !self.queues.is_empty() {
+            let (entries, departures) = self.queue_sections(now);
+            rows.push(Row::Header {
+                section: Section::Queue,
+                count: entries.len(),
+                passed: 0,
+                failed: 0,
+                cancelled: 0,
+            });
+            if entries.is_empty() {
+                rows.push(Row::Empty(Section::Queue));
+            }
+            rows.extend(
+                entries
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, &entry)| Row::Entry {
+                        entry,
+                        selected: marks_item(selected, first + offset),
+                    }),
+            );
+            first += entries.len();
+            let count_of = |outcome: Outcome| {
+                departures
+                    .iter()
+                    .filter(|departure| departure.outcome == outcome)
+                    .count()
+            };
+            rows.push(Row::Header {
+                section: Section::History,
+                count: departures.len(),
+                passed: count_of(Outcome::Merged),
+                failed: count_of(Outcome::Failed),
+                cancelled: count_of(Outcome::Removed),
+            });
+            if departures.is_empty() {
+                rows.push(Row::Empty(Section::History));
+            }
+            rows.extend(
+                departures
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, &departure)| Row::Departure {
+                        departure,
+                        selected: marks_item(selected, first + offset),
+                    }),
+            );
+            first += departures.len();
+        }
         let (active, recent) = self.sections(now);
         let count_of = |state: RunState| recent.iter().filter(|run| run.state == state).count();
-        let mut rows = vec![Row::Header {
+        let view = JobView {
+            jobs: &self.jobs,
+            errors: &self.errors,
+            expanded: &self.expanded,
+        };
+        rows.push(Row::Header {
             section: Section::Active,
             count: active.len(),
             passed: 0,
             failed: 0,
             cancelled: 0,
-        }];
-        push_runs(
-            &mut rows,
-            &active,
-            Section::Active,
-            0,
-            self.selected,
-            JobView {
-                jobs: &self.jobs,
-                errors: &self.errors,
-                expanded: &self.expanded,
-            },
-        );
+        });
+        push_runs(&mut rows, &active, Section::Active, first, selected, view);
         rows.push(Row::Header {
             section: Section::Recent,
             count: recent.len(),
@@ -488,13 +738,9 @@ impl Board {
             &mut rows,
             &recent,
             Section::Recent,
-            active.len(),
-            self.selected,
-            JobView {
-                jobs: &self.jobs,
-                errors: &self.errors,
-                expanded: &self.expanded,
-            },
+            first + active.len(),
+            selected,
+            view,
         );
         rows
     }
@@ -502,22 +748,22 @@ impl Board {
     /// Expands the run of the selection. The run shows its jobs at once when
     /// the board holds an answer for it. Else it shows a loading row until
     /// `set_jobs` gives its jobs. A run that is already expanded changes
-    /// nothing. On a job row, the run is already expanded. With no selection,
-    /// nothing happens.
+    /// nothing. On a job row, the run is already expanded. A pull request
+    /// row, or no selection, changes nothing.
     pub fn expand(&mut self, now: DateTime<Utc>) {
         self.settle(now);
-        if let Some(Selection { run: (id, _), .. }) = self.selected {
+        if let Some(id) = self.selected.as_ref().and_then(Selection::run) {
             self.expanded.insert(id);
         }
     }
 
     /// Collapses the run of the selection. The board keeps the job answer of
     /// the run, thus the run row keeps its marker. On a job row, the selection
-    /// goes to the row of that run. A run that is not expanded, or no
-    /// selection, changes nothing.
+    /// goes to the row of that run. A run that is not expanded, a pull request
+    /// row, or no selection changes nothing.
     pub fn collapse(&mut self, now: DateTime<Utc>) {
         self.settle(now);
-        if let Some(Selection { run: (id, _), .. }) = self.selected {
+        if let Some(id) = self.selected.as_ref().and_then(Selection::run) {
             self.expanded.remove(&id);
         }
     }
@@ -567,13 +813,13 @@ impl Board {
             .collect()
     }
 
-    /// Moves the selection to the next row: a run row or a job row.
+    /// Moves the selection to the next row: an item row or a job row.
     pub fn select_next(&mut self, now: DateTime<Utc>) {
         self.settle(now);
         self.move_selection(now, |index, count| (index + 1).min(count - 1));
     }
 
-    /// Moves the selection to the previous row: a run row or a job row.
+    /// Moves the selection to the previous row: an item row or a job row.
     pub fn select_previous(&mut self, now: DateTime<Utc>) {
         self.settle(now);
         self.move_selection(now, |index, _| index.saturating_sub(1));
@@ -582,42 +828,79 @@ impl Board {
     /// Moves the selection to the row at the position that `target` gives.
     ///
     /// `target` gets the current position and the number of rows that the
-    /// selection can mark. The rows are the run rows and the job rows of the
+    /// selection can mark. The rows are the item rows and the job rows of the
     /// expanded runs. When the selection is not among them, it stays.
     fn move_selection(&mut self, now: DateTime<Utc>, target: impl Fn(usize, usize) -> usize) {
         let slots = self.selectable_rows(now);
         let moved = self
             .selected
-            .and_then(|current| slots.iter().position(|slot| *slot == current))
-            .and_then(|index| slots.get(target(index, slots.len())).copied());
+            .as_ref()
+            .and_then(|current| slots.iter().position(|slot| slot == current))
+            .and_then(|index| slots.get(target(index, slots.len())).cloned());
         if moved.is_some() {
             self.selected = moved;
         }
     }
 
+    /// Gives the item of the selection at `now`, and the job when a job row is
+    /// selected. The value is `None` when the board has no item.
+    fn selected_item(&mut self, now: DateTime<Utc>) -> Option<(Item<'_>, Option<&Job>)> {
+        self.settle(now);
+        let Selection {
+            item: (key, _),
+            job,
+        } = self.selected.clone()?;
+        let item = self
+            .shown_items(now)
+            .into_iter()
+            .find(|item| item.has_key(&key))?;
+        let job = match item {
+            Item::Run(run) => job.and_then(|(_, index)| self.shown_jobs(run.id).get(index)),
+            Item::Entry(_) | Item::Departure(_) => None,
+        };
+        Some((item, job))
+    }
+
     /// Gives the run of the selection at `now`, and the job when a job row is
-    /// selected. The value is `None` when the board has no run.
+    /// selected. The value is `None` when the board has no item, and when a
+    /// pull request row is selected.
     ///
     /// It calls `settle` first, as `selected_url` does.
     pub fn selected_target(&mut self, now: DateTime<Utc>) -> Option<(&Run, Option<&Job>)> {
-        self.settle(now);
-        let Selection { run: (id, _), job } = self.selected?;
-        let run = self.shown_runs(now).into_iter().find(|run| run.id == id)?;
-        let job = job.and_then(|(_, index)| self.shown_jobs(id).get(index));
-        Some((run, job))
+        match self.selected_item(now)? {
+            (Item::Run(run), job) => Some((run, job)),
+            (Item::Entry(_) | Item::Departure(_), _) => None,
+        }
     }
 
-    /// The address of the selected row, or `None` when the board has no run.
+    /// The number of the pull request of the selected row, or `None` when the
+    /// selected row is not a merge queue row.
+    pub fn selected_pull(&mut self, now: DateTime<Utc>) -> Option<PullNumber> {
+        match self.selected_item(now)?.0 {
+            Item::Entry(entry) => Some(entry.pull),
+            Item::Departure(departure) => Some(departure.pull),
+            Item::Run(_) => None,
+        }
+    }
+
+    /// The address of the selected row, or `None` when the board has no item.
     ///
-    /// On a run row, this is the address of the run. On a job row, this is the
+    /// On a pull request row, this is the address of the pull request. On a
+    /// run row, this is the address of the run. On a job row, this is the
     /// address of the job, and the address of the run when the job has none.
     pub fn selected_url(&mut self, now: DateTime<Utc>) -> Option<String> {
-        let (run, job) = self.selected_target(now)?;
+        let (item, job) = self.selected_item(now)?;
         let job_url = job
             .map(|job| job.url.as_str())
             .filter(|url| !url.is_empty());
-        Some(job_url.unwrap_or(run.url.as_str()).to_owned())
+        Some(job_url.unwrap_or(item.url()).to_owned())
     }
+}
+
+/// True when `selected` marks the item row at `position` itself, and not one
+/// of its job rows.
+fn marks_item(selected: Option<&Selection>, position: usize) -> bool {
+    selected.is_some_and(|selection| selection.item.1 == position && selection.job.is_none())
 }
 
 /// Finds the scroll offset for a view of `height` rows over `len` rows.
@@ -667,7 +950,7 @@ struct JobView<'a> {
 
 /// Adds the runs of one section to `rows`, or the empty row when there is none.
 ///
-/// `first` is the position of the first run of `runs` among all runs. The row
+/// `first` is the position of the first run of `runs` among all items. The row
 /// of the run at the position of `selected` gets the mark when the selection
 /// has no job part. Otherwise the job row at the selected job position gets
 /// the mark. The state of each run row comes from the job answer of the run,
@@ -678,14 +961,14 @@ fn push_runs<'a>(
     runs: &[&'a Run],
     section: Section,
     first: usize,
-    selected: Option<Selection>,
+    selected: Option<&Selection>,
     view: JobView<'a>,
 ) {
     if runs.is_empty() {
         rows.push(Row::Empty(section));
     }
     for (offset, &run) in runs.iter().enumerate() {
-        let here = selected.filter(|selection| selection.run.1 == first + offset);
+        let here = selected.filter(|selection| selection.item.1 == first + offset);
         let answer = view.jobs.get(&run.id);
         let jobs = match answer {
             Some(Jobs::Ready(jobs) | Jobs::Failed { jobs, .. }) => jobs.as_slice(),
@@ -737,8 +1020,8 @@ fn push_jobs<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Duration as Span, TimeZone};
     use crate::queue::{EntryState, Outcome};
+    use chrono::{Duration as Span, TimeZone};
 
     const HOUR: u64 = 3600;
 
@@ -2871,7 +3154,10 @@ mod tests {
         );
         board.set_queue(
             &repo("a/x"),
-            Ok(vec![queue_entry("a/x", 7, 2, 3), queue_entry("a/x", 8, 1, 4)]),
+            Ok(vec![
+                queue_entry("a/x", 7, 2, 3),
+                queue_entry("a/x", 8, 1, 4),
+            ]),
             Ok(Vec::new()),
         );
         assert_eq!(
@@ -2932,10 +3218,7 @@ mod tests {
 
     #[test]
     fn a_failed_event_read_keeps_the_last_departures_and_lists_its_error() {
-        let mut board = queue_board(
-            Vec::new(),
-            vec![departure("a/x", 2, Outcome::Merged, 10)],
-        );
+        let mut board = queue_board(Vec::new(), vec![departure("a/x", 2, Outcome::Merged, 10)]);
         board.set_queue(&repo("a/x"), Ok(Vec::new()), Err("boom".to_owned()));
         assert!(shape(&board.rows(now())).contains(&"Departure(a/x#2)".to_owned()));
         assert_eq!(board.errors(), [(&repo("a/x"), "merge history: boom")]);
@@ -3104,9 +3387,13 @@ mod tests {
     #[test]
     fn the_selection_stays_on_its_pull_request_when_rows_arrive_above_it() {
         let mut board = queue_board(vec![queue_entry("a/x", 7, 1, 3)], Vec::new());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Entry(a/x#7)*"));
         board.set_queue(
             &repo("a/x"),
-            Ok(vec![queue_entry("a/x", 6, 1, 9), queue_entry("a/x", 7, 2, 3)]),
+            Ok(vec![
+                queue_entry("a/x", 6, 1, 9),
+                queue_entry("a/x", 7, 2, 3),
+            ]),
             Ok(Vec::new()),
         );
         assert_eq!(selected_text(&mut board).as_deref(), Some("Entry(a/x#7)*"));
@@ -3132,15 +3419,20 @@ mod tests {
 
     #[test]
     fn when_the_selected_entry_leaves_the_queue_the_row_at_its_position_is_selected() {
-        let mut board = queue_board(vec![queue_entry("a/x", 7, 1, 3)], Vec::new());
+        let mut board = queue_board(
+            vec![queue_entry("a/x", 7, 1, 3), queue_entry("a/x", 8, 2, 2)],
+            Vec::new(),
+        );
+        board.select_next(now());
+        assert_eq!(selected_text(&mut board).as_deref(), Some("Entry(a/x#8)*"));
         board.set_queue(
             &repo("a/x"),
-            Ok(Vec::new()),
-            Ok(vec![departure("a/x", 7, Outcome::Merged, 0)]),
+            Ok(vec![queue_entry("a/x", 7, 1, 3)]),
+            Ok(vec![departure("a/x", 8, Outcome::Merged, 0)]),
         );
         assert_eq!(
             selected_text(&mut board).as_deref(),
-            Some("Departure(a/x#7)*")
+            Some("Departure(a/x#8)*")
         );
     }
 
