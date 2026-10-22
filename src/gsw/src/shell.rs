@@ -1026,7 +1026,7 @@ mod run_tests {
             "the stub answers 0, so the probe must report the command present",
         );
         let pull_request =
-            ShellCommand::new(Some(DEFAULT_PR_COMMAND), DEFAULT_ISSUE_COMMAND).expect("a name");
+            ShellCommand::new(None, DEFAULT_PR_COMMAND).expect("the default names a command");
         let steps = Steps::new(Some(pull_request), Some(default_command()))
             .expect("two commands are steps");
         let outcome = run(run_stub.as_shell(), &steps, workdir.path());

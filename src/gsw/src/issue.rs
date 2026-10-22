@@ -1,14 +1,16 @@
-//! Opening the issue that the branch names, from watch mode.
+//! Opening the pull request or the issue of the branch, from watch mode.
 //!
-//! The `G` key of watch mode runs one command in the user's own interactive
-//! shell. That command is usually a shell function, so only a shell can find
-//! it and only a shell can run it. [`crate::shell`] asks the shell both
-//! questions, and it starts the child — for this key and for every other key
-//! that runs a command the user supplies.
+//! The `G` key of watch mode runs up to two commands in the user's own
+//! interactive shell. The command of the pull request runs first. Where it
+//! fails, the command of the issue runs, so a branch with no pull request
+//! still opens its issue. Each command is usually a shell function, so only a
+//! shell can find it and only a shell can run it. [`crate::shell`] asks the
+//! shell both questions, and it starts each child — for this key and for every
+//! other key that runs a command the user supplies.
 //!
-//! What is here is what belongs to `G` alone: the variable that names its
-//! command, the name it falls back on, how long a run gets, and the words a
-//! finished run leaves under the frame.
+//! What is here is what belongs to `G` alone: the variables that name its
+//! commands, the names they fall back on, the order of the steps, how long a
+//! press gets, and the words a finished press leaves under the frame.
 
 use std::ffi::OsStr;
 use std::path::Path;
@@ -218,7 +220,7 @@ pub(crate) fn run(shell: &OsStr, steps: &Steps, workdir: &Path) -> IssueOutcome 
 ///    message.
 /// 4. A step that is still running at the deadline ends the press. The next
 ///    step does not start, because two commands that open a page at the same
-///    time is worse than one that is slow. The message names that step and
+///    time are worse than one command that is slow. The message names that step and
 ///    the whole deadline of the press.
 fn run_in(
     shell: &OsStr,
@@ -397,8 +399,8 @@ mod run_tests {
     /// The press of two steps: the pull request command, then the issue
     /// command.
     fn two_steps() -> Steps {
-        let pull_request = ShellCommand::new(Some(DEFAULT_PR_COMMAND), DEFAULT_ISSUE_COMMAND)
-            .expect("a name for the pull request command");
+        let pull_request =
+            ShellCommand::new(None, DEFAULT_PR_COMMAND).expect("the default names a command");
         let issue =
             ShellCommand::new(None, DEFAULT_ISSUE_COMMAND).expect("the default names a command");
         Steps::new(Some(pull_request), Some(issue)).expect("two commands are steps")

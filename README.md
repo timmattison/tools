@@ -562,7 +562,8 @@ cannot hang the caller. Used by `cwt` and `ha`.
     budget pushes the timed refresh out past the interval, and the countdown shows the longer wait
     rather than promising one it will not keep.
   - Watch-mode keys: `q` or Ctrl-C quits, `r` forces an immediate refresh, `p` pushes the
-    current branch, `G` opens the issue the branch names, `R` rebases the branch onto the base
+    current branch, `G` opens the pull request of the branch (or the issue the branch names when
+    there is no pull request), `R` rebases the branch onto the base
     and pushes it, `M` merges the base into the branch and pushes it, `m` measures a rebase and
     a merge against the default branch, and the arrow keys move the watch between the worktrees
     of the repository. Ctrl-C quits from anywhere, including while a push is in flight.
@@ -634,34 +635,48 @@ cannot hang the caller. Used by `cwt` and `ha`.
       the way it always has. The fade is the 24-bit gradient the commit log uses, under the same
       `--truecolor`/`--no-truecolor` control; without truecolor the message simply dims halfway
       through its life instead.
-  - `G` opens the issue of the branch. A worktree branch usually names one — `issue-475` — and
-    the command that turns that name into a page is yours, not gsw's: `G` runs one command in
-    your own interactive shell, with the work tree as its current directory.
-    - `GSW_ISSUE_COMMAND` holds the command, and it defaults to `ggs`. Set it to an empty string
-      to turn the key off, which is also what to do if you have no such command: this repository
-      ships none, and the default is simply the name these plans are written with.
-    - **The value is a whole command line, so it can carry arguments.**
+  - `G` opens the pull request of the branch. Where the branch has no pull request, `G` opens the
+    issue that the branch names — `issue-475` names issue 475. The commands that find these pages
+    are yours, not gsw's: `G` runs them in your own interactive shell, with the work tree as their
+    current directory.
+    - `GSW_PR_COMMAND` holds the command that `G` runs first, and it defaults to `ggsp`.
+      `GSW_ISSUE_COMMAND` holds the command that `G` runs second, and it defaults to `ggs`. This
+      repository ships neither one. The defaults are the names these plans are written with.
+    - **The first command that exits 0 completes the press.** Where the pull request command exits
+      with a different status, gsw runs the issue command in the same work tree. On a branch with
+      no pull request, the first step always fails. That failure is the usual path and not an
+      error, so gsw shows nothing of it: where the issue command opens the page, the frame gets no
+      row. Where both steps fail, the row shows the last line of the issue command, because that
+      line gives the last reason that no page opened.
+    - Set a variable to an empty string to remove its step. An empty `GSW_PR_COMMAND` gives the `G`
+      of earlier versions, which opens the issue. An empty value in both variables turns the key
+      off, which is also what to do if you have neither command.
+    - **Each value is a whole command line, so it can carry arguments.**
       `GSW_ISSUE_COMMAND='gh issue view --web'` works, the way `WN_START_COMMAND` takes
       `gh issue develop`. gsw asks your shell about the first word and runs the whole line, so
       the first word is the part that has to exist and everything after it is yours: the shell
       reads those arguments the way it reads arguments at an interactive prompt.
-    - The command is usually a shell function, and a function lives only inside a shell. So gsw
-      asks your shell once, at startup, with `$SHELL -ic 'command -v <first word>'` —
+    - Each command is usually a shell function, and a function lives only inside a shell. So gsw
+      asks your shell once, at startup, about each command, with
+      `$SHELL -ic 'command -v <first word>'` —
       `command -v` reports a function and an alias in both bash and zsh, and `-i` is what makes
-      the rc file load. The answer arrives on the watch loop's own channel, so nothing waits for
-      it: until it comes, `G` does nothing. An rc file that never returns is given five seconds,
+      the rc file load. Each answer arrives on the watch loop's own channel, so nothing waits for
+      it: until one comes, `G` does nothing. An rc file that never returns is given five seconds,
       after which the command is treated as absent and the whole process group of that shell is
       killed — the shell itself and anything it started, because an rc file that hangs hangs
       inside some command it ran, not inside a builtin. So a slow rc file cannot leave a process
       behind for the life of the session.
-    - **Where the command does not exist, `G` does nothing and says nothing** — the way an
+    - **Where only one of the two commands exists, `G` runs that command alone.** A shell that has
+      `ggs` but not `ggsp` thus keeps the `G` of earlier versions.
+    - **Where neither command exists, `G` does nothing and says nothing** — the way an
       unbound key does. That is the one silent case the key has: every other outcome speaks.
       Because the question is asked once, a function you add to your rc file after gsw started
       needs a restart.
     - **On a remote shell, `G` asks once more.** The browser opens on the machine that runs gsw, and
       on a remote shell nobody sits at that machine — so the first `G` runs nothing and puts
-      `remote shell — press G again to run ggs` under the frame, where the command named is whatever
-      `GSW_ISSUE_COMMAND` holds. The second `G` runs it, for as long as that message is on the
+      `remote shell — press G again to run ggsp, then ggs` under the frame, where the commands
+      named are whatever the two variables hold. Where only one command exists, the message names
+      only that command. The second `G` runs the steps, for as long as that message is on the
       screen. gsw decides once, at start, whether the shell is remote: it is remote when
       `SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY` is in the environment, or when a `mosh-server`
       stands above the process — mosh carries none of those variables into the shell it starts, so
@@ -673,15 +688,15 @@ cannot hang the caller. Used by `cwt` and `ha`.
       multiplexer that starts its server as a daemon: that server reparents to PID 1, and the walk
       up the process tree stops there. gsw answers that for Zellij through the Zellij client, which
       keeps the chain. A session viewed through tmux reports whatever stands above the tmux server.
-    - A run that works costs the frame no row: the browser is the answer. A run that fails puts
-      the last line the command wrote under the frame, where it waits for a key the way git's
-      error text does — `ggs` refuses on a branch that names no issue, and that refusal is the
-      whole reason no page opened. `G` works while a push runs, and a message that arrives then
+    - A press that opens a page costs the frame no row: the browser is the answer. A press that
+      fails puts the last line the issue command wrote under the frame, where it waits for a key
+      the way git's error text does — `ggs` refuses on a branch that names no issue, and that
+      refusal is the whole reason no page opened. `G` works while a push runs, and a message that arrives then
       waits for the row rather than taking it from the push. A push takes minutes, so a second
       `G` can refuse while the first refusal is still waiting: the messages queue up, and each
       one takes the row in the order it arrived and waits for a key of its own. Four wait at
       most. Past that the message that arrives is the one dropped, because the first refusal
-      says what went wrong and the ones after it repeat it. The child gets no terminal, so it
+      says what went wrong and the ones after it repeat it. Each child gets no terminal, so it
       cannot read the keyboard gsw reads, and it gets no `GIT_` variable out of gsw's own
       environment, so it cannot be aimed at another repository. The rule there is the `GIT_`
       prefix and never a list of names: `GIT_DIR` aims git elsewhere, and so do `GIT_COMMON_DIR`
@@ -689,11 +704,15 @@ cannot hang the caller. Used by `cwt` and `ha`.
       variables you state on purpose stay: `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_SSH`,
       `GIT_SSH_COMMAND`, `GIT_ASKPASS` and `GIT_TERMINAL_PROMPT`. A pre-commit hook exports
       none of those. Your shell or direnv does.
-    - A run gets a minute. One run at a time is the rule, so a run that never ends would hold `G`
+    - A press gets a minute, and its two steps share that minute, so `G` never stays busy for
+      more than 60 seconds. One run at a time is the rule, so a run that never ends would hold `G`
       for the rest of the session — and a key that does nothing and says nothing is exactly what
       an unbound key looks like. So after 60 seconds gsw stops waiting, says
-      `ggs has not finished after 60s` under the frame (with the last line the command wrote
-      after it, where there is one), and gives the key back.
+      `ggsp has not finished after 60s` under the frame (it names the step that is still running,
+      with the last line that command wrote after it, where there is one), and gives the key back.
+      Where the first step is still running at that point, gsw does not start the second step:
+      the first step can still open the pull request after the minute, and a second step then
+      opens a second page.
     - **gsw stops waiting; it does not stop the command.** Your rc file is gsw's own question and
       gsw ends it — that shell and its whole process group — which is the five seconds above.
       The run is *your* command: a command that

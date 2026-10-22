@@ -939,7 +939,7 @@ enum IssuePress {
 /// The `G` key's own state, for the life of one watch-mode run.
 ///
 /// Four facts, and they are one value because one key reads all of them: the
-/// command each probe found, whether a run of it is in flight, where the person
+/// command each probe found, whether a press of them is in flight, where the person
 /// who reads this screen sits, and whether a message that asks for a second
 /// press stands. None of them is an [`InputMode`], because each changes what
 /// this one key does and changes no other key.
@@ -1958,7 +1958,7 @@ fn read_value(name: &str) -> Option<String> {
 /// and report each answer on the loop's own channel.
 ///
 /// **One thread and one shell for each command.** `G` has two commands, so the
-/// four keys that run commands have four probes. A shell that answered for several
+/// three keys that run commands have four probes. A shell that answered for several
 /// names at once would need its standard output parsed, and an rc file can
 /// print to that output — so the answer of such a shell says as much about the
 /// banner of the user as about the commands. Exit status carries one answer,
