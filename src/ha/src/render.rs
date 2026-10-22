@@ -2887,8 +2887,8 @@ mod tests {
             }
         }
         assert_eq!(
-            column_of(whole, "7001") + 4,
-            column_of(cut, "7002") + 4,
+            last_digit_column(whole, "7001"),
+            last_digit_column(cut, "7002"),
             "the run IDs do not end in the same column"
         );
     }
