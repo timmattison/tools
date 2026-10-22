@@ -9204,9 +9204,26 @@ mod push_loop_tests {
         crate::issue::Steps::new(None, Some(found_command())).expect("one command is a step")
     }
 
+    /// The command the probe of the pull request found.
+    fn found_pr_command() -> crate::shell::ShellCommand {
+        crate::shell::ShellCommand::new(None, crate::issue::DEFAULT_PR_COMMAND)
+            .expect("the default names a command")
+    }
+
+    /// The steps of a press whose probes found both commands.
+    fn both_steps() -> crate::issue::Steps {
+        crate::issue::Steps::new(Some(found_pr_command()), Some(found_command()))
+            .expect("two commands are steps")
+    }
+
     /// The probe's answer, as the loop receives it.
     fn probe_answered() -> Event {
         Event::IssueCommandFound(crate::issue::Page::Issue, found_command())
+    }
+
+    /// The answer of the probe of the pull request, as the loop receives it.
+    fn pr_probe_answered() -> Event {
+        Event::IssueCommandFound(crate::issue::Page::PullRequest, found_pr_command())
     }
 
     /// One press of `G`.
@@ -9242,6 +9259,17 @@ mod push_loop_tests {
             issue.press(Instant::now()),
             IssuePress::Run(found_steps()),
             "a local shell must run the command on the first press",
+        );
+    }
+
+    #[test]
+    fn a_press_that_found_both_commands_runs_the_pull_request_command_first() {
+        let mut issue = issue_run_in(crate::remote::Session::Local);
+        issue.found(crate::issue::Page::PullRequest, found_pr_command());
+        assert_eq!(
+            issue.press(Instant::now()),
+            IssuePress::Run(both_steps()),
+            "a press must try the pull request command first and the issue command after it",
         );
     }
 
