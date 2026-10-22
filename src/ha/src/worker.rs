@@ -43,6 +43,7 @@ use chrono::{DateTime, Utc};
 
 use crate::github::{RepoList, RunList, RunQuery, Source, SourceError};
 use crate::job::Job;
+use crate::queue::{Departure, QueueEntry};
 use crate::run::{Run, RunId};
 use crate::settings::Settings;
 use crate::status::{OwnerProblem, RateLimit};
@@ -123,6 +124,27 @@ pub enum Update {
         run: RunId,
         /// The error text.
         error: String,
+    },
+    /// The watched repositories that have a merge queue. The worker sends the
+    /// set when it or the error changes. Before the first one, no repository
+    /// has a queue.
+    MergeQueues {
+        /// Every watched repository that has a merge queue.
+        repos: BTreeSet<RepoName>,
+        /// The first error of the checks of this cycle. `None` when no check
+        /// of this cycle failed.
+        error: Option<SourceError>,
+    },
+    /// The merge queue of one repository that has one.
+    MergeQueue {
+        /// The repository that holds the queue.
+        repo: RepoName,
+        /// The pull requests in the queue now, in queue order, or the error
+        /// of the read.
+        entries: Result<Vec<QueueEntry>, SourceError>,
+        /// Each time that a pull request left the queue, the oldest first, or
+        /// the error of the read of the events.
+        departures: Result<Vec<Departure>, SourceError>,
     },
     /// A cycle ended.
     CycleDone {
@@ -1147,7 +1169,7 @@ mod tests {
     use super::*;
     use crate::github::{RepoList, RunList, RunQuery, SourceError};
     use crate::job::Job;
-    use crate::queue::{PullNumber, QueueEntry, QueueEvent};
+    use crate::queue::{EntryState, EventKind, Outcome, PullNumber, QueueEntry, QueueEvent};
     use crate::run::{RunId, RunState};
     use crate::suspect::{Item, Suspicion};
     use crate::target::Target;
@@ -1184,6 +1206,26 @@ mod tests {
         /// its run, whatever the result, because a call can leave pages whether
         /// it fails or not. Each `forget_jobs` call removes its run.
         held: BTreeSet<(RepoName, RunId)>,
+        /// The repositories that have a merge queue.
+        queues: BTreeSet<RepoName>,
+        /// The error of each merge queue check. `None` gives the answer of
+        /// `queues`.
+        queue_error: Option<SourceError>,
+        /// The repositories of each merge queue check, in order.
+        queue_batches: Vec<Vec<RepoName>>,
+        /// The live entries of each queue. A repository with no entry here
+        /// has an empty queue.
+        entries: HashMap<RepoName, Result<Vec<QueueEntry>, SourceError>>,
+        /// The merge queue events of each repository. A repository with no
+        /// entry here has no event.
+        events: HashMap<RepoName, Result<Vec<QueueEvent>, SourceError>>,
+        /// The `since` of each read of the events, in order.
+        events_since: Vec<DateTime<Utc>>,
+        /// The head branches that each repository gives. A repository with
+        /// no entry here finds no pull request.
+        branches: HashMap<RepoName, Result<BTreeMap<PullNumber, String>, SourceError>>,
+        /// The pull requests of each branch lookup, in order.
+        branch_asks: Vec<Vec<PullNumber>>,
     }
 
     /// A [`Source`] that answers from a script and logs each call.
@@ -1292,13 +1334,23 @@ mod tests {
             &self,
             repos: &[RepoName],
         ) -> Result<BTreeSet<RepoName>, SourceError> {
-            let _ = repos;
-            Ok(BTreeSet::new())
+            let mut script = self.script();
+            script.calls.push(("queues", repos.len().to_string()));
+            script.queue_batches.push(repos.to_vec());
+            if let Some(error) = &script.queue_error {
+                return Err(error.clone());
+            }
+            Ok(repos
+                .iter()
+                .filter(|repo| script.queues.contains(*repo))
+                .cloned()
+                .collect())
         }
 
         fn queue_entries_of(&self, repo: &RepoName) -> Result<Vec<QueueEntry>, SourceError> {
-            let _ = repo;
-            Ok(Vec::new())
+            let mut script = self.script();
+            script.calls.push(("entries", repo.to_string()));
+            script.entries.get(repo).cloned().unwrap_or(Ok(Vec::new()))
         }
 
         fn queue_events_of(
@@ -1306,8 +1358,10 @@ mod tests {
             repo: &RepoName,
             since: DateTime<Utc>,
         ) -> Result<Vec<QueueEvent>, SourceError> {
-            let _ = (repo, since);
-            Ok(Vec::new())
+            let mut script = self.script();
+            script.calls.push(("events", repo.to_string()));
+            script.events_since.push(since);
+            script.events.get(repo).cloned().unwrap_or(Ok(Vec::new()))
         }
 
         fn pull_branches_of(
@@ -1315,8 +1369,14 @@ mod tests {
             repo: &RepoName,
             pulls: &[PullNumber],
         ) -> Result<BTreeMap<PullNumber, String>, SourceError> {
-            let _ = (repo, pulls);
-            Ok(BTreeMap::new())
+            let mut script = self.script();
+            script.calls.push(("branches", repo.to_string()));
+            script.branch_asks.push(pulls.to_vec());
+            script
+                .branches
+                .get(repo)
+                .cloned()
+                .unwrap_or(Ok(BTreeMap::new()))
         }
 
         fn rate_limit(&self) -> Option<RateLimit> {
@@ -3676,5 +3736,446 @@ mod tests {
             "{answers:?}"
         );
         assert!(calls_named(&fake, "run").is_empty());
+    }
+
+    /// A merge queue event of pull request `pull`, `minutes` before now.
+    fn queue_event(pull: u64, minutes: i64, kind: EventKind) -> QueueEvent {
+        QueueEvent {
+            pull: PullNumber(pull),
+            title: format!("pull {pull}"),
+            url: format!("https://example.test/pull/{pull}"),
+            at: Utc::now() - chrono::TimeDelta::minutes(minutes),
+            kind,
+        }
+    }
+
+    /// The events of one merge of pull request `pull` by the queue: the
+    /// addition 10 minutes before the merge, and the merge `minutes` before now.
+    fn merge_events(pull: u64, minutes: i64) -> Vec<QueueEvent> {
+        vec![
+            queue_event(pull, minutes + 10, EventKind::Added),
+            queue_event(pull, minutes, EventKind::Removed { by_queue: true }),
+            queue_event(pull, minutes, EventKind::Merged),
+        ]
+    }
+
+    /// An entry of the queue of `acme/a` for pull request `pull`.
+    fn entry(pull: u64, branch: &str) -> QueueEntry {
+        QueueEntry {
+            repo: repo("acme/a"),
+            pull: PullNumber(pull),
+            title: format!("pull {pull}"),
+            branch: branch.to_owned(),
+            position: 1,
+            state: EntryState::AwaitingChecks,
+            enqueued_at: Utc::now(),
+            url: format!("https://example.test/pull/{pull}"),
+        }
+    }
+
+    /// The argument of each call of the kind `what`, in order.
+    fn calls_of(fake: &FakeSource, what: &str) -> Vec<String> {
+        fake.script()
+            .calls
+            .iter()
+            .filter(|(kind, _)| *kind == what)
+            .map(|(_, argument)| argument.clone())
+            .collect()
+    }
+
+    /// The entries and the departures of the merge queue update of `wanted`.
+    #[expect(
+        clippy::type_complexity,
+        reason = "the pair holds the two fields of the update as they are"
+    )]
+    fn queue_of<'a>(
+        updates: &'a [Update],
+        wanted: &RepoName,
+    ) -> (
+        &'a Result<Vec<QueueEntry>, SourceError>,
+        &'a Result<Vec<Departure>, SourceError>,
+    ) {
+        updates
+            .iter()
+            .find_map(|update| match update {
+                Update::MergeQueue {
+                    repo,
+                    entries,
+                    departures,
+                } if repo == wanted => Some((entries, departures)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no MergeQueue update for {wanted}: {updates:?}"))
+    }
+
+    /// The departures of the merge queue update of `acme/a`, which must be good.
+    fn departures_of(updates: &[Update]) -> &[Departure] {
+        queue_of(updates, &repo("acme/a"))
+            .1
+            .as_ref()
+            .expect("good departures")
+    }
+
+    /// A fake in which `acme/a` has a merge queue.
+    fn fake_with_queue() -> Arc<FakeSource> {
+        let fake = Arc::new(FakeSource::default());
+        fake.script().queues.insert(repo("acme/a"));
+        fake
+    }
+
+    fn is_queue_update(update: &Update) -> bool {
+        matches!(
+            update,
+            Update::MergeQueues { .. } | Update::MergeQueue { .. }
+        )
+    }
+
+    #[test]
+    fn a_repository_with_a_merge_queue_gives_its_queue_before_the_runs() {
+        let fake = fake_with_queue();
+        fake.script()
+            .events
+            .insert(repo("acme/a"), Ok(merge_events(5, 30)));
+        let worker = spawn_with(
+            Arc::clone(&fake),
+            &settings(&["acme/a", "acme/b"]),
+            SLOW_CADENCE,
+        );
+
+        let updates = one_cycle(&worker);
+
+        assert!(matches!(updates[0], Update::Repos { .. }), "{updates:?}");
+        assert_eq!(
+            updates[1],
+            Update::MergeQueues {
+                repos: BTreeSet::from([repo("acme/a")]),
+                error: None
+            }
+        );
+        assert!(
+            matches!(&updates[2], Update::MergeQueue { repo: queue, .. } if *queue == repo("acme/a")),
+            "{updates:?}"
+        );
+        assert!(matches!(updates[3], Update::Runs { .. }), "{updates:?}");
+        let (entries, _) = queue_of(&updates, &repo("acme/a"));
+        assert_eq!(entries, &Ok(Vec::new()));
+        let departures = departures_of(&updates);
+        assert_eq!(departures.len(), 1, "{departures:?}");
+        assert_eq!(departures[0].pull, PullNumber(5));
+        assert_eq!(departures[0].outcome, Outcome::Merged);
+        assert_eq!(calls_of(&fake, "events"), ["acme/a"]);
+        assert_eq!(
+            fake.script().queue_batches,
+            [vec![repo("acme/a"), repo("acme/b")]]
+        );
+    }
+
+    #[test]
+    fn with_no_merge_queue_the_worker_reads_no_queue_and_sends_no_queue_update() {
+        let fake = Arc::new(FakeSource::default());
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+
+        let updates = one_cycle(&worker);
+
+        assert!(!updates.iter().any(is_queue_update), "{updates:?}");
+        assert_eq!(fake.script().queue_batches, [vec![repo("acme/a")]]);
+        assert!(calls_of(&fake, "events").is_empty());
+        assert!(calls_of(&fake, "entries").is_empty());
+    }
+
+    #[test]
+    fn the_check_asks_for_at_most_100_repositories_in_one_call() {
+        let fake = Arc::new(FakeSource::default());
+        let repos: Vec<RepoName> = (0..150).map(|index| repo(&format!("acme/r{index}"))).collect();
+        fake.script().owners.insert(owner("acme"), Ok(repos));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme"]), SLOW_CADENCE);
+
+        let _ = one_cycle(&worker);
+
+        let sizes: Vec<usize> = fake.script().queue_batches.iter().map(Vec::len).collect();
+        assert_eq!(sizes, [100, 50]);
+    }
+
+    #[test]
+    fn the_check_runs_again_only_at_the_slow_cadence() {
+        let fake = fake_with_queue();
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let _ = one_cycle(&worker);
+        refresh(&worker);
+        let second = one_cycle(&worker);
+
+        assert_eq!(fake.script().queue_batches.len(), 1);
+        assert!(
+            second
+                .iter()
+                .any(|update| matches!(update, Update::MergeQueue { .. })),
+            "the queue is still read: {second:?}"
+        );
+    }
+
+    #[test]
+    fn the_check_runs_on_each_cycle_of_the_slow_cadence() {
+        let fake = fake_with_queue();
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), Duration::ZERO);
+        let _ = one_cycle(&worker);
+        refresh(&worker);
+        let _ = one_cycle(&worker);
+
+        assert_eq!(fake.script().queue_batches.len(), 2);
+    }
+
+    #[test]
+    fn an_unchanged_set_of_queues_is_not_sent_again() {
+        let fake = fake_with_queue();
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), Duration::ZERO);
+        let _ = one_cycle(&worker);
+        refresh(&worker);
+        let second = one_cycle(&worker);
+
+        assert!(
+            !second
+                .iter()
+                .any(|update| matches!(update, Update::MergeQueues { .. })),
+            "{second:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_check_is_sent_and_runs_again_on_the_next_cycle() {
+        let fake = fake_with_queue();
+        let failure = SourceError::Failed("boom".to_owned());
+        fake.script().queue_error = Some(failure.clone());
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let first = one_cycle(&worker);
+        fake.script().queue_error = None;
+        refresh(&worker);
+        let second = one_cycle(&worker);
+
+        let sent = |updates: &[Update]| -> Vec<Update> {
+            updates
+                .iter()
+                .filter(|update| matches!(update, Update::MergeQueues { .. }))
+                .cloned()
+                .collect()
+        };
+        assert_eq!(
+            sent(&first),
+            [Update::MergeQueues {
+                repos: BTreeSet::new(),
+                error: Some(failure)
+            }]
+        );
+        assert!(calls_of(&fake, "events").len() <= 1);
+        assert_eq!(
+            sent(&second),
+            [Update::MergeQueues {
+                repos: BTreeSet::from([repo("acme/a")]),
+                error: None
+            }]
+        );
+        assert_eq!(fake.script().queue_batches.len(), 2);
+    }
+
+    #[test]
+    fn the_first_cycle_reads_the_live_entries() {
+        let fake = fake_with_queue();
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+
+        let _ = one_cycle(&worker);
+
+        assert_eq!(calls_of(&fake, "entries"), ["acme/a"]);
+    }
+
+    #[test]
+    fn an_empty_queue_is_not_read_again_while_the_events_show_no_open_entry() {
+        let fake = fake_with_queue();
+        fake.script()
+            .events
+            .insert(repo("acme/a"), Ok(merge_events(5, 30)));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let _ = one_cycle(&worker);
+        refresh(&worker);
+        let second = one_cycle(&worker);
+
+        assert_eq!(calls_of(&fake, "entries").len(), 1);
+        assert_eq!(calls_of(&fake, "events").len(), 2);
+        assert_eq!(queue_of(&second, &repo("acme/a")).0, &Ok(Vec::new()));
+    }
+
+    #[test]
+    fn an_open_entry_in_the_events_makes_the_next_read_due() {
+        let fake = fake_with_queue();
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let _ = one_cycle(&worker);
+        fake.script().events.insert(
+            repo("acme/a"),
+            Ok(vec![queue_event(5, 1, EventKind::Added)]),
+        );
+        refresh(&worker);
+        let _ = one_cycle(&worker);
+
+        assert_eq!(calls_of(&fake, "entries").len(), 2);
+    }
+
+    #[test]
+    fn a_read_that_held_entries_makes_the_next_read_due() {
+        let fake = fake_with_queue();
+        fake.script()
+            .entries
+            .insert(repo("acme/a"), Ok(vec![entry(5, "issue-5")]));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let first = one_cycle(&worker);
+        fake.script().entries.insert(repo("acme/a"), Ok(Vec::new()));
+        refresh(&worker);
+        let _ = one_cycle(&worker);
+        refresh(&worker);
+        let _ = one_cycle(&worker);
+
+        assert_eq!(
+            queue_of(&first, &repo("acme/a")).0,
+            &Ok(vec![entry(5, "issue-5")])
+        );
+        assert_eq!(
+            calls_of(&fake, "entries").len(),
+            2,
+            "the third cycle must not read an empty queue again"
+        );
+    }
+
+    #[test]
+    fn a_failed_entry_read_is_sent_and_is_due_again() {
+        let fake = fake_with_queue();
+        let failure = SourceError::Failed("boom".to_owned());
+        fake.script()
+            .entries
+            .insert(repo("acme/a"), Err(failure.clone()));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let first = one_cycle(&worker);
+        refresh(&worker);
+        let _ = one_cycle(&worker);
+
+        assert_eq!(queue_of(&first, &repo("acme/a")).0, &Err(failure));
+        assert_eq!(calls_of(&fake, "entries").len(), 2);
+    }
+
+    #[test]
+    fn a_failed_event_read_is_sent_and_the_entries_are_read() {
+        let fake = fake_with_queue();
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let _ = one_cycle(&worker);
+        let failure = SourceError::Failed("boom".to_owned());
+        fake.script()
+            .events
+            .insert(repo("acme/a"), Err(failure.clone()));
+        refresh(&worker);
+        let second = one_cycle(&worker);
+
+        assert_eq!(queue_of(&second, &repo("acme/a")).1, &Err(failure));
+        assert_eq!(calls_of(&fake, "entries").len(), 2);
+    }
+
+    #[test]
+    fn a_departure_takes_the_branch_of_the_entry_that_the_worker_saw() {
+        let fake = fake_with_queue();
+        fake.script()
+            .entries
+            .insert(repo("acme/a"), Ok(vec![entry(5, "issue-5")]));
+        fake.script().events.insert(
+            repo("acme/a"),
+            Ok(vec![queue_event(5, 11, EventKind::Added)]),
+        );
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let _ = one_cycle(&worker);
+        fake.script().entries.insert(repo("acme/a"), Ok(Vec::new()));
+        fake.script()
+            .events
+            .insert(repo("acme/a"), Ok(merge_events(5, 1)));
+        refresh(&worker);
+        let second = one_cycle(&worker);
+
+        let departures = departures_of(&second);
+        assert_eq!(departures.len(), 1, "{departures:?}");
+        assert_eq!(departures[0].branch, "issue-5");
+        assert!(calls_of(&fake, "branches").is_empty());
+    }
+
+    #[test]
+    fn a_departure_with_an_unknown_branch_is_looked_up_one_time() {
+        let fake = fake_with_queue();
+        fake.script().events.insert(
+            repo("acme/a"),
+            Ok([merge_events(7, 30), merge_events(8, 20)].concat()),
+        );
+        fake.script().branches.insert(
+            repo("acme/a"),
+            Ok(BTreeMap::from([
+                (PullNumber(7), "feature".to_owned()),
+                (PullNumber(8), "fix".to_owned()),
+            ])),
+        );
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let first = one_cycle(&worker);
+        refresh(&worker);
+        let second = one_cycle(&worker);
+
+        for updates in [&first, &second] {
+            let branches: Vec<&str> = departures_of(updates)
+                .iter()
+                .map(|departure| departure.branch.as_str())
+                .collect();
+            assert_eq!(branches, ["feature", "fix"]);
+        }
+        assert_eq!(
+            fake.script().branch_asks,
+            [vec![PullNumber(7), PullNumber(8)]]
+        );
+    }
+
+    #[test]
+    fn a_pull_request_that_github_cannot_find_is_not_looked_up_again() {
+        let fake = fake_with_queue();
+        fake.script()
+            .events
+            .insert(repo("acme/a"), Ok(merge_events(7, 30)));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let first = one_cycle(&worker);
+        refresh(&worker);
+        let _ = one_cycle(&worker);
+
+        assert_eq!(departures_of(&first)[0].branch, "");
+        assert_eq!(fake.script().branch_asks.len(), 1);
+    }
+
+    #[test]
+    fn a_failed_branch_lookup_is_tried_again_on_the_next_cycle() {
+        let fake = fake_with_queue();
+        fake.script()
+            .events
+            .insert(repo("acme/a"), Ok(merge_events(7, 30)));
+        fake.script().branches.insert(
+            repo("acme/a"),
+            Err(SourceError::Failed("boom".to_owned())),
+        );
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        let first = one_cycle(&worker);
+        refresh(&worker);
+        let _ = one_cycle(&worker);
+
+        assert_eq!(departures_of(&first)[0].branch, "");
+        assert_eq!(fake.script().branch_asks.len(), 2);
+    }
+
+    #[test]
+    fn the_events_reach_back_the_window_and_one_hour() {
+        let fake = fake_with_queue();
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+
+        let _ = one_cycle(&worker);
+
+        let expected = Utc::now() - chrono::TimeDelta::hours(8 + 1);
+        let since = fake.script().events_since.clone();
+        assert_eq!(since.len(), 1, "{since:?}");
+        let off = (since[0] - expected).abs();
+        assert!(off < chrono::TimeDelta::seconds(60), "off by {off}");
     }
 }

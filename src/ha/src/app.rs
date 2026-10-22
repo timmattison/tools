@@ -236,6 +236,7 @@ where
                 }
                 Update::Jobs { run, jobs } => self.board.set_jobs(run, jobs),
                 Update::JobsFailed { run, error } => self.board.fail_jobs(run, error),
+                Update::MergeQueues { .. } | Update::MergeQueue { .. } => {}
                 Update::Repos {
                     repos,
                     owner_errors,
