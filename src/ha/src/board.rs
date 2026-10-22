@@ -171,6 +171,14 @@ impl Board {
         self.read_at.retain(|repo, _| repos.contains(repo));
     }
 
+    /// The stale repositories of issue #599: each repository with an error,
+    /// sorted by repository. The time is the last good read, or `None` when
+    /// the repository never had one.
+    #[must_use]
+    pub fn stale(&self) -> Vec<(&RepoName, Option<DateTime<Utc>>)> {
+        Vec::new()
+    }
+
     /// The error of each failed repository, sorted by repository.
     #[must_use]
     pub fn errors(&self) -> Vec<(&RepoName, &str)> {
@@ -1182,6 +1190,32 @@ mod tests {
                 ("b/y".to_owned(), "HTTP 404"),
             ]
         );
+    }
+
+    #[test]
+    fn a_repository_is_stale_from_its_failure_until_its_next_good_read() {
+        let t1 = now() - Span::minutes(30);
+        let mut board = board();
+        board.replace(repo("b/y"), Vec::new(), t1);
+        board.fail(repo("b/y"), "HTTP 500".to_owned());
+        board.fail(repo("a/x"), "HTTP 404".to_owned());
+
+        let stale: Vec<(String, Option<DateTime<Utc>>)> = board
+            .stale()
+            .into_iter()
+            .map(|(repo, at)| (repo.to_string(), at))
+            .collect();
+        assert_eq!(
+            stale,
+            [("a/x".to_owned(), None), ("b/y".to_owned(), Some(t1))]
+        );
+
+        board.replace(repo("b/y"), Vec::new(), now());
+        assert_eq!(board.stale().len(), 1);
+        assert_eq!(board.stale()[0].0.to_string(), "a/x");
+
+        board.keep_only(&BTreeSet::from([repo("b/y")]));
+        assert!(board.stale().is_empty());
     }
 
     #[test]
