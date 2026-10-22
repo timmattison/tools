@@ -116,6 +116,8 @@ pub struct Board {
     window: Duration,
     runs: BTreeMap<RepoName, Vec<Run>>,
     errors: BTreeMap<RepoName, String>,
+    /// The time of the last good read of each repository.
+    read_at: BTreeMap<RepoName, DateTime<Utc>>,
     selected: Option<Selection>,
     offset: usize,
     /// The last job answer of each run that the board holds. A run in this map
@@ -133,6 +135,7 @@ impl Board {
             window,
             runs: BTreeMap::new(),
             errors: BTreeMap::new(),
+            read_at: BTreeMap::new(),
             selected: None,
             offset: 0,
             jobs: BTreeMap::new(),
@@ -147,10 +150,12 @@ impl Board {
     }
 
     /// Stores the runs of one repository and clears the error of that repository.
-    /// A repeated run ID keeps its first run only.
-    pub fn replace(&mut self, repo: RepoName, mut runs: Vec<Run>) {
+    /// `read_at` is the time of this good read. A repeated run ID keeps its
+    /// first run only.
+    pub fn replace(&mut self, repo: RepoName, mut runs: Vec<Run>, read_at: DateTime<Utc>) {
         keep_first_of_each_id(&mut runs, |run| run.id);
         self.errors.remove(&repo);
+        self.read_at.insert(repo.clone(), read_at);
         self.runs.insert(repo, runs);
     }
 
@@ -159,10 +164,11 @@ impl Board {
         self.errors.insert(repo, error);
     }
 
-    /// Drops the runs and the errors of every repository that is not in `repos`.
+    /// Drops the runs, the errors, and the read times of every repository that is not in `repos`.
     pub fn keep_only(&mut self, repos: &BTreeSet<RepoName>) {
         self.runs.retain(|repo, _| repos.contains(repo));
         self.errors.retain(|repo, _| repos.contains(repo));
+        self.read_at.retain(|repo, _| repos.contains(repo));
     }
 
     /// The error of each failed repository, sorted by repository.
@@ -758,6 +764,7 @@ mod tests {
                 run(4, "a/x", RunState::Passed, 50, 15),
                 run(2, "a/x", RunState::Passed, 30, 20),
             ],
+            now(),
         );
         let rows = board.rows(now());
         assert_eq!(
@@ -776,7 +783,11 @@ mod tests {
     #[test]
     fn an_empty_section_shows_an_empty_row_after_its_header() {
         let mut only_active = board();
-        only_active.replace(repo("a/x"), vec![run(1, "a/x", RunState::Running, 5, 1)]);
+        only_active.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Running, 5, 1)],
+            now(),
+        );
         let rows = only_active.rows(now());
         assert_eq!(
             shape(&rows)[2..],
@@ -784,7 +795,11 @@ mod tests {
         );
 
         let mut only_recent = board();
-        only_recent.replace(repo("a/x"), vec![run(2, "a/x", RunState::Passed, 30, 20)]);
+        only_recent.replace(
+            repo("a/x"),
+            vec![run(2, "a/x", RunState::Passed, 30, 20)],
+            now(),
+        );
         let rows = only_recent.rows(now());
         assert_eq!(
             shape(&rows)[..2],
@@ -803,6 +818,7 @@ mod tests {
                 run(3, "a/x", RunState::Other, 30, 25),
                 run(4, "a/x", RunState::Passed, 40, 30),
             ],
+            now(),
         );
         assert_eq!(
             shape(&board.rows(now())),
@@ -827,6 +843,7 @@ mod tests {
                 run(7, "a/x", RunState::Running, 10, 1),
                 run(5, "a/x", RunState::Running, 10, 1),
             ],
+            now(),
         );
         let rows = board.rows(now());
         assert_eq!(shape(&rows)[1..5], ["Run(8)", "Run(5)", "Run(7)", "Run(9)"]);
@@ -843,6 +860,7 @@ mod tests {
                 run(3, "a/x", RunState::Passed, 100, 30),
                 run(4, "a/x", RunState::Passed, 100, 30),
             ],
+            now(),
         );
         let rows = board.rows(now());
         assert_eq!(shape(&rows)[3..], ["Run(2)", "Run(4)", "Run(3)", "Run(1)"]);
@@ -861,6 +879,7 @@ mod tests {
                 run(5, "a/x", RunState::Cancelled, 50, 40),
                 run(6, "a/x", RunState::Other, 50, 15),
             ],
+            now(),
         );
         assert_eq!(
             shape(&board.rows(now())),
@@ -888,6 +907,7 @@ mod tests {
                 run(4, "a/x", RunState::Cancelled, 50, 13),
                 run(5, "a/x", RunState::Other, 50, 14),
             ],
+            now(),
         );
         board.replace(
             repo("b/y"),
@@ -898,6 +918,7 @@ mod tests {
                 run(9, "b/y", RunState::Failed, 50, 18),
                 run(10, "b/y", RunState::Running, 50, 1),
             ],
+            now(),
         );
         let rows = board.rows(now());
         let position = rows
@@ -954,7 +975,7 @@ mod tests {
             })
             .collect();
         let mut board = board();
-        board.replace(repo("a/x"), runs);
+        board.replace(repo("a/x"), runs, now());
         assert_eq!(
             shape(&board.rows(now())),
             [
@@ -976,6 +997,7 @@ mod tests {
                 finished_run(1, RunState::Cancelled, window + 100, window - 1),
                 finished_run(2, RunState::Cancelled, window + 100, window + 1),
             ],
+            now(),
         );
         assert_eq!(
             shape(&board.rows(now())),
@@ -998,6 +1020,7 @@ mod tests {
                 run(2, "a/x", RunState::Running, 20, 1),
                 run(3, "a/x", RunState::Passed, 60, 10),
             ],
+            now(),
         );
         board.select_next(now());
         assert_eq!(
@@ -1017,6 +1040,7 @@ mod tests {
                 run(2, "a/x", RunState::Cancelled, 20, 0),
                 run(3, "a/x", RunState::Passed, 60, 10),
             ],
+            now(),
         );
         assert_eq!(
             marked(&board.rows(now())),
@@ -1053,6 +1077,7 @@ mod tests {
                 finished_run(2, RunState::Passed, window + 100, window + 1),
                 finished_run(3, RunState::Failed, window + 100, window),
             ],
+            now(),
         );
         let rows = board.rows(now());
         assert_eq!(
@@ -1073,6 +1098,7 @@ mod tests {
         board.replace(
             repo("a/x"),
             vec![finished_run(1, RunState::Passed, 9 * 3600, 3600)],
+            now(),
         );
         assert_eq!(shape(&board.rows(now()))[3..], ["Run(1)"]);
     }
@@ -1086,6 +1112,7 @@ mod tests {
                 finished_run(1, RunState::Running, 3 * 24 * 3600, 3 * 24 * 3600),
                 finished_run(2, RunState::Queued, 20 * 3600, 20 * 3600),
             ],
+            now(),
         );
         assert_eq!(
             shape(&board.rows(now()))[..4],
@@ -1101,8 +1128,16 @@ mod tests {
     #[test]
     fn replace_changes_only_the_runs_of_its_repository() {
         let mut board = board();
-        board.replace(repo("a/x"), vec![run(1, "a/x", RunState::Running, 5, 1)]);
-        board.replace(repo("b/y"), vec![run(2, "b/y", RunState::Running, 4, 1)]);
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Running, 5, 1)],
+            now(),
+        );
+        board.replace(
+            repo("b/y"),
+            vec![run(2, "b/y", RunState::Running, 4, 1)],
+            now(),
+        );
         assert_eq!(shape(&board.rows(now()))[1..3], ["Run(1)", "Run(2)"]);
 
         board.replace(
@@ -1111,6 +1146,7 @@ mod tests {
                 run(3, "a/x", RunState::Running, 6, 1),
                 run(4, "a/x", RunState::Passed, 9, 8),
             ],
+            now(),
         );
         let rows = board.rows(now());
         let shown = shape(&rows);
@@ -1123,7 +1159,11 @@ mod tests {
     #[test]
     fn a_failed_repository_keeps_its_last_good_runs_and_lists_its_error() {
         let mut board = board();
-        board.replace(repo("a/x"), vec![run(1, "a/x", RunState::Running, 5, 1)]);
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Running, 5, 1)],
+            now(),
+        );
         board.fail(repo("b/y"), "HTTP 404".to_owned());
         board.fail(repo("a/x"), "timed out".to_owned());
         board.fail(repo("a/w"), "HTTP 500".to_owned());
@@ -1149,7 +1189,7 @@ mod tests {
         let mut board = board();
         board.fail(repo("a/x"), "timed out".to_owned());
         board.fail(repo("b/y"), "HTTP 404".to_owned());
-        board.replace(repo("a/x"), Vec::new());
+        board.replace(repo("a/x"), Vec::new(), now());
         let errors = board.errors();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].0.to_string(), "b/y");
@@ -1174,8 +1214,16 @@ mod tests {
     #[test]
     fn keep_only_drops_the_runs_and_errors_of_other_repositories() {
         let mut board = board();
-        board.replace(repo("a/x"), vec![run(1, "a/x", RunState::Running, 5, 1)]);
-        board.replace(repo("b/y"), vec![run(2, "b/y", RunState::Running, 4, 1)]);
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Running, 5, 1)],
+            now(),
+        );
+        board.replace(
+            repo("b/y"),
+            vec![run(2, "b/y", RunState::Running, 4, 1)],
+            now(),
+        );
         board.fail(repo("b/y"), "timed out".to_owned());
         board.fail(repo("c/z"), "HTTP 404".to_owned());
         board.fail(repo("a/x"), "HTTP 500".to_owned());
@@ -1201,6 +1249,7 @@ mod tests {
                 run(1, "a/x", RunState::Running, 5, 1),
                 run(2, "a/x", RunState::Passed, 30, 20),
             ],
+            now(),
         );
         assert_eq!(
             marked(&with_active.rows(now())),
@@ -1219,6 +1268,7 @@ mod tests {
                 run(3, "a/x", RunState::Passed, 30, 10),
                 run(2, "a/x", RunState::Failed, 30, 20),
             ],
+            now(),
         );
         assert_eq!(
             marked(&only_recent.rows(now()))[2..],
@@ -1255,6 +1305,7 @@ mod tests {
                 run(3, "a/x", RunState::Passed, 60, 10),
                 run(4, "a/x", RunState::Failed, 60, 20),
             ],
+            now(),
         );
         board
     }
@@ -1283,6 +1334,7 @@ mod tests {
                 run(5, "a/x", RunState::Running, 10, 1),
                 run(4, "a/x", RunState::Running, 5, 1),
             ],
+            now(),
         );
         let rows = board.rows(now());
         let shown = shape(&rows);
@@ -1349,6 +1401,7 @@ mod tests {
                 run(5, "b/y", RunState::Running, 90, 1),
                 run(6, "b/y", RunState::Passed, 60, 2),
             ],
+            now(),
         );
         let rows = board.rows(now());
         assert_eq!(
@@ -1383,6 +1436,7 @@ mod tests {
                 run(2, "a/x", RunState::Queued, 20, 1),
                 run(4, "a/x", RunState::Failed, 60, 20),
             ],
+            now(),
         );
         assert_eq!(selected_text(&mut board).as_deref(), Some("Run(4)*"));
     }
@@ -1401,6 +1455,7 @@ mod tests {
                 run(2, "a/x", RunState::Queued, 20, 1),
                 run(3, "a/x", RunState::Passed, 60, 10),
             ],
+            now(),
         );
         assert_eq!(selected_text(&mut board).as_deref(), Some("Run(3)*"));
     }
@@ -1427,7 +1482,7 @@ mod tests {
     fn with_no_run_left_nothing_is_selected_and_the_first_run_is_selected_again_later() {
         let mut board = four_runs_in_two_sections();
         select_third(&mut board);
-        board.replace(repo("a/x"), Vec::new());
+        board.replace(repo("a/x"), Vec::new(), now());
         assert_eq!(selected_text(&mut board), None);
         assert_eq!(board.selected_url(now()), None);
 
@@ -1437,6 +1492,7 @@ mod tests {
                 run(7, "a/x", RunState::Running, 30, 1),
                 run(8, "a/x", RunState::Passed, 60, 10),
             ],
+            now(),
         );
         assert_eq!(selected_text(&mut board).as_deref(), Some("Run(7)*"));
     }
@@ -1485,7 +1541,7 @@ mod tests {
             let finished = i64::try_from(id).expect("a small id") - 100;
             runs.push(run(id, "a/x", RunState::Passed, 300, finished));
         }
-        board.replace(repo("a/x"), runs);
+        board.replace(repo("a/x"), runs, now());
         board
     }
 
@@ -1573,7 +1629,11 @@ mod tests {
             board.select_next(now());
         }
         assert_eq!(board.view(now(), 4).first, 7);
-        board.replace(repo("a/x"), vec![run(1, "a/x", RunState::Running, 5, 1)]);
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Running, 5, 1)],
+            now(),
+        );
         let view = board.view(now(), 4);
         assert_eq!(view.first, 0);
         assert_eq!(view.rows.len(), 4);
@@ -1588,6 +1648,7 @@ mod tests {
                 run(1, "a/x", RunState::Running, 30, 1),
                 run(2, "a/x", RunState::Passed, 60, 10),
             ],
+            now(),
         );
         board
     }
@@ -1730,7 +1791,11 @@ mod tests {
     #[test]
     fn a_collapsed_run_keeps_the_running_marker_of_its_jobs() {
         let mut board = board();
-        board.replace(repo("a/x"), vec![run(1, "a/x", RunState::Queued, 30, 1)]);
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 30, 1)],
+            now(),
+        );
         board.expand(now());
         board.set_jobs(
             RunId(1),
@@ -1753,7 +1818,11 @@ mod tests {
     #[test]
     fn a_run_that_never_was_expanded_shows_the_running_marker_of_its_jobs() {
         let mut board = board();
-        board.replace(repo("a/x"), vec![run(1, "a/x", RunState::Queued, 30, 1)]);
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 30, 1)],
+            now(),
+        );
         board.set_jobs(RunId(1), vec![job(11, RunState::Running)]);
         let rows = board.rows(now());
         assert_eq!(
@@ -1771,11 +1840,19 @@ mod tests {
     #[test]
     fn a_run_that_leaves_the_board_loses_its_job_states() {
         let mut board = board();
-        board.replace(repo("a/x"), vec![run(1, "a/x", RunState::Queued, 30, 1)]);
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 30, 1)],
+            now(),
+        );
         board.set_jobs(RunId(1), vec![job(11, RunState::Running)]);
-        board.replace(repo("a/x"), Vec::new());
+        board.replace(repo("a/x"), Vec::new(), now());
         board.rows(now());
-        board.replace(repo("a/x"), vec![run(1, "a/x", RunState::Queued, 30, 1)]);
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Queued, 30, 1)],
+            now(),
+        );
         let rows = board.rows(now());
         assert_eq!(run_state(&rows, 1), Some(RunState::Queued));
     }
@@ -1826,6 +1903,7 @@ mod tests {
                 run(99, "a/x", RunState::Running, 20, 1),
                 run(2, "a/x", RunState::Passed, 60, 10),
             ],
+            now(),
         );
         board.select_next(now());
         board.select_next(now());
@@ -1925,6 +2003,7 @@ mod tests {
                 run(3, "a/x", RunState::Running, 10, 1),
                 run(4, "a/x", RunState::Running, 5, 1),
             ],
+            now(),
         );
         board.expand(now());
         board.select_next(now());
@@ -2089,7 +2168,11 @@ mod tests {
         board.set_jobs(RunId(2), vec![named_job(21, "c"), named_job(22, "d")]);
         board.select_previous(now());
         assert_eq!(selected_text(&mut board).as_deref(), Some("LastJob(12)*"));
-        board.replace(repo("a/x"), vec![run(2, "a/x", RunState::Passed, 60, 10)]);
+        board.replace(
+            repo("a/x"),
+            vec![run(2, "a/x", RunState::Passed, 60, 10)],
+            now(),
+        );
         assert_eq!(
             marked(&board.rows(now())),
             [
@@ -2113,6 +2196,7 @@ mod tests {
                 run(1, "a/x", RunState::Passed, 30, 1),
                 run(2, "a/x", RunState::Passed, 60, 10),
             ],
+            now(),
         );
         assert_eq!(
             marked(&board.rows(now()))[3..7],
@@ -2123,8 +2207,16 @@ mod tests {
     #[test]
     fn expanded_gives_the_repository_and_the_id_of_each_expanded_run() {
         let mut board = board();
-        board.replace(repo("a/x"), vec![run(1, "a/x", RunState::Running, 30, 1)]);
-        board.replace(repo("b/y"), vec![run(2, "b/y", RunState::Running, 20, 1)]);
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Running, 30, 1)],
+            now(),
+        );
+        board.replace(
+            repo("b/y"),
+            vec![run(2, "b/y", RunState::Running, 20, 1)],
+            now(),
+        );
         board.expand(now());
         board.select_next(now());
         board.expand(now());
@@ -2187,6 +2279,7 @@ mod tests {
                 run(1, "a/x", RunState::Passed, 30, 1),
                 run(2, "a/x", RunState::Passed, 60, 10),
             ],
+            now(),
         );
         assert_eq!(
             marked(&board.rows(now())),
@@ -2207,9 +2300,13 @@ mod tests {
         let mut board = two_run_board();
         board.expand(now());
         board.set_jobs(RunId(1), vec![job(11, RunState::Passed)]);
-        board.replace(repo("a/x"), Vec::new());
+        board.replace(repo("a/x"), Vec::new(), now());
         assert!(board.expanded(now()).is_empty());
-        board.replace(repo("a/x"), vec![run(1, "a/x", RunState::Running, 30, 1)]);
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Running, 30, 1)],
+            now(),
+        );
         assert_eq!(shape(&board.rows(now())).len(), 4);
     }
 
@@ -2219,7 +2316,11 @@ mod tests {
         board.expand(now());
         board.keep_only(&BTreeSet::new());
         assert!(board.expanded(now()).is_empty());
-        board.replace(repo("a/x"), vec![run(1, "a/x", RunState::Running, 30, 1)]);
+        board.replace(
+            repo("a/x"),
+            vec![run(1, "a/x", RunState::Running, 30, 1)],
+            now(),
+        );
         assert_eq!(shape(&board.rows(now())).len(), 4);
     }
 
@@ -2251,6 +2352,7 @@ mod tests {
                 run(1, "a/x", RunState::Other, 30, 1),
                 run(2, "a/x", RunState::Passed, 60, 10),
             ],
+            now(),
         );
         assert!(board.expanded(now()).is_empty());
         board.replace(
@@ -2259,6 +2361,7 @@ mod tests {
                 run(1, "a/x", RunState::Running, 30, 1),
                 run(2, "a/x", RunState::Passed, 60, 10),
             ],
+            now(),
         );
         assert_eq!(shape(&board.rows(now())).len(), 4);
     }
@@ -2385,6 +2488,7 @@ mod tests {
                 run(2, "a/x", RunState::Passed, 60, 10),
                 run(3, "a/x", RunState::Passed, 70, 20),
             ],
+            now(),
         );
         board.select_next(now());
         assert_eq!(
@@ -2397,6 +2501,7 @@ mod tests {
                 run(1, "a/x", RunState::Running, 30, 1),
                 run(3, "a/x", RunState::Passed, 70, 20),
             ],
+            now(),
         );
         assert_eq!(
             board.selected_target(now()).map(|(run, _)| run.id),

@@ -228,7 +228,7 @@ where
                 first_cycle.note(&update);
             }
             match update {
-                Update::Runs { repo, runs } => self.board.replace(repo, runs),
+                Update::Runs { repo, runs } => self.board.replace(repo, runs, (self.now)()),
                 Update::Failed { repo, error } => self.board.fail(repo, error.to_string()),
                 Update::Suspect { repo, reason } => self.board.fail(repo, reason.to_string()),
                 Update::Jobs { run, jobs } => self.board.set_jobs(run, jobs),

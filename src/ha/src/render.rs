@@ -1075,6 +1075,7 @@ mod tests {
                     "2026-10-14T09:10:05Z",
                 ),
             ],
+            now(),
         );
         board.replace(
             repo("acme/widgets"),
@@ -1100,6 +1101,7 @@ mod tests {
                     "2026-10-14T04:30:00Z",
                 ),
             ],
+            now(),
         );
         board
     }
@@ -1177,6 +1179,7 @@ mod tests {
                 "2026-10-14T11:45:30Z",
                 "2026-10-14T11:59:00Z",
             )],
+            now(),
         );
         board.replace(
             repo("acme/widgets"),
@@ -1190,6 +1193,7 @@ mod tests {
                 "2026-10-14T09:00:00Z",
                 "2026-10-14T09:10:05Z",
             )],
+            now(),
         );
         board.expand(now());
         board.set_jobs(
@@ -1284,6 +1288,7 @@ mod tests {
                 "2026-10-14T11:45:30Z",
                 "2026-10-14T11:59:00Z",
             )],
+            now(),
         );
         let text = lines(&render_with(120, 10, &mut board, &loaded()));
         let branch = header_column(&text, "BRANCH");
@@ -1310,6 +1315,7 @@ mod tests {
                     "2026-10-14T11:45:30Z",
                     "2026-10-14T11:59:00Z",
                 )],
+                now(),
             );
             let text = lines(&render_with(width, 8, &mut board, &loaded()));
             assert!(
@@ -1350,6 +1356,7 @@ mod tests {
                     "2026-10-14T11:45:30Z",
                     "2026-10-14T11:59:00Z",
                 )],
+                now(),
             );
             let text = lines(&render_with(width, 8, &mut board, &loaded()));
             assert!(
@@ -1404,6 +1411,7 @@ mod tests {
                     "2026-10-14T11:59:00Z",
                 ),
             ],
+            now(),
         );
         let text = lines(&render_with(120, 8, &mut board, &loaded()));
         let (short, long) = (&text[2], &text[3]);
@@ -1466,6 +1474,7 @@ mod tests {
                         "2026-10-14T11:59:00Z",
                     ),
                 ],
+                now(),
             );
             let text = lines(&render_with(width, 8, &mut board, &loaded()));
             let (short, long) = (&text[2], &text[3]);
@@ -1523,6 +1532,7 @@ mod tests {
                         "2026-10-14T11:59:00Z",
                     ),
                 ],
+                now(),
             );
             let text = lines(&render_with(width, 8, &mut board, &loaded()));
             let (short, long) = (&text[2], &text[3]);
@@ -1593,6 +1603,7 @@ mod tests {
                 "2026-10-14T11:45:30Z",
                 "2026-10-14T11:59:00Z",
             )],
+            now(),
         );
         let text = lines(&render_with(120, 8, &mut board, &Status::default()));
         assert_eq!(text[1], "Running");
@@ -1743,6 +1754,7 @@ mod tests {
                 finished(3, RunState::Cancelled, "2026-10-14T10:00:00Z"),
                 finished(4, RunState::Cancelled, "2026-10-14T11:00:00Z"),
             ],
+            now(),
         );
         let text = lines(&render_with(120, 10, &mut board, &loaded()));
         assert_eq!(text[3], "Last 8h · 1 passed · 1 failed · 2 cancelled");
@@ -1803,6 +1815,7 @@ mod tests {
                     "2026-10-13T14:59:00Z",
                 ),
             ],
+            now(),
         );
         let tokyo = chrono::FixedOffset::east_opt(9 * 3_600).expect("nine hours is valid");
         let in_tokyo = lines(&render_in(120, 8, &mut board, &Status::default(), &tokyo));
@@ -1830,6 +1843,7 @@ mod tests {
                 "2026-10-13T16:00:00Z",
                 "2026-10-13T16:00:00Z",
             )],
+            now(),
         );
         // 16:00 UTC on 10-13 is 01:00 on 10-14 at +09:00, and now is 21:00 on 10-14 there.
         let tokyo = chrono::FixedOffset::east_opt(9 * 3_600).expect("nine hours is valid");
@@ -1860,6 +1874,7 @@ mod tests {
                 "2026-10-14T10:45:30Z",
                 "2026-10-14T11:59:59Z",
             )],
+            now(),
         );
         let text = lines(&render_with(120, 8, &mut board, &Status::default()));
         assert_eq!(time_cells(&text, 2), "1h 14m");
@@ -1880,6 +1895,7 @@ mod tests {
                 "2026-10-14T10:00:00Z",
                 "2026-10-14T10:03:07Z",
             )],
+            now(),
         );
         let text = lines(&render_with(120, 8, &mut board, &Status::default()));
         assert_eq!(time_cells(&text, 4), "3m 07s");
@@ -1997,6 +2013,7 @@ mod tests {
                 "2026-10-14T11:45:30Z",
                 "2026-10-14T11:59:00Z",
             )],
+            now(),
         );
         board.expand(now());
         board.set_jobs(
@@ -2058,6 +2075,7 @@ mod tests {
                 "2026-10-14T11:45:30Z",
                 "2026-10-14T11:59:00Z",
             )],
+            now(),
         );
         board.expand(now());
         board.set_jobs(
@@ -2167,6 +2185,7 @@ mod tests {
                 "2026-10-14T11:45:30Z",
                 "2026-10-14T11:59:00Z",
             )],
+            now(),
         );
         board.expand(now());
         board.set_jobs(
@@ -2447,6 +2466,7 @@ mod tests {
                     "2026-10-14T12:02:00Z",
                 ),
             ],
+            now(),
         );
         let text = lines(&render_with(120, 8, &mut board, &Status::default()));
         assert_eq!(time_cells(&text, 2), "0s");
@@ -2604,6 +2624,7 @@ mod tests {
                     "2026-10-14T11:45:30Z",
                     "2026-10-14T11:45:30Z",
                 )],
+                now(),
             );
             board.expand(now());
             board.set_jobs(RunId(1), three_jobs());
@@ -2794,6 +2815,7 @@ mod tests {
                     "2026-10-14T11:45:30Z",
                     "2026-10-14T11:45:30Z",
                 )],
+                now(),
             );
             let text = lines(&render_with(w, 6, &mut board, &loaded()));
             let row = &text[2];
@@ -2829,6 +2851,7 @@ mod tests {
                 "2026-10-14T11:55:00Z",
                 "2026-10-14T11:55:00Z",
             )],
+            now(),
         );
         let text = lines(&render_with(68, 6, &mut board, &Status::default()));
         // 68 - 42 = 26 columns for the text: 6, 4, 5, and 11.
@@ -2875,6 +2898,7 @@ mod tests {
                     "2026-10-14T11:53:00Z",
                 ),
             ],
+            now(),
         );
         let text = lines(&render_with(68, 7, &mut board, &Status::default()));
         assert_eq!(
@@ -2910,6 +2934,7 @@ mod tests {
                 "2026-10-14T11:55:00Z",
                 "2026-10-14T11:55:00Z",
             )],
+            now(),
         );
         let narrow = lines(&render_with(80, 6, &mut board, &Status::default()));
         let wide = lines(&render_with(160, 6, &mut board, &Status::default()));
@@ -2948,7 +2973,7 @@ mod tests {
                 )
             })
             .collect();
-        board.replace(repo("a/x"), runs);
+        board.replace(repo("a/x"), runs, now());
         for _ in 0..9 {
             board.select_next(now());
         }
@@ -3710,6 +3735,7 @@ mod tests {
                 "2026-10-14T10:00:00Z",
                 "2026-10-14T10:05:00Z",
             )],
+            now(),
         );
         board.expand(now());
         // The order is by name: `a-cancelled` comes before `b-other`.
@@ -3825,6 +3851,7 @@ mod tests {
                     )
                 })
                 .collect(),
+            now(),
         );
         board.expand(now());
         // The order is by name, thus the names state the order of the rows.
@@ -4064,6 +4091,7 @@ mod tests {
                 "2026-10-14T11:45:30Z",
                 "2026-10-14T11:59:00Z",
             )],
+            now(),
         );
         board.expand(now());
         board.set_jobs(
