@@ -529,7 +529,9 @@ enum Fetched {
 ///
 /// The function reads the recent (created) answer. It also reads the sweep
 /// when the slow cadence is due or when the last sweep of the repository was
-/// suspect. A failed request gives [`Fetched::Failed`]. Then the function
+/// stale. A failed request gives [`Fetched::Failed`]. A failed sweep also
+/// marks the sweep of the repository as stale, because the stored sweep is
+/// then old, and the next cycle merges it. Then the function
 /// judges each answer in one step of its own. The recent answer goes through
 /// [`suspicion_of_created`], and the sweep goes through
 /// [`suspicion_of_sweep`]. Both steps share one read of the newest run, so the
@@ -556,7 +558,14 @@ fn fetch_repo<S: Source>(source: &S, repo: &RepoName, fetch: &Fetch<'_>) -> Fetc
     let swept = if fetch.sweep_due || sweep_stale {
         match source.runs_of(repo, RunQuery::Active) {
             Ok(active) => Some(active),
-            Err(error) => return Fetched::Failed(error),
+            Err(error) => {
+                fetch
+                    .stale_sweeps
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(repo.clone());
+                return Fetched::Failed(error);
+            }
         }
     } else {
         None
