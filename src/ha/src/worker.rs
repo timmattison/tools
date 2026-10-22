@@ -3134,4 +3134,135 @@ mod tests {
             "{first:?}"
         );
     }
+
+    /// Scripts the active answer (the sweep) of `acme/a`.
+    fn script_active(fake: &FakeSource, runs: Vec<Run>) {
+        fake.script().active.insert(repo("acme/a"), Ok(runs));
+    }
+
+    /// An active run of `acme/a` that GitHub created three days ago, before the window.
+    fn old_active_run(id: u64) -> Run {
+        Run {
+            state: RunState::Running,
+            ..created_ago(id, 3 * 24 * 60)
+        }
+    }
+
+    #[test]
+    fn an_empty_sweep_after_a_sweep_with_a_run_that_is_still_active_is_suspect() {
+        let fake = Arc::new(FakeSource::default());
+        let old = old_active_run(1);
+        script_active(&fake, vec![old.clone()]);
+        script_direct(&fake, std::slice::from_ref(&old));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), Duration::ZERO);
+        let first = one_cycle(&worker);
+        assert!(
+            matches!(answers_of_a(&first).as_slice(), [Update::Runs { runs, .. }] if *runs == [old.clone()]),
+            "{first:?}"
+        );
+
+        script_active(&fake, Vec::new());
+        let second = refresh_now(&worker);
+
+        let answers = answers_of_a(&second);
+        assert!(
+            matches!(
+                answers.as_slice(),
+                [Update::Suspect {
+                    reason: Suspicion::LeftOut(Item::Run(RunId(1))),
+                    ..
+                }]
+            ),
+            "{answers:?}"
+        );
+        assert_eq!(
+            calls_named(&fake, "forget-runs"),
+            vec!["acme/a active".to_owned()]
+        );
+    }
+
+    #[test]
+    fn an_empty_sweep_with_an_active_newest_run_is_suspect() {
+        let fake = Arc::new(FakeSource::default());
+        script_newest(&fake, Ok(Some(old_active_run(9))));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+
+        let first = one_cycle(&worker);
+
+        let answers = answers_of_a(&first);
+        assert!(
+            matches!(
+                answers.as_slice(),
+                [Update::Suspect {
+                    reason: Suspicion::NewestLeftOut(RunId(9)),
+                    ..
+                }]
+            ),
+            "{answers:?}"
+        );
+        assert_eq!(
+            calls_named(&fake, "forget-runs"),
+            vec!["acme/a active".to_owned()]
+        );
+        assert_eq!(calls_named(&fake, "newest").len(), 1);
+    }
+
+    #[test]
+    fn a_suspect_sweep_is_repeated_on_the_next_cycle_and_a_good_sweep_waits_for_the_cadence() {
+        let fake = Arc::new(FakeSource::default());
+        script_newest(&fake, Ok(Some(old_active_run(9))));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
+        one_cycle(&worker);
+        assert_eq!(calls_named(&fake, "active").len(), 1);
+
+        let second = refresh_now(&worker);
+        assert_eq!(calls_named(&fake, "active").len(), 2, "{second:?}");
+
+        script_newest(&fake, Ok(None));
+        let third = refresh_now(&worker);
+        assert_eq!(calls_named(&fake, "active").len(), 3, "{third:?}");
+        assert!(
+            matches!(answers_of_a(&third).as_slice(), [Update::Runs { .. }]),
+            "{third:?}"
+        );
+
+        refresh_now(&worker);
+        assert_eq!(
+            calls_named(&fake, "active").len(),
+            3,
+            "a good sweep clears the mark"
+        );
+    }
+
+    #[test]
+    fn when_both_answers_are_suspect_the_created_suspicion_is_reported_and_both_are_forgotten() {
+        let fake = Arc::new(FakeSource::default());
+        let recent = created_ago(2, 10);
+        let old = old_active_run(1);
+        script_created(&fake, vec![recent.clone()]);
+        script_active(&fake, vec![old.clone()]);
+        script_direct(&fake, &[recent, old]);
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), Duration::ZERO);
+        one_cycle(&worker);
+
+        script_created(&fake, Vec::new());
+        script_active(&fake, Vec::new());
+        let second = refresh_now(&worker);
+
+        let answers = answers_of_a(&second);
+        assert!(
+            matches!(
+                answers.as_slice(),
+                [Update::Suspect {
+                    reason: Suspicion::LeftOut(Item::Run(RunId(2))),
+                    ..
+                }]
+            ),
+            "{answers:?}"
+        );
+        assert_eq!(
+            calls_named(&fake, "forget-runs"),
+            vec!["acme/a created".to_owned(), "acme/a active".to_owned()]
+        );
+    }
 }
