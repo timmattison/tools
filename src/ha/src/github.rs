@@ -608,8 +608,9 @@ impl Source for GhSource {
     }
 
     fn repo_is_listable(&self, repo: &RepoName) -> Result<bool, SourceError> {
-        let _ = repo;
-        Ok(false)
+        let path = format!("repos/{}/{}", repo.owner(), repo.name());
+        self.request(&path, None)?;
+        Ok(true)
     }
 
     fn rate_limit(&self) -> Option<RateLimit> {
