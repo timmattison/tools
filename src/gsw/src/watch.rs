@@ -985,11 +985,15 @@ impl IssueRun {
     }
 
     /// Keep the command the probe of `page` found.
+    ///
+    /// The arming goes too. An answer changes the steps, and the message on
+    /// the row named the old steps. The next press must ask again.
     fn found(&mut self, page: crate::issue::Page, command: crate::shell::ShellCommand) {
         match page {
             crate::issue::Page::PullRequest => self.pull_request = Some(command),
             crate::issue::Page::Issue => self.issue = Some(command),
         }
+        self.armed.disarm();
     }
 
     /// What one press of `G` does now.
