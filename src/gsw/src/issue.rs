@@ -461,6 +461,39 @@ mod run_tests {
     }
 
     #[test]
+    fn a_pull_request_command_that_opens_the_page_runs_no_issue_command() {
+        let stub = StubShell::answering(0);
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let outcome = run(stub.as_shell(), &two_steps(), workdir.path());
+        assert_eq!(outcome.message(), None, "the browser is the answer");
+        assert_eq!(
+            steps_run(&stub.runs()),
+            [PR_COMMAND],
+            "a step that exits 0 completes the press",
+        );
+    }
+
+    #[test]
+    fn when_both_steps_fail_the_row_shows_the_last_line_of_the_issue_command() {
+        let stub = StubShell::new(
+            "case \"$2\" in\n  ggsp) echo 'no pull request for this branch' >&2; exit 1 ;;\n  *) echo 'branch main names no issue' >&2; exit 2 ;;\nesac",
+        );
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let outcome = run(stub.as_shell(), &two_steps(), workdir.path());
+        assert_eq!(outcome.message(), Some("branch main names no issue"));
+    }
+
+    #[test]
+    fn when_the_issue_command_fails_in_silence_the_row_names_it_and_not_the_first_step() {
+        let stub = StubShell::new(
+            "case \"$2\" in\n  ggsp) echo 'no pull request for this branch' >&2; exit 1 ;;\n  *) exit 2 ;;\nesac",
+        );
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let outcome = run(stub.as_shell(), &two_steps(), workdir.path());
+        assert_eq!(outcome.message(), Some("ggs failed (exit status: 2)"));
+    }
+
+    #[test]
     fn a_run_that_worked_leaves_no_message() {
         let stub = StubShell::answering(0);
         let workdir = tempfile::tempdir().expect("tempdir");
