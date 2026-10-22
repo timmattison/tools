@@ -690,7 +690,7 @@ enum Event {
     /// name.
     ///
     /// One event for each key, because each key has a probe of its own and the
-    /// three probes answer in whatever order their shells finish. A key is
+    /// four probes answer in whatever order their shells finish. A key is
     /// unbound until its own answer arrives. A shell that says no, a shell
     /// that cannot be started, and a shell that never answers all send
     /// nothing, so that key stays unbound and silent.
@@ -906,7 +906,7 @@ pub(crate) enum Binding {
 /// them: `G`, `R`, and `M`.
 ///
 /// One value rather than three parameters of [`classify_input`], because the
-/// three answers travel together and arrive together: each of the three probes
+/// answers of the keys travel together and arrive together: each of the four probes
 /// answers on the loop's own channel, and the key table reads whatever has
 /// arrived by the press. A fourth such key then adds a field here and moves no
 /// call site.
