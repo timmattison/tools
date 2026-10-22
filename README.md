@@ -689,8 +689,8 @@ cannot hang the caller. Used by `cwt` and `ha`.
       up the process tree stops there. gsw answers that for Zellij through the Zellij client, which
       keeps the chain. A session viewed through tmux reports whatever stands above the tmux server.
     - A press that opens a page costs the frame no row: the browser is the answer. A press that
-      fails puts the last line the issue command wrote under the frame, where it waits for a key
-      the way git's error text does — `ggs` refuses on a branch that names no issue, and that
+      fails puts the last line of the last command that ran under the frame, where it waits for a
+      key the way git's error text does — `ggs` refuses on a branch that names no issue, and that
       refusal is the whole reason no page opened. `G` works while a push runs, and a message that arrives then
       waits for the row rather than taking it from the push. A push takes minutes, so a second
       `G` can refuse while the first refusal is still waiting: the messages queue up, and each
