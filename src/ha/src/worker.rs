@@ -32,6 +32,20 @@
 //! recent answer skipped. A suspect sweep does not throw away a good recent
 //! answer. The worker then merges the recent answer with the last good sweep and
 //! sends [`Update::SuspectSweep`], so new runs show while the sweep stays wrong.
+//!
+//! The worker also reads the merge queues, before the runs, because the
+//! screen shows them on top. On the slow cadence, it asks GitHub which watched
+//! repositories have a merge queue, one GraphQL query for each
+//! [`QUEUE_CHECK_BATCH`] repositories. A repository whose check failed, and a
+//! repository that is new in the set, is checked on the next cycle. On each
+//! cycle, it reads the merge queue events of each repository with a queue,
+//! through REST and the `ETag` cache. It reads the live entries of a queue
+//! through GraphQL only when they are due: before the first good read, when
+//! the last read held an entry or failed, when the events show an entry that
+//! is still open, or when the events could not be read. Thus an empty queue
+//! costs no GraphQL point. The head branch of a pull request that left the
+//! queue comes from its live entry when the worker saw one. Else the worker
+//! looks it up one time.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -41,9 +55,9 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 
-use crate::github::{RepoList, RunList, RunQuery, Source, SourceError};
+use crate::github::{RepoList, RunList, RunQuery, Source, SourceError, QUEUE_CHECK_BATCH};
 use crate::job::Job;
-use crate::queue::{Departure, QueueEntry};
+use crate::queue::{read_events, Departure, PullNumber, QueueEntry};
 use crate::run::{Run, RunId};
 use crate::settings::Settings;
 use crate::status::{OwnerProblem, RateLimit};
@@ -53,16 +67,23 @@ use crate::target::{OwnerName, RepoName, Target};
 /// How many repositories the worker fetches at the same time.
 pub const CONCURRENCY: usize = 8;
 
-/// How often the worker lists the repositories of the owners and sweeps for
-/// active runs. The sweep finds runs that started before the window. A
-/// repository is swept again on the next cycle in three cases: its last sweep
-/// failed, its last sweep was suspect, or a failed recent read skipped its due
-/// sweep. An owner with no good list, an owner whose good list is empty, and
-/// an owner whose last list failed or was suspect, is listed on every cycle
-/// until a good list that holds a repository replaces the problem. An empty
-/// list needs this, because the comparison with the last good list cannot
-/// judge a first empty list.
+/// How often the worker lists the repositories of the owners, sweeps for
+/// active runs, and checks which repositories have a merge queue. The sweep
+/// finds runs that started before the window. A repository is swept again on
+/// the next cycle in three cases: its last sweep failed, its last sweep was
+/// suspect, or a failed recent read skipped its due sweep. An owner with no
+/// good list, an owner whose good list is empty, and an owner whose last list
+/// failed or was suspect, is listed on every cycle until a good list that
+/// holds a repository replaces the problem. An empty list needs this, because
+/// the comparison with the last good list cannot judge a first empty list. A
+/// repository with no good check is checked on every cycle until a check
+/// succeeds.
 pub const SLOW_CADENCE: Duration = Duration::from_secs(600);
+
+/// How far before the window the worker reads the merge queue events. A pull
+/// request that left the queue inside the window shows its enqueue time when
+/// it joined the queue at most this long before the window.
+pub const QUEUE_EVENTS_MARGIN: Duration = Duration::from_secs(3600);
 
 /// One message from the worker to the screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -299,6 +320,25 @@ struct State {
     /// The runs whose job pages the source can still hold. It is each run that
     /// the worker fetched since it last told the source to forget that run.
     held_jobs: Mutex<BTreeSet<RunKey>>,
+    /// The cadence of the check for merge queues.
+    queue_cadence: Cadence,
+    /// The answer of the last good check of each watched repository: true
+    /// when the repository has a merge queue.
+    queue_checks: BTreeMap<RepoName, bool>,
+    /// The repositories whose last check failed. The next cycle checks them
+    /// again, and until then they keep the answer of their last good check.
+    failed_checks: BTreeSet<RepoName>,
+    /// The repositories with a queue and the error of the last
+    /// [`Update::MergeQueues`] that the worker sent.
+    sent_queues: (BTreeSet<RepoName>, Option<SourceError>),
+    /// For each repository with a queue that the worker read: true when the
+    /// last read of the live entries held an entry or failed. A repository
+    /// with no value has no read yet. Both make the next read due.
+    entries_due: Mutex<HashMap<RepoName, bool>>,
+    /// The head branch of each pull request that the worker learned, from a
+    /// live entry or from a lookup. An empty text is a pull request that
+    /// GitHub did not find, thus the worker does not look it up again.
+    branches: Mutex<HashMap<(RepoName, PullNumber), String>>,
 }
 
 impl State {
@@ -315,6 +355,12 @@ impl State {
             facts: Mutex::new(HashMap::new()),
             job_marks: Mutex::new(HashMap::new()),
             held_jobs: Mutex::new(BTreeSet::new()),
+            queue_cadence: Cadence::new(slow),
+            queue_checks: BTreeMap::new(),
+            failed_checks: BTreeSet::new(),
+            sent_queues: (BTreeSet::new(), None),
+            entries_due: Mutex::new(HashMap::new()),
+            branches: Mutex::new(HashMap::new()),
         }
     }
 
@@ -465,14 +511,15 @@ fn apply_command(
     }
 }
 
-/// Runs one cycle: lists the owners that need it, fetches every repository,
-/// fetches the jobs of the runs that are due (the watched runs, the active
-/// runs, and the runs with a mark, when the list of runs holds the run), and
-/// reports the end of the cycle. A mark whose run left the list of runs is
-/// removed. The reconcile at the end of the job fetch then tells the source to
-/// forget the pages of each run whose mark went away. A failed or suspect
-/// repository fetch keeps its old facts, thus its marks stay. Returns how long to wait
-/// before the next one, and whether the worker waits for a rate limit reset.
+/// Runs one cycle: lists the owners that need it, checks for merge queues,
+/// reads each merge queue, fetches every repository, fetches the jobs of the
+/// runs that are due (the watched runs, the active runs, and the runs with a
+/// mark, when the list of runs holds the run), and reports the end of the
+/// cycle. A mark whose run left the list of runs is removed. The reconcile at
+/// the end of the job fetch then tells the source to forget the pages of each
+/// run whose mark went away. A failed or suspect repository fetch keeps its
+/// old facts, thus its marks stay. Returns how long to wait before the next
+/// one, and whether the worker waits for a rate limit reset.
 fn cycle<S: Source>(
     source: &S,
     settings: &Settings,
@@ -480,6 +527,8 @@ fn cycle<S: Source>(
     updates: &Sender<Update>,
 ) -> Result<(Duration, bool), ReceiverGone> {
     let repos = refresh_repos(source, settings, state, updates)?;
+    let queues = check_queues(source, state, &repos, updates)?;
+    fetch_queues(source, settings, state, &queues, updates)?;
     let now = Instant::now();
     let sweep_due = state.sweep_cadence.due(now);
     if sweep_due {
@@ -1150,6 +1199,224 @@ fn refresh_repos<S: Source>(
             .map_err(|_| ReceiverGone)?;
     }
     Ok(repos)
+}
+
+/// Checks which watched repositories have a merge queue, and returns them.
+///
+/// When the queue cadence is due, the function checks every repository in
+/// `repos`. On every cycle it also checks each repository that has no good
+/// check yet, and each repository whose last check failed. A failed check
+/// keeps the last good answer of its repositories. The function asks the
+/// source for [`QUEUE_CHECK_BATCH`] repositories at most in one call. It
+/// sends [`Update::MergeQueues`] when the set of repositories with a queue or
+/// the first error of this cycle differs from what it last sent.
+fn check_queues<S: Source>(
+    source: &S,
+    state: &mut State,
+    repos: &BTreeSet<RepoName>,
+    updates: &Sender<Update>,
+) -> Result<BTreeSet<RepoName>, ReceiverGone> {
+    let now = Instant::now();
+    let due = state.queue_cadence.due(now);
+    if due {
+        state.queue_cadence.mark(now);
+    }
+    state.queue_checks.retain(|repo, _| repos.contains(repo));
+    state.failed_checks.retain(|repo| repos.contains(repo));
+    let to_check: Vec<RepoName> = repos
+        .iter()
+        .filter(|repo| {
+            due || !state.queue_checks.contains_key(*repo) || state.failed_checks.contains(*repo)
+        })
+        .cloned()
+        .collect();
+    let mut error = None;
+    for batch in to_check.chunks(QUEUE_CHECK_BATCH) {
+        match source.merge_queues_among(batch) {
+            Ok(found) => {
+                for repo in batch {
+                    state
+                        .queue_checks
+                        .insert(repo.clone(), found.contains(repo));
+                    state.failed_checks.remove(repo);
+                }
+            }
+            Err(failure) => {
+                state.failed_checks.extend(batch.iter().cloned());
+                error.get_or_insert(failure);
+            }
+        }
+    }
+    let queues: BTreeSet<RepoName> = state
+        .queue_checks
+        .iter()
+        .filter(|(_, has_queue)| **has_queue)
+        .map(|(repo, _)| repo.clone())
+        .collect();
+    let message = (queues.clone(), error);
+    if message != state.sent_queues {
+        updates
+            .send(Update::MergeQueues {
+                repos: message.0.clone(),
+                error: message.1.clone(),
+            })
+            .map_err(|_| ReceiverGone)?;
+        state.sent_queues = message;
+    }
+    Ok(queues)
+}
+
+/// What every read of a merge queue of one cycle shares.
+struct QueueFetch<'a> {
+    /// The oldest event time to read.
+    since: DateTime<Utc>,
+    /// See [`State::entries_due`]. No thread holds this lock during a call.
+    entries_due: &'a Mutex<HashMap<RepoName, bool>>,
+    /// See [`State::branches`]. No thread holds this lock during a call.
+    branches: &'a Mutex<HashMap<(RepoName, PullNumber), String>>,
+}
+
+/// Reads the merge queue of each repository of `queues` with the shared pool
+/// of threads, and sends one [`Update::MergeQueue`] for each.
+///
+/// The function first drops what it keeps for each repository that has no
+/// queue now.
+fn fetch_queues<S: Source>(
+    source: &S,
+    settings: &Settings,
+    state: &mut State,
+    queues: &BTreeSet<RepoName>,
+    updates: &Sender<Update>,
+) -> Result<(), ReceiverGone> {
+    state
+        .entries_due
+        .get_mut()
+        .unwrap_or_else(PoisonError::into_inner)
+        .retain(|repo, _| queues.contains(repo));
+    state
+        .branches
+        .get_mut()
+        .unwrap_or_else(PoisonError::into_inner)
+        .retain(|(repo, _), _| queues.contains(repo));
+    let fetch = QueueFetch {
+        since: queue_events_start(settings.window),
+        entries_due: &state.entries_due,
+        branches: &state.branches,
+    };
+    let repos: Vec<&RepoName> = queues.iter().collect();
+    run_pool(&repos, updates, |repo| fetch_queue(source, repo, &fetch))
+}
+
+/// Reads the merge queue of one repository.
+///
+/// The function reads the events, and it reads the live entries when they are
+/// due (see the module documentation). It records whether the next read of
+/// the entries is due. It gives each departure its head branch (see
+/// [`with_branches`]). When both reads succeed, it forgets the branch of each
+/// pull request of `repo` that is no longer an entry or a departure.
+fn fetch_queue<S: Source>(source: &S, repo: &RepoName, fetch: &QueueFetch<'_>) -> Update {
+    let log = source
+        .queue_events_of(repo, fetch.since)
+        .map(|events| read_events(repo, events));
+    let open = log.as_ref().map_or(true, |log| !log.open.is_empty());
+    let due = open
+        || fetch
+            .entries_due
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(repo)
+            .copied()
+            .unwrap_or(true);
+    let entries = if due {
+        source.queue_entries_of(repo)
+    } else {
+        Ok(Vec::new())
+    };
+    fetch
+        .entries_due
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(
+            repo.clone(),
+            entries.as_ref().map_or(true, |entries| !entries.is_empty()),
+        );
+    if let Ok(entries) = &entries {
+        let mut branches = fetch
+            .branches
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for entry in entries {
+            branches.insert((repo.clone(), entry.pull), entry.branch.clone());
+        }
+    }
+    let departures = log.map(|log| with_branches(source, repo, log.departures, fetch.branches));
+    if let (Ok(entries), Ok(departures)) = (&entries, &departures) {
+        let shown: BTreeSet<PullNumber> = entries
+            .iter()
+            .map(|entry| entry.pull)
+            .chain(departures.iter().map(|departure| departure.pull))
+            .collect();
+        fetch
+            .branches
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|(held, pull), _| held != repo || shown.contains(pull));
+    }
+    Update::MergeQueue {
+        repo: repo.clone(),
+        entries,
+        departures,
+    }
+}
+
+/// Gives each departure of `repo` the head branch that `branches` holds.
+///
+/// The function first looks up, in one call of the source, each pull request
+/// that `branches` does not hold. A pull request that the answer lacks gets an
+/// empty branch, thus the worker does not look it up again. A failed lookup
+/// records nothing: the departures keep an empty branch, and the next cycle
+/// looks them up again. No lock is held during the call.
+fn with_branches<S: Source>(
+    source: &S,
+    repo: &RepoName,
+    mut departures: Vec<Departure>,
+    branches: &Mutex<HashMap<(RepoName, PullNumber), String>>,
+) -> Vec<Departure> {
+    let unknown: Vec<PullNumber> = {
+        let known = branches.lock().unwrap_or_else(PoisonError::into_inner);
+        departures
+            .iter()
+            .map(|departure| departure.pull)
+            .filter(|pull| !known.contains_key(&(repo.clone(), *pull)))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    };
+    if !unknown.is_empty() {
+        if let Ok(found) = source.pull_branches_of(repo, &unknown) {
+            let mut known = branches.lock().unwrap_or_else(PoisonError::into_inner);
+            for pull in unknown {
+                let branch = found.get(&pull).cloned().unwrap_or_default();
+                known.insert((repo.clone(), pull), branch);
+            }
+        }
+    }
+    let known = branches.lock().unwrap_or_else(PoisonError::into_inner);
+    for departure in &mut departures {
+        if let Some(branch) = known.get(&(repo.clone(), departure.pull)) {
+            departure.branch.clone_from(branch);
+        }
+    }
+    departures
+}
+
+/// The oldest merge queue event the worker asks for: the window plus
+/// [`QUEUE_EVENTS_MARGIN`].
+fn queue_events_start(window: Duration) -> DateTime<Utc> {
+    chrono::TimeDelta::from_std(window + QUEUE_EVENTS_MARGIN)
+        .ok()
+        .and_then(|lookback| Utc::now().checked_sub_signed(lookback))
+        .unwrap_or(DateTime::<Utc>::MIN_UTC)
 }
 
 /// The oldest creation time the worker asks for: the window plus one day, so
@@ -3768,7 +4035,7 @@ mod tests {
             branch: branch.to_owned(),
             position: 1,
             state: EntryState::AwaitingChecks,
-            enqueued_at: Utc::now(),
+            enqueued_at: DateTime::from_timestamp(1_792_000_000, 0).expect("a valid time"),
             url: format!("https://example.test/pull/{pull}"),
         }
     }
@@ -3886,7 +4153,9 @@ mod tests {
     #[test]
     fn the_check_asks_for_at_most_100_repositories_in_one_call() {
         let fake = Arc::new(FakeSource::default());
-        let repos: Vec<RepoName> = (0..150).map(|index| repo(&format!("acme/r{index}"))).collect();
+        let repos: Vec<RepoName> = (0..150)
+            .map(|index| repo(&format!("acme/r{index}")))
+            .collect();
         fake.script().owners.insert(owner("acme"), Ok(repos));
         let worker = spawn_with(Arc::clone(&fake), &settings(&["acme"]), SLOW_CADENCE);
 
@@ -3965,7 +4234,11 @@ mod tests {
                 error: Some(failure)
             }]
         );
-        assert!(calls_of(&fake, "events").len() <= 1);
+        assert_eq!(
+            calls_of(&fake, "events").len(),
+            1,
+            "only the second cycle knows the queue"
+        );
         assert_eq!(
             sent(&second),
             [Update::MergeQueues {
@@ -4152,10 +4425,9 @@ mod tests {
         fake.script()
             .events
             .insert(repo("acme/a"), Ok(merge_events(7, 30)));
-        fake.script().branches.insert(
-            repo("acme/a"),
-            Err(SourceError::Failed("boom".to_owned())),
-        );
+        fake.script()
+            .branches
+            .insert(repo("acme/a"), Err(SourceError::Failed("boom".to_owned())));
         let worker = spawn_with(Arc::clone(&fake), &settings(&["acme/a"]), SLOW_CADENCE);
         let first = one_cycle(&worker);
         refresh(&worker);
