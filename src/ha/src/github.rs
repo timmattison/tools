@@ -84,6 +84,13 @@ struct RunJson {
     html_url: String,
 }
 
+/// The JSON body of one repository. Only the fields that `ha` reads are here.
+#[derive(Deserialize)]
+struct RepoBody {
+    full_name: String,
+    archived: bool,
+}
+
 /// Maps the JSON body of one page of runs to a [`Page`].
 ///
 /// `Run::repo` is `repo`, the repository that the request named.
@@ -610,7 +617,11 @@ impl Source for GhSource {
     fn repo_is_listable(&self, repo: &RepoName) -> Result<bool, SourceError> {
         let path = format!("repos/{}/{}", repo.owner(), repo.name());
         match self.request(&path, None) {
-            Ok(_) => Ok(true),
+            Ok(response) => {
+                let body: RepoBody = serde_json::from_str(&response.body)
+                    .map_err(|error| SourceError::BadResponse(error.to_string()))?;
+                Ok(!body.archived)
+            }
             Err(SourceError::Http { status: 404, .. }) => Ok(false),
             Err(error) => Err(error),
         }
