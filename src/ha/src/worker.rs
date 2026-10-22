@@ -1595,6 +1595,53 @@ mod tests {
         assert!(repos_of_cycle(&second).1.is_empty());
     }
 
+    /// The time of the last good list of `acme` in the first `Repos` update.
+    fn listed_at_of_acme(updates: &[Update]) -> DateTime<Utc> {
+        let Some(Update::Repos { listed_at, .. }) = updates
+            .iter()
+            .find(|update| matches!(update, Update::Repos { .. }))
+        else {
+            panic!("no Repos update: {updates:?}");
+        };
+        *listed_at
+            .get(&owner("acme"))
+            .unwrap_or_else(|| panic!("no time for acme in {listed_at:?}"))
+    }
+
+    #[test]
+    fn the_time_of_a_list_stays_after_a_suspect_list_and_moves_after_a_good_list() {
+        let fake = Arc::new(FakeSource::default());
+        script_owner(&fake, &["acme/a", "acme/b"]);
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme"]), Duration::ZERO);
+        let first = listed_at_of_acme(&one_cycle(&worker));
+        std::thread::sleep(Duration::from_millis(5));
+
+        fake.script().owners.insert(owner("acme"), Ok(Vec::new()));
+        let suspect = listed_at_of_acme(&refresh_now(&worker));
+        assert_eq!(suspect, first, "a suspect list keeps the old time");
+        std::thread::sleep(Duration::from_millis(5));
+
+        script_owner(&fake, &["acme/a", "acme/b"]);
+        let good = listed_at_of_acme(&refresh_now(&worker));
+        assert!(good > first, "a good list moves the time on");
+    }
+
+    #[test]
+    fn an_owner_with_no_good_list_has_no_time() {
+        let fake = Arc::new(FakeSource::default());
+        fake.script()
+            .owners
+            .insert(owner("acme"), Err(SourceError::Failed("boom".to_owned())));
+        let worker = spawn_with(Arc::clone(&fake), &settings(&["acme"]), SLOW_CADENCE);
+
+        let updates = one_cycle(&worker);
+
+        let Some(Update::Repos { listed_at, .. }) = updates.first() else {
+            panic!("no Repos update: {updates:?}");
+        };
+        assert!(listed_at.is_empty(), "{listed_at:?}");
+    }
+
     /// Asks for a new cycle at once and reads its updates.
     fn refresh_now(worker: &Worker) -> Vec<Update> {
         worker
