@@ -76,6 +76,9 @@ impl FirstCycle {
                     .iter()
                     .filter_map(|(owner, problem)| match problem {
                         OwnerProblem::Failed(error) => Some((owner.clone(), error.clone())),
+                        OwnerProblem::Suspect(suspicion) => {
+                            Some((owner.clone(), SourceError::Failed(suspicion.to_string())))
+                        }
                         OwnerProblem::Cut(_) => None,
                     })
                     .collect();
@@ -159,6 +162,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::suspect::{Item, Suspicion};
 
     fn repo(name: &str) -> RepoName {
         RepoName::parse(name).unwrap()
@@ -240,6 +244,31 @@ mod tests {
             runs: vec![],
         });
         assert_eq!(cycle.verdict(None), Ok(Verdict::Read));
+    }
+
+    #[test]
+    fn a_suspect_owner_list_is_not_a_failure() {
+        let mut cycle = FirstCycle::default();
+        cycle.note(&Update::Repos {
+            repos: BTreeSet::new(),
+            listed_at: BTreeMap::new(),
+            owner_errors: vec![(
+                OwnerName::parse("acme").unwrap(),
+                OwnerProblem::Suspect(Suspicion::LeftOut(Item::Repo(repo("acme/a")))),
+            )],
+        });
+        cycle.note(&failed("zzz/r"));
+        assert!(cycle.verdict(None).is_err(), "the failed repository counts");
+        let mut only_suspect = FirstCycle::default();
+        only_suspect.note(&Update::Repos {
+            repos: BTreeSet::new(),
+            listed_at: BTreeMap::new(),
+            owner_errors: vec![(
+                OwnerName::parse("acme").unwrap(),
+                OwnerProblem::Suspect(Suspicion::LeftOut(Item::Repo(repo("acme/a")))),
+            )],
+        });
+        assert_eq!(only_suspect.verdict(None), Ok(Verdict::Read));
     }
 
     #[test]

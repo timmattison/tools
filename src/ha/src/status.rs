@@ -6,6 +6,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 
 use crate::github::SourceError;
+use crate::suspect::Suspicion;
 use crate::target::OwnerName;
 
 /// The core rate limit of the GitHub API, as the last response stated it.
@@ -51,15 +52,20 @@ pub enum OwnerProblem {
     /// GitHub has more repositories for the owner than `ha` watches. The text
     /// says so. A cut list is a warning, not a failure.
     Cut(String),
+    /// The list succeeded, but `ha` does not trust it. The owner keeps its
+    /// last good list.
+    Suspect(Suspicion),
 }
 
 impl std::fmt::Display for OwnerProblem {
     /// Writes the text that the status line shows: the error of a failed list,
-    /// or the warning of a cut list.
+    /// the warning of a cut list, or the
+    /// suspicion about a list.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Failed(error) => write!(f, "{error}"),
             Self::Cut(text) => f.write_str(text),
+            Self::Suspect(suspicion) => write!(f, "{suspicion}"),
         }
     }
 }
